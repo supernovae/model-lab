@@ -21,7 +21,8 @@ published until all declared quotas and unique-content floors pass. Retained
 single-exposure schedules avoid the additional temporary encoded spool.
 
 Mixture source reads use an ordered prefetch queue (128 MiB of serialized source
-or cached-token payloads), followed by bounded tokenizer batches and one cache
+or cached-token payloads, with a record cap of 256 or twice the reader count,
+whichever is larger), followed by bounded tokenizer batches and one cache
 writer. Ordinary preflight verifies per-record rights before cache hits can use
 its authenticated metadata to avoid schedule-stage source-body reads. Retained
 references lack those rights fields, so retained candidates still read and check
@@ -66,7 +67,10 @@ supply beyond the output quota; committed target tokens describe output.
 Source-worker utilization is busy wall time divided by available worker time,
 not a CPU-utilization measurement. Peak simultaneous source reads, encoder
 Rayon bounds, observed child thread counts and encoder CPU utilization make
-small concurrency comparisons inspectable. Full supply and family accounting
+small concurrency comparisons inspectable. A child that exits during sampling
+records an incomplete observation instead of aborting materialization; unknown
+encoder utilization is reported as null. Three workers allocate one reader and
+two encoder threads, while four workers allocate two of each. Full supply and family accounting
 continues after output quotas fill because those counts remain receipt semantics.
 
 For a small standalone comparison, export `tools/benchmark_mixture.py` from the

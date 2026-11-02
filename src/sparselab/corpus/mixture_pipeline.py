@@ -23,6 +23,7 @@ from sparselab.result_publication import sync_directory
 from sparselab.training.manifest import sha256_file
 
 PREFETCH_BYTES = 128 * 1024**2
+PREFETCH_DOCUMENTS = 256  # One tokenizer batch can read ahead while encoding runs.
 
 
 def ordered_fetch(
@@ -87,7 +88,9 @@ def ordered_fetch(
     ) as pool:
         try:
             while current is not None or queued:
-                while current is not None and len(queued) < 2 * workers:
+                while current is not None and len(queued) < max(
+                    PREFETCH_DOCUMENTS, 2 * workers
+                ):
                     charge = size(current)
                     if type(charge) is not int or not 0 < charge <= MAX_ROW_BYTES:
                         raise ValueError("invalid mixture prefetch byte reservation")
@@ -340,3 +343,41 @@ class MixturePreflight:
             capture([path]),
             limit=4 * 1024**2,
         )
+
+
+def process_tree_sample():
+    """Sample diagnostics without making a disappearing child fail the work."""
+    import psutil
+
+    from sparselab.corpus.progress import memory_bytes
+
+    rss, peak, _available = memory_bytes()
+    sample = {
+        "rss_bytes": rss,
+        "process_peak_rss_bytes": peak,
+        "child_cpu_seconds": 0.0,
+        "child_rss_bytes": 0,
+        "child_process_threads": 0,
+        "child_sample_complete": True,
+        "process_observation_errors": [],
+    }
+    errors = set()
+    try:
+        children = psutil.Process().children()
+    except psutil.Error as error:
+        children = []
+        errors.add(type(error).__name__)
+    for child in children:
+        try:
+            cpu = child.cpu_times()
+            memory = child.memory_info()
+            threads = child.num_threads()
+        except psutil.Error as error:
+            errors.add(type(error).__name__)
+            continue
+        sample["child_cpu_seconds"] += cpu.user + cpu.system
+        sample["child_rss_bytes"] += memory.rss
+        sample["child_process_threads"] += threads
+    sample["child_sample_complete"] = not errors
+    sample["process_observation_errors"] = sorted(errors)
+    return sample

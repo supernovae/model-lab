@@ -750,6 +750,16 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
         "duplicate_train_content",
     ]
     assert result["actual_target_tokens"] == {"general": 10}
+    with monkeypatch.context() as worker_patch:
+        import psutil
+
+        worker_patch.setenv("SPARSELAB_MIXTURE_WORKERS", "3")
+        worker_patch.setattr(psutil, "cpu_count", lambda **kwargs: 4)
+        worker_patch.setattr(psutil.Process, "cpu_affinity", lambda self: [0, 1, 2, 3])
+        assert run("three-workers", reuse_tokens=False) == (result, output)
+        progress = json.loads((root / "three-workers/progress.json").read_bytes())
+        assert (progress["read_workers"], progress["encoder_rayon_threads"]) == (1, 2)
+
     calls.clear()
     warm_result, warm_output = run("warm")
     original_source = source.read_bytes()
@@ -1002,3 +1012,60 @@ def test_admitted_ordinary_metadata_can_bypass_warm_source_fetch(tmp_path, monke
     progress = json.loads((tmp_path / ".warm.assembly/progress.json").read_bytes())
     assert progress["cache_hits"] == 3
     assert progress.get("read_worker_seconds", 0) == 0
+
+
+@pytest.mark.parametrize(
+    "failure", ["children", "cpu_times", "memory_info", "num_threads"]
+)
+def test_child_telemetry_races_do_not_abort_materialization(
+    tmp_path, monkeypatch, failure
+):
+    import psutil
+
+    declaration, _, _ = _fixture(tmp_path, monkeypatch)
+    expected = mixture.materialize_mixture(declaration, tmp_path / "expected")
+
+    def sample(name, value):
+        if name == failure:
+            raise psutil.NoSuchProcess(123456)
+        return value
+
+    child = SimpleNamespace(
+        cpu_times=lambda: sample("cpu_times", SimpleNamespace(user=1.0, system=0.5)),
+        memory_info=lambda: sample("memory_info", SimpleNamespace(rss=1024)),
+        num_threads=lambda: sample("num_threads", 1),
+    )
+    monkeypatch.setattr(
+        psutil.Process, "children", lambda self: sample("children", [child])
+    )
+    actual = mixture.materialize_mixture(declaration, tmp_path / "raced")
+    assert actual == expected
+    progress = json.loads((tmp_path / ".raced.assembly/progress.json").read_bytes())
+    assert progress["process_observation_errors"] == ["NoSuchProcess"]
+    assert not progress["child_sample_complete"]
+    assert progress["encoder_utilization"] is None
+
+
+def test_source_prefetch_continues_while_consumer_is_encoding():
+    import threading
+
+    from sparselab.corpus.mixture_pipeline import ordered_fetch
+
+    ready = threading.Event()
+    lock = threading.Lock()
+    fetched = 0
+
+    def fetch(item):
+        nonlocal fetched
+        with lock:
+            fetched += 1
+            if fetched == 8:
+                ready.set()
+        return item
+
+    iterator = ordered_fetch(range(8), fetch, workers=2, size=lambda item: 1)
+    assert next(iterator) == (0, 0)
+    # Pause the coordinator as encoding does. Both readers must continue
+    # fetching beyond the old four-record window without another next().
+    assert ready.wait(5)
+    assert list(iterator) == [(i, i) for i in range(1, 8)]

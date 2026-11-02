@@ -546,7 +546,7 @@ def _schedule(
             reserve_bytes=1024**3,
             operator_cap=int(cap) if cap else None,
         ).workers
-        read_workers = min(workers - 1, max(2, workers // 4)) if workers > 1 else 0
+        read_workers = max(2 if workers >= 4 else 1, workers // 4) if workers > 1 else 0
         encode_workers = max(1, workers - read_workers)
         metrics = {
             "workers": workers,
@@ -643,12 +643,10 @@ def _schedule(
             metrics["checkpoint_seconds"] = (
                 metrics.get("checkpoint_seconds", 0) + time.monotonic() - commit_started
             )
-            import psutil
+            from sparselab.corpus.mixture_pipeline import process_tree_sample
 
-            children = psutil.Process().children()
-            child_cpu_seconds = sum(
-                p.cpu_times().user + p.cpu_times().system for p in children
-            )
+            observation = process_tree_sample()
+            child_cpu_seconds = observation["child_cpu_seconds"]
             metrics.update(
                 {
                     "elapsed_seconds": time.monotonic() - started,
@@ -671,18 +669,20 @@ def _schedule(
                     "cache_encode_seconds": tokens.encode_seconds
                     if tokens is not None
                     else 0,
-                    "rss_bytes": psutil.Process().memory_info().rss,
-                    "child_rss_bytes": sum(p.memory_info().rss for p in children),
-                    "child_process_threads": sum(p.num_threads() for p in children),
+                    **observation,
                     "encoder_rayon_threads": encoder.rayon_threads
                     if encoder is not None
                     else 0,
                     "encoder_cpu_seconds": child_cpu_seconds,
-                    "encoder_utilization": child_cpu_seconds
-                    / max(
-                        1e-9,
-                        (time.monotonic() - started)
-                        * (encoder.rayon_threads if encoder is not None else 1),
+                    "encoder_utilization": (
+                        child_cpu_seconds
+                        / max(
+                            1e-9,
+                            (time.monotonic() - started)
+                            * (encoder.rayon_threads if encoder is not None else 1),
+                        )
+                        if observation["child_sample_complete"]
+                        else None
                     ),
                     "commits": frontier.sequence if frontier is not None else 0,
                 }
