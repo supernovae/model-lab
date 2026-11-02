@@ -106,11 +106,39 @@ cursor field `next_block` count **groups** under this opt-in protocol.
 Native smoke/warmup staging preserves the configured number of pilot updates.
 For matched packing it derives the pilot token budget from the first complete
 matched groups in the verified staged array (`targets_for_updates(steps)`),
-including repeated passes when needed. It does not use microbatch row capacity
+including repeated passes when needed. Budget derivation enters the authenticated
+`stage_bundle_verification` progress phase beneath `input_validation`; the native
+supervisor still rejects counters outside the active phase. It does not use microbatch row capacity
 as a target count. Pilot LR warmup/decay are clipped to that short pilot horizon;
 the full experiment budget, horizon and frozen evaluation remain unchanged.
 
+## Reusing prepared arrays after operational fixes
+
+Ordinary prepared-cache identity includes all top-level `data/*.py` modules
+(except the publication-only snapshot writer) and `config/models.py`. Adding or
+changing story-index helpers therefore invalidates that conservative preparation
+fingerprint, even when packed bytes would be identical. Do not rewrite old cache
+identities or exclude modules to force a hit.
+
+A change confined to staging/progress code leaves that preparation fingerprint
+unchanged. Keep the same verified dataset/tokenizer declarations and canonical
+`dataset.cache_dir`, then create a fresh stage output through the normal native
+preparation path. `prepare_data` can authenticate and reuse the matching canonical
+cache while the new stage records the current full package source identity.
+An older `--prepared-inputs` bundle has an additional exact package-source binding
+and is not interchangeable with that canonical cache across source changes.
+Do not bypass it with runtime/source drift. If the matching canonical cache is
+absent, ordinary preparation must rebuild it; any broader historical-source reuse
+requires the separately reviewed native operational-compatibility workflow.
+
 ## Validation and limits
+
+The supervised staging regression launches real smoke/warmup subprocesses for
+both layouts in cold and verified-reuse modes and replays their authenticated
+accepted events through `PilotDeadlineState`. A sparse 64 MiB auxiliary fixture
+asset reaches the production hash-progress threshold without enlarging the token
+corpus or model. Direct `run_pilot()` calls alone do not activate that channel and
+cannot establish supervisor compatibility.
 
 Synthetic tests cover target coverage, long-story endings, clipping across
 passes, matched per-update counts, padding loss/gradient and native interrupted

@@ -82,6 +82,7 @@ from sparselab.training.pilot_deadline import (
     PilotSupervisorError,
     supervise_pilot,
 )
+from sparselab.training.pilot_progress import pilot_phase
 from sparselab.training.preparation_guard import require_model_runtime_allowed
 from sparselab.training.stages import ExperimentStage, StageHistory
 from sparselab.verification_proofs import file_binding
@@ -336,23 +337,24 @@ def pilot_config(
         if matched_dataset is None:
             # Derive from authenticated staged bytes, never the mutable source
             # cache. Bundle verification can supply its already verified dataset.
-            proofs: dict[str, VerifiedFile] = {}
-            verify_prepared_inputs(
-                root,
-                config,
-                proof_store=proof_store,
-                verification_mode=verification_mode,
-                _proofs=proofs,
-            )
-            data = _load_inventory_prepared(
-                root / "assets",
-                proofs,
-                byte_enabled=config.model.memory in {"byte", "portable"},
-            )
-            tokenizer = load_tokenizer(root / "assets" / "tokenizer.json")
-            matched_dataset = _pilot_story_dataset(
-                config, data, tokenizer.token_to_id("<eos>")
-            )
+            with pilot_phase("stage_bundle_verification"):
+                proofs: dict[str, VerifiedFile] = {}
+                verify_prepared_inputs(
+                    root,
+                    config,
+                    proof_store=proof_store,
+                    verification_mode=verification_mode,
+                    _proofs=proofs,
+                )
+                data = _load_inventory_prepared(
+                    root / "assets",
+                    proofs,
+                    byte_enabled=config.model.memory in {"byte", "portable"},
+                )
+                tokenizer = load_tokenizer(root / "assets" / "tokenizer.json")
+                matched_dataset = _pilot_story_dataset(
+                    config, data, tokenizer.token_to_id("<eos>")
+                )
         targets = matched_dataset.targets_for_updates(steps)
     payload = config.model_dump(mode="json")
     payload["training"].update(max_steps=steps, max_tokens=targets)

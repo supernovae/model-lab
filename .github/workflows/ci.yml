@@ -120,9 +120,9 @@ jobs:
             tests/test_explorer.py \
             tests/test_generation.py \
             tests/test_inference.py
-          uv run --locked --no-sync pytest -q -p no:cacheprovider -n 0 \
+          uv run --locked --no-sync pytest -q -p no:cacheprovider -n 2 \
             --basetemp "$RUNNER_TEMP/matched-story-staging-pytest" \
-            tests/test_staging.py::test_matched_story_pilots_derive_complete_groups_and_train \
+            tests/test_staging.py::test_matched_story_pilots_complete_under_native_supervision \
             tests/test_staging.py::test_warmup_pilots_are_isolated_and_bundle_is_self_contained
 
   fast:

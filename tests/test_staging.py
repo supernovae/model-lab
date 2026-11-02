@@ -472,12 +472,14 @@ def test_owned_directory_publication_never_replaces_a_late_destination(
 
 
 @pytest.mark.parametrize("layout", ["contiguous", "story"])
-def test_matched_story_pilots_derive_complete_groups_and_train(
-    tmp_path: Path, layout: str
+@pytest.mark.parametrize("verification_mode", ["cold", "verified_reuse"])
+def test_matched_story_pilots_complete_under_native_supervision(
+    tmp_path: Path, layout: str, verification_mode: str, monkeypatch
 ) -> None:
     from sparselab.config.models import MatchedStoryConfig
     from sparselab.data.story_packing import MatchedStoryDataset
-    from sparselab.training.pilot import run_pilot
+    from sparselab.training.pilot_deadline import PilotDeadlineState, PurposeDeadlines
+    from sparselab.verification_proofs import verification_options
 
     base = _config(tmp_path)
     tokenizer = load_tokenizer(base.tokenizer.path)
@@ -503,16 +505,37 @@ def test_matched_story_pilots_derive_complete_groups_and_train(
             )
         }
     )
-    root = stage(config, tmp_path / "stage", through="validate")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "verification-config"))
+    options = verification_options(tmp_path, cold=verification_mode == "cold")
+    assert options["verification_mode"] == verification_mode
+    template = staging_module.materialize_prepared_inputs(
+        config, tmp_path / "input-template", **options
+    )
+    # Author a separate tiny-corpus fixture with one sparse auxiliary asset at
+    # the real 64 MiB hash-progress threshold. No training array is enlarged,
+    # no emitted event is mocked, and the original sealed inputs stay intact.
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    shutil.copytree(template / "assets", inputs / "assets")
+    with (inputs / "assets" / "hash-progress-fixture.bin").open("wb") as handle:
+        handle.truncate(64 * 1024 * 1024)
+    payload = _read_sealed(template / "inputs.json")
+    payload.pop("sha256")
+    payload["artifacts"] = staging_module._inventory(inputs / "assets")
+    staging_module._seal(inputs / "inputs.json", payload)
     # Use only the frozen bundle: neither derivation nor trainer may fall back
     # to mutable caller-owned tokenizer/cache paths.
     config.tokenizer.path.unlink()
     shutil.rmtree(config.dataset.cache_dir)
+    root = stage(
+        config, tmp_path / "stage", through="warmup", prepared_inputs=inputs, **options
+    )
     for purpose in ("smoke", "warmup"):
         steps = getattr(config.staging, f"{purpose}_steps")
         expected_targets = plan.targets_for_updates(steps)
         assert expected_targets != steps * 16 * config.training.seq_len
-        report = _read_sealed(run_pilot(root, purpose))
+        directory = root / "pilots" / purpose
+        report = _read_sealed(directory / "report.json")
         assert report["step"] == report["timed_updates"] == steps
         assert report["tokens_seen"] == expected_targets
         assert report["derived_config"]["training"]["max_tokens"] == expected_targets
@@ -521,3 +544,42 @@ def test_matched_story_pilots_derive_complete_groups_and_train(
             == expected_targets
         )
         assert report["checkpoint_reload"] == "verified_full_state_and_finite_forward"
+
+        supervision = _read_sealed(directory / "supervisor-completion.json")
+        assert supervision["status"] == "COMPLETE"
+        assert supervision["returncode"] == 0
+        assert supervision["reason"] is None
+        assert supervision["completed_steps"] == steps
+        assert supervision["completed_targets"] == expected_targets
+        state = PilotDeadlineState(
+            PurposeDeadlines.model_validate(supervision["effective_deadlines"]),
+            expected_steps=steps,
+        )
+        events = [
+            json.loads(line)
+            for line in (directory / supervision["events_ref"]).read_text().splitlines()
+        ]
+        nested_verification = False
+        verification_counters = 0
+        for record in events:
+            if record["kind"] != "progress":
+                continue
+            event = record["event"]
+            if (event["kind"], event["phase"], state.current_phase) == (
+                "start",
+                "stage_bundle_verification",
+                "input_validation",
+            ):
+                nested_verification = True
+            if (
+                event["kind"] == "progress"
+                and event["phase"] == "stage_bundle_verification"
+            ):
+                verification_counters += 1
+            state.observe(event)
+        assert nested_verification
+        assert state.finished and not state.phases
+        assert state.completed_steps == steps
+        assert state.completed_targets == expected_targets
+        if verification_mode == "cold":
+            assert verification_counters > 0
