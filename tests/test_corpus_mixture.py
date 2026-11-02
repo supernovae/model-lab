@@ -18,7 +18,7 @@ from sparselab.data.packing import TokenBlockDataset, _collect_token_mixture
 
 
 def _fixture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, actual_content=False
 ) -> tuple[Path, Path, Path]:
     release = tmp_path / ("a" * 64)
     (release / "lm").mkdir(parents=True)
@@ -61,6 +61,8 @@ def _fixture(
         },
     ]
     for row in docs:
+        if actual_content:
+            row["content_sha256"] = hashlib.sha256(row["text"].encode()).hexdigest()
         row["domains"] = {
             "gutenberg": ["general"],
             "wikimedia": ["explanatory"],
@@ -749,15 +751,18 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
     ]
     assert result["actual_target_tokens"] == {"general": 10}
     calls.clear()
-    with monkeypatch.context() as warm_patch:
-
-        def unexpected_source_read(*args):
-            raise AssertionError("warm token cache must bypass source body reads")
-
-        warm_patch.setattr(
-            RetainedMixtureIndex, "_read_document", unexpected_source_read
+    warm_result, warm_output = run("warm")
+    original_source = source.read_bytes()
+    source.write_bytes(
+        original_source.replace(
+            b'"training_eligibility":"eligible"',
+            b'"training_eligibility":"blocked!"',
+            1,
         )
-        warm_result, warm_output = run("warm")
+    )
+    with pytest.raises(ValueError, match="disagrees with executed metadata"):
+        run("warm-ineligible")
+    source.write_bytes(original_source)
     assert (warm_result, warm_output) == (result, output)
     assert calls == []
 
@@ -782,6 +787,20 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
 
     monkeypatch.setattr(encoding, "TOKENIZER_BATCH_DOCUMENTS", 1)
     monkeypatch.setattr(mixture, "MIXTURE_BATCH_SOURCE_BYTES", 64)
+    monkeypatch.setenv("SPARSELAB_MIXTURE_COMMIT_CANDIDATES", "4096")
+    assert run("grouped", checkpoint=True) == (result, output)
+    assert len(list((root / ".grouped.assembly").glob("commit-*.json"))) == 1
+    with monkeypatch.context() as cadence:
+        cadence.setattr(mixture, "MIXTURE_COMMIT_SEGMENT_BYTES", 1)
+        assert run("byte-commits", checkpoint=True) == (result, output)
+        assert len(list((root / ".byte-commits.assembly").glob("commit-*.json"))) > 1
+    with monkeypatch.context() as cadence:
+        cadence.setattr(mixture, "MIXTURE_COMMIT_INTERVAL_SECONDS", 0)
+        assert run("time-commits", checkpoint=True) == (result, output)
+        assert len(list((root / ".time-commits.assembly").glob("commit-*.json"))) > 1
+    monkeypatch.setenv("SPARSELAB_MIXTURE_COMMIT_CANDIDATES", "1")
+    assert run("eager", checkpoint=True) == (result, output)
+    assert len(list((root / ".eager.assembly").glob("commit-*.json"))) > 1
     commit = MixtureFrontier.commit
 
     def interrupt(self, *args):
@@ -857,6 +876,7 @@ def test_mixture_frontier_resumes_without_committed_candidate_replay(
     expected = mixture._materialize_mixture(declaration, baseline, reuse_tokens=False)
     monkeypatch.setattr(encoding, "TOKENIZER_BATCH_DOCUMENTS", 1)
     monkeypatch.setenv("SPARSELAB_MIXTURE_WORKERS", "1")
+    monkeypatch.setenv("SPARSELAB_MIXTURE_COMMIT_CANDIDATES", "1")
     output = tmp_path / "interrupted"
     original = MixtureFrontier.commit
 
@@ -960,6 +980,7 @@ def test_ordered_source_fetch_bounds_reorder_and_propagates_failure(monkeypatch)
         next(iterator)
     assert metrics["read_queue_bytes_peak"] <= 3
     assert metrics["read_queue_records_peak"] <= 3
+    assert metrics["read_active_peak"] >= 2
 
 
 def test_mixture_writer_rejects_concurrent_owner(tmp_path):
@@ -971,3 +992,13 @@ def test_mixture_writer_rejects_concurrent_owner(tmp_path):
         mixture_writer(tmp_path / "output"),
     ):
         pytest.fail("two writers acquired the same output")
+
+
+def test_admitted_ordinary_metadata_can_bypass_warm_source_fetch(tmp_path, monkeypatch):
+    declaration, _, _ = _fixture(tmp_path, monkeypatch, actual_content=True)
+    cold = mixture.materialize_mixture(declaration, tmp_path / "cold")
+    warm = mixture.materialize_mixture(declaration, tmp_path / "warm")
+    assert cold == warm
+    progress = json.loads((tmp_path / ".warm.assembly/progress.json").read_bytes())
+    assert progress["cache_hits"] == 3
+    assert progress.get("read_worker_seconds", 0) == 0

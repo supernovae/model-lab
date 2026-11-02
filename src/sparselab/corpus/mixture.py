@@ -38,6 +38,8 @@ from sparselab.result_publication import sync_directory
 from sparselab.training.manifest import sha256_file
 
 MIXTURE_BATCH_SOURCE_BYTES = 8 * 1024**2
+MIXTURE_COMMIT_SEGMENT_BYTES = 64 * 1024**2
+MIXTURE_COMMIT_INTERVAL_SECONDS = 30
 
 
 class ObservationFile(BaseModel):
@@ -544,7 +546,7 @@ def _schedule(
             reserve_bytes=1024**3,
             operator_cap=int(cap) if cap else None,
         ).workers
-        read_workers = max(1, workers // 4) if workers > 1 else 0
+        read_workers = min(workers - 1, max(2, workers // 4)) if workers > 1 else 0
         encode_workers = max(1, workers - read_workers)
         metrics = {
             "workers": workers,
@@ -582,9 +584,36 @@ def _schedule(
                 done = resumed["done"]
             frontier.begin(index)
 
-        def checkpoint(stratum, available):
+        commit_candidates = int(
+            os.environ.get("SPARSELAB_MIXTURE_COMMIT_CANDIDATES", "4096")
+        )
+        if commit_candidates < 1:
+            raise ValueError("SPARSELAB_MIXTURE_COMMIT_CANDIDATES must be positive")
+        committed_at = time.monotonic()
+
+        def checkpoint(stratum, available, *, force=False):
+            nonlocal committed_at
             commit_started = time.monotonic()
-            if frontier is not None:
+            committed = (
+                frontier.state["state"]
+                if frontier is not None and frontier.state
+                else {}
+            )
+            pending_bytes = (
+                frontier.event_file.tell() + stream.tell() - frontier.output_offset
+                if frontier is not None
+                else 0
+            )
+            due = (
+                force
+                or sum(candidates.values())
+                - sum(committed.get("candidates", {}).values())
+                >= commit_candidates
+                or records - committed.get("records", 0) >= commit_candidates
+                or pending_bytes >= MIXTURE_COMMIT_SEGMENT_BYTES
+                or commit_started - committed_at >= MIXTURE_COMMIT_INTERVAL_SECONDS
+            )
+            if frontier is not None and due:
                 frontier.commit(
                     {
                         "stratum": stratum,
@@ -608,22 +637,29 @@ def _schedule(
                     excluded,
                     index,
                 )
+                committed_at = time.monotonic()
+                committed = frontier.state["state"]
+                pending_bytes = 0
             metrics["checkpoint_seconds"] = (
                 metrics.get("checkpoint_seconds", 0) + time.monotonic() - commit_started
             )
             import psutil
 
+            children = psutil.Process().children()
+            child_cpu_seconds = sum(
+                p.cpu_times().user + p.cpu_times().system for p in children
+            )
             metrics.update(
                 {
                     "elapsed_seconds": time.monotonic() - started,
                     "candidates": dict(candidates),
                     "selected": dict(selected),
-                    "committed_candidates": dict(candidates)
-                    if frontier is not None
-                    else {},
-                    "committed_target_tokens": dict(totals)
-                    if frontier is not None
-                    else {},
+                    "committed_candidates": committed.get("candidates", {}),
+                    "committed_target_tokens": committed.get("totals", {}),
+                    "pending_segment_bytes": pending_bytes,
+                    "commit_candidate_limit": commit_candidates,
+                    "commit_segment_bytes": MIXTURE_COMMIT_SEGMENT_BYTES,
+                    "commit_interval_seconds": MIXTURE_COMMIT_INTERVAL_SECONDS,
                     "cache_hits": tokens.hits if tokens is not None else 0,
                     "cache_misses": tokens.misses if tokens is not None else 0,
                     "cache_lookup_seconds": tokens.lookup_seconds
@@ -636,10 +672,17 @@ def _schedule(
                     if tokens is not None
                     else 0,
                     "rss_bytes": psutil.Process().memory_info().rss,
-                    "child_rss_bytes": sum(
-                        p.memory_info().rss
-                        for p in psutil.Process().children()
-                        if p.is_running()
+                    "child_rss_bytes": sum(p.memory_info().rss for p in children),
+                    "child_process_threads": sum(p.num_threads() for p in children),
+                    "encoder_rayon_threads": encoder.rayon_threads
+                    if encoder is not None
+                    else 0,
+                    "encoder_cpu_seconds": child_cpu_seconds,
+                    "encoder_utilization": child_cpu_seconds
+                    / max(
+                        1e-9,
+                        (time.monotonic() - started)
+                        * (encoder.rayon_threads if encoder is not None else 1),
                     ),
                     "commits": frontier.sequence if frontier is not None else 0,
                 }
@@ -876,7 +919,7 @@ def _schedule(
             if totals[stratum] != quota:
                 raise ValueError(f"unfilled quota for {stratum}")
             done.append(stratum)
-            checkpoint(stratum, available)
+            checkpoint(stratum, available, force=True)
         stream.flush()
         os.fsync(stream.fileno())
     receipt = {

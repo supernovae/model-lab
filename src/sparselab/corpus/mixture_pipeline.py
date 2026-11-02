@@ -13,6 +13,7 @@ from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from pathlib import Path
+from threading import Lock
 
 from sparselab.canonical import canonical_digest, canonical_json
 from sparselab.corpus.admission_inspection_cache import capture
@@ -40,11 +41,23 @@ def ordered_fetch(
     admission decisions. Exceptions propagate at the original candidate slot.
     """
     metrics = metrics if metrics is not None else {}
+    metrics.setdefault("read_active", 0)
+    metrics.setdefault("read_active_peak", 0)
+    active_lock = Lock()
 
     def timed(item):
         started = time.monotonic()
-        value = fetch(item)
-        return value, time.monotonic() - started
+        with active_lock:
+            metrics["read_active"] += 1
+            metrics["read_active_peak"] = max(
+                metrics["read_active_peak"], metrics["read_active"]
+            )
+        try:
+            value = fetch(item)
+            return value, time.monotonic() - started
+        finally:
+            with active_lock:
+                metrics["read_active"] -= 1
 
     if workers == 0:
         # A one-worker operation reads inline, so encoding never overlaps a

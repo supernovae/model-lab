@@ -22,7 +22,10 @@ single-exposure schedules avoid the additional temporary encoded spool.
 
 Mixture source reads use an ordered prefetch queue (128 MiB of serialized source
 or cached-token payloads), followed by bounded tokenizer batches and one cache
-writer. Cache hits use authenticated source metadata to avoid source-body reads.
+writer. Ordinary preflight verifies per-record rights before cache hits can use
+its authenticated metadata to avoid schedule-stage source-body reads. Retained
+references lack those rights fields, so retained candidates still read and check
+each source record, including on a warm token cache.
 A single tokenizer subprocess owns its Rayon pool; the measured CPU/RAM plan
 splits capacity between source readers and encoding instead of nesting pools.
 `SPARSELAB_MIXTURE_WORKERS=N` caps that operation's combined worker plan; omitted,
@@ -34,7 +37,15 @@ memory, SQLite and final receipt storage are additional.
 An interrupted materialization resumes automatically at the last authenticated
 assembly frontier for the same output. Immutable segments live beside it in
 `.OUTPUT.assembly`; preserve that directory and the output parent's `cache`.
-Each committed batch binds source position, dedup/index deltas, counters,
+Commit cadence is independent of the 256-document/8 MiB tokenizer batches.
+By default a commit becomes due after 4,096 candidates or emitted rows, 64 MiB
+of pending segment data, or 30 seconds, checked at the next batch boundary;
+a completed stratum always commits. `SPARSELAB_MIXTURE_COMMIT_CANDIDATES=N`
+selects a positive candidate/row interval (use `1` for eager commits). Byte and
+time guards still apply. Pending index deltas stream to disk, not a growing RAM
+buffer. This amortizes proof/fsync overhead at the cost of replaying uncommitted
+work after a stop; a long individual batch can exceed the time interval.
+Each committed segment binds source position, dedup/index deltas, counters,
 exclusions and emitted rows to the exact declaration, sources, tokenizer and
 producer. Restart restores SQL lookup structures from deltas and concatenates
 sealed output segments; it does not fetch, encode, select or emit committed
@@ -50,8 +61,12 @@ so budget extra disk space for them and any multi-exposure encoded spool.
 `.OUTPUT.assembly/progress.json` records per-stratum candidates, selected and
 committed work, cache lookups, read queue peaks, stage elapsed/worker time and
 parent/child RSS. It is operational telemetry, separate from the scientific
-receipt. Source-worker utilization is busy wall time divided by available
-worker time, not a CPU-utilization measurement. Full supply and family accounting
+receipt. Selected counts nonempty deduplicated eligible candidates, including
+supply beyond the output quota; committed target tokens describe output.
+Source-worker utilization is busy wall time divided by available worker time,
+not a CPU-utilization measurement. Peak simultaneous source reads, encoder
+Rayon bounds, observed child thread counts and encoder CPU utilization make
+small concurrency comparisons inspectable. Full supply and family accounting
 continues after output quotas fill because those counts remain receipt semantics.
 
 For a small standalone comparison, export `tools/benchmark_mixture.py` from the

@@ -538,6 +538,14 @@ def _ranked(directory, cohorts, seed, strata, order_policy=None):
 class RetainedMixtureIndex(MixtureIndex):
     """Use signed source offsets and a bounded file-handle cache."""
 
+    def cached_document(self, doc_id, source, content):
+        # Ranked references do not carry per-record rights. A content-cache hit
+        # from another document cannot authorize this record: read and check it.
+        return None
+
+    def candidate_bytes(self, source_bytes, content):
+        return source_bytes
+
     def record_family(self, stratum, family):
         """Count an eligible family without retaining a second token copy."""
         self.record_event(["family", [stratum, family]])
