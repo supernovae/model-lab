@@ -103,6 +103,13 @@ Exposure records identify this protocol and its group-offset digest separately
 from default packed-block exposure. The legacy exposure `eligible_blocks` and
 cursor field `next_block` count **groups** under this opt-in protocol.
 
+Native smoke/warmup staging preserves the configured number of pilot updates.
+For matched packing it derives the pilot token budget from the first complete
+matched groups in the verified staged array (`targets_for_updates(steps)`),
+including repeated passes when needed. It does not use microbatch row capacity
+as a target count. Pilot LR warmup/decay are clipped to that short pilot horizon;
+the full experiment budget, horizon and frozen evaluation remain unchanged.
+
 ## Validation and limits
 
 Synthetic tests cover target coverage, long-story endings, clipping across

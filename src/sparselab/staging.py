@@ -26,11 +26,13 @@ from sparselab.data.encoding import (
     validate_tokenizer_batch_limits,
 )
 from sparselab.data.packing import (
+    PreparedData,
     _publish_prepared_directory,
     _tokenizer_sha256,
     load_prepared_data,
     prepare_data,
 )
+from sparselab.data.story_packing import MatchedStoryDataset
 from sparselab.data.tokenizer import load_tokenizer
 from sparselab.data.verification import (
     VerifiedFile,
@@ -297,18 +299,63 @@ def _load_inventory_prepared(
     )
 
 
-def pilot_config(config: RunConfig, purpose: str, root: Path) -> RunConfig:
+def _pilot_story_dataset(
+    config: RunConfig, data: PreparedData, eos: int | None
+) -> MatchedStoryDataset:
+    matched = config.training.matched_stories
+    if matched is None or eos is None:
+        raise ValueError("matched pilot requires story configuration and EOS")
+    return MatchedStoryDataset(
+        data.train,
+        config.training.seq_len,
+        eos,
+        layout=matched.layout,
+        targets_per_update=matched.targets_per_update,
+    )
+
+
+def pilot_config(
+    config: RunConfig,
+    purpose: str,
+    root: Path,
+    *,
+    matched_dataset: MatchedStoryDataset | None = None,
+    proof_store: ProofStore | None = None,
+    verification_mode: Literal["cold", "verified_reuse"] = "cold",
+) -> RunConfig:
     if purpose not in {"smoke", "warmup"}:
         raise ValueError("invalid pilot purpose")
     steps = getattr(config.staging, f"{purpose}_steps")
-    payload = config.model_dump(mode="json")
-    payload["training"].update(
-        max_steps=steps,
-        max_tokens=steps
+    targets = (
+        steps
         * config.training.micro_batch_size
         * config.training.gradient_accumulation
-        * config.training.seq_len,
+        * config.training.seq_len
     )
+    if config.training.matched_stories is not None:
+        if matched_dataset is None:
+            # Derive from authenticated staged bytes, never the mutable source
+            # cache. Bundle verification can supply its already verified dataset.
+            proofs: dict[str, VerifiedFile] = {}
+            verify_prepared_inputs(
+                root,
+                config,
+                proof_store=proof_store,
+                verification_mode=verification_mode,
+                _proofs=proofs,
+            )
+            data = _load_inventory_prepared(
+                root / "assets",
+                proofs,
+                byte_enabled=config.model.memory in {"byte", "portable"},
+            )
+            tokenizer = load_tokenizer(root / "assets" / "tokenizer.json")
+            matched_dataset = _pilot_story_dataset(
+                config, data, tokenizer.token_to_id("<eos>")
+            )
+        targets = matched_dataset.targets_for_updates(steps)
+    payload = config.model_dump(mode="json")
+    payload["training"].update(max_steps=steps, max_tokens=targets)
     payload["optimizer"]["warmup_steps"] = min(config.optimizer.warmup_steps, steps - 1)
     if payload["optimizer"].get("decay_steps") is not None:
         payload["optimizer"]["decay_steps"] = min(
@@ -339,10 +386,17 @@ def verify_stage_bundle(
     root = root.resolve(strict=True)
     inputs = _read_sealed(root / "inputs.json")
     base = RunConfig.model_validate(inputs["requested_config"])
-    expected = base if purpose == "training" else pilot_config(base, purpose, root)
-    if config_sha256(config.model_dump(mode="json")) != config_sha256(
-        expected.model_dump(mode="json")
-    ):
+    matched_pilot = purpose != "training" and base.training.matched_stories is not None
+    expected = (
+        None
+        if matched_pilot
+        else base
+        if purpose == "training"
+        else pilot_config(base, purpose, root)
+    )
+    if expected is not None and config_sha256(
+        config.model_dump(mode="json")
+    ) != config_sha256(expected.model_dump(mode="json")):
         raise ValueError("stage bundle configuration differs from requested execution")
     if (
         inputs.get("source_identity_sha256") != source_identity()["sha256"]
@@ -365,6 +419,21 @@ def verify_stage_bundle(
         assets, proofs, byte_enabled=base.model.memory in {"byte", "portable"}
     )
     tokenizer = load_tokenizer(root / "assets" / "tokenizer.json")
+    if matched_pilot:
+        expected = pilot_config(
+            base,
+            purpose,
+            root,
+            matched_dataset=_pilot_story_dataset(
+                base, data, tokenizer.token_to_id("<eos>")
+            ),
+        )
+        if config_sha256(config.model_dump(mode="json")) != config_sha256(
+            expected.model_dump(mode="json")
+        ):
+            raise ValueError(
+                "stage bundle configuration differs from requested execution"
+            )
     if tokenizer.get_vocab_size() != base.model.vocab_size:
         raise ValueError("staged tokenizer vocabulary does not match model")
     if base.dataset.corpus_release_path is not None:

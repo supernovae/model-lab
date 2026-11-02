@@ -53,7 +53,11 @@ def run_pilot(
     with pilot_phase("input_validation"):
         inputs = _read_sealed(root / "inputs.json")
         config = pilot_config(
-            RunConfig.model_validate(inputs["requested_config"]), purpose, root
+            RunConfig.model_validate(inputs["requested_config"]),
+            purpose,
+            root,
+            proof_store=proof_store,
+            verification_mode=verification_mode,
         )
         tokenizer_batch_documents, tokenizer_batch_source_bytes = (
             validate_tokenizer_batch_limits(

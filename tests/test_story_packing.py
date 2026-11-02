@@ -91,3 +91,22 @@ def test_manifest_layout_costs_match_materialized_full_pass():
         assert counts[cost["max_rows_group_index"]] == max(counts)
         assert cost["padded_slots_per_pass"] == sum(padding)
         assert cost["max_padded_slots_per_update"] == max(padding)
+
+
+@pytest.mark.parametrize("updates", [1, 2, 3, 4, 7, 10])
+def test_complete_group_budget_inverts_horizon_across_passes(updates):
+    budgets = []
+    for layout in ("contiguous", "story"):
+        plan = MatchedStoryDataset(
+            story_ids(), 4, 0, layout=layout, targets_per_update=8
+        )
+        budget = plan.targets_for_updates(updates)
+        assert plan.horizon(budget) == updates
+        observed = sum(
+            int(np.count_nonzero(row[1] != -100))
+            for step in range(updates)
+            for row in plan.update_rows(step % len(plan), budget)
+        )
+        assert observed == budget
+        budgets.append(budget)
+    assert budgets[0] == budgets[1]

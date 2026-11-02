@@ -469,3 +469,55 @@ def test_owned_directory_publication_never_replaces_a_late_destination(
             staging_module.materialize_prepared_inputs(config, destination)
     assert (destination / "owner.txt").read_bytes() == b"competing transaction"
     assert sorted(path.name for path in destination.iterdir()) == ["owner.txt"]
+
+
+@pytest.mark.parametrize("layout", ["contiguous", "story"])
+def test_matched_story_pilots_derive_complete_groups_and_train(
+    tmp_path: Path, layout: str
+) -> None:
+    from sparselab.config.models import MatchedStoryConfig
+    from sparselab.data.story_packing import MatchedStoryDataset
+    from sparselab.training.pilot import run_pilot
+
+    base = _config(tmp_path)
+    tokenizer = load_tokenizer(base.tokenizer.path)
+    prepared = prepare_data(base, tokenizer)
+    plan = MatchedStoryDataset(
+        prepared.train,
+        base.training.seq_len,
+        tokenizer.token_to_id("<eos>"),
+        layout=layout,
+        targets_per_update=1,
+    )
+    config = base.model_copy(
+        update={
+            "training": base.training.model_copy(
+                update={
+                    "matched_stories": MatchedStoryConfig(
+                        layout=layout, targets_per_update=1
+                    ),
+                    "micro_batch_size": 16,
+                    "max_steps": 3,
+                    "max_tokens": plan.targets_for_updates(3),
+                }
+            )
+        }
+    )
+    root = stage(config, tmp_path / "stage", through="validate")
+    # Use only the frozen bundle: neither derivation nor trainer may fall back
+    # to mutable caller-owned tokenizer/cache paths.
+    config.tokenizer.path.unlink()
+    shutil.rmtree(config.dataset.cache_dir)
+    for purpose in ("smoke", "warmup"):
+        steps = getattr(config.staging, f"{purpose}_steps")
+        expected_targets = plan.targets_for_updates(steps)
+        assert expected_targets != steps * 16 * config.training.seq_len
+        report = _read_sealed(run_pilot(root, purpose))
+        assert report["step"] == report["timed_updates"] == steps
+        assert report["tokens_seen"] == expected_targets
+        assert report["derived_config"]["training"]["max_tokens"] == expected_targets
+        assert (
+            sum(row["targets"] for row in report["update_observations"])
+            == expected_targets
+        )
+        assert report["checkpoint_reload"] == "verified_full_state_and_finite_forward"

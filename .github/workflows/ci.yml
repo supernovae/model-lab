@@ -120,6 +120,9 @@ jobs:
             tests/test_explorer.py \
             tests/test_generation.py \
             tests/test_inference.py
+          uv run --locked --no-sync pytest -q -p no:cacheprovider -n 0 \
+            --basetemp "$RUNNER_TEMP/matched-story-staging-pytest" \
+            tests/test_staging.py::test_matched_story_pilots_derive_complete_groups_and_train
 
   fast:
     # Remaining fast CPU suite (excluding slow tests and modules already run in

@@ -64,6 +64,13 @@ class MatchedStoryDataset:
             int(np.searchsorted(self.group_offsets, tail, side="left")) if tail else 0
         )
 
+    def targets_for_updates(self, updates: int) -> int:
+        """Exact valid-target budget for a fresh run of complete matched groups."""
+        if updates <= 0:
+            raise ValueError("updates must be positive")
+        passes, groups = divmod(updates, len(self))
+        return passes * len(self.ids) + int(self.group_offsets[groups])
+
     def layout_costs(self) -> dict[str, dict[str, int]]:
         """Full-pass row/padding bounds for both layouts, without materializing rows.
 
