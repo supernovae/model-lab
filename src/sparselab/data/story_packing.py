@@ -64,6 +64,37 @@ class MatchedStoryDataset:
             int(np.searchsorted(self.group_offsets, tail, side="left")) if tail else 0
         )
 
+    def layout_costs(self) -> dict[str, dict[str, int]]:
+        """Full-pass row/padding bounds for both layouts, without materializing rows.
+
+        Row bounds also cover the clipped final update; padding counts describe
+        uncut groups only. These are input slots, not measured memory or FLOPs;
+        microbatching determines resident row count.
+        """
+        lengths = np.diff(np.concatenate(([0], self.document_ends)))
+        cumulative_rows = np.concatenate(
+            ([0], np.cumsum((lengths + self.seq_len - 1) // self.seq_len))
+        )
+        document_indices = np.searchsorted(
+            self.document_ends, self.group_offsets, side="right"
+        )
+        targets = np.diff(self.group_offsets)
+        rows_by_layout = {
+            "contiguous": (targets + self.seq_len - 1) // self.seq_len,
+            "story": np.diff(cumulative_rows[document_indices]),
+        }
+        result = {}
+        for layout, rows in rows_by_layout.items():
+            padded = rows * self.seq_len - targets
+            result[layout] = {
+                "rows_per_pass": int(rows.sum()),
+                "max_rows_per_update": int(rows.max()),
+                "max_rows_group_index": int(rows.argmax()),
+                "padded_slots_per_pass": int(padded.sum()),
+                "max_padded_slots_per_update": int(padded.max()),
+            }
+        return result
+
     def group_manifest(self, budget: int, *, train_tokens_sha256: str) -> dict:
         """Layout-independent declaration for freezing a matched pair."""
         return {
@@ -79,6 +110,7 @@ class MatchedStoryDataset:
             "targets_per_pass": len(self.ids),
             "max_tokens": budget,
             "max_steps": self.horizon(budget),
+            "full_pass_layout_costs": self.layout_costs(),
         }
 
     def exposure_supply(self) -> dict[str, int]:

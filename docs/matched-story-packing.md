@@ -50,12 +50,28 @@ Retain this manifest with the experiment declaration, compare it across arms,
 and set **both** `training.max_steps` to its `max_steps`. The trainer rejects an
 incorrect horizon; do not assume 24,415 updates. Set `optimizer.decay_steps` to
 that same common horizon and freeze a shared `optimizer.warmup_steps` before
-calibration. Public configuration overlay (replace `HORIZON`/`WARMUP` with integers):
+calibration. `full_pass_layout_costs` contains both layouts' total rows and padded
+slots per pass, maximum rows and padded slots per update, and the index of a
+maximum-row group. These full-pass bounds are useful for worst-case calibration,
+even when the requested budget stops earlier. Padding counts describe uncut
+full-pass groups; final clipping may add padding within its last retained row.
+These are counts, not GPU memory
+or throughput measurements. `update_rows(max_rows_group_index, len(ids))`
+materializes that calibration group through the same public API.
+
+The existing `micro_batch_size` supports multiple rows per native microbatch.
+Calibrate a shared value greater than one when it fits: single-row microbatches
+can require many serial passes for the story arm. Do not assume 16 or 32 fits,
+or claim a speedup without ROCm measurements. Freeze the same measured value in
+both arms before the full pair. Variable row-length padding is deferred because
+it would change this fixed-512-shape comparison.
+
+Public configuration overlay (replace `HORIZON`, `WARMUP`, and `MICROBATCH` with integers):
 
 ```yaml
 training:
   seq_len: 512
-  micro_batch_size: 1
+  micro_batch_size: MICROBATCH
   gradient_accumulation: 1
   max_tokens: 100003840
   max_steps: HORIZON

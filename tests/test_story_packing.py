@@ -73,3 +73,21 @@ def test_padding_has_zero_loss_and_gradient():
 def test_refuses_unterminated_data():
     with pytest.raises(ValueError, match="terminal EOS"):
         MatchedStoryDataset(np.array([1, 2], dtype=np.int32), 4, 0, layout="story")
+
+
+def test_manifest_layout_costs_match_materialized_full_pass():
+    ids = story_ids()
+    plan = MatchedStoryDataset(ids, 4, 0, layout="story", targets_per_update=8)
+    for layout, cost in plan.layout_costs().items():
+        other = MatchedStoryDataset(ids, 4, 0, layout=layout, targets_per_update=8)
+        groups = [list(other.update_rows(i, len(ids))) for i in range(len(other))]
+        counts = [len(rows) for rows in groups]
+        padding = [
+            sum(int(np.count_nonzero(row[1] == -100)) for row in rows)
+            for rows in groups
+        ]
+        assert cost["rows_per_pass"] == sum(counts)
+        assert cost["max_rows_per_update"] == max(counts)
+        assert counts[cost["max_rows_group_index"]] == max(counts)
+        assert cost["padded_slots_per_pass"] == sum(padding)
+        assert cost["max_padded_slots_per_update"] == max(padding)
