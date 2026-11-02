@@ -40,7 +40,9 @@ tokens_path = prepared_root / "train.npy"  # Path to verified prepared inputs
 ids = np.load(tokens_path, mmap_mode="r")
 eos = load_tokenizer(tokenizer_path).token_to_id("<eos>")
 plan = MatchedStoryDataset(ids, 512, eos, layout="contiguous", targets_per_update=4096)
-manifest = plan.group_manifest(100_003_840, train_tokens_sha256=sha256_file(tokens_path))
+manifest = plan.group_manifest(
+    100_003_840, train_tokens_sha256=sha256_file(tokens_path)
+)
 print(json.dumps(manifest, indent=2))
 ```
 
