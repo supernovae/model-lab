@@ -824,6 +824,8 @@ def _schedule(
                 if emission_exposure
                 else index.candidates(stratum, candidate_cursor, workers=read_workers)
             )
+            if hasattr(candidate_rows, "close"):
+                encoders.callback(candidate_rows.close)
             for doc, family in candidate_rows:
                 if "cached_payload" in doc:
                     doc["cached_ids"] = TokenCache.decode_ids(doc.pop("cached_payload"))

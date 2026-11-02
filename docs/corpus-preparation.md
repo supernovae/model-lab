@@ -26,7 +26,10 @@ whichever is larger), followed by bounded tokenizer batches and one cache
 writer. Ordinary preflight verifies per-record rights before cache hits can use
 its authenticated metadata to avoid schedule-stage source-body reads. Retained
 references lack those rights fields, so retained candidates still read and check
-each source record, including on a warm token cache.
+each source record, including on a warm token cache. A bounded LRU retains up
+to 64 source handles (also limited by the process descriptor budget). Each
+active read duplicates its handle and uses positional I/O, so concurrent reads
+and cache eviction cannot change another reader's position or close its file.
 A single tokenizer subprocess owns its Rayon pool; the measured CPU/RAM plan
 splits capacity between source readers and encoding instead of nesting pools.
 `SPARSELAB_MIXTURE_WORKERS=N` caps that operation's combined worker plan; omitted,

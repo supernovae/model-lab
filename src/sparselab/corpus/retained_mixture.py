@@ -11,8 +11,10 @@ import heapq
 import itertools
 import json
 import mmap
+import os
 import sqlite3
 import struct
+import threading
 from collections import OrderedDict
 from pathlib import Path
 
@@ -560,6 +562,7 @@ class RetainedMixtureIndex(MixtureIndex):
         self.work_root = Path(work_root)
         self.cohorts = cohorts
         self.handles = OrderedDict()
+        self.handle_lock = threading.Lock()
         total_sources = sum(len(cohort["sources"]) for cohort in cohorts)
         if not total_sources:
             raise ValueError("retained mixture has no source renders")
@@ -572,7 +575,7 @@ class RetainedMixtureIndex(MixtureIndex):
             )
         except ImportError, OSError, ValueError:
             available = 64
-        self.handle_limit = min(total_sources, available)
+        self.handle_limit = min(total_sources, available, 64)
         paths = []
         for cohort in cohorts:
             if cohort.get("stage_migration_receipt"):
@@ -687,9 +690,21 @@ class RetainedMixtureIndex(MixtureIndex):
             or not 0 < size <= MAX_ROW_BYTES
         ):
             raise ValueError("invalid retained document offset")
-        with Path(self.cohorts[cohort]["sources"][shard]).open("rb") as stream:
-            stream.seek(offset)
-            raw = stream.read(size)
+        # Duplicate under the cache lock so eviction cannot close an active
+        # reader's descriptor. pread keeps parallel readers' offsets independent.
+        key = (cohort, shard)
+        with self.handle_lock:
+            stream = self.handles.pop(key, None)
+            if stream is None:
+                if len(self.handles) >= self.handle_limit:
+                    self.handles.popitem(last=False)[1].close()
+                stream = Path(self.cohorts[cohort]["sources"][shard]).open("rb")  # noqa: SIM115 - owned by the bounded index cache
+            self.handles[key] = stream
+            descriptor = os.dup(stream.fileno())
+        try:
+            raw = os.pread(descriptor, size, offset)
+        finally:
+            os.close(descriptor)
         if len(raw) != size:
             raise ValueError("retained source document changed")
         doc = json.loads(raw)

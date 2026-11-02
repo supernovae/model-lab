@@ -1069,3 +1069,71 @@ def test_source_prefetch_continues_while_consumer_is_encoding():
     # fetching beyond the old four-record window without another next().
     assert ready.wait(5)
     assert list(iterator) == [(i, i) for i in range(1, 8)]
+
+
+def test_retained_handle_eviction_does_not_invalidate_active_read(
+    tmp_path, monkeypatch
+):
+    import os
+    import threading
+    from collections import OrderedDict
+    from concurrent.futures import ThreadPoolExecutor
+
+    from sparselab.corpus.retained_mixture import RetainedMixtureIndex
+
+    index = RetainedMixtureIndex.__new__(RetainedMixtureIndex)
+    index.handles = OrderedDict()
+    index.handle_lock = threading.Lock()
+    index.handle_limit = 1
+    sources, references = [], []
+    for i in range(2):
+        path = tmp_path / f"source-{i}.jsonl"
+        raw = (
+            canonical_json(
+                {
+                    "document_id": str(i),
+                    "source_id": "source",
+                    "content_sha256": str(i),
+                    "domains": ["general"],
+                    "rights": {"training_eligibility": "eligible"},
+                    "text": str(i),
+                }
+            )
+            + b"\n"
+        )
+        path.write_bytes(raw)
+        sources.append(path)
+        references.append(
+            ["general", 0, str(i), 0, i, 0, len(raw), str(i), "family", "source"]
+        )
+    index.cohorts = [{"sources": sources}]
+    entered, release = threading.Event(), threading.Event()
+    original = os.pread
+
+    def pause_first(fd, size, offset):
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5)
+        return original(fd, size, offset)
+
+    monkeypatch.setattr(os, "pread", pause_first)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(index._read_document, references[0])
+            assert entered.wait(5)
+            try:
+                assert (
+                    pool.submit(index._read_document, references[1]).result(5)["text"]
+                    == "1"
+                )
+            finally:
+                release.set()
+            assert first.result(5)["text"] == "0"
+        assert len(index.handles) == 1
+        handle = next(iter(index.handles.values()))
+        assert index._read_document(references[1])["text"] == "1"
+        assert next(iter(index.handles.values())) is handle
+    finally:
+        release.set()
+        for handle in index.handles.values():
+            handle.close()
