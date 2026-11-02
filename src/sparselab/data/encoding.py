@@ -56,7 +56,7 @@ class PreparationEncoder:
                 "tokenizer_rayon",
                 worker_memory_bytes=512 * 1024**2,
                 reserve_bytes=max(1024**3, total // 10),
-                operator_cap=4 if max_workers is None else min(4, max_workers),
+                operator_cap=4 if max_workers is None else max_workers,
             )
             with tempfile.NamedTemporaryFile(
                 mode="w",

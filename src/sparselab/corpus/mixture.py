@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from collections import Counter
 from contextlib import ExitStack, nullcontext
 from datetime import datetime, timedelta
@@ -240,7 +241,9 @@ def _rank(
 
 def materialize_mixture(declaration: Path, output: Path) -> dict:
     """Publish exact token IDs only after all quotas and closure checks pass."""
-    with _verification_operation():
+    from sparselab.corpus.mixture_pipeline import mixture_writer
+
+    with mixture_writer(output), _verification_operation():
         return _materialize_mixture(declaration, output)
 
 
@@ -347,9 +350,26 @@ def _materialize_mixture(
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".mixture-", dir=output.parent))
     try:
+        checkpoint_cache, checkpoint_request = _native_mixture_completion(
+            spec, raw, output, manifest, tokenizer_sha
+        )
         with tempfile.TemporaryDirectory(prefix=".index-", dir=staging) as scratch:
+            preflight = None
             if cohorts is None:
-                index = MixtureIndex(Path(scratch), release / "documents.jsonl")
+                from sparselab.corpus.mixture_pipeline import MixturePreflight
+
+                if reuse_tokens:
+                    preflight = MixturePreflight(
+                        checkpoint_cache,
+                        checkpoint_request,
+                        release,
+                        spec.family_inventory,
+                    )
+                index = MixtureIndex(
+                    Path(scratch),
+                    release / "documents.jsonl",
+                    prepared=preflight.snapshot if preflight else None,
+                )
             else:
                 from sparselab.corpus.retained_mixture import RetainedMixtureIndex
 
@@ -362,7 +382,7 @@ def _materialize_mixture(
                     spec.order_policy,
                 )
             with index:
-                if cohorts is None:
+                if cohorts is None and not index.prepared:
                     index.inventory(
                         spec.family_inventory,
                         spec.source_strata,
@@ -375,6 +395,22 @@ def _materialize_mixture(
                         ),
                     )
                     index.select(release / "lm/train.lineage.jsonl")
+                    if preflight is not None:
+                        preflight.publish(index)
+                elif preflight is not None:
+                    index.input_digests.update(preflight.inputs)
+                frontier = None
+                if reuse_tokens:
+                    from sparselab.corpus.mixture_pipeline import (
+                        MixtureFrontier,
+                        pipeline_request,
+                    )
+
+                    frontier = MixtureFrontier(
+                        output,
+                        checkpoint_cache,
+                        pipeline_request(checkpoint_request, index),
+                    )
                 receipt = _schedule(
                     spec,
                     raw,
@@ -386,6 +422,7 @@ def _materialize_mixture(
                     index,
                     staging,
                     reuse_tokens=reuse_tokens,
+                    frontier=frontier,
                 )
                 index.verify_inputs()
                 if cohorts is not None:
@@ -462,6 +499,7 @@ def _schedule(
     staging,
     *,
     reuse_tokens=True,
+    frontier=None,
 ):
     totals: Counter[str] = Counter()
     unique: Counter[str] = Counter()
@@ -495,8 +533,127 @@ def _schedule(
         (
             TokenCache(token_root, tokenizer_sha) if reuse_tokens else nullcontext(None)
         ) as tokens,
-        (staging / "train.tokens.jsonl").open("wb") as stream,
+        (staging / "train.tokens.jsonl").open("wb+") as stream,
     ):
+        from sparselab.host_capacity import plan_host_workers
+
+        cap = os.environ.get("SPARSELAB_MIXTURE_WORKERS")
+        workers = plan_host_workers(
+            "mixture",
+            worker_memory_bytes=512 * 1024**2,
+            reserve_bytes=1024**3,
+            operator_cap=int(cap) if cap else None,
+        ).workers
+        read_workers = max(1, workers // 4) if workers > 1 else 0
+        encode_workers = max(1, workers - read_workers)
+        metrics = {
+            "workers": workers,
+            "read_workers": read_workers,
+            "encode_workers": encode_workers,
+        }
+        index.pipeline_metrics = metrics
+        index.token_lookup = tokens.lookup if tokens is not None else None
+        index.token_bytes = tokens.payload_bytes if tokens is not None else None
+        started = time.monotonic()
+        selected = Counter()
+        done = []
+        resumed = None
+        candidate_cursor = None
+        emission_exposure = emission_ordinal = 0
+        candidates = Counter()
+        if frontier is not None:
+            encoders.callback(frontier.close, index)
+            frontier.restore(index, stream, token_digest, excluded)
+            if frontier.state is not None:
+                resumed = frontier.state["state"]
+                for counter, name in (
+                    (totals, "totals"),
+                    (unique, "unique"),
+                    (available_unique, "available_unique"),
+                    (available_content, "available_content"),
+                    (eligible_families, "eligible_families"),
+                    (source_totals, "source_totals"),
+                    (candidates, "candidates"),
+                    (selected, "selected"),
+                ):
+                    counter.update(resumed[name])
+                records = resumed["records"]
+                excluded_bytes = resumed["excluded_bytes"]
+                done = resumed["done"]
+            frontier.begin(index)
+
+        def checkpoint(stratum, available):
+            commit_started = time.monotonic()
+            if frontier is not None:
+                frontier.commit(
+                    {
+                        "stratum": stratum,
+                        "cursor": candidate_cursor,
+                        "emission_exposure": emission_exposure,
+                        "emission_ordinal": emission_ordinal,
+                        "available": available,
+                        "done": list(done),
+                        "totals": dict(totals),
+                        "unique": dict(unique),
+                        "available_unique": dict(available_unique),
+                        "available_content": dict(available_content),
+                        "eligible_families": dict(eligible_families),
+                        "source_totals": dict(source_totals),
+                        "candidates": dict(candidates),
+                        "selected": dict(selected),
+                        "records": records,
+                        "excluded_bytes": excluded_bytes,
+                    },
+                    stream,
+                    excluded,
+                    index,
+                )
+            metrics["checkpoint_seconds"] = (
+                metrics.get("checkpoint_seconds", 0) + time.monotonic() - commit_started
+            )
+            import psutil
+
+            metrics.update(
+                {
+                    "elapsed_seconds": time.monotonic() - started,
+                    "candidates": dict(candidates),
+                    "selected": dict(selected),
+                    "committed_candidates": dict(candidates)
+                    if frontier is not None
+                    else {},
+                    "committed_target_tokens": dict(totals)
+                    if frontier is not None
+                    else {},
+                    "cache_hits": tokens.hits if tokens is not None else 0,
+                    "cache_misses": tokens.misses if tokens is not None else 0,
+                    "cache_lookup_seconds": tokens.lookup_seconds
+                    if tokens is not None
+                    else 0,
+                    "cache_write_seconds": tokens.write_seconds
+                    if tokens is not None
+                    else 0,
+                    "cache_encode_seconds": tokens.encode_seconds
+                    if tokens is not None
+                    else 0,
+                    "rss_bytes": psutil.Process().memory_info().rss,
+                    "child_rss_bytes": sum(
+                        p.memory_info().rss
+                        for p in psutil.Process().children()
+                        if p.is_running()
+                    ),
+                    "commits": frontier.sequence if frontier is not None else 0,
+                }
+            )
+            metrics["read_utilization"] = metrics.get("read_worker_seconds", 0) / max(
+                1e-9, metrics["elapsed_seconds"] * max(1, read_workers)
+            )
+            progress = (
+                frontier.root if frontier is not None else staging
+            ) / "progress.json"
+            temporary = progress.with_suffix(".partial")
+            temporary.write_bytes(canonical_json(metrics) + b"\n")
+            os.replace(temporary, progress)
+
         direct = spec.max_exposures == 1 and callable(
             getattr(index, "record_family", None)
         )
@@ -544,12 +701,28 @@ def _schedule(
                 ]
             if encoder is None:
                 encoder = encoders.enter_context(
-                    PreparationEncoder(tokenizer, staging, max_workers=None)
+                    PreparationEncoder(tokenizer, staging, max_workers=encode_workers)
                 )
-            return encoder.encode(texts)
+            encode_started = time.monotonic()
+            try:
+                return encoder.encode(texts)
+            finally:
+                metrics["encode_seconds"] = (
+                    metrics.get("encode_seconds", 0) + time.monotonic() - encode_started
+                )
 
         for stratum, quota in sorted(spec.target_quotas.items()):
-            available = 0
+            if stratum in done:
+                if hasattr(index, "ranked") and resumed is not None:
+                    index.frontier = resumed["cursor"]
+                continue
+            continuing = resumed is not None and resumed["stratum"] == stratum
+            candidate_cursor = resumed["cursor"] if continuing else None
+            available = resumed["available"] if continuing else 0
+            emission_exposure = resumed["emission_exposure"] if continuing else 0
+            emission_ordinal = resumed["emission_ordinal"] if continuing else 0
+            if not continuing:
+                index.record_event(["reset", None])
             pending = []
             pending_bytes = 0
 
@@ -558,6 +731,7 @@ def _schedule(
                 if not ids:
                     exclude(doc, "zero_encoded_targets")
                     return
+                selected[stratum] += 1
                 encoded_doc = {
                     "document_id": doc["document_id"],
                     "source_id": doc["source_id"],
@@ -575,9 +749,15 @@ def _schedule(
                 available += len(ids) + 1
                 available_content[stratum] += len(ids)
 
-            def flush(pending=pending):
-                nonlocal pending_bytes
-                texts = [doc["text"] for doc, family in pending if family is not None]
+            def flush(pending=pending, stratum=stratum):
+                nonlocal pending_bytes, available
+                if not pending:
+                    return
+                texts = [
+                    doc["text"]
+                    for doc, family in pending
+                    if family is not None and "cached_ids" not in doc
+                ]
                 ids = iter(
                     tokens.encode_many(texts, encode_missing)
                     if tokens is not None
@@ -587,59 +767,77 @@ def _schedule(
                     if family is None:
                         exclude(doc, "duplicate_train_content")
                     else:
-                        process(doc, family, next(ids))
+                        process(
+                            doc,
+                            family,
+                            doc["cached_ids"] if "cached_ids" in doc else next(ids),
+                        )
                 pending.clear()
                 pending_bytes = 0
+                checkpoint(stratum, available)  # noqa: B023 - synchronous flush of current stratum
 
-            for doc, family in index.candidates(stratum):
+            candidate_rows = (
+                ()
+                if emission_exposure
+                else index.candidates(stratum, candidate_cursor, workers=read_workers)
+            )
+            for doc, family in candidate_rows:
+                if "cached_payload" in doc:
+                    doc["cached_ids"] = TokenCache.decode_ids(doc.pop("cached_payload"))
                 marker = {"document_id": doc["document_id"]}
-                marker_bytes = len(doc["document_id"].encode("utf-8"))
-                if index.seen(doc["content_sha256"]):
-                    if marker_bytes > batch_source_bytes:
-                        flush()
-                        exclude(marker, "duplicate_train_content")
-                    else:
-                        if (
-                            pending
-                            and pending_bytes + marker_bytes > batch_source_bytes
-                        ):
-                            flush()
-                        pending.append((marker, None))
-                        pending_bytes += marker_bytes
-                        if len(pending) >= TOKENIZER_BATCH_DOCUMENTS:
-                            flush()
-                    continue
-                source_bytes = len(doc["text"].encode("utf-8"))
                 buffered_bytes = (
-                    source_bytes
-                    + marker_bytes
+                    max(
+                        len(doc["text"].encode("utf-8")),
+                        36 * len(doc.get("cached_ids", [])),
+                    )
+                    + len(doc["document_id"].encode("utf-8"))
                     + len(doc["source_id"].encode("utf-8"))
                     + len(family.encode("utf-8"))
                 )
-                if buffered_bytes > batch_source_bytes:
-                    flush()
-                    ids = (
-                        tokens.encode(tokenizer, doc["text"])
-                        if tokens is not None
-                        else tokenizer.encode(doc["text"], add_special_tokens=False).ids
-                    )
-                    process(doc, family, ids)
-                    continue
+                # Flush before mutating dedup state for this candidate. Its
+                # cursor must never get ahead of the committed index delta.
                 if pending and (
                     len(pending) >= TOKENIZER_BATCH_DOCUMENTS
                     or pending_bytes + buffered_bytes > batch_source_bytes
                 ):
                     flush()
-                pending.append(
-                    (
-                        {**marker, "source_id": doc["source_id"], "text": doc["text"]},
-                        family,
+                candidate_cursor = index.frontier
+                candidates[stratum] += 1
+                if index.seen(doc["content_sha256"]):
+                    pending.append((marker, None))
+                    pending_bytes += len(doc["document_id"].encode("utf-8"))
+                elif buffered_bytes > batch_source_bytes:
+                    ids = doc.get("cached_ids")
+                    if ids is None:
+                        ids = (
+                            tokens.encode(tokenizer, doc["text"])
+                            if tokens is not None
+                            else tokenizer.encode(
+                                doc["text"], add_special_tokens=False
+                            ).ids
+                        )
+                    process(doc, family, ids)
+                    checkpoint(stratum, available)
+                else:
+                    pending.append(
+                        (
+                            {
+                                **marker,
+                                "source_id": doc["source_id"],
+                                "text": doc["text"],
+                                **(
+                                    {"cached_ids": doc["cached_ids"]}
+                                    if "cached_ids" in doc
+                                    else {}
+                                ),
+                            },
+                            family,
+                        )
                     )
-                )
-                pending_bytes += buffered_bytes
+                    pending_bytes += buffered_bytes
                 if (
                     len(pending) >= TOKENIZER_BATCH_DOCUMENTS
-                    or pending_bytes == batch_source_bytes
+                    or pending_bytes >= batch_source_bytes
                 ):
                     flush()
             flush()
@@ -662,15 +860,23 @@ def _schedule(
             available_unique[stratum] = available
             eligible_families[stratum] = index.family_count(stratum)
             if not direct:
-                for exposure in range(1, spec.max_exposures + 1):
-                    for doc in index.encoded(stratum):
+                start_exposure = emission_exposure or 1
+                for exposure in range(start_exposure, spec.max_exposures + 1):
+                    after = emission_ordinal if exposure == start_exposure else 0
+                    emission_exposure = exposure
+                    for doc in index.encoded(stratum, after=after):
                         if totals[stratum] >= quota:
                             break
                         emit(doc, stratum, quota, exposure)
+                        emission_ordinal = index.encoded_frontier
+                        if records % TOKENIZER_BATCH_DOCUMENTS == 0:
+                            checkpoint(stratum, available)
                     if totals[stratum] == quota:
                         break
             if totals[stratum] != quota:
                 raise ValueError(f"unfilled quota for {stratum}")
+            done.append(stratum)
+            checkpoint(stratum, available)
         stream.flush()
         os.fsync(stream.fileno())
     receipt = {
@@ -721,7 +927,12 @@ def _completed_mixture_cache(spec):
         **cache.authority,
         "mixture": {
             name: sha256_file(Path(__file__).with_name(name))
-            for name in ("mixture.py", "mixture_index.py")
+            for name in (
+                "mixture.py",
+                "mixture_index.py",
+                "mixture_pipeline.py",
+                "token_cache.py",
+            )
         },
     }
     if spec.additional_releases:
@@ -820,6 +1031,7 @@ def _native_mixture_completion(spec, raw, output, manifest, tokenizer_sha):
                 "mixture_index.py",
                 "retained_mixture.py",
                 "token_cache.py",
+                "mixture_pipeline.py",
             )
         },
     }

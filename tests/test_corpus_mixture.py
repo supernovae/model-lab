@@ -637,7 +637,8 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
         ("three", "efgh", "e" * 64),
     ]
     with source.open("wb") as stream:
-        for name, text, content in documents:
+        for name, text, _content in documents:
+            content = hashlib.sha256(text.encode()).hexdigest()
             row = {
                 "document_id": name,
                 "source_id": "source",
@@ -704,14 +705,27 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
 
     monkeypatch.setattr(PreparationEncoder, "encode", observe_batch)
 
-    def run(name, *, reuse_tokens=True):
+    def run(name, *, reuse_tokens=True, checkpoint=False):
+        import tempfile
+
+        from sparselab.corpus.admission_inspection_cache import InspectionCache
+        from sparselab.corpus.mixture_pipeline import MixtureFrontier, pipeline_request
+
         staging = root / name
-        staging.mkdir()
-        scratch = staging / "index"
-        scratch.mkdir()
+        staging.mkdir(exist_ok=checkpoint)
+        scratch = Path(tempfile.mkdtemp(dir=staging))
         with RetainedMixtureIndex(
             scratch, root, [cohort], 42, {"source": "general"}
         ) as index:
+            frontier = None
+            if checkpoint:
+                frontier = MixtureFrontier(
+                    staging,
+                    InspectionCache(root),
+                    pipeline_request(
+                        {"tokenizer": "a" * 64, "declaration": "fixture"}, index
+                    ),
+                )
             result = mixture._schedule(
                 spec,
                 b"declaration",
@@ -723,6 +737,7 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
                 index,
                 staging,
                 reuse_tokens=reuse_tokens,
+                frontier=frontier,
             )
         return result, (staging / "train.tokens.jsonl").read_bytes()
 
@@ -734,7 +749,15 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
     ]
     assert result["actual_target_tokens"] == {"general": 10}
     calls.clear()
-    warm_result, warm_output = run("warm")
+    with monkeypatch.context() as warm_patch:
+
+        def unexpected_source_read(*args):
+            raise AssertionError("warm token cache must bypass source body reads")
+
+        warm_patch.setattr(
+            RetainedMixtureIndex, "_read_document", unexpected_source_read
+        )
+        warm_result, warm_output = run("warm")
     assert (warm_result, warm_output) == (result, output)
     assert calls == []
 
@@ -754,6 +777,24 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
     serial_result, serial_output = run("serial", reuse_tokens=False)
     assert (serial_result, serial_output) == (result, output)
     assert calls == []
+
+    from sparselab.corpus.mixture_pipeline import MixtureFrontier
+
+    monkeypatch.setattr(encoding, "TOKENIZER_BATCH_DOCUMENTS", 1)
+    monkeypatch.setattr(mixture, "MIXTURE_BATCH_SOURCE_BYTES", 64)
+    commit = MixtureFrontier.commit
+
+    def interrupt(self, *args):
+        commit(self, *args)
+        if self.sequence == 3:
+            raise InterruptedError("retained frontier committed")
+
+    monkeypatch.setattr(MixtureFrontier, "commit", interrupt)
+    with pytest.raises(InterruptedError):
+        run("resumed", checkpoint=True)
+    monkeypatch.setattr(MixtureFrontier, "commit", commit)
+    monkeypatch.setenv("SPARSELAB_MIXTURE_WORKERS", "8")
+    assert run("resumed", checkpoint=True) == (result, output)
 
     # Batched padding changes IDs, so padded tokenizers retain serial semantics.
     tokenizer.enable_padding(pad_id=1, pad_token="<pad>")
@@ -802,3 +843,131 @@ def test_real_batch_cache_survives_interrupted_caller(tmp_path: Path) -> None:
         )
         with pytest.raises(ValueError, match="cached token payload digest mismatch"):
             cache.encode_many(["plain"], unexpected)
+
+
+@pytest.mark.parametrize("after_commit", [False, True])
+def test_mixture_frontier_resumes_without_committed_candidate_replay(
+    tmp_path, monkeypatch, after_commit
+):
+    from sparselab.corpus.mixture_pipeline import MixtureFrontier
+    from sparselab.data import encoding
+
+    declaration, _, _ = _fixture(tmp_path, monkeypatch)
+    baseline = tmp_path / "baseline"
+    expected = mixture._materialize_mixture(declaration, baseline, reuse_tokens=False)
+    monkeypatch.setattr(encoding, "TOKENIZER_BATCH_DOCUMENTS", 1)
+    monkeypatch.setenv("SPARSELAB_MIXTURE_WORKERS", "1")
+    output = tmp_path / "interrupted"
+    original = MixtureFrontier.commit
+
+    def interrupt(self, *args):
+        if self.sequence == 1 and not after_commit:
+            raise InterruptedError("before durable commit")
+        original(self, *args)
+        if self.sequence == 2 and after_commit:
+            raise InterruptedError("after durable commit")
+
+    monkeypatch.setattr(MixtureFrontier, "commit", interrupt)
+    with pytest.raises(InterruptedError):
+        mixture.materialize_mixture(declaration, output)
+    assert not output.exists()
+    checkpoints = tmp_path / ".interrupted.assembly"
+    last = json.loads(max(checkpoints.glob("commit-*.json")).read_bytes())
+    committed = sum(last["state"]["candidates"].values())
+    visited = []
+    original_cached = mixture.MixtureIndex.cached_document
+
+    def observe(self, doc_id, *args):
+        visited.append(doc_id)
+        return original_cached(self, doc_id, *args)
+
+    monkeypatch.setattr(MixtureFrontier, "commit", original)
+    monkeypatch.setattr(mixture.MixtureIndex, "cached_document", observe)
+
+    def unexpected_inventory_replay(*args):
+        raise AssertionError("authenticated preflight must bypass inventory replay")
+
+    monkeypatch.setattr(
+        mixture.MixtureIndex, "_load_documents", unexpected_inventory_replay
+    )
+    monkeypatch.setenv("SPARSELAB_MIXTURE_WORKERS", "8")
+    actual = mixture.materialize_mixture(declaration, output)
+    assert actual == expected
+    assert (output / "train.tokens.jsonl").read_bytes() == (
+        baseline / "train.tokens.jsonl"
+    ).read_bytes()
+    assert len(visited) == 3 - committed
+
+
+@pytest.mark.parametrize("damage", ["output", "index", "identity", "marker"])
+def test_mixture_frontier_rejects_changed_checkpoint(tmp_path, monkeypatch, damage):
+    from sparselab.corpus.mixture_pipeline import MixtureFrontier
+
+    declaration, _, _ = _fixture(tmp_path, monkeypatch)
+    output = tmp_path / "interrupted"
+    original = MixtureFrontier.commit
+
+    def interrupt(self, *args):
+        original(self, *args)
+        raise InterruptedError("after durable commit")
+
+    monkeypatch.setattr(MixtureFrontier, "commit", interrupt)
+    with pytest.raises(InterruptedError):
+        mixture.materialize_mixture(declaration, output)
+    monkeypatch.setattr(MixtureFrontier, "commit", original)
+    checkpoints = tmp_path / ".interrupted.assembly"
+    marker = next(checkpoints.glob("commit-*.json"))
+    entry = json.loads(marker.read_bytes())
+    if damage in {"output", "index"}:
+        path = Path(entry["directory"]) / f"{damage}.jsonl"
+        path.write_bytes(path.read_bytes() + b"{}\n")
+    elif damage == "identity":
+        declaration.write_bytes(declaration.read_bytes() + b"\n# changed declaration\n")
+    else:
+        entry["state"]["records"] += 1
+        marker.write_bytes(canonical_json(entry))
+    with pytest.raises(ValueError, match="checkpoint"):
+        mixture.materialize_mixture(declaration, output)
+    assert not output.exists()
+
+
+def test_ordered_source_fetch_bounds_reorder_and_propagates_failure(monkeypatch):
+    import threading
+
+    from sparselab.corpus import mixture_pipeline
+
+    assert list(
+        mixture_pipeline.ordered_fetch(range(3), str, workers=0, size=lambda i: 1)
+    ) == [(i, str(i)) for i in range(3)]
+    monkeypatch.setattr(mixture_pipeline, "PREFETCH_BYTES", 3)
+    later = threading.Event()
+    metrics = {}
+
+    def fetch(i):
+        if i == 0:
+            assert later.wait(5)
+        if i == 1:
+            later.set()
+        if i == 4:
+            raise OSError("source read failed")
+        return str(i)
+
+    iterator = mixture_pipeline.ordered_fetch(
+        range(6), fetch, workers=4, size=lambda i: 1, metrics=metrics
+    )
+    assert [next(iterator) for _ in range(4)] == [(i, str(i)) for i in range(4)]
+    with pytest.raises(OSError, match="source read failed"):
+        next(iterator)
+    assert metrics["read_queue_bytes_peak"] <= 3
+    assert metrics["read_queue_records_peak"] <= 3
+
+
+def test_mixture_writer_rejects_concurrent_owner(tmp_path):
+    from sparselab.corpus.mixture_pipeline import mixture_writer
+
+    with (
+        mixture_writer(tmp_path / "output"),
+        pytest.raises(ValueError, match="active writer"),
+        mixture_writer(tmp_path / "output"),
+    ):
+        pytest.fail("two writers acquired the same output")
