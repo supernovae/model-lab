@@ -16,7 +16,7 @@ from test_surface_review import cells
 from test_training import config
 
 from sparselab.campaign.state import publish_immutable
-from sparselab.canonical import canonical_json
+from sparselab.canonical import canonical_digest, canonical_json
 from sparselab.evaluation import inference
 from sparselab.evaluation.capabilities import describe_capability_card
 from sparselab.evaluation.suite import (
@@ -71,6 +71,147 @@ def evaluated_run(tmp_path_factory):
         )
     )
     return source, small.logging.root_dir
+
+
+@pytest.fixture(scope="module")
+def fixed_panel_run(tmp_path_factory):
+    from sparselab.config.models import RunConfig
+    from sparselab.data.packing import prepare_data
+    from sparselab.data.tokenizer import load_tokenizer
+    from sparselab.training.manifest import sha256_file
+
+    root = tmp_path_factory.mktemp("fixed-panel-evidence")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("SPARSELAB_WORK_DIR", str(root / "work"))
+        base = config(root)
+        values = base.model_dump(mode="json")
+        values["training"].update(max_steps=1, max_tokens=32)
+        values["optimizer"]["warmup_steps"] = 0
+        values["evaluation"].update(every_steps=1, max_batches=1)
+        values["checkpoint"]["every_steps"] = 1
+        base = RunConfig.model_validate(values)
+        tokenizer = load_tokenizer(base.tokenizer.path)
+        panels = []
+        for seed, name in ((8, "first"), (9, "second")):
+            source = base.model_copy(
+                update={
+                    "dataset": base.dataset.model_copy(
+                        update={
+                            "synthetic_seed": seed,
+                            "train_max_documents": 8,
+                            "validation_max_documents": 4,
+                            "train_max_tokens": 256,
+                            "validation_max_tokens": 256,
+                        }
+                    )
+                }
+            )
+            prepared = prepare_data(source, tokenizer)
+            panels.append(
+                {
+                    "name": name,
+                    "prepared_path": str(prepared.root),
+                    "prepared_manifest_sha256": prepared.manifest["manifest_sha256"],
+                    "tokenizer_file_sha256": sha256_file(base.tokenizer.path),
+                    "tokenizer_canonical_sha256": prepared.manifest["tokenizer_sha256"],
+                    "split": "validation",
+                    "sampling": "first_eligible_blocks",
+                    "sequence_length": 16,
+                    "blocks": 3,
+                    "supervised_targets": 48,
+                    "batch_size": 2,
+                    "max_forward_positions": 48,
+                }
+            )
+        values["evaluation"]["panels"] = panels
+        measured = RunConfig.model_validate(values)
+        train(measured, run_id="fixed-panels")
+    return measured.logging.root_dir / "fixed-panels"
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ("protocol", "fixed-panel report protocol mismatch"),
+        ("ownership", "fixed-panel inputs are not owned run artifacts"),
+        ("artifact", "fixed-panel artifact identity mismatch"),
+        ("data", "fixed-panel data identity mismatch"),
+    ],
+)
+def test_fixed_panel_evidence_refuses_resealed_metadata(
+    fixed_panel_run, tmp_path, change, reason
+):
+    from sparselab.evaluation.evidence import (
+        experiment_evidence,
+        validate_held_out_report,
+    )
+    from sparselab.evaluation.post_train_triage import read_triage
+    from sparselab.training.manifest import read_manifest
+
+    run = fixed_panel_run
+    evidence = experiment_evidence(run)
+    assert evidence["evidence_level"] == "checkpointed_held_out"
+    assert not evidence["rejected_reports"]
+    manifest = read_manifest(run / "manifest.json")
+    artifacts = {
+        item["relative_path"]: item["sha256"] for item in manifest["artifacts"]
+    }
+    checkpoints = {
+        item["path"]: item for item in evidence["checkpoints"] if item["verified"]
+    }
+    original = next((run / "evaluations").glob("validation_step_*_gen_*.json"))
+    accepted, error = validate_held_out_report(
+        original, checkpoints, artifacts, manifest, 96, 4
+    )
+    assert error is None
+    assert accepted["valid_targets"] == 96 and accepted["batches"] == 4
+    triage = read_triage(run.name, run.parent)
+    assert triage["core"]["evidence"]["expected_validation_targets"] == 96
+
+    payload = json.loads(original.read_text())
+    if change == "protocol":
+        payload["panels"]["first"]["protocol"]["blocks"] = 2
+    elif change == "ownership":
+        del artifacts["panels/first/manifest.json"]
+    elif change == "artifact":
+        payload["identities"]["panels/first/manifest.json"] = "0" * 64
+    else:
+        payload["panels"]["first"]["data_identity"]["validation_sha256"] = "0" * 64
+    payload.pop("sha256")
+    payload["sha256"] = canonical_digest(payload)
+    report = tmp_path / "resealed.json"
+    report.write_bytes(canonical_json(payload))
+    rejected, error = validate_held_out_report(
+        report, checkpoints, artifacts, manifest, 96, 4
+    )
+    assert rejected is None
+    assert error == reason
+
+
+def test_ordinary_run_refuses_resealed_unexpected_panel_results(
+    evaluated_run, tmp_path
+):
+    from sparselab.evaluation.evidence import experiment_evidence
+
+    _, runs = evaluated_run
+    run = tmp_path / "suite-run"
+    shutil.copytree(runs / "suite-run", run)
+    assert experiment_evidence(run)["evidence_level"] == "checkpointed_held_out"
+    report = next((run / "evaluations").glob("validation_step_*_gen_*.json"))
+    payload = json.loads(report.read_text())
+    payload["panels"] = {"undeclared": {}}
+    payload.pop("sha256")
+    payload["sha256"] = canonical_digest(payload)
+    report.write_bytes(canonical_json(payload))
+    result = experiment_evidence(run)
+    assert {"path": report.name, "reason": "unexpected fixed-panel results"} in result[
+        "rejected_reports"
+    ]
+    assert payload["checkpoint"] in result["missing_reports"]
+    assert all(
+        item["checkpoint"] != payload["checkpoint"]
+        for item in result["quality_observations"]
+    )
 
 
 def test_run_evidence_signed_reuse_across_process_and_restored_mtime(
