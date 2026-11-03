@@ -227,6 +227,13 @@ def declarations(workload: TryWorkload, root: Path) -> tuple:
             or config.model.max_seq_len > 64
         ):
             raise ValueError("model exceeds the existing tiny smoke profile")
+        evaluation_positions = (
+            sum(p.blocks * p.sequence_length for p in config.evaluation.panels)
+            if config.evaluation.panels
+            else config.evaluation.batch_limit
+            * (config.evaluation.batch_size or config.training.micro_batch_size)
+            * config.training.seq_len
+        )
         if (
             config.training.max_steps > 12
             or config.training.max_tokens > 1536
@@ -234,6 +241,7 @@ def declarations(workload: TryWorkload, root: Path) -> tuple:
             or config.training.micro_batch_size > 4
             or config.training.gradient_accumulation != 1
             or config.evaluation.batch_limit > 4
+            or evaluation_positions > 4 * 4 * 32
         ):
             raise ValueError(
                 "training/evaluation exceeds the existing tiny smoke profile"
