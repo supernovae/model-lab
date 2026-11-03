@@ -400,6 +400,16 @@ class ProofStore:
             key = stream.read(33)
         return key if len(key) == 32 else None
 
+    def key_available(self, *, create: bool = False) -> bool:
+        """Check key access without exposing key bytes; read-only by default.
+
+        ``create=True`` uses the existing publication trust checks and may create
+        the private key and its directories. A readable existing key does not
+        imply that those stricter publication checks will succeed. This checks
+        only key access, not receipt-directory availability.
+        """
+        return self._key(create=create) is not None
+
     def migration_signature(self, observation: dict[str, object]) -> str:
         """Authenticate a relocation observation, not a native execution proof.
 
