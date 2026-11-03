@@ -4,13 +4,13 @@ Commands below use the [activated, provisioned environment](../README.md#first-r
 
 SparseLab uses upstream PyTorch's `torch.xpu` backend for Intel GPUs. The
 `xpu-arc-v1` recipe provisions an isolated Linux x86_64 / Python 3.14 environment
-with `torch==2.14.1+xpu` and the Intel runtime pins in
+with `torch==2.15.0+xpu` and the Intel runtime pins in
 [`requirements/xpu-arc.txt`](../requirements/xpu-arc.txt). It follows the same
 native provision/register/doctor path as ROCm. No Intel Extension for PyTorch
 (IPEX), alternate trainer, CPU extra in the vendor environment, or full oneAPI
 build toolkit is needed for this binary-wheel path.
 
-PyTorch's [Intel GPU guide](https://docs.pytorch.org/docs/2.14/notes/get_start_xpu.html)
+PyTorch's [Intel GPU guide](https://docs.pytorch.org/docs/2.15/notes/get_start_xpu.html)
 lists Arc A-series and B-series on supported Ubuntu and WSL2 environments.
 The A380 is an A-series device. Arc Pro B60/B70 use the same XPU execution path,
 but support for each SKU, host and precision must be checked against the current
@@ -21,6 +21,30 @@ integrated `Intel(R) Arc(TM) Graphics` does not match. Check
 `torch.xpu.get_device_name(0)` in the XPU interpreter before provisioning. On
 multi-GPU machines, register a separate explicit profile with `--device-index`
 for the desired GPU.
+
+## Reproducing the dependency lock
+
+Use the repository's uv version and Python 3.14. Export common application
+constraints from `uv.lock`, excluding Torch, then resolve the vendor recipe for
+Linux x86_64. This does not install a runtime or exercise a device:
+
+```sh
+uv export --locked --extra cpu --no-dev --no-hashes --no-emit-project \
+  --no-emit-package torch -o /tmp/lab-common.txt
+uv pip compile pyproject.toml requirements/xpu-arc.txt container/build-requirements.txt \
+  --constraint /tmp/lab-common.txt --python-version 3.14 \
+  --python-platform x86_64-manylinux_2_28 --generate-hashes \
+  --no-header --no-annotate --emit-index-url --emit-find-links \
+  -o container/backends/xpu/requirements.lock
+```
+
+For find-links entries where uv omits hashes, retain the SHA-256 published by
+the official package index for the selected CPython 3.14 Linux x86_64 wheel;
+never leave an unhashed pin. `container/image_plan.py plan xpu` validates all
+lock entries and their shared application versions. The lock includes Torch
+2.15.0+xpu, Triton XPU 3.9.0, Intel compiler/SYCL runtime 2026.1.2, oneCCL
+2022.1.2, PTI 1.1.0, and pyzes 0.1.3. These are Python dependency changes;
+the separately pinned driver userspace is unchanged and requires native testing.
 
 ## Host prerequisites
 

@@ -1,6 +1,6 @@
 {
   "backend": "xpu",
-  "torch_version": "2.14.1+xpu",
+  "torch_version": "2.15.0+xpu",
   "runtime_version": "2026.1",
   "platform": "linux/amd64"
 }

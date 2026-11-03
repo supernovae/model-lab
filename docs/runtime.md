@@ -97,6 +97,59 @@ when the selected execution engine is MLX. MLX itself remains a separate engine;
 the CPU extra is not a fallback for a requested Metal backend. See the
 [native macOS delivery guide](macos-mlx.md) for installation and dependency reuse.
 
+## Framework baseline and capability boundaries
+
+The target lab baseline is **PyTorch 2.15.0 / CPython 3.14**. Version equality
+is a packaging target, not evidence of identical kernels, precision, throughput,
+or numerical results. Current repository pins are:
+
+| Runtime | Package / source | Qualification boundary |
+| --- | --- | --- |
+| Linux CPU | `2.15.0+cpu`, official CPU index in `uv.lock` | CPU tests; no accelerator evidence |
+| Mac CPU / PyTorch MPS | `2.15.0`, PyPI macOS 14+ arm64 wheel in `uv.lock` | Native Mac execution still required |
+| Intel XPU | `2.15.0+xpu`, official XPU index | Recipe and hashed container lock; native device validation still required |
+| AMD gfx1100 local recipe | `2.13.0+rocm10.0.0`, AMD source | Retained until the separately tested 2.15 replacement is qualified |
+| AMD container | `2.14.0+rocm10.1.0`, AMD source | Separate packaging from the local recipe; not a 2.15 runtime |
+| NVIDIA container | `2.14.1+cu132` | Outside the CPU/Intel/Mac/ROCm migration; remains separately pinned |
+| Mac MLX / Metal | `mlx==0.32.4`, `mlx-metal==0.32.4` | Separate engine; not PyTorch MPS or a Torch version |
+
+As checked on 2026-11-03, the existing
+[AMD Torch source](https://stable.repo.amd.com/rocm/whl-next/torch/) does not
+publish 2.15. The [official PyTorch ROCm 10.0 source](https://download.pytorch.org/whl/rocm10.0/torch/)
+publishes `2.15.0+rocm10.0` for CPython 3.14. That is a different distribution
+from AMD's device-specific Torch/SDK packages; do not substitute its version
+into the AMD recipe or combine the dependency sets. ROCm standardization remains
+pending native gfx1100 qualification and a complete reproducible replacement recipe.
+
+| Feature | PyTorch CPU | PyTorch MPS | PyTorch XPU / ROCm | MLX Metal |
+| --- | --- | --- | --- | --- |
+| Dense training, evaluation, generation | Implemented | Implemented; native validation required | Implemented; native validation required | Implemented |
+| FP32 | Supported | Requires available MPS | Requires available vendor device | Supported |
+| BF16 | Explicit precision probe | Explicit precision probe | Explicit precision probe | Rejected |
+| FP16 training | Rejected | Rejected: no Lab GradScaler path | Explicit precision/scaler probe | Rejected |
+| Block-sparse attention | PyTorch implementation | PyTorch implementation | Kernel selection and hardware support must be validated | Native implementation |
+| MoE, Engram, MLA, sliding attention | PyTorch implementation | Device validation required | Device validation required | Rejected |
+| Compiled transformer blocks | Explicit opt-in, compiler required | No qualification claimed | Explicit opt-in, compiler/device validation required | Rejected |
+| Probe battery / explorer | Available | PyTorch path; validate workload | PyTorch path; validate workload | Not implemented |
+
+Discovery reports declared APIs; `tested_precisions` and `tested_features` report
+only exercised capabilities. MPS discovery omits FP16 because validation rejects
+it. FP32 eager execution is the conservative starting declaration, not an automatic
+retry after a failed compiled or mixed-precision run. Never silently switch device,
+precision, engine, tokenizer, or model to manufacture parity.
+
+Provision a new idle checkout/environment for upgrades, record its exact framework
+build with the runtime profile, and retain the prior checkout and environment for
+rollback. Do not sync the CPU extra into vendor environments. If qualification
+fails, explicitly select the retained runtime and start a new comparison identity;
+never relabel historical results or mutate an active run. An existing 2.15 host
+installation is not proven by these repository pins.
+
+PRs [#303](https://github.com/supernovae/tiny-sparse-lab/pull/303) (compiled output
+loss) and [#305](https://github.com/supernovae/tiny-sparse-lab/pull/305) (shared
+tokenizer provenance) remain separate changes. Their behavior is not implied by
+this baseline; test the combined revision before using either for comparisons.
+
 ## Machine-local runtime environments
 
 `sparselab runtime env` is a lightweight, Torch-free management entry point.
