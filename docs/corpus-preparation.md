@@ -952,23 +952,29 @@ selections; the modulus is not an adjustable sampling or automatic retry knob.
 
 Mixture materialization and cold replay index document offsets, family/content
 constraints, deterministic ranks and encoded-token offsets in disposable SQLite
-storage. Encoded documents are spooled on disk and replayed in the same stratum,
-rank and exposure order. Token JSONL bytes and schema-1 receipt meanings are
+storage. Ordinary and multi-exposure schedules spool encoded documents on disk
+and replay them in the same stratum, rank and exposure order. Retained
+single-exposure schedules write directly to the output stream without that
+additional encoded spool; committed assembly segments still consume disk.
+Token JSONL bytes and schema-1 receipt meanings are
 unchanged. The existing contiguous-EOS packer writes train and validation arrays
 through disk spools and opens the completed arrays read-only with memory mapping;
 it does not allocate arrays for the entire scheduled training quota in RAM.
 
 This bounds retained Python data by individual records and finite metadata, not
-by total corpus tokens. Individual source/encoded JSONL records are limited to
-64 MiB, receipts to 256 MiB, and exclusion entries to 128 MiB of canonical JSON. An
+by total corpus tokens. Individual mixture source/encoded JSONL records are limited
+to 64 MiB, receipts to 256 MiB, and exclusion entries to 128 MiB of canonical JSON.
+Raw validation JSONL follows the local-text packer instead: at the default
+1 MiB tokenizer source batch, its per-row cap is 6,292,480 bytes
+(`6 * source_batch_bytes + 1024`), not the mixture's 64 MiB cap. An
 oversized record or receipt refuses publication without dropping evidence from a
 successful receipt. SQLite uses a 4 MiB page cache and disk temporary storage;
 these are not hard RSS enforcement. Tokenizer internals and release verification
 have their own resource requirements.
 
-Scratch is real storage: document indexes, all eligible encoded candidates,
-output schedules, cold-replay output, raw array spools and completed arrays can
-coexist. Keep native workspace/resource monitoring and cumulative accounting;
+Scratch is real storage: document indexes, encoded candidates where spooling is
+used, retained assembly segments, output schedules, cold-replay output, raw array
+spools and completed arrays can coexist. Keep native workspace/resource monitoring and cumulative accounting;
 cleanup is not a refund. This implementation does not reduce acquisition
 reservations, authorize a larger disk budget or establish that a full corpus fits.
 
@@ -1280,8 +1286,11 @@ Unfinished phases can still require recomputation. Native output/copy hashing an
 actual free-space monitoring remain; tiny tests make no full-corpus throughput or
 capacity claim.
 
-Within a private owner-only work root, owner-group-writable declarations are
-mutable inputs, not immutable artifact members. Inspection cache proofs bind
+Within a trusted private work root, group write is eligible when the group is
+the owner's user-private group as checked by `writable_by_others`; shared-group
+or world write does not qualify an immutable artifact as trusted. The separate
+mutable-declaration path can bind eligible owner-group-writable declarations
+under its ownership and path checks. Inspection cache proofs bind
 their captured fingerprints in the signed
 closure and recheck them on load, without changing filesystem permissions. A
 same-size input change still invalidates reuse. World-writable, foreign-owned,
@@ -1290,7 +1299,8 @@ linked or unsafe mutable dependencies remain ineligible.
 For native split/build phases, an owned atomic completion record can also recover
 a checkpoint whose optional cache proof was never published. The current request
 identity, completion digest and cached result must agree; all outputs must retain
-their recorded stamps and owned paths without group or world write access. This is local native
+their recorded stamps and trusted owned paths. User-private group write is
+eligible; shared-group and world write are refused. This is local native
 completion evidence, reported as `owned_native_completion`, not a newly invented
 execution signature. Corrupt present proofs and incomplete or changed native
 records refuse reuse. A present proof rejected for changed verifier authority is
@@ -1360,11 +1370,18 @@ fingerprints. It authenticates each historical proof using the existing store,
 requires an unchanged native producer and every non-authority binding, and
 records the exact old proof, old/current binding and authority hashes. It does
 not re-sign old execution, claim a new cold render, or read corpus bodies.
+`--from-source` and `--to-source` are operator assertions with distinct
+40-character hexadecimal values; this path does not resolve Git commits or
+verify that a checkout matches either label. The operator's assessment remains
+necessary.
 The decision binds the parsed project and a fixed set of source-stage requests.
-Changed requests, inputs, outputs, proofs or current authority refuse continuation
-instead of silently rerendering. Original proofs and completion records remain
+Within the declared source-stage root, changed requests, inputs, outputs, proofs
+or current authority refuse continuation instead of silently rerendering.
+Directories outside that root follow ordinary cache behavior; the option is not
+a global no-rerender guarantee. Original proofs and completion records remain
 untouched. Each adopted render appends a durable `retained-renders.uses-*.jsonl`
-entry next to the declaration; keep it with the run evidence. The option applies
+entry next to the declaration; keep it with the run evidence. This journal records
+actual adoptions, not proof that every declared entry was consumed. The option applies
 only to that build invocation and does not change future default cache behavior.
 
 ### Add a separately prepared release

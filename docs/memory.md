@@ -48,6 +48,11 @@ records a pilot's measured peak above the planning ceiling without treating that
 comparison as an allocator failure. Resolved configurations record observation mode explicitly. No proposal is applied automatically, and model, batch, optimizer,
 precision and token budgets are unchanged.
 
+This also applies when `budget_bytes` lowers the planning ceiling: with
+`estimate_policy: observe`, an estimate above that ceiling produces a warning rather
+than a refusal. `budget_bytes` is not an enforced allocation cap in observation
+mode.
+
 Actual allocation failures, failed pilots, cancellation, input verification and
 explicit resource envelopes still apply. Observation mode does not certify a
 physical fit or implement a hard memory cap. This option addresses a potential
