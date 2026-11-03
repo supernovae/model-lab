@@ -43,6 +43,9 @@ SDK links resolve to AMD's official package server. Exact versions and SHA256
 hashes are recorded, while shared application versions remain constrained by
 `uv.lock`. The SDK wheels alone total approximately 6.54 GiB compressed; plan
 additional storage for Torch, Triton, unpacked packages, build layers and cache.
+The image workflow requires at least 24 GiB free before a ROCm build; it refuses
+an undersized runner without deleting host data. This floor is not a capacity
+guarantee for every Docker storage configuration.
 The image's validation target remains gfx1100 even though Torch declares broader
 package dependencies. Those dependencies do not establish other GPUs' support.
 
