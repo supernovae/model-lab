@@ -128,8 +128,25 @@ class ModelConfig(StrictModel):
         return self
 
 
+class TokenizerOrigin(StrictModel):
+    """Explicit immutable origin of a tokenizer reused across frozen snapshots."""
+
+    dataset: DatasetConfig
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_origin(self) -> TokenizerOrigin:
+        if self.dataset.source not in {"snapshot", "local_stories"}:
+            raise ValueError("explicit tokenizer origin requires a frozen snapshot")
+        return self
+
+
 class TokenizerConfig(StrictModel):
     path: Path
+    origin: TokenizerOrigin | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class DatasetConfig(StrictModel):
@@ -650,6 +667,11 @@ class RunConfig(StrictModel):
                 "compiled output head and loss do not support allocation "
                 "or portability runs"
             )
+        if self.tokenizer.origin is not None and self.dataset.source not in {
+            "snapshot",
+            "local_stories",
+        }:
+            raise ValueError("explicit tokenizer origin requires a snapshot consumer")
         if self.evaluation.panels:
             if (
                 self.runtime.engine != "pytorch"

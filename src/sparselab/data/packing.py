@@ -1358,17 +1358,13 @@ def _prepare_data(
             )
     if config.dataset.source == "snapshot":
         from sparselab.data.sources import verify_snapshot as verify_generic_snapshot
-        from sparselab.data.tokenizer import verify_tokenizer_artifact
 
         generic_snapshot = verify_generic_snapshot(config.dataset)
-        verify_tokenizer_artifact(
-            config.tokenizer.path,
-            source="snapshot",
-            revision=config.dataset.revision,
-            vocab_size=config.model.vocab_size,
-            dataset=config.dataset,
-            proof_store=proof_store,
-            verification_mode=verification_mode,
+    if config.dataset.source == "snapshot" or config.tokenizer.origin is not None:
+        from sparselab.data.tokenizer import verify_run_tokenizer
+
+        verify_run_tokenizer(
+            config, proof_store=proof_store, verification_mode=verification_mode
         )
         if (
             tokenizer.to_str()

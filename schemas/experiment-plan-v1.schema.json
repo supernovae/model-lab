@@ -1869,6 +1869,17 @@
     "TokenizerConfig": {
       "additionalProperties": false,
       "properties": {
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenizerOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "path": {
           "format": "path",
           "title": "Path",
@@ -1879,6 +1890,32 @@
         "path"
       ],
       "title": "TokenizerConfig",
+      "type": "object"
+    },
+    "TokenizerOrigin": {
+      "additionalProperties": false,
+      "description": "Explicit immutable origin of a tokenizer reused across frozen snapshots.",
+      "properties": {
+        "dataset": {
+          "$ref": "#/$defs/DatasetConfig"
+        },
+        "manifest_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Manifest Sha256",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dataset",
+        "sha256",
+        "manifest_sha256"
+      ],
+      "title": "TokenizerOrigin",
       "type": "object"
     },
     "TrainingConfig": {
