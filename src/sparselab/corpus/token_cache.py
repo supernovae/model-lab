@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 from sparselab.canonical import canonical_json
@@ -33,6 +34,37 @@ class TokenCache:
             );
         """)
         self.pending = 0
+        self.hits = self.misses = 0
+        self.lookup_seconds = self.write_seconds = self.encode_seconds = 0.0
+
+    def lookup(self, content, *, count_miss=True, decode=True):
+        started = time.monotonic()
+        row = self.db.execute(
+            "SELECT payload, digest FROM tokens WHERE content=?", (content,)
+        ).fetchone()
+        self.lookup_seconds += time.monotonic() - started
+        if row is None:
+            if count_miss:
+                self.misses += 1
+            return None
+        payload, digest = row
+        if hashlib.sha256(payload).hexdigest() != digest:
+            raise ValueError("cached token payload digest mismatch")
+        self.hits += 1
+        return self.decode_ids(payload) if decode else payload
+
+    @staticmethod
+    def decode_ids(payload):
+        ids = json.loads(payload)
+        if not isinstance(ids, list) or any(type(i) is not int or i < 0 for i in ids):
+            raise ValueError("invalid cached token IDs")
+        return ids
+
+    def payload_bytes(self, content):
+        row = self.db.execute(
+            "SELECT length(payload) FROM tokens WHERE content=?", (content,)
+        ).fetchone()
+        return row[0] if row is not None else 0
 
     def encode_many(self, texts, encode_missing):
         """Return cached encodings in input order and batch only missing content."""
@@ -42,26 +74,19 @@ class TokenCache:
             keys.append(content)
             if content in cached or content in missing:
                 continue
-            row = self.db.execute(
-                "SELECT payload, digest FROM tokens WHERE content=?", (content,)
-            ).fetchone()
-            if row is None:
+            ids = self.lookup(content)
+            if ids is None:
                 missing[content] = text
-                continue
-            payload, digest = row
-            if hashlib.sha256(payload).hexdigest() != digest:
-                raise ValueError("cached token payload digest mismatch")
-            ids = json.loads(payload)
-            if not isinstance(ids, list) or any(
-                type(i) is not int or i < 0 for i in ids
-            ):
-                raise ValueError("invalid cached token IDs")
-            cached[content] = ids
+            else:
+                cached[content] = ids
 
         if missing:
+            started = time.monotonic()
             results = encode_missing(list(missing.values()))
+            self.encode_seconds += time.monotonic() - started
             if len(results) != len(missing):
                 raise ValueError("tokenizer returned incorrect batch length")
+            started = time.monotonic()
             for content, ids in zip(missing, results, strict=True):
                 payload = canonical_json(ids)
                 if len(payload) > MAX_ROW_BYTES:
@@ -75,6 +100,7 @@ class TokenCache:
                     self.db.commit()
                     self.pending = 0
                 cached[content] = ids
+            self.write_seconds += time.monotonic() - started
         return [cached[content] for content in keys]
 
     def encode(self, tokenizer, text):
