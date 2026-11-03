@@ -255,6 +255,18 @@ is a completion proof. Acquisition and admission verification remain required
 before frozen splits publish. Historical timers and resource allowances are not
 execution policy for the adopting run.
 
+The historical signed native-completion fallback also needs the original
+producer checkout at the declaration's source path. It checks the recorded bytes
+of `src/sparselab/corpus/split_inventory_adoption.py` and
+`src/sparselab/corpus/completed_preparation.py`, alongside the authenticated
+completion evidence and the remaining producer authority. Preserve that checkout
+and evidence while relying on the handoff: changing or removing those files can
+refuse a later verification that needs this fallback. An unchanged cached
+adoption can return without repeating that checkout check; a successful first
+adoption is not a general guarantee that the checkout is no longer needed.
+This is an inventory-completion contract, separate from retained-release
+executor adoption and from any supported release relocation.
+
 Adoption preserves output from the explicitly selected producer revision; it
 does not run that historical code or claim current-code production equivalence.
 Native completion reuse instead binds current producer and transitive corpus
@@ -799,6 +811,15 @@ authority or evidence that the corpus is scientifically suitable for training.
 
 ### Bounded admission metadata and split inventory
 
+`corpus admission-draft`, `corpus split-inventory`, and `corpus freeze-splits`
+verify acquired snapshots through `verification_options(root)`. In a trusted
+work root, matching authenticated proofs can reuse verification of unchanged
+dependencies and verifier authority. Missing or stale proofs fall back to cold
+verification; an untrusted work root uses cold verification directly. The first
+run after a relevant authority change may therefore reread snapshot bytes.
+Proof reuse does not waive integrity checks: changed snapshot bytes that no
+longer match their manifest refuse rather than becoming a new trusted snapshot.
+
 `corpus admission-draft`, admission inspection/reverification, and split inventory
 use disposable SQLite storage for allowlisted JSON inventory arrays (positions listed below)
 and row-index lookups during their operation. Original JSON files remain the
@@ -1093,13 +1114,28 @@ source-step admission does not certify downstream build, tokenizer, packing or
 training capacity. Keep every step's JSON/stdout/stderr and supervisor receipts.
 No real corpus acquisition or model run is part of the offline fixture evidence.
 
-To finalize only already verified snapshots without fetching or reconstructing a
-missing source, use `corpus acquire PROJECT --require-existing`. It publishes
-the full lock only after every selected snapshot verifies, and refuses a missing
-or invalid snapshot before attempting a new acquisition. This option does not
-replace the snapshot integrity checks or apply to a single source step. Do not
-combine it with `--offline`, which verifies an already published lock rather
-than publishing one.
+To finalize eligible existing snapshots without fetching or reconstructing a
+missing source, use `corpus acquire PROJECT --require-existing`. Eligibility
+depends on the source and lock state:
+
+| Source path | Existing matching lock | Stale or absent lock |
+| --- | --- | --- |
+| Ordinary pinned `git`, `huggingface_dataset`, or `wikimedia_dump` | Reverify the referenced snapshot and its declaration/adapter compatibility. | Discover verified compatible snapshots under the project's source snapshot directory and rebuild the lock; refuse if no eligible snapshot exists. A stale reference can also fall through to discovery. |
+| Ordinary `local` or `http_document` | Excluded from old-lock reuse; refuse without reacquiring. | Excluded from immutable snapshot discovery; refuse without reacquiring. |
+| Declared `reuse_only` source effect | Verify retained origin rights/permissions and bytes, and the matching snapshot already in the destination project. | The same checks apply independently of the lock. A valid origin alone is insufficient: a missing destination snapshot refuses instead of being copied. |
+| HF `retained_subset` project | An existing lock takes the dedicated verification path; an invalid or stale lock refuses instead of entering ordinary discovery. | With no lock, existing compatible snapshots can be discovered; missing snapshots refuse. Retained-subset project restrictions still apply. |
+
+Rejected sources are recorded as rejected rather than requiring an acquired
+snapshot. A replacement full lock publishes only after all applicable source
+checks succeed; failure preserves the prior active lock. Do not delete a live
+lock to work around a refusal. This command can write metadata and the completed
+lock, so it is not a read-only check. Its bounded output reports `lock_path`,
+`project_id`, `source_count`, and `complete`; `--summary` remains an alias for
+that output.
+
+The flag does not replace snapshot integrity checks and cannot be combined with
+`--source-id`, `--plan`, or `--offline`. Use `--offline` to verify an already
+published lock rather than finalize one.
 
 
 ### Local network observation
