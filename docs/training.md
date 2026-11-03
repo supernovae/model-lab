@@ -76,6 +76,8 @@ sparselab train --runs-dir sparselab-work/runs configs/smoke_moe_cpu.yaml --run-
 
 Resume creates a child run and retains parent telemetry. It rejects changed model, optimizer, data, tokenizer, budget, engine, or backend configuration. Source or runtime identity drift requires `--allow-runtime-drift` and is recorded as `best_effort`; the flag never bypasses scientific compatibility. Recovery applies the same checks. Completed budgets cannot be resumed. Run-owned data, tokenizer, and memory-package artifacts—including their manifests—are verified before continuation.
 
+For supported dense PyTorch resumes and recovery, `--allow-runtime-optimization` permits a narrow set of execution changes while preserving scientific settings, effective training batch and validation coverage. The child records a best-effort transition; see [explicit runtime optimization on resume](checkpointing.md#explicit-runtime-optimization-on-resume).
+
 An explicit PyTorch/AdamW `--extend-budget CHECKPOINT` is different from ordinary
 resume: only a verified terminal full-state generation may grow both whole-update
 caps, with `optimizer.decay_steps` fixed to the parent's original step limit.

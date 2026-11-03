@@ -37,7 +37,7 @@ loader, GPU driver and compiler libraries before checking the installed XPU
 framework. All package URLs were verified, but no package was installed during
 recipe preparation.
 
-Official references: [stable PyTorch XPU](https://docs.pytorch.org/docs/2.14/notes/get_start_xpu.html),
+Official references: [stable PyTorch XPU](https://docs.pytorch.org/docs/2.15/notes/get_start_xpu.html),
 [Intel compute runtime](https://github.com/intel/compute-runtime/releases/tag/26.35.39758.10),
 [Level Zero loader](https://github.com/oneapi-src/level-zero/releases/tag/v1.34.0),
 [Python standalone release](https://github.com/astral-sh/python-build-standalone/releases/tag/20261013).
