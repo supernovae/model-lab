@@ -27,9 +27,9 @@ from sparselab.training.trainer import train
 FIXTURES = Path(__file__).with_name("fixtures")
 
 
-def _config(root: Path) -> RunConfig:
+def _config(root: Path, *, retention: bool = False) -> RunConfig:
     base = training_config(root)
-    return base.model_copy(
+    config = base.model_copy(
         update={
             "training": base.training.model_copy(
                 update={
@@ -46,11 +46,67 @@ def _config(root: Path) -> RunConfig:
         }
     )
 
+    if retention:
+        payload = config.model_dump(mode="json")
+        payload["checkpoint"].update(
+            keep_periodic=False,
+            retention={
+                "milestones": [
+                    {"name": "early", "step": 1, "committed_targets": 16},
+                    {"name": "full", "step": 3, "committed_targets": 48},
+                ],
+                "terminal_step": 3,
+                "terminal_targets": 48,
+                "max_generations": 6,
+                "max_generation_bytes": 10_000_000,
+                "max_retained_bytes": 60_000_000,
+                "max_peak_bytes": 70_000_000,
+                "reserve_free_bytes": 0,
+            },
+        )
+        config = RunConfig.model_validate(payload)
+    return config
 
+
+@pytest.mark.parametrize("purpose", ["smoke", "warmup"])
+@pytest.mark.parametrize("retention", [False, True])
+def test_pilot_retention_is_isolated_from_full_run(
+    tmp_path: Path, purpose: str, retention: bool
+) -> None:
+    config = _config(tmp_path, retention=retention)
+    original = config.model_dump(mode="json")
+    pilot = staging_module.pilot_config(config, purpose, tmp_path / "stage")
+    assert pilot.training.max_steps == getattr(config.staging, f"{purpose}_steps")
+    assert pilot.training.max_tokens == (
+        pilot.training.max_steps
+        * pilot.training.micro_batch_size
+        * pilot.training.gradient_accumulation
+        * pilot.training.seq_len
+    )
+    if retention:
+        expected = dict(original["checkpoint"]["retention"])
+        expected.update(
+            milestones=[],
+            terminal_step=pilot.training.max_steps,
+            terminal_targets=pilot.training.max_tokens,
+        )
+        assert pilot.checkpoint.retention.model_dump(mode="json") == expected
+        invalid = pilot.model_dump(mode="json")
+        invalid["checkpoint"]["retention"]["terminal_step"] += 1
+        with pytest.raises(ValueError, match="retention terminal boundary"):
+            RunConfig.model_validate(invalid)
+    else:
+        assert pilot.checkpoint.retention is None
+    assert config.model_dump(mode="json") == original
+    assert RunConfig.model_validate(original) == config
+
+
+@pytest.mark.parametrize("retention", [False, True])
 def test_warmup_pilots_are_isolated_and_bundle_is_self_contained(
     tmp_path: Path,
+    retention: bool,
 ) -> None:
-    config = _config(tmp_path)
+    config = _config(tmp_path, retention=retention)
     bundle_root = stage(config, tmp_path / "stage", through="warmup")
     bundle = _read_sealed(bundle_root / "bundle.json")
 

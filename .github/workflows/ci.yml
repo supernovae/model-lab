@@ -121,6 +121,16 @@ jobs:
             tests/test_generation.py \
             tests/test_inference.py
 
+      - name: Pilot retention and full-run staging regression
+        env:
+          UV_OFFLINE: "1"
+          SPARSELAB_WORK_DIR: ${{ runner.temp }}/staging-retention-work
+        run: |
+          uv run --locked --no-sync pytest -q -n 0 -p no:cacheprovider \
+            --basetemp "$RUNNER_TEMP/staging-retention-pytest" \
+            tests/test_staging.py::test_pilot_retention_is_isolated_from_full_run \
+            tests/test_staging.py::test_warmup_pilots_are_isolated_and_bundle_is_self_contained
+
   fast:
     # Remaining fast CPU suite (excluding slow tests and modules already run in
     # safe and lab-loop so checks are not duplicated across jobs).
