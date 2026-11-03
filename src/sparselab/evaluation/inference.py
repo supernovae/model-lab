@@ -95,14 +95,17 @@ class InferenceRun:
             return evaluate(
                 self.model,
                 dataset,
-                batch_size=self.config.training.micro_batch_size,
+                batch_size=self.config.evaluation.batch_size
+                or self.config.training.micro_batch_size,
                 max_batches=self.config.evaluation.max_batches,
                 device=self.device,
                 observer=observer,
             )
         if observer is not None:
             raise ValueError("evaluation observers need the PyTorch engine")
-        batch_size = self.config.training.micro_batch_size
+        batch_size = (
+            self.config.evaluation.batch_size or self.config.training.micro_batch_size
+        )
         limit = min(len(dataset), batch_size * self.config.evaluation.max_batches)
 
         def batches() -> Any:

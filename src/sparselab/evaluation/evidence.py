@@ -172,7 +172,8 @@ def validate_held_out_report(
         expected_protocol = {
             "batch_size": None
             if declared_panels
-            else config["training"]["micro_batch_size"],
+            else config["evaluation"].get("batch_size")
+            or config["training"]["micro_batch_size"],
             "seq_len": config["training"]["seq_len"],
             "max_batches": None
             if declared_panels
@@ -239,7 +240,9 @@ def experiment_evidence(
         corpus_release_sha256 = export["release_id"]
         corpus_report_path = "corpus/report.json"
     seq_len = config["training"]["seq_len"]
-    batch_size = config["training"]["micro_batch_size"]
+    batch_size = (
+        config["evaluation"].get("batch_size") or config["training"]["micro_batch_size"]
+    )
     validation = TokenBlockDataset(
         prepared.validation,
         seq_len,

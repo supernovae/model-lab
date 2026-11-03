@@ -554,6 +554,11 @@ class PyTorchEngine:
             )
         self.config, self.runtime, self.device = config, runtime, device
         self.model, self.optimizer = model, optimizer
+        if config.runtime.compile_transformer_blocks:
+            for block in model.blocks:
+                block.forward_with_aux = torch.compile(
+                    block.forward_with_aux, dynamic=False
+                )
         self.portability_run = portability_run
         self._portability_parameters = trainable_parameters
         self._last_gradient_parameter_names = ()

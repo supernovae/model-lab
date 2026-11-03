@@ -1038,6 +1038,7 @@ def _train(args: argparse.Namespace) -> None:
         run_id=args.run_id,
         stop_after_step=args.stop_after_step,
         allow_runtime_drift=args.allow_runtime_drift,
+        allow_runtime_optimization=args.allow_runtime_optimization,
         stage_bundle=Path(args.stage_bundle) if args.stage_bundle else None,
         authorization=args.runtime_authorization,
         resource_envelope=args.resource_envelope_value,
@@ -3394,6 +3395,11 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     training.add_argument("--promote")
     training.add_argument("--recover")
     training.add_argument("--allow-runtime-drift", action="store_true")
+    training.add_argument(
+        "--allow-runtime-optimization",
+        action="store_true",
+        help="Explicitly resume full state with supported runtime changes; numerical trajectory may differ",
+    )
     training.add_argument("--stop-after-step", type=int)
     training.add_argument("--stage-bundle")
     train_runtime = training.add_mutually_exclusive_group()

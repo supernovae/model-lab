@@ -14,8 +14,9 @@ from sparselab.config.loading import load_config
 from sparselab.config.migrate import migrate_v1
 from sparselab.config.models import RunConfig, TokenizerTrainConfig
 from sparselab.data.tokenizer import train_tokenizer
-from sparselab.engines.base import EngineCapabilityError
+from sparselab.engines.base import EngineCapabilityError, EngineState
 from sparselab.engines.mlx_policy import validate as validate_mlx
+from sparselab.engines.pytorch import PyTorchEngine
 from sparselab.evaluation.evidence import experiment_evidence
 from sparselab.evaluation.post_train_triage import read_triage
 from sparselab.evaluation.reference_exercise import PROMPTS
@@ -567,6 +568,176 @@ def test_whole_update_crosses_epoch_without_losing_targets(tmp_path: Path) -> No
     assert (snapshot.step, snapshot.tokens_seen) == (10, 320)
     assert snapshot.cursor[0] == 1
     assert CheckpointManager(root).verify(root / "checkpoints/latest.json").valid
+
+
+def test_explicit_runtime_transition_preserves_full_resume_state(
+    tmp_path: Path,
+) -> None:
+    original = config(tmp_path)
+    train(original, run_id="runtime-parent", stop_after_step=2)
+    parent = original.logging.root_dir / "runtime-parent"
+    checkpoint = parent / "checkpoints/latest.json"
+    before = CheckpointManager(parent).load(checkpoint)
+    assert before.step == 2
+    target = original.model_copy(
+        update={
+            "attention": original.attention.model_copy(
+                update={"implementation": "sdpa"}
+            ),
+            "training": original.training.model_copy(
+                update={
+                    "micro_batch_size": 1,
+                    "gradient_accumulation": 2,
+                    "deterministic": False,
+                }
+            ),
+            "evaluation": original.evaluation.model_copy(
+                update={"batch_size": original.training.micro_batch_size}
+            ),
+        }
+    )
+    engine = PyTorchEngine()
+    engine.validate(target)
+    engine.initialize(target, initial_weights=before.model)
+    try:
+        engine.restore_training_state(
+            EngineState(
+                before.optimizer,
+                before.rng or {},
+                before.scaler,
+                before.optimizer_parameter_names or [],
+            )
+        )
+        restored = engine.export_training_state()
+        equal(before.optimizer, restored.optimizer)
+        equal(before.rng, restored.rng)
+        equal(before.scaler, restored.scaler)
+        assert before.optimizer_parameter_names == restored.optimizer_parameter_names
+        equal(before.model, engine.model.state_dict())
+    finally:
+        engine.close()
+    with pytest.raises(ValueError, match="architecture semantics"):
+        train(target, run_id="runtime-refused", resume=checkpoint, stop_after_step=3)
+    bad_batch = target.model_copy(
+        update={
+            "training": target.training.model_copy(update={"gradient_accumulation": 3})
+        }
+    )
+    with pytest.raises(ValueError, match="preserve effective batch"):
+        train(
+            bad_batch,
+            run_id="runtime-bad-batch",
+            resume=checkpoint,
+            allow_runtime_optimization=True,
+            stop_after_step=3,
+        )
+    bad_validation = target.model_copy(
+        update={"evaluation": target.evaluation.model_copy(update={"batch_size": None})}
+    )
+    with pytest.raises(ValueError, match="preserve ordinary validation batch size"):
+        train(
+            bad_validation,
+            run_id="runtime-bad-validation",
+            resume=checkpoint,
+            allow_runtime_optimization=True,
+            stop_after_step=3,
+        )
+    bad = target.model_copy(update={"seed": target.seed + 1})
+    with pytest.raises(ValueError, match="scientific or unsupported"):
+        train(
+            bad,
+            run_id="runtime-bad",
+            resume=checkpoint,
+            allow_runtime_optimization=True,
+            stop_after_step=3,
+        )
+    train(
+        target,
+        run_id="runtime-child",
+        resume=checkpoint,
+        allow_runtime_optimization=True,
+        stop_after_step=3,
+    )
+    child = original.logging.root_dir / "runtime-child"
+    manifest = read_manifest(child / "manifest.json")
+    decision = next(
+        item
+        for item in manifest["resource_decisions"]
+        if item.get("kind") == "runtime_optimization_transition"
+    )
+    assert decision["parent_checkpoint_sha256"] == before.checkpoint_sha256
+    assert {item["field"] for item in decision["changes"]} == {
+        "attention.implementation",
+        "training.deterministic",
+        "training.micro_batch_size",
+        "training.gradient_accumulation",
+        "evaluation.batch_size",
+    }
+    resumed = CheckpointManager(child).load(child / "checkpoints/latest.json")
+    assert resumed.step == 3
+    assert resumed.tokens_seen == before.tokens_seen + 32
+    assert resumed.parent_checkpoint_sha256 == before.checkpoint_sha256
+    assert resumed.optimizer and resumed.rng is not None
+    child_report = next(
+        json.loads(path.read_text())
+        for path in (child / "evaluations").glob("*.json")
+        if json.loads(path.read_text())["step"] == 3
+    )
+    parent_report = next(
+        json.loads(path.read_text())
+        for path in (parent / "evaluations").glob("*.json")
+        if json.loads(path.read_text())["step"] == 2
+    )
+    assert child_report["batch_size"] == parent_report["batch_size"] == 2
+    assert child_report["valid_targets"] == parent_report["valid_targets"]
+    child_evidence = experiment_evidence(child)
+    assert any(point["step"] == 3 for point in child_evidence["quality_observations"])
+    assert (
+        CheckpointManager(parent).load(checkpoint).checkpoint_sha256
+        == before.checkpoint_sha256
+    )
+    train(
+        target,
+        run_id="runtime-grandchild",
+        resume=child / "checkpoints/latest.json",
+        stop_after_step=4,
+    )
+    grandchild = original.logging.root_dir / "runtime-grandchild"
+    loaded = CheckpointManager(grandchild).load(grandchild / "checkpoints/latest.json")
+    assert loaded.step == 4 and loaded.tokens_seen == before.tokens_seen + 64
+
+
+@pytest.mark.slow
+def test_compiled_block_checkpoint_round_trip(tmp_path: Path) -> None:
+    original = config(tmp_path)
+    compiled = original.model_copy(
+        update={
+            "runtime": original.runtime.model_copy(
+                update={"compile_transformer_blocks": True}
+            )
+        }
+    )
+    train(compiled, run_id="compiled-parent", stop_after_step=1)
+    parent = compiled.logging.root_dir / "compiled-parent"
+    first = CheckpointManager(parent).load(parent / "checkpoints/latest.json")
+    assert first.step == 1 and first.optimizer and first.rng is not None
+    train(
+        compiled,
+        run_id="compiled-child",
+        resume=parent / "checkpoints/latest.json",
+        stop_after_step=2,
+    )
+    child = compiled.logging.root_dir / "compiled-child"
+    second = CheckpointManager(child).load(child / "checkpoints/latest.json")
+    assert second.step == 2 and second.tokens_seen == first.tokens_seen + 32
+    assert second.parent_checkpoint_sha256 == first.checkpoint_sha256
+    assert second.optimizer and second.rng is not None
+    assert (
+        read_manifest(child / "manifest.json")["effective_config"]["runtime"][
+            "compile_transformer_blocks"
+        ]
+        is True
+    )
 
 
 def test_allow_runtime_drift_does_not_allow_dataset_change(tmp_path: Path) -> None:

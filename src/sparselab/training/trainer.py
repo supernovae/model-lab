@@ -544,7 +544,7 @@ def _write_validation_report(
         "identities": identities,
         "batch_size": None
         if config.evaluation.panels
-        else config.training.micro_batch_size,
+        else config.evaluation.batch_size or config.training.micro_batch_size,
         "max_batches": None
         if config.evaluation.panels
         else config.evaluation.max_batches,
@@ -586,6 +586,7 @@ def train(
     stop_after_step: int | None = None,
     worker_id: str | None = None,
     allow_runtime_drift: bool = False,
+    allow_runtime_optimization: bool = False,
     max_wall_seconds: float | None = None,
     cancel_path: Path | None = None,
     experiment_id: str | None = None,
@@ -633,6 +634,7 @@ def train(
         stop_after_step=stop_after_step,
         worker_id=worker_id,
         allow_runtime_drift=allow_runtime_drift,
+        allow_runtime_optimization=allow_runtime_optimization,
         stage_bundle=stage_bundle,
         cancel_path=cancel_path,
         purpose="training",
@@ -691,6 +693,7 @@ def _train_impl(
     stop_after_step: int | None = None,
     worker_id: str | None = None,
     allow_runtime_drift: bool = False,
+    allow_runtime_optimization: bool = False,
     stage_bundle: Path | None = None,
     cancel_path: Path | None = None,
     purpose: str = "training",
@@ -946,6 +949,7 @@ def _train_impl(
             promote=promote,
             recover=recover,
             allow_runtime_drift=allow_runtime_drift,
+            allow_runtime_optimization=allow_runtime_optimization,
         )
         snapshot = continuation_state.snapshot
         source_run = continuation_state.source_run
@@ -1896,7 +1900,11 @@ def _train_impl(
             limit=config.evaluation.max_batches,
             name="default",
         ):
-            batch_size = batch_size or config.training.micro_batch_size
+            batch_size = (
+                batch_size
+                or config.evaluation.batch_size
+                or config.training.micro_batch_size
+            )
             progress_total = 0
             if current_pilot_progress() is not None:
                 count = (len(selected) + batch_size - 1) // batch_size

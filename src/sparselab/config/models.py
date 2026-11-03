@@ -328,6 +328,21 @@ class RuntimeConfig(StrictModel):
     device_index: int = Field(default=0, ge=0)
     precision: Literal["auto", "fp32", "bf16", "fp16"] = "fp32"
     memory: MemoryConfig = MemoryConfig()
+    compile_transformer_blocks: bool = Field(
+        default=False, exclude_if=lambda value: not value
+    )
+
+    @model_validator(mode="after")
+    def validate_block_compilation(self) -> RuntimeConfig:
+        if self.compile_transformer_blocks and (
+            self.engine != "pytorch"
+            or self.memory.activation_checkpointing.enabled
+            or self.memory.activation_offload.enabled
+        ):
+            raise ValueError(
+                "block compilation requires PyTorch without activation checkpointing or offload"
+            )
+        return self
 
 
 class TrainingConfig(StrictModel):
@@ -477,6 +492,9 @@ class FixedValidationPanel(StrictModel):
 class EvaluationConfig(StrictModel):
     every_steps: int = Field(default=25, gt=0)
     max_batches: int = Field(default=16, gt=0)
+    batch_size: int | None = Field(
+        default=None, gt=0, exclude_if=lambda value: value is None
+    )
     panels: tuple[FixedValidationPanel, ...] = Field(
         default=(), exclude_if=lambda value: not value
     )

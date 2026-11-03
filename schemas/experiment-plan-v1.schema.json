@@ -1033,6 +1033,19 @@
     "EvaluationConfig": {
       "additionalProperties": false,
       "properties": {
+        "batch_size": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Batch Size"
+        },
         "every_steps": {
           "default": 25,
           "exclusiveMinimum": 0,
@@ -1751,6 +1764,11 @@
           ],
           "title": "Backend",
           "type": "string"
+        },
+        "compile_transformer_blocks": {
+          "default": false,
+          "title": "Compile Transformer Blocks",
+          "type": "boolean"
         },
         "device_index": {
           "default": 0,
