@@ -345,6 +345,7 @@ class DenseLM(nn.Module):
         valid_target_mask: Tensor | None = None,
         activation_checkpointing: bool = False,
         diagnostics: Literal["scalar", "full"] = "scalar",
+        return_hidden: bool = False,
     ) -> tuple[Tensor, Tensor]:
         if input_ids.ndim != 2 or input_ids.shape[1] == 0:
             raise ValueError("input_ids must have shape [batch, non-empty sequence]")
@@ -402,7 +403,7 @@ class DenseLM(nn.Module):
         if self.config.memory_injection == "final":
             x = self._apply_memory(x, input_ids, byte_addresses, mask=memory_mask)
         x = self._apply_semantic_site(x, semantic_query_map, site="final")
-        return self.output(x), auxiliary_loss
+        return (x if return_hidden else self.output(x)), auxiliary_loss
 
     def architecture_metric_tensors(self) -> dict[str, Tensor]:
         """Detached scalar diagnostics from the most recent forward on this device.

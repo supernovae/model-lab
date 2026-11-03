@@ -25,6 +25,16 @@ sparselab train --runs-dir sparselab-work/runs configs/smoke_combined_cpu.yaml -
 
 A smoke run validates a path through training, checkpointing, evaluation, and metrics. It is not a quality benchmark. Compare runs only when data, tokenizer, device, sequence length, token budget, optimizer, and seed are recorded and intentionally matched.
 
+## Compiled output projection and loss
+
+For PyTorch XPU BF16 runs, `runtime.compile_output_head_loss: true` optionally
+compiles the output projection and summed FP32 cross-entropy together. It keeps
+the same token IDs, tied weights, masking and effective batch; measured speed
+depends on the device and workload. The option is currently unavailable with
+activation offload, allocation ownership or portability runs. The default is
+off. Enabling it on a full-state continuation is an explicit runtime change:
+use `--allow-runtime-optimization` and retain its recorded transition.
+
 ## Runtime forecast and target progress
 
 Planning is available only from compatible historical optimizer timings; without

@@ -331,6 +331,9 @@ class RuntimeConfig(StrictModel):
     compile_transformer_blocks: bool = Field(
         default=False, exclude_if=lambda value: not value
     )
+    compile_output_head_loss: bool = Field(
+        default=False, exclude_if=lambda value: not value
+    )
 
     @model_validator(mode="after")
     def validate_block_compilation(self) -> RuntimeConfig:
@@ -341,6 +344,16 @@ class RuntimeConfig(StrictModel):
         ):
             raise ValueError(
                 "block compilation requires PyTorch without activation checkpointing or offload"
+            )
+        if self.compile_output_head_loss and (
+            self.engine != "pytorch"
+            or self.backend != "xpu"
+            or self.precision != "bf16"
+            or self.memory.activation_offload.enabled
+        ):
+            raise ValueError(
+                "compiled output head and loss require PyTorch XPU BF16 "
+                "without activation offload"
             )
         return self
 
@@ -629,6 +642,14 @@ class RunConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_cross_section(self) -> RunConfig:
+        if self.runtime.compile_output_head_loss and (
+            self.dataset.allocation_manifest_path is not None
+            or self.training.portability_manifest_path is not None
+        ):
+            raise ValueError(
+                "compiled output head and loss do not support allocation "
+                "or portability runs"
+            )
         if self.evaluation.panels:
             if (
                 self.runtime.engine != "pytorch"

@@ -395,6 +395,20 @@ def _initialize_learned_parameters(
         )
 
 
+def output_projection_cross_entropy(
+    hidden: torch.Tensor, targets: torch.Tensor, weight: torch.Tensor
+) -> torch.Tensor:
+    """Project in BF16 and accumulate cross-entropy in FP32, as in training."""
+    with torch.autocast(device_type=hidden.device.type, dtype=torch.bfloat16):
+        logits = functional.linear(hidden, weight)
+    return functional.cross_entropy(
+        logits.float().flatten(0, 1),
+        targets.flatten(),
+        ignore_index=-100,
+        reduction="sum",
+    )
+
+
 class PyTorchEngine:
     """The former trainer compute path, without lifecycle or checkpoint ownership."""
 
@@ -554,6 +568,10 @@ class PyTorchEngine:
             )
         self.config, self.runtime, self.device = config, runtime, device
         self.model, self.optimizer = model, optimizer
+        if config.runtime.compile_output_head_loss:
+            self._compiled_output_head_loss = torch.compile(
+                output_projection_cross_entropy, dynamic=False
+            )
         if config.runtime.compile_transformer_blocks:
             for block in model.blocks:
                 block.forward_with_aux = torch.compile(
@@ -1252,15 +1270,19 @@ class PyTorchEngine:
                     valid_target_mask=valid_target_mask,
                     activation_checkpointing=config.runtime.memory.activation_checkpointing.enabled,
                     diagnostics=config.logging.architecture_diagnostics,
+                    return_hidden=config.runtime.compile_output_head_loss,
                 )
             diagnostics = architecture_metrics(model)
             monitor.sample("forward")
-            ce_sum = functional.cross_entropy(
-                logits.float().flatten(0, 1),
-                y.flatten(),
-                ignore_index=-100,
-                reduction="sum",
-            )
+            if config.runtime.compile_output_head_loss:
+                ce_sum = self._compiled_output_head_loss(logits, y, model.output.weight)
+            else:
+                ce_sum = functional.cross_entropy(
+                    logits.float().flatten(0, 1),
+                    y.flatten(),
+                    ignore_index=-100,
+                    reduction="sum",
+                )
             auxiliary = auxiliary.float()
             losses_finite = (
                 losses_finite & torch.isfinite(ce_sum) & torch.isfinite(auxiliary)
