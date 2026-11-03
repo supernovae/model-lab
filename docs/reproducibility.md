@@ -24,6 +24,8 @@ Checkpoint generations are immutable and verified before publication. `latest.js
 
 Use `--resume` for the same compatible PyTorch experiment. It restores model, optimizer, scheduler, scaler when present, cursor, counters, cadence, and RNG state into a child run. Full resume requires matching scientific state and engine/backend. If source/runtime identity has changed but the same-backend scientific contract remains compatible, `--allow-runtime-drift` is explicit and records the continuation as best effort.
 
+For supported dense PyTorch full-state resume or recovery, `--allow-runtime-optimization` separately admits the supported execution changes while preserving scientific settings, effective training batch and validation coverage. It records a best-effort transition, not bitwise equivalence; see [explicit runtime optimization on resume](checkpointing.md#explicit-runtime-optimization-on-resume).
+
 Use `--promote` for compatible **weights-only** reuse with fresh optimizer/schedule/scaler/RNG/cursor/counters. Promotion does not allow an architecture semantic or tokenizer/package mismatch, does not resize the model, and is not a general external checkpoint importer. Historical/incomplete state without required optimizer/RNG/provenance is promotion-only rather than pretending to be full-resumable.
 
 `--recover RUN_DIR` is the explicit recovery path for finalized verified generations. It never turns a corrupt explicitly selected `--resume` pointer into a silent fallback.

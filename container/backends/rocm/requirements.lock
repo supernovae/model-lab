@@ -1,14 +1,36 @@
-# CPython 3.14 Linux x86-64; application pins constrained to uv.lock.
-# rocm itself is in source-requirements.lock.
+# Python 3.14 Linux x86_64; common pins constrained to uv.lock.
+# rocm itself is installed from source-requirements.lock.
 --index-url https://pypi.org/simple
---find-links https://stable.repo.amd.com/rocm/whl-next/torch/
---find-links https://stable.repo.amd.com/rocm/whl-next/triton/
---find-links https://stable.repo.amd.com/rocm/whl-next/amd-torch-device-gfx1100/
---find-links https://stable.repo.amd.com/rocm/whl-next/amd-torch-device-gfx110x/
---find-links https://stable.repo.amd.com/rocm/whl-next/rocm-bootstrap/
---find-links https://stable.repo.amd.com/rocm/whl-next/rocm-sdk-device-gfx1100/
---find-links https://stable.repo.amd.com/rocm/whl-next/rocm-sdk-libraries/
---find-links https://stable.repo.amd.com/rocm/whl-next/rocm-sdk-core/
+--find-links https://download.pytorch.org/whl/rocm10.0/torch/
+--find-links https://download.pytorch.org/whl/rocm10.0/triton-rocm/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-core/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1010/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1011/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1012/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1030/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1031/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1032/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1033/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1034/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1035/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1036/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1100/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1101/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1102/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1103/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1150/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1151/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1152/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1153/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1200/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1201/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx1250/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx908/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx90a/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx942/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-device-gfx950/
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm-sdk-libraries/
 
 aiohappyeyeballs==2.7.1 \
     --hash=sha256:065665c041c42a5938ed220bdcd7230f22527fbec085e1853d2402c8a3615d9d \
@@ -139,10 +161,6 @@ aiosignal==1.4.0 \
 altair==6.3.0 \
     --hash=sha256:7defb6ca730676dfc99a299768e2769f51585fcb3dc960ea71aacc368929d65e \
     --hash=sha256:fa632121aca6d0fcb198a3d8a9f7d937fa5b7518ec947951cfffb44e736d97c8
-amd-torch-device-gfx1100==2.14.0+rocm10.1.0 \
-    --hash=sha256:437bce348c91a585281a80cb3fff8dd346dc8d9c50af970efe00a81b0dfe6837
-amd-torch-device-gfx110x==2.14.0+rocm10.1.0 \
-    --hash=sha256:8e7a48012ad17ac5842eef262fc4b6a9c4a984555cccef73ddf60bfc09a3bbd0
 annotated-types==0.8.0 \
     --hash=sha256:13b2beaad985e05e2d6407ee4c4f35590b11f8d693a258a561055cac8f64cab7 \
     --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
@@ -1505,14 +1523,60 @@ referencing==0.37.0 \
 requests==2.34.2 \
     --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0 \
     --hash=sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed
-rocm-bootstrap==0.3.0 \
-    --hash=sha256:62d0160ecdd86f7132dbab9aec257cb2c96327df2592b0633aa6bb56399cc095
-rocm-sdk-core==10.1.0 \
-    --hash=sha256:a1a2433334ac61a526c6bae2f58f6bbc9b525f5a9e008e76a1a48d07f64f0703
-rocm-sdk-device-gfx1100==10.1.0 \
-    --hash=sha256:55fc9d7505c78178060d11bc8dc44b52b3e715f319bd61dd7e7f37c5bec2a94d
-rocm-sdk-libraries==10.1.0 \
-    --hash=sha256:ffb36d5e1d97e96c191052a10c39a1a7a4ddb4da4a88d3166ab4bf7bfdb94cf6
+rocm-sdk-core==10.0.0 \
+    --hash=sha256:3bf4a72d11aa2a4ee1e90572c73630f937d38c1b7af4dda45b483b54655138a7
+rocm-sdk-device-gfx1010==10.0.0 \
+    --hash=sha256:d79dae603d40bd9301c896d848ca022e7ed02c860c23041af69d0b86c92cc029
+rocm-sdk-device-gfx1011==10.0.0 \
+    --hash=sha256:923d74f1912938defda23c8ddadd175b0ffc0cabb6082c3121f03bfad1d16ff3
+rocm-sdk-device-gfx1012==10.0.0 \
+    --hash=sha256:93de1ca0efd82ef3bdf9143596b0d6a0ee3dbc7dd41fac0afc88d2d405b4c924
+rocm-sdk-device-gfx1030==10.0.0 \
+    --hash=sha256:493cf38e23d970afab6e21df09a68ce678a5d28a8107d7fd2841c90a557369f6
+rocm-sdk-device-gfx1031==10.0.0 \
+    --hash=sha256:d6b1ac96507c4e79828cf447b14e25f797a14bb4e3d1b1681789323d9a0b05ea
+rocm-sdk-device-gfx1032==10.0.0 \
+    --hash=sha256:5606f831643a31426090590c6bab375f391051b55aed21195c2196051aa3eb97
+rocm-sdk-device-gfx1033==10.0.0 \
+    --hash=sha256:7fb7d4b80f1de69056deb8f6384d0e2d65257600f53df37cae90f2bbece9faed
+rocm-sdk-device-gfx1034==10.0.0 \
+    --hash=sha256:96d7368e12256f7d2ea2291f7e426a57e2ce2e27da3e6ace838a597173d1355c
+rocm-sdk-device-gfx1035==10.0.0 \
+    --hash=sha256:516598b1aace5f2b5b551f54efd134313b3cddd126203dd648a87a0bf19d7da3
+rocm-sdk-device-gfx1036==10.0.0 \
+    --hash=sha256:8de22ec33d8dd9564be9555672187cd0748954c42b9f13036050c1c111d232d2
+rocm-sdk-device-gfx1100==10.0.0 \
+    --hash=sha256:d44af24724dd1a104a973a8dbc2eb514c1a0c155ac2cf5bf38cc9ab5846f8f29
+rocm-sdk-device-gfx1101==10.0.0 \
+    --hash=sha256:3e5c648e0b0291863536732bc3e90198903b2a4907e2806d1b41e8fb4f9d4a2d
+rocm-sdk-device-gfx1102==10.0.0 \
+    --hash=sha256:dbfc6d85cd64c625555084714302467d8a46a98c05bba9f62f91b49e178af901
+rocm-sdk-device-gfx1103==10.0.0 \
+    --hash=sha256:45aca48e24b79f4e3a9a17759839658417fefbb15134a7e51c3e7d5acd2e8f28
+rocm-sdk-device-gfx1150==10.0.0 \
+    --hash=sha256:64aaa7e396bb89372eba17293e63a66f8fc0a3ff9bf1d86dc6d1eb8b57bd03e9
+rocm-sdk-device-gfx1151==10.0.0 \
+    --hash=sha256:ec705df531e523777a5cd47b2dfadb2272935927c46c122effb11fcdcedb73d0
+rocm-sdk-device-gfx1152==10.0.0 \
+    --hash=sha256:0cd4ac7751be934d01e20bf9077e57282b805b733c37c6b51305d1b0ca3be4e0
+rocm-sdk-device-gfx1153==10.0.0 \
+    --hash=sha256:79579d77dba25c0eac769a796ed5665aa2e3093a2b7f304ea4e13bb8415e6579
+rocm-sdk-device-gfx1200==10.0.0 \
+    --hash=sha256:3b638ed38afa08cc700c8853a7f1390e0e37175cc926fc0ecb743c1d772dc26d
+rocm-sdk-device-gfx1201==10.0.0 \
+    --hash=sha256:81856692c18e5d6ccce486193d0f4a54b368d2e84ff5a0811b644f6f788ed4b2
+rocm-sdk-device-gfx1250==10.0.0 \
+    --hash=sha256:5d3998d5805030adfa2abbae87cef9194c3f910788ce02313a9ba83b11e7ae82
+rocm-sdk-device-gfx908==10.0.0 \
+    --hash=sha256:35fff75186b81ff46499522928abb4d46efe53cbe20b8e53c40941f28c62c7ec
+rocm-sdk-device-gfx90a==10.0.0 \
+    --hash=sha256:8bb0e955378aae4e7962ddd55661782e9e2843101b3c15dd6f9a0c7568d4b0bb
+rocm-sdk-device-gfx942==10.0.0 \
+    --hash=sha256:636f4e4c3110e4e1ccc9eacb08ef39e08f635ba9472ead2b000bedd76bfea8bd
+rocm-sdk-device-gfx950==10.0.0 \
+    --hash=sha256:01604bedb4acec867e7bbc18c4580ed15aa056fc6b151d976746a43305a8a09e
+rocm-sdk-libraries==10.0.0 \
+    --hash=sha256:bbe83a550cb8ceeb306abf6d57df6617857a1b19384549526db2ec81a4374e57
 rpds-py==2026.6.3 \
     --hash=sha256:0be972be84cfcaf46c8c6edf690ca0f154ac17babf1f6a955a51579b34ad2dc5 \
     --hash=sha256:127565fead0a10943b282957bd5447804ff3160ad79f2ad2635e6d249e380680 \
@@ -1691,13 +1755,13 @@ tokenizers==0.22.2 \
 toml==0.10.2 \
     --hash=sha256:806143ae5bfb6a3c6e736a764057db0e6a0e05e338b5630894a5f779cabb4f9b \
     --hash=sha256:b3bda1d108d5dd99f4a20d24d9c348e91c4db7ab1b749200bded2f839ccbe68f
-torch==2.14.0+rocm10.1.0 \
-    --hash=sha256:a4aa192a8485b208593148026fc5e9043f6e0a330306efbd522deabf575b6e19
+torch==2.15.0+rocm10.0 \
+    --hash=sha256:1026907ac581efbbb8a7b524d5f54c254afd1da1315c4f95c5874555c5cc423a
 tqdm==4.70.1 \
     --hash=sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73 \
     --hash=sha256:cefd0eca11b2a37a3aee776544d4f4ae913f02688135b5556b8788dfa474afc4
-triton==3.8.0+git669b31ac.rocm10.1.0 \
-    --hash=sha256:3d0c082a0cc7109618ae43550ac3ddf80427543ef20e9c83248db417475e2cba
+triton-rocm==3.9.0 \
+    --hash=sha256:94e4c228ea90a4d6c79edc5063832993dceb35d82202d1c891e8ec8e2bf543c3
 typing-extensions==4.16.0 \
     --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8 \
     --hash=sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5

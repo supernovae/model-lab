@@ -11,8 +11,10 @@ import heapq
 import itertools
 import json
 import mmap
+import os
 import sqlite3
 import struct
+import threading
 from collections import OrderedDict
 from pathlib import Path
 
@@ -538,8 +540,17 @@ def _ranked(directory, cohorts, seed, strata, order_policy=None):
 class RetainedMixtureIndex(MixtureIndex):
     """Use signed source offsets and a bounded file-handle cache."""
 
+    def cached_document(self, doc_id, source, content):
+        # Ranked references do not carry per-record rights. A content-cache hit
+        # from another document cannot authorize this record: read and check it.
+        return None
+
+    def candidate_bytes(self, source_bytes, content):
+        return source_bytes
+
     def record_family(self, stratum, family):
         """Count an eligible family without retaining a second token copy."""
+        self.record_event(["family", [stratum, family]])
         self.db.execute(
             "INSERT INTO encoded(offset,family,stratum) VALUES(NULL,?,?)",
             (family, stratum),
@@ -551,6 +562,7 @@ class RetainedMixtureIndex(MixtureIndex):
         self.work_root = Path(work_root)
         self.cohorts = cohorts
         self.handles = OrderedDict()
+        self.handle_lock = threading.Lock()
         total_sources = sum(len(cohort["sources"]) for cohort in cohorts)
         if not total_sources:
             raise ValueError("retained mixture has no source renders")
@@ -563,7 +575,7 @@ class RetainedMixtureIndex(MixtureIndex):
             )
         except ImportError, OSError, ValueError:
             available = 64
-        self.handle_limit = min(total_sources, available)
+        self.handle_limit = min(total_sources, available, 64)
         paths = []
         for cohort in cohorts:
             if cohort.get("stage_migration_receipt"):
@@ -671,13 +683,6 @@ class RetainedMixtureIndex(MixtureIndex):
 
     def _read_document(self, row):
         stratum, _, doc_id, cohort, shard, offset, size, content, _family, source = row
-        key = (cohort, shard)
-        stream = self.handles.pop(key, None)
-        if stream is None:
-            stream = Path(self.cohorts[cohort]["sources"][shard]).open("rb")  # noqa: SIM115 - bounded LRU owns the handle
-        self.handles[key] = stream
-        if len(self.handles) > self.handle_limit:
-            self.handles.popitem(last=False)[1].close()
         if (
             type(offset) is not int
             or type(size) is not int
@@ -685,8 +690,21 @@ class RetainedMixtureIndex(MixtureIndex):
             or not 0 < size <= MAX_ROW_BYTES
         ):
             raise ValueError("invalid retained document offset")
-        stream.seek(offset)
-        raw = stream.read(size)
+        # Duplicate under the cache lock so eviction cannot close an active
+        # reader's descriptor. pread keeps parallel readers' offsets independent.
+        key = (cohort, shard)
+        with self.handle_lock:
+            stream = self.handles.pop(key, None)
+            if stream is None:
+                if len(self.handles) >= self.handle_limit:
+                    self.handles.popitem(last=False)[1].close()
+                stream = Path(self.cohorts[cohort]["sources"][shard]).open("rb")  # noqa: SIM115 - owned by the bounded index cache
+            self.handles[key] = stream
+            descriptor = os.dup(stream.fileno())
+        try:
+            raw = os.pread(descriptor, size, offset)
+        finally:
+            os.close(descriptor)
         if len(raw) != size:
             raise ValueError("retained source document changed")
         doc = json.loads(raw)
@@ -705,11 +723,37 @@ class RetainedMixtureIndex(MixtureIndex):
         doc["drop_reason"] = None
         return doc
 
-    def candidates(self, stratum):
-        self.db.execute("DELETE FROM seen")
-        while self.current is not None and self.current[0] == stratum:
-            row, self.current = self.current, next(self.records, None)
-            yield self._read_document(row), row[8]
+    def candidates(self, stratum, frontier=None, *, workers=1):
+        from sparselab.corpus.mixture_pipeline import ordered_fetch
+
+        if frontier is None:
+            self.db.execute("DELETE FROM seen")
+
+        # Byte cursors refer to the authenticated ranked reference file, not
+        # source bodies. Resume never parses the committed reference prefix.
+        def references():
+            with Path(self.ranked).open("rb") as stream:
+                stream.seek(frontier or getattr(self, "frontier", 0))
+                while raw := stream.readline(MAX_ROW_BYTES + 1):
+                    if len(raw) > MAX_ROW_BYTES:
+                        raise ValueError("mixture reference-byte cap exceeded")
+                    row = json.loads(raw)
+                    if row[0] != stratum:
+                        break
+                    yield row, stream.tell()
+
+        for item, doc in ordered_fetch(
+            references(),
+            lambda item: self._read_document(item[0]),
+            workers=workers,
+            size=lambda item: self.candidate_bytes(item[0][6], item[0][7]),
+            metrics=getattr(self, "pipeline_metrics", None),
+            cached=lambda item: self.cached_document(
+                item[0][2], item[0][9], item[0][7]
+            ),
+        ):
+            self.frontier = item[1]
+            yield doc, item[0][8]
 
     def verify_inputs(self):
         unchanged(self.dependencies)

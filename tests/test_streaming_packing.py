@@ -122,7 +122,8 @@ prepared = prepare_data(
     tokenizer_batch_documents=int(sys.argv[3]),
     tokenizer_batch_source_bytes=int(sys.argv[4]),
     resource_envelope=ResourceEnvelope(
-        resource_envelope_version=1, max_workers=int(sys.argv[5])
+        resource_envelope_version=1, max_workers=int(sys.argv[5]),
+        preparation_shard_workers=int(sys.argv[6])
     ),
 )
 print(json.dumps({
@@ -132,8 +133,13 @@ print(json.dumps({
 }))
 """
     reference = None
-    for workers, documents in [(1, 1), *product((1, 2, 4), (16, 64, 256))]:
-        cache_dir = tmp_path / f"cache-{workers}-{documents}"
+    coordinates = [
+        (workers, documents, 1)
+        for workers, documents in [(1, 1), *product((1, 2, 4), (16, 64, 256))]
+    ]
+    coordinates += [(2, 16, 2), (4, 256, 2), (3, 16, 2), (3, 16, 8), (4, 16, 4)]
+    for workers, documents, shards in coordinates:
+        cache_dir = tmp_path / f"cache-{workers}-{documents}-{shards}"
         cache_dir.mkdir()
         environment = os.environ.copy()
         environment.update(
@@ -153,6 +159,7 @@ print(json.dumps({
                 str(documents),
                 "3000",
                 str(workers),
+                str(shards),
             ],
             capture_output=True,
             text=True,
@@ -629,3 +636,286 @@ def test_empty_records_resume_in_order_without_encoding_or_overconsuming(
     assert acquired == texts[:7] * 2
     assert encoded == expected_texts
     assert np.load(root / "train.npy").tolist() == expected_ids
+
+
+def test_parallel_shards_join_on_failure_and_resume_verified_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataclasses import replace
+    from threading import Barrier
+
+    from sparselab.data import encoding, preparation_chunks
+    from sparselab.resource_envelope import ResourceEnvelope
+
+    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+
+    run = config(tmp_path)
+    paths = {}
+    for split in ("train", "validation"):
+        path = tmp_path / f"{split}.jsonl"
+        path.write_text(
+            "".join(
+                json.dumps({"text": f"{split} fox {n} café"}) + "\n" for n in range(8)
+            )
+        )
+        paths[f"{split}_path"] = path
+    run = run.model_copy(
+        update={
+            "dataset": run.dataset.model_copy(
+                update={
+                    "source": "local_text",
+                    "license": "fixture",
+                    **paths,
+                    "train_max_documents": 8,
+                    "validation_max_documents": 8,
+                    "train_max_tokens": 1000,
+                    "validation_max_tokens": 1000,
+                }
+            )
+        }
+    )
+    tokenizer = load_tokenizer(run.tokenizer.path)
+    # Pin a tiny two-worker capacity so this also tests concurrency on CI hosts.
+    plan = encoding.tokenizer_work_plan(1)
+    monkeypatch.setattr(
+        "sparselab.data.preparation_workers.tokenizer_work_plan",
+        lambda cap: replace(plan, workers=min(2, cap or 2)),
+    )
+    initialize = preparation_chunks.PreparationChunks.__init__
+
+    def tiny_chunks(self, *args, **kwargs):
+        kwargs["record_limit"] = 4
+        initialize(self, *args, **kwargs)
+
+    monkeypatch.setattr(preparation_chunks.PreparationChunks, "__init__", tiny_chunks)
+    barrier = Barrier(2)
+    real_seal = preparation_chunks._after_sealed_chunk
+
+    def interrupt(split, index, receipt):
+        if split == "train" and index == 0:
+            if receipt.parent.name.startswith("work-"):
+                barrier.wait(timeout=10)
+            else:
+                raise ValueError("fixture interrupt after committed shard")
+
+    monkeypatch.setattr(preparation_chunks, "_after_sealed_chunk", interrupt)
+    with pytest.raises(
+        (ValueError, RuntimeError), match="fixture interrupt|sibling shard"
+    ):
+        prepare_data(
+            run,
+            tokenizer,
+            resource_envelope=ResourceEnvelope(
+                resource_envelope_version=1, max_workers=2, preparation_shard_workers=2
+            ),
+            tokenizer_batch_documents=4,
+        )
+    staged = [
+        p
+        for p in run.dataset.cache_dir.rglob("staging.json")
+        if not p.parent.name.startswith("work-")
+    ]
+    assert len(staged) == 1
+    assert not (staged[0].parent / "manifest.json").exists()
+    assert len(list(staged[0].parent.glob("*.receipt.json"))) == 1
+    monkeypatch.setattr(preparation_chunks, "_after_sealed_chunk", real_seal)
+
+    encoded = []
+    original_encode = PreparationEncoder.encode
+
+    def record_encoding(self, texts):
+        encoded.extend(texts)
+        return original_encode(self, texts)
+
+    monkeypatch.setattr(PreparationEncoder, "encode", record_encoding)
+    prepared = prepare_data(
+        run,
+        tokenizer,
+        resource_envelope=ResourceEnvelope(
+            resource_envelope_version=1, max_workers=1, preparation_shard_workers=1
+        ),
+    )
+    for split in ("train", "validation"):
+        expected = [
+            token
+            for n in range(8)
+            for token in [
+                *tokenizer.encode(
+                    f"{split} fox {n} café", add_special_tokens=False
+                ).ids,
+                tokenizer.token_to_id("<eos>"),
+            ]
+        ]
+        assert np.load(prepared.root / f"{split}.npy").tolist() == expected
+    receipt = json.loads(
+        prepared.root.with_name(prepared.root.name + ".preparation.json").read_text()
+    )
+    assert receipt["shard_workers"] == 1
+    assert set(receipt["shards"]) == {"train", "validation"}
+    assert sorted(encoded) == sorted(
+        [f"train fox {n} café" for n in range(4, 8)]
+        + [f"validation fox {n} café" for n in range(8)]
+    )
+    assert receipt["worker_pool"]["effective_workers"] == 1
+    assert not list(prepared.root.glob("work-*"))
+
+
+def test_parallel_token_cap_stops_before_next_record_and_preserves_frontier(
+    tmp_path: Path,
+):
+    from sparselab.data.preparation_chunks import PreparationChunks
+    from sparselab.data.preparation_telemetry import PreparationTelemetry
+    from sparselab.data.preparation_workers import (
+        PreparationWorkers,
+        collect_parallel_stream,
+    )
+    from sparselab.resource_envelope import ResourceEnvelope
+
+    run = config(tmp_path)
+    tokenizer = load_tokenizer(run.tokenizer.path)
+    texts = [f"The fox explored a different meadow {n}." for n in range(3)]
+    visited = []
+
+    def documents():
+        for text in texts:
+            visited.append(text)
+            yield RenderedConversation(text, ((0, len(text)),), "all_tokens")
+
+    eos = tokenizer.token_to_id("<eos>")
+    root = tmp_path / "bounded.tmp"
+    owner = PreparationChunks(
+        root,
+        cache_identity={"fixture": "bounded"},
+        binding={"fixture": "bounded"},
+        arrays={"ids": np.dtype(np.int32)},
+    )
+    with (
+        owner,
+        PreparationWorkers(
+            tokenizer,
+            root,
+            envelope=ResourceEnvelope(
+                resource_envelope_version=1, max_workers=2, preparation_shard_workers=2
+            ),
+            parallel_supported=True,
+        ) as workers,
+    ):
+        split = owner.open_split("train")
+        with pytest.raises(ValueError, match="token cap would truncate"):
+            collect_parallel_stream(
+                documents(),
+                split,
+                workers,
+                selected_documents=3,
+                max_tokens=len(tokenizer.encode(texts[0], add_special_tokens=False).ids)
+                + 2,
+                batch_documents=1,
+                batch_source_bytes=1024,
+                transform=lambda model, ids, text: {"ids": ids + [eos]},
+                telemetry=PreparationTelemetry(root),
+            )
+    assert visited == texts[:2]
+    assert split.state["acquired_documents"] == 1
+    assert not (root / "train.npy").exists()
+    with PreparationChunks(
+        root,
+        cache_identity={"fixture": "bounded"},
+        binding={"fixture": "bounded"},
+        arrays={"ids": np.dtype(np.int32)},
+    ) as resumed:
+        assert resumed.open_split("train").state == split.state
+        assert not list(root.glob("work-*"))
+
+
+def test_worker_scratch_cleanup_preserves_unexpected_files(tmp_path: Path):
+    from sparselab.data.preparation_chunks import PreparationChunks
+
+    root = tmp_path / "owned.tmp"
+    settings = {
+        "cache_identity": {"fixture": "scratch"},
+        "binding": {"fixture": "scratch"},
+        "arrays": {"ids": np.dtype(np.int32)},
+    }
+    with (
+        PreparationChunks(root, **settings) as owner,
+        owner.work_chunks("train", 0) as work,
+    ):
+        unexpected = work.root / "keep-me.txt"
+        unexpected.write_text("unrelated")
+    with pytest.raises(ValueError, match="unexpected preparation work entry"):
+        PreparationChunks(root, **settings)
+    assert unexpected.read_text() == "unrelated"
+    assert (unexpected.parent / "staging.json").exists()
+
+
+def test_worker_adoption_refuses_changed_raw_bytes(tmp_path: Path):
+    from sparselab.data.preparation_chunks import PreparationChunks
+
+    with PreparationChunks(
+        tmp_path / "changed.tmp",
+        cache_identity={"fixture": "changed"},
+        binding={"fixture": "changed"},
+        arrays={"ids": np.dtype(np.int32)},
+    ) as owner:
+        destination = owner.open_split("train")
+        with owner.work_chunks("train", 0) as scratch:
+            work = scratch.open_split("train")
+            work.append_record(1, {"ids": [1, 2, 3]})
+            work.seal()
+        raw = next(work.root.glob("*.ids.raw"))
+        before = raw.stat()
+        raw.write_bytes(b"\0" * before.st_size)
+        os.utime(raw, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+        with pytest.raises(ValueError, match="worker raw chunk changed"):
+            destination.adopt(work, first_acquired_index=1)
+        assert destination.state["acquired_documents"] == 0
+        assert not list(owner.root.glob("*.receipt.json"))
+
+
+@pytest.mark.parametrize("model_change", [{"dropout": 0.1}, {"byte_fallback": True}])
+def test_unsafe_parallel_tokenizer_uses_reported_serial_fallback(
+    tmp_path: Path, monkeypatch, model_change
+):
+    from tokenizers import Tokenizer
+
+    from sparselab.resource_envelope import ResourceEnvelope
+
+    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    run = config(tmp_path)
+    spec = json.loads(load_tokenizer(run.tokenizer.path).to_str())
+    spec["model"].update(model_change)
+    tokenizer = Tokenizer.from_str(json.dumps(spec))
+    paths = {}
+    for split in ("train", "validation"):
+        path = tmp_path / f"{split}.jsonl"
+        path.write_text(json.dumps({"text": f"{split} fox café " * 32}) + "\n")
+        paths[f"{split}_path"] = path
+    run = run.model_copy(
+        update={
+            "dataset": run.dataset.model_copy(
+                update={
+                    "source": "local_text",
+                    "license": "fixture",
+                    **paths,
+                    "train_max_documents": 1,
+                    "validation_max_documents": 1,
+                    "train_max_tokens": 1000,
+                    "validation_max_tokens": 1000,
+                }
+            )
+        }
+    )
+    prepared = prepare_data(
+        run,
+        tokenizer,
+        resource_envelope=ResourceEnvelope(
+            resource_envelope_version=1, max_workers=2, preparation_shard_workers=2
+        ),
+    )
+    receipt = json.loads(
+        prepared.root.with_name(prepared.root.name + ".preparation.json").read_text()
+    )
+    assert receipt["worker_pool"]["requested_workers"] == 2
+    assert receipt["worker_pool"]["effective_workers"] == 1
+    assert receipt["worker_pool"]["fallback"] == "tokenizer_not_parallel_eligible"
+    assert prepared.manifest["train"]["retained_documents"] == 1

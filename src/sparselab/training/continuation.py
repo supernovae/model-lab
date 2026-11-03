@@ -73,6 +73,7 @@ def _runtime_optimization_transition(
         ("evaluation", "batch_size"),
         ("runtime", "memory", "activation_checkpointing", "enabled"),
         ("runtime", "compile_transformer_blocks"),
+        ("runtime", "compile_output_head_loss"),
     )
     changes: list[dict[str, object]] = []
     for path in paths:

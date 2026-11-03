@@ -39,10 +39,7 @@ _ROCM_GFX1100 = Recipe(
     requirements_file=_REQUIREMENTS_DIR / "rocm-gfx1100.txt",
     python_version=(3, 14),
     backend="rocm",
-    indexes=(
-        "https://stable.repo.amd.com/rocm/whl-next/",
-        "https://stable.repo.amd.com/rocm/core/whl-next/",
-    ),
+    indexes=("https://download.pytorch.org/whl/rocm10.0",),
     requirements=MappingProxyType(
         {
             "torch_hip": True,

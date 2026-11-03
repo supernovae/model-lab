@@ -204,9 +204,9 @@ def _declared_precisions(backend: str, available: bool) -> tuple[str, ...]:
     """Return static API declarations, never validation evidence."""
     if not available:
         return ()
-    if backend == "cpu":
+    if backend in {"cpu", "mps"}:
         return ("fp32", "bf16")
-    if backend in {"mps", "cuda", "rocm", "xpu"}:
+    if backend in {"cuda", "rocm", "xpu"}:
         return ("fp32", "bf16", "fp16")
     return ()
 

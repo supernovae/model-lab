@@ -121,19 +121,10 @@ jobs:
             tests/test_generation.py \
             tests/test_inference.py
 
-      - name: Pilot retention and full-run staging regression
-        env:
-          UV_OFFLINE: "1"
-          SPARSELAB_WORK_DIR: ${{ runner.temp }}/staging-retention-work
-        run: |
-          uv run --locked --no-sync pytest -q -n 0 -p no:cacheprovider \
-            --basetemp "$RUNNER_TEMP/staging-retention-pytest" \
-            tests/test_staging.py::test_pilot_retention_is_isolated_from_full_run \
-            tests/test_staging.py::test_warmup_pilots_are_isolated_and_bundle_is_self_contained
 
   fast:
-    # Remaining fast CPU suite (excluding slow tests and modules already run in
-    # safe and lab-loop so checks are not duplicated across jobs).
+    # Remaining fast CPU suite plus focused supervised staging regressions.
+    # Modules already run in safe and lab-loop are excluded to avoid duplication.
     if: github.event_name != 'workflow_dispatch' || inputs.suite == 'fast'
     runs-on: ubuntu-24.04
     timeout-minutes: 12
@@ -183,6 +174,17 @@ jobs:
           --ignore=tests/test_generation.py
           --ignore=tests/test_inference.py
           -m "not slow and not mps and not mlx and not cuda and not rocm and not xpu and not network"
+      - name: Supervised staging regressions
+        env:
+          UV_OFFLINE: "1"
+          SPARSELAB_WORK_DIR: ${{ runner.temp }}/matched-story-staging-work
+        run: |
+          uv run --locked --no-sync pytest -q -p no:cacheprovider \
+            -n auto --maxprocesses=4 --dist worksteal --durations=10 \
+            --basetemp "$RUNNER_TEMP/matched-story-staging-pytest" \
+            tests/test_staging.py::test_pilot_retention_is_isolated_from_full_run \
+            tests/test_staging.py::test_matched_story_pilots_complete_under_native_supervision \
+            tests/test_staging.py::test_warmup_pilots_are_isolated_and_bundle_is_self_contained
   integration-linux:
     # Model work is manual-only. Dispatch requires its own reviewed allocation.
     if: github.event_name == 'workflow_dispatch' && inputs.suite == 'integration-linux'

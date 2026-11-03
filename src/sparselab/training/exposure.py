@@ -39,6 +39,22 @@ def exposure_context(
         "shuffle_seed": seed,
         "identities": identities,
     }
+    from sparselab.data.story_packing import MatchedStoryDataset
+
+    if isinstance(dataset, MatchedStoryDataset):
+        protocol.update(
+            {
+                "kind": "matched-eos-stories-v1",
+                "layout": dataset.layout,
+                "targets_per_update": dataset.targets_per_update,
+                "order": "source",
+                "initial_context": "virtual-eos",
+                "group_offsets_sha256": canonical_digest(
+                    dataset.group_offsets.tolist()
+                ),
+            }
+        )
+        protocol.pop("shuffle_seed")
     resumed = continuation == "RESUMED"
     return {
         "version": 1,

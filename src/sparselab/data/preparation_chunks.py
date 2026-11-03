@@ -138,7 +138,62 @@ class PreparationChunks:
                 stream.close()
             split._streams.clear()
 
+    def work_chunks(
+        self, split: str, sequence: int, *, telemetry=None
+    ) -> PreparationChunks:
+        """Exclusive scratch namespace for one bounded, uncommitted worker batch."""
+        if (
+            split not in {"train", "validation"}
+            or type(sequence) is not int
+            or sequence < 0
+        ):
+            raise ValueError("invalid preparation work coordinate")
+        root = self.root / f"work-{split}-{sequence:09d}"
+        if root.exists() or root.is_symlink():
+            raise ValueError(f"preparation work already exists: {root}")
+        return PreparationChunks(
+            root,
+            cache_identity={"parent_owner_sha256": canonical_digest(self._owner)},
+            binding={"split": split, "sequence": sequence},
+            arrays=self.arrays,
+            record_limit=self.record_limit,
+            raw_byte_limit=self.raw_byte_limit,
+            telemetry=telemetry,
+        )
+
+    def discard_work(self, root: Path) -> None:
+        """Discard only owned scratch names, never an unexpected file or symlink.
+
+        Worker receipts are not the parent commit frontier. After a crash they
+        may reference raw files already adopted into that frontier.
+        """
+        if root.parent != self.root or not re.fullmatch(
+            r"work-(train|validation)-[0-9]{9,}", root.name
+        ):
+            raise ValueError("invalid preparation work path")
+        if root.is_symlink() or not root.is_dir():
+            raise ValueError(f"invalid preparation work directory: {root}")
+        entries = list(root.iterdir())
+        for entry in entries:
+            allowed = entry.name in {"staging.json", "staging.json.tmp"}
+            match = re.fullmatch(r"(train|validation)-[0-9]{6,}\.(.+)", entry.name)
+            if match:
+                allowed = match[2] in {"receipt.json", "receipt.json.tmp"} | {
+                    f"{name}.raw{suffix}"
+                    for name in self.arrays
+                    for suffix in ("", ".tmp")
+                }
+            if not allowed or entry.is_symlink() or not entry.is_file():
+                raise ValueError(f"unexpected preparation work entry: {entry}")
+        for entry in entries:
+            entry.unlink()
+        root.rmdir()
+        sync_directory(self.root)
+
     def _inspect_inventory(self) -> None:
+        for entry in list(self.root.iterdir()):
+            if re.fullmatch(r"work-(train|validation)-[0-9]{9,}", entry.name):
+                self.discard_work(entry)
         allowed = {"staging.json", "manifest.json", "manifest.json.tmp"}
         for split in ("train", "validation"):
             prefix = f"{split}-"
@@ -501,6 +556,7 @@ class PreparationChunks:
 class SplitChunks:
     def __init__(self, owner: PreparationChunks, split: str) -> None:
         self.owner = owner
+        self.telemetry = owner.telemetry
         self.split = split
         self.root = owner.root
         self._sealed: list[
@@ -640,10 +696,8 @@ class SplitChunks:
                     _after_unsealed_chunk_write(
                         self.split, len(self._sealed), Path(self._streams[name].name)
                     )
-            if self.owner.telemetry is not None:
-                self.owner.telemetry.add(
-                    "spool_write_seconds", time.monotonic() - started
-                )
+            if self.telemetry is not None:
+                self.telemetry.add("spool_write_seconds", time.monotonic() - started)
 
     def seal(self) -> None:
         if not self._pending["acquired_documents"]:
@@ -684,12 +738,64 @@ class SplitChunks:
         self._streams = {}
         self._hashes = {}
         self._sizes = {name: 0 for name in self.owner.arrays}
-        if self.owner.telemetry is not None:
-            self.owner.telemetry.add(
-                "finalize_fsync_seconds", time.monotonic() - started
-            )
+        if self.telemetry is not None:
+            self.telemetry.add("finalize_fsync_seconds", time.monotonic() - started)
         if _after_sealed_chunk is not None:
             _after_sealed_chunk(self.split, index, receipt)
+
+    def adopt(self, work: SplitChunks, *, first_acquired_index: int) -> None:
+        """Commit independently written chunks in source order without copying bytes."""
+        if (
+            self._pending["acquired_documents"]
+            or work._pending["acquired_documents"]
+            or work.owner.root.parent != self.root
+            or work.split != self.split
+            or work.owner.arrays != self.owner.arrays
+            or work.owner._owner["cache_identity"]
+            != {"parent_owner_sha256": canonical_digest(self.owner._owner)}
+            or not re.fullmatch(f"work-{self.split}-[0-9]{{9,}}", work.root.name)
+            or work.root.is_symlink()
+            or _document(work.root / "staging.json") != work.owner._owner
+            or first_acquired_index != self._state["acquired_documents"] + 1
+        ):
+            raise ValueError(
+                "worker chunks do not extend the committed source frontier"
+            )
+        for source_index, (payload, fingerprints) in enumerate(work._sealed):
+            if _document(work._receipt_path(source_index)) != payload:
+                raise ValueError("worker receipt changed before adoption")
+            index = len(self._sealed)
+            committed = {
+                **payload,
+                "index": index,
+                "first_acquired_index": first_acquired_index
+                + payload["first_acquired_index"]
+                - 1,
+            }
+            self.owner._validate_receipt(self.split, index, committed)
+            if (
+                committed["first_acquired_index"]
+                != self._state["acquired_documents"] + 1
+            ):
+                raise ValueError("worker chunk source frontier is not contiguous")
+            for name in self.owner.arrays:
+                source = work._raw_path(source_index, name)
+                destination = self._raw_path(index, name)
+                if _fingerprint(source) != fingerprints[name]:
+                    raise ValueError("worker raw chunk changed before adoption")
+                if destination.exists() or destination.is_symlink():
+                    raise ValueError("worker adoption destination already exists")
+                source.rename(destination)
+                if _fingerprint(destination) != fingerprints[name]:
+                    raise ValueError("worker raw chunk changed during adoption")
+            sync_directory(self.root)
+            _store_document(self._receipt_path(index), committed)
+            self._sealed.append((committed, fingerprints))
+            for key in self._state:
+                self._state[key] += committed[key]
+            if _after_sealed_chunk is not None:
+                _after_sealed_chunk(self.split, index, self._receipt_path(index))
+        self.owner.discard_work(work.root)
 
     def finish(self) -> tuple[dict[str, VerifiedFile], dict[str, int]]:
         self.seal()
@@ -735,8 +841,8 @@ class SplitChunks:
                         raise ValueError(
                             f"sealed staging chunk changed during finalization: {source_path}"
                         )
-                if self.owner.telemetry is not None:
-                    self.owner.telemetry.add(
+                if self.telemetry is not None:
+                    self.telemetry.add(
                         "spool_write_seconds", time.monotonic() - copy_started
                     )
                 sync_started = time.monotonic()
@@ -744,8 +850,8 @@ class SplitChunks:
                 os.fsync(output.fileno())
             temporary.replace(path)
             sync_directory(self.root)
-            if self.owner.telemetry is not None:
-                self.owner.telemetry.add(
+            if self.telemetry is not None:
+                self.telemetry.add(
                     "finalize_fsync_seconds", time.monotonic() - sync_started
                 )
             proofs[basename] = _written_file(
@@ -756,6 +862,6 @@ class SplitChunks:
             "artifact_bytes": sum(proof.size_bytes for proof in proofs.values()),
             "artifact_files": len(proofs),
         }
-        if self.owner.telemetry is not None:
-            self.owner.telemetry.logical_output_bytes += stats["artifact_bytes"]
+        if self.telemetry is not None:
+            self.telemetry.logical_output_bytes += stats["artifact_bytes"]
         return proofs, stats

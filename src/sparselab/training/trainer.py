@@ -45,6 +45,7 @@ from sparselab.data.packing import (
     prepare_data,
     supervision_requires_mask,
 )
+from sparselab.data.story_packing import MatchedStoryDataset
 from sparselab.data.tokenizer import load_tokenizer
 from sparselab.engines.base import EngineState, EvaluationResult, Microbatch
 from sparselab.engines.pytorch import PyTorchEngine
@@ -1042,6 +1043,40 @@ def _train_impl(
             data.train_semantic_queries,
             data.train_semantic_mask,
         )
+        matched = config.training.matched_stories
+        if matched is not None:
+            if config.model.memory != "none" or any(
+                value is not None
+                for value in (
+                    data.train_supervision,
+                    data.train_byte_addresses,
+                    data.train_owner_ids,
+                    data.train_semantic_queries,
+                    data.train_semantic_mask,
+                )
+            ):
+                raise ValueError(
+                    "matched stories support plain all-token data without memory only"
+                )
+            story_tokenizer = load_tokenizer(
+                artifact_source / "tokenizer.json"
+                if artifact_source
+                else config.tokenizer.path
+            )
+            eos = story_tokenizer.token_to_id("<eos>")
+            if eos is None:
+                raise ValueError("matched stories require an EOS token")
+            dataset = MatchedStoryDataset(
+                data.train,
+                config.training.seq_len,
+                eos,
+                layout=matched.layout,
+                targets_per_update=matched.targets_per_update,
+            )
+            if config.training.max_steps != dataset.horizon(config.training.max_tokens):
+                raise ValueError(
+                    "matched story max_steps must equal the exact shared budget horizon"
+                )
         validation_dataset = TokenBlockDataset(
             data.validation,
             config.training.seq_len,
@@ -2124,49 +2159,64 @@ def _train_impl(
                     finish_run("interrupted", reason)
                     return run_id
                 remaining = config.training.max_tokens - tokens
-                window_size = (
-                    config.training.micro_batch_size
-                    * config.training.gradient_accumulation
-                )
-                candidates: list[tuple[int, BatchCursor]] = []
-                next_cursor = cursor
-                while len(candidates) < window_size:
-                    order = epoch_order(len(dataset), config.seed, next_cursor.epoch)
-                    count = min(
-                        window_size - len(candidates),
-                        len(order) - next_cursor.next_block,
+                if isinstance(dataset, MatchedStoryDataset):
+                    epoch, group = cursor.epoch, cursor.next_block
+                    if group == len(dataset):
+                        epoch, group = epoch + 1, 0
+                    records = list(dataset.update_rows(group, remaining))
+                    valid_targets = sum(
+                        int(np.count_nonzero(row[1] != -100)) for row in records
                     )
-                    if count == 0:
-                        next_cursor = BatchCursor(next_cursor.epoch + 1, 0)
-                        continue
-                    candidates.extend(
-                        (int(order[offset]), BatchCursor(next_cursor.epoch, offset + 1))
-                        for offset in range(
-                            next_cursor.next_block, next_cursor.next_block + count
+                    committed_cursor = BatchCursor(epoch, group + 1)
+                else:
+                    window_size = (
+                        config.training.micro_batch_size
+                        * config.training.gradient_accumulation
+                    )
+                    candidates: list[tuple[int, BatchCursor]] = []
+                    next_cursor = cursor
+                    while len(candidates) < window_size:
+                        order = epoch_order(
+                            len(dataset), config.seed, next_cursor.epoch
                         )
-                    )
-                    next_cursor = BatchCursor(
-                        next_cursor.epoch, next_cursor.next_block + count
-                    )
-                records = []
-                valid_targets = 0
-                committed_cursor = cursor
-                for index, candidate_cursor in candidates:
-                    inputs, targets, addresses, owners, queries, query_mask = (
-                        dataset.numpy_microblock(index)
-                    )
-                    labels = targets.copy()
-                    available = int(np.count_nonzero(labels != -100))
-                    allowed = min(remaining - valid_targets, available)
-                    if allowed < available:
-                        labels[np.flatnonzero(labels != -100)[allowed:]] = -100
-                    records.append(
-                        (inputs, labels, addresses, owners, queries, query_mask)
-                    )
-                    committed_cursor = candidate_cursor
-                    valid_targets += allowed
-                    if valid_targets == remaining:
-                        break
+                        count = min(
+                            window_size - len(candidates),
+                            len(order) - next_cursor.next_block,
+                        )
+                        if count == 0:
+                            next_cursor = BatchCursor(next_cursor.epoch + 1, 0)
+                            continue
+                        candidates.extend(
+                            (
+                                int(order[offset]),
+                                BatchCursor(next_cursor.epoch, offset + 1),
+                            )
+                            for offset in range(
+                                next_cursor.next_block, next_cursor.next_block + count
+                            )
+                        )
+                        next_cursor = BatchCursor(
+                            next_cursor.epoch, next_cursor.next_block + count
+                        )
+                    records = []
+                    valid_targets = 0
+                    committed_cursor = cursor
+                    for index, candidate_cursor in candidates:
+                        inputs, targets, addresses, owners, queries, query_mask = (
+                            dataset.numpy_microblock(index)
+                        )
+                        labels = targets.copy()
+                        available = int(np.count_nonzero(labels != -100))
+                        allowed = min(remaining - valid_targets, available)
+                        if allowed < available:
+                            labels[np.flatnonzero(labels != -100)[allowed:]] = -100
+                        records.append(
+                            (inputs, labels, addresses, owners, queries, query_mask)
+                        )
+                        committed_cursor = candidate_cursor
+                        valid_targets += allowed
+                        if valid_targets == remaining:
+                            break
                 if valid_targets == 0:
                     raise RuntimeError(
                         "selected training window has no supervised targets"
