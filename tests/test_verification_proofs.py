@@ -86,3 +86,56 @@ def test_key_availability_refuses_malformed_existing_key_without_replacing_it(
     assert store.key_available() is False
     assert store.key_available(create=True) is False
     assert store.key_path.read_bytes() == malformed
+
+
+@pytest.mark.parametrize("mode", [0o700, 0o755])
+def test_key_publication_diagnostic_preserves_cold_verification(
+    tmp_path, monkeypatch, mode
+):
+    from sparselab.data.verification import verify_file
+    from sparselab.training.manifest import sha256_file
+
+    work = tmp_path / "work"
+    work.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "settings"))
+    store = ProofStore(work)
+    assert store.key_available(create=True)
+    store.key_path.parent.chmod(mode)
+    assert store.key_available()  # The existing private key is readable in both cases.
+    payload = work / "payload.bin"
+    payload.write_bytes(b"bounded cold verification fixture")
+    digest = sha256_file(payload)
+    cold = []
+    for _ in range(2):
+        proof = verify_file(
+            payload,
+            expected_sha256=digest,
+            proof_store=store,
+            verification_mode="verified_reuse",
+        )
+        assert proof.sha256 == digest
+        cold.append(proof.cold_verified)
+    diagnostics = store.diagnostics()
+    failures = 2 if mode == 0o755 else 0
+    assert cold == ([True, True] if mode == 0o755 else [True, False])
+    assert diagnostics["recorded"] == (0 if mode == 0o755 else 1)
+    assert diagnostics["misses"] == (2 if mode == 0o755 else 1)
+    assert diagnostics["hits"] == (0 if mode == 0o755 else 1)
+    assert diagnostics["reasons"].get("key_publication_unavailable", 0) == failures
+    assert diagnostics["reasons"].get("no_receipt", 0) == diagnostics["misses"]
+    assert store.key_path.parent.stat().st_mode & 0o777 == mode
+    assert store.directory.exists() is (mode == 0o700)
+
+    # Corrupt bytes must still refuse before attempting to publish a receipt.
+    payload.write_bytes(b"changed")
+    with pytest.raises(ValueError, match="prepared file digest mismatch"):
+        verify_file(
+            payload,
+            expected_sha256=digest,
+            proof_store=store,
+            verification_mode="verified_reuse",
+        )
+    assert store.diagnostics()["recorded"] == diagnostics["recorded"]
+    assert (
+        store.diagnostics()["reasons"].get("key_publication_unavailable", 0) == failures
+    )

@@ -262,6 +262,10 @@ def _excluded_edges(kind: str) -> frozenset[tuple[str, str]]:
 # moved verbatim to prepared_dataset_identity. Inlining that helper restores
 # the prior module AST exactly; no imports, verifier calls or exclusions changed.
 # Re-pin the affected complete owners without broadening the excluded edges.
+# verification_proofs record re-audited 2026-11-03: only a diagnostic event
+# was added before the existing unavailable-key return. Removing that call
+# restores the complete record AST; imported artifact uses, cold-evidence
+# validation, trust checks and excluded edges are unchanged.
 _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
@@ -414,7 +418,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "verification_proofs",
         "experiments.artifacts",
-    ): "87dcdcdc201f47a1883857ad24d645e5d4ec3dfdcd5ffb4e805cf025cd63f126",
+    ): "ef3237ce0f4e0bd2de58092bd5712316738fe25d49981b2993bda24f135d11ae",
 }
 
 

@@ -208,7 +208,11 @@ class ProofStore:
         return _trusted(self.root, path)
 
     def diagnostics(self) -> dict[str, object]:
-        """Operational lookup outcomes, separate from artifact identity."""
+        """Operational verification outcomes, separate from artifact identity.
+
+        Hit/miss counters count lookups; reasons also include cold requests and
+        receipt-publication failures.
+        """
         return {
             "hits": self.hits,
             "misses": self.misses,
@@ -618,6 +622,7 @@ class ProofStore:
         try:
             key = self._key(create=True)
             if key is None:
+                self._event(binding, "key_publication_unavailable")
                 return
             self.directory.parent.mkdir(mode=0o700, exist_ok=True)
             if not _trusted(self.root, self.directory.parent):
