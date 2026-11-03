@@ -1765,6 +1765,11 @@
           "title": "Backend",
           "type": "string"
         },
+        "compile_output_head_loss": {
+          "default": false,
+          "title": "Compile Output Head Loss",
+          "type": "boolean"
+        },
         "compile_transformer_blocks": {
           "default": false,
           "title": "Compile Transformer Blocks",
