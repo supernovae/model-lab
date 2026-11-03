@@ -6,33 +6,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sparselab.lab_job_workload import TryWorkload, declarations
+from sparselab.config.loading import load_config
 from sparselab.training.manifest import sha256_file
 
 
-@pytest.mark.parametrize(
-    ("blocks", "batch_size", "max_batches", "expected_batches", "accepted"),
-    [
-        (None, None, 4, 4, True),
-        (None, None, 5, 5, False),
-        ((3, 3), 2, 64, 4, True),
-        ((3, 5), 2, 1, 5, False),
-        ((128, 128), 2, 1, 128, False),
-        ((16, 16), 16, 1, 2, True),
-        ((16, 17), 17, 1, 2, False),
-        ((100_000, 100_000), 100_000, 1, 2, False),
-        (None, 8, 4, 4, True),
-        (None, 9, 4, 4, False),
-    ],
-)
-def test_tiny_profile_effective_evaluation_limit(
-    tmp_path: Path,
-    blocks: tuple[int, int] | None,
-    batch_size: int | None,
-    max_batches: int,
-    expected_batches: int,
-    accepted: bool,
-) -> None:
+def _evaluation_config(tmp_path, blocks, batch_size, max_batches):
     root = tmp_path / "inputs"
     example = Path(__file__).resolve().parents[1] / "examples/lab-job-try"
     shutil.copytree(example, root)
@@ -60,6 +38,36 @@ def test_tiny_profile_effective_evaluation_limit(
             for name, count in zip(("first", "second"), blocks, strict=True)
         ]
     baseline.write_text(yaml.safe_dump(config))
+    return baseline
+
+
+@pytest.mark.parametrize(
+    ("blocks", "batch_size", "max_batches", "expected_batches", "accepted"),
+    [
+        (None, None, 4, 4, True),
+        (None, None, 5, 5, False),
+        ((3, 3), 2, 64, 4, True),
+        ((3, 5), 2, 1, 5, False),
+        ((128, 128), 2, 1, 128, False),
+        ((16, 16), 16, 1, 2, True),
+        ((16, 17), 17, 1, 2, False),
+        ((100_000, 100_000), 100_000, 1, 2, False),
+        (None, 8, 4, 4, True),
+        (None, 9, 4, 4, False),
+    ],
+)
+def test_tiny_profile_effective_evaluation_limit(
+    tmp_path: Path,
+    blocks: tuple[int, int] | None,
+    batch_size: int | None,
+    max_batches: int,
+    expected_batches: int,
+    accepted: bool,
+) -> None:
+    from sparselab.lab_job_workload import TryWorkload, declarations
+
+    baseline = _evaluation_config(tmp_path, blocks, batch_size, max_batches)
+    root = baseline.parent
     workload = TryWorkload(
         kind="lab_try",
         profile="tiny-cpu-lab",
@@ -83,3 +91,43 @@ def test_tiny_profile_effective_evaluation_limit(
     # Admission reads declarations only; it must not prepare or evaluate panels.
     assert not (tmp_path / "outputs").exists()
     assert not (tmp_path / "native").exists()
+
+
+@pytest.mark.parametrize(
+    ("section", "changes", "message"),
+    [
+        ("model", {"ffn": "moe", "num_experts": 2}, "dense PyTorch"),
+        (
+            "model",
+            {
+                "memory": "ngram",
+                "memory_table_size": 16,
+                "memory_ngram_size": 2,
+                "memory_dim": 8,
+            },
+            "dense PyTorch",
+        ),
+        ("runtime", {"engine": "mlx", "backend": "metal"}, "dense PyTorch"),
+        (
+            "dataset",
+            {"source": "local_chat", "allocation_manifest_path": "allocation.json"},
+            "dense PyTorch",
+        ),
+        ("training", {"seq_len": 8}, "sequence length must match"),
+    ],
+)
+def test_fixed_panels_refuse_incompatible_run_config(
+    tmp_path, section, changes, message
+):
+    baseline = _evaluation_config(tmp_path, (3, 3), 2, 64)
+    # The same non-divisible selection is valid on an ordinary dense run.
+    assert load_config(baseline).evaluation.batch_limit == 4
+    values = yaml.safe_load(baseline.read_text())
+    values[section].update(changes)
+    baseline.write_text(yaml.safe_dump(values))
+    with pytest.raises(ValueError, match=message):
+        load_config(baseline)
+    # Each variant is otherwise valid: the fixed panels are the refusal boundary.
+    del values["evaluation"]["panels"]
+    baseline.write_text(yaml.safe_dump(values))
+    load_config(baseline)
