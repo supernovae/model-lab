@@ -691,12 +691,13 @@ def test_pending_surface_review_preserves_completed_numeric_gate(
 
 
 def test_suite_signed_replay_reuses_payload_and_preserves_canonical_index(
-    evaluated_run, monkeypatch
+    evaluated_run, tmp_path, monkeypatch
 ):
     from sparselab.data import verification
     from sparselab.verification_proofs import ProofStore
 
     source, runs = evaluated_run
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     options = {
         "proof_store": ProofStore(source.parent),
         "verification_mode": "verified_reuse",
