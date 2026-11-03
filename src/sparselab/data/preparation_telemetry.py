@@ -31,6 +31,9 @@ class PreparationTelemetry:
         self.workspace = workspace
         self.observer = observer
         self.started = time.monotonic()
+        self.shards: dict[str, object] = {}
+        self.shard_workers = 1
+        self.workers: dict[str, object] = {}
         self.records = 0
         self.source_bytes = 0
         self.output_tokens = 0
@@ -69,6 +72,9 @@ class PreparationTelemetry:
         except OSError:
             disk_free = free_inodes = None
         result = {
+            "shard_workers": self.shard_workers,
+            "worker_pool": self.workers,
+            "shards": self.shards,
             "records": self.records,
             "source_bytes": self.source_bytes,
             "output_tokens": self.output_tokens,

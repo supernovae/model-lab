@@ -245,3 +245,69 @@ def test_venv_aliases_deduplicate_without_merging_independent_prefixes(tmp_path)
     row = next(item for item in candidates if item["python"] == first)
     assert row["ids"] == ["alias", "first"]
     assert len([item for item in candidates if "registered" in item["origins"]]) == 2
+
+
+@pytest.mark.parametrize(
+    "failed_lock", ["requirements.lock", "source-requirements.lock"]
+)
+def test_rocm_provision_hash_failure_retains_evidence_without_device_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_lock: str
+) -> None:
+    import json
+    from types import SimpleNamespace
+
+    from sparselab import runtime_env_provision as provisioner
+    from sparselab.training.manifest import sha256_file
+
+    root = tmp_path / "runtimes"
+    monkeypatch.setattr(provisioner.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(provisioner.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        provisioner, "read_registry", lambda: SimpleNamespace(runtimes={})
+    )
+    monkeypatch.setattr(provisioner, "resolve_runtime_dir", lambda: root)
+    monkeypatch.setattr(provisioner, "preflight_runtime_root", lambda _: {})
+    monkeypatch.setattr(provisioner, "_validate_python", lambda _: {})
+    monkeypatch.setattr(provisioner, "_source_commit", lambda _: "a" * 40)
+    monkeypatch.setattr(
+        provisioner,
+        "inspect_python",
+        lambda _: pytest.fail("hash failure reached device probe"),
+    )
+    installs = []
+
+    def fake_uv(command, *, environment, checkout, log):
+        assert environment["ROCM_SDK_TARGET_FAMILY"] == "gfx1100"
+        if command[1] == "export":
+            Path(command[command.index("--output-file") + 1]).write_text(
+                "pyyaml==6.0.3\n"
+            )
+        if "-r" not in command:
+            return
+        lock = Path(command[command.index("-r") + 1])
+        if lock.name not in {"requirements.lock", "source-requirements.lock"}:
+            return
+        assert "--require-hashes" in command and "--no-deps" in command
+        assert (
+            "--only-binary=:all:"
+            if lock.name == "requirements.lock"
+            else "--no-build-isolation"
+        ) in command
+        installs.append(lock)
+        if lock.name == failed_lock:
+            raise ValueError("fixture: package hash mismatch")
+
+    monkeypatch.setattr(provisioner, "_run_uv", fake_uv)
+    result = provisioner.provision("rocm-test", recipe="rocm-gfx1100-v1")
+    assert result["status"] == "ERROR"
+    assert "hash mismatch" in result["reason"]
+    assert installs[-1].name == failed_lock
+    assert len(installs) == (1 if failed_lock == "requirements.lock" else 2)
+    receipt = json.loads(Path(result["failure_record"]).read_text())
+    assert receipt["dependency_lock_sha256"] == {
+        str(path): sha256_file(path)
+        for path in (installs[0], installs[0].with_name("source-requirements.lock"))
+    }
+    assert not (root / "rocm-test/provision-receipt.json").exists()
+    with pytest.raises(ValueError, match="target already exists"):
+        provisioner.provision("rocm-test", recipe="rocm-gfx1100-v1")

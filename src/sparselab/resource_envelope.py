@@ -48,6 +48,7 @@ class ResourceEnvelope(BaseModel):
     min_disk_bytes: int | None = Field(default=None, strict=True, ge=0)
     min_inodes: int | None = Field(default=None, strict=True, ge=0)
     max_workers: int | None = Field(default=None, strict=True, gt=0)
+    preparation_shard_workers: int = Field(default=1, strict=True, ge=1, le=32)
     max_queue_depth: int | None = Field(default=None, strict=True, gt=0)
     spill_to_disk: bool = Field(default=True, strict=True)
 

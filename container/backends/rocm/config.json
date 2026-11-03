@@ -1,6 +1,6 @@
 {
   "backend": "rocm",
-  "torch_version": "2.14.0+rocm10.1.0",
-  "runtime_version": "7.16.26385",
+  "torch_version": "2.15.0+rocm10.0",
+  "runtime_version": "7.15.26333",
   "platform": "linux/amd64"
 }

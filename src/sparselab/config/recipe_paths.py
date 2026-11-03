@@ -11,6 +11,10 @@ from sparselab.declaration_context import RecipeContext, canonical_reference, sa
 _INPUT_FIELDS = frozenset(
     {
         "tokenizer.path",
+        "tokenizer.origin.dataset.train_path",
+        "tokenizer.origin.dataset.validation_path",
+        "tokenizer.origin.dataset.source_manifest_path",
+        "tokenizer.origin.dataset.cache_dir",
         "model.memory_package_path",
         "dataset.train_path",
         "dataset.validation_path",
@@ -68,6 +72,9 @@ def _bind_config(
                 path
             )
         else:
-            section, name = field.split(".")
-            raw[section][name] = path
+            parts = field.split(".")
+            target = raw
+            for part in parts[:-1]:
+                target = target[part]
+            target[parts[-1]] = path
     return RunConfig.model_validate(raw)

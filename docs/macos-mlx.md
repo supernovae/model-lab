@@ -7,7 +7,7 @@ stable CPython 3.14 interpreter, and uv. Use an arm64 terminal and interpreter,
 not an x86_64 Rosetta environment. Linux containers on a Mac do not expose Metal;
 there is no MLX/Metal container image in this delivery path.
 
-The lock selects **MLX 0.32.4**, **mlx-metal 0.32.4**, and **PyTorch 2.14.1**.
+The lock selects **MLX 0.32.4**, **mlx-metal 0.32.4**, and **PyTorch 2.15.0**.
 Published stable wheels cover CPython 3.14 on macOS arm64; mlx-metal supplies the
 Metal runtime. PyTorch is installed because the full Lab CLI currently imports
 it even when a declaration selects MLX. Installing the `cpu` extra on macOS
@@ -84,4 +84,4 @@ Package availability and platform requirements can be checked against the
 [MLX installation guide](https://ml-explore.github.io/mlx/build/html/install.html),
 [MLX 0.32.4 files](https://pypi.org/project/mlx/0.32.4/#files),
 [mlx-metal 0.32.4 files](https://pypi.org/project/mlx-metal/0.32.4/#files), and
-[Torch 2.14.1 files](https://pypi.org/project/torch/2.14.1/#files).
+[Torch 2.15.0 files](https://pypi.org/project/torch/2.15.0/#files).

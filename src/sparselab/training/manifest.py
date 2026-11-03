@@ -131,6 +131,23 @@ def config_sha256(config: Mapping[str, Any]) -> str:
                 if key != "source_manifest_path"
             },
         }
+    tokenizer = config.get("tokenizer")
+    if isinstance(tokenizer, Mapping) and tokenizer.get("origin") is not None:
+        origin = tokenizer["origin"]
+        config = {
+            **config,
+            "tokenizer": {
+                **tokenizer,
+                "origin": {
+                    **origin,
+                    "dataset": {
+                        key: value
+                        for key, value in origin["dataset"].items()
+                        if key != "source_manifest_path"
+                    },
+                },
+            },
+        }
     return canonical_digest(
         {
             "identity_version": IDENTITY_VERSION,
