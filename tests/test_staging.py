@@ -68,17 +68,49 @@ def _config(root: Path, *, retention: bool = False) -> RunConfig:
     return config
 
 
+@pytest.mark.parametrize("matched", [False, True])
 @pytest.mark.parametrize("purpose", ["smoke", "warmup"])
 @pytest.mark.parametrize("retention", [False, True])
 def test_pilot_retention_is_isolated_from_full_run(
-    tmp_path: Path, purpose: str, retention: bool
+    tmp_path: Path, purpose: str, retention: bool, matched: bool
 ) -> None:
     config = _config(tmp_path, retention=retention)
+    dataset = None
+    if matched:
+        import numpy as np
+
+        from sparselab.data.story_packing import MatchedStoryDataset
+
+        dataset = MatchedStoryDataset(
+            np.array([1, 2, 0, 3, 0], dtype=np.int32),
+            config.training.seq_len,
+            0,
+            layout="story",
+            targets_per_update=1,
+        )
+        payload = config.model_dump(mode="json")
+        payload["training"]["matched_stories"] = {
+            "layout": "story",
+            "targets_per_update": 1,
+        }
+        payload["training"]["max_tokens"] = dataset.targets_for_updates(3)
+        if retention:
+            keep = payload["checkpoint"]["retention"]
+            keep["terminal_targets"] = dataset.targets_for_updates(3)
+            for milestone in keep["milestones"]:
+                milestone["committed_targets"] = dataset.targets_for_updates(
+                    milestone["step"]
+                )
+        config = RunConfig.model_validate(payload)
     original = config.model_dump(mode="json")
-    pilot = staging_module.pilot_config(config, purpose, tmp_path / "stage")
+    pilot = staging_module.pilot_config(
+        config, purpose, tmp_path / "stage", matched_dataset=dataset
+    )
     assert pilot.training.max_steps == getattr(config.staging, f"{purpose}_steps")
     assert pilot.training.max_tokens == (
-        pilot.training.max_steps
+        dataset.targets_for_updates(pilot.training.max_steps)
+        if dataset is not None
+        else pilot.training.max_steps
         * pilot.training.micro_batch_size
         * pilot.training.gradient_accumulation
         * pilot.training.seq_len

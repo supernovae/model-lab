@@ -285,3 +285,28 @@ def test_ram_env_cannot_bypass_low_memory_limits(
     )
     with pytest.raises(ValueError, match=next(iter(limit))):
         check_envelope(envelope, workspace=tmp_path, rss_bytes=rss)
+
+
+def test_corpus_encoder_budget_keeps_preparation_pool_cap(capacity, tmp_path):
+    from tokenizers import Tokenizer, models
+
+    from sparselab.data.encoding import tokenizer_work_plan
+    from sparselab.data.preparation_workers import PreparationWorkers
+
+    capacity.total = 64 * 1024**3
+    capacity.available = 48 * 1024**3
+    # Six available CPUs: corpus assembly can use its explicit encoder budget.
+    assert tokenizer_work_plan(6).workers == 6
+    assert tokenizer_work_plan(None).workers == 4
+    tokenizer = Tokenizer(models.BPE())
+    for envelope in (
+        None,
+        ResourceEnvelope(),
+        ResourceEnvelope(max_workers=6, preparation_shard_workers=6),
+    ):
+        pool = PreparationWorkers(
+            tokenizer, tmp_path, envelope=envelope, parallel_supported=True
+        )
+        assert pool.plan.workers == 4
+        assert sum(pool.threads) == 4
+        assert pool.count <= 4
