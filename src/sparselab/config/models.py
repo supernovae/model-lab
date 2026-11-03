@@ -345,6 +345,13 @@ class RuntimeConfig(StrictModel):
         return self
 
 
+class MatchedStoryConfig(StrictModel):
+    """Shared document grouping; layout is the sole arm-specific setting."""
+
+    layout: Literal["contiguous", "story"]
+    targets_per_update: int = Field(default=4096, gt=0)
+
+
 class TrainingConfig(StrictModel):
     micro_batch_size: int = Field(gt=0)
     gradient_accumulation: int = Field(default=1, gt=0)
@@ -354,6 +361,9 @@ class TrainingConfig(StrictModel):
     grad_clip_norm: float = Field(default=1.0, gt=0)
     neural_loss_weight: float = Field(default=1.0, ge=0, le=1)
     deterministic: bool = True
+    matched_stories: MatchedStoryConfig | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
     trainable_parameters: tuple[str, ...] | None = None
     portability_manifest_path: Path | None = None
 

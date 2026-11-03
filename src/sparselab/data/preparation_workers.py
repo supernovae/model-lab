@@ -20,7 +20,9 @@ from sparselab.resource_envelope import check_envelope, current_process_rss_byte
 class PreparationWorkers:
     def __init__(self, tokenizer, root, *, envelope, parallel_supported):
         self.plan = tokenizer_work_plan(
-            None if envelope is None else min(4, envelope.max_workers)
+            None
+            if envelope is None or envelope.max_workers is None
+            else min(4, envelope.max_workers)
         )
         self.requested = 1 if envelope is None else envelope.preparation_shard_workers
         queue_cap = None if envelope is None else envelope.max_queue_depth

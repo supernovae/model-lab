@@ -1256,6 +1256,31 @@
       "title": "LoggingConfig",
       "type": "object"
     },
+    "MatchedStoryConfig": {
+      "additionalProperties": false,
+      "description": "Shared document grouping; layout is the sole arm-specific setting.",
+      "properties": {
+        "layout": {
+          "enum": [
+            "contiguous",
+            "story"
+          ],
+          "title": "Layout",
+          "type": "string"
+        },
+        "targets_per_update": {
+          "default": 4096,
+          "exclusiveMinimum": 0,
+          "title": "Targets Per Update",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "layout"
+      ],
+      "title": "MatchedStoryConfig",
+      "type": "object"
+    },
     "MemoryConfig": {
       "additionalProperties": false,
       "properties": {
@@ -1870,6 +1895,17 @@
           "exclusiveMinimum": 0,
           "title": "Gradient Accumulation",
           "type": "integer"
+        },
+        "matched_stories": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MatchedStoryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "max_steps": {
           "exclusiveMinimum": 0,
