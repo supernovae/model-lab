@@ -24,7 +24,11 @@ image build still does not establish GPU availability, precision or performance.
 The [dependency recipe](../container/backends/xpu/dependencies.Dockerfile)
 contains immutable base, interpreter and package checksums.
 [Userspace package pins](../container/backends/xpu/userspace.lock.json) record
-nine exact Intel/Ubuntu archive URLs and SHA256 values. The
+nine exact Intel/Ubuntu archive URLs and SHA256 values. Ubuntu packages use the
+[Ubuntu snapshot service](https://snapshot.ubuntu.com/) at `20261015T160000Z`,
+matching the original recipe date, because superseded versions can disappear
+from the live archive. The snapshot URLs retain the same package versions and
+SHA256 checks; a different response still refuses the build. The
 [wheel lock](../container/backends/xpu/requirements.lock) pins all 93 packages,
 including public Lab dependencies. Nothing installs or modifies a host driver.
 
