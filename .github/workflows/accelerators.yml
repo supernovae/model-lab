@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - "container/**"
+      - "requirements/rocm-gfx1100.txt"
       - pyproject.toml
       - uv.lock
       - .github/workflows/accelerators.yml
