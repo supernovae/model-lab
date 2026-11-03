@@ -787,8 +787,12 @@ def shared_tokenizer(tmp_path, offline):
     return config, config_path
 
 
-def test_shared_tokenizer_verification_and_public_preparation(shared_tokenizer, capsys):
-    from sparselab.cli.main import build_parser
+def test_shared_tokenizer_verification_and_public_preparation(
+    shared_tokenizer, capsys, monkeypatch, tmp_path
+):
+    import sys
+
+    from sparselab.cli.main import main
     from sparselab.data.tokenizer_cli import verify_configured_tokenizer
     from sparselab.training.manifest import sha256_file
 
@@ -798,8 +802,19 @@ def test_shared_tokenizer_verification_and_public_preparation(shared_tokenizer, 
     assert result["origin"]["source_manifest_sha256"] == sha256_file(
         config.tokenizer.origin.dataset.source_manifest_path
     )
-    args = build_parser().parse_args(["data", "prepare", str(path)])
-    args.handler(args)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sparselab",
+            "--work-dir",
+            str(tmp_path / "work"),
+            "data",
+            "prepare",
+            str(path),
+        ],
+    )
+    main()
     packed = Path(capsys.readouterr().out.strip().splitlines()[-1])
     manifest = json.loads((packed / "manifest.json").read_text())
     from sparselab.training.manifest import canonical_digest
@@ -811,7 +826,7 @@ def test_shared_tokenizer_verification_and_public_preparation(shared_tokenizer, 
     # A cache hit must reauthenticate the origin, not trust old packed arrays.
     config.tokenizer.origin.dataset.train_path.write_text("tampered")
     with pytest.raises(ValueError):
-        args.handler(args)
+        main()
 
 
 @pytest.mark.parametrize("target", ["tokenizer", "manifest", "origin", "consumer"])
