@@ -744,3 +744,125 @@ def test_batch_allowance_shrinks_to_available_work_budget(tmp_path, offline):
         )
         <= 65536
     )
+
+
+@pytest.fixture
+def shared_tokenizer(tmp_path, offline):
+    from sparselab.config.loading import load_config
+    from sparselab.config.models import RunConfig, TokenizerTrainConfig
+    from sparselab.data.tokenizer import train_tokenizer
+    from sparselab.training.manifest import sha256_file
+
+    origin = runtime(acquire(tmp_path / "origin"))
+    path = train_tokenizer(
+        TokenizerTrainConfig(
+            schema_version=1,
+            vocab_size=260,
+            min_frequency=1,
+            max_documents=2,
+            output_dir=tmp_path / "tokenizer",
+            dataset=origin,
+        )
+    )
+    offline["train"] = [{"text": "a different training story"}]
+    offline["validation"] = [{"text": "a different heldout story"}]
+    consumer = runtime(acquire(tmp_path / "consumer"))
+    base = load_config(
+        Path(__file__).resolve().parents[1] / "configs/runtime_smoke_cpu.yaml"
+    )
+    raw = base.model_dump(mode="json")
+    raw["model"]["vocab_size"] = 260
+    raw["dataset"] = consumer.model_dump(mode="json")
+    raw["tokenizer"] = {
+        "path": str(path),
+        "origin": {
+            "dataset": origin.model_dump(mode="json"),
+            "sha256": sha256_file(path),
+            "manifest_sha256": sha256_file(path.with_name("tokenizer_manifest.json")),
+        },
+    }
+    config = RunConfig.model_validate(raw)
+    config_path = tmp_path / "run.yaml"
+    config_path.write_text(yaml.safe_dump(config.model_dump(mode="json")))
+    return config, config_path
+
+
+def test_shared_tokenizer_verification_and_public_preparation(
+    shared_tokenizer, capsys, monkeypatch, tmp_path
+):
+    import sys
+
+    from sparselab.cli.main import main
+    from sparselab.data.tokenizer_cli import verify_configured_tokenizer
+    from sparselab.training.manifest import sha256_file
+
+    config, path = shared_tokenizer
+    before = sha256_file(config.tokenizer.path)
+    result = verify_configured_tokenizer(path)
+    assert result["origin"]["source_manifest_sha256"] == sha256_file(
+        config.tokenizer.origin.dataset.source_manifest_path
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sparselab",
+            "--work-dir",
+            str(tmp_path / "work"),
+            "data",
+            "prepare",
+            str(path),
+        ],
+    )
+    main()
+    packed = Path(capsys.readouterr().out.strip().splitlines()[-1])
+    manifest = json.loads((packed / "manifest.json").read_text())
+    from sparselab.training.manifest import canonical_digest
+
+    assert manifest["cache_identity"]["snapshot_source_sha256"] == canonical_digest(
+        sources.verify_snapshot(config.dataset)
+    )
+    assert sha256_file(config.tokenizer.path) == before
+    # A cache hit must reauthenticate the origin, not trust old packed arrays.
+    config.tokenizer.origin.dataset.train_path.write_text("tampered")
+    with pytest.raises(ValueError):
+        main()
+
+
+@pytest.mark.parametrize("target", ["tokenizer", "manifest", "origin", "consumer"])
+def test_shared_tokenizer_rejects_tampered_inputs(shared_tokenizer, target):
+    from sparselab.data.packing import prepare_data
+    from sparselab.data.tokenizer import load_tokenizer
+
+    config, _ = shared_tokenizer
+    tokenizer = load_tokenizer(config.tokenizer.path)
+    path = {
+        "tokenizer": config.tokenizer.path,
+        "manifest": config.tokenizer.path.with_name("tokenizer_manifest.json"),
+        "origin": config.tokenizer.origin.dataset.train_path,
+        "consumer": config.dataset.train_path,
+    }[target]
+    path.write_bytes(path.read_bytes() + b" ")
+    with pytest.raises(ValueError):
+        prepare_data(config, tokenizer)
+
+
+def test_shared_tokenizer_requires_correct_explicit_origin(shared_tokenizer):
+    from sparselab.config.models import RunConfig
+    from sparselab.data.tokenizer import verify_run_tokenizer
+
+    config, _ = shared_tokenizer
+    raw = config.model_dump(mode="json")
+    raw["tokenizer"].pop("origin")
+    with pytest.raises(ValueError, match="snapshot identity mismatch"):
+        verify_run_tokenizer(RunConfig.model_validate(raw))
+    raw["dataset"] = config.tokenizer.origin.dataset.model_dump(mode="json")
+    assert (
+        verify_run_tokenizer(RunConfig.model_validate(raw))["sha256"]
+        == config.tokenizer.origin.sha256
+    )
+    assert "origin" not in RunConfig.model_validate(raw).model_dump()["tokenizer"]
+    raw = config.model_dump(mode="json")
+    raw["tokenizer"]["origin"]["dataset"] = config.dataset.model_dump(mode="json")
+    with pytest.raises(ValueError, match="snapshot identity mismatch"):
+        verify_run_tokenizer(RunConfig.model_validate(raw))

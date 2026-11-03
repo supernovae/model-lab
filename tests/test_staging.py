@@ -68,17 +68,49 @@ def _config(root: Path, *, retention: bool = False) -> RunConfig:
     return config
 
 
+@pytest.mark.parametrize("matched", [False, True])
 @pytest.mark.parametrize("purpose", ["smoke", "warmup"])
 @pytest.mark.parametrize("retention", [False, True])
 def test_pilot_retention_is_isolated_from_full_run(
-    tmp_path: Path, purpose: str, retention: bool
+    tmp_path: Path, purpose: str, retention: bool, matched: bool
 ) -> None:
     config = _config(tmp_path, retention=retention)
+    dataset = None
+    if matched:
+        import numpy as np
+
+        from sparselab.data.story_packing import MatchedStoryDataset
+
+        dataset = MatchedStoryDataset(
+            np.array([1, 2, 0, 3, 0], dtype=np.int32),
+            config.training.seq_len,
+            0,
+            layout="story",
+            targets_per_update=1,
+        )
+        payload = config.model_dump(mode="json")
+        payload["training"]["matched_stories"] = {
+            "layout": "story",
+            "targets_per_update": 1,
+        }
+        payload["training"]["max_tokens"] = dataset.targets_for_updates(3)
+        if retention:
+            keep = payload["checkpoint"]["retention"]
+            keep["terminal_targets"] = dataset.targets_for_updates(3)
+            for milestone in keep["milestones"]:
+                milestone["committed_targets"] = dataset.targets_for_updates(
+                    milestone["step"]
+                )
+        config = RunConfig.model_validate(payload)
     original = config.model_dump(mode="json")
-    pilot = staging_module.pilot_config(config, purpose, tmp_path / "stage")
+    pilot = staging_module.pilot_config(
+        config, purpose, tmp_path / "stage", matched_dataset=dataset
+    )
     assert pilot.training.max_steps == getattr(config.staging, f"{purpose}_steps")
     assert pilot.training.max_tokens == (
-        pilot.training.max_steps
+        dataset.targets_for_updates(pilot.training.max_steps)
+        if dataset is not None
+        else pilot.training.max_steps
         * pilot.training.micro_batch_size
         * pilot.training.gradient_accumulation
         * pilot.training.seq_len
@@ -525,3 +557,117 @@ def test_owned_directory_publication_never_replaces_a_late_destination(
             staging_module.materialize_prepared_inputs(config, destination)
     assert (destination / "owner.txt").read_bytes() == b"competing transaction"
     assert sorted(path.name for path in destination.iterdir()) == ["owner.txt"]
+
+
+@pytest.mark.parametrize("layout", ["contiguous", "story"])
+@pytest.mark.parametrize("verification_mode", ["cold", "verified_reuse"])
+def test_matched_story_pilots_complete_under_native_supervision(
+    tmp_path: Path, layout: str, verification_mode: str, monkeypatch
+) -> None:
+    from sparselab.config.models import MatchedStoryConfig
+    from sparselab.data.story_packing import MatchedStoryDataset
+    from sparselab.training.pilot_deadline import PilotDeadlineState, PurposeDeadlines
+    from sparselab.verification_proofs import verification_options
+
+    base = _config(tmp_path)
+    tokenizer = load_tokenizer(base.tokenizer.path)
+    prepared = prepare_data(base, tokenizer)
+    plan = MatchedStoryDataset(
+        prepared.train,
+        base.training.seq_len,
+        tokenizer.token_to_id("<eos>"),
+        layout=layout,
+        targets_per_update=1,
+    )
+    config = base.model_copy(
+        update={
+            "training": base.training.model_copy(
+                update={
+                    "matched_stories": MatchedStoryConfig(
+                        layout=layout, targets_per_update=1
+                    ),
+                    "micro_batch_size": 16,
+                    "max_steps": 3,
+                    "max_tokens": plan.targets_for_updates(3),
+                }
+            )
+        }
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "verification-config"))
+    options = verification_options(tmp_path, cold=verification_mode == "cold")
+    assert options["verification_mode"] == verification_mode
+    template = staging_module.materialize_prepared_inputs(
+        config, tmp_path / "input-template", **options
+    )
+    # Author a separate tiny-corpus fixture with one sparse auxiliary asset at
+    # the real 64 MiB hash-progress threshold. No training array is enlarged,
+    # no emitted event is mocked, and the original sealed inputs stay intact.
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    shutil.copytree(template / "assets", inputs / "assets")
+    with (inputs / "assets" / "hash-progress-fixture.bin").open("wb") as handle:
+        handle.truncate(64 * 1024 * 1024)
+    payload = _read_sealed(template / "inputs.json")
+    payload.pop("sha256")
+    payload["artifacts"] = staging_module._inventory(inputs / "assets")
+    staging_module._seal(inputs / "inputs.json", payload)
+    # Use only the frozen bundle: neither derivation nor trainer may fall back
+    # to mutable caller-owned tokenizer/cache paths.
+    config.tokenizer.path.unlink()
+    shutil.rmtree(config.dataset.cache_dir)
+    root = stage(
+        config, tmp_path / "stage", through="warmup", prepared_inputs=inputs, **options
+    )
+    for purpose in ("smoke", "warmup"):
+        steps = getattr(config.staging, f"{purpose}_steps")
+        expected_targets = plan.targets_for_updates(steps)
+        assert expected_targets != steps * 16 * config.training.seq_len
+        directory = root / "pilots" / purpose
+        report = _read_sealed(directory / "report.json")
+        assert report["step"] == report["timed_updates"] == steps
+        assert report["tokens_seen"] == expected_targets
+        assert report["derived_config"]["training"]["max_tokens"] == expected_targets
+        assert (
+            sum(row["targets"] for row in report["update_observations"])
+            == expected_targets
+        )
+        assert report["checkpoint_reload"] == "verified_full_state_and_finite_forward"
+
+        supervision = _read_sealed(directory / "supervisor-completion.json")
+        assert supervision["status"] == "COMPLETE"
+        assert supervision["returncode"] == 0
+        assert supervision["reason"] is None
+        assert supervision["completed_steps"] == steps
+        assert supervision["completed_targets"] == expected_targets
+        state = PilotDeadlineState(
+            PurposeDeadlines.model_validate(supervision["effective_deadlines"]),
+            expected_steps=steps,
+        )
+        events = [
+            json.loads(line)
+            for line in (directory / supervision["events_ref"]).read_text().splitlines()
+        ]
+        nested_verification = False
+        verification_counters = 0
+        for record in events:
+            if record["kind"] != "progress":
+                continue
+            event = record["event"]
+            if (event["kind"], event["phase"], state.current_phase) == (
+                "start",
+                "stage_bundle_verification",
+                "input_validation",
+            ):
+                nested_verification = True
+            if (
+                event["kind"] == "progress"
+                and event["phase"] == "stage_bundle_verification"
+            ):
+                verification_counters += 1
+            state.observe(event)
+        assert nested_verification
+        assert state.finished and not state.phases
+        assert state.completed_steps == steps
+        assert state.completed_targets == expected_targets
+        if verification_mode == "cold":
+            assert verification_counters > 0

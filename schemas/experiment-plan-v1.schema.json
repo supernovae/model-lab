@@ -1256,6 +1256,31 @@
       "title": "LoggingConfig",
       "type": "object"
     },
+    "MatchedStoryConfig": {
+      "additionalProperties": false,
+      "description": "Shared document grouping; layout is the sole arm-specific setting.",
+      "properties": {
+        "layout": {
+          "enum": [
+            "contiguous",
+            "story"
+          ],
+          "title": "Layout",
+          "type": "string"
+        },
+        "targets_per_update": {
+          "default": 4096,
+          "exclusiveMinimum": 0,
+          "title": "Targets Per Update",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "layout"
+      ],
+      "title": "MatchedStoryConfig",
+      "type": "object"
+    },
     "MemoryConfig": {
       "additionalProperties": false,
       "properties": {
@@ -1765,6 +1790,11 @@
           "title": "Backend",
           "type": "string"
         },
+        "compile_output_head_loss": {
+          "default": false,
+          "title": "Compile Output Head Loss",
+          "type": "boolean"
+        },
         "compile_transformer_blocks": {
           "default": false,
           "title": "Compile Transformer Blocks",
@@ -1839,6 +1869,17 @@
     "TokenizerConfig": {
       "additionalProperties": false,
       "properties": {
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenizerOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "path": {
           "format": "path",
           "title": "Path",
@@ -1849,6 +1890,32 @@
         "path"
       ],
       "title": "TokenizerConfig",
+      "type": "object"
+    },
+    "TokenizerOrigin": {
+      "additionalProperties": false,
+      "description": "Explicit immutable origin of a tokenizer reused across frozen snapshots.",
+      "properties": {
+        "dataset": {
+          "$ref": "#/$defs/DatasetConfig"
+        },
+        "manifest_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Manifest Sha256",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dataset",
+        "sha256",
+        "manifest_sha256"
+      ],
+      "title": "TokenizerOrigin",
       "type": "object"
     },
     "TrainingConfig": {
@@ -1870,6 +1937,17 @@
           "exclusiveMinimum": 0,
           "title": "Gradient Accumulation",
           "type": "integer"
+        },
+        "matched_stories": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MatchedStoryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "max_steps": {
           "exclusiveMinimum": 0,

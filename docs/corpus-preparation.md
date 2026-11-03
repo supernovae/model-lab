@@ -20,6 +20,81 @@ encodings are committed even when a supply floor cannot be met. No mixture is
 published until all declared quotas and unique-content floors pass. Retained
 single-exposure schedules avoid the additional temporary encoded spool.
 
+Mixture source reads use an ordered prefetch queue (128 MiB of serialized source
+or cached-token payloads, with a record cap of 256 or twice the reader count,
+whichever is larger), followed by bounded tokenizer batches and one cache
+writer. Ordinary preflight verifies per-record rights before cache hits can use
+its authenticated metadata to avoid schedule-stage source-body reads. Retained
+references lack those rights fields, so retained candidates still read and check
+each source record, including on a warm token cache. A bounded LRU retains up
+to 64 source handles (also limited by the process descriptor budget). Each
+active read duplicates its handle and uses positional I/O, so concurrent reads
+and cache eviction cannot change another reader's position or close its file.
+A single tokenizer subprocess owns its Rayon pool; the measured CPU/RAM plan
+splits capacity between source readers and encoding instead of nesting pools.
+`SPARSELAB_MIXTURE_WORKERS=N` caps that operation's combined worker plan; omitted,
+it uses available physical cores, affinity and measured memory. Ordinary text
+preparation retains its existing default. These byte budgets bound queued
+payloads, not total RSS: decoded objects, the current record, tokenizer native
+memory, SQLite and final receipt storage are additional.
+
+An interrupted materialization resumes automatically at the last authenticated
+assembly frontier for the same output. Immutable segments live beside it in
+`.OUTPUT.assembly`; preserve that directory and the output parent's `cache`.
+Commit cadence is independent of the 256-document/8 MiB tokenizer batches.
+By default a commit becomes due after 4,096 candidates or emitted rows, 64 MiB
+of pending segment data, or 30 seconds, checked at the next batch boundary;
+a completed stratum always commits. `SPARSELAB_MIXTURE_COMMIT_CANDIDATES=N`
+selects a positive candidate/row interval (use `1` for eager commits). Byte and
+time guards still apply. Pending index deltas stream to disk, not a growing RAM
+buffer. This amortizes proof/fsync overhead at the cost of replaying uncommitted
+work after a stop; a long individual batch can exceed the time interval.
+Each committed segment binds source position, dedup/index deltas, counters,
+exclusions and emitted rows to the exact declaration, sources, tokenizer and
+producer. Restart restores SQL lookup structures from deltas and concatenates
+sealed output segments; it does not fetch, encode, select or emit committed
+candidates again. Ordinary source inventory indexes also have authenticated
+preflight reuse. Input verification still runs; restoration and final output
+copying require sequential I/O. Multiple-exposure output has its own committed
+ordinal. A worker-count change is operational and can resume the same frontier.
+Changed identities or corrupt frontiers fail closed; choose a new output for a
+changed request. Only one writer may own an output. Uncommitted directories are
+retained for diagnosis, and completed segments currently remain after publication,
+so budget extra disk space for them and any multi-exposure encoded spool.
+
+`.OUTPUT.assembly/progress.json` records per-stratum candidates, selected and
+committed work, cache lookups, read queue peaks, stage elapsed/worker time and
+parent/child RSS. It is operational telemetry, separate from the scientific
+receipt. Selected counts nonempty deduplicated eligible candidates, including
+supply beyond the output quota; committed target tokens describe output.
+Source-worker utilization is busy wall time divided by available worker time,
+not a CPU-utilization measurement. Peak simultaneous source reads, encoder
+Rayon bounds, observed child thread counts and encoder CPU utilization make
+small concurrency comparisons inspectable. A child that exits during sampling
+records an incomplete observation instead of aborting materialization; unknown
+encoder utilization is reported as null. Three workers allocate one reader and
+two encoder threads, while four workers allocate two of each. Full supply and family accounting
+continues after output quotas fill because those counts remain receipt semantics.
+
+For a small standalone comparison, export `tools/benchmark_mixture.py` from the
+candidate and run that **same file** with each pinned Lab interpreter (no pytest,
+installation, downloads or training). For example:
+
+```sh
+/path/to/pinned-lab/.venv/bin/python /path/to/benchmark_mixture.py \
+  --root /srv/sparselab/synthetic-mixture-UNIQUE --workers 1 \
+  --documents 512 --text-bytes 512
+```
+
+The root must be new. The harness pins affinity, runs cold and warm content-cache
+cases, includes candidate checkpoint costs, and writes `benchmark.json` with code
+revision, fixture/output hashes, complete receipts, timings and scratch usage.
+It uses explicitly synthetic retained-source evidence and exercises index/schedule
+machinery, **not** the release verifier. Compare hashes and semantic receipts
+before timings. Warm means the token cache is warm; it does not claim cold OS or
+ZFS caches for the first case. Use each host's own baseline; cross-host timings
+alone do not establish NVMe causality or a corpus-scale completion estimate.
+
 Ordinary `corpus verify-mixture DECLARATION --output OUTPUT` authenticates native
 completion and current inputs without re-running the schedule. An unchanged
 materialization request returns that verified completion. Missing or changed

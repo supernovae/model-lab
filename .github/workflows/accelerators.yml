@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - "container/**"
+      - "requirements/rocm-gfx1100.txt"
       - pyproject.toml
       - uv.lock
       - .github/workflows/accelerators.yml
@@ -59,14 +60,19 @@ jobs:
         with:
           driver: docker
       - name: Check available build storage
+        env:
+          BACKEND: ${{ matrix.backend }}
         run: |
           python3 - <<'PY'
-          import shutil
-          required = 12 * 1024**3
+          import os, shutil
+          # ROCm was ~18 GB installed in review, plus 6.54 GiB compressed SDKs.
+          # Leave headroom for downloads, layers and the base image.
+          required_gib = 32 if os.environ["BACKEND"] == "rocm" else 12
+          required = required_gib * 1024**3
           free = shutil.disk_usage("/var/lib/docker").free
           print(f"Docker store free bytes: {free}; required: {required}")
           if free < required:
-              raise SystemExit("Insufficient build storage: need at least 12 GiB free; use a larger runner. No host files were deleted.")
+              raise SystemExit(f"Insufficient build storage: need at least {required_gib} GiB free; use a larger runner. No host files were deleted.")
           PY
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:

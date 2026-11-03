@@ -10,7 +10,7 @@ from sparselab.config.loading import load_config
 from sparselab.data.tokenizer import (
     SPECIAL_TOKENS,
     load_tokenizer,
-    verify_tokenizer_artifact,
+    verify_run_tokenizer,
 )
 from sparselab.training.manifest import sha256_file
 
@@ -18,7 +18,11 @@ from sparselab.training.manifest import sha256_file
 def verify_configured_tokenizer(config_path: Path) -> dict[str, object]:
     """Authenticate configured artifact bytes, immutable origin, and vocabulary."""
     config = load_config(config_path)
-    dataset = config.dataset
+    dataset = (
+        config.tokenizer.origin.dataset
+        if config.tokenizer.origin is not None
+        else config.dataset
+    )
     if dataset.corpus_release_path is None and dataset.source not in {
         "snapshot",
         "local_stories",
@@ -30,14 +34,7 @@ def verify_configured_tokenizer(config_path: Path) -> dict[str, object]:
             "be authenticated without replay"
         )
     path = config.tokenizer.path
-    manifest = verify_tokenizer_artifact(
-        path,
-        source=dataset.source,
-        revision=dataset.revision,
-        vocab_size=config.model.vocab_size,
-        dataset=dataset,
-        verification_mode="cold",
-    )
+    manifest = verify_run_tokenizer(config, verification_mode="cold")
     tokenizer = load_tokenizer(path)
     actual = tokenizer.get_vocab_size()
     if actual != config.model.vocab_size or actual != manifest.get("vocab_size"):

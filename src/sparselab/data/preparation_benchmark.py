@@ -43,6 +43,7 @@ class BenchmarkDeclaration(StrictModel):
     batch_documents: list[int] = Field(default_factory=lambda: [1, 16])
     batch_source_bytes: int = Field(default=MIB, strict=True, ge=1, le=8 * MIB)
     threads: list[int] = Field(default_factory=lambda: [1])
+    shard_workers: int = Field(default=1, strict=True, ge=1, le=32)
     worker_timeout_seconds: float = Field(default=120, strict=True, gt=0, le=3600)
 
     @field_validator("sizes_bytes", "batch_documents", "threads", mode="before")
@@ -215,19 +216,21 @@ def _worker(case_file: Path) -> None:
             "maximum_batch_source_bytes": 0,
             "encode_calls": 0,
         }
+        observation_lock = threading.Lock()
         original = PreparationEncoder.encode
 
         def bounded(self: PreparationEncoder, texts: list[str]):
             size = sum(len(text.encode("utf-8")) for text in texts)
             if len(texts) > case["documents"] or size > case["batch_source_bytes"]:
                 raise ValueError("observed tokenizer batch exceeds benchmark caps")
-            observed["maximum_batch_documents"] = max(
-                observed["maximum_batch_documents"], len(texts)
-            )
-            observed["maximum_batch_source_bytes"] = max(
-                observed["maximum_batch_source_bytes"], size
-            )
-            observed["encode_calls"] += 1
+            with observation_lock:
+                observed["maximum_batch_documents"] = max(
+                    observed["maximum_batch_documents"], len(texts)
+                )
+                observed["maximum_batch_source_bytes"] = max(
+                    observed["maximum_batch_source_bytes"], size
+                )
+                observed["encode_calls"] += 1
             return original(self, texts)
 
         PreparationEncoder.encode = bounded
@@ -238,7 +241,9 @@ def _worker(case_file: Path) -> None:
             tokenizer_batch_documents=case["documents"],
             tokenizer_batch_source_bytes=case["batch_source_bytes"],
             resource_envelope=ResourceEnvelope(
-                resource_envelope_version=1, max_workers=case["threads"]
+                resource_envelope_version=1,
+                max_workers=case["threads"],
+                preparation_shard_workers=case["shard_workers"],
             ),
         )
         prep_seconds = time.perf_counter() - prep_started
@@ -282,6 +287,7 @@ def _worker(case_file: Path) -> None:
                 "host": platform.platform(),
             },
             "rayon_threads": receipt["tokenizer_rayon_threads"],
+            "shard_workers": receipt["shard_workers"],
             "requested_batch_documents": case["documents"],
             "requested_batch_source_bytes": case["batch_source_bytes"],
             "requested_threads": case["threads"],
@@ -294,9 +300,9 @@ def _worker(case_file: Path) -> None:
             "cache_identity": prepared.manifest["cache_identity"],
             "operational_receipt": receipt,
         }
-        if result["rayon_threads"] != case["threads"]:
+        if receipt["tokenizer_host_work_plan"]["workers"] != case["threads"]:
             raise ValueError(
-                "actual preparation Rayon cap differs from benchmark request"
+                "actual preparation total worker cap differs from benchmark request"
             )
         _write_json(result_path, result)
     finally:
@@ -497,6 +503,7 @@ def run_preparation_benchmark(source: Path) -> dict[str, Any]:
                                 "documents": documents,
                                 "threads": threads,
                                 "batch_source_bytes": declaration.batch_source_bytes,
+                                "shard_workers": declaration.shard_workers,
                                 "result": str(result),
                             }
                         )

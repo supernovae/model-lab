@@ -202,7 +202,8 @@ which describes plan storage expectations and does not configure the trainer.
 
 A full-state `train --resume` or `train --recover` may opt in to
 `--allow-runtime-optimization` to change dense attention implementation,
-activation checkpointing, block compilation, determinism, or microbatch and
+activation checkpointing, block compilation, compiled output projection and loss,
+determinism, or microbatch and
 accumulation while preserving their product. Fixed validation panels retain their
 own batch sizes. Without fixed panels, set `evaluation.batch_size` to the prior
 microbatch size when changing microbatch so the validation sample is unchanged.
@@ -217,3 +218,9 @@ blocks. This currently requires activation checkpointing and offload to be
 disabled; startup compilation cost and device compatibility depend on the
 installed PyTorch backend. Test the target workload before using it for a long
 run.
+
+Set `runtime.compile_output_head_loss: true` to compile the output projection
+and summed FP32 cross-entropy together on PyTorch XPU BF16. It defaults to off;
+changing it on full-state resume or recovery requires
+`--allow-runtime-optimization`. See [compiled output projection and loss](training.md#compiled-output-projection-and-loss)
+for its supported scope and exclusions.

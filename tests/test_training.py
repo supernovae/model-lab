@@ -1109,3 +1109,67 @@ def test_completed_training_calibrates_and_reuses_runtime_forecast(
     assert isinstance(phases, dict)
     assert phases["generation"]["availability"] == "not_observed"
     assert phases["evaluation"]["availability"] == "not_observed"
+
+
+@pytest.mark.parametrize("layout", ["story", "contiguous"])
+def test_matched_story_resume_and_config_identity(tmp_path: Path, layout: str) -> None:
+    from sparselab.config.models import MatchedStoryConfig
+    from sparselab.data.packing import prepare_data
+    from sparselab.data.story_packing import MatchedStoryDataset
+    from sparselab.data.tokenizer import load_tokenizer
+
+    base = config(tmp_path)
+    tokenizer = load_tokenizer(base.tokenizer.path)
+    prepared = prepare_data(base, tokenizer)
+    plan = MatchedStoryDataset(
+        prepared.train,
+        16,
+        tokenizer.token_to_id("<eos>"),
+        layout=layout,
+        targets_per_update=128,
+    )
+    measured = base.model_copy(
+        update={
+            "training": base.training.model_copy(
+                update={
+                    "matched_stories": MatchedStoryConfig(
+                        layout=layout, targets_per_update=128
+                    ),
+                    "max_steps": plan.horizon(1025),
+                    "max_tokens": 1025,
+                }
+            ),
+            "optimizer": base.optimizer.model_copy(update={"warmup_steps": 0}),
+        }
+    )
+    train(measured, run_id="full")
+    train(measured, run_id="part", stop_after_step=1)
+    source = measured.logging.root_dir / "part/checkpoints/latest.json"
+    changed = measured.model_copy(
+        update={
+            "training": measured.training.model_copy(
+                update={
+                    "matched_stories": MatchedStoryConfig(
+                        layout="contiguous" if layout == "story" else "story",
+                        targets_per_update=128,
+                    ),
+                }
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="settings|config"):
+        train(changed, run_id="incompatible", resume=source)
+    train(measured, run_id="resumed", resume=source)
+    snapshots = [
+        CheckpointManager(measured.logging.root_dir / name).load(
+            measured.logging.root_dir / name / "checkpoints/latest.json"
+        )
+        for name in ("full", "resumed")
+    ]
+    left, right = snapshots
+    assert left.tokens_seen == right.tokens_seen == 1025
+    assert left.cursor == right.cursor
+    assert left.step == right.step == plan.horizon(1025)
+    equal(left.model, right.model)
+    equal(left.optimizer, right.optimizer)
+    equal(left.rng, right.rng)
