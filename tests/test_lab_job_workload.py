@@ -11,18 +11,24 @@ from sparselab.training.manifest import sha256_file
 
 
 @pytest.mark.parametrize(
-    ("blocks", "max_batches", "expected_batches", "accepted"),
+    ("blocks", "batch_size", "max_batches", "expected_batches", "accepted"),
     [
-        (None, 4, 4, True),
-        (None, 5, 5, False),
-        ((3, 3), 64, 4, True),
-        ((3, 5), 1, 5, False),
-        ((128, 128), 1, 128, False),
+        (None, None, 4, 4, True),
+        (None, None, 5, 5, False),
+        ((3, 3), 2, 64, 4, True),
+        ((3, 5), 2, 1, 5, False),
+        ((128, 128), 2, 1, 128, False),
+        ((16, 16), 16, 1, 2, True),
+        ((16, 17), 17, 1, 2, False),
+        ((100_000, 100_000), 100_000, 1, 2, False),
+        (None, 8, 4, 4, True),
+        (None, 9, 4, 4, False),
     ],
 )
 def test_tiny_profile_effective_evaluation_limit(
     tmp_path: Path,
     blocks: tuple[int, int] | None,
+    batch_size: int | None,
     max_batches: int,
     expected_batches: int,
     accepted: bool,
@@ -33,6 +39,8 @@ def test_tiny_profile_effective_evaluation_limit(
     baseline = root / "baseline.yaml"
     config = yaml.safe_load(baseline.read_text())
     config["evaluation"]["max_batches"] = max_batches
+    if blocks is None and batch_size is not None:
+        config["evaluation"]["batch_size"] = batch_size
     if blocks is not None:
         config["evaluation"]["panels"] = [
             {
@@ -46,7 +54,7 @@ def test_tiny_profile_effective_evaluation_limit(
                 "sequence_length": config["training"]["seq_len"],
                 "blocks": count,
                 "supervised_targets": count * config["training"]["seq_len"],
-                "batch_size": 2,
+                "batch_size": batch_size,
                 "max_forward_positions": count * config["training"]["seq_len"],
             }
             for name, count in zip(("first", "second"), blocks, strict=True)
