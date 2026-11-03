@@ -78,7 +78,7 @@ def _phase(
         raise ValueError("retained mixture proof store unavailable")
     cache.directory = stage_root / "sealed"
     cache.authority = {**cache.authority, "streaming_producer": _producer()}
-    cache_path = cache._path("split-phase", request)
+    cache_path = cache.entry_path("split-phase", request)
     raw = _small(cache_path, root)
     value = json.loads(raw)
     if set(value) != {"dependencies", "payload"} or value["payload"] != payload:
@@ -93,8 +93,8 @@ def _phase(
     ):
         raise ValueError("unsafe retained mixture dependencies")
     dependencies = capture(paths)
-    binding = cache._binding(cache_path, raw, request, dependencies)
-    proof_path = cache.proofs._receipt(binding)
+    binding = cache.entry_binding(cache_path, raw, request, dependencies)
+    proof_path = cache.proofs.receipt_path(binding)
     if allow_native and not proof_path.exists() and not proof_path.is_symlink():
         # Use the already-supported owned native completion only when the
         # optional receipt is truly absent. A present but rejected proof never
@@ -148,7 +148,7 @@ def _phase(
         "historical_proof_sha256": hashlib.sha256(old_raw).hexdigest(),
         "completion_path": str(completion_path),
         "cache_path": str(cache_path),
-        "proof_path": str(cache.proofs._receipt(binding)),
+        "proof_path": str(cache.proofs.receipt_path(binding)),
     }
     if include_cache_hash:
         evidence["cache_sha256"] = hashlib.sha256(raw).hexdigest()

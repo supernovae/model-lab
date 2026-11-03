@@ -144,7 +144,7 @@ def _native_completion_without_lock_binding(
     if cache.proofs is None:
         raise ValueError("native inventory completion proof store unavailable")
     request = cache.request(project, inventory)
-    path = cache._path("inventory", request)
+    path = cache.entry_path("inventory", request)
     if (
         not _trusted(cache.root, path, private=True)
         or path.stat().st_size > 4 * 1024**2
@@ -176,8 +176,8 @@ def _native_completion_without_lock_binding(
             "native inventory completion does not bind the recorded execution"
         )
     dependencies = capture(names)
-    binding = cache._binding(path, raw, request, dependencies)
-    receipt = cache.proofs._receipt(binding)
+    binding = cache.entry_binding(path, raw, request, dependencies)
+    receipt = cache.proofs.receipt_path(binding)
     if (
         not _trusted(cache.root, receipt, private=True)
         or receipt.stat().st_size > 16 * 1024**2

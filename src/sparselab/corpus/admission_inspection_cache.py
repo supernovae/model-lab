@@ -128,11 +128,13 @@ class InspectionCache:
             except OSError:
                 self._unavailable("cache_cleanup_unavailable")
 
-    def _path(self, kind, request):
+    def entry_path(self, kind, request):
+        """Locate a cache entry without loading or authenticating its contents."""
         key = canonical_digest([kind, request])
         return self.directory / f"{kind}-{key}.json"
 
-    def _binding(self, path, raw, request, dependencies):
+    def entry_binding(self, path, raw, request, dependencies):
+        """Bind captured entry bytes and dependencies for proof verification."""
         # Declarations may be edited by the owner's group. Their exact captured
         # fingerprints belong in the signed closure, rather than pretending
         # they are immutable artifact members in ProofStore's trust walk.
@@ -198,7 +200,7 @@ class InspectionCache:
             return None
         events = self.proofs.diagnostics()["events"]
         reason = events[-1]["reason"] if events else None
-        receipt = self.proofs._receipt(binding)
+        receipt = self.proofs.receipt_path(binding)
         if (
             receipt.exists()
             or receipt.is_symlink()
@@ -239,7 +241,7 @@ class InspectionCache:
             ]:
                 return None
         unchanged(dependencies)
-        self.proofs._event(binding, "owned_native_completion")
+        self.proofs.record_event(binding, "owned_native_completion")
         return payload, dependencies
 
     def load(self, kind, request, *, limit):
@@ -257,7 +259,7 @@ class InspectionCache:
                     "retained render proof store unavailable; refusing replay"
                 )
             return None
-        path = self._path(kind, request)
+        path = self.entry_path(kind, request)
         try:
             if not self.proofs.trusted(path) or path.stat().st_size > limit:
                 if explicit:
@@ -279,7 +281,7 @@ class InspectionCache:
             ):
                 raise ValueError("invalid inspection cache dependencies")
             dependencies = capture(paths)
-            binding = self._binding(path, raw, request, dependencies)
+            binding = self.entry_binding(path, raw, request, dependencies)
             if explicit:
                 return adopt_render(
                     self, request, value["payload"], dependencies, binding
@@ -320,7 +322,7 @@ class InspectionCache:
         if any(p.is_symlink() for p in (self.directory, *self.directory.parents)):
             self._unavailable("untrusted_cache_directory")
             return
-        path = self._path(kind, request)
+        path = self.entry_path(kind, request)
         from sparselab.data.verification import verify_file
 
         temporary = None
@@ -352,7 +354,7 @@ class InspectionCache:
             try:
                 os.replace(temporary, path)
                 sync_directory(self.directory)
-                binding = self._binding(path, raw, request, dependencies)
+                binding = self.entry_binding(path, raw, request, dependencies)
                 verify_file(
                     path,
                     expected_sha256=binding["sha256"],
