@@ -14,6 +14,7 @@ from collections import Counter
 from collections.abc import Iterator
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -40,6 +41,10 @@ from sparselab.data.encoding import (
 from sparselab.data.local_stories import verify_snapshot
 from sparselab.data.preparation_chunks import PreparationChunks
 from sparselab.data.preparation_telemetry import PreparationTelemetry
+from sparselab.data.preparation_workers import (
+    PreparationWorkers,
+    collect_parallel_stream,
+)
 from sparselab.data.verification import (
     HashingWriter,
     VerifiedFile,
@@ -855,6 +860,24 @@ class _ArraySpool:
         return _written_file(self.path, writer.digest.hexdigest(), writer.size)
 
 
+def _streaming_values(
+    tokenizer, encoded_ids, text, *, eos, byte_table_size=None, byte_ngram_size=None
+):
+    values = {"ids": encoded_ids + [eos]}
+    if byte_table_size is not None:
+        assert byte_ngram_size is not None
+        prefix = bytearray()
+        addresses = []
+        for piece in _encoded_token_bytes(tokenizer, encoded_ids, text):
+            prefix.extend(piece)
+            addresses.append(
+                table_address(bytes(prefix[-byte_ngram_size:]), byte_table_size)
+            )
+        addresses.append(0)
+        values["byte_addresses"] = addresses
+    return values
+
+
 def _collect_streaming(
     config: DatasetConfig,
     tokenizer: Tokenizer,
@@ -1028,36 +1051,26 @@ def _collect_streaming(
                 pending, encodings, strict=True
             ):
                 bookkeeping_started = time.monotonic()
-                selected = encoded_ids + [eos]
+                values = _streaming_values(
+                    tokenizer,
+                    encoded_ids,
+                    rendered.text,
+                    eos=eos,
+                    byte_table_size=byte_table_size,
+                    byte_ngram_size=byte_ngram_size,
+                )
+                selected = values["ids"]
                 if output_tokens + len(selected) > max_tokens:
                     raise ValueError(
                         f"{split} token cap would truncate selected story "
                         f"{acquired_index}: {output_tokens + len(selected)} > {max_tokens}"
                     )
-                if byte_table_size is not None:
-                    assert byte_ngram_size is not None and byte_table_size is not None
-                    prefix = bytearray()
-                    addresses: list[int] = []
-                    for piece in _encoded_token_bytes(
-                        tokenizer, encoded_ids, rendered.text
-                    ):
-                        prefix.extend(piece)
-                        addresses.append(
-                            table_address(
-                                bytes(prefix[-byte_ngram_size:]), byte_table_size
-                            )
-                        )
-                    addresses.append(0)
-                    if chunks is None:
-                        assert byte_addresses is not None
-                        byte_addresses.append(addresses)
                 if chunks is None:
                     assert ids is not None
                     ids.append(selected)
+                    if byte_addresses is not None:
+                        byte_addresses.append(values["byte_addresses"])
                 else:
-                    values = {"ids": selected}
-                    if byte_table_size is not None:
-                        values["byte_addresses"] = addresses
                     chunks.append_record(acquired_index, values)
                 output_tokens += len(selected)
                 stats["retained_documents"] += 1
@@ -1676,64 +1689,99 @@ def _prepare_data(
         if config.dataset.source == "local_stories":
             assert local_stories is not None
         assert chunks_owner is not None
+        tokenizer_spec = json.loads(tokenizer.to_str())
+        bpe = tokenizer_spec.get("model", {})
+        parallel_supported = (
+            bpe.get("type") == "BPE"
+            and bpe.get("dropout") in (None, 0.0)
+            and not bpe.get("byte_fallback", False)
+            and bpe.get("continuing_subword_prefix") in (None, "")
+            and bpe.get("end_of_word_suffix") in (None, "")
+            and tokenizer_spec.get("pre_tokenizer", {}).get("type") == "ByteLevel"
+            and tokenizer_spec.get("normalizer") is None
+            and tokenizer_spec.get("pre_tokenizer", {}).get("add_prefix_space") is False
+            and tokenizer_spec.get("padding") is None
+        )
+        results = {}
         with (
             chunks_owner,
-            PreparationEncoder(
+            PreparationWorkers(
                 tokenizer,
                 temporary_root,
-                max_workers=None
-                if resource_envelope is None
-                else resource_envelope.max_workers,
-            ) as encoder,
+                envelope=resource_envelope,
+                parallel_supported=parallel_supported,
+            ) as workers,
         ):
-            train_stats = _collect_streaming(
-                config.dataset,
-                tokenizer,
-                "train",
-                temporary_root,
-                selected_documents=(
-                    min(
-                        config.dataset.train_max_documents,
-                        selected_snapshot["splits"]["train"]["count"],
-                    )
-                    if selected_snapshot is not None
-                    else config.dataset.train_max_documents
-                ),
-                resource_envelope=resource_envelope,
-                telemetry=telemetry,
-                encoder=encoder,
-                tokenizer_batch_documents=tokenizer_batch_documents,
-                tokenizer_batch_source_bytes=tokenizer_batch_source_bytes,
-                proofs=proofs,
-                chunks=chunks_owner.open_split("train")
-                if chunks_owner is not None
-                else None,
-                **settings,
+            telemetry.shard_workers = workers.count
+            telemetry.tokenizer_host_work_plan = asdict(workers.plan)
+            telemetry.tokenizer_rayon_threads = sum(
+                e.rayon_threads for e in workers.encoders
             )
-            validation_stats = _collect_streaming(
-                config.dataset,
-                tokenizer,
-                "validation",
-                temporary_root,
-                selected_documents=(
-                    min(
-                        config.dataset.validation_max_documents,
-                        selected_snapshot["splits"]["validation"]["count"],
+            for split in ("train", "validation"):
+                chunks = chunks_owner.open_split(split)
+                measured = PreparationTelemetry(temporary_root)
+                chunks.telemetry = measured
+                count = getattr(config.dataset, f"{split}_max_documents")
+                if selected_snapshot is not None:
+                    count = min(count, selected_snapshot["splits"][split]["count"])
+                diagnostics = {}
+                if workers.count > 1:
+                    eos = tokenizer.token_to_id("<eos>")
+                    if eos is None:
+                        raise ValueError("tokenizer has no <eos> special token")
+                    stats, shard_proofs, diagnostics = collect_parallel_stream(
+                        _source_documents(
+                            config.dataset,
+                            split,
+                            local_text_source_bytes=tokenizer_batch_source_bytes
+                            if config.dataset.source == "local_text"
+                            else None,
+                        ),
+                        chunks,
+                        workers,
+                        selected_documents=count,
+                        max_tokens=getattr(config.dataset, f"{split}_max_tokens"),
+                        batch_documents=tokenizer_batch_documents,
+                        batch_source_bytes=tokenizer_batch_source_bytes,
+                        transform=partial(_streaming_values, eos=eos, **settings),
+                        telemetry=measured,
                     )
-                    if selected_snapshot is not None
-                    else config.dataset.validation_max_documents
-                ),
-                resource_envelope=resource_envelope,
-                telemetry=telemetry,
-                encoder=encoder,
-                tokenizer_batch_documents=tokenizer_batch_documents,
-                tokenizer_batch_source_bytes=tokenizer_batch_source_bytes,
-                proofs=proofs,
-                chunks=chunks_owner.open_split("validation")
-                if chunks_owner is not None
-                else None,
-                **settings,
-            )
+                    proofs.update(shard_proofs)
+                else:
+                    stats = _collect_streaming(
+                        config.dataset,
+                        tokenizer,
+                        split,
+                        temporary_root,
+                        selected_documents=count,
+                        resource_envelope=resource_envelope,
+                        telemetry=measured,
+                        encoder=workers.encoders[0],
+                        tokenizer_batch_documents=tokenizer_batch_documents,
+                        tokenizer_batch_source_bytes=tokenizer_batch_source_bytes,
+                        proofs=proofs,
+                        chunks=chunks,
+                        **settings,
+                    )
+                results[split] = stats
+                telemetry.shards[split] = {**measured.snapshot(), **diagnostics}
+                for name in (
+                    "records",
+                    "source_bytes",
+                    "output_tokens",
+                    "logical_input_bytes",
+                    "logical_output_bytes",
+                ):
+                    setattr(
+                        telemetry,
+                        name,
+                        getattr(telemetry, name) + getattr(measured, name),
+                    )
+                for name, elapsed in measured.durations.items():
+                    telemetry.add(name, elapsed)
+            telemetry.workers = workers.snapshot()
+        train_stats = results["train"]
+        validation_stats = results["validation"]
         train = np.load(temporary_root / "train.npy", mmap_mode="r", allow_pickle=False)
         validation = np.load(
             temporary_root / "validation.npy", mmap_mode="r", allow_pickle=False

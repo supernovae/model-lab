@@ -36,6 +36,20 @@ def validate_tokenizer_batch_limits(
     return documents, source_bytes
 
 
+def tokenizer_work_plan(max_workers: int | None):
+    """One shared capacity budget for native tokenization across output shards."""
+    try:
+        total = host_capacity.measure_memory().total
+    except OSError, psutil.Error, AttributeError:
+        total = 0
+    return plan_host_workers(
+        "tokenizer_rayon",
+        worker_memory_bytes=512 * 1024**2,
+        reserve_bytes=max(1024**3, total // 10),
+        operator_cap=4 if max_workers is None else min(4, max_workers),
+    )
+
+
 class PreparationEncoder:
     """One fresh Rayon pool per preparation, shared by train and validation."""
 
@@ -45,19 +59,13 @@ class PreparationEncoder:
         self._path: Path | None = None
         self._process: subprocess.Popen[bytes] | None = None
         self._pending = bytearray()
+        self.batch_count = 0
+        self.request_bytes = 0
+        self.reply_bytes = 0
+        self.wait_seconds = 0.0
+        self.child_cpu_seconds = 0.0
         try:
-            try:
-                total = host_capacity.measure_memory().total
-            except OSError, psutil.Error, AttributeError:
-                total = 0
-            # The measured 4-thread tree peaked below 512 MiB. Keep a conservative
-            # per-thread bound, including the child, buffers and native overhead.
-            self.host_work_plan = plan_host_workers(
-                "tokenizer_rayon",
-                worker_memory_bytes=512 * 1024**2,
-                reserve_bytes=max(1024**3, total // 10),
-                operator_cap=4 if max_workers is None else min(4, max_workers),
-            )
+            self.host_work_plan = tokenizer_work_plan(max_workers)
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",
@@ -118,7 +126,17 @@ class PreparationEncoder:
     def __exit__(self, *_: object) -> None:
         self.close()
 
+    def sample_cpu(self) -> float:
+        if self._process is not None:
+            try:
+                cpu = psutil.Process(self._process.pid).cpu_times()
+                self.child_cpu_seconds = cpu.user + cpu.system
+            except psutil.Error:
+                pass
+        return self.child_cpu_seconds
+
     def close(self) -> None:
+        self.sample_cpu()
         process = self._process
         self._process = None
         if process is not None:
@@ -147,6 +165,8 @@ class PreparationEncoder:
             json.dumps(texts, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             + b"\n"
         )
+        started = time.monotonic()
+        self.request_bytes += len(payload)
         try:
             process.stdin.write(payload)
             process.stdin.flush()
@@ -173,7 +193,10 @@ class PreparationEncoder:
                     raise ValueError(
                         "preparation tokenizer child batch reply exceeds 128 MiB"
                     )
+        self.wait_seconds += time.monotonic() - started
+        self.batch_count += 1
         line, _, rest = self._pending.partition(b"\n")
+        self.reply_bytes += len(line) + 1
         self._pending = bytearray(rest)
         try:
             response: Any = json.loads(line)
