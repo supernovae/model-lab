@@ -12,9 +12,9 @@ image build still does not establish GPU availability, precision or performance.
 | --- | --- |
 | OS | Ubuntu 26.04, immutable amd64 image digest |
 | Python | CPython 3.14.8, Astral standalone release 20261013, SHA256 |
-| PyTorch | 2.14.1+xpu, stable CPython 3.14 manylinux_2_28 wheel |
-| Triton XPU | 3.8.0, stable CPython 3.14 wheel |
-| Intel SYCL runtimes | 2026.1.0 and exact transitive wheel pins |
+| PyTorch | 2.15.0+xpu, stable CPython 3.14 manylinux_2_28 wheel |
+| Triton XPU | 3.9.0, stable CPython 3.14 wheel |
+| Intel SYCL runtimes | 2026.1.2 and exact transitive wheel pins |
 | Level Zero loader | 1.34.0, official Ubuntu 24.04 binary |
 | Intel Level Zero GPU driver | 26.35.39758.10-0 |
 | Intel graphics compiler | 2.41.5, release build 22716 |

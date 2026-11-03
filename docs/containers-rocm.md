@@ -57,6 +57,11 @@ or dependency resolution. `ROCM_SDK_TARGET_FAMILY=gfx1100` prevents build-time
 hardware discovery in both the container and native provisioner.
 The Dockerfile checks dependencies, exact Torch/HIP versions, and a tiny CPU tensor.
 The image planner additionally rejects missing/mismatched recipe pins.
+Native provisioning reuses the same binary and source locks with `--require-hashes`
+and `--no-deps`; only the metapackage permits a source build, using the already
+installed pinned setuptools without build isolation. Provision receipts record both
+lock digests. The un-hashed `requirements/rocm-gfx1100.txt` is resolution input,
+not the native installation path.
 
 To regenerate, export the common constraints as in the [XPU guide](intel-xpu.md#reproducing-the-dependency-lock),
 then resolve `pyproject.toml` with `container/backends/rocm/requirements.in` for

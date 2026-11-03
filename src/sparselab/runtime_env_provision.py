@@ -26,6 +26,7 @@ from sparselab.runtime_environments import (
 )
 from sparselab.runtime_identity_probe import source_identity
 from sparselab.runtime_profile import RuntimeProfile, probe_runtime_profile
+from sparselab.training.manifest import sha256_file
 
 
 def _validate_python(python: Path) -> dict:
@@ -180,6 +181,15 @@ def provision(identifier: str, *, recipe: str, python: Path | None = None) -> di
             preflight_runtime_root(root / name)
     checkout = selected.requirements_file.resolve().parent.parent
     source_commit = _source_commit(checkout)
+    vendor_locks = (
+        {
+            name: checkout / "container/backends/rocm" / name
+            for name in ("requirements.lock", "source-requirements.lock")
+        }
+        if selected.backend == "rocm"
+        else {}
+    )
+    lock_hashes = {str(path): sha256_file(path) for path in vendor_locks.values()}
     requirements_bytes = selected.requirements_file.read_bytes()
     recipe_sha = hashlib.sha256(requirements_bytes).hexdigest()
     expected_torch = re.search(
@@ -195,6 +205,7 @@ def provision(identifier: str, *, recipe: str, python: Path | None = None) -> di
         "recipe": selected.id,
         "recipe_version": selected.version,
         "recipe_sha256": recipe_sha,
+        "dependency_lock_sha256": lock_hashes,
         "environment_path": str(target),
         "status": "ERROR",
         "reason": None,
@@ -255,15 +266,36 @@ def provision(identifier: str, *, recipe: str, python: Path | None = None) -> di
             "-r",
             str(common),
         )
-        uv(
-            "pip",
-            "install",
-            "--no-config",
-            "--python",
-            str(selected_python),
-            "-r",
-            str(selected.requirements_file),
-        )
+        if selected.backend == "rocm":
+            # Reuse the reviewed image locks, including pinned setuptools before
+            # building the sole allowed source metapackage without isolation.
+            for name, build_flag in (
+                ("requirements.lock", "--only-binary=:all:"),
+                ("source-requirements.lock", "--no-build-isolation"),
+            ):
+                uv(
+                    "pip",
+                    "install",
+                    "--no-config",
+                    "--python",
+                    str(selected_python),
+                    "--no-deps",
+                    "--require-hashes",
+                    build_flag,
+                    "-r",
+                    str(vendor_locks[name]),
+                )
+            uv("pip", "check", "--no-config", "--python", str(selected_python))
+        else:
+            uv(
+                "pip",
+                "install",
+                "--no-config",
+                "--python",
+                str(selected_python),
+                "-r",
+                str(selected.requirements_file),
+            )
         before = inspect_python(selected_python)["torch"]
         if (
             not before.get("installed")

@@ -1,5 +1,6 @@
 # rocm-gfx1100-v1: official PyTorch 2.15 / Python 3.14 / Linux x86_64.
 # Torch declares device-all; preserve the complete SDK closure, even on gfx1100.
+# Resolution inputs: native provision installs the shared hashed container locks.
 # Install into a new environment; never CPU-sync or mutate an active runtime.
 --index-url https://pypi.org/simple
 --find-links https://download.pytorch.org/whl/rocm10.0/torch/
