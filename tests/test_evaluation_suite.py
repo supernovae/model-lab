@@ -181,32 +181,54 @@ def test_fixed_panel_training_alias_refused_at_public_consumers(
 
     monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path))
     measured = _panel_run_config(fixed_panel_run, tmp_path)
-    shared = tmp_path / "shared.jsonl"
-    shared.write_bytes(
-        canonical_json({"text": "A neutral fixture sentence. " * 100}) + b"\n"
+
+    def local_config(values, train_name, train_text, validation_name, validation_text):
+        for name, text in (
+            (train_name, train_text),
+            (validation_name, validation_text),
+        ):
+            (tmp_path / name).write_bytes(canonical_json({"text": text}) + b"\n")
+        values["dataset"].update(
+            source="local_text",
+            train_path=str(tmp_path / train_name),
+            validation_path=str(tmp_path / validation_name),
+            license="CC0-1.0",
+            train_max_documents=1,
+            validation_max_documents=1,
+            train_max_tokens=256,
+            validation_max_tokens=256,
+        )
+        return RunConfig.model_validate(values)
+
+    shared_text = "A neutral fixture sentence about X. " * 4
+    panel_config = local_config(
+        measured.model_dump(mode="json"),
+        "panel-train.jsonl",
+        "Other text for Y. " * 8,
+        "panel-validation.jsonl",
+        shared_text,
     )
+    tokenizer = load_tokenizer(measured.tokenizer.path)
+    prepared = prepare_data(panel_config, tokenizer)
     values = measured.model_dump(mode="json")
-    values["dataset"].update(
-        source="local_text",
-        train_path=str(shared),
-        validation_path=str(shared),
-        train_max_documents=1,
-        validation_max_documents=1,
-        train_max_tokens=256,
-        validation_max_tokens=256,
-    )
-    measured = RunConfig.model_validate(values)
-    prepared = prepare_data(measured, load_tokenizer(measured.tokenizer.path))
-    assert (
-        prepared.manifest["train"]["sha256"]
-        == prepared.manifest["validation"]["sha256"]
-    )
     values["evaluation"]["panels"][0].update(
         prepared_path=str(prepared.root),
         prepared_manifest_sha256=prepared.manifest["manifest_sha256"],
         tokenizer_canonical_sha256=prepared.manifest["tokenizer_sha256"],
     )
-    measured = RunConfig.model_validate(values)
+    measured = local_config(
+        values,
+        "run-train.jsonl",
+        shared_text,
+        "run-validation.jsonl",
+        "Third unrelated text Z. " * 8,
+    )
+    training = prepare_data(measured, tokenizer)
+    # Each bundle has disjoint splits; the forbidden alias crosses bundles.
+    assert (
+        training.manifest["train"]["sha256"]
+        == prepared.manifest["validation"]["sha256"]
+    )
 
     def no_model(*args, **kwargs):
         pytest.fail("aliased inputs must be refused before model initialization")
