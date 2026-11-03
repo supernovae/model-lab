@@ -338,11 +338,12 @@ def test_native_packing_supervises_exact_exported_quota(
     ]
 
 
-def test_yaml_mixture_consumer_is_independent_of_cwd(
+def test_yaml_mixture_consumer_and_storage_identity_are_independent_of_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Release authentication and tokenizer encoding use the tiny synthetic fixture;
     # mixture materialization, cold replay, dataset binding and packing are real.
+    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
     assets = tmp_path / "source" / "nested"
     assets.mkdir(parents=True)
     declaration, _, release = _fixture(assets, monkeypatch)
@@ -351,7 +352,8 @@ def test_yaml_mixture_consumer_is_independent_of_cwd(
     (release / "lm/validation.jsonl").write_text('{"text":"heldout"}\n')
     fit_dir = assets / "fit"
     fit_dir.mkdir()
-    (fit_dir / "tokenizer.json").write_text("{}")
+    tokenizer = _byte_tokenizer()
+    tokenizer.save(str(fit_dir / "tokenizer.json"))
     monkeypatch.setattr(
         mixture,
         "load_tokenizer_config",
@@ -364,7 +366,9 @@ def test_yaml_mixture_consumer_is_independent_of_cwd(
         Path(__file__).resolve().parents[1] / "configs/runtime_smoke_cpu.yaml"
     ).model_dump(mode="json")
     raw["model"]["vocab_size"] = 260
-    raw["training"]["seq_len"] = 8
+    # The seven-character validation fixture must contain a full next-token block.
+    raw["training"]["seq_len"] = 4
+    raw["logging"]["root_dir"] = "runs"
     raw["tokenizer"]["path"] = "fit/tokenizer.json"
     raw["dataset"] = {
         "source": "local_token_mixture",
@@ -382,9 +386,9 @@ def test_yaml_mixture_consumer_is_independent_of_cwd(
     }
     source = assets / "run.yaml"
     source.write_text(yaml.safe_dump(raw))
-    tokenizer = SimpleNamespace(
-        token_to_id=lambda value: {"<bos>": 2, "<eos>": 3, "<pad>": 0}[value]
-    )
+    from sparselab.data.packing import prepare_data
+    from sparselab.workspace_preflight import training_storage_checks
+
     for cwd in (tmp_path / "cwd-a", tmp_path / "unrelated" / "cwd-b"):
         cwd.mkdir(parents=True)
         monkeypatch.chdir(cwd)
@@ -400,6 +404,35 @@ def test_yaml_mixture_consumer_is_independent_of_cwd(
         assert stats["supervised_target_positions"] == 20
         assert sum(mask) == 20
         assert len(ids) == len(mask)
+        prepared = prepare_data(config, tokenizer)
+        checks = training_storage_checks(
+            config, work_dir=tmp_path / "work", verified_prepared=prepared.receipt
+        )
+        relocated = config.model_copy(
+            update={
+                "dataset": config.dataset.model_copy(
+                    update={
+                        "mixture_declaration_path": cwd / "relocated-mixture.yaml",
+                        "mixture_output_path": cwd / "relocated-output",
+                    }
+                )
+            }
+        )
+        relocated_checks = training_storage_checks(
+            relocated, work_dir=tmp_path / "work", verified_prepared=prepared.receipt
+        )
+        assert [item.projected_bytes for item in relocated_checks] == [
+            item.projected_bytes for item in checks
+        ]
+        changed = config.model_copy(
+            update={
+                "dataset": config.dataset.model_copy(update={"train_max_tokens": 21})
+            }
+        )
+        with pytest.raises(ValueError, match="does not match run configuration"):
+            training_storage_checks(
+                changed, work_dir=tmp_path / "work", verified_prepared=prepared.receipt
+            )
 
 
 def test_native_packing_rejects_malformed_target_row(tmp_path: Path) -> None:

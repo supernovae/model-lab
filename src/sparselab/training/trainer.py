@@ -141,16 +141,11 @@ def _check_training_storage(
 
     # Fresh packing checks new-cache growth before allocating. Native loading
     # has now authenticated these inputs, so reserve only their run copy and
-    # checkpoints. Bind the actual cache/stage location for this storage query;
-    # mixture path selectors are excluded by the native packing identity.
+    # checkpoints. Bind the actual cache/stage location for this storage query.
     storage_config = config.model_copy(
         update={
             "dataset": config.dataset.model_copy(
-                update={
-                    "cache_dir": data.root.parent,
-                    "mixture_declaration_path": None,
-                    "mixture_output_path": None,
-                }
+                update={"cache_dir": data.root.parent}
             ),
             "tokenizer": config.tokenizer.model_copy(
                 update={"path": tokenizer_path or config.tokenizer.path}

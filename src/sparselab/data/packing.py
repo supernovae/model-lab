@@ -98,6 +98,25 @@ class PreparedData:
     receipt: VerifiedPreparedData
 
 
+def prepared_dataset_identity(dataset: DatasetConfig) -> dict[str, object]:
+    """Dataset selection identity; verified content binds operational locations."""
+    return {
+        key: value
+        for key, value in dataset.model_dump(mode="json").items()
+        if key
+        not in {
+            "cache_dir",
+            "train_path",
+            "validation_path",
+            "source_manifest_path",
+            "corpus_release_path",
+            "corpus_export_path",
+            "mixture_declaration_path",
+            "mixture_output_path",
+        }
+    }
+
+
 def preparation_source_identity(inventory: dict[str, str] | None = None) -> str:
     """Conservative reader/transform/packing fingerprint, not acquisition code.
 
@@ -1413,21 +1432,7 @@ def _prepare_data(
                 "allocation manifest corpus digests do not match local_chat"
             )
     cache_identity = {
-        "dataset": {
-            key: value
-            for key, value in config.dataset.model_dump(mode="json").items()
-            if key
-            not in {
-                "cache_dir",
-                "train_path",
-                "validation_path",
-                "source_manifest_path",
-                "corpus_release_path",
-                "corpus_export_path",
-                "mixture_declaration_path",
-                "mixture_output_path",
-            }
-        },
+        "dataset": prepared_dataset_identity(config.dataset),
         "local_chat_source": local_chat,
         **(
             {
