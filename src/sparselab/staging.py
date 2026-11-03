@@ -309,6 +309,14 @@ def pilot_config(config: RunConfig, purpose: str, root: Path) -> RunConfig:
         * config.training.gradient_accumulation
         * config.training.seq_len,
     )
+    if (retention := payload["checkpoint"].get("retention")) is not None:
+        # Pilots have isolated outputs and their own terminal checkpoint; full-run
+        # milestones are not pilot evidence. Keep the declared storage bounds.
+        retention.update(
+            milestones=[],
+            terminal_step=steps,
+            terminal_targets=payload["training"]["max_tokens"],
+        )
     payload["optimizer"]["warmup_steps"] = min(config.optimizer.warmup_steps, steps - 1)
     if payload["optimizer"].get("decay_steps") is not None:
         payload["optimizer"]["decay_steps"] = min(
