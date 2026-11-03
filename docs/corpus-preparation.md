@@ -261,9 +261,9 @@ of `src/sparselab/corpus/split_inventory_adoption.py` and
 `src/sparselab/corpus/completed_preparation.py`, alongside the authenticated
 completion evidence and the remaining producer authority. Preserve that checkout
 and evidence while relying on the handoff: changing or removing those files can
-refuse a later verification that needs this fallback. An unchanged cached
-adoption can return without repeating that checkout check; a successful first
-adoption is not a general guarantee that the checkout is no longer needed.
+refuse later verification. This historical fallback does not record a new
+adopted-completion cache entry, so subsequent verification through this path
+repeats the producer-file checks.
 This is an inventory-completion contract, separate from retained-release
 executor adoption and from any supported release relocation.
 
@@ -1122,6 +1122,7 @@ depends on the source and lock state:
 | --- | --- | --- |
 | Ordinary pinned `git`, `huggingface_dataset`, or `wikimedia_dump` | Reverify the referenced snapshot and its declaration/adapter compatibility. | Discover verified compatible snapshots under the project's source snapshot directory and rebuild the lock; refuse if no eligible snapshot exists. A stale reference can also fall through to discovery. |
 | Ordinary `local` or `http_document` | Excluded from old-lock reuse; refuse without reacquiring. | Excluded from immutable snapshot discovery; refuse without reacquiring. |
+| Ordinary `deterministic_generator` or `inference_generator` | Reuse requires a verified snapshot with a matching declaration and exact adapter identity, including its module digest. | Excluded from snapshot discovery; refuse without regenerating if the lock cannot supply an eligible reference. |
 | Declared `reuse_only` source effect | Verify retained origin rights/permissions and bytes, and the matching snapshot already in the destination project. | The same checks apply independently of the lock. A valid origin alone is insufficient: a missing destination snapshot refuses instead of being copied. |
 | HF `retained_subset` project | An existing lock takes the dedicated verification path; an invalid or stale lock refuses instead of entering ordinary discovery. | With no lock, existing compatible snapshots can be discovered; missing snapshots refuse. Retained-subset project restrictions still apply. |
 
