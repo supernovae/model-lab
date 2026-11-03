@@ -301,8 +301,10 @@ def test_corpus_encoder_budget_keeps_preparation_pool_cap(capacity, tmp_path):
     tokenizer = Tokenizer(models.BPE())
     for envelope in (
         None,
-        ResourceEnvelope(),
-        ResourceEnvelope(max_workers=6, preparation_shard_workers=6),
+        ResourceEnvelope(resource_envelope_version=1),
+        ResourceEnvelope(
+            resource_envelope_version=1, max_workers=6, preparation_shard_workers=6
+        ),
     ):
         pool = PreparationWorkers(
             tokenizer, tmp_path, envelope=envelope, parallel_supported=True
