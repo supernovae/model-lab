@@ -129,6 +129,101 @@ def fixed_panel_run(tmp_path_factory):
     return measured.logging.root_dir / "fixed-panels"
 
 
+def _panel_run_config(fixed_panel_run, root):
+    from sparselab.config.models import RunConfig
+    from sparselab.training.manifest import read_manifest
+
+    values = read_manifest(fixed_panel_run / "manifest.json")["effective_config"]
+    values["logging"]["root_dir"] = str(root / "runs")
+    values["dataset"]["cache_dir"] = str(root / "cache")
+    return RunConfig.model_validate(values)
+
+
+@pytest.mark.parametrize("field", ["valid_targets", "batches"])
+def test_active_fixed_panels_refuse_incomplete_evaluation(
+    fixed_panel_run, tmp_path, monkeypatch, field
+):
+    from sparselab.engines.pytorch import PyTorchEngine
+
+    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path))
+    measured = _panel_run_config(fixed_panel_run, tmp_path)
+    original = PyTorchEngine.evaluate
+    observed = []
+
+    def incomplete(self, batches):
+        result = original(self, batches)
+        observed.append(result)
+        return replace(result, **{field: getattr(result, field) - 1})
+
+    monkeypatch.setattr(PyTorchEngine, "evaluate", incomplete)
+    with pytest.raises(
+        ValueError, match="active evaluation did not complete panel coverage"
+    ):
+        train(measured, run_id="incomplete")
+    assert len(observed) == 1
+    assert observed[0].valid_targets == 48 and observed[0].batches == 2
+    assert not list(
+        (measured.logging.root_dir / "incomplete" / "evaluations").glob(
+            "validation_step_*.json"
+        )
+    )
+
+
+@pytest.mark.parametrize("consumer", ["train", "stage"])
+def test_fixed_panel_training_alias_refused_at_public_consumers(
+    fixed_panel_run, tmp_path, monkeypatch, consumer
+):
+    from sparselab.config.models import RunConfig
+    from sparselab.data.packing import prepare_data
+    from sparselab.data.tokenizer import load_tokenizer
+    from sparselab.engines.pytorch import PyTorchEngine
+    from sparselab.staging import materialize_prepared_inputs
+
+    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path))
+    measured = _panel_run_config(fixed_panel_run, tmp_path)
+    shared = tmp_path / "shared.jsonl"
+    shared.write_bytes(
+        canonical_json({"text": "A neutral fixture sentence. " * 100}) + b"\n"
+    )
+    values = measured.model_dump(mode="json")
+    values["dataset"].update(
+        source="local_text",
+        train_path=str(shared),
+        validation_path=str(shared),
+        train_max_documents=1,
+        validation_max_documents=1,
+        train_max_tokens=256,
+        validation_max_tokens=256,
+    )
+    measured = RunConfig.model_validate(values)
+    prepared = prepare_data(measured, load_tokenizer(measured.tokenizer.path))
+    assert (
+        prepared.manifest["train"]["sha256"]
+        == prepared.manifest["validation"]["sha256"]
+    )
+    values["evaluation"]["panels"][0].update(
+        prepared_path=str(prepared.root),
+        prepared_manifest_sha256=prepared.manifest["manifest_sha256"],
+        tokenizer_canonical_sha256=prepared.manifest["tokenizer_sha256"],
+    )
+    measured = RunConfig.model_validate(values)
+
+    def no_model(*args, **kwargs):
+        pytest.fail("aliased inputs must be refused before model initialization")
+
+    monkeypatch.setattr(PyTorchEngine, "initialize", no_model)
+    destination = tmp_path / "stage"
+    with pytest.raises(
+        ValueError, match="fixed panel validation aliases the training array"
+    ):
+        if consumer == "train":
+            train(measured, run_id="aliased")
+        else:
+            materialize_prepared_inputs(measured, destination)
+    assert not destination.exists()
+    assert not (measured.logging.root_dir / "aliased").exists()
+
+
 @pytest.mark.parametrize(
     ("change", "reason"),
     [
