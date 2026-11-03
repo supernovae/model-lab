@@ -233,7 +233,7 @@ def declarations(workload: TryWorkload, root: Path) -> tuple:
             or config.training.seq_len > 32
             or config.training.micro_batch_size > 4
             or config.training.gradient_accumulation != 1
-            or config.evaluation.max_batches > 4
+            or config.evaluation.batch_limit > 4
         ):
             raise ValueError(
                 "training/evaluation exceeds the existing tiny smoke profile"

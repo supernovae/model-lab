@@ -61,7 +61,9 @@ YAML declarations and hashes their complete input closure. Relative producer and
 consumer paths resolve inside retained evidence after the exact bytes are copied.
 
 The `tiny-cpu-lab` profile bounds dense models to width 32, two layers, FFN 128,
-vocabulary 512; training to 12 updates / 1,536 targets per arm; local input closure
+vocabulary 512; training to 12 updates / 1,536 targets per arm; evaluation to four
+batches per pass (the sum of both fixed panels' rounded-up batch counts, when
+declared); local input closure
 to 1 MiB. It requires fresh arms, retained checkpoints, CPU fp32 and explicit
 native per-arm wall bounds (at most 120 seconds). The example selects 30 seconds
 per arm and 90 seconds for the entire monitored job. The lab-loop CI's separate
