@@ -343,6 +343,7 @@ def test_yaml_mixture_consumer_and_storage_identity_are_independent_of_cwd(
 ) -> None:
     # Release authentication and tokenizer encoding use the tiny synthetic fixture;
     # mixture materialization, cold replay, dataset binding and packing are real.
+    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
     assets = tmp_path / "source" / "nested"
     assets.mkdir(parents=True)
     declaration, _, release = _fixture(assets, monkeypatch)
@@ -365,7 +366,9 @@ def test_yaml_mixture_consumer_and_storage_identity_are_independent_of_cwd(
         Path(__file__).resolve().parents[1] / "configs/runtime_smoke_cpu.yaml"
     ).model_dump(mode="json")
     raw["model"]["vocab_size"] = 260
-    raw["training"]["seq_len"] = 8
+    # The seven-character validation fixture must contain a full next-token block.
+    raw["training"]["seq_len"] = 4
+    raw["logging"]["root_dir"] = "runs"
     raw["tokenizer"]["path"] = "fit/tokenizer.json"
     raw["dataset"] = {
         "source": "local_token_mixture",
