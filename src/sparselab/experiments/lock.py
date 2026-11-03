@@ -694,6 +694,23 @@ def resolve_plan(
         if context is None
         else recipe_run_config(plan, source, context)
     )
+    patches = [choice.set for axis in plan.axes for choice in axis.choices]
+    patches.extend(phase.set for phase in plan.phases)
+    if base.tokenizer.origin is not None or any(
+        (path == "tokenizer.origin" and value is not None)
+        or path.startswith("tokenizer.origin.")
+        or (
+            path == "tokenizer"
+            and isinstance(value, Mapping)
+            and value.get("origin") is not None
+        )
+        for patch in patches
+        for path, value in patch.items()
+    ):
+        raise ValueError(
+            "ExperimentPlan does not support tokenizer.origin; "
+            "use a tokenizer bound to the consuming dataset"
+        )
     phases = _phases(plan)
     variants = _prepared_variants(plan, prepared)
     memo: dict[tuple[object, ...], Any] = {}

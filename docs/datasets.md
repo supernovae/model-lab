@@ -189,7 +189,10 @@ to the run's own dataset and serialization.
 This opt-in currently supports lab runs consuming `snapshot` or `local_stories`
 with tokenizer origins of those same frozen source types. It does not change
 Forge release/export, token-mixture, or release ExperimentPlan artifact binding
-contracts. Cross-source release locking remains unsupported. Reusing an origin
+contracts. ExperimentPlan resolution rejects `tokenizer.origin` in the base run,
+axis choices, or phase patches before verifying input artifacts; use a tokenizer
+bound to the consuming dataset for those plans. Cross-source release locking
+remains unsupported. Reusing an origin
 does not establish train/evaluation disjointness across datasets: audit those
 splits separately before making a comparison.
 
