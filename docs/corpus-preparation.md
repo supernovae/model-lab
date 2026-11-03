@@ -802,6 +802,15 @@ foreign keys and unsafe ownership/permissions prevent warm reuse rather than
 relaxing checks. The proof-store trust boundary assumes immutable service-owned
 inputs; it does not protect against a compromised same-UID owner.
 
+Proof-store diagnostics distinguish lookup misses from receipt-publication
+refusals. `key_publication_unavailable` means the key creation/publication check
+refused after successful cold verification; the verified result still stands,
+but no warm-reuse receipt was published. A readable existing key can still fail
+this stricter check (for example, its parent is `0755` instead of the required
+private `0700`). Diagnostics retain the original lookup miss as well; hit/miss
+counters count lookups, while the reason summary also includes publication events.
+Lab does not change existing directory permissions to enable reuse.
+
 The `work` summary counts completed full validation passes for this invocation,
 not partial work from a failed attempt. Source indexing and exact-median queries
 use disposable disk metadata; only successful bounded inspection results are
