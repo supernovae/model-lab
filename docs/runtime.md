@@ -108,18 +108,17 @@ or numerical results. Current repository pins are:
 | Linux CPU | `2.15.0+cpu`, official CPU index in `uv.lock` | CPU tests; no accelerator evidence |
 | Mac CPU / PyTorch MPS | `2.15.0`, PyPI macOS 14+ arm64 wheel in `uv.lock` | Native Mac execution still required |
 | Intel XPU | `2.15.0+xpu`, official XPU index | Recipe and hashed container lock; native device validation still required |
-| AMD gfx1100 local recipe | `2.13.0+rocm10.0.0`, AMD source | Retained until the separately tested 2.15 replacement is qualified |
-| AMD container | `2.14.0+rocm10.1.0`, AMD source | Separate packaging from the local recipe; not a 2.15 runtime |
+| AMD gfx1100 local recipe / container | `2.15.0+rocm10.0`, official PyTorch index; SDK `10.0.0` | Bounded host smoke reported; full native Lab/container qualification remains separate |
 | NVIDIA container | `2.14.1+cu132` | Outside the CPU/Intel/Mac/ROCm migration; remains separately pinned |
 | Mac MLX / Metal | `mlx==0.32.4`, `mlx-metal==0.32.4` | Separate engine; not PyTorch MPS or a Torch version |
 
-As checked on 2026-11-03, the existing
-[AMD Torch source](https://stable.repo.amd.com/rocm/whl-next/torch/) does not
-publish 2.15. The [official PyTorch ROCm 10.0 source](https://download.pytorch.org/whl/rocm10.0/torch/)
-publishes `2.15.0+rocm10.0` for CPython 3.14. That is a different distribution
-from AMD's device-specific Torch/SDK packages; do not substitute its version
-into the AMD recipe or combine the dependency sets. ROCm standardization remains
-pending native gfx1100 qualification and a complete reproducible replacement recipe.
+The [official PyTorch ROCm 10.0 source](https://download.pytorch.org/whl/rocm10.0/torch/)
+provides the CPython 3.14 `2.15.0+rocm10.0` wheel (HIP `7.15.26333`). It uses
+`triton-rocm==3.9.0` and `rocm[device-all,libraries]==10.0.0`; the latter's
+complete SDK closure is retained, including all declared device wheels. Do not
+mix this with AMD's former `torch[device-gfx1100]` / `amd-torch-device-*` recipe.
+The new recipe updates future provisioning, not registered or active runtimes.
+See [ROCm packaging](containers-rocm.md) for dependency and validation details.
 
 | Feature | PyTorch CPU | PyTorch MPS | PyTorch XPU / ROCm | MLX Metal |
 | --- | --- | --- | --- | --- |
@@ -229,7 +228,7 @@ checkpoints. Do not copy this host's registry to an SSH worker.
 
 ### Versioned vendor provisioning
 
-The built-in `rocm-gfx1100-v1` recipe binds AMD ROCm 10.0.0/Python 3.14 pins
+The built-in `rocm-gfx1100-v1` recipe binds official PyTorch 2.15.0/ROCm 10.0.0/Python 3.14 pins
 and indexes in `requirements/rocm-gfx1100.txt`; it is not a portable ROCm extra
 or a global ROCm version. First establish the actual Windows/WSL/Linux driver
 and GPU combination against AMD's

@@ -202,6 +202,8 @@ def provision(identifier: str, *, recipe: str, python: Path | None = None) -> di
     }
     try:
         environment = _environment(root)
+        if selected.backend == "rocm":
+            environment["ROCM_SDK_TARGET_FAMILY"] = "gfx1100"
         for name in (".cache", ".scratch"):
             (root / name).mkdir(mode=0o700, exist_ok=True)
         logs = root / ".scratch" / f"{identifier}-provision"

@@ -1,3 +1,3 @@
-# Audited 27,536-byte official AMD metapackage. Build only with pinned setuptools.
---find-links https://stable.repo.amd.com/rocm/core/whl-next/rocm/
-rocm==10.1.0 --hash=sha256:e6616e62ebd1324031681e6e59349d46ee4f143a8d8f4f901a91c35c993041fc
+# Audited 24,780-byte official AMD metapackage; build with pinned setuptools.
+--find-links https://download.pytorch.org/whl/rocm10.0/rocm/
+rocm==10.0.0 --hash=sha256:65b5982249612a310135f5e061b9f28909e8ad718a1ddb3f1abba92298b7216b

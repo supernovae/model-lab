@@ -11,19 +11,20 @@ access are prerequisites; see AMD's
 | Component | Pin |
 | --- | --- |
 | Python/base OS | Python 3.14.4, Debian Bookworm, immutable base digest in the Dockerfile |
-| AMD PyTorch | `2.14.0+rocm10.1.0`, extra `device-gfx1100` |
-| ROCm SDK | `10.1.0` |
-| Embedded HIP build | `7.16.26385` (checked separately from SDK marketing version) |
-| AMD Triton | `3.8.0+git669b31ac.rocm10.1.0` |
-| AMD device packages | gfx1100 and gfx110x, both `2.14.0+rocm10.1.0` |
+| Official PyTorch | `2.15.0+rocm10.0` |
+| ROCm SDK | `10.0.0`, including the complete `device-all,libraries` closure |
+| Embedded HIP build | `7.15.26333` (checked separately from SDK version) |
+| Triton ROCm | `triton-rocm==3.9.0` (imports as `triton`) |
 | Metapackage builder | `setuptools==84.0.0` |
 | Lab build backend | `uv_build==0.12.17` |
 
-AMD's [official guide](https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest/frameworks/pytorch/install.html)
-selects `torch[device-gfx1100]==2.14.0+rocm10.1.0` from the stable publisher's
-`whl-next` directory. This is the latest vendor build observed on 2026-10-15;
-upstream PyTorch 2.14.1 does not imply an equivalent AMD wheel. No nightly,
-Python downgrade, optional torchvision alpha, or CPU substitution is used.
+The [official PyTorch index](https://download.pytorch.org/whl/rocm10.0/torch/)
+publishes the CPython 3.14 Linux x86_64 wheel. Its metadata requires
+`rocm[device-all,libraries]==10.0.*`, not AMD's former Torch device extras.
+The local provisioner and container now use the same exact framework/SDK pins.
+Existing runtimes remain intact; provision a new runtime ID and retain the prior
+checkout/environment for rollback. Do not combine old `amd-torch-device-*` or
+AMD `triton` packages with this distribution.
 
 ## Dependency reuse
 
@@ -35,22 +36,32 @@ layer. Missing dependency images bootstrap once; heavyweight dependencies are
 not rebuilt just because the application source changed. See the
 [accelerator image guide](container-builds.md) for publication and refresh.
 
-`requirements.lock` contains the complete binary closure for Lab's common
-dependencies, PyTorch and gfx1100 libraries. Package-specific AMD `--find-links`
-entries avoid letting AMD's general index replace unrelated PyPI dependencies.
-All distributions are exact-pinned and SHA256-checked. Shared application
-packages retain their versions from `uv.lock`; selecting ROCm does not upgrade
-Hugging Face Hub, Streamlit, datasets, or other unrelated Lab dependencies.
+`requirements.lock` contains the binary closure for Lab, Torch, Triton and all
+SDK device packages requested by Torch. Package-specific official PyTorch
+`--find-links` entries retain PyPI as the source for common application packages;
+SDK links resolve to AMD's official package server. Exact versions and SHA256
+hashes are recorded, while shared application versions remain constrained by
+`uv.lock`. The SDK wheels alone total approximately 6.54 GiB compressed; plan
+additional storage for Torch, Triton, unpacked packages, build layers and cache.
+The image's validation target remains gfx1100 even though Torch declares broader
+package dependencies. Those dependencies do not establish other GPUs' support.
 
-AMD intentionally distributes `rocm==10.1.0` as a small source metapackage.
-`source-requirements.lock` pins the inspected 27,536-byte archive and its SHA256.
-Its build uses only the already hash-pinned setuptools, with build isolation and
-dependency resolution disabled. `ROCM_SDK_TARGET_FAMILY=gfx1100` prevents its
-build-time hardware discovery; no GPU is exposed. Its required SDK core and
-`libraries` extra dependencies are included explicitly in the binary lock.
-The Dockerfile runs `uv pip check`, verifies the exact Torch/HIP build, and uses
-a tiny CPU tensor for packaging validation. This exception does not allow other
-source distributions or unpinned build dependencies.
+`rocm==10.0.0` is AMD's 24,780-byte source metapackage. Its inspected archive is
+hash-pinned in `source-requirements.lock`. Only that package is excluded from
+binary resolution; all of its required core, libraries and device-all dependencies
+are explicitly retained. The build uses pinned setuptools without build isolation
+or dependency resolution. `ROCM_SDK_TARGET_FAMILY=gfx1100` prevents build-time
+hardware discovery in both the container and native provisioner.
+The Dockerfile checks dependencies, exact Torch/HIP versions, and a tiny CPU tensor.
+The image planner additionally rejects missing/mismatched recipe pins.
+
+To regenerate, export the common constraints as in the [XPU guide](intel-xpu.md#reproducing-the-dependency-lock),
+then resolve `pyproject.toml` with `container/backends/rocm/requirements.in` for
+Python 3.14 / `x86_64-manylinux_2_28`, using the same hash and index emission
+flags. Pass `--excludes` a requirements file containing only `rocm`, and set
+`ROCM_SDK_TARGET_FAMILY=gfx1100`. Preserve the separately audited source lock.
+Confirm any missing find-links hashes against downloaded bytes or the publisher's
+wheel hash; an unhashed entry must fail `container/image_plan.py plan rocm`.
 
 ## Running Lab
 
@@ -78,13 +89,22 @@ The separate CPU viewer can observe the same persisted evidence read-only.
 
 Lab records HIP-backed PyTorch execution as `rocm`; an unavailable explicit
 backend refuses rather than silently retrying on CPU. See [runtime selection](runtime.md).
-The existing `rocm-gfx1100-v1` provisioning recipe remains a distinct ROCm 10.0.0
-environment; this image does not mutate it.
+The `rocm-gfx1100-v1` provisioning recipe shares the image's framework pins;
+this image does not mutate any already provisioned environment.
 
 ## Validation boundary
 
-The lock was resolved for Python 3.14/Linux x86-64 from official wheel payloads
-and published metadata. The required AMD source metapackage was inspected and
-hashed. Hardware execution is untested: no GPU workload, model, dataset, driver
-installation, or host configuration change was part of this packaging work.
-Image build and smoke results must be reported separately from hardware support.
+Package metadata and the wheel's `torch/version.py` establish the Torch/SDK/HIP
+versions above. The source metapackage was inspected and hashed. CPU tests and
+packaging checks do not exercise GPU kernels or certify the resulting ROCm image.
+
+The coordinating task reported a separate host smoke on 2026-11-03 (task
+`01a1a25a-19cb-75d8-9901-dd312eeb602a`): RX 7900 XTX/gfx1100, Python 3.14.4,
+Torch 2.15.0+rocm10.0, Triton 3.9.0, three BF16 AdamW updates of a 50.6M model,
+finite gradients, inference and exact checkpoint tensor recovery. The original
+2.13 environment was retained. This packaging task received that summary but
+could not retrieve the underlying task's raw evidence or installed dependency
+manifest. It therefore does not claim an exact environment reproduction or full
+Lab continuation, compiled kernels, performance, container, or full-run acceptance.
+Native Mac/MPS/MLX and XPU validation are also separate outstanding checks.
+No active installations, driver settings or training were modified here.
