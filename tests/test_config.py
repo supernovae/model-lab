@@ -355,3 +355,66 @@ def test_portability_config_is_opt_in_and_requires_exact_controls() -> None:
     }
     with pytest.raises(ValueError, match="require the PyTorch engine"):
         RunConfig.model_validate(mlx)
+
+
+@pytest.fixture
+def origin_bound_config():
+    base = load_config(
+        Path(__file__).resolve().parents[1] / "configs/runtime_smoke_cpu.yaml"
+    )
+    raw = base.model_dump(mode="json")
+    snapshot = {
+        **raw["dataset"],
+        "source": "snapshot",
+        "revision": "a" * 40,
+        "license": "MIT",
+        "dataset_config": "default",
+        "source_manifest_path": "origin/manifest.json",
+        "train_path": "origin/train.jsonl",
+        "validation_path": "origin/validation.jsonl",
+    }
+    raw["dataset"] = {**snapshot, "cache_dir": "consumer/cache"}
+    raw["tokenizer"]["origin"] = {
+        "dataset": snapshot,
+        "sha256": "b" * 64,
+        "manifest_sha256": "c" * 64,
+    }
+    return raw
+
+
+def test_origin_binding_resolves_paths_and_preserves_default_identity(
+    tmp_path, origin_bound_config
+):
+    from sparselab.training.manifest import config_sha256
+
+    path = tmp_path / "run.yaml"
+    path.write_text(yaml.safe_dump(origin_bound_config))
+    config = load_config(path)
+    assert config.tokenizer.origin.dataset.train_path == tmp_path / "origin/train.jsonl"
+    raw = config.model_dump(mode="json")
+    before = config_sha256(raw)
+    raw["tokenizer"]["origin"]["dataset"]["source_manifest_path"] = (
+        "/moved/manifest.json"
+    )
+    assert config_sha256(raw) == before
+    raw["tokenizer"]["origin"]["manifest_sha256"] = "d" * 64
+    assert config_sha256(raw) != before
+    del raw["tokenizer"]["origin"]
+    assert RunConfig.model_validate(raw).model_dump(mode="json") == raw
+
+
+@pytest.mark.parametrize(
+    "change", ["missing_digest", "bad_digest", "unfrozen_origin", "unfrozen_consumer"]
+)
+def test_origin_binding_requires_pins_and_frozen_sources(origin_bound_config, change):
+    raw = origin_bound_config
+    if change == "missing_digest":
+        del raw["tokenizer"]["origin"]["manifest_sha256"]
+    elif change == "bad_digest":
+        raw["tokenizer"]["origin"]["sha256"] = "bad"
+    elif change == "unfrozen_origin":
+        raw["tokenizer"]["origin"]["dataset"]["source"] = "synthetic"
+    else:
+        raw["dataset"]["source"] = "synthetic"
+    with pytest.raises(ValueError):
+        RunConfig.model_validate(raw)
