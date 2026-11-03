@@ -65,8 +65,9 @@ jobs:
         run: |
           python3 - <<'PY'
           import os, shutil
-          # ROCm includes the official device-all SDK closure (6.54 GiB compressed).
-          required_gib = 24 if os.environ["BACKEND"] == "rocm" else 12
+          # ROCm was ~18 GB installed in review, plus 6.54 GiB compressed SDKs.
+          # Leave headroom for downloads, layers and the base image.
+          required_gib = 32 if os.environ["BACKEND"] == "rocm" else 12
           required = required_gib * 1024**3
           free = shutil.disk_usage("/var/lib/docker").free
           print(f"Docker store free bytes: {free}; required: {required}")
