@@ -41,6 +41,66 @@ def _resume_settings(config: RunConfig) -> str:
     return config_sha256(settings)
 
 
+def _runtime_optimization_transition(
+    source: RunConfig, target: RunConfig, checkpoint_sha256: str
+) -> dict[str, object]:
+    """Admit only explicitly requested execution changes with a fixed effective batch."""
+    if source.runtime.engine != "pytorch" or target.runtime.engine != "pytorch":
+        raise ValueError("runtime optimization transition requires PyTorch")
+    if source.attention.kind != "dense" or target.attention.kind != "dense":
+        raise ValueError("runtime optimization transition requires dense attention")
+    if (
+        source.training.micro_batch_size * source.training.gradient_accumulation
+        != target.training.micro_batch_size * target.training.gradient_accumulation
+    ):
+        raise ValueError(
+            "runtime optimization transition must preserve effective batch"
+        )
+    original = source.model_dump(mode="json")
+    comparable = target.model_dump(mode="json")
+    paths = (
+        ("attention", "implementation"),
+        ("training", "deterministic"),
+        ("training", "micro_batch_size"),
+        ("training", "gradient_accumulation"),
+        ("runtime", "memory", "activation_checkpointing", "enabled"),
+        ("runtime", "compile_transformer_blocks"),
+    )
+    changes: list[dict[str, object]] = []
+    for path in paths:
+        old: dict[str, Any] = original
+        new: dict[str, Any] = comparable
+        for part in path[:-1]:
+            old, new = old[part], new[part]
+        key = path[-1]
+        # Default-valued fields are intentionally omitted from historical identities.
+        default: object = (
+            "reference" if path == ("attention", "implementation") else False
+        )
+        previous, requested = old.get(key, default), new.get(key, default)
+        if previous != requested:
+            changes.append(
+                {"field": ".".join(path), "previous": previous, "requested": requested}
+            )
+        if key in old:
+            new[key] = old[key]
+        else:
+            new.pop(key, None)
+    if _resume_settings(source) != _resume_settings(
+        RunConfig.model_validate(comparable)
+    ):
+        raise ValueError(
+            "runtime optimization transition changes scientific or unsupported settings"
+        )
+    return {
+        "kind": "runtime_optimization_transition",
+        "resume_level": "best_effort",
+        "parent_checkpoint_sha256": checkpoint_sha256,
+        "changes": changes,
+        "reason": "explicit --allow-runtime-optimization; numerical trajectory may differ",
+    }
+
+
 def _extension_settings(
     source: RunConfig, target: RunConfig, *, parent_tokenizer: Path | None = None
 ) -> str:
@@ -188,7 +248,16 @@ def load_continuation(
     promote: Path | None,
     recover: Path | None,
     allow_runtime_drift: bool,
+    allow_runtime_optimization: bool = False,
 ) -> Continuation:
+    if allow_runtime_optimization and (
+        (resume is None and recover is None)
+        or promote is not None
+        or extend_budget is not None
+    ):
+        raise ValueError(
+            "runtime optimization requires an explicit full-state resume or recovery"
+        )
     selected = extend_budget or resume or promote
     if selected is None and recover is None:
         return Continuation()
@@ -247,7 +316,7 @@ def load_continuation(
             raise ValueError(f"checkpoint run binding failed: {binding.errors}")
         _verify_artifacts(root, manifest, resume=promote is None)
         source_config = RunConfig.model_validate(manifest["effective_config"])
-        if architecture_sha256(
+        if not allow_runtime_optimization and architecture_sha256(
             source_config.model_dump(mode="json")
         ) != architecture_sha256(config.model_dump(mode="json")):
             raise ValueError(
@@ -284,7 +353,13 @@ def load_continuation(
             raise ValueError(
                 "checkpoint scientific identity differs from its source run manifest"
             )
-        if extend_budget is None:
+        if allow_runtime_optimization:
+            decisions.append(
+                _runtime_optimization_transition(
+                    saved_config, config, snapshot.checkpoint_sha256
+                )
+            )
+        elif extend_budget is None:
             if _resume_settings(saved_config) != _resume_settings(config):
                 raise ValueError(
                     "resume configuration differs from checkpoint; use promotion for changed scientific settings"

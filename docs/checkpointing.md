@@ -22,7 +22,7 @@ The checkpoint manager writes a temporary sibling, verifies the completed genera
 
 `--resume` creates a new child run. It restores canonical model weights, named optimizer state, warmup/cosine schedule, optional scaler, committed counters, data cursor, cadence watermarks, cumulative timing, and the engine's safe RNG envelope. The child records `parent_run_id` and the exact parent `checkpoint_sha256`; it does not bind itself to a moving `latest` pointer.
 
-Full resume requires the same engine/backend, architecture semantics, tokenizer/data/package identities, optimizer settings, schedule horizon, training budget, micro-batch/accumulation, sequence length, deterministic setting, and verified run-owned artifacts. Source/runtime or device-identity drift requires `--allow-runtime-drift`; that produces an explicit best-effort record and never bypasses scientific compatibility. A completed budget cannot be resumed.
+By default full resume requires the same engine/backend, architecture semantics, tokenizer/data/package identities, optimizer settings, schedule horizon, training budget, micro-batch/accumulation, sequence length, deterministic setting, and verified run-owned artifacts. The explicit runtime-optimization transition described below permits a narrow, recorded exception for supported execution settings. Source/runtime or device-identity drift requires `--allow-runtime-drift`; that produces an explicit best-effort record and never bypasses scientific compatibility. A completed budget cannot be resumed.
 
 Use `--recover RUN_DIR` only to seek the latest valid finalized generation after interruption/corruption. It creates a child after checking compatible state; it is not permission to overwrite the existing run. Old or incomplete historical artifacts that lack required continuation state are not full-resumable.
 
@@ -197,3 +197,21 @@ scientific milestones and reserves its declared peak bytes plus free-space
 headroom. Its keep-set replaces the default latest/previous/best-only bound.
 This RunConfig policy differs from experiment-plan `retention.keep_periodic`,
 which describes plan storage expectations and does not configure the trainer.
+
+## Explicit runtime optimization on resume
+
+A full-state `train --resume` or `train --recover` may opt in to
+`--allow-runtime-optimization` to change dense attention implementation,
+activation checkpointing, block compilation, determinism, or microbatch and
+accumulation while preserving their product. All other training, data, model,
+optimizer, schedule and budget settings remain bound. The child manifest records
+the old and new values and parent checkpoint digest as a best-effort transition;
+results are not bitwise comparable when these settings change. Original
+checkpoints are not modified. Source/runtime identity changes separately require
+`--allow-runtime-drift`.
+
+Set `runtime.compile_transformer_blocks: true` to compile PyTorch transformer
+blocks. This currently requires activation checkpointing and offload to be
+disabled; startup compilation cost and device compatibility depend on the
+installed PyTorch backend. Test the target workload before using it for a long
+run.

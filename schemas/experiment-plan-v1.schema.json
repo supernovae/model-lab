@@ -1752,6 +1752,11 @@
           "title": "Backend",
           "type": "string"
         },
+        "compile_transformer_blocks": {
+          "default": false,
+          "title": "Compile Transformer Blocks",
+          "type": "boolean"
+        },
         "device_index": {
           "default": 0,
           "minimum": 0,

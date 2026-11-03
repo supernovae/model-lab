@@ -586,6 +586,7 @@ def train(
     stop_after_step: int | None = None,
     worker_id: str | None = None,
     allow_runtime_drift: bool = False,
+    allow_runtime_optimization: bool = False,
     max_wall_seconds: float | None = None,
     cancel_path: Path | None = None,
     experiment_id: str | None = None,
@@ -633,6 +634,7 @@ def train(
         stop_after_step=stop_after_step,
         worker_id=worker_id,
         allow_runtime_drift=allow_runtime_drift,
+        allow_runtime_optimization=allow_runtime_optimization,
         stage_bundle=stage_bundle,
         cancel_path=cancel_path,
         purpose="training",
@@ -691,6 +693,7 @@ def _train_impl(
     stop_after_step: int | None = None,
     worker_id: str | None = None,
     allow_runtime_drift: bool = False,
+    allow_runtime_optimization: bool = False,
     stage_bundle: Path | None = None,
     cancel_path: Path | None = None,
     purpose: str = "training",
@@ -946,6 +949,7 @@ def _train_impl(
             promote=promote,
             recover=recover,
             allow_runtime_drift=allow_runtime_drift,
+            allow_runtime_optimization=allow_runtime_optimization,
         )
         snapshot = continuation_state.snapshot
         source_run = continuation_state.source_run
