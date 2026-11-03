@@ -346,7 +346,7 @@ def eval_protocol(config: Any) -> dict[str, int]:
     """The evaluation windowing and batching both arms are scored with."""
     return {
         "seq_len": config.training.seq_len,
-        "batch_size": config.training.micro_batch_size,
+        "batch_size": config.evaluation.batch_size or config.training.micro_batch_size,
         "max_batches": config.evaluation.max_batches,
     }
 
@@ -365,7 +365,10 @@ def _with_eval_protocol(loaded: Any, protocol: Mapping[str, int]) -> Any:
                     }
                 ),
                 "evaluation": config.evaluation.model_copy(
-                    update={"max_batches": protocol["max_batches"]}
+                    update={
+                        "max_batches": protocol["max_batches"],
+                        "batch_size": protocol["batch_size"],
+                    }
                 ),
             }
         ),

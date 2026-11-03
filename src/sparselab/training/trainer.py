@@ -544,7 +544,7 @@ def _write_validation_report(
         "identities": identities,
         "batch_size": None
         if config.evaluation.panels
-        else config.training.micro_batch_size,
+        else config.evaluation.batch_size or config.training.micro_batch_size,
         "max_batches": None
         if config.evaluation.panels
         else config.evaluation.max_batches,
@@ -1900,7 +1900,11 @@ def _train_impl(
             limit=config.evaluation.max_batches,
             name="default",
         ):
-            batch_size = batch_size or config.training.micro_batch_size
+            batch_size = (
+                batch_size
+                or config.evaluation.batch_size
+                or config.training.micro_batch_size
+            )
             progress_total = 0
             if current_pilot_progress() is not None:
                 count = (len(selected) + batch_size - 1) // batch_size

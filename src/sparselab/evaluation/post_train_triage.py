@@ -246,7 +246,9 @@ def _expected_validation(
 
         return panel_coverage(config["evaluation"])
     seq = config["training"]["seq_len"]
-    batch = config["training"]["micro_batch_size"]
+    batch = (
+        config["evaluation"].get("batch_size") or config["training"]["micro_batch_size"]
+    )
     supervision = "data/validation_supervision.npy"
     data = TokenBlockDataset(
         np.load(_owned(run, "data/validation.npy"), mmap_mode="r", allow_pickle=False),

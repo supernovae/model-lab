@@ -591,6 +591,9 @@ def test_explicit_runtime_transition_preserves_full_resume_state(
                     "deterministic": False,
                 }
             ),
+            "evaluation": original.evaluation.model_copy(
+                update={"batch_size": original.training.micro_batch_size}
+            ),
         }
     )
     engine = PyTorchEngine()
@@ -628,6 +631,17 @@ def test_explicit_runtime_transition_preserves_full_resume_state(
             allow_runtime_optimization=True,
             stop_after_step=3,
         )
+    bad_validation = target.model_copy(
+        update={"evaluation": target.evaluation.model_copy(update={"batch_size": None})}
+    )
+    with pytest.raises(ValueError, match="preserve ordinary validation batch size"):
+        train(
+            bad_validation,
+            run_id="runtime-bad-validation",
+            resume=checkpoint,
+            allow_runtime_optimization=True,
+            stop_after_step=3,
+        )
     bad = target.model_copy(update={"seed": target.seed + 1})
     with pytest.raises(ValueError, match="scientific or unsupported"):
         train(
@@ -657,12 +671,27 @@ def test_explicit_runtime_transition_preserves_full_resume_state(
         "training.deterministic",
         "training.micro_batch_size",
         "training.gradient_accumulation",
+        "evaluation.batch_size",
     }
     resumed = CheckpointManager(child).load(child / "checkpoints/latest.json")
     assert resumed.step == 3
     assert resumed.tokens_seen == before.tokens_seen + 32
     assert resumed.parent_checkpoint_sha256 == before.checkpoint_sha256
     assert resumed.optimizer and resumed.rng is not None
+    child_report = next(
+        json.loads(path.read_text())
+        for path in (child / "evaluations").glob("*.json")
+        if json.loads(path.read_text())["step"] == 3
+    )
+    parent_report = next(
+        json.loads(path.read_text())
+        for path in (parent / "evaluations").glob("*.json")
+        if json.loads(path.read_text())["step"] == 2
+    )
+    assert child_report["batch_size"] == parent_report["batch_size"] == 2
+    assert child_report["valid_targets"] == parent_report["valid_targets"]
+    child_evidence = experiment_evidence(child)
+    assert any(point["step"] == 3 for point in child_evidence["quality_observations"])
     assert (
         CheckpointManager(parent).load(checkpoint).checkpoint_sha256
         == before.checkpoint_sha256

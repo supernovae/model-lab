@@ -56,6 +56,13 @@ def _runtime_optimization_transition(
         raise ValueError(
             "runtime optimization transition must preserve effective batch"
         )
+    if not source.evaluation.panels and (
+        (source.evaluation.batch_size or source.training.micro_batch_size)
+        != (target.evaluation.batch_size or target.training.micro_batch_size)
+    ):
+        raise ValueError(
+            "runtime optimization transition must preserve ordinary validation batch size"
+        )
     original = source.model_dump(mode="json")
     comparable = target.model_dump(mode="json")
     paths = (
@@ -63,6 +70,7 @@ def _runtime_optimization_transition(
         ("training", "deterministic"),
         ("training", "micro_batch_size"),
         ("training", "gradient_accumulation"),
+        ("evaluation", "batch_size"),
         ("runtime", "memory", "activation_checkpointing", "enabled"),
         ("runtime", "compile_transformer_blocks"),
     )
@@ -75,7 +83,11 @@ def _runtime_optimization_transition(
         key = path[-1]
         # Default-valued fields are intentionally omitted from historical identities.
         default: object = (
-            "reference" if path == ("attention", "implementation") else False
+            "reference"
+            if path == ("attention", "implementation")
+            else None
+            if path == ("evaluation", "batch_size")
+            else False
         )
         previous, requested = old.get(key, default), new.get(key, default)
         if previous != requested:

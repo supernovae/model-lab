@@ -203,8 +203,10 @@ which describes plan storage expectations and does not configure the trainer.
 A full-state `train --resume` or `train --recover` may opt in to
 `--allow-runtime-optimization` to change dense attention implementation,
 activation checkpointing, block compilation, determinism, or microbatch and
-accumulation while preserving their product. All other training, data, model,
-optimizer, schedule and budget settings remain bound. The child manifest records
+accumulation while preserving their product. Fixed validation panels retain their
+own batch sizes. Without fixed panels, set `evaluation.batch_size` to the prior
+microbatch size when changing microbatch so the validation sample is unchanged.
+All other training, data, model, optimizer, schedule and budget settings remain bound. The child manifest records
 the old and new values and parent checkpoint digest as a best-effort transition;
 results are not bitwise comparable when these settings change. Original
 checkpoints are not modified. Source/runtime identity changes separately require

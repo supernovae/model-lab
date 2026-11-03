@@ -492,6 +492,9 @@ class FixedValidationPanel(StrictModel):
 class EvaluationConfig(StrictModel):
     every_steps: int = Field(default=25, gt=0)
     max_batches: int = Field(default=16, gt=0)
+    batch_size: int | None = Field(
+        default=None, gt=0, exclude_if=lambda value: value is None
+    )
     panels: tuple[FixedValidationPanel, ...] = Field(
         default=(), exclude_if=lambda value: not value
     )
