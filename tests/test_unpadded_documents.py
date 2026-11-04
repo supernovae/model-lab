@@ -67,7 +67,8 @@ def test_unpadded_targets_resume_and_overlength_refusal():
         MatchedStoryDataset(ids, 2, 3, layout="story", unpadded_documents=True)
 
 
-def test_unpadded_native_train_resume(tmp_path):
+@pytest.mark.parametrize("multiport", [False, True])
+def test_unpadded_native_train_resume(tmp_path, multiport):
     from test_training import config, equal
 
     from sparselab.data.packing import prepare_data
@@ -97,6 +98,25 @@ def test_unpadded_native_train_resume(tmp_path):
         memory_ngram_size=3,
         memory_dim=8,
     )
+    if multiport:
+        from sparselab.address_hash import engram_table_sizes
+        from sparselab.memory_tokenizer import build_memory_token_map
+
+        raw["model"].update(
+            num_layers=2,
+            memory_variant="context_key",
+            memory_injection="after_block",
+            memory_block_indices=[0, 1],
+            memory_conv_kernel_size=4,
+            memory_ngram_orders=[2, 3],
+            memory_hash_heads=2,
+            memory_table_size=31,
+            memory_table_sizes=list(engram_table_sizes(31, 8)),
+            memory_addressing="prime_xor_v1",
+            memory_token_mapping=build_memory_token_map(
+                base.tokenizer.path, mode="identity"
+            ).to_dict(),
+        )
     budget = plan.targets_for_updates(2)
     raw["training"].update(
         seq_len=length,
