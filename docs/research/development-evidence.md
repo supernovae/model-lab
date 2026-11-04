@@ -668,6 +668,8 @@ workflows; it does not turn this historical coordinator into a general runner.
 
 The coordinator enforces pre-launch byte/inode reservations plus a 25% free
 floor; it does not itself monitor live storage growth. Execution must provide
-that monitoring. Typed declarative inheritance and a compact durable identity
-metadata closure remain separate code work in `TODO.md`; the operational
-coordinator does not close either item or prove historical release recovery.
+that monitoring. The historical coordinator does not prove historical release
+recovery. Its proposed compact durable identity metadata closure was a follow-up
+proposal, not a guarantee of the recorded execution; this record does not
+establish the proposal's current implementation status. Current inheritance
+behavior is defined by the native contract linked above.
