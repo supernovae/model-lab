@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -242,6 +242,13 @@ METRICS = {
             "model",
         ),
         MetricSpec(
+            "engram/injection/after_block",
+            "indicator",
+            "Memory was injected after configured decoder blocks.",
+            "engram",
+            "model",
+        ),
+        MetricSpec(
             "engram/injection/embedding",
             "indicator",
             "Memory was injected after token embedding and before decoder block 0.",
@@ -252,6 +259,55 @@ METRICS = {
 }
 
 
+# These are per-forward diagnostics, target-weighted over a committed update.
+_ENGRAM = {
+    "lookup_count": (
+        "lookups",
+        "Address lookups per forward; not a cumulative training count.",
+    ),
+    "unique_addresses": (
+        "addresses",
+        "Distinct addresses observed per forward across tables.",
+    ),
+    "collision_count": (
+        "reused addresses",
+        "Lookups minus distinct addresses, including repeated input; not proven hash collisions.",
+    ),
+    "bucket_reuse_rate": (
+        "fraction",
+        "Fraction of lookups that reuse an observed address; not retrieval accuracy.",
+    ),
+    "table_utilization": (
+        "fraction",
+        "Observed distinct addresses divided by table capacity; not lifetime occupancy.",
+    ),
+    "maximum_address_fraction": (
+        "fraction",
+        "Largest address count divided by lookup count.",
+    ),
+    "gate_mean": (
+        "gate",
+        "Mean learned gate value; not memory quality or a gradient measurement.",
+    ),
+    "value_norm": ("L2", "Mean memory value-vector norm."),
+    "hidden_norm": ("L2", "Mean hidden-vector norm at the memory adapter."),
+}
+METRICS.update(
+    {
+        f"engram/{name}": MetricSpec(f"engram/{name}", unit, summary, "engram", "model")
+        for name, (unit, summary) in _ENGRAM.items()
+    }
+)
+
+
 def metric_spec(name: str) -> MetricSpec | None:
     """Return canonical metadata for an exact persisted metric name."""
-    return METRICS.get(name)
+    spec = METRICS.get(name)
+    if spec is not None:
+        return spec
+    parts = name.split("/")
+    if len(parts) == 4 and parts[:2] == ["engram", "port"] and parts[2].isdigit():
+        base = METRICS.get(f"engram/{parts[3]}")
+        if base is not None:
+            return replace(base, name=name)
+    return None

@@ -316,3 +316,33 @@ values but hide deltas (`architecture_matches=False`). Expert routing is shown
 separately for each checkpoint; dense FFNs have no MoE router. Changing a selector
 or sentence hides the previous result until you run again. A failed new comparison
 clears the prior comparison, so old charts cannot appear under a new selection.
+
+### Training, memory and snapshot inspection
+
+Run telemetry includes **Engram memory** (separate from device/RAM memory) and
+**Snapshot inspector**. Training opens with a compact memory summary and three
+curves: training loss, validation loss and throughput, when recorded. Use the
+metric selector to add other curves. The quick navigation links retain the run
+selection across telemetry pages.
+
+Engram memory shows aggregate and recorded per-port gates, value/hidden norms,
+address reuse and table utilization. Every value retains its observation step;
+missing diagnostics say unavailable. These are target-weighted forward diagnostics,
+so counts can be fractional. Address reuse includes repeated inputs and is not
+proof of hash collisions or retrieval quality. The page does not infer gradients,
+parameter updates or quality gains.
+
+Snapshot inspector filters current recorded metric values and their changes from
+the preceding observation, displays the saved configuration, shows recent events,
+and inspects an explicitly selected checkpoint generation (newest by default).
+It reads projected metadata only; no weights are loaded and no inference runs.
+Save-time verification is distinct from a current local file check. Existing
+**Checkpoints** verification and **Explorer** remain available through the quick
+links. Explorer's native size/runtime restrictions still apply.
+
+Automatic refresh defaults to ten seconds and offers two seconds, thirty seconds,
+or paused. **Refresh now** refreshes the telemetry fragment without a full-page
+rerun. The query reads telemetry for selected runs only. A failed read retains
+that selection's last successful snapshot with a visible stale-data warning;
+it never substitutes another selection's data. Charts retain their existing
+interaction-preserving component.

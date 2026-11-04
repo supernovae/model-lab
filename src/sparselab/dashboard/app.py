@@ -18,7 +18,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from sparselab.dashboard import lab_pages, training_charts
+from sparselab.dashboard import inspection, lab_pages, training_charts, ui
 from sparselab.dashboard.queries import DashboardSnapshot, RunRecord, runs, snapshot
 from sparselab.dashboard.research import learn_page, research_page
 from sparselab.evaluation.post_train_triage import read_triage, triage_summary
@@ -396,8 +396,9 @@ def _triage_panel(
 def training(
     view: DashboardSnapshot, root: Path | None = None, surface_dir: Path | None = None
 ) -> None:
-    st.header("Training")
+    ui.page_header("Training", "How is the current run progressing?")
     records, selected_ids = selected(view)
+    inspection.engram_summary(view, selected_ids, compact=True)
     _runtime_forecast_panel(view, selected_ids)
     comparison([record for record in records if record.run_id in selected_ids], view)
     if root is not None:
@@ -425,7 +426,19 @@ def training(
     )
     names = sorted({str(point["name"]) for point in points})
     selected_names = st.multiselect(
-        "Metrics", names, default=names, key="training_metrics"
+        "Metrics",
+        names,
+        default=[
+            name
+            for name in (
+                "train/loss",
+                "validation/loss",
+                "performance/tokens_per_second",
+            )
+            if name in names
+        ],
+        key="training_metrics",
+        help="Start with loss and throughput. Add any recorded metric for deeper inspection.",
     )
     for name in selected_names:
         subset = [point for point in points if point["name"] == name]
@@ -441,6 +454,7 @@ def training(
 
 def architecture_diagnostics(view: DashboardSnapshot) -> None:
     st.header("Architecture diagnostics")
+    st.caption("For per-port memory values, use Engram memory in the navigation.")
     _, selected_ids = selected(view)
     points = _rows_for(view.metrics, selected_ids)
     for title, prefix in {
@@ -888,9 +902,10 @@ def learn() -> None:
 def _read_snapshot(
     root: Path,
 ) -> tuple[DashboardSnapshot | None, datetime | None, str | None]:
-    key = f"dashboard_snapshot:{root.resolve()}"
+    run_ids = tuple(st.session_state.get("selected_runs", []))
+    key = f"dashboard_snapshot:{root.resolve()}:{run_ids}"
     try:
-        fresh = snapshot(root)
+        fresh = snapshot(root, run_ids)
     except (OSError, sqlite3.Error, ValueError) as error:
         previous = st.session_state.get(key)
         if previous is None:
@@ -902,10 +917,12 @@ def _read_snapshot(
     return fresh, observed_at, None
 
 
-@st.fragment(run_every=2)
 def render(root: Path, page: str, surface_dir: Path | None = None) -> None:
-    if st.button("Refresh now", key="dashboard_refresh"):
-        st.rerun()
+    st.button(
+        "Refresh now",
+        key="dashboard_refresh",
+        help="Read the current recorded values without reloading the page.",
+    )
     view, observed_at, error = _read_snapshot(root)
     if view is None:
         st.error(f"Dashboard could not read the run store: {error}")
@@ -915,14 +932,22 @@ def render(root: Path, page: str, surface_dir: Path | None = None) -> None:
         st.error(f"Showing stale data ({_observation_age(observed_at)} old): {error}")
     else:
         st.caption(
-            f"Last observed {_observation_age(observed_at)} ago. Refreshes every 2 seconds."
+            f"Observed at {observed_at:%H:%M:%S} UTC · "
+            + (
+                f"Refreshes every {st.session_state.get('refresh_seconds', 10)} seconds."
+                if st.session_state.get("refresh_seconds", 10)
+                else "Automatic refresh paused."
+            )
         )
-    _selection_controls(root)
     pages = {
         "overview": overview,
         "training": lambda value: training(value, root, surface_dir),
         "evaluation": evaluation,
         "architecture": architecture_diagnostics,
+        "engram": lambda value: inspection.engram_summary(value, selected(value)[1]),
+        "snapshots": lambda value: inspection.snapshot_inspector(
+            value, selected(value)[1]
+        ),
         "runtime": runtime_view,
         "memory": memory_view,
         "checkpoints": lambda value: checkpoint_view(value, root),
@@ -933,17 +958,20 @@ def render(root: Path, page: str, surface_dir: Path | None = None) -> None:
 
 def _run_page(root: Path, page: str, surface_dir: Path | None = None) -> None:
     """Keep run views unavailable until a read-only projection exists."""
-    key = f"dashboard_snapshot:{root.resolve()}"
+    run_ids = tuple(st.session_state.get("selected_runs", []))
+    key = f"dashboard_snapshot:{root.resolve()}:{run_ids}"
     if not (root / "experiments.sqlite3").is_file() and key not in st.session_state:
         st.info("No runs yet. Run `sparselab train CONFIG --run-id NAME`.")
         return
     if page == "training":
         training_charts.load_plotly()
-    render(root, page, surface_dir)
+    interval = st.session_state.get("refresh_seconds", 10)
+    st.fragment(run_every=interval or None)(render)(root, page, surface_dir)
 
 
 def main() -> None:
     st.set_page_config(page_title="Tiny Sparse Lab", page_icon="🔬", layout="wide")
+    ui.style()
     args = arguments()
     root = Path(args.runs_dir)
     reports_dir = Path(args.reports_dir)
@@ -992,12 +1020,24 @@ def main() -> None:
             (lambda name=name: _run_page(root, name, surface_dir))
             if name == "training"
             else (lambda name=name: _run_page(root, name)),
-            title=name.title(),
+            title={
+                "engram": "Engram memory",
+                "snapshots": "Snapshot inspector",
+                "memory": "Device memory",
+            }.get(name, name.title()),
+            icon={
+                "training": ":material/monitoring:",
+                "engram": ":material/memory:",
+                "snapshots": ":material/manage_search:",
+                "checkpoints": ":material/save:",
+            }.get(name, ":material/analytics:"),
             url_path=name,
         )
         for name in (
             "overview",
             "training",
+            "engram",
+            "snapshots",
             "evaluation",
             "architecture",
             "runtime",
@@ -1021,7 +1061,31 @@ def main() -> None:
         }
     )
     st.sidebar.markdown("### 🔬 Tiny Sparse Lab")
-    st.sidebar.caption(f"lab {lab_dir}  \nruns {root}")
+    st.sidebar.caption("Observe training · Inspect evidence · Compare models")
+    with st.sidebar.expander("Data locations"):
+        st.caption(f"lab {lab_dir}  \nruns {root}")
+    if page.url_path in {item.url_path for item in run_pages}:
+        _selection_controls(root)
+        st.sidebar.selectbox(
+            "Automatic refresh",
+            [10, 2, 30, 0],
+            format_func=lambda value: f"Every {value}s" if value else "Paused",
+            key="refresh_seconds",
+        )
+        with st.container(horizontal=True):
+            for destination in (
+                "training",
+                "engram",
+                "snapshots",
+                "checkpoints",
+                "explorer",
+            ):
+                target = next(
+                    (item for item in run_pages + lab if item.url_path == destination),
+                    None,
+                )
+                if target is not None:
+                    st.page_link(target, label=target.title)
     page.run()
 
 

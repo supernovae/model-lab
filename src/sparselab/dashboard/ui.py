@@ -57,7 +57,7 @@ SEQUENTIAL = "Viridis"
 
 CSS = """
 <style>
-.block-container {padding-top: 2.2rem; max-width: 1400px;}
+.block-container {padding-top: 4.5rem; max-width: 1400px;}
 .pb-banner {border-radius: 14px; padding: 18px 22px; margin: 6px 0 14px 0;
   color: white; box-shadow: 0 2px 10px rgba(0,0,0,.08);}
 .pb-banner h3 {margin: 0 0 4px 0; color: white;}
