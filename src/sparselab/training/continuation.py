@@ -71,10 +71,16 @@ def _runtime_optimization_transition(
         ("training", "micro_batch_size"),
         ("training", "gradient_accumulation"),
         ("evaluation", "batch_size"),
+        ("runtime", "memory", "estimate_policy"),
         ("runtime", "memory", "activation_checkpointing", "enabled"),
         ("runtime", "compile_transformer_blocks"),
         ("runtime", "compile_output_head_loss"),
     )
+    defaults = {
+        ("attention", "implementation"): "reference",
+        ("evaluation", "batch_size"): None,
+        ("runtime", "memory", "estimate_policy"): "enforce",
+    }
     changes: list[dict[str, object]] = []
     for path in paths:
         old: dict[str, Any] = original
@@ -83,15 +89,16 @@ def _runtime_optimization_transition(
             old, new = old[part], new[part]
         key = path[-1]
         # Default-valued fields are intentionally omitted from historical identities.
-        default: object = (
-            "reference"
-            if path == ("attention", "implementation")
-            else None
-            if path == ("evaluation", "batch_size")
-            else False
-        )
+        default = defaults.get(path, False)
         previous, requested = old.get(key, default), new.get(key, default)
         if previous != requested:
+            if path == ("runtime", "memory", "estimate_policy") and (
+                previous,
+                requested,
+            ) != ("enforce", "observe"):
+                raise ValueError(
+                    "runtime estimate policy transition permits only enforce-to-observe"
+                )
             changes.append(
                 {"field": ".".join(path), "previous": previous, "requested": requested}
             )

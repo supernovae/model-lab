@@ -335,6 +335,7 @@ def test_append_composes_explicit_runtime_transition_without_reset(
     source, _root, parent, _tokenizer = document_parent
     raw = append_config(document_parent, tmp_path).model_dump(mode="json")
     raw["attention"]["implementation"] = "sdpa"
+    raw["runtime"]["memory"]["estimate_policy"] = "observe"
     target = RunConfig.model_validate(raw)
     with pytest.raises(ValueError, match="architecture semantics"):
         train(target, extend_budget=parent, append_data=True, run_id="not_optimized")
@@ -361,22 +362,34 @@ def test_append_composes_explicit_runtime_transition_without_reset(
             "field": "attention.implementation",
             "previous": "reference",
             "requested": "sdpa",
-        }
+        },
+        {
+            "field": "runtime.memory.estimate_policy",
+            "previous": "enforce",
+            "requested": "observe",
+        },
     ]
 
 
-@pytest.mark.parametrize("damage", ["prefix", "optimizer"])
+@pytest.mark.parametrize(
+    "damage", ["prefix", "optimizer", "memory_budget", "memory_fraction"]
+)
 def test_runtime_flag_cannot_bypass_data_or_scientific_rails(
     document_parent, tmp_path, damage
 ):
     source, _root, parent, _tokenizer = document_parent
     raw = append_config(document_parent, tmp_path).model_dump(mode="json")
     raw["attention"]["implementation"] = "sdpa"
+    raw["runtime"]["memory"]["estimate_policy"] = "observe"
     if damage == "prefix":
         path = Path(raw["dataset"]["train_path"])
         path.write_text(path.read_text().replace("alpha", "wrong", 1))
-    else:
+    elif damage == "optimizer":
         raw["optimizer"]["peak"] *= 2
+    elif damage == "memory_budget":
+        raw["runtime"]["memory"]["budget_bytes"] = 1024**3
+    else:
+        raw["runtime"]["memory"]["max_device_memory_fraction"] = 0.5
     with pytest.raises(ValueError):
         train(
             RunConfig.model_validate(raw),
