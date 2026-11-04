@@ -1279,6 +1279,15 @@
       "additionalProperties": false,
       "description": "Shared document grouping; layout is the sole arm-specific setting.",
       "properties": {
+        "document_batching": {
+          "default": "separate",
+          "enum": [
+            "separate",
+            "padded"
+          ],
+          "title": "Document Batching",
+          "type": "string"
+        },
         "frozen_update_ends": {
           "default": [],
           "items": {
@@ -1295,6 +1304,12 @@
           ],
           "title": "Layout",
           "type": "string"
+        },
+        "padding_multiple": {
+          "default": 128,
+          "exclusiveMinimum": 0,
+          "title": "Padding Multiple",
+          "type": "integer"
         },
         "targets_per_update": {
           "default": 4096,

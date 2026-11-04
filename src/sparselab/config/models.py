@@ -508,12 +508,22 @@ class MatchedStoryConfig(StrictModel):
     layout: Literal["contiguous", "story"]
     targets_per_update: int = Field(default=4096, gt=0)
     unpadded_documents: bool = False
+    document_batching: Literal["separate", "padded"] = Field(
+        default="separate", exclude_if=lambda value: value == "separate"
+    )
+    padding_multiple: int = Field(
+        default=128, gt=0, exclude_if=lambda value: value == 128
+    )
     frozen_update_ends: tuple[Annotated[int, Field(strict=True, gt=0)], ...] = Field(
         default=(), exclude_if=lambda value: not value
     )
 
     @model_validator(mode="after")
     def validate_frozen_ends(self) -> MatchedStoryConfig:
+        if self.document_batching == "padded" and not self.unpadded_documents:
+            raise ValueError(
+                "padded document batching requires whole unpadded documents"
+            )
         if tuple(sorted(set(self.frozen_update_ends))) != self.frozen_update_ends:
             raise ValueError("frozen update ends must be sorted and unique")
         return self
@@ -811,14 +821,35 @@ class RunConfig(StrictModel):
             and matched.unpadded_documents
             and (
                 matched.layout != "story"
-                or self.training.micro_batch_size != 1
+                or (
+                    self.training.micro_batch_size != 1
+                    and matched.document_batching != "padded"
+                )
                 or self.evaluation.batch_size not in {None, 1}
+                or (
+                    self.training.micro_batch_size > 1
+                    and self.evaluation.batch_size != 1
+                )
                 or self.runtime.engine != "pytorch"
                 or self.model.memory not in {"none", "ngram"}
             )
         ):
             raise ValueError(
                 "unpadded documents require story layout, batch size one and PyTorch none/ngram memory"
+            )
+        if (
+            matched is not None
+            and matched.document_batching == "padded"
+            and (
+                self.attention.kind != "dense"
+                or self.model.ffn != "dense"
+                or self.training.gradient_accumulation != 1
+                or self.dataset.allocation_manifest_path is not None
+                or self.training.portability_manifest_path is not None
+            )
+        ):
+            raise ValueError(
+                "padded document batching requires dense attention/FFN, no sidecars and accumulation one"
             )
         if self.runtime.compile_output_head_loss and (
             self.dataset.allocation_manifest_path is not None

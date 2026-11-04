@@ -36,6 +36,7 @@ class MemoryDiagnostics:
     value_norm: Tensor
     hidden_norm: Tensor
     streams: tuple[MemoryDiagnostics, ...] = ()
+    document_scoped: bool = False
 
 
 def _diagnostics(
@@ -44,7 +45,42 @@ def _diagnostics(
     values: Tensor,
     hidden: Tensor,
     table_size: int,
+    position_mask: Tensor | None = None,
 ) -> MemoryDiagnostics:
+    if position_mask is not None:
+        # Document-scoped occupancy; additive across microbatch boundaries.
+        # Bincount weights exclude padding without dynamic-sized indexing.
+        weights = position_mask.to(torch.float32)
+        offsets = (
+            torch.arange(addresses.shape[0], device=addresses.device)[:, None]
+            * table_size
+        )
+        counts = torch.bincount(
+            (addresses + offsets).flatten(),
+            weights=weights.flatten(),
+            minlength=addresses.shape[0] * table_size,
+        ).reshape(addresses.shape[0], table_size)
+        lookups = weights.sum()
+        unique = (counts > 0).sum()
+        collisions = lookups - unique
+        denominator = lookups.clamp_min(1)
+        lengths = weights.sum(-1)
+        return MemoryDiagnostics(
+            document_scoped=True,
+            lookup_count=lookups.detach(),
+            unique_addresses=unique.detach(),
+            collision_count=collisions.detach(),
+            bucket_reuse_rate=(collisions / denominator).detach(),
+            table_utilization=(
+                ((counts > 0).sum(-1) * lengths).sum() / denominator / table_size
+            ).detach(),
+            maximum_address_fraction=(
+                counts.max(-1).values.sum() / denominator
+            ).detach(),
+            gate_mean=((gate.squeeze(-1) * weights).sum() / denominator).detach(),
+            value_norm=((values.norm(dim=-1) * weights).sum() / denominator).detach(),
+            hidden_norm=((hidden.norm(dim=-1) * weights).sum() / denominator).detach(),
+        )
     counts = torch.bincount(addresses.flatten(), minlength=table_size)
     lookup_count = torch.tensor(addresses.numel(), device=addresses.device)
     unique = (counts > 0).sum()
@@ -214,7 +250,11 @@ class TokenNgramMemory(nn.Module):
         return token_address_finish(address, self.table_size, seed)
 
     def _apply_addresses(
-        self, hidden: Tensor, addresses: list[Tensor], history: Tensor | None = None
+        self,
+        hidden: Tensor,
+        addresses: list[Tensor],
+        history: Tensor | None = None,
+        position_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor | None]:
         tables = (self.table, *self.extra_tables)
         retrieved = [
@@ -230,26 +270,52 @@ class TokenNgramMemory(nn.Module):
             values = torch.stack(stream_values).mean(dim=0)
             gate = torch.sigmoid(self.gate(hidden))
         stream_diagnostics = tuple(
-            _diagnostics(address, gate, value, hidden, size)
+            _diagnostics(address, gate, value, hidden, size, position_mask)
             for address, value, size in zip(
                 addresses, stream_values, self.table_sizes, strict=True
             )
         )
-        self.last_diagnostics = replace(
-            _diagnostics(
-                torch.cat(
-                    [
-                        address.flatten() + sum(self.table_sizes[:index])
-                        for index, address in enumerate(addresses)
-                    ]
+        if position_mask is not None:
+            combined = stream_diagnostics
+            first = combined[0]
+            weights = position_mask.to(torch.float32)
+            self.last_diagnostics = replace(
+                first,
+                lookup_count=sum(d.lookup_count for d in combined),
+                unique_addresses=sum(d.unique_addresses for d in combined),
+                collision_count=sum(d.collision_count for d in combined),
+                bucket_reuse_rate=torch.stack(
+                    [d.bucket_reuse_rate for d in combined]
+                ).mean(),
+                table_utilization=sum(
+                    d.table_utilization * size
+                    for d, size in zip(combined, self.table_sizes, strict=True)
+                )
+                / sum(self.table_sizes),
+                maximum_address_fraction=torch.stack(
+                    [d.maximum_address_fraction for d in combined]
+                ).mean(),
+                value_norm=(
+                    (values.norm(dim=-1) * weights).sum() / weights.sum().clamp_min(1)
+                ).detach(),
+                streams=stream_diagnostics,
+            )
+        else:
+            self.last_diagnostics = replace(
+                _diagnostics(
+                    torch.cat(
+                        [
+                            address.flatten() + sum(self.table_sizes[:index])
+                            for index, address in enumerate(addresses)
+                        ]
+                    ),
+                    gate,
+                    values,
+                    hidden,
+                    sum(self.table_sizes),
                 ),
-                gate,
-                values,
-                hidden,
-                sum(self.table_sizes),
-            ),
-            streams=stream_diagnostics,
-        )
+                streams=stream_diagnostics,
+            )
         gated = gate * values
         next_history = None
         if self.conv is not None:
@@ -279,7 +345,9 @@ class TokenNgramMemory(nn.Module):
             raise ValueError("memory history supplied without convolution")
         return hidden + gated, next_history
 
-    def forward(self, hidden: Tensor, input_ids: Tensor) -> Tensor:
+    def forward(
+        self, hidden: Tensor, input_ids: Tensor, *, position_mask: Tensor | None = None
+    ) -> Tensor:
         return self._apply_addresses(
             hidden,
             [
@@ -287,6 +355,7 @@ class TokenNgramMemory(nn.Module):
                 for order in self.ngram_orders
                 for head in range(self.hash_heads)
             ],
+            position_mask=position_mask,
         )[0]
 
     def forward_last(

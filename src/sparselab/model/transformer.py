@@ -213,6 +213,7 @@ class DenseLM(nn.Module):
         *,
         mask: Tensor | None = None,
         cache: GenerationCache | None = None,
+        position_mask: Tensor | None = None,
         block_index: int | None = None,
     ) -> Tensor:
         extra_key = str(block_index)
@@ -241,7 +242,7 @@ class DenseLM(nn.Module):
                 else:
                     cache.memory_history = next_history
             else:
-                updated = memory(hidden, token_ids)
+                updated = memory(hidden, token_ids, position_mask=position_mask)
         elif isinstance(memory, (ByteAddressMemory, PortableEngramAdapter)):
             if byte_addresses is None:
                 raise ValueError(
@@ -378,6 +379,7 @@ class DenseLM(nn.Module):
         activation_checkpointing: bool = False,
         diagnostics: Literal["scalar", "full"] = "scalar",
         return_hidden: bool = False,
+        position_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         if input_ids.ndim != 2 or input_ids.shape[1] == 0:
             raise ValueError("input_ids must have shape [batch, non-empty sequence]")
@@ -390,7 +392,13 @@ class DenseLM(nn.Module):
         self._recomputed_block_calls = 0
         x = self.embedding(input_ids)
         if self.config.memory_injection == "embedding":
-            x = self._apply_memory(x, input_ids, byte_addresses, mask=memory_mask)
+            x = self._apply_memory(
+                x,
+                input_ids,
+                byte_addresses,
+                mask=memory_mask,
+                position_mask=position_mask,
+            )
         x = self._apply_semantic_site(x, semantic_query_map, site="embedding")
         auxiliary_loss = x.new_zeros(())
         for block_index, block in enumerate(self.blocks):
@@ -433,6 +441,7 @@ class DenseLM(nn.Module):
                     input_ids,
                     byte_addresses,
                     mask=memory_mask,
+                    position_mask=position_mask,
                     block_index=block_index,
                 )
             x = self._apply_semantic_site(
@@ -444,7 +453,13 @@ class DenseLM(nn.Module):
             auxiliary_loss = auxiliary_loss + block_aux
         x = self.norm(x)
         if self.config.memory_injection == "final":
-            x = self._apply_memory(x, input_ids, byte_addresses, mask=memory_mask)
+            x = self._apply_memory(
+                x,
+                input_ids,
+                byte_addresses,
+                mask=memory_mask,
+                position_mask=position_mask,
+            )
         x = self._apply_semantic_site(x, semantic_query_map, site="final")
         return (x if return_hidden else self.output(x)), auxiliary_loss
 
@@ -508,17 +523,27 @@ class DenseLM(nn.Module):
                 result["engram/bucket_reuse_rate"] = (
                     total_lookups - unique
                 ).float() / total_lookups.clamp_min(1)
-                result["engram/table_utilization"] = unique.float() / sum(
-                    sum(memory.table_sizes) for memory in ports.values()
-                )
-                result["engram/maximum_address_fraction"] = torch.stack(
-                    [
-                        item.maximum_address_fraction
-                        * item.lookup_count
-                        / total_lookups.clamp_min(1)
-                        for item in diagnostics
-                    ]
-                ).max()
+                if diagnostics[0].document_scoped:
+                    result["engram/table_utilization"] = sum(
+                        memory.last_diagnostics.table_utilization
+                        * sum(memory.table_sizes)
+                        for memory in ports.values()
+                    ) / sum(sum(memory.table_sizes) for memory in ports.values())
+                    result["engram/maximum_address_fraction"] = torch.stack(
+                        [item.maximum_address_fraction for item in diagnostics]
+                    ).mean()
+                else:
+                    result["engram/table_utilization"] = unique.float() / sum(
+                        sum(memory.table_sizes) for memory in ports.values()
+                    )
+                    result["engram/maximum_address_fraction"] = torch.stack(
+                        [
+                            item.maximum_address_fraction
+                            * item.lookup_count
+                            / total_lookups.clamp_min(1)
+                            for item in diagnostics
+                        ]
+                    ).max()
                 for name in ("gate_mean", "value_norm", "hidden_norm"):
                     result[f"engram/{name}"] = torch.stack(
                         [getattr(item, name) for item in diagnostics]

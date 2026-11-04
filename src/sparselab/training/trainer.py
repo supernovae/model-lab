@@ -2279,45 +2279,76 @@ def _train_impl(
                     raise RuntimeError(
                         "selected training window has no supervised targets"
                     )
-                microbatches = [
-                    Microbatch(
-                        np.stack(
-                            [
-                                record[0]
-                                for record in records[
-                                    offset : offset + config.training.micro_batch_size
+                padded_documents = (
+                    isinstance(dataset, MatchedStoryDataset)
+                    and config.training.matched_stories.document_batching == "padded"
+                )
+                microbatches = (
+                    []
+                    if padded_documents
+                    else [
+                        Microbatch(
+                            np.stack(
+                                [
+                                    record[0]
+                                    for record in records[
+                                        offset : offset
+                                        + config.training.micro_batch_size
+                                    ]
                                 ]
-                            ]
-                        ),
-                        np.stack(
-                            [
-                                record[1]
-                                for record in records[
-                                    offset : offset + config.training.micro_batch_size
+                            ),
+                            np.stack(
+                                [
+                                    record[1]
+                                    for record in records[
+                                        offset : offset
+                                        + config.training.micro_batch_size
+                                    ]
                                 ]
-                            ]
-                        ),
-                        _stack_optional(
-                            records[offset : offset + config.training.micro_batch_size],
-                            2,
-                        ),
-                        _stack_optional(
-                            records[offset : offset + config.training.micro_batch_size],
-                            3,
-                        ),
-                        _stack_optional(
-                            records[offset : offset + config.training.micro_batch_size],
-                            4,
-                        ),
-                        _stack_optional(
-                            records[offset : offset + config.training.micro_batch_size],
-                            5,
-                        ),
+                            ),
+                            _stack_optional(
+                                records[
+                                    offset : offset + config.training.micro_batch_size
+                                ],
+                                2,
+                            ),
+                            _stack_optional(
+                                records[
+                                    offset : offset + config.training.micro_batch_size
+                                ],
+                                3,
+                            ),
+                            _stack_optional(
+                                records[
+                                    offset : offset + config.training.micro_batch_size
+                                ],
+                                4,
+                            ),
+                            _stack_optional(
+                                records[
+                                    offset : offset + config.training.micro_batch_size
+                                ],
+                                5,
+                            ),
+                        )
+                        for offset in range(
+                            0, len(records), config.training.micro_batch_size
+                        )
+                    ]
+                )
+                if (
+                    isinstance(dataset, MatchedStoryDataset)
+                    and config.training.matched_stories.document_batching == "padded"
+                ):
+                    from sparselab.data.document_batching import collate_document_update
+
+                    microbatches = collate_document_update(
+                        records,
+                        width=config.training.micro_batch_size,
+                        eos=dataset.eos,
+                        max_length=config.training.seq_len,
+                        padding_multiple=config.training.matched_stories.padding_multiple,
                     )
-                    for offset in range(
-                        0, len(records), config.training.micro_batch_size
-                    )
-                ]
                 retry_seconds = 0.0
                 emit_pilot_progress(
                     "start",

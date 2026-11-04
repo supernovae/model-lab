@@ -41,7 +41,7 @@ def _resume_settings(config: RunConfig) -> str:
     return config_sha256(settings)
 
 
-def _runtime_optimization_transition(
+def runtime_optimization_transition(
     source: RunConfig, target: RunConfig, checkpoint_sha256: str
 ) -> dict[str, object]:
     """Admit only explicitly requested execution changes with a fixed effective batch."""
@@ -49,7 +49,22 @@ def _runtime_optimization_transition(
         raise ValueError("runtime optimization transition requires PyTorch")
     if source.attention.kind != "dense" or target.attention.kind != "dense":
         raise ValueError("runtime optimization transition requires dense attention")
-    if (
+    source_matched = source.training.matched_stories
+    target_matched = target.training.matched_stories
+    document_groups = (
+        source_matched is not None
+        and target_matched is not None
+        and source_matched.unpadded_documents
+        and target_matched.unpadded_documents
+        and source_matched.layout == target_matched.layout == "story"
+    )
+    # Grouping/data/budget/cursor remain covered by the complete settings
+    # comparison below and native checkpoint/data verification.
+    if document_groups and (
+        source.training.gradient_accumulation != target.training.gradient_accumulation
+    ):
+        raise ValueError("document batching must preserve declared accumulation")
+    if not document_groups and (
         source.training.micro_batch_size * source.training.gradient_accumulation
         != target.training.micro_batch_size * target.training.gradient_accumulation
     ):
@@ -80,7 +95,14 @@ def _runtime_optimization_transition(
         ("attention", "implementation"): "reference",
         ("evaluation", "batch_size"): None,
         ("runtime", "memory", "estimate_policy"): "enforce",
+        ("training", "matched_stories", "document_batching"): "separate",
+        ("training", "matched_stories", "padding_multiple"): 128,
     }
+    if document_groups:
+        paths += (
+            ("training", "matched_stories", "document_batching"),
+            ("training", "matched_stories", "padding_multiple"),
+        )
     changes: list[dict[str, object]] = []
     for path in paths:
         old: dict[str, Any] = original
@@ -118,6 +140,16 @@ def _runtime_optimization_transition(
         "parent_checkpoint_sha256": checkpoint_sha256,
         "changes": changes,
         "reason": "explicit --allow-runtime-optimization; numerical trajectory may differ",
+        **(
+            {
+                "effective_batch_contract": "original-document-update-groups",
+                "document_diagnostics_version": 2
+                if target_matched.document_batching == "padded"
+                else 1,
+            }
+            if document_groups
+            else {}
+        ),
     }
 
 
@@ -244,7 +276,7 @@ def validate_budget_extension(
     )
     optimization = None
     if allow_runtime_optimization:
-        optimization = _runtime_optimization_transition(
+        optimization = runtime_optimization_transition(
             source, comparable, snapshot.checkpoint_sha256
         )
     elif _resume_settings(comparable) != _resume_settings(source):
@@ -524,7 +556,7 @@ def load_continuation(
                 decisions.append(optimization)
         elif allow_runtime_optimization:
             decisions.append(
-                _runtime_optimization_transition(
+                runtime_optimization_transition(
                     saved_config, config, snapshot.checkpoint_sha256
                 )
             )

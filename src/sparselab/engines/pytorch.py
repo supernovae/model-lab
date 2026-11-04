@@ -1104,6 +1104,7 @@ class PyTorchEngine:
         language_sum = torch.zeros((), device=device)
         aux_sum = torch.zeros((), device=device)
         diagnostic_sums: dict[str, torch.Tensor] = {}
+        diagnostic_weights: dict[str, int] = {}
         losses_finite = torch.ones((), device=device, dtype=torch.bool)
         recomputed = 0.0
         executed_microbatches = 0
@@ -1149,7 +1150,7 @@ class PyTorchEngine:
                     allocation_raw_counts[owner] += int(
                         np.count_nonzero(batch.owner_ids == owner)
                     )
-            if not chunk_valid:
+            if not chunk_valid and batch.position_mask is None:
                 continue
             executed_microbatches += 1
             x, y = (
@@ -1252,6 +1253,22 @@ class PyTorchEngine:
                     torch.from_numpy(batch.semantic_queries).to(device),
                     torch.from_numpy(batch.semantic_mask).to(device),
                 )
+            position_mask = None
+            position_count = chunk_valid
+            if batch.position_mask is not None:
+                mask = batch.position_mask
+                if mask.dtype != np.bool_ or mask.shape != batch.inputs.shape:
+                    raise ValueError("position mask must be boolean and match inputs")
+                if (
+                    np.any((batch.targets != -100) & ~mask)
+                    or np.any(mask[:, 1:] & ~mask[:, :-1])
+                    or np.any(~mask[:, 0])
+                ):
+                    raise ValueError(
+                        "position mask must be nonempty right-padded prefixes covering targets"
+                    )
+                position_mask = torch.from_numpy(mask).to(device)
+                position_count = int(mask.sum())
             valid_target_mask = y != -100
             neural_aux_targets = 0
             if allocation_enabled:
@@ -1275,6 +1292,7 @@ class PyTorchEngine:
                     activation_checkpointing=config.runtime.memory.activation_checkpointing.enabled,
                     diagnostics=config.logging.architecture_diagnostics,
                     return_hidden=config.runtime.compile_output_head_loss,
+                    position_mask=position_mask,
                 )
             diagnostics = architecture_metrics(model)
             monitor.sample("forward")
@@ -1369,8 +1387,26 @@ class PyTorchEngine:
             else:
                 aux_sum = aux_sum + auxiliary.detach() * chunk_valid
             for name, value in diagnostics.items():
+                padded_engram = batch.position_mask is not None and name.startswith(
+                    "engram/"
+                )
+                count_metric = padded_engram and name.rsplit("/", 1)[-1] in {
+                    "lookup_count",
+                    "unique_addresses",
+                    "collision_count",
+                }
+                weight = (
+                    1
+                    if count_metric
+                    else position_count
+                    if padded_engram
+                    else chunk_valid
+                )
                 diagnostic_sums[name] = (
-                    diagnostic_sums.get(name, value.new_zeros(())) + value * chunk_valid
+                    diagnostic_sums.get(name, value.new_zeros(())) + value * weight
+                )
+                diagnostic_weights[name] = (
+                    1 if count_metric else diagnostic_weights.get(name, 0) + weight
                 )
         if self.scaler is not None:
             self.scaler.unscale_(optimizer)
@@ -1541,9 +1577,25 @@ class PyTorchEngine:
                 sum(batch.inputs.shape[0] for batch in microbatches)
             ),
             "batch/effective_tokens_per_update": float(valid_targets),
+            "batch/compute_slots": float(
+                sum(batch.inputs.size for batch in microbatches)
+            ),
+            "batch/real_positions": float(
+                sum(
+                    batch.inputs.size
+                    if batch.position_mask is None
+                    else batch.position_mask.sum()
+                    for batch in microbatches
+                )
+            ),
+            "batch/document_diagnostics_version": float(
+                2
+                if any(batch.position_mask is not None for batch in microbatches)
+                else 1
+            ),
             "recompute/block_call_ratio": recomputed / executed_microbatches,
             **{
-                name: float(value) / valid_targets
+                name: float(value) / diagnostic_weights[name]
                 for name, value in diagnostic_sums.items()
             },
             **memory_metrics,

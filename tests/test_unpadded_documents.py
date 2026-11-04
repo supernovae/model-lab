@@ -68,7 +68,8 @@ def test_unpadded_targets_resume_and_overlength_refusal():
 
 
 @pytest.mark.parametrize("multiport", [False, True])
-def test_unpadded_native_train_resume(tmp_path, multiport):
+@pytest.mark.parametrize("width", [1, 4, 8])
+def test_unpadded_native_train_resume(tmp_path, multiport, width):
     from test_training import config, equal
 
     from sparselab.data.packing import prepare_data
@@ -131,6 +132,9 @@ def test_unpadded_native_train_resume(tmp_path, multiport):
     )
     raw["optimizer"]["warmup_steps"] = 0
     raw["evaluation"].update(max_batches=2, batch_size=1)
+    if width > 1:
+        raw["training"]["micro_batch_size"] = width
+        raw["training"]["matched_stories"]["document_batching"] = "padded"
     measured = RunConfig.model_validate(raw)
     train(measured, run_id="whole")
     train(measured, run_id="part", stop_after_step=1)
@@ -149,6 +153,44 @@ def test_unpadded_native_train_resume(tmp_path, multiport):
     equal(states[0].model, states[1].model)
     equal(states[0].optimizer, states[1].optimizer)
     equal(states[0].rng, states[1].rng)
+    if width > 1:
+        source_raw = measured.model_dump(mode="json")
+        source_raw["training"]["micro_batch_size"] = 1
+        source_raw["training"]["matched_stories"].pop("document_batching")
+        source = RunConfig.model_validate(source_raw)
+        train(source, run_id="separate-part", stop_after_step=1)
+        parent = source.logging.root_dir / "separate-part/checkpoints/latest.json"
+        with pytest.raises(ValueError):
+            train(measured, run_id="refused-transition", resume=parent)
+        train(
+            measured,
+            run_id="padded-transition",
+            resume=parent,
+            allow_runtime_optimization=True,
+        )
+        target = CheckpointManager(
+            measured.logging.root_dir / "padded-transition"
+        ).load(measured.logging.root_dir / "padded-transition/checkpoints/latest.json")
+        assert target.cursor == states[0].cursor
+        assert target.tokens_seen == budget
+        assert target.schedule == states[0].schedule
+        for name, tensor in target.model.items():
+            torch.testing.assert_close(
+                tensor, states[0].model[name], rtol=2e-4, atol=5e-6
+            )
+        import json
+
+        manifest = json.loads(
+            (measured.logging.root_dir / "padded-transition/manifest.json").read_text()
+        )
+        decision = next(
+            d
+            for d in manifest["resource_decisions"]
+            if d.get("kind") == "runtime_optimization_transition"
+        )
+        assert decision["effective_batch_contract"] == "original-document-update-groups"
+        assert decision["document_diagnostics_version"] == 2
+    raw["training"]["matched_stories"].pop("document_batching", None)
     raw["training"]["micro_batch_size"] = 2
     with pytest.raises(ValueError, match="batch size one"):
         RunConfig.model_validate(raw)
