@@ -110,7 +110,7 @@ def _fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, family_count=10):
     monkeypatch.setattr(
         split_freeze,
         "write_split_inventory",
-        lambda *_: {"sha256": sha256_file(inventory)},
+        lambda *_, completion_cache: {"sha256": sha256_file(inventory)},
     )
     monkeypatch.setattr(
         split_freeze,
