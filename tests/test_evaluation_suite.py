@@ -282,6 +282,92 @@ def test_artifact_copy_refuses_training_alias_before_copying_panels(
     assert not (refused / "panels").exists()
 
 
+def test_run_input_panel_check_refuses_alias_after_earlier_checks_are_bypassed(
+    aliased_panel_inputs, fixed_panel_run, tmp_path, monkeypatch
+):
+    from sparselab.training import trainer
+
+    measured, _ = aliased_panel_inputs
+    original_load = trainer.load_fixed_panels
+    original_copy = trainer.copy_fixed_panels
+
+    # Fault injection: omit alias validation at the two earlier boundaries,
+    # retaining native preparation, panel authentication and artifact copying.
+    # Only the final run-owned input loader can refuse this alias now.
+    def load_before_run(config, **kwargs):
+        if kwargs.get("inputs_root") is None:
+            kwargs.pop("training_manifest", None)
+        return original_load(config, **kwargs)
+
+    def copy_without_alias_check(config, destination, **kwargs):
+        kwargs.pop("training_manifest", None)
+        return original_copy(config, destination, **kwargs)
+
+    monkeypatch.setattr(trainer, "load_fixed_panels", load_before_run)
+    monkeypatch.setattr(trainer, "copy_fixed_panels", copy_without_alias_check)
+    allowed = measured.model_copy(
+        update={"evaluation": _panel_run_config(fixed_panel_run, tmp_path).evaluation}
+    )
+    train(allowed, run_id="post-copy-control")
+    with pytest.raises(
+        ValueError, match="fixed panel validation aliases the training array"
+    ):
+        train(measured, run_id="post-copy-alias")
+    refused = measured.logging.root_dir / "post-copy-alias"
+    assert (refused / "panels/first/validation.npy").is_file()
+    assert not list((refused / "checkpoints").glob("step_*"))
+    assert not list((refused / "evaluations").glob("validation_step_*.json"))
+
+
+def test_staged_panel_training_and_resume_use_owned_inputs(
+    fixed_panel_run, tmp_path, monkeypatch
+):
+    from sparselab.config.models import RunConfig
+    from sparselab.evaluation.evidence import experiment_evidence
+    from sparselab.staging import stage
+    from sparselab.training.manifest import read_manifest
+
+    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    values = _panel_run_config(fixed_panel_run, tmp_path).model_dump(mode="json")
+    values["training"].update(max_steps=2, max_tokens=64)
+    caller_inputs = tmp_path / "caller-inputs"
+    caller_inputs.mkdir()
+    shutil.copy2(values["tokenizer"]["path"], caller_inputs / "tokenizer.json")
+    values["tokenizer"]["path"] = str(caller_inputs / "tokenizer.json")
+    for panel in values["evaluation"]["panels"]:
+        target = caller_inputs / panel["name"]
+        shutil.copytree(panel["prepared_path"], target)
+        panel["prepared_path"] = str(target)
+    measured = RunConfig.model_validate(values)
+    bundle = stage(measured, tmp_path / "stage", through="validate")
+    caller_inputs.rename(tmp_path / "removed-caller-inputs")
+    measured.dataset.cache_dir.rename(tmp_path / "removed-cache")
+
+    train(measured, run_id="staged-panels", stage_bundle=bundle, stop_after_step=1)
+    parent = measured.logging.root_dir / "staged-panels"
+    bundle.rename(tmp_path / "removed-stage")
+    train(
+        measured,
+        run_id="resumed-panels",
+        resume=parent / "checkpoints/latest.json",
+    )
+    for name in ("staged-panels", "resumed-panels"):
+        run = measured.logging.root_dir / name
+        evidence = experiment_evidence(run)
+        assert evidence["evidence_level"] == "checkpointed_held_out"
+        assert not evidence["rejected_reports"]
+        manifest = read_manifest(run / "manifest.json")
+        owned = {item["relative_path"] for item in manifest["artifacts"]}
+        for panel in measured.evaluation.panels:
+            path = f"panels/{panel.name}/validation.npy"
+            assert path in owned and (run / path).is_file()
+        reports = list((run / "evaluations").glob("validation_step_*_gen_*.json"))
+        assert reports
+        for path in reports:
+            report = json.loads(path.read_text())
+            assert report["valid_targets"] == 96 and report["batches"] == 4
+
+
 @pytest.mark.parametrize(
     ("change", "reason"),
     [
