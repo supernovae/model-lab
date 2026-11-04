@@ -1,6 +1,6 @@
 # Capability status and evidence roadmap
 
-This roadmap describes what SparseLab can execute, what has been smoke-tested, what outcomes have been observed, and what still blocks stronger claims. Progress is organized by capability and evidence—not release phases. **Implemented** means the path exists; **smoke-tested** means it ran; neither means a model is useful or an architecture is better. Missing code belongs in [TODO.md](../../TODO.md); scientific questions and next experiments remain here and in the versioned lifecycle.
+This roadmap describes what SparseLab can execute, what has been smoke-tested, what outcomes have been observed, and what still blocks stronger claims. Progress is organized by capability and evidence—not release phases. **Implemented** means the path exists; **smoke-tested** means it ran; neither means a model is useful or an architecture is better. Missing code belongs in [GitHub issues](https://github.com/supernovae/tiny-sparse-lab/issues); scientific questions and next experiments remain here and in the versioned lifecycle.
 
 Durable experiment definitions use the [`experiments/`](../../experiments/)
 layout: copyable teaching material under `samples/`, actual campaigns under
@@ -51,7 +51,7 @@ cross-host evidence.
 
 These are evidence gaps and proposed investigations, not implementation TODOs.
 If an experiment exposes missing or defective software, open a separate Code task
-and add that implementation gap to [TODO.md](../../TODO.md). The main open
+under the [current implementation tracking policy](../../ROADMAP.md#where-work-is-tracked). The main open
 questions are:
 
 - **Useful tasks:** establish one low-risk real task against an independent test population and a simple baseline, with declared error handling and human review.

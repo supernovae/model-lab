@@ -7,7 +7,7 @@ Surface Review separates **exploratory checkpoint chat** from a **sealed review 
 Each import requires a new, nonexistent output directory and verifies indexed
 source bytes before selection. The current importer consumes native triage
 reports. Experiment-specific decoding and data-rich import adapters are retired;
-their findings remain in the [inactive research history](../../experiments/research/history/).
+their findings remain in the [inactive research history](https://github.com/supernovae/tiny-sparse-lab/tree/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history).
 
 To compare compatible Tier-1 outputs from at least two verified, immutable post-train triage reports, provide the runs explicitly; no matching report/prompt/settings cells means no bundle:
 

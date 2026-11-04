@@ -304,18 +304,18 @@ The artifact memo/proof key includes sibling payloads, not just manifest bytes.
 Native snapshot/config/tokenizer/prepared hashes and legacy seed coercion are
 unchanged. No model execution capability is added.
 
-Tests in `test_portable_snapshot_preparation.py` exercise the real native
+The historical [`test_portable_snapshot_preparation.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_portable_snapshot_preparation.py) exercised the real native
 snapshot/tokenizer/packing/verifier and public CLI. Snapshot fixture construction
 substitutes only Hub metadata/transport with local rows; it is not real-data
 acquisition evidence. See [portable experiment ownership](portable-experiment-migration.md)
 for where recipes and Lab code belong.
 
-The verifier-authority regression boundary is covered by
-`test_snapshot_warm_reuse.py`, `test_snapshot_authority.py`,
-`test_verifier_authority_current.py`, and `test_verification_reuse.py`:
-registered authorities remain available; authenticated legacy snapshot reuse
-still works; new uses of excluded artifact imports require re-audit; prepared
-inventory proofs remain independent of source preparation. The new artifact
+Current [`test_verifier_authority_current.py`](../tests/test_verifier_authority_current.py)
+checks registered authority closures and exclusion audits. The historical
+[`test_snapshot_warm_reuse.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_snapshot_warm_reuse.py), [`test_snapshot_authority.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_snapshot_authority.py) and
+[`test_verification_reuse.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_verification_reuse.py) documented additional snapshot and prepared-inventory
+reuse coverage before test consolidation; these retired files are evidence of
+that earlier coverage, not tests run by current CI. The new artifact
 branch uses cold native verification and does not add a persistent authority
 kind. Existing dispatch-owner exclusion pins were explicitly re-audited for
 this addition; historical content hashes and records are not rewritten.
@@ -433,12 +433,18 @@ their own verification and are not established by these tests.
 
 ### Acquisition boundary tests
 
-[Transport guard tests](../tests/test_acquisition_guards.py) cover HTTP and
+[Historical transport guard tests](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_acquisition_guards.py) covered HTTP and
 credential boundaries, explicit network permission, cache/storage integrity,
 decoder limits and cumulative verification accounting.
-[Authority tests](../tests/test_acquisition_authority.py) cover admission paths/stages
-and exclusive invocation ownership. HTTP tests use an in-memory opener and fake token, with no external
-network or credential-store access.
+[Historical authority tests](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_acquisition_authority.py) covered admission paths/stages
+and exclusive invocation ownership. Those HTTP fixtures used an in-memory opener
+and fake token, with no external network or credential-store access. These files
+were retired during test consolidation. Current
+[corpus acquisition tests](../tests/test_corpus_acquisition.py) exercise pinned
+source selection, bounded reads, offline reuse and mutation refusal;
+[dataset source tests](../tests/test_dataset_sources.py) cover snapshot bindings,
+resource caps and interrupted replay. These links do not claim one-for-one
+coverage of every retired guard.
 
 Known limitation: each 64 KiB read and decoded batch calls `observe()`, which walks
 the work root at O(entries) cost.
@@ -466,13 +472,19 @@ obsolete admissions or rewrite their identities. No compatibility execution
 branch is retained. Native scientific hash algorithms and seed acceptance are
 unchanged.
 
-| Boundary | Regression fence | What it proves |
+The following table records the **historical regression layout** before test
+consolidation. Its pinned files are not part of current CI. Current connected
+preparation coverage lives in [the preparation sequence tests](../tests/test_preparation_sequence.py),
+including native phase supervision, declaration refusal, reviewed admission,
+split freezing and inventory completion reuse.
+
+| Boundary | Historical regression | Original coverage |
 | --- | --- | --- |
-| Current models/schema | `test_preparation_contract.py` | One round-trip/schema per document; obsolete input refuses before context/compilation; paired strict snapshot ceilings |
-| Typed graph/local binding | `test_preparation_recipe.py` | Exact paths/ports, metadata-only inspection, no interpretation of opaque plugin paths |
-| Synthetic execution | `test_preparation_execution.py` | Native CPU prep, bounds, provenance, replay, no-clobber and source-change refusal |
-| Snapshot consumption | `test_portable_snapshot_preparation.py` | Required caps, cold integrity, exact split/source bindings and replay |
-| Acquisition | `test_portable_acquisition.py`, `test_acquisition_authority.py`, `test_acquisition_guards.py` | Explicit network authority, lock identity, reservations, cancellation and recovery |
+| Current models/schema | [`test_preparation_contract.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_preparation_contract.py) | One round-trip/schema per document; obsolete input refuses before context/compilation; paired strict snapshot ceilings |
+| Typed graph/local binding | [`test_preparation_recipe.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_preparation_recipe.py) | Exact paths/ports, metadata-only inspection, no interpretation of opaque plugin paths |
+| Synthetic execution | [`test_preparation_execution.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_preparation_execution.py) | Native CPU prep, bounds, provenance, replay, no-clobber and source-change refusal |
+| Snapshot consumption | [`test_portable_snapshot_preparation.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_portable_snapshot_preparation.py) | Required caps, cold integrity, exact split/source bindings and replay |
+| Acquisition | [`test_portable_acquisition.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_portable_acquisition.py), [`test_acquisition_authority.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_acquisition_authority.py), [`test_acquisition_guards.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_acquisition_guards.py) | Explicit network authority, lock identity, reservations, cancellation and recovery |
 
 This consolidation changes operational admission/binding identity, not computation,
 Campaign ordering or historical content identity. It proves fixture-scale contract
