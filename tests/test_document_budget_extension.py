@@ -327,3 +327,62 @@ def test_checkpoint_phase_rejects_changed_trained_history(checkpoint_phase):
             run_id="damaged_prefix",
         )
     assert not (source.logging.root_dir / "damaged_prefix").exists()
+
+
+def test_append_composes_explicit_runtime_transition_without_reset(
+    document_parent, tmp_path
+):
+    source, _root, parent, _tokenizer = document_parent
+    raw = append_config(document_parent, tmp_path).model_dump(mode="json")
+    raw["attention"]["implementation"] = "sdpa"
+    target = RunConfig.model_validate(raw)
+    with pytest.raises(ValueError, match="architecture semantics"):
+        train(target, extend_budget=parent, append_data=True, run_id="not_optimized")
+    train(
+        target,
+        extend_budget=parent,
+        append_data=True,
+        allow_runtime_optimization=True,
+        run_id="optimized",
+        stop_after_step=2,
+    )
+    child = source.logging.root_dir / "optimized"
+    snapshot = CheckpointManager(child).load(child / "checkpoints/latest.json")
+    assert snapshot.step == 2 and all(
+        float(v["step"]) == 2 for v in snapshot.optimizer["state"].values()
+    )
+    decisions = read_manifest(child / "manifest.json")["resource_decisions"]
+    assert any(d["kind"] == "budget_extension" and d["append_data"] for d in decisions)
+    optimization = next(
+        d for d in decisions if d["kind"] == "runtime_optimization_transition"
+    )
+    assert optimization["changes"] == [
+        {
+            "field": "attention.implementation",
+            "previous": "reference",
+            "requested": "sdpa",
+        }
+    ]
+
+
+@pytest.mark.parametrize("damage", ["prefix", "optimizer"])
+def test_runtime_flag_cannot_bypass_data_or_scientific_rails(
+    document_parent, tmp_path, damage
+):
+    source, _root, parent, _tokenizer = document_parent
+    raw = append_config(document_parent, tmp_path).model_dump(mode="json")
+    raw["attention"]["implementation"] = "sdpa"
+    if damage == "prefix":
+        path = Path(raw["dataset"]["train_path"])
+        path.write_text(path.read_text().replace("alpha", "wrong", 1))
+    else:
+        raw["optimizer"]["peak"] *= 2
+    with pytest.raises(ValueError):
+        train(
+            RunConfig.model_validate(raw),
+            extend_budget=parent,
+            append_data=True,
+            allow_runtime_optimization=True,
+            run_id="refused_optimization",
+        )
+    assert not (source.logging.root_dir / "refused_optimization").exists()

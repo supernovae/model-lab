@@ -168,3 +168,14 @@ learned memory remain full-state; this is not a weight-only promotion or an
 objective change. Without the new flag, append-data still requires a terminal
 parent. Coordinate device/source ownership before launching the child; preparation
 and read-only checkpoint validation do not stop or change a live parent.
+
+A separately measured runtime configuration can be composed with a budget/data
+extension using `--allow-runtime-optimization`. Both validators run: the extension
+must preserve the authenticated consumed prefix, update boundaries, heldouts and
+scheduler; the existing runtime policy permits only its supported dense-attention
+execution changes and preserves effective batch and ordinary validation batch.
+Changed optimizer/scientific settings remain refused. The child records separate
+budget-extension and runtime-optimization decisions. Full optimizer/RNG state is
+retained, while changed kernels may change the numerical trajectory. This flag is
+explicit consent to a supported transition, not evidence that it is faster or
+correct; choose settings only after the separate comparison results are reviewed.

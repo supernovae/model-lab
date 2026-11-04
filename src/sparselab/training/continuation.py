@@ -114,13 +114,13 @@ def _runtime_optimization_transition(
     }
 
 
-def _extension_settings(
+def _extension_config(
     source: RunConfig,
     target: RunConfig,
     *,
     parent_tokenizer: Path | None = None,
     append_data: bool = False,
-) -> str:
+) -> RunConfig:
     """Compare budget-independent settings; authenticate relocated tokenizer bytes."""
     comparable = target.model_dump(mode="json")
     comparable["training"]["max_steps"] = source.training.max_steps
@@ -154,7 +154,21 @@ def _extension_settings(
         if parent_sha256 != sha256_file(target.tokenizer.path):
             raise ValueError("budget extension requires matching tokenizer identity")
         comparable["tokenizer"]["path"] = str(source.tokenizer.path)
-    return _resume_settings(RunConfig.model_validate(comparable))
+    return RunConfig.model_validate(comparable)
+
+
+def _extension_settings(
+    source: RunConfig,
+    target: RunConfig,
+    *,
+    parent_tokenizer: Path | None = None,
+    append_data: bool = False,
+) -> str:
+    return _resume_settings(
+        _extension_config(
+            source, target, parent_tokenizer=parent_tokenizer, append_data=append_data
+        )
+    )
 
 
 def validate_budget_extension(
@@ -166,6 +180,7 @@ def validate_budget_extension(
     parent_root: Path | None = None,
     append_data: bool = False,
     append_from_checkpoint: bool = False,
+    allow_runtime_optimization: bool = False,
 ) -> dict[str, object]:
     """Validate the sole scientific difference allowed for full-state extension."""
     old = source.training
@@ -214,12 +229,18 @@ def validate_budget_extension(
         )
     elif append_data:
         raise ValueError("append-data requires matched whole-document training")
-    if _extension_settings(
+    comparable = _extension_config(
         source,
         target,
         parent_tokenizer=parent_tokenizer,
         append_data=append_data,
-    ) != _resume_settings(source):
+    )
+    optimization = None
+    if allow_runtime_optimization:
+        optimization = _runtime_optimization_transition(
+            source, comparable, snapshot.checkpoint_sha256
+        )
+    elif _resume_settings(comparable) != _resume_settings(source):
         raise ValueError(
             "budget extension changes settings other than the budget and decay horizon"
         )
@@ -231,6 +252,7 @@ def validate_budget_extension(
         "new_max_steps": new.max_steps,
         "new_max_tokens": new.max_tokens,
         "decay_steps": target.optimizer.decay_steps,
+        **({"runtime_optimization": optimization} if optimization is not None else {}),
         **supply,
     }
 
@@ -330,12 +352,11 @@ def load_continuation(
                 "add-ngram-memory requires an immutable checkpoint generation directory"
             )
     if allow_runtime_optimization and (
-        (resume is None and recover is None)
+        (resume is None and recover is None and extend_budget is None)
         or promote is not None
-        or extend_budget is not None
     ):
         raise ValueError(
-            "runtime optimization requires an explicit full-state resume or recovery"
+            "runtime optimization requires an explicit full-state resume, recovery or budget extension"
         )
     selected = extend_budget or resume or promote
     if selected is None and recover is None:
@@ -480,18 +501,7 @@ def load_continuation(
             raise ValueError(
                 "checkpoint scientific identity differs from its source run manifest"
             )
-        if allow_runtime_optimization:
-            decisions.append(
-                _runtime_optimization_transition(
-                    saved_config, config, snapshot.checkpoint_sha256
-                )
-            )
-        elif extend_budget is None:
-            if _resume_settings(saved_config) != _resume_settings(config):
-                raise ValueError(
-                    "resume configuration differs from checkpoint; use promotion for changed scientific settings"
-                )
-        else:
+        if extend_budget is not None:
             extension = validate_budget_extension(
                 saved_config,
                 config,
@@ -500,7 +510,22 @@ def load_continuation(
                 parent_root=root,
                 append_data=append_data,
                 append_from_checkpoint=append_from_checkpoint,
+                allow_runtime_optimization=allow_runtime_optimization,
             )
+            optimization = extension.pop("runtime_optimization", None)
+            if optimization is not None:
+                decisions.append(optimization)
+        elif allow_runtime_optimization:
+            decisions.append(
+                _runtime_optimization_transition(
+                    saved_config, config, snapshot.checkpoint_sha256
+                )
+            )
+        else:
+            if _resume_settings(saved_config) != _resume_settings(config):
+                raise ValueError(
+                    "resume configuration differs from checkpoint; use promotion for changed scientific settings"
+                )
         if snapshot.engine != runtime.engine or snapshot.backend != runtime.backend:
             raise ValueError("full resume requires the same engine and backend")
         drift: list[dict[str, object]] = []
