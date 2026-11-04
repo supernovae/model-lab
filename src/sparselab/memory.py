@@ -162,6 +162,7 @@ def registered_runtime_buffers_bytes(config: RunConfig) -> int:
     mask = (
         context * context
         if config.attention.kind in {"dense", "sliding_window", "mla"}
+        and config.attention.implementation != "sdpa"
         else 0
     )
     rope = 4 * (head_dim // 2 + config.training.seq_len * head_dim)

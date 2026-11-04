@@ -263,7 +263,10 @@ def load_continuation(
     allow_runtime_drift: bool,
     allow_runtime_optimization: bool = False,
     add_ngram_memory: bool = False,
+    extend_context: bool = False,
 ) -> Continuation:
+    if extend_context and not add_ngram_memory:
+        raise ValueError("extend-context requires explicit add-ngram-memory promotion")
     if add_ngram_memory:
         if promote is None or any(
             path is not None for path in (resume, recover, extend_budget)
@@ -397,6 +400,7 @@ def load_continuation(
                     source_tokenizer_sha256=sha256_file(root / "tokenizer.json"),
                     target_tokenizer_sha256=sha256_file(config.tokenizer.path),
                     source_checkpoint_sha256=snapshot.checkpoint_sha256,
+                    extend_context=extend_context,
                 )
                 migration.update(
                     source_run_manifest_sha256=manifest_digest,

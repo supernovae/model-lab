@@ -117,3 +117,41 @@ and repository patch evaluation remain outstanding.
 The companion Workshop `experiments/devmind/ngram-memory` contains controlled
 fusion/addressing studies, code/docs source review, continuation design and
 retention/work panels. No active run is renamed or automatically continued.
+
+## Explicit context transfer with memory promotion
+
+A larger context requires an additional `--extend-context` alongside
+`--promote IMMUTABLE_GENERATION --add-ngram-memory`. Set the target
+`model.max_seq_len` and `training.seq_len` explicitly. The native path accepts
+context growth only for the same dense attention/RoPE contract and continues to
+reject changes to trunk dimensions, layers, attention settings, tokenizer and
+weight inventory. Omitting the flag rejects a context mismatch; the flag also
+rejects unchanged or shorter contexts.
+
+This policy retains the RoPE base and original position frequencies. It neither
+rescales positions nor claims long-context quality without training/evaluation.
+The initial original-context function is preserved by the unchanged trunk and
+zero-output memory initialization. Longer documents can train that new context
+in the revised diet; retain complete source records and document boundaries.
+
+The child records source/target context, RoPE policy, both optimizer
+configurations, parent checkpoint, parent step and parent token exposure. Memory
+promotion resets optimizer, scheduler, RNG and counters for the declared target
+recipe. Parent optimizer moments and the old scheduler position are not carried
+into a changed model/data experiment. Subsequent ordinary `--resume` restores
+the child's state exactly; repeating `--extend-context` on resume is rejected.
+The original checkpoint remains immutable.
+
+Dense SDPA uses causal attention without a per-layer square mask allocation.
+Reference attention retains its mask; explicit attention-weight diagnostics
+construct a temporary causal mask when requested. For 24 layers, this avoids
+384 MiB at 4K or 1.5 GiB at 8K compared with the old unused Boolean buffers.
+These are allocation counts, not measured training speed improvements.
+
+Large address maps remain complete in the run configuration and immutable
+manifest. Run-created replication events refer to that manifest when the
+configuration would exceed the bounded transport payload; artifact ingestion
+restores the full configuration only from matching verified manifest bytes.
+Runtime forecast signatures bind the complete map by its content digest instead
+of repeating the vocabulary array in each event. Neither optimization changes
+the model's mapping or raises the 64 KiB event limit.

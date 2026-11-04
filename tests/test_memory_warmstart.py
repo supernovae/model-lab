@@ -179,10 +179,15 @@ def test_memory_warmstart_refuses_incompatible_sources(
 
 
 @pytest.mark.parametrize("memory_only", [False, True])
+@pytest.mark.parametrize("extend_context", [False, True])
 def test_native_promotion_resets_state_then_resumes_exactly(
-    tmp_path: Path, memory_only: bool
+    tmp_path: Path, memory_only: bool, extend_context: bool
 ) -> None:
     source, target = _configs(tmp_path, tokenizer=True, multiport=True)
+    if extend_context:
+        target = target.model_copy(
+            update={"model": target.model.model_copy(update={"max_seq_len": 32})}
+        )
     if memory_only:
         target = target.model_copy(
             update={
@@ -227,6 +232,7 @@ def test_native_promotion_resets_state_then_resumes_exactly(
         target,
         promote=source_checkpoint,
         add_ngram_memory=True,
+        extend_context=extend_context,
         run_id="memory-part",
         stop_after_step=1,
     )
@@ -258,13 +264,20 @@ def test_native_promotion_resets_state_then_resumes_exactly(
         if item["kind"] == "dense_to_ngram_warmstart"
     )
     assert migration["optimizer_policy"] == "reset"
+    if extend_context:
+        assert migration["context_transfer"]["source_max_seq_len"] == 16
+        assert migration["context_transfer"]["target_max_seq_len"] == 32
     assert migration["parent_checkpoint_sha256"] == source_snapshot.checkpoint_sha256
     assert manifest["continuation_kind"] == "PROMOTED"
     for name, digest in source_files.items():
         assert sha256_file(source_dir / name) == digest
     train(target, resume=part / "checkpoints/latest.json", run_id="memory-resumed")
     train(
-        target, promote=source_checkpoint, add_ngram_memory=True, run_id="memory-full"
+        target,
+        promote=source_checkpoint,
+        add_ngram_memory=True,
+        extend_context=extend_context,
+        run_id="memory-full",
     )
     snapshots = [
         CheckpointManager(target.logging.root_dir / name).load(
@@ -279,3 +292,45 @@ def test_native_promotion_resets_state_then_resumes_exactly(
     )
     assert snapshots[0].step == snapshots[1].step == 2
     assert snapshots[0].tokens_seen == snapshots[1].tokens_seen == 16
+
+
+def test_context_transfer_requires_explicit_growth_and_keeps_architecture_guards(
+    tmp_path,
+):
+    source, target = _configs(tmp_path)
+    dense = DenseLM(source.model, source.attention)
+    target = target.model_copy(
+        update={"model": target.model.model_copy(update={"max_seq_len": 32})}
+    )
+    args = {
+        "source_tokenizer_sha256": "a" * 64,
+        "target_tokenizer_sha256": "a" * 64,
+        "source_checkpoint_sha256": "b" * 64,
+    }
+    with pytest.raises(ValueError, match="backbone"):
+        migrate_dense_to_ngram(source, target, dense.state_dict(), **args)
+    with pytest.raises(ValueError, match="backbone"):
+        changed = target.model_copy(
+            update={
+                "attention": target.attention.model_copy(update={"rope_base": 20000.0})
+            }
+        )
+        migrate_dense_to_ngram(
+            source, changed, dense.state_dict(), extend_context=True, **args
+        )
+    with pytest.raises(ValueError, match="larger"):
+        changed = target.model_copy(
+            update={"model": target.model.model_copy(update={"max_seq_len": 8})}
+        )
+        migrate_dense_to_ngram(
+            source, changed, dense.state_dict(), extend_context=True, **args
+        )
+    weights, decision = migrate_dense_to_ngram(
+        source, target, dense.state_dict(), extend_context=True, **args
+    )
+    transferred = DenseLM(target.model, target.attention).eval()
+    transferred.load_state_dict(weights)
+    ids = torch.tensor([[4, 5, 6, 7] * 4])
+    torch.testing.assert_close(dense(ids), transferred(ids), rtol=0, atol=0)
+    assert decision["context_transfer"]["rope_base"] == source.attention.rope_base
+    assert decision["target_optimizer"] == target.optimizer.model_dump(mode="json")

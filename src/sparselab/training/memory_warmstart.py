@@ -49,6 +49,7 @@ def migrate_dense_to_ngram(
     source_tokenizer_sha256: str,
     target_tokenizer_sha256: str,
     source_checkpoint_sha256: str,
+    extend_context: bool = False,
 ) -> tuple[dict[str, Tensor], dict[str, object]]:
     """Preserve every trunk tensor and initialize only a zero-output memory branch.
 
@@ -80,6 +81,22 @@ def migrate_dense_to_ngram(
     for field in _TOKEN_MEMORY_FIELDS:
         source_model.pop(field, None)
         target_model.pop(field, None)
+    context_transfer = None
+    if extend_context:
+        if (
+            source.attention.kind != "dense"
+            or target.model.max_seq_len <= source.model.max_seq_len
+        ):
+            raise ValueError("context transfer requires a larger dense RoPE context")
+        context_transfer = {
+            "source_max_seq_len": source.model.max_seq_len,
+            "target_max_seq_len": target.model.max_seq_len,
+            "rope_policy": "unchanged-base-unscaled-positions",
+            "rope_base": source.attention.rope_base,
+            "prefix_policy": "preserve-original-position-frequencies",
+        }
+        source_model.pop("max_seq_len")
+        target_model.pop("max_seq_len")
     if source_model != target_model or source.attention != target.attention:
         raise ValueError(
             "memory migration must preserve backbone and attention semantics"
@@ -163,4 +180,8 @@ def migrate_dense_to_ngram(
         "resume_level": "weights_only",
         "reason": "explicit --add-ngram-memory with --promote; not exact resume",
     }
+    if context_transfer is not None:
+        decision["context_transfer"] = context_transfer
+        decision["source_optimizer"] = source.optimizer.model_dump(mode="json")
+        decision["target_optimizer"] = target.optimizer.model_dump(mode="json")
     return weights, decision

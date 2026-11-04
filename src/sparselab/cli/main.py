@@ -1029,6 +1029,7 @@ def _train(args: argparse.Namespace) -> None:
         extend_budget=Path(args.extend_budget) if args.extend_budget else None,
         promote=Path(args.promote) if args.promote else None,
         add_ngram_memory=args.add_ngram_memory,
+        extend_context=args.extend_context,
         recover=Path(args.recover) if args.recover else None,
         run_id=args.run_id,
         stop_after_step=args.stop_after_step,
@@ -3465,6 +3466,11 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         "--add-ngram-memory",
         action="store_true",
         help="explicit zero-impact dense-checkpoint migration; requires --promote",
+    )
+    training.add_argument(
+        "--extend-context",
+        action="store_true",
+        help="explicit larger unscaled RoPE context; requires --promote --add-ngram-memory",
     )
     training.add_argument("--recover")
     training.add_argument("--allow-runtime-drift", action="store_true")

@@ -1823,7 +1823,26 @@ def _prepare_data(
         validation, validation_supervision, validation_byte, validation_stats = (
             _collect(config.dataset, tokenizer, "validation", **settings)
         )
-    if (
+    unpadded = (
+        config.training.matched_stories is not None
+        and config.training.matched_stories.unpadded_documents
+    )
+    if unpadded:
+        from sparselab.data.story_packing import MatchedStoryDataset
+
+        eos = tokenizer.token_to_id("<eos>")
+        if eos is None:
+            raise ValueError("whole-document preparation requires EOS")
+        for values in (train, validation):
+            MatchedStoryDataset(
+                values,
+                config.training.seq_len,
+                eos,
+                layout="story",
+                targets_per_update=1,
+                unpadded_documents=True,
+            )
+    elif (
         len(train) < config.training.seq_len + 1
         or len(validation) < config.training.seq_len + 1
     ):

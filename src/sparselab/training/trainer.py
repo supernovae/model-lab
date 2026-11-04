@@ -578,6 +578,7 @@ def train(
     extend_budget: Path | None = None,
     promote: Path | None = None,
     add_ngram_memory: bool = False,
+    extend_context: bool = False,
     recover: Path | None = None,
     run_id: str | None = None,
     stop_after_step: int | None = None,
@@ -603,6 +604,8 @@ def train(
     """Run one independent experiment, optionally bound to a stage bundle."""
     if add_ngram_memory and promote is None:
         raise ValueError("--add-ngram-memory requires --promote")
+    if extend_context and not add_ngram_memory:
+        raise ValueError("--extend-context requires --add-ngram-memory and --promote")
     require_model_runtime_allowed()
     require_authorization(config, authorization)
     validate_tokenizer_batch_limits(
@@ -629,6 +632,7 @@ def train(
         extend_budget=extend_budget,
         promote=promote,
         add_ngram_memory=add_ngram_memory,
+        extend_context=extend_context,
         recover=recover,
         run_id=run_id,
         stop_after_step=stop_after_step,
@@ -688,6 +692,7 @@ def _train_impl(
     resume: Path | None = None,
     promote: Path | None = None,
     add_ngram_memory: bool = False,
+    extend_context: bool = False,
     extend_budget: Path | None = None,
     recover: Path | None = None,
     run_id: str | None = None,
@@ -949,6 +954,7 @@ def _train_impl(
             extend_budget=extend_budget,
             promote=promote,
             add_ngram_memory=add_ngram_memory,
+            extend_context=extend_context,
             recover=recover,
             allow_runtime_drift=allow_runtime_drift,
             allow_runtime_optimization=allow_runtime_optimization,

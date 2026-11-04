@@ -231,6 +231,9 @@ def _excluded_edges(kind: str) -> frozenset[tuple[str, str]]:
 # Pinned below to the AST of each excluded import and all existing uses of its
 # imported names. A new use in a verifier, or any change to an existing user,
 # makes authority unavailable until the exclusion is explicitly re-audited.
+# Context-transfer audit 2026-11-04: only _prepare_data changes.
+# It validates short unpadded splits through MatchedStoryDataset; all byte-loader
+# verifiers and their uses of excluded imports are unchanged. No exclusions added.
 # Combined PR290/305 audit 2026-11-03: versus integrated PR290 only
 # _prepare_data changes, to verify the explicit tokenizer origin.
 # load_prepared_data and _verified_receipt ASTs are unchanged; semantic
@@ -277,7 +280,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.preparation_workers",
-    ): "e1df02a2f9e87faeafe2f58fb578c9d58621bd1f2c8046a3c7905ec61f798daa",
+    ): "5126180b8577bd0aacd382b6ee22de2b145c32c741810d38c1e2ff8ea370fef9",
     (
         "experiments.artifacts",
         "data.sources",
@@ -285,7 +288,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "corpus.mixture",
-    ): "664a613cae6d41b62908230fbd63aef54573f064704f7c310d060aa599ccc295",
+    ): "f77bfacd6a6d35e43d549da41f928b1b211a8d27f4cf302354bc8627c0ecf261",
     (
         "workers",
         "workers.transport",
@@ -293,11 +296,11 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.tokenizer",
-    ): "1d3d5146dfdc65109e6c642ecebc5c06d655368102b4516a4d3f377e76a0cb48",
+    ): "2f651da540ca2aff3661e128a0e27bebc4dd17026bd4ea82ba288b76cdcc8ad9",
     (
         "data.packing",
         "data.sources",
-    ): "ee37d60d4735667c6375be090a2d2f87e90c47a94d3c9348431e585562c4d46c",
+    ): "ce7e86b9762dfafd0fa28d7d6972d1302f8d3a24297cfcf8eda426a6bd66ecab",
     (
         "data",
         "data.tokenizer",
@@ -317,11 +320,11 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "corpus.export",
-    ): "c3176aab596622ca9e204f5ff508dc23e708811b9c9f052290a1c6282478dcfc",
+    ): "5e4b5f4c2962e576a41f2ac40c8ef42aaa260c89a2c7314c58c47b11e697c99d",
     (
         "data.packing",
         "data.allocation",
-    ): "3d3b71a9d000a06f22b98f491172f18818db20c8db2911f7eadadf4a1936ae01",
+    ): "df59daeff8e1c47d7d22cb79a2bd70f1a078a45ead92bca79f180b92bea5f520",
     (
         "data.packing",
         "data.byte_hash",
@@ -337,31 +340,31 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.encoding",
-    ): "8878ffc0a6f1188f7b0b0135d37ff1966887ccf5211b9ec628fe65748776295d",
+    ): "3adef8a18ff8dbf5d40888770c214c2ce868d0f5ea7bfecc17fafcf33014ec5d",
     (
         "data.packing",
         "data.local_stories",
-    ): "b7e36841b5078cf3c76d8c397d802f36eb1dbf5fa605393015f3d406e3c84c1e",
+    ): "1f7739888e70a0ff05704ef209b640f1dd01da0d83171f4d230f224a03fc095d",
     (
         "data.packing",
         "data.preparation_chunks",
-    ): "8cdb7f7169d022c2e2a7ae144654f25329e2444cfba658a452b4aa83ab67c71e",
+    ): "c9de1970ffdc127106fe679cc16ee04ab8d02b1e58ca1b0037da3a55425921d4",
     (
         "data.packing",
         "data.preparation_telemetry",
-    ): "7ede3716ca4786cd7f422b2ef234d0f968b574db5648a0972a8b2d70aeeb595c",
+    ): "625e7c3b12a1c99b1e89966c2a50c7e11fb5f2a18964d97635ce555dd6986544",
     (
         "data.packing",
         "experiments.source_compatibility",
-    ): "7db12bda75ed2b2bf775680cdbefcc829487b6ffefbea5c700dc7e565290709b",
+    ): "265b2709fca173d7cb401be8a9f5aa9bfb866df04e6abc1258107fd6574e067e",
     (
         "data.packing",
         "progress",
-    ): "fa9e31dfbc9daddeda0e184f17dc841e2e46d578f4230307c4c3cd38f4ea8a7b",
+    ): "f310da62fd0aa6f2039047297678d2d265cf17f07ac545632c6828b0ef153f5c",
     (
         "data.packing",
         "resource_envelope",
-    ): "d318bae55fdfd121cd4a9236651d64b66bea88d872f2b13237f85f092f1e5aff",
+    ): "edd778d8c9d776b293d87aab082d34db567333a28279cac28fbca279d340babe",
     (
         "data.packing",
         "workdir",
@@ -373,7 +376,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "workspace_preflight",
-    ): "b6e2a815c9e721028dfc18acf3167310bc2698a51fdb1c1cc79668a52fb8a22d",
+    ): "fa188ec41bf039968ae569eb5709a6af1a4cb6b5954af2b004b3a86bb137b0b4",
     (
         "corpus.tokenizer_bakeoff",
         "corpus.cli",
@@ -430,7 +433,8 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
 
 
 @lru_cache(maxsize=128)
-def _exclusion_signature(source: bytes, imported: str) -> str:
+def exclusion_signature(source: bytes, imported: str) -> str:
+    """Compute the static review signature; this does not authorize an exclusion."""
     tree = ast.parse(source)
     declared: set[str] = set()
     imports: list[str] = []
@@ -676,7 +680,7 @@ def verifier_authority(kind: str, version: int) -> dict[str, object]:
         for imported in imports:
             edge = name, imported
             if edge in excluded:
-                if _exclusion_signature(source, imported) != _EXCLUSION_SIGNATURES.get(
+                if exclusion_signature(source, imported) != _EXCLUSION_SIGNATURES.get(
                     edge
                 ):
                     raise ValueError(f"verifier exclusion needs review: {edge}")

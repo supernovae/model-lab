@@ -535,3 +535,21 @@ def test_policy_cannot_discard_measured_uncertainty_to_claim_a_fit() -> None:
         raw_candidate.peak_bytes + corrected.peak_bytes - baseline.peak_bytes
     )
     assert proposal.estimate.calibration_sample_count == 0
+
+
+def test_sdpa_buffer_estimate_matches_registered_runtime_allocations():
+    import torch
+
+    from sparselab.model.transformer import DenseLM
+
+    config = load_config(Path("configs/smoke_cpu.yaml"))
+    config = config.model_copy(
+        update={
+            "attention": config.attention.model_copy(update={"implementation": "sdpa"})
+        }
+    )
+    model = DenseLM(config.model, config.attention).eval()
+    with torch.inference_mode():
+        model(torch.zeros((1, config.training.seq_len), dtype=torch.long))
+    actual = sum(buffer.numel() * buffer.element_size() for buffer in model.buffers())
+    assert registered_runtime_buffers_bytes(config) == actual
