@@ -169,15 +169,11 @@ def test_active_fixed_panels_refuse_incomplete_evaluation(
     )
 
 
-@pytest.mark.parametrize("consumer", ["train", "stage"])
-def test_fixed_panel_training_alias_refused_at_public_consumers(
-    fixed_panel_run, tmp_path, monkeypatch, consumer
-):
+@pytest.fixture
+def aliased_panel_inputs(fixed_panel_run, tmp_path, monkeypatch):
     from sparselab.config.models import RunConfig
     from sparselab.data.packing import prepare_data
     from sparselab.data.tokenizer import load_tokenizer
-    from sparselab.engines.pytorch import PyTorchEngine
-    from sparselab.staging import materialize_prepared_inputs
 
     monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path))
     measured = _panel_run_config(fixed_panel_run, tmp_path)
@@ -230,6 +226,18 @@ def test_fixed_panel_training_alias_refused_at_public_consumers(
         == prepared.manifest["validation"]["sha256"]
     )
 
+    return measured, training
+
+
+@pytest.mark.parametrize("consumer", ["train", "stage"])
+def test_fixed_panel_training_alias_refused_at_public_consumers(
+    aliased_panel_inputs, tmp_path, monkeypatch, consumer
+):
+    from sparselab.engines.pytorch import PyTorchEngine
+    from sparselab.staging import materialize_prepared_inputs
+
+    measured, _ = aliased_panel_inputs
+
     def no_model(*args, **kwargs):
         pytest.fail("aliased inputs must be refused before model initialization")
 
@@ -244,6 +252,34 @@ def test_fixed_panel_training_alias_refused_at_public_consumers(
             materialize_prepared_inputs(measured, destination)
     assert not destination.exists()
     assert not (measured.logging.root_dir / "aliased").exists()
+
+
+def test_artifact_copy_refuses_training_alias_before_copying_panels(
+    aliased_panel_inputs, fixed_panel_run, tmp_path
+):
+    from sparselab.training.trainer import _copy_artifacts
+
+    measured, training = aliased_panel_inputs
+    # The original synthetic panels do not alias this local-text training array.
+    # First prove the real copier accepts the same training bundle with them.
+    allowed = measured.model_copy(
+        update={"evaluation": _panel_run_config(fixed_panel_run, tmp_path).evaluation}
+    )
+    control = tmp_path / "accepted-copy"
+    control.mkdir()
+    artifacts = _copy_artifacts(control, allowed, training)
+    for panel in allowed.evaluation.panels:
+        name = f"panels/{panel.name}/validation.npy"
+        assert any(artifact.relative_path == name for artifact in artifacts)
+        assert (control / name).is_file()
+
+    refused = tmp_path / "refused-copy"
+    refused.mkdir()
+    with pytest.raises(
+        ValueError, match="fixed panel validation aliases the training array"
+    ):
+        _copy_artifacts(refused, measured, training)
+    assert not (refused / "panels").exists()
 
 
 @pytest.mark.parametrize(
