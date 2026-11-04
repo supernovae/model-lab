@@ -135,7 +135,12 @@ def _load_run_data(
 
 
 def _check_training_storage(
-    config: RunConfig, data: PreparedData, *, tokenizer_path: Path | None = None
+    config: RunConfig,
+    data: PreparedData,
+    *,
+    tokenizer_path: Path | None = None,
+    completed_steps: int = 0,
+    completed_tokens: int = 0,
 ) -> None:
     from sparselab.workspace_preflight import require_storage, training_storage_checks
 
@@ -153,7 +158,12 @@ def _check_training_storage(
         }
     )
     require_storage(
-        training_storage_checks(storage_config, verified_prepared=data.receipt)
+        training_storage_checks(
+            storage_config,
+            verified_prepared=data.receipt,
+            completed_steps=completed_steps,
+            completed_tokens=completed_tokens,
+        )
     )
 
 
@@ -1055,6 +1065,10 @@ def _train_impl(
             _check_training_storage(
                 config,
                 data,
+                completed_steps=snapshot.step if continuation == "RESUMED" else 0,
+                completed_tokens=snapshot.tokens_seen
+                if continuation == "RESUMED"
+                else 0,
                 # Native continuation/stage verification selected this owned
                 # input source. A resumed run need not retain caller-local files.
                 tokenizer_path=(

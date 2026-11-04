@@ -136,6 +136,8 @@ def training_storage_checks(
     work_dir: Path | None = None,
     run_dir: Path | None = None,
     checkpoint_generations_upper: int | None = None,
+    completed_steps: int = 0,
+    completed_tokens: int = 0,
     verified_prepared: VerifiedPreparedData | None = None,
 ) -> list[StorageCheck]:
     """Reserve incremental growth on each device, not already allocated cache bytes.
@@ -146,9 +148,9 @@ def training_storage_checks(
     if checkpoint_generations_upper is None:
         from sparselab.experiments.storage import checkpoint_generation_bounds
 
-        checkpoint_generations_upper = checkpoint_generation_bounds(config)[
-            "peak_generations"
-        ]
+        checkpoint_generations_upper = checkpoint_generation_bounds(
+            config, completed_steps=completed_steps, completed_tokens=completed_tokens
+        )["peak_generations"]
     if checkpoint_generations_upper < 1:
         raise ValueError("checkpoint generation count must be positive")
     checkpoint = int(inspection_report(config)["estimated_checkpoint_bytes"])
