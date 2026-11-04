@@ -19,6 +19,7 @@ def verify_matched_extension(
     parent_root: Path,
     *,
     append_data: bool,
+    append_from_checkpoint: bool = False,
 ) -> dict[str, object]:
     """Require complete update caps; preserve prior tokens, groups and heldout bytes."""
     old, new = source.training.matched_stories, target.training.matched_stories
@@ -38,18 +39,27 @@ def verify_matched_extension(
         unpadded_documents=old.unpadded_documents,
         frozen_update_ends=old.frozen_update_ends,
     )
-    if (
-        old_plan.targets_for_updates(source.training.max_steps)
-        != source.training.max_tokens
+    consumed_steps = (
+        snapshot.step if append_from_checkpoint else source.training.max_steps
+    )
+    consumed_tokens = (
+        snapshot.tokens_seen if append_from_checkpoint else source.training.max_tokens
+    )
+    if not (
+        0 < consumed_steps <= source.training.max_steps
+        and 0 < consumed_tokens <= source.training.max_tokens
     ):
+        raise ValueError("checkpoint prefix lies outside the declared source budget")
+    if old_plan.targets_for_updates(consumed_steps) != consumed_tokens:
         raise ValueError("parent budget ends within a variable update")
-    passes, group = divmod(source.training.max_steps, len(old_plan))
+    passes, group = divmod(consumed_steps, len(old_plan))
     expected_cursor = (passes, group) if group else (passes - 1, len(old_plan))
     if snapshot.cursor != expected_cursor:
         raise ValueError("parent cursor does not match completed document updates")
     metadata: dict[str, object] = {
         "variable_document_groups": True,
         "append_data": append_data,
+        **({"append_from_checkpoint": True} if append_from_checkpoint else {}),
     }
     plan = old_plan
     if append_data:
@@ -59,18 +69,21 @@ def verify_matched_extension(
             or not old.unpadded_documents
             or not new.unpadded_documents
             or source.training.max_tokens != len(ids)
-            or snapshot.cursor != (0, len(old_plan))
+            or snapshot.cursor
+            != (0, consumed_steps if append_from_checkpoint else len(old_plan))
         ):
             raise ValueError(
                 "append-data requires a terminal single-pass whole-document parent"
             )
         data = prepare_data(target, load_tokenizer(target.tokenizer.path))
-        if len(data.train) <= len(ids):
+        prefix_tokens = consumed_tokens if append_from_checkpoint else len(ids)
+        prefix_groups = consumed_steps if append_from_checkpoint else len(old_plan)
+        if len(data.train) <= prefix_tokens:
             raise ValueError("append-data requires a larger prepared stream")
-        for offset in range(0, len(ids), 1_048_576):
+        for offset in range(0, prefix_tokens, 1_048_576):
             if not np.array_equal(
-                ids[offset : offset + 1_048_576],
-                data.train[offset : min(offset + 1_048_576, len(ids))],
+                ids[offset : min(offset + 1_048_576, prefix_tokens)],
+                data.train[offset : min(offset + 1_048_576, prefix_tokens)],
             ):
                 raise ValueError("append-data changed the trained token prefix")
         validation = np.load(
@@ -88,7 +101,8 @@ def verify_matched_extension(
             frozen_update_ends=new.frozen_update_ends,
         )
         if not np.array_equal(
-            plan.group_offsets[: len(old_plan) + 1], old_plan.group_offsets
+            plan.group_offsets[: prefix_groups + 1],
+            old_plan.group_offsets[: prefix_groups + 1],
         ):
             raise ValueError(
                 "append-data changed prior update boundaries; freeze the parent terminal boundary"
@@ -98,13 +112,20 @@ def verify_matched_extension(
                 "append-data budget must cover exactly the new single-pass stream"
             )
         metadata.update(
-            parent_prefix_tokens=len(ids),
-            additional_unique_stream_tokens=len(data.train) - len(ids),
+            parent_prefix_tokens=prefix_tokens,
+            additional_unique_stream_tokens=len(data.train) - prefix_tokens,
             old_train_sha256=sha256_file(parent_root / "data/train.npy"),
             new_train_sha256=sha256_file(data.root / "train.npy"),
             validation_sha256=sha256_file(data.root / "validation.npy"),
             frozen_update_ends=list(new.frozen_update_ends),
         )
+        if append_from_checkpoint:
+            metadata.update(
+                parent_consumed_steps=consumed_steps,
+                parent_consumed_tokens=consumed_tokens,
+                unconsumed_source_tokens_deferred=len(ids) - prefix_tokens,
+                unconsumed_source_preserved_at=str(parent_root / "data/train.npy"),
+            )
     if (
         plan.targets_for_updates(target.training.max_steps)
         != target.training.max_tokens

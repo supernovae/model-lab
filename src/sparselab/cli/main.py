@@ -1031,6 +1031,7 @@ def _train(args: argparse.Namespace) -> None:
         add_ngram_memory=args.add_ngram_memory,
         extend_context=args.extend_context,
         append_data=args.append_data,
+        append_from_checkpoint=args.append_from_checkpoint,
         recover=Path(args.recover) if args.recover else None,
         run_id=args.run_id,
         stop_after_step=args.stop_after_step,
@@ -3466,6 +3467,11 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         "--append-data",
         action="store_true",
         help="verified append-only document data; requires --extend-budget",
+    )
+    training.add_argument(
+        "--append-from-checkpoint",
+        action="store_true",
+        help="explicit data phase after a complete checkpoint update; preserve consumed prefix and defer untrained source tail",
     )
     training.add_argument("--promote")
     training.add_argument(

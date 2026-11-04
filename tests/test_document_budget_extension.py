@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 from test_training import config, equal
 
@@ -220,3 +221,109 @@ def test_variable_budget_extension_can_chain_without_restarting_schedule(
     )
     assert final.step == 3 and final.tokens_seen == source.training.max_tokens * 3
     assert final.schedule["decay_steps"] == 1
+
+
+@pytest.fixture
+def checkpoint_phase(document_parent, tmp_path):
+    _source, _root, generation, tokenizer = document_parent
+    planned = append_config(document_parent, tmp_path)
+    train(
+        planned,
+        extend_budget=generation,
+        append_data=True,
+        run_id="planned",
+        stop_after_step=2,
+    )
+    root = planned.logging.root_dir / "planned"
+    parent = next((root / "checkpoints").glob("step_00000002_gen_*"))
+    snapshot = CheckpointManager(root).load(parent)
+    ids = np.load(root / "data/train.npy", mmap_mode="r")
+    document_count = int(np.count_nonzero(ids[: snapshot.tokens_seen] == 3))
+    prefix = planned.dataset.train_path.read_text().splitlines()[:document_count]
+    path = tmp_path / "checkpoint-phase.jsonl"
+    path.write_text("\n".join(prefix) + '\n{"text":"new."}\n')
+    raw = planned.model_dump(mode="json")
+    total = (
+        snapshot.tokens_seen
+        + len(tokenizer.encode("new.", add_special_tokens=False).ids)
+        + 1
+    )
+    raw["dataset"].update(
+        train_path=str(path),
+        revision="explicit-checkpoint-phase",
+        train_max_documents=document_count + 1,
+        train_max_tokens=total,
+    )
+    ends = [*planned.training.matched_stories.frozen_update_ends, snapshot.tokens_seen]
+    raw["training"]["matched_stories"]["frozen_update_ends"] = ends
+    raw["training"]["max_tokens"] = total
+    candidate = RunConfig.model_validate(raw)
+    data = prepare_data(candidate, tokenizer)
+    plan = MatchedStoryDataset(
+        data.train,
+        64,
+        3,
+        layout="story",
+        targets_per_update=planned.training.matched_stories.targets_per_update,
+        unpadded_documents=True,
+        frozen_update_ends=tuple(ends),
+    )
+    raw["training"]["max_steps"] = plan.horizon(total)
+    return planned, RunConfig.model_validate(raw), root, parent, snapshot
+
+
+def test_explicit_checkpoint_phase_retains_full_state_with_smaller_planned_cap(
+    checkpoint_phase,
+):
+    source, target, root, parent, prior = checkpoint_phase
+    assert prior.step == 2 < source.training.max_steps
+    assert target.training.max_steps < source.training.max_steps
+    assert target.training.max_tokens < source.training.max_tokens
+    before = {p.name: sha256_file(p) for p in parent.iterdir()}
+    with pytest.raises(ValueError, match="terminal"):
+        train(target, extend_budget=parent, append_data=True, run_id="not_explicit")
+    train(
+        target,
+        extend_budget=parent,
+        append_data=True,
+        append_from_checkpoint=True,
+        run_id="phase",
+    )
+    child = source.logging.root_dir / "phase"
+    final = CheckpointManager(child).load(child / "checkpoints/latest.json")
+    assert (
+        final.step == prior.step + 1 and final.tokens_seen == target.training.max_tokens
+    )
+    assert all(
+        float(v["step"]) == final.step for v in final.optimizer["state"].values()
+    )
+    decision = next(
+        d
+        for d in read_manifest(child / "manifest.json")["resource_decisions"]
+        if d["kind"] == "budget_extension"
+    )
+    assert (
+        decision["append_from_checkpoint"]
+        and decision["parent_consumed_tokens"] == prior.tokens_seen
+    )
+    assert (
+        decision["unconsumed_source_tokens_deferred"] > 0
+        and decision["decay_steps"] == 1
+    )
+    assert before == {p.name: sha256_file(p) for p in parent.iterdir()}
+    assert (root / "data/train.npy").is_file()
+
+
+def test_checkpoint_phase_rejects_changed_trained_history(checkpoint_phase):
+    source, target, _root, parent, _prior = checkpoint_phase
+    path = target.dataset.train_path
+    path.write_text(path.read_text().replace("alpha", "wrong", 1))
+    with pytest.raises(ValueError, match="trained token prefix"):
+        train(
+            target,
+            extend_budget=parent,
+            append_data=True,
+            append_from_checkpoint=True,
+            run_id="damaged_prefix",
+        )
+    assert not (source.logging.root_dir / "damaged_prefix").exists()

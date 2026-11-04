@@ -165,6 +165,7 @@ def validate_budget_extension(
     parent_tokenizer: Path | None = None,
     parent_root: Path | None = None,
     append_data: bool = False,
+    append_from_checkpoint: bool = False,
 ) -> dict[str, object]:
     """Validate the sole scientific difference allowed for full-state extension."""
     old = source.training
@@ -172,6 +173,10 @@ def validate_budget_extension(
     targets_per_step = old.seq_len * old.micro_batch_size * old.gradient_accumulation
     variable = old.matched_stories is not None
     decay_horizon = getattr(source.optimizer, "decay_steps", None) or old.max_steps
+    if append_from_checkpoint and not append_data:
+        raise ValueError("append-from-checkpoint requires append-data")
+    prior_steps = snapshot.step if append_from_checkpoint else old.max_steps
+    prior_tokens = snapshot.tokens_seen if append_from_checkpoint else old.max_tokens
     if (
         source.optimizer.name != "adamw"
         or target.optimizer.name != "adamw"
@@ -182,12 +187,13 @@ def validate_budget_extension(
             if source.optimizer.decay_steps is not None
             else "warmup_cosine_v1"
         )
-        or snapshot.step != old.max_steps
-        or snapshot.tokens_seen != old.max_tokens
+        or (not append_from_checkpoint and snapshot.step != old.max_steps)
+        or (not append_from_checkpoint and snapshot.tokens_seen != old.max_tokens)
+        or (append_from_checkpoint and not variable)
         or (not variable and old.max_tokens != old.max_steps * targets_per_step)
         or (not variable and new.max_tokens != new.max_steps * targets_per_step)
-        or new.max_steps <= old.max_steps
-        or new.max_tokens <= old.max_tokens
+        or new.max_steps <= prior_steps
+        or new.max_tokens <= prior_tokens
     ):
         raise ValueError(
             "budget extension requires a terminal, whole-update AdamW parent and strictly larger whole-update caps"
@@ -199,7 +205,12 @@ def validate_budget_extension(
         from sparselab.training.data_extension import verify_matched_extension
 
         supply = verify_matched_extension(
-            source, target, snapshot, parent_root, append_data=append_data
+            source,
+            target,
+            snapshot,
+            parent_root,
+            append_data=append_data,
+            append_from_checkpoint=append_from_checkpoint,
         )
     elif append_data:
         raise ValueError("append-data requires matched whole-document training")
@@ -292,7 +303,10 @@ def load_continuation(
     add_ngram_memory: bool = False,
     extend_context: bool = False,
     append_data: bool = False,
+    append_from_checkpoint: bool = False,
 ) -> Continuation:
+    if append_from_checkpoint and not append_data:
+        raise ValueError("append-from-checkpoint requires explicit append-data")
     if append_data and extend_budget is None:
         raise ValueError("append-data requires explicit extend-budget")
     if extend_context and not add_ngram_memory:
@@ -485,6 +499,7 @@ def load_continuation(
                 parent_tokenizer=root / "tokenizer.json",
                 parent_root=root,
                 append_data=append_data,
+                append_from_checkpoint=append_from_checkpoint,
             )
         if snapshot.engine != runtime.engine or snapshot.backend != runtime.backend:
             raise ValueError("full resume requires the same engine and backend")

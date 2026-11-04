@@ -154,3 +154,17 @@ do not repeat `--append-data` without another terminal budget extension. A code
 or runtime change still requires the existing explicit drift policy. Arbitrary
 corpus replacement, masked SFT and multi-pass append transitions are not admitted
 by this append-only path.
+
+To start a new data phase before the source's planned budget finishes, add
+`--append-from-checkpoint` alongside `--extend-budget` and `--append-data`.
+This explicit transition admits only a verified complete-update checkpoint from
+a single-pass whole-document parent. The new stream must preserve every consumed
+token, every consumed update boundary and the validation stream. Its caps must
+advance beyond the checkpoint; they may be smaller than the parent's unconsumed
+plan. Freeze the consumed token boundary in `frozen_update_ends`. The decision
+records consumed counters and the number/location of deferred source tokens.
+Original source data and checkpoints are retained. Optimizer, RNG, scheduler and
+learned memory remain full-state; this is not a weight-only promotion or an
+objective change. Without the new flag, append-data still requires a terminal
+parent. Coordinate device/source ownership before launching the child; preparation
+and read-only checkpoint validation do not stop or change a live parent.

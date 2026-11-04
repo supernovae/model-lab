@@ -580,6 +580,7 @@ def train(
     add_ngram_memory: bool = False,
     extend_context: bool = False,
     append_data: bool = False,
+    append_from_checkpoint: bool = False,
     recover: Path | None = None,
     run_id: str | None = None,
     stop_after_step: int | None = None,
@@ -607,6 +608,8 @@ def train(
         raise ValueError("--add-ngram-memory requires --promote")
     if extend_context and not add_ngram_memory:
         raise ValueError("--extend-context requires --add-ngram-memory and --promote")
+    if append_from_checkpoint and not append_data:
+        raise ValueError("--append-from-checkpoint requires --append-data")
     if append_data and extend_budget is None:
         raise ValueError("--append-data requires --extend-budget")
     require_model_runtime_allowed()
@@ -637,6 +640,7 @@ def train(
         add_ngram_memory=add_ngram_memory,
         extend_context=extend_context,
         append_data=append_data,
+        append_from_checkpoint=append_from_checkpoint,
         recover=recover,
         run_id=run_id,
         stop_after_step=stop_after_step,
@@ -698,6 +702,7 @@ def _train_impl(
     add_ngram_memory: bool = False,
     extend_context: bool = False,
     append_data: bool = False,
+    append_from_checkpoint: bool = False,
     extend_budget: Path | None = None,
     recover: Path | None = None,
     run_id: str | None = None,
@@ -961,6 +966,7 @@ def _train_impl(
             add_ngram_memory=add_ngram_memory,
             extend_context=extend_context,
             append_data=append_data,
+            append_from_checkpoint=append_from_checkpoint,
             recover=recover,
             allow_runtime_drift=allow_runtime_drift,
             allow_runtime_optimization=allow_runtime_optimization,
