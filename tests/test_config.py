@@ -474,3 +474,32 @@ def test_context_memory_roundtrip_preserves_distinct_architecture():
     )
     assert ModelConfig.model_validate_json(contextual.model_dump_json()) == contextual
     assert contextual.model_dump() != base.model_dump()
+
+
+def test_mixture_tokenizer_origin_requires_one_pinned_declaration(
+    tmp_path, origin_bound_config
+):
+    from sparselab.training.manifest import config_sha256
+
+    raw = origin_bound_config
+    raw["tokenizer"]["origin"] = {
+        "mixture_declaration_path": "origin/mixture.json",
+        "mixture_declaration_sha256": "a" * 64,
+        "sha256": "b" * 64,
+        "manifest_sha256": "c" * 64,
+    }
+    path = tmp_path / "run.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    config = load_config(path)
+    assert (
+        config.tokenizer.origin.mixture_declaration_path
+        == tmp_path / "origin/mixture.json"
+    )
+    before = config_sha256(raw)
+    raw["tokenizer"]["origin"]["mixture_declaration_path"] = "/moved/mixture.json"
+    assert config_sha256(raw) == before
+    raw["tokenizer"]["origin"]["mixture_declaration_sha256"] = "d" * 64
+    assert config_sha256(raw) != before
+    del raw["tokenizer"]["origin"]["mixture_declaration_sha256"]
+    with pytest.raises(ValueError, match="requires its digest"):
+        RunConfig.model_validate(raw)

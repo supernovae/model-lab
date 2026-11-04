@@ -18,16 +18,26 @@ from sparselab.training.manifest import sha256_file
 def verify_configured_tokenizer(config_path: Path) -> dict[str, object]:
     """Authenticate configured artifact bytes, immutable origin, and vocabulary."""
     config = load_config(config_path)
+    mixture_origin = (
+        config.tokenizer.origin is not None
+        and config.tokenizer.origin.mixture_declaration_path is not None
+    )
     dataset = (
         config.tokenizer.origin.dataset
         if config.tokenizer.origin is not None
+        and config.tokenizer.origin.dataset is not None
         else config.dataset
     )
-    if dataset.corpus_release_path is None and dataset.source not in {
-        "snapshot",
-        "local_stories",
-        "local_token_mixture",
-    }:
+    if (
+        not mixture_origin
+        and dataset.corpus_release_path is None
+        and dataset.source
+        not in {
+            "snapshot",
+            "local_stories",
+            "local_token_mixture",
+        }
+    ):
         raise ValueError(
             "read-only tokenizer origin verification requires a frozen corpus "
             "export, snapshot, or verified token mixture; unbound sources cannot "

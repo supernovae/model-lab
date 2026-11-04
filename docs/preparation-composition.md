@@ -90,3 +90,38 @@ admitted later work. Historical seed and mixture identity decisions are unchange
 [Portable preparation planning](preparation-recipes.md) now supplies inventoried
 external graphs/configs to this same compiler. It adds no engine admission or
 execution route; the remaining execution/provenance boundaries still apply.
+
+### Unpadded whole-document n-gram pilot
+
+For an all-token CPU/PyTorch pilot, set
+`training.matched_stories: {layout: story, targets_per_update: 4096,
+unpadded_documents: true}`, `training.micro_batch_size: 1` and
+`evaluation.batch_size: 1`. Both training and default validation use one complete
+EOS-terminated document per row, with a fresh virtual EOS input and fresh model
+history. No other document shares its attention or n-gram suffix. Rows end at
+the last valid target, so there are no padding slots. The native shared target
+groups and cursor still determine updates, budgets and exact resume.
+
+This mode accepts `memory: none` or `memory: ngram`. It refuses overlength
+documents and supervision/byte/semantic sidecars instead of silently splitting
+context or discarding masks. Select complete source records within the desired
+context and retain the original records for a separate longer-context identity.
+Use `MatchedStoryDataset.horizon(max_tokens)` for the exact `max_steps`;
+the token budget must end at a document boundary. An interior cutoff is rejected.
+Changing 4096 to 8192 does not require tokenizing those same documents again.
+This is not multi-document concatenation, assistant-only SFT, or a guarantee of
+GPU performance; microbatch one and variable shapes should be measured on the
+intended runtime before scaling.
+
+A reused tokenizer can bind `tokenizer.origin` to either an existing frozen
+snapshot dataset or a `mixture_declaration_path` plus its
+`mixture_declaration_sha256`. Both forms also require `sha256` and
+`manifest_sha256` for the tokenizer files. The mixture declaration form checks
+its native release and fit-tokenizer closure, including an explicitly recorded
+post-run observation when applicable. It does not replay the consumer mixture
+or assert that its schedule completed. A post-run observation remains bounded
+metadata/current-byte evidence, not a historical output-digest attestation.
+`sparselab tokenizer verify CONFIG --json` checks the actual vocabulary and
+special IDs, and `sparselab data prepare CONFIG` uses the same origin check.
+Existing service verification context is required for authenticated relocated
+releases; do not replace keys or rewrite historical receipts.

@@ -241,13 +241,30 @@ class ModelConfig(StrictModel):
 class TokenizerOrigin(StrictModel):
     """Explicit immutable origin of a tokenizer reused across frozen snapshots."""
 
-    dataset: DatasetConfig
+    dataset: DatasetConfig | None = Field(default=None, exclude_if=lambda v: v is None)
+    mixture_declaration_path: Path | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
+    mixture_declaration_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda v: v is None
+    )
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def validate_origin(self) -> TokenizerOrigin:
-        if self.dataset.source not in {"snapshot", "local_stories"}:
+        if (self.dataset is None) == (self.mixture_declaration_path is None):
+            raise ValueError(
+                "tokenizer origin requires exactly one snapshot or mixture declaration"
+            )
+        if (self.mixture_declaration_path is None) != (
+            self.mixture_declaration_sha256 is None
+        ):
+            raise ValueError("tokenizer origin mixture declaration requires its digest")
+        if self.dataset is not None and self.dataset.source not in {
+            "snapshot",
+            "local_stories",
+        }:
             raise ValueError("explicit tokenizer origin requires a frozen snapshot")
         return self
 
@@ -490,6 +507,7 @@ class MatchedStoryConfig(StrictModel):
 
     layout: Literal["contiguous", "story"]
     targets_per_update: int = Field(default=4096, gt=0)
+    unpadded_documents: bool = False
 
 
 class TrainingConfig(StrictModel):
@@ -778,6 +796,21 @@ class RunConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_cross_section(self) -> RunConfig:
+        matched = self.training.matched_stories
+        if (
+            matched is not None
+            and matched.unpadded_documents
+            and (
+                matched.layout != "story"
+                or self.training.micro_batch_size != 1
+                or self.evaluation.batch_size not in {None, 1}
+                or self.runtime.engine != "pytorch"
+                or self.model.memory not in {"none", "ngram"}
+            )
+        ):
+            raise ValueError(
+                "unpadded documents require story layout, batch size one and PyTorch none/ngram memory"
+            )
         if self.runtime.compile_output_head_loss and (
             self.dataset.allocation_manifest_path is not None
             or self.training.portability_manifest_path is not None
@@ -789,8 +822,12 @@ class RunConfig(StrictModel):
         if self.tokenizer.origin is not None and self.dataset.source not in {
             "snapshot",
             "local_stories",
+            "local_text",
+            "local_chat",
         }:
-            raise ValueError("explicit tokenizer origin requires a snapshot consumer")
+            raise ValueError(
+                "explicit tokenizer origin requires a content-bound consumer"
+            )
         if (
             self.model.memory_conv_kernel_size
             and self.dataset.allocation_manifest_path is not None

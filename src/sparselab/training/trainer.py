@@ -1055,7 +1055,10 @@ def _train_impl(
         )
         matched = config.training.matched_stories
         if matched is not None:
-            if config.model.memory != "none" or any(
+            if (
+                config.model.memory != "none"
+                and not (config.model.memory == "ngram" and matched.unpadded_documents)
+            ) or any(
                 value is not None
                 for value in (
                     data.train_supervision,
@@ -1066,7 +1069,7 @@ def _train_impl(
                 )
             ):
                 raise ValueError(
-                    "matched stories support plain all-token data without memory only"
+                    "matched stories require plain all-token data; ngram memory requires unpadded whole documents"
                 )
             story_tokenizer = load_tokenizer(
                 artifact_source / "tokenizer.json"
@@ -1082,6 +1085,7 @@ def _train_impl(
                 eos,
                 layout=matched.layout,
                 targets_per_update=matched.targets_per_update,
+                unpadded_documents=matched.unpadded_documents,
             )
             if config.training.max_steps != dataset.horizon(config.training.max_tokens):
                 raise ValueError(
@@ -1096,6 +1100,28 @@ def _train_impl(
             data.validation_semantic_queries,
             data.validation_semantic_mask,
         )
+        if matched is not None and matched.unpadded_documents:
+            if any(
+                value is not None
+                for value in (
+                    data.validation_supervision,
+                    data.validation_byte_addresses,
+                    data.validation_owner_ids,
+                    data.validation_semantic_queries,
+                    data.validation_semantic_mask,
+                )
+            ):
+                raise ValueError(
+                    "unpadded document validation requires plain all-token data"
+                )
+            validation_dataset = MatchedStoryDataset(
+                data.validation,
+                config.training.seq_len,
+                eos,
+                layout="story",
+                targets_per_update=1,
+                unpadded_documents=True,
+            )
         if not len(dataset):
             raise ValueError("training data contains no supervised next-token targets")
         if not len(validation_dataset):

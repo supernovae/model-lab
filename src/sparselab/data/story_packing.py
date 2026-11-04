@@ -21,6 +21,7 @@ class MatchedStoryDataset:
         *,
         layout: str,
         targets_per_update: int = 4096,
+        unpadded_documents: bool = False,
     ) -> None:
         if ids.ndim != 1 or ids.dtype != np.dtype(np.int32) or not len(ids):
             raise ValueError("story IDs must be nonempty one-dimensional int32")
@@ -34,6 +35,7 @@ class MatchedStoryDataset:
             raise ValueError("matched stories require a terminal EOS")
         self.ids, self.seq_len, self.eos = ids, seq_len, eos
         self.layout, self.targets_per_update = layout, targets_per_update
+        self.unpadded_documents = unpadded_documents
         self.supervision = None
         # Scan in bounded slices: no corpus-sized temporary boolean array.
         ends = []
@@ -44,6 +46,13 @@ class MatchedStoryDataset:
                 ).tolist()
             )
         self.document_ends = np.asarray(ends, dtype=np.int64)
+        if unpadded_documents and (
+            layout != "story"
+            or np.diff(np.concatenate(([0], self.document_ends))).max() > seq_len
+        ):
+            raise ValueError(
+                "unpadded documents require whole stories within sequence length"
+            )
         groups = [0]
         for end in ends:
             if end - groups[-1] >= targets_per_update:
@@ -60,6 +69,14 @@ class MatchedStoryDataset:
         if budget <= 0:
             raise ValueError("budget must be positive")
         passes, tail = divmod(budget, len(self.ids))
+        if (
+            self.unpadded_documents
+            and tail
+            and self.document_ends[np.searchsorted(self.document_ends, tail)] != tail
+        ):
+            raise ValueError(
+                "unpadded documents require a document-aligned target budget"
+            )
         return passes * len(self) + (
             int(np.searchsorted(self.group_offsets, tail, side="left")) if tail else 0
         )
@@ -93,6 +110,8 @@ class MatchedStoryDataset:
         result = {}
         for layout, rows in rows_by_layout.items():
             padded = rows * self.seq_len - targets
+            if layout == "story" and self.unpadded_documents:
+                padded = np.zeros_like(padded)
             result[layout] = {
                 "rows_per_pass": int(rows.sum()),
                 "max_rows_per_update": int(rows.max()),
@@ -118,6 +137,7 @@ class MatchedStoryDataset:
             "max_tokens": budget,
             "max_steps": self.horizon(budget),
             "full_pass_layout_costs": self.layout_costs(),
+            **({"unpadded_documents": True} if self.unpadded_documents else {}),
         }
 
     def exposure_supply(self) -> dict[str, int]:
@@ -130,12 +150,27 @@ class MatchedStoryDataset:
             "usable_supervised_targets_per_pass": len(self.ids),
         }
 
+    def numpy_microblock(self, index: int):
+        """Read one whole validation document with a fresh EOS context."""
+        if not self.unpadded_documents or self.targets_per_update != 1:
+            raise ValueError(
+                "document indexing requires unpadded single-document groups"
+            )
+        return next(self.update_rows(index, len(self.ids)))
+
     def update_rows(self, group: int, remaining: int):
         """Yield padded native microblock records for one common target interval."""
         if not 0 <= group < len(self) or remaining <= 0:
             raise ValueError("invalid group cursor or remaining budget")
         start, end = map(int, self.group_offsets[group : group + 2])
         end = min(end, start + remaining)
+        if (
+            self.unpadded_documents
+            and self.document_ends[np.searchsorted(self.document_ends, end)] != end
+        ):
+            raise ValueError(
+                "unpadded documents require a document-aligned target budget"
+            )
         if self.layout == "story":
             lo, hi = np.searchsorted(self.document_ends, [start, end], side="right")
             boundaries = [*self.document_ends[lo:hi], end]
@@ -146,8 +181,9 @@ class MatchedStoryDataset:
             while start < boundary:
                 stop = min(start + self.seq_len, boundary)
                 count = stop - start
-                inputs = np.full(self.seq_len, self.eos, dtype=np.int64)
-                labels = np.full(self.seq_len, -100, dtype=np.int64)
+                row_length = count if self.unpadded_documents else self.seq_len
+                inputs = np.full(row_length, self.eos, dtype=np.int64)
+                labels = np.full(row_length, -100, dtype=np.int64)
                 inputs[0] = self.eos if start == 0 else self.ids[start - 1]
                 inputs[1:count] = self.ids[start : stop - 1]
                 labels[:count] = self.ids[start:stop]

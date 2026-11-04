@@ -1292,6 +1292,11 @@
           "exclusiveMinimum": 0,
           "title": "Targets Per Update",
           "type": "integer"
+        },
+        "unpadded_documents": {
+          "default": false,
+          "title": "Unpadded Documents",
+          "type": "boolean"
         }
       },
       "required": [
@@ -2061,12 +2066,46 @@
       "description": "Explicit immutable origin of a tokenizer reused across frozen snapshots.",
       "properties": {
         "dataset": {
-          "$ref": "#/$defs/DatasetConfig"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DatasetConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "manifest_sha256": {
           "pattern": "^[0-9a-f]{64}$",
           "title": "Manifest Sha256",
           "type": "string"
+        },
+        "mixture_declaration_path": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mixture Declaration Path"
+        },
+        "mixture_declaration_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mixture Declaration Sha256"
         },
         "sha256": {
           "pattern": "^[0-9a-f]{64}$",
@@ -2075,7 +2114,6 @@
         }
       },
       "required": [
-        "dataset",
         "sha256",
         "manifest_sha256"
       ],
