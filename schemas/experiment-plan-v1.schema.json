@@ -1279,6 +1279,15 @@
       "additionalProperties": false,
       "description": "Shared document grouping; layout is the sole arm-specific setting.",
       "properties": {
+        "frozen_update_ends": {
+          "default": [],
+          "items": {
+            "exclusiveMinimum": 0,
+            "type": "integer"
+          },
+          "title": "Frozen Update Ends",
+          "type": "array"
+        },
         "layout": {
           "enum": [
             "contiguous",

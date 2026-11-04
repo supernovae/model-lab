@@ -115,13 +115,22 @@ def _runtime_optimization_transition(
 
 
 def _extension_settings(
-    source: RunConfig, target: RunConfig, *, parent_tokenizer: Path | None = None
+    source: RunConfig,
+    target: RunConfig,
+    *,
+    parent_tokenizer: Path | None = None,
+    append_data: bool = False,
 ) -> str:
     """Compare budget-independent settings; authenticate relocated tokenizer bytes."""
     comparable = target.model_dump(mode="json")
     comparable["training"]["max_steps"] = source.training.max_steps
     comparable["training"]["max_tokens"] = source.training.max_tokens
     comparable["optimizer"]["decay_steps"] = source.optimizer.decay_steps
+    if append_data:
+        comparable["dataset"] = source.dataset.model_dump(mode="json")
+        comparable["training"]["matched_stories"]["frozen_update_ends"] = list(
+            source.training.matched_stories.frozen_update_ends
+        )
     if parent_tokenizer is not None:
         manifest = read_manifest(parent_tokenizer.parent / "manifest.json")
         record = next(
@@ -148,22 +157,25 @@ def _extension_settings(
     return _resume_settings(RunConfig.model_validate(comparable))
 
 
-def _budget_extension(
+def validate_budget_extension(
     source: RunConfig,
     target: RunConfig,
     snapshot: TrainingSnapshot,
     *,
     parent_tokenizer: Path | None = None,
+    parent_root: Path | None = None,
+    append_data: bool = False,
 ) -> dict[str, object]:
     """Validate the sole scientific difference allowed for full-state extension."""
     old = source.training
     new = target.training
     targets_per_step = old.seq_len * old.micro_batch_size * old.gradient_accumulation
+    variable = old.matched_stories is not None
+    decay_horizon = getattr(source.optimizer, "decay_steps", None) or old.max_steps
     if (
         source.optimizer.name != "adamw"
         or target.optimizer.name != "adamw"
-        or source.optimizer.decay_steps not in {None, old.max_steps}
-        or target.optimizer.decay_steps != old.max_steps
+        or target.optimizer.decay_steps != decay_horizon
         or snapshot.schedule.get("kind")
         != (
             "warmup_cosine_floor_v1"
@@ -172,16 +184,30 @@ def _budget_extension(
         )
         or snapshot.step != old.max_steps
         or snapshot.tokens_seen != old.max_tokens
-        or old.max_tokens != old.max_steps * targets_per_step
-        or new.max_tokens != new.max_steps * targets_per_step
+        or (not variable and old.max_tokens != old.max_steps * targets_per_step)
+        or (not variable and new.max_tokens != new.max_steps * targets_per_step)
         or new.max_steps <= old.max_steps
         or new.max_tokens <= old.max_tokens
     ):
         raise ValueError(
             "budget extension requires a terminal, whole-update AdamW parent and strictly larger whole-update caps"
         )
+    supply = {}
+    if variable:
+        if parent_root is None:
+            raise ValueError("matched budget extension requires verified parent data")
+        from sparselab.training.data_extension import verify_matched_extension
+
+        supply = verify_matched_extension(
+            source, target, snapshot, parent_root, append_data=append_data
+        )
+    elif append_data:
+        raise ValueError("append-data requires matched whole-document training")
     if _extension_settings(
-        source, target, parent_tokenizer=parent_tokenizer
+        source,
+        target,
+        parent_tokenizer=parent_tokenizer,
+        append_data=append_data,
     ) != _resume_settings(source):
         raise ValueError(
             "budget extension changes settings other than the budget and decay horizon"
@@ -194,6 +220,7 @@ def _budget_extension(
         "new_max_steps": new.max_steps,
         "new_max_tokens": new.max_tokens,
         "decay_steps": target.optimizer.decay_steps,
+        **supply,
     }
 
 
@@ -264,7 +291,10 @@ def load_continuation(
     allow_runtime_optimization: bool = False,
     add_ngram_memory: bool = False,
     extend_context: bool = False,
+    append_data: bool = False,
 ) -> Continuation:
+    if append_data and extend_budget is None:
+        raise ValueError("append-data requires explicit extend-budget")
     if extend_context and not add_ngram_memory:
         raise ValueError("extend-context requires explicit add-ngram-memory promotion")
     if add_ngram_memory:
@@ -448,8 +478,13 @@ def load_continuation(
                     "resume configuration differs from checkpoint; use promotion for changed scientific settings"
                 )
         else:
-            extension = _budget_extension(
-                saved_config, config, snapshot, parent_tokenizer=root / "tokenizer.json"
+            extension = validate_budget_extension(
+                saved_config,
+                config,
+                snapshot,
+                parent_tokenizer=root / "tokenizer.json",
+                parent_root=root,
+                append_data=append_data,
             )
         if snapshot.engine != runtime.engine or snapshot.backend != runtime.backend:
             raise ValueError("full resume requires the same engine and backend")

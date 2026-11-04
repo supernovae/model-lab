@@ -1030,6 +1030,7 @@ def _train(args: argparse.Namespace) -> None:
         promote=Path(args.promote) if args.promote else None,
         add_ngram_memory=args.add_ngram_memory,
         extend_context=args.extend_context,
+        append_data=args.append_data,
         recover=Path(args.recover) if args.recover else None,
         run_id=args.run_id,
         stop_after_step=args.stop_after_step,
@@ -3461,6 +3462,11 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         "--spot-policy", type=Path, help="Separate operational spot-safety JSON policy"
     )
     training.add_argument("--extend-budget")
+    training.add_argument(
+        "--append-data",
+        action="store_true",
+        help="verified append-only document data; requires --extend-budget",
+    )
     training.add_argument("--promote")
     training.add_argument(
         "--add-ngram-memory",

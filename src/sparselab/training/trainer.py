@@ -579,6 +579,7 @@ def train(
     promote: Path | None = None,
     add_ngram_memory: bool = False,
     extend_context: bool = False,
+    append_data: bool = False,
     recover: Path | None = None,
     run_id: str | None = None,
     stop_after_step: int | None = None,
@@ -606,6 +607,8 @@ def train(
         raise ValueError("--add-ngram-memory requires --promote")
     if extend_context and not add_ngram_memory:
         raise ValueError("--extend-context requires --add-ngram-memory and --promote")
+    if append_data and extend_budget is None:
+        raise ValueError("--append-data requires --extend-budget")
     require_model_runtime_allowed()
     require_authorization(config, authorization)
     validate_tokenizer_batch_limits(
@@ -633,6 +636,7 @@ def train(
         promote=promote,
         add_ngram_memory=add_ngram_memory,
         extend_context=extend_context,
+        append_data=append_data,
         recover=recover,
         run_id=run_id,
         stop_after_step=stop_after_step,
@@ -693,6 +697,7 @@ def _train_impl(
     promote: Path | None = None,
     add_ngram_memory: bool = False,
     extend_context: bool = False,
+    append_data: bool = False,
     extend_budget: Path | None = None,
     recover: Path | None = None,
     run_id: str | None = None,
@@ -955,6 +960,7 @@ def _train_impl(
             promote=promote,
             add_ngram_memory=add_ngram_memory,
             extend_context=extend_context,
+            append_data=append_data,
             recover=recover,
             allow_runtime_drift=allow_runtime_drift,
             allow_runtime_optimization=allow_runtime_optimization,
@@ -962,7 +968,9 @@ def _train_impl(
         snapshot = continuation_state.snapshot
         source_run = continuation_state.source_run
         continuation = continuation_state.kind
-        artifact_source = source_run if continuation == "RESUMED" else None
+        artifact_source = (
+            source_run if continuation == "RESUMED" and not append_data else None
+        )
         if staged is not None and continuation != "RESUMED":
             artifact_source = Path(staged["assets_root"])
             config = config.model_copy(
@@ -983,7 +991,7 @@ def _train_impl(
         preparation_started = time.perf_counter()
         seed_everything(config.seed, deterministic_cpu=config.training.deterministic)
         with pilot_phase("data_open"):
-            if continuation == "RESUMED":
+            if continuation == "RESUMED" and not append_data:
                 assert source_run is not None
                 data = _load_run_data(
                     source_run,
@@ -1092,6 +1100,7 @@ def _train_impl(
                 layout=matched.layout,
                 targets_per_update=matched.targets_per_update,
                 unpadded_documents=matched.unpadded_documents,
+                frozen_update_ends=matched.frozen_update_ends,
             )
             if config.training.max_steps != dataset.horizon(config.training.max_tokens):
                 raise ValueError(

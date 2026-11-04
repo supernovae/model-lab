@@ -508,6 +508,15 @@ class MatchedStoryConfig(StrictModel):
     layout: Literal["contiguous", "story"]
     targets_per_update: int = Field(default=4096, gt=0)
     unpadded_documents: bool = False
+    frozen_update_ends: tuple[Annotated[int, Field(strict=True, gt=0)], ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+
+    @model_validator(mode="after")
+    def validate_frozen_ends(self) -> MatchedStoryConfig:
+        if tuple(sorted(set(self.frozen_update_ends))) != self.frozen_update_ends:
+            raise ValueError("frozen update ends must be sorted and unique")
+        return self
 
 
 class TrainingConfig(StrictModel):

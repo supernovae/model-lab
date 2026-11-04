@@ -125,3 +125,32 @@ metadata/current-byte evidence, not a historical output-digest attestation.
 special IDs, and `sparselab data prepare CONFIG` uses the same origin check.
 Existing service verification context is required for authenticated relocated
 releases; do not replace keys or rewrite historical receipts.
+
+### Continue variable document groups and append new data
+
+`train TARGET --extend-budget IMMUTABLE_GENERATION` now supports terminal matched
+story runs. Budget caps must equal complete native update boundaries; derive
+counts with `MatchedStoryDataset.targets_for_updates` / `horizon`, rather than
+multiplying steps by sequence length. AdamW moments, RNG, cursor and cumulative
+counters are restored. The target's `optimizer.decay_steps` must retain the
+parent's existing decay horizon (or the parent's terminal step on its first
+extension). Further extensions keep that same horizon and floor; they do not
+restart warmup.
+
+Adding `--append-data` admits a larger, already prepared `local_text` stream for
+an unpadded, single-pass parent. The target must preserve every trained token in
+its original order, every prior update boundary, and identical validation tokens.
+Set `training.matched_stories.frozen_update_ends` to the old stream length, plus
+any earlier frozen phase ends. Those document-aligned boundaries prevent the
+parent's short terminal update from being merged with newly appended records.
+The native validator rejects a missing boundary, changed prefix/heldout stream,
+changed grouping or other scientific settings, and records old/new token hashes.
+The new single-pass budget includes the consumed prefix; training starts after
+that prefix and processes only the new records.
+
+The explicit operation is full-state continuation, not weight promotion. After
+its first checkpoint, ordinary `--resume` uses the expanded owned data snapshot;
+do not repeat `--append-data` without another terminal budget extension. A code
+or runtime change still requires the existing explicit drift policy. Arbitrary
+corpus replacement, masked SFT and multi-pass append transitions are not admitted
+by this append-only path.

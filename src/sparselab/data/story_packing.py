@@ -22,6 +22,7 @@ class MatchedStoryDataset:
         layout: str,
         targets_per_update: int = 4096,
         unpadded_documents: bool = False,
+        frozen_update_ends: tuple[int, ...] = (),
     ) -> None:
         if ids.ndim != 1 or ids.dtype != np.dtype(np.int32) or not len(ids):
             raise ValueError("story IDs must be nonempty one-dimensional int32")
@@ -46,6 +47,12 @@ class MatchedStoryDataset:
                 ).tolist()
             )
         self.document_ends = np.asarray(ends, dtype=np.int64)
+        if tuple(sorted(set(frozen_update_ends))) != frozen_update_ends or any(
+            end <= 0 or end > len(ids) or end not in self.document_ends
+            for end in frozen_update_ends
+        ):
+            raise ValueError("frozen update ends must be document boundaries")
+        self.frozen_update_ends = frozen_update_ends
         if unpadded_documents and (
             layout != "story"
             or np.diff(np.concatenate(([0], self.document_ends))).max() > seq_len
@@ -55,7 +62,7 @@ class MatchedStoryDataset:
             )
         groups = [0]
         for end in ends:
-            if end - groups[-1] >= targets_per_update:
+            if end - groups[-1] >= targets_per_update or end in frozen_update_ends:
                 groups.append(end)
         if groups[-1] != len(ids):
             groups.append(len(ids))
@@ -137,6 +144,11 @@ class MatchedStoryDataset:
             "max_tokens": budget,
             "max_steps": self.horizon(budget),
             "full_pass_layout_costs": self.layout_costs(),
+            **(
+                {"frozen_update_ends": list(self.frozen_update_ends)}
+                if self.frozen_update_ends
+                else {}
+            ),
             **({"unpadded_documents": True} if self.unpadded_documents else {}),
         }
 
