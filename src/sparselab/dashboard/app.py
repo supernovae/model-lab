@@ -21,6 +21,7 @@ import streamlit as st
 from sparselab.dashboard import inspection, lab_pages, training_charts, ui
 from sparselab.dashboard.queries import DashboardSnapshot, RunRecord, runs, snapshot
 from sparselab.dashboard.research import learn_page, research_page
+from sparselab.dashboard.stores import configured_stores, parse_run_store
 from sparselab.evaluation.post_train_triage import read_triage, triage_summary
 from sparselab.evaluation.surface_overlay import surface_review_status
 from sparselab.training.checkpoints import CheckpointManager, _safe_member
@@ -61,6 +62,9 @@ _ESTIMATE_BUCKETS = (
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--runs-dir", default="sparselab-work/runs")
+    parser.add_argument(
+        "--run-store", action="append", type=parse_run_store, default=[]
+    )
     parser.add_argument("--reports-dir", default="artifacts/research-reports")
     parser.add_argument("--lifecycle")
     parser.add_argument("--evidence-root", default=".")
@@ -161,6 +165,36 @@ def _selection_controls(root: Path) -> None:
     previous = st.session_state.get("selected_runs", ids[:1])
     st.session_state["selected_runs"] = [run_id for run_id in previous if run_id in ids]
     st.sidebar.multiselect("Runs", ids, key="selected_runs")
+
+
+def _store_controls(primary: Path, extra: list[tuple[str, str]]) -> Path:
+    """Switch whole read-only projections, keeping selections scoped by directory."""
+    stores = configured_stores(primary, extra)
+    label = (
+        st.sidebar.selectbox("Run store", list(stores), key="dashboard_run_store")
+        if len(stores) > 1
+        else next(iter(stores))
+    )
+    root = stores[label]
+    identity = str(root)
+    previous = st.session_state.get("dashboard_active_store")
+    if previous != identity:
+        selections = st.session_state.setdefault("dashboard_store_selections", {})
+        if previous is not None and "selected_runs" in st.session_state:
+            selections[previous] = list(st.session_state["selected_runs"])
+        if identity in selections:
+            st.session_state["selected_runs"] = selections[identity]
+        else:
+            st.session_state.pop("selected_runs", None)
+        # These widgets name values/generations in one store, not global identities.
+        for key in ("training_metrics", "inspect_run", "inspect_checkpoint"):
+            st.session_state.pop(key, None)
+        st.session_state["dashboard_active_store"] = identity
+    if len(stores) > 1:
+        st.sidebar.caption(
+            "Telemetry uses the selected store. Lab records remain separate."
+        )
+    return root
 
 
 def _rows_for(
@@ -973,12 +1007,20 @@ def main() -> None:
     st.set_page_config(page_title="Tiny Sparse Lab", page_icon="🔬", layout="wide")
     ui.style()
     args = arguments()
-    root = Path(args.runs_dir)
+    try:
+        root = _store_controls(Path(args.runs_dir), args.run_store)
+    except ValueError as error:
+        st.error(str(error))
+        st.stop()
     reports_dir = Path(args.reports_dir)
     lifecycle = Path(args.lifecycle) if args.lifecycle else None
     evidence_root = Path(args.evidence_root)
     surface_dir = Path(args.surface_dir) if args.surface_dir else None
-    lab_dir = Path(args.lab_dir) if args.lab_dir else root.parent / "lab"
+    lab_dir = (
+        Path(args.lab_dir)
+        if args.lab_dir
+        else Path(args.runs_dir).expanduser().resolve().parent / "lab"
+    )
     runs_dirs = [root, lab_dir / "runs"]
     pages: dict[str, Any] = {}
     lab = [

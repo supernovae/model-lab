@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 from sparselab.batch_calibration import calibrate_batch
 from sparselab.config.loading import load_config, load_tokenizer_config
 from sparselab.config.migrate import migrate_file
+from sparselab.dashboard.stores import configured_stores, parse_run_store
 from sparselab.data.bakeoff import bakeoff
 from sparselab.data.encoding import (
     TOKENIZER_BATCH_DOCUMENTS,
@@ -120,6 +121,7 @@ from sparselab.canonical import reject_duplicate_keys
 
 
 def _dashboard(args: argparse.Namespace) -> None:
+    configured_stores(Path(args.runs_dir), args.run_store)
     app_path = Path(__file__).resolve().parents[1] / "dashboard" / "app.py"
 
     command = [
@@ -144,6 +146,8 @@ def _dashboard(args: argparse.Namespace) -> None:
         "--reports-dir",
         args.reports_dir,
     ]
+    for label, directory in args.run_store:
+        command.extend(["--run-store", f"{label}={directory}"])
     if args.lifecycle is not None:
         command.extend(["--lifecycle", args.lifecycle])
     command.extend(["--evidence-root", args.evidence_root])
@@ -3953,6 +3957,14 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         "--runs-dir",
         default=runs_dir_default,
         help="Run directory (default: selected persistent state root/runs)",
+    )
+    dashboard.add_argument(
+        "--run-store",
+        action="append",
+        type=parse_run_store,
+        default=[],
+        metavar="LABEL=DIRECTORY",
+        help="Additional read-only run store shown in the dashboard selector (repeatable)",
     )
     dashboard.add_argument("--port", type=int, default=8501)
     dashboard.add_argument(

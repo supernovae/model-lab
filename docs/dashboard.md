@@ -346,3 +346,26 @@ rerun. The query reads telemetry for selected runs only. A failed read retains
 that selection's last successful snapshot with a visible stale-data warning;
 it never substitutes another selection's data. Charts retain their existing
 interaction-preserving component.
+
+### Browse separate run stores
+
+Keep the existing `--runs-dir` as the primary store and add named directories:
+
+```sh
+sparselab dashboard --runs-dir /data/history/runs \
+  --run-store 'Devmind pilot=/data/devmind/pilot/runs' \
+  --lab-dir /data/history/lab
+```
+
+`--run-store LABEL=DIRECTORY` is repeatable. The **Run store** sidebar selector
+appears only when extra stores are configured. It switches the entire telemetry
+view without merging, copying or migrating databases. Labels and directories
+must be distinct. Missing stores remain unavailable rather than being created or
+falling back to another store. Run selections are remembered per directory;
+checkpoint and metric selectors reset on a store change, and stale snapshots are
+also scoped to that directory. Identical run IDs in different stores stay separate.
+
+The existing `--lab-dir` still selects the Lab records for Home, Experiments,
+Models and Behaviors. Explorer sees the selected run store plus `LAB/runs`, as
+before. Changing the run store does not silently change the Lab records directory.
+With no extra stores, existing single-store commands behave as before.
