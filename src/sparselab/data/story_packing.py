@@ -23,6 +23,7 @@ class MatchedStoryDataset:
         targets_per_update: int = 4096,
         unpadded_documents: bool = False,
         frozen_update_ends: tuple[int, ...] = (),
+        target_group_transition: dict | None = None,
     ) -> None:
         if ids.ndim != 1 or ids.dtype != np.dtype(np.int32) or not len(ids):
             raise ValueError("story IDs must be nonempty one-dimensional int32")
@@ -60,10 +61,23 @@ class MatchedStoryDataset:
             raise ValueError(
                 "unpadded documents require whole stories within sequence length"
             )
+        self.target_group_transition = target_group_transition
+        boundary = (
+            target_group_transition["after_tokens"] if target_group_transition else 0
+        )
+        if boundary and (boundary not in self.document_ends or boundary >= len(ids)):
+            raise ValueError("regroup boundary requires an interior document boundary")
         groups = [0]
         for end in ends:
-            if end - groups[-1] >= targets_per_update or end in frozen_update_ends:
+            goal = (
+                target_group_transition["previous_targets_per_update"]
+                if groups[-1] < boundary
+                else targets_per_update
+            )
+            if end - groups[-1] >= goal or end in frozen_update_ends:
                 groups.append(end)
+        if boundary and boundary not in groups:
+            raise ValueError("regroup boundary must be an existing complete update")
         if groups[-1] != len(ids):
             groups.append(len(ids))
         self.group_offsets = np.asarray(groups, dtype=np.int64)
@@ -75,6 +89,10 @@ class MatchedStoryDataset:
         """Exact update count for a fresh run, including the clipped final group."""
         if budget <= 0:
             raise ValueError("budget must be positive")
+        if self.target_group_transition and budget > len(self.ids):
+            raise ValueError(
+                "regroup policy currently supports a single source-order pass"
+            )
         passes, tail = divmod(budget, len(self.ids))
         if (
             self.unpadded_documents
@@ -138,6 +156,11 @@ class MatchedStoryDataset:
             "initial_context": "virtual-eos",
             "order": "source",
             "targets_per_update": self.targets_per_update,
+            **(
+                {"target_group_transition": self.target_group_transition}
+                if self.target_group_transition
+                else {}
+            ),
             "group_offsets_sha256": canonical_digest(self.group_offsets.tolist()),
             "groups_per_pass": len(self),
             "targets_per_pass": len(self.ids),

@@ -8,7 +8,14 @@ from sparselab.engines.base import Microbatch
 
 
 def collate_document_update(
-    records, *, width: int, eos: int, max_length: int, padding_multiple: int = 128
+    records,
+    *,
+    width: int,
+    eos: int,
+    max_length: int,
+    padding_multiple: int = 128,
+    max_padded_slots: int | None = None,
+    max_attention_cells: int | None = None,
 ) -> list[Microbatch]:
     """Stable length buckets; never pack, truncate or move a document to another update.
 
@@ -34,13 +41,32 @@ def collate_document_update(
             raise ValueError("document batching does not support sidecars")
     ordered = sorted(records, key=lambda row: len(row[0]))
     batches = []
-    for offset in range(0, len(ordered), width):
-        rows = ordered[offset : offset + width]
-        longest = max(len(row[0]) for row in rows)
-        length = min(
-            max_length,
-            ((longest + padding_multiple - 1) // padding_multiple) * padding_multiple,
-        )
+    offset = 0
+    while offset < len(ordered):
+        rows = []
+        length = 0
+        for row in ordered[offset : offset + width]:
+            candidate_length = min(
+                max_length,
+                ((len(row[0]) + padding_multiple - 1) // padding_multiple)
+                * padding_multiple,
+            )
+            count = len(rows) + 1
+            if (
+                max_padded_slots is not None
+                and count * candidate_length > max_padded_slots
+            ) or (
+                max_attention_cells is not None
+                and count * candidate_length**2 > max_attention_cells
+            ):
+                if not rows:
+                    raise ValueError(
+                        "one document exceeds the microbatch shape envelope"
+                    )
+                break
+            rows.append(row)
+            length = candidate_length
+        offset += len(rows)
         inputs = np.full((len(rows), length), eos, dtype=np.int64)
         targets = np.full_like(inputs, -100)
         positions = np.zeros(inputs.shape, dtype=np.bool_)

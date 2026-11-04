@@ -1105,9 +1105,21 @@ def _train_impl(
                 eos,
                 layout=matched.layout,
                 targets_per_update=matched.targets_per_update,
+                target_group_transition=(
+                    matched.target_group_transition.model_dump()
+                    if matched.target_group_transition
+                    else None
+                ),
                 unpadded_documents=matched.unpadded_documents,
                 frozen_update_ends=matched.frozen_update_ends,
             )
+            if snapshot is not None and any(
+                decision["kind"] == "target_group_transition"
+                for decision in continuation_state.decisions
+            ):
+                from sparselab.training.continuation import verify_regroup_cursor
+
+                verify_regroup_cursor(dataset, snapshot)
             if config.training.max_steps != dataset.horizon(config.training.max_tokens):
                 raise ValueError(
                     "matched story max_steps must equal the exact shared budget horizon"
@@ -2348,6 +2360,8 @@ def _train_impl(
                         eos=dataset.eos,
                         max_length=config.training.seq_len,
                         padding_multiple=config.training.matched_stories.padding_multiple,
+                        max_padded_slots=config.training.matched_stories.max_padded_slots,
+                        max_attention_cells=config.training.matched_stories.max_attention_cells,
                     )
                 retry_seconds = 0.0
                 emit_pilot_progress(

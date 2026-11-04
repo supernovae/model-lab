@@ -154,6 +154,102 @@ def runtime_optimization_transition(
     }
 
 
+def target_group_transition(
+    source: RunConfig, target: RunConfig, snapshot: TrainingSnapshot
+) -> dict[str, object]:
+    """Explicit scientific transition; retain Adam/RNG and the already reached LR floor."""
+    old, new = source.training.matched_stories, target.training.matched_stories
+    policy = new.target_group_transition if new else None
+    if (
+        old is None
+        or new is None
+        or policy is None
+        or old.target_group_transition is not None
+        or source.runtime.engine != "pytorch"
+        or source.optimizer.name != "adamw"
+        or source.optimizer.decay_steps is None
+        or snapshot.step < source.optimizer.decay_steps
+        or policy.after_tokens != snapshot.tokens_seen
+        or policy.previous_targets_per_update != old.targets_per_update
+        or policy.parent_checkpoint_sha256 != snapshot.checkpoint_sha256
+        or snapshot.cursor != (0, snapshot.step)
+        or new.targets_per_update <= old.targets_per_update
+        or target.training.max_steps <= snapshot.step
+        or target.training.max_steps >= source.training.max_steps
+        or new.document_batching != "padded"
+        or new.max_padded_slots is None
+        or new.max_attention_cells is None
+    ):
+        raise ValueError(
+            "regrouping requires a first-pass complete checkpoint at the existing LR floor and explicit bounded larger groups"
+        )
+    comparable = target.model_dump(mode="json")
+    comparable["training"]["max_steps"] = source.training.max_steps
+    settings = comparable["training"]["matched_stories"]
+    settings["targets_per_update"] = old.targets_per_update
+    settings.pop("target_group_transition", None)
+    for field in ("max_padded_slots", "max_attention_cells"):
+        settings.pop(field, None)
+        previous = getattr(old, field)
+        if previous is not None:
+            settings[field] = previous
+    if _resume_settings(source) != _resume_settings(
+        RunConfig.model_validate(comparable)
+    ):
+        raise ValueError(
+            "regrouping must preserve data, curriculum, optimizer, runtime and evaluation settings"
+        )
+    from sparselab.training.optimizer import schedule_payload
+
+    if snapshot.schedule != schedule_payload(source, snapshot.step):
+        raise ValueError(
+            "regrouping checkpoint schedule differs from its source configuration"
+        )
+    return {
+        "kind": "target_group_transition",
+        **policy.model_dump(),
+        "targets_per_update": new.targets_per_update,
+        "old_max_steps": source.training.max_steps,
+        "new_max_steps": target.training.max_steps,
+        "optimizer_state": "preserved; one Adam step per new effective group",
+        "schedule": "existing absolute-step floor; no warmup restart or LR scaling",
+        "cursor": "preserve historical group prefix; verify against prepared stream",
+        "resume_level": "changed_optimizer_trajectory",
+    }
+
+
+def verify_regroup_cursor(dataset, snapshot: TrainingSnapshot) -> None:
+    """Bind unchanged group-index cursor to exactly the next unconsumed document."""
+    import numpy as np
+
+    from sparselab.data.story_packing import MatchedStoryDataset
+
+    source = RunConfig.model_validate(snapshot.config)
+    old = source.training.matched_stories
+    previous = MatchedStoryDataset(
+        dataset.ids,
+        dataset.seq_len,
+        dataset.eos,
+        layout=old.layout,
+        targets_per_update=old.targets_per_update,
+        unpadded_documents=True,
+        frozen_update_ends=old.frozen_update_ends,
+    )
+    epoch, group = snapshot.cursor
+    if (
+        epoch != 0
+        or group != snapshot.step
+        or group >= len(previous)
+        or int(previous.group_offsets[group]) != snapshot.tokens_seen
+        or not np.array_equal(
+            previous.group_offsets[: group + 1], dataset.group_offsets[: group + 1]
+        )
+    ):
+        raise ValueError(
+            "regrouping changed the consumed prefix or next-document cursor"
+        )
+
+
 def _extension_config(
     source: RunConfig,
     target: RunConfig,
@@ -555,6 +651,13 @@ def load_continuation(
             optimization = extension.pop("runtime_optimization", None)
             if optimization is not None:
                 decisions.append(optimization)
+        elif (
+            config.training.matched_stories is not None
+            and config.training.matched_stories.target_group_transition is not None
+            and saved_config.training.matched_stories is not None
+            and saved_config.training.matched_stories.target_group_transition is None
+        ):
+            decisions.append(target_group_transition(saved_config, config, snapshot))
         elif allow_runtime_optimization:
             decisions.append(
                 runtime_optimization_transition(

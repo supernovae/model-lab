@@ -509,6 +509,14 @@ class RuntimeConfig(StrictModel):
         return self
 
 
+class TargetGroupTransition(StrictModel):
+    """One explicit first-pass regrouping at a completed checkpoint boundary."""
+
+    after_tokens: int = Field(strict=True, gt=0)
+    previous_targets_per_update: int = Field(strict=True, gt=0)
+    parent_checkpoint_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class MatchedStoryConfig(StrictModel):
     """Shared document grouping; layout is the sole arm-specific setting."""
 
@@ -521,12 +529,25 @@ class MatchedStoryConfig(StrictModel):
     padding_multiple: int = Field(
         default=128, gt=0, exclude_if=lambda value: value == 128
     )
+    target_group_transition: TargetGroupTransition | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    max_padded_slots: int | None = Field(
+        default=None, gt=0, exclude_if=lambda v: v is None
+    )
+    max_attention_cells: int | None = Field(
+        default=None, gt=0, exclude_if=lambda v: v is None
+    )
     frozen_update_ends: tuple[Annotated[int, Field(strict=True, gt=0)], ...] = Field(
         default=(), exclude_if=lambda value: not value
     )
 
     @model_validator(mode="after")
     def validate_frozen_ends(self) -> MatchedStoryConfig:
+        if self.target_group_transition is not None and (
+            not self.unpadded_documents or self.layout != "story"
+        ):
+            raise ValueError("target regrouping requires whole source-order documents")
         if self.document_batching == "padded" and not self.unpadded_documents:
             raise ValueError(
                 "padded document batching requires whole unpadded documents"

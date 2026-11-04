@@ -158,7 +158,8 @@ def configured(tmp_path, memory=True, width=4):
 
 
 @pytest.mark.parametrize("memory", [False, True])
-def test_native_engine_step_and_padding_aware_diagnostics(tmp_path, memory):
+@pytest.mark.parametrize("bounded", [False, True])
+def test_native_engine_step_and_padding_aware_diagnostics(tmp_path, memory, bounded):
     cfg = configured(tmp_path, memory)
     rows = rows_for([61, 1, 3, 13, 32, 7, 19])
     rows[2][1][:] = -100  # all-masked real context still counts in diagnostics
@@ -174,7 +175,13 @@ def test_native_engine_step_and_padding_aware_diagnostics(tmp_path, memory):
         updates = [
             engine.train_update(
                 collate_document_update(
-                    rows, width=w, eos=3, max_length=64, padding_multiple=16
+                    rows,
+                    width=w,
+                    eos=3,
+                    max_length=64,
+                    padding_multiple=16,
+                    max_padded_slots=64 if bounded else None,
+                    max_attention_cells=4096 if bounded else None,
                 ),
                 1,
                 total,

@@ -312,6 +312,14 @@ def _pilot_story_dataset(
         eos,
         layout=matched.layout,
         targets_per_update=matched.targets_per_update,
+        target_group_transition=(
+            matched.target_group_transition.model_dump()
+            if matched.target_group_transition
+            else None
+        ),
+        frozen_update_ends=(
+            matched.frozen_update_ends if matched.target_group_transition else ()
+        ),
     )
 
 

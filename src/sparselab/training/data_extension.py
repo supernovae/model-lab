@@ -36,6 +36,11 @@ def verify_matched_extension(
         eos,
         layout=old.layout,
         targets_per_update=old.targets_per_update,
+        target_group_transition=(
+            old.target_group_transition.model_dump()
+            if old.target_group_transition
+            else None
+        ),
         unpadded_documents=old.unpadded_documents,
         frozen_update_ends=old.frozen_update_ends,
     )
@@ -97,6 +102,11 @@ def verify_matched_extension(
             eos,
             layout=new.layout,
             targets_per_update=new.targets_per_update,
+            target_group_transition=(
+                new.target_group_transition.model_dump()
+                if new.target_group_transition
+                else None
+            ),
             unpadded_documents=True,
             frozen_update_ends=new.frozen_update_ends,
         )
