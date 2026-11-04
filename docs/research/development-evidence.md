@@ -555,9 +555,10 @@ Corrected raw references under the task-owned external root:
 - `final-cli-corrected.json`: `33d2df99fb7ff3b0873dac2e0385f40b90812eb0216a97141de684ee75d7d2e4`
 - `recovery-final-smoke.json`: `a756cf39bed1c740f8472f368552b14e7f4abd2c45197cbffaca2e0abe2a1616`
 
-Detailed phase observation is currently an opt-in internal API on preparation,
-staging, Controller and Campaign; there is no documented native switch for it.
-See the [native diagnostic backlog](../../TODO.md#native-diagnostic-interfaces).
+The retained measurements above used an opt-in internal observer. Current
+`data prepare`, `stage` and Campaign commands expose `--observations-output`;
+see [native diagnostic interfaces](../using-sparselab.md#native-diagnostic-interfaces)
+for the supported commands and output boundaries.
 Without an observer, these phase samples are unavailable.
 Records remain operational; endpoint RSS is not a lifetime/phase peak and
 missing accelerator probes produce unknown, not an accelerator-bound claim.
@@ -660,10 +661,10 @@ and preserves the first failure without automatic retry:
 The original invocation is retained with the
 [ancestry replay record](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/devmind-pretrain-v4/ancestry-replay-report.md).
 It is a historical recovery procedure, not a general native lab workflow.
-Declarative snapshot inheritance remains an explicit
-[implementation gap](../../TODO.md#p3--conditional-work-activate-for-a-concrete-workload);
-new workflows should use the native recovery operations above within their
-supported boundaries.
+Current `corpus_release` recovery steps support
+[declared snapshot inheritance](lifecycle-recovery.md#declared-snapshot-inheritance)
+from authenticated parent replay evidence. Use that native contract for new
+workflows; it does not turn this historical coordinator into a general runner.
 
 The coordinator enforces pre-launch byte/inode reservations plus a 25% free
 floor; it does not itself monitor live storage growth. Execution must provide
