@@ -472,6 +472,9 @@ class RuntimeConfig(StrictModel):
     device_index: int = Field(default=0, ge=0)
     precision: Literal["auto", "fp32", "bf16", "fp16"] = "fp32"
     memory: MemoryConfig = MemoryConfig()
+    compile_dynamic_shapes: bool = Field(
+        default=False, exclude_if=lambda value: not value
+    )
     compile_transformer_blocks: bool = Field(
         default=False, exclude_if=lambda value: not value
     )
@@ -481,6 +484,10 @@ class RuntimeConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_block_compilation(self) -> RuntimeConfig:
+        if self.compile_dynamic_shapes and not (
+            self.compile_transformer_blocks or self.compile_output_head_loss
+        ):
+            raise ValueError("dynamic compilation requires a compiled training kernel")
         if self.compile_transformer_blocks and (
             self.engine != "pytorch"
             or self.memory.activation_checkpointing.enabled

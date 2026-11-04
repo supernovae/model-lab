@@ -89,6 +89,7 @@ def runtime_optimization_transition(
         ("runtime", "memory", "estimate_policy"),
         ("runtime", "memory", "activation_checkpointing", "enabled"),
         ("runtime", "compile_transformer_blocks"),
+        ("runtime", "compile_dynamic_shapes"),
         ("runtime", "compile_output_head_loss"),
     )
     defaults = {

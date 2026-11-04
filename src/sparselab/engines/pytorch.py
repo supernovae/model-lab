@@ -573,12 +573,22 @@ class PyTorchEngine:
         self.model, self.optimizer = model, optimizer
         if config.runtime.compile_output_head_loss:
             self._compiled_output_head_loss = torch.compile(
-                output_projection_cross_entropy, dynamic=False
+                output_projection_cross_entropy,
+                dynamic=config.runtime.compile_dynamic_shapes,
+                fullgraph=config.runtime.compile_dynamic_shapes,
             )
         if config.runtime.compile_transformer_blocks:
+            if config.runtime.compile_dynamic_shapes:
+                from sparselab.model.rope import RoPE
+
+                for module in model.modules():
+                    if isinstance(module, RoPE):
+                        module.reserve(config.model.max_seq_len, device)
             for block in model.blocks:
                 block.forward_with_aux = torch.compile(
-                    block.forward_with_aux, dynamic=False
+                    block.forward_with_aux,
+                    dynamic=config.runtime.compile_dynamic_shapes,
+                    fullgraph=config.runtime.compile_dynamic_shapes,
                 )
         self.portability_run = portability_run
         self._portability_parameters = trainable_parameters
@@ -1062,7 +1072,19 @@ class PyTorchEngine:
     def train_update(
         self, microbatches: list[Microbatch], update_index: int, valid_targets: int
     ) -> UpdateResult:
-        with _translate_allocation_failures():
+        # Strict dynamic compilation must never turn cache exhaustion or a
+        # compiler failure into an apparently successful eager training run.
+        strict_compile = (
+            self.config is not None and self.config.runtime.compile_dynamic_shapes
+        )
+        with (
+            _translate_allocation_failures(),
+            torch._dynamo.config.patch(
+                suppress_errors=False, fail_on_recompile_limit_hit=True
+            )
+            if strict_compile
+            else nullcontext(),
+        ):
             return self._train_update(microbatches, update_index, valid_targets)
 
     def _train_update(

@@ -1983,6 +1983,11 @@
           "title": "Backend",
           "type": "string"
         },
+        "compile_dynamic_shapes": {
+          "default": false,
+          "title": "Compile Dynamic Shapes",
+          "type": "boolean"
+        },
         "compile_output_head_loss": {
           "default": false,
           "title": "Compile Output Head Loss",
