@@ -1410,6 +1410,7 @@ def _train_impl(
                 "runtime_forecast": runtime_forecast,
             },
             parent_run_id,
+            config_manifest=manifest.payload(),
         )
         store.register_manifest(run_id, manifest_digest, manifest.payload())
         for sequence, stage_record in enumerate(history.records):

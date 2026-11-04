@@ -280,3 +280,33 @@ def test_planning_reads_only_compatible_recent_runtime_calibrations(tmp_path) ->
         {"field": "sequence_length", "reason": "does not match"}
     ]
     assert store.export_records() == before
+
+
+def test_runtime_signature_binds_large_mapping_without_embedding_it(tmp_path):
+    import json
+
+    from tokenizers import Tokenizer, models
+
+    from sparselab.canonical import canonical_digest
+    from sparselab.config.models import RunConfig
+    from sparselab.memory_tokenizer import build_memory_token_map
+
+    path = tmp_path / "tokenizer.json"
+    Tokenizer(models.WordLevel({f"token{i}": i for i in range(32768)})).save(str(path))
+    mapping = build_memory_token_map(path, mode="identity").to_dict()
+    raw = _config().model_dump(mode="json")
+    raw["model"].update(
+        vocab_size=32768,
+        memory="ngram",
+        memory_table_size=31,
+        memory_dim=8,
+        memory_ngram_size=2,
+        memory_token_mapping=mapping,
+    )
+    config = RunConfig.model_validate(raw)
+    signature = runtime_signature(config, _runtime())
+    assert signature["architecture_identity"]["model"]["memory_token_mapping"] == {
+        "sha256": canonical_digest(mapping)
+    }
+    assert len(json.dumps(signature).encode()) < 16384
+    assert len(config.model.memory_token_mapping.token_ids) == 32768
