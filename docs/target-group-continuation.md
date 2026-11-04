@@ -86,7 +86,8 @@ Do not run the training command concurrently with the active run. First coordina
 a completed-checkpoint handoff through the owner. Choose the final checkpoint at
 that handoff, not the older sample checkpoint (which would repeat subsequent work).
 The planner reads the full prepared token stream to compute the exact horizon;
-that full scan has intentionally not been performed against the active run here.
+one such scan was subsequently performed against the existing NVMe prepared copy
+for the staged step-13500 configuration. Refresh it for the actual handoff.
 It opens no model/optimizer tensors and never initializes XPU. It was tested against
 a tiny native completed-checkpoint fixture.
 
@@ -101,9 +102,8 @@ python -B tools/plan_target_groups.py \
 
 The generated complete YAML preserves the current runtime choices and fills the
 exact prefix provenance, target budget, shape caps and new max_steps. It does not
-change the live YAML or choose storage destinations. A complete production YAML
-cannot be honestly finalized before choosing the handoff generation and computing
-its suffix horizon. The relevant new declaration is:
+change the live YAML or choose storage destinations. The staged complete YAML is bound to step 13500 and must be regenerated
+if the handoff selects a later checkpoint. The relevant new declaration is:
 
 ```yaml
 training:
@@ -156,5 +156,26 @@ Focused CPU tests cover source-order suffix coverage, masks, curriculum boundari
 shape caps, whole-update normalization/gradients including Engram, unchanged old
 batching, native Adam/RNG/scheduler/cursor save-reload equality, source-setting
 refusals, planner output and existing document-budget extensions. The broad suite,
-full production stream scan, GPU memory validation and real-training comparison
-were not run. See the handoff for exact test results.
+GPU memory validation and real-training comparison were not run. The later NVMe
+follow-up did run the full token-only planner scan, without checkpoint tensor loads. See the handoff for exact test results.
+
+## NVMe preparation follow-up
+
+The subsequent explicit NVMe request produced a complete staged YAML and launcher
+at `/home/byron/Documents/Codex/2026-11-04/task-12/nvme-handoff/`. A single sequential
+scan of the existing NVMe prepared tokens computed 587 remaining 131072-target
+updates from step 13500 (66,864,692 tokens), with terminal step 14087. The source
+run remains active; refresh the selected generation/config at the actual handoff.
+
+The planner now accepts `--runs-dir` and `--train-tokens`. The latter selects an
+existing prepared copy for CPU planning only; native continuation still verifies
+its parent-bound data. Native resume maps the parent run's data, so the immutable
+selected parent and its bound artifacts must be copied to NVMe before launching
+if every resumed update must read from NVMe. No copy or launch was performed here.
+
+The staged config preserves all periodic checkpoints. Native local retention does
+not archive before deleting, and the separate async archive prototype remains WIP.
+Observed ~889 GiB free NVMe covers a conservative 160 GiB finite-run working budget.
+Automatic verified archival/eviction remains separate pending work; no checkpoint
+was deleted or claimed archived. See `nvme-handoff/HANDOFF.md` for the exact paths,
+capacity assumptions and launcher command.

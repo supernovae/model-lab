@@ -25,6 +25,12 @@ def main():
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--runs-dir", type=Path)
+    parser.add_argument(
+        "--train-tokens",
+        type=Path,
+        help="Existing prepared token copy used only for CPU planning; native resume verifies source data",
+    )
     parser.add_argument(
         "--targets", type=int, choices=(32768, 65536, 131072), default=131072
     )
@@ -45,7 +51,9 @@ def main():
         "previous_targets_per_update": source.targets_per_update,
         "parent_checkpoint_sha256": manifest["sha256"],
     }
-    ids = np.load(root / "data/train.npy", mmap_mode="r", allow_pickle=False)
+    ids = np.load(
+        args.train_tokens or root / "data/train.npy", mmap_mode="r", allow_pickle=False
+    )
     plan = MatchedStoryDataset(
         ids,
         config.training.seq_len,
@@ -64,6 +72,8 @@ def main():
         )
     raw = config.model_dump(mode="json")
     raw["name"] = f"{config.name}-targets-{args.targets}"
+    if args.runs_dir is not None:
+        raw["logging"]["root_dir"] = str(args.runs_dir.resolve())
     raw["training"]["max_steps"] = plan.horizon(config.training.max_tokens)
     raw["training"]["matched_stories"].update(
         targets_per_update=args.targets,

@@ -179,6 +179,10 @@ def test_native_regroup_save_reload_adam_rng_cursor_and_floor(tmp_path):
             str(generation),
             "--targets",
             "32768",
+            "--runs-dir",
+            str(tmp_path / "nvme-runs"),
+            "--train-tokens",
+            str(root / "data/train.npy"),
             "--output",
             str(planned_yaml),
         ],
@@ -187,6 +191,7 @@ def test_native_regroup_save_reload_adam_rng_cursor_and_floor(tmp_path):
         text=True,
     )
     planned = RunConfig.model_validate(yaml.safe_load(planned_yaml.read_text()))
+    assert planned.logging.root_dir == tmp_path / "nvme-runs"
     assert planned.training.max_steps == 3
     assert (
         planned.training.matched_stories.target_group_transition.after_tokens
