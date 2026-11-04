@@ -110,7 +110,10 @@ def test_duplicate_executor_claim_is_nonblocking(tmp_path: Path) -> None:
         first.close()
 
 
-def test_dead_running_receipt_becomes_unknown_without_relaunch(tmp_path: Path) -> None:
+def test_dead_running_receipt_becomes_unknown_without_relaunch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SPARSELAB_WORKER_LEASE_DIR", str(tmp_path / "leases"))
     from sparselab.workers.execution import (
         _receipt_payload,
         _write_receipt,

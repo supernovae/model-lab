@@ -25,7 +25,11 @@ from sparselab.model.cache import (
     IncrementalCacheCapability,
 )
 from sparselab.model.ffn import SwiGLU
-from sparselab.model.memory import ByteAddressMemory, TokenNgramMemory
+from sparselab.model.memory import (
+    ByteAddressMemory,
+    TokenNgramMemory,
+    build_token_memory,
+)
 from sparselab.model.moe import (
     TopKMoE,
     diagnostic_writes_enabled,
@@ -132,6 +136,13 @@ class DecoderBlock(nn.Module):
         return self.forward_with_aux(x)[0]
 
 
+def initialize_module(module: nn.Module) -> None:
+    if isinstance(module, (nn.Linear, nn.Embedding)) and module.weight.requires_grad:
+        nn.init.normal_(module.weight, mean=0.0, std=0.02)
+    elif isinstance(module, RMSNorm):
+        nn.init.ones_(module.weight)
+
+
 class DenseLM(nn.Module):
     def __init__(self, model: ModelConfig, attention: AttentionConfig) -> None:
         super().__init__()
@@ -141,18 +152,13 @@ class DenseLM(nn.Module):
             DecoderBlock(model, attention) for _ in range(model.num_layers)
         )
         self.norm = RMSNorm(model.hidden_dim, model.rms_norm_eps)
+        independent_memory = model.memory == "ngram" and model.memory_independent_init
+        memory_rng = torch.get_rng_state() if independent_memory else None
         self.memory: nn.Module | None = (
             None
             if model.memory == "none"
             else (
-                TokenNgramMemory(
-                    model.hidden_dim,
-                    model.memory_table_size,
-                    model.memory_ngram_size,
-                    model.memory_dim,
-                    model.memory_ngram_orders,
-                    model.memory_hash_heads,
-                )
+                build_token_memory(model)
                 if model.memory == "ngram"
                 else (
                     ByteAddressMemory(
@@ -170,24 +176,34 @@ class DenseLM(nn.Module):
                 )
             )
         )
+        self.extra_memories = nn.ModuleDict(
+            {
+                str(site): build_token_memory(model, site)
+                for site in model.memory_block_sites[1:]
+            }
+        )
+        if memory_rng is not None:
+            torch.set_rng_state(memory_rng)
         self.semantic_memories = nn.ModuleDict()
         self.output = nn.Linear(model.hidden_dim, model.vocab_size, bias=False)
-        self.apply(self._initialize)
+        if independent_memory:
+            memory, extras = self.memory, self.extra_memories
+            self.memory = None
+            self.extra_memories = nn.ModuleDict()
+            self.apply(self._initialize)
+            with torch.random.fork_rng(devices=[]):
+                memory.apply(self._initialize)
+                extras.apply(self._initialize)
+            self.memory, self.extra_memories = memory, extras
+        else:
+            self.apply(self._initialize)
         if model.tie_embeddings:
             self.output.weight = self.embedding.weight
         self._forward_block_calls = 0
         self._cache_owner = object()
         self._recomputed_block_calls = 0
 
-    @staticmethod
-    def _initialize(module: nn.Module) -> None:
-        if (
-            isinstance(module, (nn.Linear, nn.Embedding))
-            and module.weight.requires_grad
-        ):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
-        elif isinstance(module, RMSNorm):
-            nn.init.ones_(module.weight)
+    _initialize = staticmethod(initialize_module)
 
     def _apply_memory(
         self,
@@ -196,28 +212,44 @@ class DenseLM(nn.Module):
         byte_addresses: Tensor | None,
         *,
         mask: Tensor | None = None,
-        incremental: bool = False,
+        cache: GenerationCache | None = None,
+        block_index: int | None = None,
     ) -> Tensor:
-        if self.memory is None:
+        extra_key = str(block_index)
+        memory = self.memory
+        if extra_key in self.extra_memories:
+            memory = self.extra_memories[extra_key]
+        if memory is None:
             return hidden
         if mask is not None and (
             mask.dtype != torch.bool or mask.shape != hidden.shape[:2]
         ):
             raise ValueError("memory mask must be boolean and align with hidden states")
-        if isinstance(self.memory, TokenNgramMemory):
-            updated = (
-                self.memory.forward_last(hidden, token_ids)
-                if incremental
-                else self.memory(hidden, token_ids)
-            )
-        elif isinstance(self.memory, (ByteAddressMemory, PortableEngramAdapter)):
+        if isinstance(memory, TokenNgramMemory):
+            if mask is not None and memory.conv is not None:
+                raise ValueError("convolved token memory does not support memory_mask")
+            if cache is not None:
+                history = (
+                    cache.memory_histories.get(extra_key)
+                    if extra_key in self.extra_memories
+                    else cache.memory_history
+                )
+                updated, next_history = memory.forward_last(hidden, token_ids, history)
+                if extra_key in self.extra_memories:
+                    if next_history is not None:
+                        cache.memory_histories[extra_key] = next_history
+                else:
+                    cache.memory_history = next_history
+            else:
+                updated = memory(hidden, token_ids)
+        elif isinstance(memory, (ByteAddressMemory, PortableEngramAdapter)):
             if byte_addresses is None:
                 raise ValueError(
                     "byte-addressed memory requires prepared byte addresses"
                 )
-            updated = self.memory(hidden, byte_addresses)
+            updated = memory(hidden, byte_addresses)
         else:
-            raise TypeError(f"unsupported memory module: {type(self.memory).__name__}")
+            raise TypeError(f"unsupported memory module: {type(memory).__name__}")
         return (
             updated
             if mask is None
@@ -392,6 +424,17 @@ class DenseLM(nn.Module):
                 x, block_aux = block.forward_with_aux(
                     x, valid_target_mask=valid_target_mask, diagnostics=diagnostics
                 )
+            if (
+                self.config.memory_injection == "after_block"
+                and block_index in self.config.memory_block_sites
+            ):
+                x = self._apply_memory(
+                    x,
+                    input_ids,
+                    byte_addresses,
+                    mask=memory_mask,
+                    block_index=block_index,
+                )
             x = self._apply_semantic_site(
                 x,
                 semantic_query_map,
@@ -429,6 +472,57 @@ class DenseLM(nn.Module):
             result[f"engram/injection/{self.config.memory_injection}"] = (
                 diagnostic.gate_mean.new_ones(()).detach()
             )
+        if self.config.memory_block_indices:
+            ports = {
+                str(self.config.memory_block_sites[0]): self.memory,
+                **dict(self.extra_memories.items()),
+            }
+            for site, memory in ports.items():
+                diagnostic = memory.last_diagnostics
+                if diagnostic is not None:
+                    for name in (
+                        "lookup_count",
+                        "unique_addresses",
+                        "collision_count",
+                        "bucket_reuse_rate",
+                        "table_utilization",
+                        "maximum_address_fraction",
+                        "gate_mean",
+                        "value_norm",
+                        "hidden_norm",
+                    ):
+                        result[f"engram/port/{site}/{name}"] = getattr(
+                            diagnostic, name
+                        ).detach()
+            diagnostics = [
+                memory.last_diagnostics
+                for memory in ports.values()
+                if memory.last_diagnostics is not None
+            ]
+            if diagnostics:
+                total_lookups = sum(item.lookup_count for item in diagnostics)
+                unique = sum(item.unique_addresses for item in diagnostics)
+                result["engram/lookup_count"] = total_lookups
+                result["engram/unique_addresses"] = unique
+                result["engram/collision_count"] = total_lookups - unique
+                result["engram/bucket_reuse_rate"] = (
+                    total_lookups - unique
+                ).float() / total_lookups.clamp_min(1)
+                result["engram/table_utilization"] = unique.float() / sum(
+                    sum(memory.table_sizes) for memory in ports.values()
+                )
+                result["engram/maximum_address_fraction"] = torch.stack(
+                    [
+                        item.maximum_address_fraction
+                        * item.lookup_count
+                        / total_lookups.clamp_min(1)
+                        for item in diagnostics
+                    ]
+                ).max()
+                for name in ("gate_mean", "value_norm", "hidden_norm"):
+                    result[f"engram/{name}"] = torch.stack(
+                        [getattr(item, name) for item in diagnostics]
+                    ).mean()
         for name, adapter in sorted(self.semantic_memories.items()):
             diagnostic = adapter.last_diagnostics
             if diagnostic is None:
@@ -662,17 +756,71 @@ class DenseLM(nn.Module):
                 raise ValueError(
                     "byte_addresses must match cached input IDs in shape and device"
                 )
+        if isinstance(self.memory, TokenNgramMemory) and self.memory.conv is not None:
+            expected_history = (
+                cache.batch_size,
+                self.memory.conv_history_length,
+                self.config.hidden_dim,
+            )
+            history = cache.memory_history
+            if cache.length and history is None:
+                raise ValueError(
+                    "generation cache is missing memory convolution history"
+                )
+            if history is not None and (
+                history.shape != expected_history
+                or history.device != input_ids.device
+                or history.dtype != self.embedding.weight.dtype
+                or history.requires_grad
+                or history.grad_fn is not None
+            ):
+                raise ValueError(
+                    "generation cache memory convolution history is invalid"
+                )
+        elif cache.memory_history is not None:
+            raise ValueError("generation cache contains unexpected memory history")
+        expected_extra = {
+            key
+            for key, memory in self.extra_memories.items()
+            if memory.conv is not None
+        }
+        if set(cache.memory_histories) - expected_extra or (
+            cache.length and set(cache.memory_histories) != expected_extra
+        ):
+            raise ValueError("generation cache extra memory histories mismatch")
+        for key, history in cache.memory_histories.items():
+            memory = self.extra_memories[key]
+            if (
+                history.shape
+                != (
+                    cache.batch_size,
+                    memory.conv_history_length,
+                    self.config.hidden_dim,
+                )
+                or history.device != input_ids.device
+                or history.dtype != self.embedding.weight.dtype
+                or history.requires_grad
+                or history.grad_fn is not None
+            ):
+                raise ValueError("generation cache extra memory history is invalid")
         semantic_query_map = self._semantic_query_map(semantic_queries)
         cache.append_input_ids(input_ids)
         full_ids = cache.input_ids[:, : cache.length]
         x = self.embedding(input_ids)
         if self.config.memory_injection == "embedding":
-            x = self._apply_memory(x, full_ids, byte_addresses, incremental=True)
+            x = self._apply_memory(x, full_ids, byte_addresses, cache=cache)
         x = self._apply_semantic_site(x, semantic_query_map, site="embedding")
         for block_index, (block, layer_cache) in enumerate(
             zip(self.blocks, cache.layers, strict=True)
         ):
             x, _ = block.forward_cached(x, layer_cache)
+            if (
+                self.config.memory_injection == "after_block"
+                and block_index in self.config.memory_block_sites
+            ):
+                x = self._apply_memory(
+                    x, full_ids, byte_addresses, cache=cache, block_index=block_index
+                )
             x = self._apply_semantic_site(
                 x,
                 semantic_query_map,
@@ -681,7 +829,7 @@ class DenseLM(nn.Module):
             )
         x = self.norm(x)
         if self.config.memory_injection == "final":
-            x = self._apply_memory(x, full_ids, byte_addresses, incremental=True)
+            x = self._apply_memory(x, full_ids, byte_addresses, cache=cache)
         x = self._apply_semantic_site(x, semantic_query_map, site="final")
         return self.output(x), cache
 

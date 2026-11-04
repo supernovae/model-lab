@@ -1028,6 +1028,7 @@ def _train(args: argparse.Namespace) -> None:
         resume=Path(args.resume) if args.resume else None,
         extend_budget=Path(args.extend_budget) if args.extend_budget else None,
         promote=Path(args.promote) if args.promote else None,
+        add_ngram_memory=args.add_ngram_memory,
         recover=Path(args.recover) if args.recover else None,
         run_id=args.run_id,
         stop_after_step=args.stop_after_step,
@@ -1204,6 +1205,21 @@ def _capability_result(args: argparse.Namespace, run_id: str, checkpoint: str | 
     )
     result["identity"] = loaded.identity
     return result, write_capability_result(loaded.run, result)
+
+
+def _code_work_evaluate(args: argparse.Namespace) -> None:
+    from sparselab.evaluation.code_work import run_code_work
+
+    result = run_code_work(
+        args.run_id,
+        Path(args.runs_dir),
+        args.checkpoint,
+        Path(args.declaration),
+        Path(args.output),
+        backend=args.backend,
+        authorization=getattr(args, "runtime_authorization", None),
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
 
 
 def _capability_evaluate(args: argparse.Namespace) -> None:
@@ -1520,16 +1536,70 @@ def _build_phase_e_tasks(args: argparse.Namespace) -> None:
 
 
 def _research_corpus_mine(args: argparse.Namespace) -> None:
-    from sparselab.data.lexical_mining import analyze_training_corpus
-
-    result = analyze_training_corpus(
-        Path(args.train_jsonl),
-        Path(args.tokenizer),
-        table_size=args.table_size,
-        memory_dim=args.memory_dim,
-        ngram_orders=tuple(args.ngram_orders),
-        hash_heads=args.hash_heads,
+    from sparselab.data.lexical_mining import (
+        analyze_prepared_training,
+        analyze_training_corpus,
     )
+
+    model_run = load_config(Path(args.model_config)) if args.model_config else None
+    if model_run is None and (
+        args.table_size is None or args.memory_dim is None or args.ngram_orders is None
+    ):
+        raise ValueError("supply --model-config or all table/dimension/order settings")
+    if model_run is not None and any(
+        value is not None
+        for value in (
+            args.table_size,
+            args.memory_dim,
+            args.ngram_orders,
+            args.hash_heads,
+        )
+    ):
+        raise ValueError(
+            "--model-config replaces explicit table/dimension/order settings"
+        )
+    settings = {
+        "table_size": model_run.model.memory_table_size
+        if model_run
+        else args.table_size,
+        "memory_dim": model_run.model.memory_dim if model_run else args.memory_dim,
+        "ngram_orders": (
+            model_run.model.memory_ngram_orders or (model_run.model.memory_ngram_size,)
+        )
+        if model_run
+        else tuple(args.ngram_orders),
+        "hash_heads": model_run.model.memory_hash_heads
+        if model_run
+        else (args.hash_heads or 1),
+        "model_config": model_run.model if model_run else None,
+        "memory_block_index": args.memory_block,
+    }
+    if args.prepared_train is not None:
+        if args.tokenizer is not None:
+            raise ValueError(
+                "--prepared-train uses its recorded tokenizer identity; omit --tokenizer"
+            )
+        if args.sequence_length is None or args.max_blocks is None:
+            raise ValueError(
+                "--prepared-train requires --sequence-length and --max-blocks"
+            )
+        result = analyze_prepared_training(
+            Path(args.prepared_train),
+            sequence_length=args.sequence_length,
+            max_blocks=args.max_blocks,
+            tokenizer_path=model_run.tokenizer.path if model_run else None,
+            **settings,
+        )
+    else:
+        if args.tokenizer is None:
+            raise ValueError("--train-jsonl requires --tokenizer")
+        if args.sequence_length is not None or args.max_blocks is not None:
+            raise ValueError("packed sampling options require --prepared-train")
+        result = analyze_training_corpus(
+            Path(args.train_jsonl),
+            Path(args.tokenizer),
+            **settings,
+        )
     output = _write_json_exclusive(Path(args.output), result)
     print(
         json.dumps(
@@ -3186,9 +3256,13 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     tokenizer_train = tokenizer_commands.add_parser("train")
     tokenizer_train.add_argument("config")
     tokenizer_train.set_defaults(handler=_tokenizer_train)
-    from sparselab.data.tokenizer_cli import register_verify_parser
+    from sparselab.data.tokenizer_cli import (
+        register_memory_map_parser,
+        register_verify_parser,
+    )
 
     register_verify_parser(tokenizer_commands)
+    register_memory_map_parser(tokenizer_commands)
     data = commands.add_parser("data")
     data_commands = data.add_subparsers(dest="data_command", required=True)
     data_prepare = data_commands.add_parser("prepare")
@@ -3387,6 +3461,11 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     )
     training.add_argument("--extend-budget")
     training.add_argument("--promote")
+    training.add_argument(
+        "--add-ngram-memory",
+        action="store_true",
+        help="explicit zero-impact dense-checkpoint migration; requires --promote",
+    )
     training.add_argument("--recover")
     training.add_argument("--allow-runtime-drift", action="store_true")
     training.add_argument(
@@ -3459,6 +3538,17 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         "card", help="Built-in card name or declarative JSON file"
     )
     capability_describe.set_defaults(handler=_capability_describe)
+    code_work = capability_commands.add_parser(
+        "code-work",
+        help="Score native generations with a pinned optional Inspect Docker sandbox.",
+    )
+    code_work.add_argument("run_id")
+    code_work.add_argument("declaration")
+    code_work.add_argument("--output", required=True)
+    code_work.add_argument("--runs-dir", default=runs_dir_default)
+    code_work.add_argument("--checkpoint", required=True)
+    code_work.add_argument("--backend", choices=("cpu", "mps", "cuda", "rocm", "xpu"))
+    code_work.set_defaults(handler=_code_work_evaluate)
     capability_evaluate = capability_commands.add_parser("evaluate")
     capability_evaluate.add_argument("run_id")
     capability_evaluate.add_argument("card")
@@ -3718,12 +3808,18 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         dest="corpus_command", required=True
     )
     corpus_mine = corpus_commands.add_parser("mine")
-    corpus_mine.add_argument("--train-jsonl", required=True)
-    corpus_mine.add_argument("--tokenizer", required=True)
-    corpus_mine.add_argument("--table-size", type=int, required=True)
-    corpus_mine.add_argument("--memory-dim", type=int, required=True)
-    corpus_mine.add_argument("--ngram-orders", type=int, nargs="+", required=True)
-    corpus_mine.add_argument("--hash-heads", type=int, default=1)
+    corpus_source = corpus_mine.add_mutually_exclusive_group(required=True)
+    corpus_source.add_argument("--train-jsonl")
+    corpus_source.add_argument("--prepared-train")
+    corpus_mine.add_argument("--sequence-length", type=int)
+    corpus_mine.add_argument("--max-blocks", type=int)
+    corpus_mine.add_argument("--tokenizer")
+    corpus_mine.add_argument("--model-config")
+    corpus_mine.add_argument("--memory-block", type=int)
+    corpus_mine.add_argument("--table-size", type=int)
+    corpus_mine.add_argument("--memory-dim", type=int)
+    corpus_mine.add_argument("--ngram-orders", type=int, nargs="+")
+    corpus_mine.add_argument("--hash-heads", type=int)
     corpus_mine.add_argument("--output", required=True)
     corpus_mine.set_defaults(handler=_research_corpus_mine)
     portability = research_commands.add_parser(

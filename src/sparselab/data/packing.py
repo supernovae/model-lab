@@ -160,7 +160,7 @@ def _sha256(path: Path) -> str:
     return manifest_module.sha256_file(path)
 
 
-def _tokenizer_sha256(tokenizer: Tokenizer) -> str:
+def canonical_tokenizer_sha256(tokenizer: Tokenizer) -> str:
     """Hash the complete tokenizer, not merely its vocabulary."""
     return hashlib.sha256(tokenizer.to_str().encode("utf-8")).hexdigest()
 
@@ -1420,7 +1420,7 @@ def _prepare_data(
         allocation = load_allocation_manifest(
             config.dataset.allocation_manifest_path,
             source_identity_sha256=source_digest,
-            tokenizer_sha256=_tokenizer_sha256(tokenizer),
+            tokenizer_sha256=canonical_tokenizer_sha256(tokenizer),
         )
         corpus = allocation.payload["corpus"]
         assert isinstance(corpus, dict)
@@ -1470,7 +1470,7 @@ def _prepare_data(
         },
         "packing_version": PACKING_VERSION,
         "source_identity_sha256": source_digest,
-        "tokenizer_sha256": _tokenizer_sha256(tokenizer),
+        "tokenizer_sha256": canonical_tokenizer_sha256(tokenizer),
     }
     from sparselab.experiments.source_compatibility import active_source_compatibility
 
@@ -1958,7 +1958,7 @@ def _prepare_data(
         **({"token_mixture": token_mixture} if token_mixture is not None else {}),
         **attributions[config.dataset.source],
         **({"corpus_export": corpus_export} if corpus_export is not None else {}),
-        "tokenizer_sha256": _tokenizer_sha256(tokenizer),
+        "tokenizer_sha256": canonical_tokenizer_sha256(tokenizer),
         "settings_sha256": hashlib.sha256(canonical_json(cache_identity)).hexdigest(),
         "source_identity_sha256": source_identity()["sha256"],
         "train": {
@@ -2138,6 +2138,21 @@ def prepare_data(
     observer: BottleneckObserver | None = None,
 ) -> PreparedData:
     """Prepare data and mark only new caches owned by the selected workspace."""
+    if config.model.memory_token_mapping is not None:
+        from sparselab.memory_tokenizer import validate_memory_token_map
+
+        validate_memory_token_map(
+            config.model.memory_token_mapping.model_dump(mode="json"),
+            tokenizer_path=config.tokenizer.path,
+        )
+        from sparselab.data.tokenizer import load_tokenizer
+
+        if canonical_tokenizer_sha256(tokenizer) != canonical_tokenizer_sha256(
+            load_tokenizer(config.tokenizer.path)
+        ):
+            raise ValueError(
+                "memory mapping tokenizer object differs from configured tokenizer"
+            )
     tokenizer_batch_documents, tokenizer_batch_source_bytes = (
         validate_tokenizer_batch_limits(
             tokenizer_batch_documents, tokenizer_batch_source_bytes

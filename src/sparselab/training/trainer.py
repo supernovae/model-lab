@@ -577,6 +577,7 @@ def train(
     resume: Path | None = None,
     extend_budget: Path | None = None,
     promote: Path | None = None,
+    add_ngram_memory: bool = False,
     recover: Path | None = None,
     run_id: str | None = None,
     stop_after_step: int | None = None,
@@ -600,6 +601,8 @@ def train(
     spot_policy: SpotSafetyPolicy | None = None,
 ) -> str:
     """Run one independent experiment, optionally bound to a stage bundle."""
+    if add_ngram_memory and promote is None:
+        raise ValueError("--add-ngram-memory requires --promote")
     require_model_runtime_allowed()
     require_authorization(config, authorization)
     validate_tokenizer_batch_limits(
@@ -625,6 +628,7 @@ def train(
         resume=resume,
         extend_budget=extend_budget,
         promote=promote,
+        add_ngram_memory=add_ngram_memory,
         recover=recover,
         run_id=run_id,
         stop_after_step=stop_after_step,
@@ -683,6 +687,7 @@ def _train_impl(
     *,
     resume: Path | None = None,
     promote: Path | None = None,
+    add_ngram_memory: bool = False,
     extend_budget: Path | None = None,
     recover: Path | None = None,
     run_id: str | None = None,
@@ -943,6 +948,7 @@ def _train_impl(
             resume=resume,
             extend_budget=extend_budget,
             promote=promote,
+            add_ngram_memory=add_ngram_memory,
             recover=recover,
             allow_runtime_drift=allow_runtime_drift,
             allow_runtime_optimization=allow_runtime_optimization,
@@ -1008,6 +1014,15 @@ def _train_impl(
                     proof_store=proof_store,
                     verification_mode=verification_mode,
                 )
+        if config.model.memory_token_mapping is not None:
+            from sparselab.memory_tokenizer import validate_memory_token_map
+
+            validate_memory_token_map(
+                config.model.memory_token_mapping.model_dump(mode="json"),
+                tokenizer_path=artifact_source / "tokenizer.json"
+                if artifact_source
+                else config.tokenizer.path,
+            )
         load_fixed_panels(
             config,
             inputs_root=artifact_source,

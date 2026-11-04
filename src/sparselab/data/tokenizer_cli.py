@@ -84,3 +84,57 @@ def register_verify_parser(commands: argparse._SubParsersAction) -> None:
     )
     command.add_argument("--json", action="store_true")
     command.set_defaults(handler=_verify)
+
+
+def _memory_map(args: argparse.Namespace) -> None:
+    from sparselab.canonical import canonical_json
+    from sparselab.derivation import derive_config
+    from sparselab.memory_tokenizer import build_memory_token_map
+
+    if bool(args.bind_config) != bool(args.config_output):
+        raise ValueError("--bind-config and --config-output must be supplied together")
+    output = Path(args.output)
+    if output.exists():
+        raise FileExistsError(output)
+    mapping = build_memory_token_map(Path(args.tokenizer), mode=args.mode)
+    receipt = None
+    if args.bind_config:
+        config = load_config(Path(args.bind_config))
+        if sha256_file(config.tokenizer.path) != mapping.tokenizer_sha256:
+            raise ValueError("bound config tokenizer differs from mapping tokenizer")
+        receipt = derive_config(
+            Path(args.bind_config),
+            Path(args.config_output),
+            {"model.memory_token_mapping": mapping.to_dict()},
+        )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("xb") as stream:
+        stream.write(canonical_json(mapping.to_dict()) + b"\n")
+    print(
+        json.dumps(
+            {
+                "output": str(output),
+                "mapping_sha256": mapping.mapping_sha256,
+                "vocab_size": mapping.vocab_size,
+                "memory_vocab_size": mapping.memory_vocab_size,
+                "derivation": receipt,
+            }
+        )
+    )
+
+
+def register_memory_map_parser(commands: argparse._SubParsersAction) -> None:
+    command = commands.add_parser(
+        "memory-map",
+        help="Build a tokenizer-bound memory ID map; preserve input/output tokenization.",
+    )
+    command.add_argument("tokenizer")
+    command.add_argument(
+        "--mode",
+        choices=("identity", "deepseek_v1", "deepseek_safe_v1"),
+        default="identity",
+    )
+    command.add_argument("--output", required=True)
+    command.add_argument("--bind-config")
+    command.add_argument("--config-output")
+    command.set_defaults(handler=_memory_map)

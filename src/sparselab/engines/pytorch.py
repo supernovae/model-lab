@@ -27,7 +27,7 @@ from sparselab.data.allocation import (
     load_allocation_manifest,
     load_semantic_retriever,
 )
-from sparselab.data.packing import _tokenizer_sha256
+from sparselab.data.packing import canonical_tokenizer_sha256
 from sparselab.data.tokenizer import load_tokenizer
 from sparselab.engines.base import (
     CanonicalTensor,
@@ -66,6 +66,7 @@ from sparselab.training.optimizer import (
     learning_rate_for_step,
     make_adafactor,
     make_optimizer,
+    set_optimizer_learning_rate,
 )
 from sparselab.training.pilot_progress import current_pilot_progress, pilot_phase
 
@@ -487,7 +488,7 @@ class PyTorchEngine:
             allocation = load_allocation_manifest(
                 config.dataset.allocation_manifest_path,
                 source_identity_sha256=cast(str, source_identity()["sha256"]),
-                tokenizer_sha256=_tokenizer_sha256(
+                tokenizer_sha256=canonical_tokenizer_sha256(
                     load_tokenizer(config.tokenizer.path)
                 ),
             )
@@ -545,6 +546,8 @@ class PyTorchEngine:
                     config.optimizer.weight_decay,
                     config.optimizer.betas,
                     config.optimizer.eps,
+                    memory_table_lr_multiplier=config.optimizer.memory_table_lr_multiplier,
+                    memory_table_weight_decay=config.optimizer.memory_table_weight_decay,
                 )
                 if config.optimizer.name == "adamw"
                 else make_adafactor(
@@ -1085,6 +1088,7 @@ class PyTorchEngine:
             config.optimizer.warmup_steps,
             config.optimizer.peak,
             config.optimizer.floor,
+            stable_steps=config.training.stable_steps,
             decay_steps=(
                 config.optimizer.decay_steps
                 if isinstance(config.optimizer, AdamWConfig)
@@ -1473,8 +1477,7 @@ class PyTorchEngine:
         if gradients_finite is not None and not bool(gradients_finite):
             optimizer.zero_grad(set_to_none=True)
             raise EngineNonFiniteError("nonfinite unscaled gradients")
-        for group in optimizer.param_groups:
-            group["lr"] = lr
+        set_optimizer_learning_rate(optimizer, lr)
         overflow = False
         if self.scaler is None:
             optimizer.step()

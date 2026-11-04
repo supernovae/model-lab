@@ -162,7 +162,10 @@ def training_storage_checks(
         run_copy = projected_data_bytes(config)
         cache_growth = run_copy
     else:
-        from sparselab.data.packing import _tokenizer_sha256, prepared_dataset_identity
+        from sparselab.data.packing import (
+            canonical_tokenizer_sha256,
+            prepared_dataset_identity,
+        )
         from sparselab.data.tokenizer import load_tokenizer
         from sparselab.data.verification import (
             VerifiedPreparedData,
@@ -191,7 +194,7 @@ def training_storage_checks(
             or identity.get("dataset") != expected_dataset
             or identity.get("packing") != expected_packing
             or identity.get("tokenizer_sha256")
-            != _tokenizer_sha256(load_tokenizer(config.tokenizer.path))
+            != canonical_tokenizer_sha256(load_tokenizer(config.tokenizer.path))
         ):
             raise ValueError("prepared receipt does not match run configuration")
         run_copy, _ = verified_prepared_footprint(verified_prepared)

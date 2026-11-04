@@ -29,6 +29,7 @@ from sparselab.training.optimizer import (
     learning_rate_for_step,
     make_optimizer,
     schedule_payload,
+    set_optimizer_learning_rate,
 )
 
 
@@ -166,30 +167,52 @@ def test_checkpoint_allows_symlinked_ancestor_but_not_member(tmp_path: Path) -> 
 
 
 def _snapshot(
-    step: int, loss: float | None = None, *, decay_steps: int | None = None
+    step: int,
+    loss: float | None = None,
+    *,
+    decay_steps: int | None = None,
+    memory_policy: bool = False,
+    stable_steps: int = 0,
 ) -> TrainingSnapshot:
     config = load_config(Path("configs/smoke_cpu.yaml"))
+    values = config.model_dump(mode="json")
     if decay_steps is not None:
-        values = config.model_dump(mode="json")
         values["optimizer"]["decay_steps"] = decay_steps
-        config = RunConfig.model_validate(values)
+    values["training"]["stable_steps"] = stable_steps
+    if memory_policy:
+        values["model"].update(
+            memory="ngram", memory_table_size=17, memory_dim=8, memory_ngram_size=2
+        )
+        values["optimizer"].update(
+            memory_table_lr_multiplier=5.0, memory_table_weight_decay=0.0
+        )
+    config = RunConfig.model_validate(values)
     model = DenseLM(config.model, config.attention)
     settings = config.optimizer
     optimizer = make_optimizer(
-        model, settings.peak, settings.weight_decay, settings.betas, settings.eps
+        model,
+        settings.peak,
+        settings.weight_decay,
+        settings.betas,
+        settings.eps,
+        memory_table_lr_multiplier=settings.memory_table_lr_multiplier,
+        memory_table_weight_decay=settings.memory_table_weight_decay,
     )
     inputs = torch.arange(8).reshape(1, 8)
     for update in range(1, step + 1):
         optimizer.zero_grad(set_to_none=True)
-        for group in optimizer.param_groups:
-            group["lr"] = learning_rate_for_step(
+        set_optimizer_learning_rate(
+            optimizer,
+            learning_rate_for_step(
                 update,
                 config.training.max_steps,
                 settings.warmup_steps,
                 settings.peak,
                 settings.floor,
                 decay_steps=decay_steps,
-            )
+                stable_steps=stable_steps,
+            ),
+        )
         model(inputs).square().mean().backward()
         optimizer.step()
     optimizer_state = optimizer.state_dict()
@@ -543,3 +566,15 @@ def test_retention_keeps_best_latest_and_recovery_predecessor(tmp_path: Path) ->
         json.loads((checkpoints / "best.json").read_text())["manifest_sha256"]
         == best.manifest_sha256
     )
+
+
+def test_checkpoint_binds_memory_table_optimizer_and_stable_schedule(tmp_path):
+    manager = CheckpointManager(tmp_path)
+    snapshot = _snapshot(1, memory_policy=True, stable_steps=3)
+    manager.save(snapshot)
+    assert manager.verify(tmp_path / "checkpoints/latest.json").valid
+    assert snapshot.schedule["kind"] == "warmup_stable_cosine_v1"
+    assert snapshot.schedule["stable_steps"] == 3
+    snapshot.optimizer["param_groups"][-1]["lr"] /= 5
+    with pytest.raises(ValueError, match="learning rate"):
+        CheckpointManager(tmp_path / "tampered").save(snapshot)

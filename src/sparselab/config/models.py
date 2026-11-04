@@ -22,6 +22,22 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class MemoryTokenMapping(StrictModel):
+    algorithm: Literal["identity", "deepseek_v1", "deepseek_safe_v1"]
+    token_ids: tuple[Annotated[int, Field(strict=True, ge=0)], ...]
+    vocab_size: int = Field(strict=True, gt=0)
+    memory_vocab_size: int = Field(strict=True, gt=0)
+    tokenizer_sha256: str
+    mapping_sha256: str
+
+    @model_validator(mode="after")
+    def validate_mapping(self) -> MemoryTokenMapping:
+        from sparselab.memory_tokenizer import validate_memory_token_map
+
+        validate_memory_token_map(self.model_dump(mode="json"))
+        return self
+
+
 class ModelConfig(StrictModel):
     vocab_size: int
     hidden_dim: int
@@ -38,7 +54,40 @@ class ModelConfig(StrictModel):
     shared_expert: bool = False
     router_aux_loss_coefficient: float = Field(default=0.0, ge=0)
     memory: Literal["none", "ngram", "byte", "portable"] = "none"
-    memory_injection: Literal["final", "embedding"] = "final"
+    memory_injection: Literal["final", "embedding", "after_block"] = "final"
+    memory_block_index: int | None = Field(
+        default=None, strict=True, ge=0, exclude_if=lambda value: value is None
+    )
+    memory_block_indices: tuple[Annotated[int, Field(strict=True, ge=0)], ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    memory_variant: Literal["hidden_gate", "context_key"] = Field(
+        default="hidden_gate", exclude_if=lambda value: value == "hidden_gate"
+    )
+    memory_conv_kernel_size: int = Field(
+        default=0, strict=True, ge=0, le=16, exclude_if=lambda value: value == 0
+    )
+    memory_gate_transform: Literal["identity", "signed_sqrt"] = Field(
+        default="identity", exclude_if=lambda value: value == "identity"
+    )
+    memory_addressing: Literal["legacy", "prime_xor_v1"] = Field(
+        default="legacy", exclude_if=lambda value: value == "legacy"
+    )
+    memory_table_sizes: tuple[Annotated[int, Field(strict=True, gt=0)], ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    memory_hash_seed: int = Field(
+        default=0, strict=True, ge=0, le=2**32 - 1, exclude_if=lambda value: value == 0
+    )
+    memory_token_mapping: MemoryTokenMapping | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    memory_padding_token_id: int = Field(
+        default=0, strict=True, ge=0, exclude_if=lambda value: value == 0
+    )
+    memory_independent_init: bool = Field(
+        default=False, strict=True, exclude_if=lambda value: not value
+    )
     memory_table_size: int = 0
     memory_ngram_size: int = 0
     memory_dim: int = 0
@@ -46,6 +95,12 @@ class ModelConfig(StrictModel):
     memory_ngram_orders: tuple[int, ...] = ()
     memory_hash_heads: int = Field(default=1, gt=0)
     semantic_memory_dim: int | None = Field(default=None, gt=0)
+
+    @property
+    def memory_block_sites(self) -> tuple[int, ...]:
+        return self.memory_block_indices or (
+            () if self.memory_block_index is None else (self.memory_block_index,)
+        )
 
     @model_serializer(mode="wrap")
     def _serialize_legacy_final(
@@ -96,6 +151,61 @@ class ModelConfig(StrictModel):
             self.num_experts < 2 or not 1 <= self.experts_per_token <= self.num_experts
         ):
             raise ValueError("invalid MoE expert configuration")
+        if self.memory_block_indices and (
+            self.memory_block_index is not None
+            or tuple(sorted(set(self.memory_block_indices)))
+            != self.memory_block_indices
+        ):
+            raise ValueError(
+                "memory_block_indices must be sorted unique and excludes memory_block_index"
+            )
+        if self.memory_injection == "after_block":
+            if self.memory != "ngram" or not self.memory_block_sites:
+                raise ValueError(
+                    "after_block requires token ngram memory and memory_block_index or memory_block_indices"
+                )
+            if max(self.memory_block_sites) >= self.num_layers:
+                raise ValueError(
+                    "memory_block_index must identify an existing decoder block"
+                )
+        elif self.memory_block_index is not None or self.memory_block_indices:
+            raise ValueError("memory block indices require after_block injection")
+        if self.memory_variant != "hidden_gate" and self.memory != "ngram":
+            raise ValueError("context_key requires token ngram memory")
+        if (
+            self.memory_gate_transform != "identity"
+            and self.memory_variant != "context_key"
+        ):
+            raise ValueError("gate transform requires context_key memory")
+        if self.memory_conv_kernel_size and self.memory_variant != "context_key":
+            raise ValueError("memory convolution requires context_key memory")
+        if self.memory != "ngram" and (
+            self.memory_addressing != "legacy"
+            or self.memory_token_mapping is not None
+            or self.memory_independent_init
+            or self.memory_padding_token_id
+        ):
+            raise ValueError(
+                "token addressing/mapping/independent initialization requires ngram memory"
+            )
+        if self.memory_addressing == "prime_xor_v1":
+            from sparselab.address_hash import validate_engram_table_sizes
+
+            streams = (len(self.memory_ngram_orders) or 1) * self.memory_hash_heads
+            validate_engram_table_sizes(
+                self.memory_table_sizes, streams * max(1, len(self.memory_block_sites))
+            )
+            if self.memory_table_sizes[0] != self.memory_table_size:
+                raise ValueError("memory_table_size must equal first prime stream size")
+        elif self.memory_table_sizes or self.memory_hash_seed:
+            raise ValueError("per-stream sizes and hash seed require prime_xor_v1")
+        if self.memory_padding_token_id >= self.vocab_size:
+            raise ValueError("memory padding token must belong to vocabulary")
+        if (
+            self.memory_token_mapping is not None
+            and self.memory_token_mapping.vocab_size != self.vocab_size
+        ):
+            raise ValueError("memory mapping vocabulary differs from model vocabulary")
         settings = (self.memory_table_size, self.memory_ngram_size, self.memory_dim)
         if self.memory == "none" and self.memory_injection != "final":
             raise ValueError("embedding memory injection requires enabled memory")
@@ -383,6 +493,9 @@ class MatchedStoryConfig(StrictModel):
 
 
 class TrainingConfig(StrictModel):
+    stable_steps: int = Field(
+        default=0, strict=True, ge=0, exclude_if=lambda value: value == 0
+    )
     micro_batch_size: int = Field(gt=0)
     gradient_accumulation: int = Field(default=1, gt=0)
     seq_len: int = Field(gt=0)
@@ -428,6 +541,12 @@ class TrainingConfig(StrictModel):
 
 
 class AdamWConfig(StrictModel):
+    memory_table_lr_multiplier: float = Field(
+        default=1.0, gt=0, allow_inf_nan=False, exclude_if=lambda value: value == 1.0
+    )
+    memory_table_weight_decay: float | None = Field(
+        default=None, ge=0, allow_inf_nan=False, exclude_if=lambda value: value is None
+    )
     name: Literal["adamw"] = "adamw"
     peak: float = Field(default=3e-4, gt=0)
     floor: float = Field(default=3e-5, ge=0)
@@ -672,16 +791,21 @@ class RunConfig(StrictModel):
             "local_stories",
         }:
             raise ValueError("explicit tokenizer origin requires a snapshot consumer")
+        if (
+            self.model.memory_conv_kernel_size
+            and self.dataset.allocation_manifest_path is not None
+        ):
+            raise ValueError("convolved token memory does not support allocation masks")
         if self.evaluation.panels:
             if (
                 self.runtime.engine != "pytorch"
-                or self.model.memory != "none"
+                or self.model.memory not in {"none", "ngram"}
                 or self.model.ffn != "dense"
                 or self.dataset.allocation_manifest_path is not None
                 or self.model.semantic_memory_dim is not None
             ):
                 raise ValueError(
-                    "fixed panels require a dense PyTorch run without memory"
+                    "fixed panels require dense-FFN PyTorch with no memory or token ngram memory"
                 )
             if any(
                 p.sequence_length != self.training.seq_len
@@ -751,6 +875,28 @@ class RunConfig(StrictModel):
                 )
             if self.runtime.engine == "mlx":
                 raise ValueError("optimizer.decay_steps is unsupported for MLX")
+        if self.training.stable_steps:
+            if (
+                not isinstance(self.optimizer, AdamWConfig)
+                or self.runtime.engine != "pytorch"
+            ):
+                raise ValueError("stable_steps requires PyTorch AdamW")
+            horizon = self.optimizer.decay_steps or self.training.max_steps
+            if self.optimizer.warmup_steps + self.training.stable_steps >= horizon:
+                raise ValueError(
+                    "warmup_steps + stable_steps must be below decay horizon"
+                )
+        if (
+            isinstance(self.optimizer, AdamWConfig)
+            and (
+                self.optimizer.memory_table_lr_multiplier != 1.0
+                or self.optimizer.memory_table_weight_decay is not None
+            )
+            and (self.runtime.engine != "pytorch" or self.model.memory != "ngram")
+        ):
+            raise ValueError(
+                "memory table optimizer policy requires PyTorch ngram memory"
+            )
         if self.optimizer.floor > self.optimizer.peak:
             raise ValueError("optimizer.floor cannot exceed optimizer.peak")
         if isinstance(self.optimizer, AdamWConfig) and any(

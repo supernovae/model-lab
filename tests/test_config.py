@@ -418,3 +418,59 @@ def test_origin_binding_requires_pins_and_frozen_sources(origin_bound_config, ch
         raw["dataset"]["source"] = "synthetic"
     with pytest.raises(ValueError):
         RunConfig.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"memory_injection": "after_block"},
+        {"memory_injection": "after_block", "memory_block_index": 2},
+        {"memory_injection": "after_block", "memory_block_index": True},
+        {"memory_block_index": 0},
+        {"memory_conv_kernel_size": 4},
+    ],
+)
+def test_context_memory_rejects_invalid_placement_and_refinement(change):
+    base = {
+        "vocab_size": 260,
+        "hidden_dim": 8,
+        "num_layers": 2,
+        "num_heads": 2,
+        "ffn_dim": 16,
+        "max_seq_len": 16,
+        "memory": "ngram",
+        "memory_table_size": 31,
+        "memory_ngram_size": 3,
+        "memory_dim": 4,
+    }
+    with pytest.raises(ValueError):
+        ModelConfig(**(base | change))
+
+
+def test_context_memory_roundtrip_preserves_distinct_architecture():
+    base = ModelConfig(
+        vocab_size=260,
+        hidden_dim=8,
+        num_layers=2,
+        num_heads=2,
+        ffn_dim=16,
+        max_seq_len=16,
+        memory="ngram",
+        memory_table_size=31,
+        memory_ngram_size=3,
+        memory_dim=4,
+    )
+    assert "memory_variant" not in base.model_dump()
+    assert "memory_block_index" not in base.model_dump()
+    assert "memory_conv_kernel_size" not in base.model_dump()
+    contextual = ModelConfig.model_validate(
+        base.model_dump()
+        | {
+            "memory_variant": "context_key",
+            "memory_injection": "after_block",
+            "memory_block_index": 0,
+            "memory_conv_kernel_size": 4,
+        }
+    )
+    assert ModelConfig.model_validate_json(contextual.model_dump_json()) == contextual
+    assert contextual.model_dump() != base.model_dump()

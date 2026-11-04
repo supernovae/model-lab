@@ -130,13 +130,29 @@ def architecture(config: Any) -> dict[str, Any]:
         memory = {
             "kind": m.memory,
             "injection": m.memory_injection,
-            "tables": streams,
+            "variant": m.memory_variant,
+            "conv_kernel_size": m.memory_conv_kernel_size,
+            "block_index": m.memory_block_index,
+            "tables": streams * max(1, len(m.memory_block_sites)),
+            **(
+                {"block_indices": list(m.memory_block_sites)}
+                if m.memory_block_indices
+                else {}
+            ),
             "rows": m.memory_table_size,
+            **(
+                {
+                    "rows_per_stream": list(m.memory_table_sizes),
+                    "rows_scope": "first_table",
+                }
+                if m.memory_table_sizes
+                else {}
+            ),
             "dim": m.memory_dim,
             "ngram_orders": list(m.memory_ngram_orders or (m.memory_ngram_size,))
             if m.memory == "ngram"
             else None,
-            "parameters": count("memory."),
+            "parameters": count("memory.") + count("extra_memories."),
         }
     return {
         "vocab_size": m.vocab_size,
@@ -307,15 +323,29 @@ def _forward_with_hooks(loaded: Any, ids: list[int]) -> dict[str, Any]:
         if isinstance(block.attention, DenseAttention):
             handles.append(block.attention.register_forward_hook(keep_input(layer_key)))
     memory = getattr(model, "memory", None)
-    if memory is not None:
+    ports = ([("memory", memory)] if memory is not None else []) + [
+        (f"extra_memories.{site}", module)
+        for site, module in model.extra_memories.items()
+    ]
+    captured["gates_by_port"] = {}
+
+    def keep_gate(port: str) -> Callable[..., None]:
+        def hook(_module: Any, _args: Any, output: Any) -> None:
+            captured["gates_by_port"][port] = output.detach()
+            if port == "memory":
+                captured["gate"] = output.detach()
+
+        return hook
+
+    for port, memory in ports:
         for name, module in memory.named_modules():
             if isinstance(module, torch.nn.Embedding):
-                handles.append(module.register_forward_hook(keep_lookup(name)))
-        handles.append(
-            memory.gate.register_forward_hook(
-                lambda _m, _a, output: captured.__setitem__("gate", output.detach())
-            )
-        )
+                handles.append(
+                    module.register_forward_hook(
+                        keep_lookup(name if port == "memory" else f"{port}.{name}")
+                    )
+                )
+        handles.append(memory.gate.register_forward_hook(keep_gate(port)))
     x = torch.tensor([ids], dtype=torch.long, device=loaded.device)
     try:
         with torch.inference_mode():
@@ -393,7 +423,13 @@ def _single_token_offset(
     Checked from the observed reads; the hash itself is not re-implemented.
     """
     rows = int(getattr(loaded.config.model, "memory_table_size", 0) or 0)
-    if rows <= 0 or len(addresses) < 4 or loaded.config.model.memory != "ngram":
+    if (
+        rows <= 0
+        or len(addresses) < 4
+        or loaded.config.model.memory != "ngram"
+        or loaded.config.model.memory_addressing != "legacy"
+        or loaded.config.model.memory_token_mapping is not None
+    ):
         return None
     for offset in range(4):
         expected = [
@@ -440,6 +476,16 @@ def memory_view(
         "kind": loaded.config.model.memory,
         "streams": streams,
         "gate": gates,
+        **(
+            {
+                "gates_by_port": {
+                    name: value[0, :, 0].float().sigmoid().cpu().tolist()
+                    for name, value in captured["gates_by_port"].items()
+                }
+            }
+            if len(captured.get("gates_by_port", {})) > 1
+            else {}
+        ),
         "note": "addresses are the table rows each token read; a repeat points "
         "at the first position that read the same row (the same n-gram, or a "
         "hash collision between different n-grams)",

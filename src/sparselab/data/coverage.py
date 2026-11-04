@@ -21,7 +21,7 @@ from sparselab.config.loading import load_config
 from sparselab.config.models import RunConfig
 from sparselab.data.packing import (
     _local_chat_identity,
-    _tokenizer_sha256,
+    canonical_tokenizer_sha256,
     load_prepared_data,
 )
 from sparselab.data.tokenizer import load_tokenizer
@@ -58,7 +58,7 @@ def _bind_config(manifest: dict, config: RunConfig) -> dict | None:
             k: getattr(config.model, k)
             for k in ("memory", "memory_table_size", "memory_ngram_size")
         },
-        "tokenizer_sha256": _tokenizer_sha256(tokenizer),
+        "tokenizer_sha256": canonical_tokenizer_sha256(tokenizer),
         "local_chat_source": _local_chat_identity(config.dataset),
     }
     snapshot = None

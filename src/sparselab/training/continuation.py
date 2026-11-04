@@ -262,7 +262,26 @@ def load_continuation(
     recover: Path | None,
     allow_runtime_drift: bool,
     allow_runtime_optimization: bool = False,
+    add_ngram_memory: bool = False,
 ) -> Continuation:
+    if add_ngram_memory:
+        if promote is None or any(
+            path is not None for path in (resume, recover, extend_budget)
+        ):
+            raise ValueError(
+                "add-ngram-memory requires only --promote, not resume or recovery"
+            )
+        if (
+            promote.is_symlink()
+            or not promote.is_dir()
+            or promote.parent.name != "checkpoints"
+            or not promote.name.startswith("step_")
+            or "_gen_" not in promote.name
+            or promote.resolve() != promote.parent.resolve() / promote.name
+        ):
+            raise ValueError(
+                "add-ngram-memory requires an immutable checkpoint generation directory"
+            )
     if allow_runtime_optimization and (
         (resume is None and recover is None)
         or promote is not None
@@ -329,7 +348,7 @@ def load_continuation(
             raise ValueError(f"checkpoint run binding failed: {binding.errors}")
         _verify_artifacts(root, manifest, resume=promote is None)
         source_config = RunConfig.model_validate(manifest["effective_config"])
-        if not allow_runtime_optimization and architecture_sha256(
+        if not (allow_runtime_optimization or add_ngram_memory) and architecture_sha256(
             source_config.model_dump(mode="json")
         ) != architecture_sha256(config.model_dump(mode="json")):
             raise ValueError(
@@ -340,6 +359,51 @@ def load_continuation(
                 config.tokenizer.path
             ):
                 raise ValueError("promotion requires matching tokenizer identity")
+            if add_ngram_memory:
+                from sparselab.training.memory_warmstart import migrate_dense_to_ngram
+                from sparselab.training.mlx_checkpoints import strict_json
+
+                source_binding = manager.verify(
+                    selected,
+                    expected_manifest=manifest_digest,
+                    require_training_state=False,
+                    expected_config=source_config,
+                )
+                if not source_binding.valid:
+                    raise ValueError(
+                        f"source checkpoint architecture binding failed: {source_binding.errors}"
+                    )
+                checkpoint_manifest = strict_json(selected / "manifest.json")
+                if (
+                    checkpoint_manifest.get("sha256") != snapshot.checkpoint_sha256
+                    or canonical_digest(
+                        {
+                            key: value
+                            for key, value in checkpoint_manifest.items()
+                            if key != "sha256"
+                        }
+                    )
+                    != snapshot.checkpoint_sha256
+                    or checkpoint_manifest.get("config_sha256")
+                    != config_sha256(source_config.model_dump(mode="json"))
+                ):
+                    raise ValueError(
+                        "source checkpoint scientific identity differs from its run manifest"
+                    )
+                snapshot.model, migration = migrate_dense_to_ngram(
+                    source_config,
+                    config,
+                    snapshot.model,
+                    source_tokenizer_sha256=sha256_file(root / "tokenizer.json"),
+                    target_tokenizer_sha256=sha256_file(config.tokenizer.path),
+                    source_checkpoint_sha256=snapshot.checkpoint_sha256,
+                )
+                migration.update(
+                    source_run_manifest_sha256=manifest_digest,
+                    source_step=checkpoint_manifest["step"],
+                    source_tokens_seen=checkpoint_manifest["tokens_seen"],
+                )
+                decisions.append(migration)
             if config.model.memory_package_path is not None and _package_identity(
                 root / "portable_package"
             ) != _package_identity(config.model.memory_package_path):
@@ -353,7 +417,9 @@ def load_continuation(
                 manifest["run_id"],
                 snapshot.checkpoint_sha256,
                 tuple(decisions),
-                manager.lineage_best_for_child(
+                None
+                if add_ngram_memory
+                else manager.lineage_best_for_child(
                     str(manifest["run_id"]), snapshot.checkpoint_sha256
                 ),
             )

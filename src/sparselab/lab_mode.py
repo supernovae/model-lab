@@ -196,13 +196,13 @@ def memory_packages(config: Any) -> dict[str, Any]:
 
 def current_inputs(config: Any) -> dict[str, Any]:
     """Hash tokenizer, dataset and memory-package inputs as they are on disk now."""
-    from sparselab.data.packing import _tokenizer_sha256
+    from sparselab.data.packing import canonical_tokenizer_sha256
     from sparselab.data.tokenizer import load_tokenizer
 
     tokenizer_path = Path(config.tokenizer.path)
     try:
         # Same digest prepared data records: the complete serialized tokenizer.
-        tokenizer_sha256 = _tokenizer_sha256(load_tokenizer(tokenizer_path))
+        tokenizer_sha256 = canonical_tokenizer_sha256(load_tokenizer(tokenizer_path))
     except Exception:  # noqa: BLE001 - an unreadable tokenizer is never reusable
         tokenizer_sha256 = "unreadable"
     inputs: dict[str, Any] = {

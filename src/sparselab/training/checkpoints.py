@@ -44,7 +44,11 @@ from sparselab.training.mlx_checkpoints import (
 from sparselab.training.mlx_checkpoints import (
     write_native_state as write_mlx_native_state,
 )
-from sparselab.training.optimizer import learning_rate_for_step, schedule_payload
+from sparselab.training.optimizer import (
+    is_ngram_table_parameter,
+    learning_rate_for_step,
+    schedule_payload,
+)
 from sparselab.verification_proofs import (
     ProofStore,
     VerificationMode,
@@ -353,6 +357,7 @@ def _check_common_native_state(
             config.optimizer.warmup_steps,
             config.optimizer.peak,
             config.optimizer.floor,
+            stable_steps=config.training.stable_steps,
             decay_steps=(
                 config.optimizer.decay_steps
                 if isinstance(config.optimizer, AdamWConfig)
@@ -571,8 +576,6 @@ def _check_native_state(
     ):
         raise ValueError("optimizer updated-parameter inventory mismatch")
     for group in groups:
-        if group["lr"] != learning_rate:
-            raise ValueError("optimizer learning rate differs from saved schedule")
         if config.optimizer.name == "adamw" and (
             tuple(group["betas"]) != config.optimizer.betas
             or group["eps"] != config.optimizer.eps
@@ -585,6 +588,22 @@ def _check_native_state(
                 if config.optimizer.name != "adamw" or len(shape) >= 2
                 else 0.0
             )
+            multiplier = 1.0
+            if (
+                isinstance(config.optimizer, AdamWConfig)
+                and config.model.memory == "ngram"
+                and is_ngram_table_parameter(names[parameter_id])
+            ):
+                multiplier = config.optimizer.memory_table_lr_multiplier
+                if config.optimizer.memory_table_weight_decay is not None:
+                    decay = config.optimizer.memory_table_weight_decay
+            if (
+                group.get("lr_multiplier", 1.0) != multiplier
+                or group["lr"] != learning_rate * multiplier
+            ):
+                raise ValueError(
+                    "optimizer learning rate differs from saved schedule and table policy"
+                )
             if group["weight_decay"] != decay:
                 raise ValueError("optimizer weight decay differs from configuration")
     for parameter_id, values in ordinary_state.items():

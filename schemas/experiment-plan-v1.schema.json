@@ -154,6 +154,25 @@
           "title": "Floor",
           "type": "number"
         },
+        "memory_table_lr_multiplier": {
+          "default": 1.0,
+          "exclusiveMinimum": 0,
+          "title": "Memory Table Lr Multiplier",
+          "type": "number"
+        },
+        "memory_table_weight_decay": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memory Table Weight Decay"
+        },
         "name": {
           "const": "adamw",
           "default": "adamw",
@@ -1361,6 +1380,56 @@
       "title": "MemoryConfig",
       "type": "object"
     },
+    "MemoryTokenMapping": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "enum": [
+            "identity",
+            "deepseek_v1",
+            "deepseek_safe_v1"
+          ],
+          "title": "Algorithm",
+          "type": "string"
+        },
+        "mapping_sha256": {
+          "title": "Mapping Sha256",
+          "type": "string"
+        },
+        "memory_vocab_size": {
+          "exclusiveMinimum": 0,
+          "title": "Memory Vocab Size",
+          "type": "integer"
+        },
+        "token_ids": {
+          "items": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": "Token Ids",
+          "type": "array"
+        },
+        "tokenizer_sha256": {
+          "title": "Tokenizer Sha256",
+          "type": "string"
+        },
+        "vocab_size": {
+          "exclusiveMinimum": 0,
+          "title": "Vocab Size",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "algorithm",
+        "token_ids",
+        "vocab_size",
+        "memory_vocab_size",
+        "tokenizer_sha256",
+        "mapping_sha256"
+      ],
+      "title": "MemoryTokenMapping",
+      "type": "object"
+    },
     "ModelConfig": {
       "additionalProperties": false,
       "properties": {
@@ -1401,10 +1470,57 @@
           "title": "Memory",
           "type": "string"
         },
+        "memory_addressing": {
+          "default": "legacy",
+          "enum": [
+            "legacy",
+            "prime_xor_v1"
+          ],
+          "title": "Memory Addressing",
+          "type": "string"
+        },
+        "memory_block_index": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memory Block Index"
+        },
+        "memory_block_indices": {
+          "default": [],
+          "items": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": "Memory Block Indices",
+          "type": "array"
+        },
+        "memory_conv_kernel_size": {
+          "default": 0,
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Memory Conv Kernel Size",
+          "type": "integer"
+        },
         "memory_dim": {
           "default": 0,
           "title": "Memory Dim",
           "type": "integer"
+        },
+        "memory_gate_transform": {
+          "default": "identity",
+          "enum": [
+            "identity",
+            "signed_sqrt"
+          ],
+          "title": "Memory Gate Transform",
+          "type": "string"
         },
         "memory_hash_heads": {
           "default": 1,
@@ -1412,11 +1528,24 @@
           "title": "Memory Hash Heads",
           "type": "integer"
         },
+        "memory_hash_seed": {
+          "default": 0,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Memory Hash Seed",
+          "type": "integer"
+        },
+        "memory_independent_init": {
+          "default": false,
+          "title": "Memory Independent Init",
+          "type": "boolean"
+        },
         "memory_injection": {
           "default": "final",
           "enum": [
             "final",
-            "embedding"
+            "embedding",
+            "after_block"
           ],
           "title": "Memory Injection",
           "type": "string"
@@ -1447,10 +1576,45 @@
           "default": null,
           "title": "Memory Package Path"
         },
+        "memory_padding_token_id": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Memory Padding Token Id",
+          "type": "integer"
+        },
         "memory_table_size": {
           "default": 0,
           "title": "Memory Table Size",
           "type": "integer"
+        },
+        "memory_table_sizes": {
+          "default": [],
+          "items": {
+            "exclusiveMinimum": 0,
+            "type": "integer"
+          },
+          "title": "Memory Table Sizes",
+          "type": "array"
+        },
+        "memory_token_mapping": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryTokenMapping"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "memory_variant": {
+          "default": "hidden_gate",
+          "enum": [
+            "hidden_gate",
+            "context_key"
+          ],
+          "title": "Memory Variant",
+          "type": "string"
         },
         "num_experts": {
           "default": 1,
@@ -1987,6 +2151,12 @@
         "seq_len": {
           "exclusiveMinimum": 0,
           "title": "Seq Len",
+          "type": "integer"
+        },
+        "stable_steps": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Stable Steps",
           "type": "integer"
         },
         "trainable_parameters": {

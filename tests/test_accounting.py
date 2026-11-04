@@ -253,3 +253,154 @@ def test_explicit_trainable_inventory_selects_only_canonical_storage() -> None:
                 config.attention,
                 trainable_parameters=("output.weight",),
             )
+
+
+@pytest.mark.parametrize("kernel", [0, 4])
+def test_context_memory_inventory_matches_model(kernel: int) -> None:
+    base = load_config(Path("configs/smoke_memory_cpu.yaml"))
+    model = ModelConfig.model_validate(
+        {
+            **base.model.model_dump(mode="json"),
+            "memory_variant": "context_key",
+            "memory_injection": "after_block",
+            "memory_block_index": 0,
+            "memory_conv_kernel_size": kernel,
+        }
+    )
+    config = base.model_copy(update={"model": model})
+    actual = DenseLM(model, config.attention)
+    expected = named_tensor_inventory(model, config.attention)
+    assert {
+        name: tuple(value.shape) for name, value in actual.state_dict().items()
+    } == {name: spec.shape for name, spec in expected.items()}
+    report = inspection_report(config)
+    measured = inspect_model(actual)
+    for field in (
+        "total",
+        "trainable",
+        "active_per_token",
+        "engram",
+        "engram_table",
+        "engram_adapter",
+        "norm",
+    ):
+        assert report[field] == measured[field], field
+    assert (
+        report["total"] - report["active_per_token"]
+        == 4 * (model.memory_table_size - 1) * model.memory_dim
+    )
+    assert report["optimizer_state_bytes"] >= report["trainable"] * 8
+
+
+@pytest.mark.parametrize("kernel", [0, 4])
+@pytest.mark.parametrize("ports", [(), (0, 1)])
+def test_independent_memory_initialization_preserves_trunk_and_future_rng(
+    kernel: int,
+    ports: tuple[int, ...],
+) -> None:
+    base = load_config(Path("configs/runtime_smoke_cpu.yaml"))
+    base = base.model_copy(
+        update={"model": base.model.model_copy(update={"num_layers": 2})}
+    )
+    values = base.model.model_dump(mode="json")
+    values.update(
+        memory="ngram",
+        memory_table_size=31,
+        memory_ngram_size=3,
+        memory_ngram_orders=[2, 3],
+        memory_hash_heads=2,
+        memory_dim=4,
+        memory_variant="context_key",
+        memory_conv_kernel_size=kernel,
+        memory_independent_init=True,
+    )
+    if ports:
+        values.update(memory_injection="after_block", memory_block_indices=ports)
+    memory_config = ModelConfig.model_validate(values)
+    torch.manual_seed(17)
+    dense = DenseLM(base.model, base.attention)
+    expected_future = torch.rand(10)
+    torch.manual_seed(17)
+    memory = DenseLM(memory_config, base.attention)
+    actual_future = torch.rand(10)
+    for name, value in dense.state_dict().items():
+        assert torch.equal(value, memory.state_dict()[name]), name
+    assert torch.equal(actual_future, expected_future)
+    torch.manual_seed(17)
+    repeated = DenseLM(memory_config, base.attention)
+    for name, value in memory.state_dict().items():
+        assert torch.equal(value, repeated.state_dict()[name]), name
+
+
+@pytest.mark.parametrize("ports", [(), (0, 1)])
+def test_token_mapping_buffer_bytes_match_registered_tensor(ports) -> None:
+    from sparselab.canonical import canonical_digest
+    from sparselab.memory import registered_runtime_buffers_bytes
+
+    base = load_config(Path("configs/smoke_memory_cpu.yaml"))
+    vocabulary = base.model.vocab_size
+    mapping = {
+        "algorithm": "identity",
+        "token_ids": list(range(vocabulary)),
+        "vocab_size": vocabulary,
+        "memory_vocab_size": vocabulary,
+        "tokenizer_sha256": "a" * 64,
+    }
+    mapping["mapping_sha256"] = canonical_digest(mapping)
+    values = base.model.model_dump(mode="json")
+    if ports:
+        values.update(memory_injection="after_block", memory_block_indices=ports)
+    values["memory_token_mapping"] = mapping
+    model_config = ModelConfig.model_validate(values)
+    configured = base.model_copy(update={"model": model_config})
+    model = DenseLM(model_config, base.attention)
+    tensor = dict(model.named_buffers())["memory.token_mapping"]
+    assert tensor.dtype == torch.int64 and tensor.shape == (vocabulary,)
+    assert registered_runtime_buffers_bytes(
+        configured
+    ) - registered_runtime_buffers_bytes(
+        base
+    ) == tensor.numel() * tensor.element_size() * max(1, len(ports))
+    assert "memory.token_mapping" not in model.state_dict()
+
+
+def test_multiport_inventory_matches_actual_tensors_and_active_rows() -> None:
+    base = load_config(Path("configs/smoke_memory_cpu.yaml"))
+    values = base.model.model_dump(mode="json")
+    values.update(
+        num_layers=3,
+        memory_injection="after_block",
+        memory_block_indices=[0, 2],
+        memory_variant="context_key",
+        memory_ngram_orders=[2, 3],
+        memory_hash_heads=1,
+        tie_embeddings=True,
+        memory_addressing="prime_xor_v1",
+        memory_table_sizes=[97, 101, 103, 107],
+        memory_table_size=97,
+        memory_conv_kernel_size=3,
+    )
+    configured = base.model_copy(update={"model": ModelConfig.model_validate(values)})
+    model = DenseLM(configured.model, configured.attention)
+    specs = named_tensor_inventory(configured.model, configured.attention)
+    for name, parameter in model.named_parameters():
+        assert specs[name].shape == tuple(parameter.shape), name
+    report = inspection_report(configured)
+    actual = inspect_model(model)
+    for key in (
+        "total",
+        "trainable",
+        "engram",
+        "engram_table",
+        "engram_adapter",
+        "active_per_token",
+        "norm",
+    ):
+        assert report[key] == actual[key], key
+    assert (
+        actual["engram_table"] == sum([97, 101, 103, 107]) * configured.model.memory_dim
+    )
+    assert (
+        actual["total"] - actual["active_per_token"]
+        == actual["engram_table"] - 4 * configured.model.memory_dim
+    )
