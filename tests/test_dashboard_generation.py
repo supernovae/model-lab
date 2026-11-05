@@ -3,7 +3,7 @@ from dataclasses import replace
 
 from streamlit.testing.v1 import AppTest
 
-from sparselab.dashboard.generation import selection_matches, service_config
+from sparselab.dashboard.generation import service_config
 from sparselab.dashboard.queries import snapshot
 from sparselab.training.metrics import ExperimentStore
 
@@ -17,7 +17,7 @@ def _page(root, run):
     generation_page(snapshot(Path(root)), Path(root), [run])
 
 
-def test_service_is_loopback_only_and_selection_is_exact(tmp_path, monkeypatch):
+def test_service_is_loopback_only(tmp_path, monkeypatch):
     config = {
         "url": "http://127.0.0.1:8502",
         "store": str(tmp_path),
@@ -29,9 +29,6 @@ def test_service_is_loopback_only_and_selection_is_exact(tmp_path, monkeypatch):
     path.write_text(json.dumps(config))
     monkeypatch.setenv("SPARSELAB_SNAPSHOT_SERVICE_CONFIG", str(path))
     assert service_config() == config
-    assert selection_matches(config, tmp_path, "a", "checkpoints/step_1")
-    assert not selection_matches(config, tmp_path, "b", "checkpoints/step_1")
-    assert not selection_matches(config, tmp_path / "other", "a", "checkpoints/step_1")
     import pytest
 
     for url in (
@@ -64,7 +61,7 @@ def test_empty_snapshot_metadata_does_not_load_or_embed(tmp_path, monkeypatch):
     assert any("No saved checkpoint metadata" in item.value for item in app.info)
 
 
-def test_identity_mismatch_and_missing_link_refuse_embedding(tmp_path, monkeypatch):
+def test_unverified_metadata_refuses_embedding(tmp_path, monkeypatch):
     config = {
         "url": "http://127.0.0.1:8502",
         "store": str(tmp_path),
@@ -89,13 +86,13 @@ def test_identity_mismatch_and_missing_link_refuse_embedding(tmp_path, monkeypat
     monkeypatch.setattr(queries, "snapshot", lambda root: view)
     app = AppTest.from_function(_page, args=(str(tmp_path), "a")).run()
     assert not app.exception
-    assert app.error
+    assert app.info
     assert not app.get("iframe")
     app.query_params.update(
         store=str(tmp_path), run="a", checkpoint="checkpoints/missing"
     )
     app.run()
-    assert app.warning
+    assert app.info
     assert not app.get("iframe")
 
 
@@ -149,7 +146,14 @@ def test_supported_sampler_health_and_run_changes(tmp_path, monkeypatch):
     view = replace(
         snapshot(tmp_path),
         checkpoints=tuple(
-            {"run_id": name, "relative_path": "step_1", "step": 1, "digest": "digest"}
+            {
+                "run_id": name,
+                "relative_path": "step_1",
+                "step": 1,
+                "digest": "digest",
+                "verification_status": "verified",
+                "created_at": "today",
+            }
             for name in ("a", "b")
         ),
     )
@@ -162,7 +166,7 @@ def test_supported_sampler_health_and_run_changes(tmp_path, monkeypatch):
     assert len(app.get("iframe")) == 1
     other = AppTest.from_function(_page, args=(str(tmp_path), "b")).run()
     assert not other.exception
-    assert other.warning and not other.get("iframe")
+    assert len(other.get("iframe")) == 1
 
     def unavailable(*args, **kwargs):
         raise OSError("offline")
@@ -180,7 +184,6 @@ def _sampler_page():
 
 def test_sampler_passes_controls_and_clears_old_output(tmp_path, monkeypatch):
     import importlib
-    from threading import Lock
     from types import SimpleNamespace
 
     # No model load: verify UI calls the native generator with exactly these controls.
@@ -195,12 +198,13 @@ def test_sampler_passes_controls_and_clears_old_output(tmp_path, monkeypatch):
     monkeypatch.setenv("SPARSELAB_SNAPSHOT_SERVICE_CONFIG", str(path))
     sampler = importlib.import_module("sparselab.dashboard.snapshot_sampler")
     monkeypatch.setattr(sampler, "RUNS", tmp_path)
-    monkeypatch.setattr(sampler, "RUN", "a")
-    monkeypatch.setattr(sampler, "DIGEST", "digest")
     monkeypatch.setattr(sampler, "CONFIG", config)
     generation = tmp_path / "a/checkpoints/step_1"
     generation.mkdir(parents=True)
-    monkeypatch.setattr(sampler, "GENERATION", generation)
+    from sparselab.dashboard.snapshot_catalog import SavedSnapshot, SnapshotOwner
+
+    selected = SavedSnapshot("a", "checkpoints/step_1", "digest", 1, "today", 100)
+    monkeypatch.setattr(sampler, "catalog", lambda root: [selected])
     loaded = SimpleNamespace(
         model=None,
         device="cpu",
@@ -214,7 +218,9 @@ def test_sampler_passes_controls_and_clears_old_output(tmp_path, monkeypatch):
             "tokenizer_sha256": "tok",
         },
     )
-    monkeypatch.setattr(sampler, "checkpoint", lambda: (loaded, Lock()))
+    owner = SnapshotOwner()
+    monkeypatch.setattr(sampler, "checkpoint", lambda: owner)
+    monkeypatch.setattr(sampler, "load_selected", lambda selected: loaded)
     calls = []
 
     def generate(*args, **kwargs):
@@ -225,17 +231,21 @@ def test_sampler_passes_controls_and_clears_old_output(tmp_path, monkeypatch):
     app = AppTest.from_function(_sampler_page).run()
     assert not app.exception
     assert app.text_area[0].value == ""
+    # A newly published checkpoint must not change the model on form submission.
+    newer = replace(selected, checkpoint="checkpoints/step_2", digest="newer", step=2)
+    monkeypatch.setattr(sampler, "catalog", lambda root: [newer, selected])
     app.text_area[0].set_value("neutral prefix")
     app.number_input[0].set_value(0.7)
     app.number_input[1].set_value(40)
-    app.button[0].click().run()
+    app.button[1].click().run()
     assert not app.exception
     assert calls[-1]["temperature"] == 0.7 and calls[-1]["top_k"] == 40
+    assert app.session_state["completion_result"][3]["checkpoint_sha256"] == "digest"
     assert app.session_state["completion_result"][1] == " continuation"
     app.text_area[0].set_value("")
-    app.button[0].click().run()
+    app.button[1].click().run()
     assert app.warning
     assert "completion_result" not in app.session_state
     app.query_params["run"] = "different"
     app.run()
-    assert app.error and not app.button
+    assert app.error and not app.text_area

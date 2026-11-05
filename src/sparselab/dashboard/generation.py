@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import urlencode, urlparse
@@ -13,6 +14,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from sparselab.dashboard.queries import DashboardSnapshot
+from sparselab.dashboard.snapshot_catalog import catalog
 
 
 def service_config() -> dict[str, str] | None:
@@ -40,16 +42,6 @@ def service_config() -> dict[str, str] | None:
     return value
 
 
-def selection_matches(
-    config: dict[str, str], root: Path, run: str, checkpoint: str
-) -> bool:
-    return (
-        str(root.resolve()) == config["store"]
-        and run == config["run"]
-        and checkpoint == config["checkpoint"]
-    )
-
-
 def generation_page(
     view: DashboardSnapshot, root: Path, selected_ids: list[str]
 ) -> None:
@@ -65,20 +57,40 @@ def generation_page(
     if config is None:
         st.info("No snapshot sampler is configured for this dashboard.")
         return
-    st.caption(f"Available sampler: {config['run']} · {config['checkpoint']} · CPU")
-    available_link = "generate?" + urlencode(
-        {
-            "store": config["store"],
-            "run": config["run"],
-            "checkpoint": config["checkpoint"],
-        }
-    )
-    st.markdown(f"[Select the available saved snapshot]({available_link})")
+    st.caption("CPU sampler · verified complete saved checkpoints · load on Generate")
+    verified = [
+        row for row in view.checkpoints if row.get("verification_status") == "verified"
+    ]
+    if str(root.resolve()) != config["store"]:
+        st.info("This sampler serves a different store.")
+        st.markdown(
+            "[Open sampler store](generate?"
+            + urlencode({"store": config["store"]})
+            + ")"
+        )
+        return
+    try:
+        available = catalog(root)
+    except (OSError, ValueError, sqlite3.Error) as error:
+        st.error(f"Latest checkpoint catalog unavailable: {error}")
+        return
+    if available:
+        newest = available[0]
+        st.markdown(
+            "[Try latest complete saved checkpoint](generate?"
+            + urlencode(
+                {"store": str(root), "run": newest.run, "checkpoint": newest.checkpoint}
+            )
+            + ")"
+        )
+        st.caption(
+            "Latest means a finalized saved checkpoint, even while its training run continues. Native integrity checks run before weights load."
+        )
     if len(selected_ids) != 1:
         st.info("Select exactly one run to generate from a checkpoint.")
         return
     run = selected_ids[0]
-    rows = [row for row in view.checkpoints if row["run_id"] == run]
+    rows = [row for row in verified if row["run_id"] == run]
     choices = [
         str(row["relative_path"])
         for row in sorted(rows, key=lambda row: row["step"], reverse=True)
@@ -120,25 +132,6 @@ def generation_page(
         + urlencode({"store": str(root), "run": run, "checkpoint": checkpoint})
         + ")"
     )
-    if not selection_matches(config, root, run, checkpoint):
-        st.warning(
-            "This checkpoint is not loaded by the sampler. Select the available saved snapshot above. The service will not substitute another model or load a second model."
-        )
-        return
-    matched = next(
-        (
-            row
-            for row in rows
-            if str(row["relative_path"]).removeprefix("checkpoints/")
-            == checkpoint.removeprefix("checkpoints/")
-        ),
-        None,
-    )
-    if matched is None or matched.get("digest") != config["checkpoint_sha256"]:
-        st.error(
-            "Checkpoint identity does not match the configured sampler. Generation is unavailable."
-        )
-        return
     try:
         with urlopen(
             config["url"].rstrip("/") + "/_stcore/health", timeout=2
@@ -155,4 +148,5 @@ def generation_page(
             {"embed": "true", "store": str(root), "run": run, "checkpoint": checkpoint}
         )
     )
-    components.iframe(source, height=1050, scrolling=True)
+    st.markdown(f"[Open generation controls separately]({source})")
+    components.iframe(source, height=1250, scrolling=True)

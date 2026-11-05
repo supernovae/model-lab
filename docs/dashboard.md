@@ -391,22 +391,36 @@ payloads and adds no model execution.
 
 **Generate** shares the telemetry store/run selection and offers checkpoint metadata
 without opening weights. Stable links accept `store`, `run`, and `checkpoint`.
-The separately owned, loopback snapshot sampler is embedded only when all three
-selectors and the checkpoint digest match its configured identity. Other models,
-missing snapshots, bad links, and an unavailable service report why generation is
-unavailable; they never silently sample a different run. A link selects the supported
-saved snapshot. This does not follow newer training updates automatically.
+The loopback CPU sampler offers **Try latest complete saved checkpoint**: the newest
+published verified checkpoint, including a checkpoint from an unfinished training
+run. This is distinct from the latest completed training run. Select a recorded
+checkpoint and press **Generate completion** to verify and load it. Browsing does
+not load weights. Links pin exact store/run/checkpoint; missing or unverified links
+fail without substitution. The sampler freezes its catalog for the browser session;
+**Refresh available snapshots** explicitly discovers newer saved generations.
 
-Set `SPARSELAB_SNAPSHOT_SERVICE_CONFIG` to an operator-owned JSON file containing
-`url` (loopback HTTP), `store`, `run`, `checkpoint` (run-relative generation path),
-and `checkpoint_sha256`. Run `dashboard/snapshot_sampler.py` with the checkpoint's
-compatible provisioned runtime/source package and the same configuration. It reuses
-native verified loading and generation. There is one cached CPU model per sampler
-process, shared by standalone and embedded views, with serialized requests. Never
-point an older model implementation at newer Engram state or remove validation to
-make it load. Historical moved generations must resolve via their archive mapping
-before a separately reviewed sampler configuration change; HTTP/query parameters
-cannot select arbitrary filesystem paths.
+`SPARSELAB_SNAPSHOT_SERVICE_CONFIG` identifies the allowed `store` and loopback `url`.
+The existing `run`, `checkpoint`, and `checkpoint_sha256` fields are retained as
+legacy configuration metadata, not restrictions or automatic loading instructions.
+Run `dashboard/snapshot_sampler.py` with the compatible provisioned runtime/source.
+Native cold verification checks finalized generation contents, manifest, model
+configuration, tokenizer and Engram state before loading. The catalog's recorded
+verification alone never replaces this check. No partial/staging directory loads.
+
+One shared lock spans verification, eviction, loading, and generation. Requests
+while busy are rejected rather than queued; the old model is released before a
+new model loads. Failed loading leaves no fallback model. Outputs retain the exact
+identity and controls used. The UI distinguishes selected snapshot, sampler status
+at observation time, and output identity. Checkpoints exceeding 5 GiB inventoried
+size are refused; retain the service's 10 GiB memory cap, two CPU threads and 200%
+CPU quota. Cold verification can take minutes; generation is limited by tokens,
+not a hard wall-clock cancellation that could leave a worker running.
+
+Historical mappings are consulted before generation reads. Mapped archived
+checkpoints currently report their archive location as unavailable: the native
+loader requires a generation inside its original run and does not support the
+relocated archive layout. No copy, symlink workaround, or stale-source fallback is
+used. Other stores and incompatible model schemas fail explicitly.
 
 Prompts default to blank. Technical, code and story examples require visible choice;
 no TinyStories text is silently appended. Temperature 0–2, top-k 0–200 (0 disables),

@@ -1,10 +1,11 @@
-"""Local CPU-only sampling of one verified, pinned DevMind checkpoint."""
+"""CPU-only sampling of selected verified saved checkpoints."""
 
 import json
 import math
 import os
+import sqlite3
+import sys
 from pathlib import Path
-from threading import Lock
 from urllib.parse import urlencode
 
 import streamlit as st
@@ -13,11 +14,12 @@ import torch
 from sparselab.evaluation.generation import generate
 from sparselab.evaluation.inference import load_run
 
+# Streamlit uses the matching inference runtime; catalog code lives beside this script.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from snapshot_catalog import SnapshotOwner, catalog, resolve_candidate
+
 CONFIG = json.loads(Path(os.environ["SPARSELAB_SNAPSHOT_SERVICE_CONFIG"]).read_text())
 RUNS = Path(CONFIG["store"])
-RUN = CONFIG["run"]
-GENERATION = RUNS / RUN / CONFIG["checkpoint"]
-DIGEST = CONFIG["checkpoint_sha256"]
 
 
 def validate_controls(prompt, count, temperature, top_k, seed):
@@ -42,10 +44,20 @@ def validate_controls(prompt, count, temperature, top_k, seed):
 @st.cache_resource
 def checkpoint():
     torch.set_num_threads(2)
-    loaded = load_run(
-        RUN, RUNS, str(GENERATION), "cpu", expected_checkpoint_sha256=DIGEST
+    return SnapshotOwner()
+
+
+def load_selected(selected):
+    if selected not in catalog(RUNS):
+        raise ValueError("Selected checkpoint is no longer in the verified catalog")
+    location = resolve_candidate(RUNS, selected)
+    return load_run(
+        selected.run,
+        RUNS,
+        str(location),
+        "cpu",
+        expected_checkpoint_sha256=selected.digest,
     )
-    return loaded, Lock()
 
 
 def render():
@@ -53,34 +65,67 @@ def render():
         page_title="DevMind snapshot — text completion", page_icon="🔬", layout="wide"
     )
     st.title("Try a saved snapshot")
-    expected = {"store": str(RUNS), "run": RUN, "checkpoint": CONFIG["checkpoint"]}
-    requested = {
-        key: st.query_params.get(key, value) for key, value in expected.items()
+    if st.query_params.get("store", str(RUNS)) != str(RUNS):
+        st.error("This sampler only serves its configured run store.")
+        st.stop()
+    if st.button("Refresh available snapshots"):
+        st.session_state.pop("snapshot_choices", None)
+    try:
+        if "snapshot_choices" not in st.session_state:
+            st.session_state["snapshot_choices"] = catalog(RUNS)
+        choices = st.session_state["snapshot_choices"]
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+        st.error(f"Checkpoint catalog unavailable: {error}")
+        st.stop()
+    if not choices:
+        st.info("No verified complete saved checkpoints are recorded.")
+        st.stop()
+    requested_run = st.query_params.get("run")
+    requested_checkpoint = st.query_params.get("checkpoint")
+    matches = [
+        item
+        for item in choices
+        if item.run == requested_run and item.checkpoint == requested_checkpoint
+    ]
+    if (requested_run or requested_checkpoint) and not matches:
+        st.error(
+            "Linked checkpoint is missing or not recorded verified; no substitute selected."
+        )
+        st.stop()
+    initial = matches[0] if matches else choices[0]
+    selected = st.selectbox(
+        "Snapshot to query",
+        choices,
+        index=choices.index(initial),
+        format_func=lambda item: item.label,
+    )
+    expected = {
+        "store": str(RUNS),
+        "run": selected.run,
+        "checkpoint": selected.checkpoint,
     }
-    if requested != expected:
+    if st.session_state.get("selected_identity") != selected.key:
+        st.session_state["selected_identity"] = selected.key
         st.session_state.pop("completion_result", None)
-        st.error(
-            "Selected model or checkpoint is not loaded by this sampler. No substitute was used."
-        )
-        st.stop()
-    if not GENERATION.is_dir():
-        st.session_state.pop("completion_result", None)
-        st.error(
-            "The pinned snapshot is unavailable at its verified location. Historical moves require archive-map resolution; no fallback checkpoint is loaded."
-        )
-        st.stop()
-    st.caption(f"Pinned checkpoint: {CONFIG['checkpoint']} · {RUN}")
+    st.caption(f"Selected: {selected.label}")
+    st.caption("Newest recorded complete snapshot: " + choices[0].label)
     st.info(
-        "This is a pretrained base model: it continues your text. It has not been taught to follow chat instructions reliably. Each prompt is independent; no conversation history is added."
+        "This base model continues text, not reliable instruction-following chat. A complete saved checkpoint can belong to a still-running training run."
     )
     st.caption(
-        "Saved checkpoint · CPU only · 2 CPU threads · Does not follow live training updates"
+        "CPU only · 2 threads · one shared model · 10 GiB service limit. Verification/loading may take minutes; other requests receive busy. No automatic weight changes during a response."
     )
-    st.code(RUN, language=None)
+    owner = checkpoint()
+    state, identity = owner.status
+    status_display = st.empty()
+    status_display.caption(f"Sampler status at page render: {state} · {identity}")
     st.markdown(
-        "[Open in the main dashboard](http://127.0.0.1:8501/generate?"
+        "[Link to selected snapshot](http://127.0.0.1:8501/generate?"
         + urlencode(expected)
         + ")"
+    )
+    st.caption(
+        "Generate verifies and loads this selection if necessary, replacing the previous CPU model. Browsing alone does not load weights."
     )
     preset = st.selectbox(
         "Prompt starting point",
@@ -138,31 +183,20 @@ def render():
                     "Verifying and loading the checkpoint on first use, then generating on CPU…"
                 ):
                     validate_controls(prompt, count, temperature, top_k, seed)
-                    loaded, lock = checkpoint()
-                    if (
-                        loaded.identity["run_id"] != RUN
-                        or loaded.identity["checkpoint_sha256"] != DIGEST
-                    ):
-                        raise ValueError(
-                            "Loaded snapshot identity is stale; restart the sampler before generating."
-                        )
-                    if (
-                        len(
-                            loaded.tokenizer.encode(
-                                prompt, add_special_tokens=False
-                            ).ids
-                        )
-                        + count
-                        > 1024
-                    ):
-                        raise ValueError(
-                            "Prompt plus completion must fit the 1,024-token local preview limit. Shorten the prompt."
-                        )
-                    if not lock.acquire(blocking=False):
-                        raise ValueError(
-                            "Another local request is generating. Try again when it finishes."
-                        )
-                    try:
+
+                    def complete(loaded):
+                        if (
+                            len(
+                                loaded.tokenizer.encode(
+                                    prompt, add_special_tokens=False
+                                ).ids
+                            )
+                            + count
+                            > 1024
+                        ):
+                            raise ValueError(
+                                "Prompt plus completion must fit the 1,024-token local preview limit."
+                            )
                         result = generate(
                             loaded.model,
                             loaded.tokenizer,
@@ -176,21 +210,30 @@ def render():
                             strict_context=True,
                             engine=loaded.engine,
                         )
-                    finally:
-                        lock.release()
-                    st.session_state.completion_result = (
-                        prompt,
-                        result[len(prompt) :],
-                        loaded.identity["tokenizer_sha256"],
-                        {
-                            "temperature": temperature,
-                            "top_k": top_k,
-                            "seed": seed,
-                            "max_new_tokens": count,
-                        },
+                        return (
+                            prompt,
+                            result[len(prompt) :],
+                            loaded.identity["tokenizer_sha256"],
+                            {
+                                "temperature": temperature,
+                                "top_k": top_k,
+                                "seed": seed,
+                                "max_new_tokens": count,
+                                "run": selected.run,
+                                "checkpoint": selected.checkpoint,
+                                "checkpoint_sha256": selected.digest,
+                            },
+                        )
+
+                    st.session_state.completion_result = owner.execute(
+                        selected, load_selected, complete
                     )
-            except (OSError, ValueError, RuntimeError) as error:
+            except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
                 st.error(f"Completion unavailable: {error}")
+            state, identity = owner.status
+            status_display.caption(
+                f"Sampler status after request: {state} · {identity}"
+            )
     if "completion_result" in st.session_state:
         prior_prompt, reply, tokenizer, settings = st.session_state.completion_result
         st.subheader("Generated continuation")
@@ -203,8 +246,8 @@ def render():
             st.text(prior_prompt)
             st.write(
                 {
-                    "checkpoint": str(GENERATION),
-                    "checkpoint_sha256": DIGEST,
+                    "checkpoint": settings["checkpoint"],
+                    "checkpoint_sha256": settings["checkpoint_sha256"],
                     "tokenizer_sha256": tokenizer,
                     "backend": "cpu",
                 }
