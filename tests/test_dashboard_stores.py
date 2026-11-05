@@ -101,3 +101,70 @@ def test_native_dashboard_forwards_named_stores_without_opening_them(
     assert not primary.exists() and not pilot.exists()
     single = parser.parse_args(["dashboard"])
     assert single.run_store == []
+
+
+def test_deep_link_selects_exact_store_and_run_and_missing_link_selects_nothing(
+    tmp_path,
+):
+    primary, pilot = tmp_path / "history", tmp_path / "pilot"
+    for root in (primary, pilot):
+        store = ExperimentStore(root)
+        store.create_run("a", {"name": "Model A"}, {"purpose": "training"})
+        store.create_run("b", {"name": "Model B"}, {"purpose": "training"})
+    app = AppTest.from_function(_stores_page, args=(str(primary), str(pilot)))
+    app.query_params.update(store=str(pilot), run="b")
+    app.run()
+    assert not app.exception
+    assert app.selectbox(key="dashboard_run_store").value == "Pilot"
+    assert app.multiselect(key="selected_runs").value == ["b"]
+    app.multiselect(key="selected_runs").set_value(["a"]).run()
+    assert app.multiselect(key="selected_runs").value == ["a"]
+    app.query_params["run"] = "missing"
+    app.run()
+    assert app.multiselect(key="selected_runs").value == []
+    assert not app.dataframe
+    app.query_params["store"] = str(tmp_path / "not-configured")
+    app.run()
+    assert app.error
+    assert not app.dataframe
+    assert not app.exception
+
+
+def test_empty_and_completed_store_do_not_offer_active_focus(tmp_path):
+    import sqlite3
+
+    store = ExperimentStore(tmp_path)
+    store.create_run("done", {"name": "Done"}, {"purpose": "training"})
+    with sqlite3.connect(tmp_path / "experiments.sqlite3") as db:
+        db.execute("UPDATE runs SET status='completed'")
+    app = AppTest.from_function(
+        _stores_page, args=(str(tmp_path), str(tmp_path / "empty"))
+    ).run()
+    assert not any(
+        button.label == "Focus recorded running runs" for button in app.button
+    )
+    app.selectbox(key="dashboard_run_store").set_value("Pilot").run()
+    assert not app.exception
+    assert app.multiselect(key="selected_runs").value == []
+
+
+def test_active_focus_is_explicit_and_preserves_manual_selection(tmp_path):
+    import sqlite3
+
+    store = ExperimentStore(tmp_path)
+    for run in ("old", "active"):
+        store.create_run(run, {"name": run}, {"purpose": "training"})
+    with sqlite3.connect(tmp_path / "experiments.sqlite3") as db:
+        db.execute("UPDATE runs SET status='completed' WHERE run_id='old'")
+        db.execute("UPDATE runs SET status='running' WHERE run_id='active'")
+    app = AppTest.from_function(
+        _stores_page, args=(str(tmp_path), str(tmp_path / "other"))
+    ).run()
+    assert app.multiselect(key="selected_runs").value == ["active"]
+    app.multiselect(key="selected_runs").set_value(["old"]).run()
+    assert app.multiselect(key="selected_runs").value == ["old"]
+    next(
+        button for button in app.button if button.label == "Focus recorded running runs"
+    ).click().run()
+    assert app.multiselect(key="selected_runs").value == ["active"]
+    assert not app.exception

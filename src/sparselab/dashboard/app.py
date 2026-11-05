@@ -13,10 +13,12 @@ from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+
 from sparselab.dashboard import inspection, lab_pages, training_charts, ui
 from sparselab.dashboard.queries import DashboardSnapshot, RunRecord, runs, snapshot
 from sparselab.dashboard.research import learn_page, research_page
@@ -155,8 +157,11 @@ def _selection_controls(root: Path) -> None:
     try:
         records = runs(root)
         st.session_state[key] = records
-    except OSError, sqlite3.Error, ValueError:
+    except (OSError, sqlite3.Error, ValueError) as error:
         records = st.session_state.get(key, [])
+        st.sidebar.warning(
+            f"Run list unavailable; cached selection may be stale: {error}"
+        )
     include_pilots = st.sidebar.checkbox(
         "Include smoke and warmup pilots", value=False, key="include_pilot_runs"
     )
@@ -165,9 +170,46 @@ def _selection_controls(root: Path) -> None:
         for record in records
         if include_pilots or record.purpose not in _PILOT_PURPOSES
     ]
-    previous = st.session_state.get("selected_runs", ids[:1])
+    active = [
+        record.run_id
+        for record in records
+        if record.status.lower() == "running" and record.run_id in ids
+    ]
+    requested = st.query_params.get("run")
+    request_key = (str(root), requested)
+    if requested and st.session_state.get("dashboard_link_applied") != request_key:
+        if requested in ids:
+            st.session_state["selected_runs"] = [requested]
+            st.session_state["dashboard_link_applied"] = request_key
+        else:
+            st.sidebar.warning(
+                "Linked run is unavailable or hidden in this store. No substitute selected."
+            )
+            st.session_state["selected_runs"] = []
+    if active:
+        if st.sidebar.button("Focus recorded running runs"):
+            st.session_state["selected_runs"] = active
+            st.query_params.pop("run", None)
+    else:
+        st.sidebar.info("No runs recorded as running in this store.")
+    previous = st.session_state.get("selected_runs", active or ids[:1])
     st.session_state["selected_runs"] = [run_id for run_id in previous if run_id in ids]
-    st.sidebar.multiselect("Runs", ids, key="selected_runs")
+    names = {
+        record.run_id: f"{record.name} · {record.status} · {record.run_id}"
+        for record in records
+    }
+    st.sidebar.multiselect("Runs", ids, key="selected_runs", format_func=names.get)
+    for record in records:
+        if record.run_id in st.session_state["selected_runs"]:
+            st.sidebar.caption(
+                f"{record.name} · Recorded {record.status} · Updated {record.updated_at} UTC"
+            )
+            st.sidebar.markdown(
+                f"[Open this run](training?{urlencode({'store': str(root), 'run': record.run_id})})"
+            )
+    st.sidebar.caption(
+        "Stored status is not a process heartbeat. Verify activity before calling a run live."
+    )
 
 
 def _store_controls(primary: Path, extra: list[tuple[str, str]]) -> Path:
@@ -182,6 +224,23 @@ def _store_controls(primary: Path, extra: list[tuple[str, str]]) -> Path:
         )
     for warning in warnings:
         st.sidebar.warning(warning)
+    requested_store = st.query_params.get("store")
+    if (
+        requested_store
+        and st.session_state.get("dashboard_store_link_applied") != requested_store
+    ):
+        match = next(
+            (label for label, path in stores.items() if str(path) == requested_store),
+            None,
+        )
+        if match is None:
+            st.error(
+                "Linked run store is unavailable. Configure or restore that store; no substitute is shown."
+            )
+            st.stop()
+        st.session_state["dashboard_run_store"] = match
+        previous_label = match
+        st.session_state["dashboard_store_link_applied"] = requested_store
     labels = list(stores)
     label = (
         st.sidebar.selectbox(
@@ -450,6 +509,7 @@ def training(
 ) -> None:
     ui.page_header("Training", "How is the current run progressing?")
     records, selected_ids = selected(view)
+    inspection.learning_summary(view, selected_ids)
     inspection.engram_summary(view, selected_ids, compact=True)
     _runtime_forecast_panel(view, selected_ids)
     comparison([record for record in records if record.run_id in selected_ids], view)
@@ -1138,8 +1198,8 @@ def main() -> None:
     st.sidebar.caption("Observe training · Inspect evidence · Compare models")
     with st.sidebar.expander("Data locations"):
         st.caption(f"lab {lab_dir}  \nruns {root}")
+    _selection_controls(root)
     if page.url_path in {item.url_path for item in run_pages}:
-        _selection_controls(root)
         st.sidebar.selectbox(
             "Automatic refresh",
             [10, 2, 30, 0],

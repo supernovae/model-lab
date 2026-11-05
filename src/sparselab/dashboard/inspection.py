@@ -88,7 +88,7 @@ def engram_summary(
                 for column, metric, label in zip(
                     columns,
                     ("gate_mean", "value_norm", "table_utilization"),
-                    ("Mean gate", "Value norm", "Table utilization"),
+                    ("Mean gate", "Value norm", "Addressed-row fraction"),
                     strict=True,
                 ):
                     row = by_name.get(f"engram/{metric}")
@@ -132,7 +132,13 @@ def engram_summary(
             st.dataframe(summary, hide_index=True, width="stretch")
     if compact:
         return
-    with st.expander("How to read these values"):
+    st.info(
+        "Utilization is a length-weighted per-document unique addressed-row fraction, "
+        "not the fraction of the whole table learned. Reported collision counts include "
+        "repeated inputs; they are not true hash-collision rates. Gates and norms measure "
+        "memory activity, not useful knowledge or causal impact."
+    )
+    with st.expander("How to read these values", expanded=True):
         names = (
             "gate_mean",
             "value_norm",
@@ -234,3 +240,50 @@ def snapshot_inspector(view: DashboardSnapshot, selected_ids: list[str]) -> None
             st.dataframe(list(reversed(rows)), width="stretch", hide_index=True)
         else:
             st.info("No recorded events for this run.")
+
+
+def learning_summary(view: DashboardSnapshot, selected_ids: list[str]) -> None:
+    """Explain observed learning separately from checkpoint capability evidence."""
+    st.subheader("Learning evidence")
+    st.caption(
+        "Lower training loss means better prediction of training targets. Lower validation "
+        "loss is evidence on the recorded held-out data; neither establishes reasoning, "
+        "coding skill, or the benefit of Engram without a controlled comparison."
+    )
+    rows = latest_metrics(view, selected_ids)
+    for run_id in selected_ids:
+        st.markdown(f"**{run_id}**")
+        columns = st.columns(2)
+        for col, name, label in zip(
+            columns,
+            ("train/loss", "validation/loss"),
+            ("Training prediction loss", "Held-out prediction loss"),
+            strict=True,
+        ):
+            row = next(
+                (
+                    row
+                    for row in rows
+                    if row["run_id"] == run_id and row["metric"] == name
+                ),
+                None,
+            )
+            value = row["value"] if row else None
+            col.metric(
+                label,
+                f"{value:.4f}" if value is not None else "Not recorded",
+                delta=f"{row['change']:+.4f}"
+                if row and row["change"] is not None
+                else None,
+                delta_color="inverse",
+            )
+            if row:
+                col.caption(
+                    f"Step {row['step']} · change from step {row['previous_step'] if row['previous_step'] is not None else 'unavailable'}"
+                )
+    st.info(
+        "Demonstrated capabilities: not established by this telemetry view. Open Experiments "
+        "for verified probe verdicts and Behaviors for saved examples. Check the exact "
+        "checkpoint and comparison group: an older probe does not score the current training model. "
+        "Impact requires a comparable baseline; missing evidence is unknown, not failure."
+    )

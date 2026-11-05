@@ -116,3 +116,40 @@ def test_telemetry_manual_refresh_and_selection_survive_page_change(tmp_path):
     assert not app.exception
     assert app.multiselect(key="selected_runs").value == ["memory"]
     assert app.selectbox(key="refresh_seconds").value == 0
+
+
+def test_memory_lookup_plot_preserves_table_identity_and_token_positions():
+    from sparselab.dashboard.explorer_view import memory_address_figure
+
+    figure = memory_address_figure(
+        {
+            "streams": [
+                {"table": "a", "addresses": [7, 7]},
+                {"table": "b", "addresses": [7, 9]},
+            ]
+        },
+        [{"text": "one"}, {"text": "two"}],
+    )
+    assert list(figure.data[0].x) == [0, 1]
+    assert list(figure.data[0].y) == ["a · row 7", "a · row 7"]
+    assert list(figure.data[1].y) == ["b · row 7", "b · row 9"]
+
+
+def _learning(root):
+    from pathlib import Path
+
+    from sparselab.dashboard.inspection import learning_summary
+    from sparselab.dashboard.queries import snapshot
+
+    learning_summary(snapshot(Path(root)), ["memory", "dense"])
+
+
+def test_learning_summary_keeps_missing_loss_unknown_and_observation_delta(tmp_path):
+    store = _store(tmp_path)
+    store.log_metrics("memory", 100, 1000, 100.0, {"train/loss": 2.0})
+    store.log_metrics("memory", 101, 1010, 101.0, {"train/loss": 1.5})
+    app = AppTest.from_function(_learning, args=(str(tmp_path),)).run()
+    assert not app.exception
+    assert app.metric[0].value == "1.5000"
+    assert app.metric[0].delta == "-0.5000"
+    assert app.metric[1].value == "Not recorded"

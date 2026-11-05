@@ -279,7 +279,7 @@ _ENGRAM = {
     ),
     "table_utilization": (
         "fraction",
-        "Observed distinct addresses divided by table capacity; not lifetime occupancy.",
+        "Length-weighted per-document unique addressed rows divided by table capacity; not lifetime occupancy.",
     ),
     "maximum_address_fraction": (
         "fraction",

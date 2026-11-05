@@ -1356,6 +1356,12 @@ def _memory(exploration: Mapping[str, Any], tokens: list[dict[str, Any]]) -> Non
                 "size. The hash may be degenerate for this table size (e.g. a "
                 "multiplier that is a multiple of the row count)."
             )
+    st.plotly_chart(xv.memory_address_figure(memory, tokens), use_container_width=True)
+    st.caption(
+        "Each dot is a recorded lookup. Repeated rows may reflect repeated n-grams or hash "
+        "collisions. Row IDs are addresses, not concepts or neurons. The gate below shows "
+        "mixing strength; these records do not identify neuron connections or causal influence."
+    )
     reuse = xv.memory_reuse(memory)
     cols = st.columns(max(1, len(reuse)))
     for col, (table, share) in zip(cols, reuse.items(), strict=False):

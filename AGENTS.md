@@ -248,3 +248,15 @@ checklist.
 - **No silent degradation.** An optional cache or proof that cannot publish
   records why. If a rail refuses ordinary local setups (default umask,
   user-private groups), fix the rail. Do not paper over it in tests.
+
+
+## 8. Report the model people can inspect
+
+When discussing current training, include the dashboard URL, configured run-store
+path, model name and exact run ID. Use `/training?store=<URL-encoded-path>&run=<ID>`
+for a stable selection. Verify the store and current run from fresh runtime evidence;
+do not call the newest record active merely because it sorts first. Report recorded
+status and observation time, mark stale/unverified activity explicitly, and say
+idle/completed when no training is verified. A stored `running` status alone is not
+a heartbeat. Never restart training to make the dashboard look active. Keep training
+progress distinct from checkpoint-specific benchmark results and unknown capabilities.

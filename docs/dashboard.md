@@ -369,3 +369,20 @@ The existing `--lab-dir` still selects the Lab records for Home, Experiments,
 Models and Behaviors. Explorer sees the selected run store plus `LAB/runs`, as
 before. Changing the run store does not silently change the Lab records directory.
 With no extra stores, existing single-store commands behave as before.
+
+
+### Focus and evidence
+
+The sidebar shows model names, exact run IDs, recorded status and update timestamps.
+“Focus recorded running runs” selects running records in the chosen store; stored
+status does not verify process liveness. “Open this run” links to Training with the
+configured store path and run ID. Missing linked stores stop rendering; missing or
+hidden runs select nothing instead of silently substituting another model. Store
+links only select configured/discovered stores, never arbitrary filesystem paths.
+
+Training opens with observed training and validation loss, change since the previous
+observation, and their evidence limits. Capabilities require verified checkpoint
+probes; memory activity alone does not demonstrate an improvement. Explorer's memory
+lookup plot maps token positions to recorded table/row addresses. It does not label
+hashed rows as concepts or claim neuron connections. It reads existing exploration
+payloads and adds no model execution.
