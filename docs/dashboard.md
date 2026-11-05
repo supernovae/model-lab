@@ -430,3 +430,12 @@ input, settings and verified identity with their output. No prompt/response is a
 to training data. Generate has manual refresh to avoid interrupting an embedded
 request; Explorer remains a distinct ≤60M internal-diagnostics tool and uses blank
 sample text by default. No probe-suite prompts or scientific settings are changed.
+
+Sampling defaults are temperature **0.7**, top-k **40**, seed **42**, and **32**
+new tokens. Reset sampling defaults restores those controls, keeps the prompt and
+snapshot selection, and clears the prior result without inference. Seed controls
+repeatability, not quality; vary it to explore alternative completions. Exact output
+can vary across runtimes. Temperature zero remains available for greedy decoding.
+The sampler service uses Streamlit's light base and the dashboard's existing
+`#0969da` primary color (STREAMLIT_THEME_BASE / STREAMLIT_THEME_PRIMARY_COLOR),
+so embedded and standalone views use the same native widgets and status palettes.

@@ -231,19 +231,33 @@ def test_sampler_passes_controls_and_clears_old_output(tmp_path, monkeypatch):
     app = AppTest.from_function(_sampler_page).run()
     assert not app.exception
     assert app.text_area[0].value == ""
+    assert [item.value for item in app.number_input] == [0.7, 40, 42]
+    assert app.slider[0].value == 32
     # A newly published checkpoint must not change the model on form submission.
     newer = replace(selected, checkpoint="checkpoints/step_2", digest="newer", step=2)
     monkeypatch.setattr(sampler, "catalog", lambda root: [newer, selected])
     app.text_area[0].set_value("neutral prefix")
-    app.number_input[0].set_value(0.7)
-    app.number_input[1].set_value(40)
-    app.button[1].click().run()
+    app.number_input[0].set_value(1.1)
+    app.number_input[1].set_value(20)
+    app.number_input[2].set_value(99)
+    next(
+        button for button in app.button if button.label == "Generate completion"
+    ).click().run()
     assert not app.exception
-    assert calls[-1]["temperature"] == 0.7 and calls[-1]["top_k"] == 40
+    assert calls[-1]["temperature"] == 1.1 and calls[-1]["top_k"] == 20
+    assert calls[-1]["seed"] == 99
     assert app.session_state["completion_result"][3]["checkpoint_sha256"] == "digest"
     assert app.session_state["completion_result"][1] == " continuation"
+    count = len(calls)
+    app.button(key="reset_sampling").click().run()
+    assert [item.value for item in app.number_input] == [0.7, 40, 42]
+    assert app.text_area[0].value == "neutral prefix"
+    assert "completion_result" not in app.session_state
+    assert len(calls) == count
     app.text_area[0].set_value("")
-    app.button[1].click().run()
+    next(
+        button for button in app.button if button.label == "Generate completion"
+    ).click().run()
     assert app.warning
     assert "completion_result" not in app.session_state
     app.query_params["run"] = "different"

@@ -22,6 +22,20 @@ CONFIG = json.loads(Path(os.environ["SPARSELAB_SNAPSHOT_SERVICE_CONFIG"]).read_t
 RUNS = Path(CONFIG["store"])
 
 
+SAMPLING_DEFAULTS = {
+    "sample_temperature": 0.7,
+    "sample_top_k": 40,
+    "sample_seed": 42,
+    "sample_count": 32,
+}
+
+
+def reset_sampling():
+    for key, value in SAMPLING_DEFAULTS.items():
+        st.session_state[key] = value
+    st.session_state.pop("completion_result", None)
+
+
 def validate_controls(prompt, count, temperature, top_k, seed):
     if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 4000:
         raise ValueError("Enter a nonempty prompt of at most 4,000 characters.")
@@ -141,6 +155,15 @@ def render():
         st.session_state["prompt_preset"] = preset
         st.session_state["sample_prompt"] = presets[preset]
         st.session_state.pop("completion_result", None)
+    st.caption(
+        "Start with temperature 0.7, top-k 40 and seed 42. Lower temperature is more conservative; higher values allow more variation. Top-k limits sampling to the k most likely next tokens (0 disables that filter)."
+    )
+    st.caption(
+        "A seed chooses a repeatable random sequence, not better answers. Keep prompt, checkpoint and settings fixed to compare runs; try seed 43 or 44 for another variation. Exact reproduction can differ across runtimes. Temperature 0 uses greedy decoding and ignores top-k and seed."
+    )
+    for key, value in SAMPLING_DEFAULTS.items():
+        st.session_state.setdefault(key, value)
+    st.button("Reset sampling defaults", key="reset_sampling", on_click=reset_sampling)
     with st.form("completion"):
         prompt = st.text_area(
             "Text to continue",
@@ -150,14 +173,14 @@ def render():
             height=130,
         )
         count = st.slider(
-            "Maximum new tokens", min_value=8, max_value=128, value=32, step=8
+            "Maximum new tokens", min_value=8, max_value=128, key="sample_count", step=8
         )
         columns = st.columns(3)
         temperature = columns[0].number_input(
             "Temperature",
             min_value=0.0,
             max_value=2.0,
-            value=0.0,
+            key="sample_temperature",
             step=0.1,
             help="0 is deterministic greedy decoding; higher values sample more widely.",
         )
@@ -165,12 +188,17 @@ def render():
             "Top-k",
             min_value=0,
             max_value=200,
-            value=0,
+            key="sample_top_k",
             step=1,
             help="0 disables top-k filtering. Ignored by greedy decoding.",
         )
         seed = columns[2].number_input(
-            "Seed", min_value=0, max_value=2147483647, value=0, step=1
+            "Seed",
+            min_value=0,
+            max_value=2147483647,
+            key="sample_seed",
+            step=1,
+            help="Same seed helps reproduce a sample with the same model, prompt, settings and runtime. Different seeds explore variation; none is inherently better.",
         )
         submitted = st.form_submit_button("Generate completion", type="primary")
     if submitted:
