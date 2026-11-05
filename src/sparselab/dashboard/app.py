@@ -17,11 +17,14 @@ from typing import Any
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-
 from sparselab.dashboard import inspection, lab_pages, training_charts, ui
 from sparselab.dashboard.queries import DashboardSnapshot, RunRecord, runs, snapshot
 from sparselab.dashboard.research import learn_page, research_page
-from sparselab.dashboard.stores import configured_stores, parse_run_store
+from sparselab.dashboard.stores import (
+    available_stores,
+    discovery_roots,
+    parse_run_store,
+)
 from sparselab.evaluation.post_train_triage import read_triage, triage_summary
 from sparselab.evaluation.surface_overlay import surface_review_status
 from sparselab.training.checkpoints import CheckpointManager, _safe_member
@@ -169,9 +172,24 @@ def _selection_controls(root: Path) -> None:
 
 def _store_controls(primary: Path, extra: list[tuple[str, str]]) -> Path:
     """Switch whole read-only projections, keeping selections scoped by directory."""
-    stores = configured_stores(primary, extra)
+    stores, warnings = available_stores(primary, extra)
+    previous_label = st.session_state.get("dashboard_run_store")
+    previous_path = st.session_state.get("dashboard_active_store")
+    if previous_label and previous_label not in stores and previous_path:
+        stores[previous_label] = Path(previous_path)
+        st.sidebar.warning(
+            "Selected store is no longer discoverable; selection retained."
+        )
+    for warning in warnings:
+        st.sidebar.warning(warning)
+    labels = list(stores)
     label = (
-        st.sidebar.selectbox("Run store", list(stores), key="dashboard_run_store")
+        st.sidebar.selectbox(
+            "Run store",
+            labels,
+            index=labels.index(previous_label) if previous_label in labels else 0,
+            key="dashboard_run_store",
+        )
         if len(stores) > 1
         else next(iter(stores))
     )
@@ -1012,6 +1030,20 @@ def main() -> None:
     except ValueError as error:
         st.error(str(error))
         st.stop()
+    if discovery_roots():
+
+        @st.fragment(run_every=60)
+        def watch_stores():
+            stores, warnings = available_stores(Path(args.runs_dir), args.run_store)
+            signature = (tuple(stores.items()), warnings)
+            previous = st.session_state.get("store_discovery_signature")
+            st.session_state["store_discovery_signature"] = signature
+            st.caption("New run stores are checked every minute.")
+            if previous is not None and previous != signature:
+                st.rerun()
+
+        with st.sidebar:
+            watch_stores()
     reports_dir = Path(args.reports_dir)
     lifecycle = Path(args.lifecycle) if args.lifecycle else None
     evidence_root = Path(args.evidence_root)
