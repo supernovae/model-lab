@@ -19,7 +19,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from sparselab.dashboard import inspection, lab_pages, training_charts, ui
+from sparselab.dashboard import generation, inspection, lab_pages, training_charts, ui
 from sparselab.dashboard.queries import DashboardSnapshot, RunRecord, runs, snapshot
 from sparselab.dashboard.research import learn_page, research_page
 from sparselab.dashboard.stores import (
@@ -1047,7 +1047,7 @@ def render(root: Path, page: str, surface_dir: Path | None = None) -> None:
             f"Observed at {observed_at:%H:%M:%S} UTC · "
             + (
                 f"Refreshes every {st.session_state.get('refresh_seconds', 10)} seconds."
-                if st.session_state.get("refresh_seconds", 10)
+                if page != "generate" and st.session_state.get("refresh_seconds", 10)
                 else "Automatic refresh paused."
             )
         )
@@ -1062,6 +1062,9 @@ def render(root: Path, page: str, surface_dir: Path | None = None) -> None:
                         "Activity unverified: stored running status is not a live process heartbeat."
                     )
     pages = {
+        "generate": lambda value: generation.generation_page(
+            value, root, selected(value)[1]
+        ),
         "overview": overview,
         "training": lambda value: training(value, root, surface_dir),
         "evaluation": evaluation,
@@ -1087,6 +1090,9 @@ def _run_page(root: Path, page: str, surface_dir: Path | None = None) -> None:
         return
     if page == "training":
         training_charts.load_plotly()
+    if page == "generate":
+        render(root, page, surface_dir)
+        return
     interval = st.session_state.get("refresh_seconds", 10)
     st.fragment(run_every=interval or None)(render)(root, page, surface_dir)
 
@@ -1180,6 +1186,7 @@ def main() -> None:
         for name in (
             "overview",
             "training",
+            "generate",
             "engram",
             "snapshots",
             "evaluation",
@@ -1219,6 +1226,7 @@ def main() -> None:
         with st.container(horizontal=True):
             for destination in (
                 "training",
+                "generate",
                 "engram",
                 "snapshots",
                 "checkpoints",

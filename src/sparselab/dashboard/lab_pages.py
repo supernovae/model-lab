@@ -1004,6 +1004,9 @@ def explorer_page(lab_dir: Path, runs_dirs: Sequence[Path]) -> None:
         f"≤ {ex.MAX_TOKENS} tokens) · computed through the verified checkpoint "
         "loader (runtime shown per exploration) and cached under LAB/explorer",
     )
+    st.markdown(
+        "For text completion from the available larger snapshot, open [Generate](generate). Explorer is for small-model internal diagnostics."
+    )
     snap = _snapshot(lab_dir)
     cached = snap.explorations
     choices = _explorable_runs(snap, runs_dirs)
@@ -1068,7 +1071,7 @@ def explorer_page(lab_dir: Path, runs_dirs: Sequence[Path]) -> None:
         )
         text = cols[2].text_input(
             "Sample text",
-            value=ex.DEFAULT_TEXT,
+            value="",
             key="explorer_compare_text",
             max_chars=600,
         )
@@ -1135,7 +1138,7 @@ def explorer_page(lab_dir: Path, runs_dirs: Sequence[Path]) -> None:
         key="explorer_run",
     )
     text = cols[1].text_input(
-        "Sample text", value=ex.DEFAULT_TEXT, key="explorer_text", max_chars=600
+        "Sample text", value="", key="explorer_text", max_chars=600
     )
     saved_single = st.session_state.get("explorer_last")
     if isinstance(saved_single, Mapping) and "exploration" in saved_single:

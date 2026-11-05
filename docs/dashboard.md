@@ -386,3 +386,33 @@ probes; memory activity alone does not demonstrate an improvement. Explorer's me
 lookup plot maps token positions to recorded table/row addresses. It does not label
 hashed rows as concepts or claim neuron connections. It reads existing exploration
 payloads and adds no model execution.
+
+### Generate from the selected saved snapshot
+
+**Generate** shares the telemetry store/run selection and offers checkpoint metadata
+without opening weights. Stable links accept `store`, `run`, and `checkpoint`.
+The separately owned, loopback snapshot sampler is embedded only when all three
+selectors and the checkpoint digest match its configured identity. Other models,
+missing snapshots, bad links, and an unavailable service report why generation is
+unavailable; they never silently sample a different run. A link selects the supported
+saved snapshot. This does not follow newer training updates automatically.
+
+Set `SPARSELAB_SNAPSHOT_SERVICE_CONFIG` to an operator-owned JSON file containing
+`url` (loopback HTTP), `store`, `run`, `checkpoint` (run-relative generation path),
+and `checkpoint_sha256`. Run `dashboard/snapshot_sampler.py` with the checkpoint's
+compatible provisioned runtime/source package and the same configuration. It reuses
+native verified loading and generation. There is one cached CPU model per sampler
+process, shared by standalone and embedded views, with serialized requests. Never
+point an older model implementation at newer Engram state or remove validation to
+make it load. Historical moved generations must resolve via their archive mapping
+before a separately reviewed sampler configuration change; HTTP/query parameters
+cannot select arbitrary filesystem paths.
+
+Prompts default to blank. Technical, code and story examples require visible choice;
+no TinyStories text is silently appended. Temperature 0–2, top-k 0–200 (0 disables),
+seed, and 8–128 new tokens are supported. Combined prompt/output is limited to 1024
+tokens for this CPU preview. Temperature zero is greedy. Requests retain the exact
+input, settings and verified identity with their output. No prompt/response is added
+to training data. Generate has manual refresh to avoid interrupting an embedded
+request; Explorer remains a distinct ≤60M internal-diagnostics tool and uses blank
+sample text by default. No probe-suite prompts or scientific settings are changed.
