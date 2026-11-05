@@ -1051,6 +1051,16 @@ def render(root: Path, page: str, surface_dir: Path | None = None) -> None:
                 else "Automatic refresh paused."
             )
         )
+    _, focused_ids = selected(view)
+    for record in view.runs:
+        if record.run_id in focused_ids:
+            with st.container(border=True):
+                st.markdown(f"**{record.name}** · Recorded status: **{record.status}**")
+                st.caption(f"Run {record.run_id} · Updated {record.updated_at} UTC")
+                if record.status.lower() == "running":
+                    st.caption(
+                        "Activity unverified: stored running status is not a live process heartbeat."
+                    )
     pages = {
         "overview": overview,
         "training": lambda value: training(value, root, surface_dir),
