@@ -578,3 +578,88 @@ def test_checkpoint_binds_memory_table_optimizer_and_stable_schedule(tmp_path):
     snapshot.optimizer["param_groups"][-1]["lr"] /= 5
     with pytest.raises(ValueError, match="learning rate"):
         CheckpointManager(tmp_path / "tampered").save(snapshot)
+
+
+@pytest.mark.parametrize("corrupt_best", [False, True])
+def test_lineage_verifies_only_candidates_that_can_contribute(
+    tmp_path, monkeypatch, corrupt_best
+) -> None:
+    manager = CheckpointManager(tmp_path)
+    records = [
+        manager.save(_snapshot(step), loss)
+        for step, loss in enumerate((0.6, 0.2, 0.5, 0.7), start=1)
+    ]
+    if corrupt_best:
+        shard = next(
+            (manager.root / records[1].relative_path).glob("weights-*.safetensors")
+        )
+        shard.write_bytes(shard.read_bytes() + b"corrupt")
+    original = manager.verify
+    opened = []
+
+    def verify(path, *args, **kwargs):
+        opened.append(path.name)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(manager, "verify", verify)
+    winner = records[2 if corrupt_best else 1]
+    assert manager.lineage_best_for_child("parent", records[-1].manifest_sha256) == (
+        LineageBest(
+            "parent", winner.manifest_sha256, winner.step, winner.validation_loss
+        )
+    )
+    assert opened == [
+        records[-1].relative_path,
+        records[1].relative_path,
+        *([records[2].relative_path] if corrupt_best else []),
+    ]
+    monkeypatch.setattr(manager, "verify", original)
+    assert bool(manager.recovery_report().rejected) == corrupt_best
+
+
+@pytest.mark.parametrize("corrupt_newer_ancestor", [False, True])
+def test_lineage_keeps_inherited_tie_order_and_verifies_contributor(
+    tmp_path, corrupt_newer_ancestor
+) -> None:
+    manager = CheckpointManager(tmp_path)
+    ancestors = [
+        LineageBest("older", "a" * 64, 1, 0.1),
+        LineageBest("newer", "b" * 64, 1, 0.1),
+    ]
+    records = []
+    for step, ancestor in enumerate(ancestors, start=1):
+        snapshot = _snapshot(step)
+        snapshot.lineage_best = ancestor
+        records.append(manager.save(snapshot, 0.5))
+    selected = manager.save(_snapshot(3), 0.1)
+    if corrupt_newer_ancestor:
+        shard = next(
+            (manager.root / records[-1].relative_path).glob("weights-*.safetensors")
+        )
+        shard.write_bytes(shard.read_bytes() + b"corrupt")
+    assert (
+        manager.lineage_best_for_child("parent", selected.manifest_sha256)
+        == (ancestors[0 if corrupt_newer_ancestor else 1])
+    )
+
+
+def test_lineage_rejects_corrupt_selected_parent(tmp_path) -> None:
+    manager = CheckpointManager(tmp_path)
+    manager.save(_snapshot(1), 0.1)
+    selected = manager.save(_snapshot(2), 0.2)
+    shard = next((manager.root / selected.relative_path).glob("weights-*.safetensors"))
+    shard.write_bytes(shard.read_bytes() + b"corrupt")
+    with pytest.raises(
+        ValueError, match="selected parent is not a verified generation"
+    ):
+        manager.lineage_best_for_child("parent", selected.manifest_sha256)
+
+
+def test_lineage_local_tie_keeps_earliest_generation(tmp_path) -> None:
+    manager = CheckpointManager(tmp_path)
+    first = manager.save(_snapshot(1), 0.1)
+    manager.save(_snapshot(2), 0.1)
+    selected = manager.save(_snapshot(3), 0.3)
+    assert manager.lineage_best_for_child("parent", selected.manifest_sha256) == (
+        LineageBest("parent", first.manifest_sha256, 1, 0.1)
+    )
