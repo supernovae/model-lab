@@ -116,3 +116,25 @@ def test_owner_serializes_load_and_generation_and_reuses_exact_identity():
     assert owner.loaded is None and owner.key is None and owner.status[0] == "failed"
     owner.execute(item, loader, action)
     assert owner.status[0] == "ready"
+
+
+def test_successful_switch_evicts_previous_model_before_loading():
+    owner = SnapshotOwner()
+    first = selected()
+    second = replace(
+        first, checkpoint="checkpoints/step_0002_gen_0002", digest="b" * 64, step=2
+    )
+    loads = []
+
+    def loader(value):
+        assert owner.loaded is None and owner.key is None
+        loads.append(value.key)
+        return SimpleNamespace(
+            identity={"run_id": value.run, "checkpoint_sha256": value.digest}
+        )
+
+    action = lambda model: model.identity.copy()
+    assert owner.execute(first, loader, action)["checkpoint_sha256"] == first.digest
+    assert owner.execute(second, loader, action)["checkpoint_sha256"] == second.digest
+    assert owner.execute(second, loader, action)["checkpoint_sha256"] == second.digest
+    assert loads == [first.key, second.key]
