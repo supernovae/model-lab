@@ -52,6 +52,8 @@ def test_empty_files_default(tmp_path, document):
         "seed: -1",
         "seed: 4294967296",
         "fresh_baseline: 'true'",
+        "repeat_baseline: 'true'",
+        "continuation: {checkpoint: cp, append_data: 'true'}",
         "lab_dir: 5",
     ],
 )
@@ -489,3 +491,21 @@ def test_accelerator_error_names_valid_runtime_selectors(
     assert "registered compatible worker" in message
     assert not (tmp_path / "lab/tries").exists()
     assert not (tmp_path / "lab/probes").exists()
+
+
+def test_continuation_path_and_flags_reach_cli(tmp_path):
+    from sparselab.cli.main import build_parser
+
+    path = tmp_path / "request.yaml"
+    path.write_text(
+        "repeat_baseline: true\ncontinuation:\n  checkpoint: parent/checkpoints/generation\n  append_data: true\n  allow_runtime_optimization: true\n"
+    )
+    args = build_parser(tmp_path).parse_args(
+        ["try", "delta", "--vs", "base", "--config", str(path)]
+    )
+    prepare_try_config(args)
+    assert args.repeat_baseline is True
+    assert args.continuation.checkpoint == tmp_path / "parent/checkpoints/generation"
+    assert args.continuation.append_data is True
+    assert args.continuation.allow_runtime_optimization is True
+    assert args.continuation.allow_runtime_drift is False

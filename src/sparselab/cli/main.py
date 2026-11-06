@@ -2513,6 +2513,8 @@ def _try(args: argparse.Namespace) -> None:
             authorization=args.runtime_authorization,
             resource_envelope=args.resource_envelope_value,
             fresh_baseline=args.fresh_baseline,
+            repeat_baseline=args.repeat_baseline,
+            continuation=args.continuation,
             probe_tier=None if args.probe_tier == "none" else args.probe_tier,
             request={
                 **args.try_config_loaded.model_dump(mode="json"),

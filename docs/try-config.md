@@ -14,6 +14,7 @@ try_config_version: 1
 seed: 7
 probe_tier: standard
 fresh_baseline: false
+repeat_baseline: false
 lab_dir: ./lab
 runtime_profile: ./cpu-profile.yaml
 resource_envelope: ./bounds.yaml
@@ -71,3 +72,53 @@ readable without rewriting them. Native checkpoint/digest binding and held-out
 scoring are unchanged. One paired seed is still insufficient for a scientific
 claim; this migration does not add across-seed aggregation or dashboard replay
 of custom settings.
+
+## Baseline/candidate/baseline bracket
+
+Set `repeat_baseline: true` to execute three independent native training/scoring
+arms in that order. Both baselines are fresh even when a reusable baseline exists.
+The final baseline uses the identical config, seed, prepared inputs and evaluation
+protocol as the first; it does not continue from the candidate. The sealed record
+retains all three arms and a separate `baseline_repeat_comparison`. Per-arm limits
+and safe cancellation apply to the third arm too. A failure or cancellation keeps
+completed arms and withholds an overall completed result.
+
+`train_seconds` is end-to-end native training wall time, including preparation,
+compilation, evaluation during training and checkpoint writes, and excluding the
+subsequent scoring pass. Do not call it steady-state device throughput or compare
+it with profiler timing. Arms share one Python process and its compiler/cache
+scope; A2 may be warm. There is no automatic cache reset or cold-start equivalence
+claim. Record runtime/cache policy separately for a performance experiment.
+This option adds drift/repeatability evidence; it does
+not infer a speed winner, choose a tolerance or replace separate trace runs.
+
+Without `continuation`, each arm starts from the declared initial model. For a
+same-checkpoint full-state bracket, use the native terminal budget extension:
+
+```yaml
+repeat_baseline: true
+probe_tier: none
+continuation:
+  checkpoint: /absolute/parent/checkpoints/step_00023691_gen_000001
+  append_data: true
+  allow_runtime_optimization: true
+  allow_runtime_drift: false
+```
+
+Replace the example generation with a verified actual terminal generation. The
+baseline config declares strictly larger whole-update caps and the native-verified
+append-only dataset. A 24-update test sets `max_steps` to parent step + 24 and
+`max_tokens` to the corresponding native group offset. The candidate delta changes
+only a native-allowed runtime setting, such as `training.matched_stories.padding_multiple`.
+Every arm invokes native `extend_budget` from that same parent, preserving its
+model, Adam, RNG, cursor and schedule. All baselines are fresh. The sealed record
+retains the declared continuation and parent manifest hash, and native run lineage
+records retain the verified parent checkpoint identity. Native parent-terminal,
+append-prefix, scientific-setting and full-state checks remain authoritative.
+
+`allow_runtime_drift` defaults false; if an experiment uses a changed implementation,
+explicitly record and authorize that change before setting it true. This is not a
+model-weights-only fork. Use the existing resource envelope for per-arm wall bounds;
+a checkpointed wall stop remains interrupted, not a successful throughput result.
+The caller must arrange exclusive device ownership and production fallback before
+invoking this workflow; try does not interrupt or resume another trainer.

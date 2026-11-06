@@ -17,15 +17,16 @@ from sparselab.training.trainer import train
 
 
 @pytest.fixture
-def document_parent(tmp_path):
+def document_parent(tmp_path, request):
     base = config(tmp_path)
     tokenizer = load_tokenizer(base.tokenizer.path)
     texts = ["alpha.", "beta."]
     validation = "A different held out account."
+    validation_documents = getattr(request, "param", 1)
     parent_file = tmp_path / "parent.jsonl"
     valid = tmp_path / "validation.jsonl"
     parent_file.write_text("".join(json.dumps({"text": t}) + "\n" for t in texts))
-    valid.write_text(json.dumps({"text": validation}) + "\n")
+    valid.write_text((json.dumps({"text": validation}) + "\n") * validation_documents)
     tokens = sum(
         len(tokenizer.encode(t, add_special_tokens=False).ids) + 1 for t in texts
     )
@@ -44,12 +45,12 @@ def document_parent(tmp_path):
         train_path=str(parent_file),
         validation_path=str(valid),
         train_max_documents=2,
-        validation_max_documents=1,
+        validation_max_documents=validation_documents,
         train_max_tokens=tokens,
-        validation_max_tokens=len(
-            tokenizer.encode(validation, add_special_tokens=False).ids
+        validation_max_tokens=(
+            len(tokenizer.encode(validation, add_special_tokens=False).ids) + 1
         )
-        + 1,
+        * validation_documents,
     )
     raw["training"].update(
         seq_len=64,
@@ -399,3 +400,47 @@ def test_runtime_flag_cannot_bypass_data_or_scientific_rails(
             run_id="refused_optimization",
         )
     assert not (source.logging.root_dir / "refused_optimization").exists()
+
+
+@pytest.mark.parametrize("document_parent", [8], indirect=True)
+def test_try_bracket_append_uses_same_parent_and_target_groups(
+    document_parent, tmp_path
+):
+    import yaml
+
+    from sparselab.lab_mode import run_try
+    from sparselab.try_config import TryContinuation
+
+    source, parent_root, generation, _ = document_parent
+    target = append_config(document_parent, tmp_path)
+    baseline = tmp_path / "try-baseline.yaml"
+    baseline.write_text(yaml.safe_dump(target.model_dump(mode="json")))
+    delta = tmp_path / "runtime-delta.yaml"
+    delta.write_text(
+        yaml.safe_dump({"set": {"training.matched_stories.padding_multiple": 64}})
+    )
+    record, _ = run_try(
+        delta,
+        baseline,
+        work_dir=tmp_path / "work",
+        repeat_baseline=True,
+        continuation=TryContinuation(
+            checkpoint=generation, append_data=True, allow_runtime_optimization=True
+        ),
+        probe_tier=None,
+    )
+    assert record["status"] == "completed", record.get("failure")
+    parent = CheckpointManager(parent_root).load(generation)
+    for row in record["arms"].values():
+        assert (
+            row["training_targets_applied"]
+            == target.training.max_tokens - source.training.max_tokens
+        )
+        run = Path(row["run_dir"])
+        snapshot = CheckpointManager(run).load(run / "checkpoints/latest.json")
+        assert snapshot.parent_checkpoint_sha256 == parent.checkpoint_sha256
+        assert snapshot.tokens_seen == target.training.max_tokens
+        assert snapshot.step == target.training.max_steps
+        assert {int(v["step"]) for v in snapshot.optimizer["state"].values()} == {
+            target.training.max_steps
+        }
