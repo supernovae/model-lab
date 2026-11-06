@@ -17,6 +17,7 @@ class TryContinuation(StrictModel):
 
     checkpoint: Path
     append_data: bool = Field(default=False, strict=True)
+    append_from_checkpoint: bool = Field(default=False, strict=True)
     allow_runtime_optimization: bool = Field(default=False, strict=True)
     allow_runtime_drift: bool = Field(default=False, strict=True)
 

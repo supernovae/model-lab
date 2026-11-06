@@ -423,6 +423,7 @@ def _train_and_score(
                     {
                         "extend_budget": continuation.checkpoint,
                         "append_data": continuation.append_data,
+                        "append_from_checkpoint": continuation.append_from_checkpoint,
                         "allow_runtime_optimization": continuation.allow_runtime_optimization,
                         "allow_runtime_drift": continuation.allow_runtime_drift,
                     }

@@ -122,3 +122,10 @@ model-weights-only fork. Use the existing resource envelope for per-arm wall bou
 a checkpointed wall stop remains interrupted, not a successful throughput result.
 The caller must arrange exclusive device ownership and production fallback before
 invoking this workflow; try does not interrupt or resume another trainer.
+
+For an explicitly selected nonterminal checkpoint, `append_from_checkpoint: true`
+requires `append_data: true` and retains native consumed-prefix/cursor verification.
+The bounded target dataset must cover exactly its declared new single-pass budget;
+limiting training caps alone while retaining a larger prepared stream is refused.
+Prepare that bounded dataset once with native `prepare_data`, then reuse its cache
+for all arms. This feature does not supply a zero-tokenization cache-slicing API.

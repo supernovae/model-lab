@@ -509,3 +509,4 @@ def test_continuation_path_and_flags_reach_cli(tmp_path):
     assert args.continuation.append_data is True
     assert args.continuation.allow_runtime_optimization is True
     assert args.continuation.allow_runtime_drift is False
+    assert args.continuation.append_from_checkpoint is False

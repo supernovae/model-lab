@@ -444,3 +444,57 @@ def test_try_bracket_append_uses_same_parent_and_target_groups(
         assert {int(v["step"]) for v in snapshot.optimizer["state"].values()} == {
             target.training.max_steps
         }
+
+
+@pytest.mark.parametrize("document_parent", [8], indirect=True)
+def test_try_nonterminal_checkpoint_bracket_preserves_consumed_prefix(
+    checkpoint_phase, tmp_path
+):
+    import yaml
+
+    from sparselab.lab_mode import run_try
+    from sparselab.try_config import TryContinuation
+
+    source, target, root, parent, prior = checkpoint_phase
+    baseline = tmp_path / "bounded-baseline.yaml"
+    baseline.write_text(yaml.safe_dump(target.model_dump(mode="json")))
+    delta = tmp_path / "bounded-delta.yaml"
+    delta.write_text(
+        yaml.safe_dump({"set": {"training.matched_stories.padding_multiple": 64}})
+    )
+    record, _ = run_try(
+        delta,
+        baseline,
+        work_dir=tmp_path / "bracket-work",
+        repeat_baseline=True,
+        continuation=TryContinuation(
+            checkpoint=parent,
+            append_data=True,
+            append_from_checkpoint=True,
+            allow_runtime_optimization=True,
+        ),
+        probe_tier=None,
+    )
+    assert record["status"] == "completed", record.get("failure")
+    assert prior.step < source.training.max_steps
+    for row in record["arms"].values():
+        run = Path(row["run_dir"])
+        child = CheckpointManager(run).load(run / "checkpoints/latest.json")
+        assert child.parent_checkpoint_sha256 == prior.checkpoint_sha256
+        assert child.step == prior.step + 1
+        assert (
+            row["training_targets_applied"]
+            == target.training.max_tokens - prior.tokens_seen
+        )
+        assert all(
+            float(v["step"]) == child.step for v in child.optimizer["state"].values()
+        )
+        decision = next(
+            d
+            for d in read_manifest(run / "manifest.json")["resource_decisions"]
+            if d["kind"] == "budget_extension"
+        )
+        assert decision["parent_consumed_tokens"] == prior.tokens_seen
+        assert decision["unconsumed_source_preserved_at"] == str(
+            root / "data/train.npy"
+        )
