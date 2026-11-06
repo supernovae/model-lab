@@ -266,11 +266,21 @@ def _excluded_edges(kind: str) -> frozenset[tuple[str, str]]:
 # was added before the existing unavailable-key return. Removing that call
 # restores the complete record AST; imported artifact uses, cold-evidence
 # validation, trust checks and excluded edges are unchanged.
+# data.packing prefix derivation re-audited 2026-11-06 against f61763f:
+# only existing producer owners _prepare_data/prepare_data change, adding the
+# producer-only _prepare_verified_prefix and PreparedPrefix declaration.
+# load_prepared_data/_verified_receipt ASTs are unchanged; they never invoke
+# prefix preparation. The new helper calls existing verifiers (not vice versa),
+# requires cold parent authentication and identical preparation identity, and
+# rejects source-compatibility overrides. Its new excluded-edge uses are only
+# telemetry typing, resource checks and workspace preflight during publication.
+# Re-pin the complete affected producer owners; no excluded edge or verifier
+# closure is added/removed, and packing itself remains digested in every kind.
 _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.preparation_workers",
-    ): "8501efeec2d7fa1bfc7ba62d183caf46967be782e863f3ae3b981290d47d53e3",
+    ): "08e8a1006dc05aa9b944b32af91c95782e31f8d254cf9470147fb6cdbdc88a0a",
     (
         "experiments.artifacts",
         "data.sources",
@@ -278,7 +288,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "corpus.mixture",
-    ): "ee538665bb3739ae23b3c333f01e7b96dcace6f51e1f5db7c901d04a3fa2d1d7",
+    ): "8b1609435cd6c97c72f02c76fc7082c068a69ad7ca1b66666a8d768819733d2b",
     (
         "workers",
         "workers.transport",
@@ -286,11 +296,11 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.tokenizer",
-    ): "e9e1da52bfe3bc28830632fc6db512c1588d1848aa69e1fea4a30c4b261f0cb9",
+    ): "1be34f386d7724fdf8b40751f8ba4a60ca3b47ed69847f742ed3c54a505c3539",
     (
         "data.packing",
         "data.sources",
-    ): "485c50c4cd417e1f93ea271787d32b147af2f02e89acfaac85d24adfa59ec6a0",
+    ): "5ec19f50ff74ca6a2d23f5cafbefb9c0fcf5ca9ff0878c2d84a1a2e8fa38999a",
     (
         "data",
         "data.tokenizer",
@@ -310,11 +320,11 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "corpus.export",
-    ): "809514e5a5f94bb0d4b56169653e5afdae58f059442fadae99fc383089e93155",
+    ): "978d6a4e494e157863a8d70398c9ac47a10fa392c109a64f9f829b9fc7994600",
     (
         "data.packing",
         "data.allocation",
-    ): "d0d21e33780beb62e8bbc56f05ff5f6397b7f5be94f11182f89868ee30f2b98f",
+    ): "f7baf0d9e939b8d6b80588bee15b40270ca42a1878d0ca7978bf9ef17989335e",
     (
         "data.packing",
         "data.byte_hash",
@@ -330,43 +340,43 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.encoding",
-    ): "1126f7c3cc13f8f123d49bc62ddb5a71222fcf053891f84b3af17b62f7989b71",
+    ): "60da23c7dc63de473bc4afc6e4eab257cff248bc71652d31557f2cbdf260596a",
     (
         "data.packing",
         "data.local_stories",
-    ): "6f5c869315ab93300585df4aa00841e2ffd7cd62f969252391364c3d811b86c3",
+    ): "d035b3fb6f0100ea2016d38776815f13a9c9465d6bf275e46399e110cbd849a4",
     (
         "data.packing",
         "data.preparation_chunks",
-    ): "8e8d44ac404067135aef1375f98b572d9058e3b3bd649cd3253efd5b6214777d",
+    ): "d152fe59eda209a2e303fb67e1efc190b82d4c5fbceea59d48b050b1b8ccfcbf",
     (
         "data.packing",
         "data.preparation_telemetry",
-    ): "388d56a800e86214f7883f36a55200cb60e0a00e849d9c871878af5a214b4650",
+    ): "10775254bf31039740193ccbc0f4f303a0917c39d64bfa32d68dad25e9e71f44",
     (
         "data.packing",
         "experiments.source_compatibility",
-    ): "0f4c16abf8709e64866b1a7d6207e9db9d6b6ced79fb81b603df87cf7ae5535a",
+    ): "ea598a6577c73a090264b78c4b6ffef5590f2e910cc5b46ab5dcbc8d1f54816f",
     (
         "data.packing",
         "progress",
-    ): "ea34073e9e0c0cbed67df985f81aac8e3c3c788163b6ba6aaa5f2f98f20d3e7e",
+    ): "1859fe6654622fbbf8310b35e375e55d006cfaa1c9aa2024d6ad6c9bf7e1838c",
     (
         "data.packing",
         "resource_envelope",
-    ): "3ee10340cccbcc26206bc55d3f7d5c1b3476ff2388e63daaf0b5fbfe2dfc8e00",
+    ): "dc0bbe0bfcd2578dbd829eb002aa58a3eccaae08922e1d15050db9f2b981548c",
     (
         "data.packing",
         "workdir",
-    ): "663292fe730983bd3dc49e88ba3684d1b8631ee4714f2256096c19353722407d",
+    ): "907c8eb18bd20de4cf4ea6379bf54f7b95a98488886266a56d2e12a19bc4ad23",
     (
         "data.packing",
         "workspace_cleanup",
-    ): "387d791e1615a692cd05e34b447f1a99c64885b9af73ef4d9d70ed2a9602189c",
+    ): "5a09ded445c71b585024fc56ddb95977eee969cb6f24bb93930616e0df53618f",
     (
         "data.packing",
         "workspace_preflight",
-    ): "3b02af5cb7c3068a58a927139b2acc3645c378a3c988ea46e828fa0a6b8aa1e7",
+    ): "5abc4e0ee4e882c9fd852bb02e51e44e30efb0dd35e7f8c42b3309f242808be2",
     (
         "corpus.tokenizer_bakeoff",
         "corpus.cli",
