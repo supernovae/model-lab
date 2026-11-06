@@ -9,6 +9,7 @@ import pytest
 from sparselab.dashboard.snapshot_catalog import (
     SavedSnapshot,
     SnapshotOwner,
+    available_catalog,
     catalog,
     resolve_candidate,
 )
@@ -52,7 +53,16 @@ def test_missing_corrupt_and_archived_candidates_fail_without_fallback(tmp_path)
     (path / "manifest.json").write_text(json.dumps({"sha256": "wrong", "step": 1}))
     with pytest.raises(ValueError, match="identity"):
         resolve_candidate(tmp_path, item, mapping)
-    (path / "manifest.json").write_text(json.dumps({"sha256": item.digest, "step": 1}))
+    (path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "sha256": item.digest,
+                "step": 1,
+                "files": [{"name": "weights.safetensors", "bytes": 1}],
+            }
+        )
+    )
+    (path / "weights.safetensors").write_bytes(b"x")
     assert resolve_candidate(tmp_path, item, mapping) == path
     mapping.write_text(
         json.dumps(
@@ -138,3 +148,45 @@ def test_successful_switch_evicts_previous_model_before_loading():
     assert owner.execute(second, loader, action)["checkpoint_sha256"] == second.digest
     assert owner.execute(second, loader, action)["checkpoint_sha256"] == second.digest
     assert loads == [first.key, second.key]
+
+
+def test_available_catalog_orders_utc_instants_and_skips_unavailable(tmp_path):
+    with sqlite3.connect(tmp_path / "experiments.sqlite3") as c:
+        c.execute(
+            "create table checkpoints(run_id,relative_path,digest,step,created_at,size_bytes,verification_status)"
+        )
+        # Offset timestamps deliberately sort differently as strings.
+        for step, date in [
+            (1, "2026-01-01T12:00:00+02:00"),
+            (2, "2026-01-01T11:00:00+00:00"),
+            (3, "2026-01-02T00:00:00Z"),
+        ]:
+            name = f"step_{step:04}_gen_{step:04}"
+            c.execute(
+                "insert into checkpoints values(?,?,?,?,?,?,?)",
+                ("run", name, "a" * 64, step, date, 100, "verified"),
+            )
+            if step != 3:  # newest row is missing, so must not be default
+                path = tmp_path / "run" / "checkpoints" / name
+                path.mkdir(parents=True)
+                (path / "weights").write_bytes(b"x")
+                (path / "manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "sha256": "a" * 64,
+                            "step": step,
+                            "files": [{"name": "weights", "bytes": 1}],
+                        }
+                    )
+                )
+    mapping = tmp_path / "archive.json"
+    rows = available_catalog(tmp_path, mapping)
+    assert [row.step for row in rows] == [2, 1]
+    assert rows[0].label.startswith("2026-01-01 11:00:00 UTC")
+    (tmp_path / "run" / rows[0].checkpoint / "weights").write_bytes(b"")
+    assert [row.step for row in available_catalog(tmp_path, mapping)] == [1]
+    source = str(tmp_path / "run" / rows[1].checkpoint)
+    mapping.write_text(
+        json.dumps({"checkpoints": [{"source": source, "archive": "/archive/run"}]})
+    )
+    assert available_catalog(tmp_path, mapping) == []

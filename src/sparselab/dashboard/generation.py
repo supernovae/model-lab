@@ -14,7 +14,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from sparselab.dashboard.queries import DashboardSnapshot
-from sparselab.dashboard.snapshot_catalog import catalog
+from sparselab.dashboard.snapshot_catalog import available_catalog as catalog
 
 
 def service_config() -> dict[str, str] | None:
@@ -58,9 +58,6 @@ def generation_page(
         st.info("No snapshot sampler is configured for this dashboard.")
         return
     st.caption("CPU sampler · verified complete saved checkpoints · load on Generate")
-    verified = [
-        row for row in view.checkpoints if row.get("verification_status") == "verified"
-    ]
     if str(root.resolve()) != config["store"]:
         st.info("This sampler serves a different store.")
         st.markdown(
@@ -90,17 +87,7 @@ def generation_page(
         st.info("Select exactly one run to generate from a checkpoint.")
         return
     run = selected_ids[0]
-    rows = [row for row in verified if row["run_id"] == run]
-    choices = [
-        str(row["relative_path"])
-        for row in sorted(rows, key=lambda row: row["step"], reverse=True)
-    ]
-    # Store relative paths may omit the checkpoints directory.
-    choices = [
-        item if item.startswith("checkpoints/") else "checkpoints/" + item
-        for item in choices
-    ]
-    choices = list(dict.fromkeys(choices))
+    choices = [item.checkpoint for item in available if item.run == run]
     if not choices:
         st.info(
             "No saved checkpoint metadata is available for this run. No model was loaded."
@@ -122,8 +109,13 @@ def generation_page(
         )
         return
     checkpoint = st.selectbox(
-        "Saved checkpoint",
+        "Saved checkpoint — newest first (UTC save time)",
         choices,
+        format_func=lambda path: next(
+            ("NEWEST IN RUN · " if path == choices[0] else "") + item.label
+            for item in available
+            if item.run == run and item.checkpoint == path
+        ),
         index=choices.index(requested) if requested else 0,
         key="generation_checkpoint",
     )

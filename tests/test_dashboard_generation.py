@@ -159,6 +159,18 @@ def test_supported_sampler_health_and_run_changes(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.setattr(queries, "snapshot", lambda root: view)
+    from sparselab.dashboard.snapshot_catalog import SavedSnapshot
+
+    monkeypatch.setattr(
+        generation,
+        "catalog",
+        lambda root: [
+            SavedSnapshot(
+                name, "checkpoints/step_0001_gen_0001", "a" * 64, 1, "2026-01-01", 100
+            )
+            for name in ("a", "b")
+        ],
+    )
     monkeypatch.setattr(
         generation, "urlopen", lambda *args, **kwargs: io.BytesIO(b"ok")
     )
@@ -204,7 +216,9 @@ def test_sampler_passes_controls_and_clears_old_output(tmp_path, monkeypatch):
     generation.mkdir(parents=True)
     from sparselab.dashboard.snapshot_catalog import SavedSnapshot, SnapshotOwner
 
-    selected = SavedSnapshot("a", "checkpoints/step_1", "digest", 1, "today", 100)
+    selected = SavedSnapshot(
+        "a", "checkpoints/step_0001_gen_0001", "digest", 1, "2026-01-01", 100
+    )
     monkeypatch.setattr(sampler, "catalog", lambda root: [selected])
     loaded = SimpleNamespace(
         model=None,
@@ -235,7 +249,9 @@ def test_sampler_passes_controls_and_clears_old_output(tmp_path, monkeypatch):
     assert [item.value for item in app.number_input] == [0.7, 40, 42]
     assert app.slider[0].value == 32
     # A newly published checkpoint must not change the model on form submission.
-    newer = replace(selected, checkpoint="checkpoints/step_2", digest="newer", step=2)
+    newer = replace(
+        selected, checkpoint="checkpoints/step_0002_gen_0002", digest="newer", step=2
+    )
     monkeypatch.setattr(sampler, "catalog", lambda root: [newer, selected])
     app.text_area[0].set_value("neutral prefix")
     app.number_input[0].set_value(1.1)
@@ -264,6 +280,18 @@ def test_sampler_passes_controls_and_clears_old_output(tmp_path, monkeypatch):
     ).click().run()
     assert app.warning
     assert "completion_result" not in app.session_state
+    # Default follows newest only on explicit catalog refresh, never mid-submit.
+    next(
+        button for button in app.button if button.label == "Refresh available snapshots"
+    ).click().run()
+    assert app.selectbox[0].value == newer.key
+    app.selectbox[0].set_value(selected.key).run()
+    next(
+        button for button in app.button if button.label == "Refresh available snapshots"
+    ).click().run()
+    assert app.selectbox[0].value == selected.key
+    app.button(key="use_newest").click().run()
+    assert app.selectbox[0].value == newer.key
     app.query_params["run"] = "different"
     app.run()
     assert app.error and not app.text_area

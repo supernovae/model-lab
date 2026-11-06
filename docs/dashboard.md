@@ -398,6 +398,12 @@ checkpoint and press **Generate completion** to verify and load it. Browsing doe
 not load weights. Links pin exact store/run/checkpoint; missing or unverified links
 fail without substitution. The sampler freezes its catalog for the browser session;
 **Refresh available snapshots** explicitly discovers newer saved generations.
+The list is ordered by UTC save time descending across runs, with a **NEWEST**
+marker and date, step, generation and run labels. An unpinned session defaults to
+the newest eligible saved checkpoint; an explicit choice or deep link stays pinned.
+**Use newest available** clears that pin and refreshes the list. These actions do
+not load weights. Missing files, incomplete inventories and unsupported archived
+generations are excluded; native cold verification remains mandatory on Generate.
 
 `SPARSELAB_SNAPSHOT_SERVICE_CONFIG` identifies the allowed `store` and loopback `url`.
 The existing `run`, `checkpoint`, and `checkpoint_sha256` fields are retained as

@@ -8,6 +8,7 @@ import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
@@ -30,8 +31,16 @@ class SavedSnapshot:
         return (self.run, self.checkpoint, self.digest)
 
     @property
+    def saved_at(self):
+        value = datetime.fromisoformat(self.created_at)
+        return (
+            value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        )
+
+    @property
     def label(self):
-        return f"{self.run} · {self.checkpoint} · {self.created_at}"
+        generation = int(self.checkpoint.rsplit("_gen_", 1)[-1])
+        return f"{self.saved_at:%Y-%m-%d %H:%M:%S} UTC · Step {self.step:,} · Gen {generation} · {self.run}"
 
 
 def catalog(root: Path) -> list[SavedSnapshot]:
@@ -57,23 +66,55 @@ def catalog(root: Path) -> list[SavedSnapshot]:
         result.append(
             SavedSnapshot(run, "checkpoints/" + name, digest, step, created, size)
         )
+    return sorted(
+        result,
+        key=lambda item: (item.saved_at, item.run, item.step, item.checkpoint),
+        reverse=True,
+    )
+
+
+def available_catalog(
+    root: Path, archive_map: Path = ARCHIVE_MAP
+) -> list[SavedSnapshot]:
+    """Eligibility is an inventory check, never a replacement for native cold verification."""
+    archived = {}
+    if archive_map.is_file():
+        archived = {
+            item["source"]: item["archive"]
+            for item in json.loads(archive_map.read_text())["checkpoints"]
+        }
+    result = []
+    for item in catalog(root):
+        try:
+            resolve_candidate(root, item, archive_map, archived=archived)
+        except OSError, ValueError, KeyError, TypeError:
+            continue
+        result.append(item)
     return result
 
 
 def resolve_candidate(
-    root: Path, selected: SavedSnapshot, archive_map: Path = ARCHIVE_MAP
+    root: Path,
+    selected: SavedSnapshot,
+    archive_map: Path = ARCHIVE_MAP,
+    *,
+    archived: dict[str, str] | None = None,
 ) -> Path:
     """Consult relocation mapping before any generation read; never fall back to an old copy."""
     original = root / selected.run / selected.checkpoint
-    if archive_map.is_file():
-        mapping = json.loads(archive_map.read_text())
-        for item in mapping["checkpoints"]:
-            if item["source"] == str(original):
-                raise ValueError(
-                    "Archived checkpoint at "
-                    + item["archive"]
-                    + "; the native inference loader does not support relocated generations. No fallback copy was loaded."
-                )
+    if archived is None:
+        archived = {}
+        if archive_map.is_file():
+            archived = {
+                item["source"]: item["archive"]
+                for item in json.loads(archive_map.read_text())["checkpoints"]
+            }
+    if str(original) in archived:
+        raise ValueError(
+            "Archived checkpoint at "
+            + archived[str(original)]
+            + "; native relocated loading is unavailable. No fallback copy was loaded."
+        )
     if (
         original.resolve().parent != (root / selected.run / "checkpoints").resolve()
         or original.is_symlink()
@@ -87,6 +128,20 @@ def resolve_candidate(
         raise ValueError("Published checkpoint identity differs from its manifest")
     if selected.size_bytes <= 0 or selected.size_bytes > 5 * 1024**3:
         raise ValueError("Checkpoint exceeds the 5 GiB local preview inventory limit")
+    files = metadata.get("files")
+    if not isinstance(files, list) or not files:
+        raise ValueError("Checkpoint has no finalized file inventory")
+    for entry in files:
+        name = entry["name"]
+        if not isinstance(name, str) or Path(name).name != name or name in (".", ".."):
+            raise ValueError("Unsafe checkpoint member")
+        member = original / name
+        if (
+            member.is_symlink()
+            or not member.is_file()
+            or member.stat().st_size != entry["bytes"]
+        ):
+            raise ValueError("Incomplete checkpoint file inventory")
     return original
 
 

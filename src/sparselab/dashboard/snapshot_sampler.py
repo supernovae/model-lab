@@ -16,7 +16,13 @@ from sparselab.evaluation.inference import load_run
 
 # Streamlit uses the matching inference runtime; catalog code lives beside this script.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from snapshot_catalog import SnapshotOwner, catalog, resolve_candidate
+from snapshot_catalog import (
+    SnapshotOwner,
+    resolve_candidate,
+)
+from snapshot_catalog import (
+    available_catalog as catalog,
+)
 
 CONFIG = json.loads(Path(os.environ["SPARSELAB_SNAPSHOT_SERVICE_CONFIG"]).read_text())
 RUNS = Path(CONFIG["store"])
@@ -82,8 +88,16 @@ def render():
     if st.query_params.get("store", str(RUNS)) != str(RUNS):
         st.error("This sampler only serves its configured run store.")
         st.stop()
-    if st.button("Refresh available snapshots"):
+    refresh = st.button("Refresh available snapshots")
+    newest_requested = st.button("Use newest available", key="use_newest")
+    if refresh or newest_requested:
         st.session_state.pop("snapshot_choices", None)
+    if newest_requested:
+        st.query_params.pop("run", None)
+        st.query_params.pop("checkpoint", None)
+        st.session_state["snapshot_explicit"] = False
+        st.session_state.pop("snapshot_choice_key", None)
+        st.session_state.pop("snapshot_link_applied", None)
     try:
         if "snapshot_choices" not in st.session_state:
             st.session_state["snapshot_choices"] = catalog(RUNS)
@@ -106,12 +120,43 @@ def render():
             "Linked checkpoint is missing or not recorded verified; no substitute selected."
         )
         st.stop()
-    initial = matches[0] if matches else choices[0]
-    selected = st.selectbox(
-        "Snapshot to query",
-        choices,
-        index=choices.index(initial),
-        format_func=lambda item: item.label,
+    link = (requested_run, requested_checkpoint)
+    if matches and st.session_state.get("snapshot_link_applied") != link:
+        st.session_state["snapshot_choice_key"] = matches[0].key
+        st.session_state["snapshot_explicit"] = True
+        st.session_state["snapshot_link_applied"] = link
+    keys = [item.key for item in choices]
+    if not st.session_state.get("snapshot_explicit", False):
+        st.session_state["snapshot_choice_key"] = keys[0]
+    if st.session_state.get("snapshot_choice_key") not in keys:
+        st.error(
+            "Your selected snapshot is no longer available. Choose Use newest available to select another; no substitute loaded."
+        )
+        st.stop()
+
+    def pin_selection():
+        st.session_state["snapshot_explicit"] = True
+        chosen = st.session_state["snapshot_choice_key"]
+        st.query_params["run"] = chosen[0]
+        st.query_params["checkpoint"] = chosen[1]
+        st.session_state["snapshot_link_applied"] = (chosen[0], chosen[1])
+
+    by_key = {item.key: item for item in choices}
+    key = st.selectbox(
+        "Snapshot to query — newest first (UTC save time)",
+        keys,
+        key="snapshot_choice_key",
+        on_change=pin_selection,
+        format_func=lambda key: (
+            ("NEWEST · " if key == keys[0] else "") + by_key[key].label
+        ),
+    )
+    selected = by_key[key]
+    st.caption(
+        "Ordered by saved time, newest first, across runs. Unavailable/archived and incomplete file inventories are hidden. Native integrity verification still runs before loading."
+    )
+    st.caption(
+        "Explicit choices and snapshot links stay pinned. Refresh updates the list; Use newest available returns to the newest default. Neither action loads weights."
     )
     expected = {
         "store": str(RUNS),
@@ -122,7 +167,7 @@ def render():
         st.session_state["selected_identity"] = selected.key
         st.session_state.pop("completion_result", None)
     st.caption(f"Selected: {selected.label}")
-    st.caption("Newest recorded complete snapshot: " + choices[0].label)
+    st.caption("Newest eligible snapshot in this list: " + choices[0].label)
     st.info(
         "This base model continues text, not reliable instruction-following chat. A complete saved checkpoint can belong to a still-running training run."
     )
