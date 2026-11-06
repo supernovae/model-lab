@@ -40,7 +40,7 @@ def validate_controls(prompt, count, temperature, top_k, seed):
     if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 4000:
         raise ValueError("Enter a nonempty prompt of at most 4,000 characters.")
     for value, lower, upper, label in (
-        (count, 8, 128, "Output length"),
+        (count, 8, 512, "Output length"),
         (top_k, 0, 200, "Top-k"),
         (seed, 0, 2147483647, "Seed"),
     ):
@@ -173,7 +173,12 @@ def render():
             height=130,
         )
         count = st.slider(
-            "Maximum new tokens", min_value=8, max_value=128, key="sample_count", step=8
+            "Maximum new tokens",
+            min_value=8,
+            max_value=512,
+            key="sample_count",
+            step=8,
+            help="Up to 512 new tokens. Longer completions take longer on CPU. Prompt plus requested output must fit 1,024 tokens; shorten the prompt or lower this limit if needed.",
         )
         columns = st.columns(3)
         temperature = columns[0].number_input(

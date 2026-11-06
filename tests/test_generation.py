@@ -667,3 +667,24 @@ def test_early_memory_cached_generation_matches_context_rollover(
     )
 
     assert cached == reference
+
+
+def test_long_completion_respects_token_budget_and_strict_context():
+    tokenizer = _tokenizer()
+    token = _ids(tokenizer, "h")[0]
+    model = _ScriptedModel(tokenizer, [{token: 10}])
+    text, generated = generate_with_token_ids(
+        model, tokenizer, "hello", 1024, 512, torch.device("cpu"), strict_context=True
+    )
+    assert len(generated) == 512
+    assert text == "hello" + tokenizer.decode([token] * 512)
+    with pytest.raises(ValueError, match="requested completion"):
+        generate(
+            model,
+            tokenizer,
+            "h" * 600,
+            1024,
+            512,
+            torch.device("cpu"),
+            strict_context=True,
+        )

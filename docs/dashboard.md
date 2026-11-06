@@ -424,7 +424,7 @@ used. Other stores and incompatible model schemas fail explicitly.
 
 Prompts default to blank. Technical, code and story examples require visible choice;
 no TinyStories text is silently appended. Temperature 0–2, top-k 0–200 (0 disables),
-seed, and 8–128 new tokens are supported. Combined prompt/output is limited to 1024
+seed, and 8–512 new tokens are supported. Combined prompt/output is limited to 1024
 tokens for this CPU preview. Temperature zero is greedy. Requests retain the exact
 input, settings and verified identity with their output. No prompt/response is added
 to training data. Generate has manual refresh to avoid interrupting an embedded
@@ -439,3 +439,7 @@ can vary across runtimes. Temperature zero remains available for greedy decoding
 The sampler service uses Streamlit's light base and the dashboard's existing
 `#0969da` primary color (STREAMLIT_THEME_BASE / STREAMLIT_THEME_PRIMARY_COLOR),
 so embedded and standalone views use the same native widgets and status palettes.
+
+Output length now supports 8–512 new tokens, in steps of eight; default stays 32.
+The combined 1,024-token CPU context limit still applies and is checked before
+generation. Longer requests take longer; EOS may end a completion before its cap.

@@ -113,9 +113,10 @@ def test_sampling_controls_reject_invalid_values(tmp_path, monkeypatch):
     monkeypatch.setenv("SPARSELAB_SNAPSHOT_SERVICE_CONFIG", str(path))
     sampler = importlib.import_module("sparselab.dashboard.snapshot_sampler")
     sampler.validate_controls("hello", 32, 0.7, 40, 12)
+    sampler.validate_controls("hello", 512, 0.7, 40, 42)
     for args in [
         ("", 32, 0.0, 0, 0),
-        ("x", 129, 0.0, 0, 0),
+        ("x", 513, 0.0, 0, 0),
         ("x", 32, float("nan"), 0, 0),
         ("x", 32, 3.0, 0, 0),
         ("x", 32, 0.0, -1, 0),
@@ -224,7 +225,7 @@ def test_sampler_passes_controls_and_clears_old_output(tmp_path, monkeypatch):
     calls = []
 
     def generate(*args, **kwargs):
-        calls.append(kwargs)
+        calls.append(dict(kwargs, max_new_tokens=args[4]))
         return args[2] + " continuation"
 
     monkeypatch.setattr(sampler, "generate", generate)
@@ -240,12 +241,14 @@ def test_sampler_passes_controls_and_clears_old_output(tmp_path, monkeypatch):
     app.number_input[0].set_value(1.1)
     app.number_input[1].set_value(20)
     app.number_input[2].set_value(99)
+    app.slider[0].set_value(512)
     next(
         button for button in app.button if button.label == "Generate completion"
     ).click().run()
     assert not app.exception
     assert calls[-1]["temperature"] == 1.1 and calls[-1]["top_k"] == 20
     assert calls[-1]["seed"] == 99
+    assert calls[-1]["max_new_tokens"] == 512
     assert app.session_state["completion_result"][3]["checkpoint_sha256"] == "digest"
     assert app.session_state["completion_result"][1] == " continuation"
     count = len(calls)
@@ -254,6 +257,7 @@ def test_sampler_passes_controls_and_clears_old_output(tmp_path, monkeypatch):
     assert app.text_area[0].value == "neutral prefix"
     assert "completion_result" not in app.session_state
     assert len(calls) == count
+    assert app.slider[0].value == 32
     app.text_area[0].set_value("")
     next(
         button for button in app.button if button.label == "Generate completion"
