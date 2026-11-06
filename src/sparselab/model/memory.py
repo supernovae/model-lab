@@ -112,6 +112,16 @@ class TokenNgramMemory(nn.Module):
         return self._addresses_from_shifts(shifts, order, seed)
 
     def _all_addresses(self, input_ids: Tensor) -> list[Tensor]:
+        if (
+            "addresses" in self.__dict__
+            or getattr(type(self).addresses, "__func__", type(self).addresses)
+            is not _DEFAULT_ADDRESSES
+        ):
+            return [
+                self.addresses(input_ids, order, head)
+                for order in self.ngram_orders
+                for head in range(self.hash_heads)
+            ]
         shifts = self._shifted_inputs(input_ids, max(self.ngram_orders))
         return [
             self._addresses_from_shifts(shifts, order, head)
@@ -204,6 +214,9 @@ class TokenNgramMemory(nn.Module):
             address[:, -hidden.shape[1] :] for address in self._all_addresses(suffix)
         ]
         return self._apply_addresses(hidden, addresses)
+
+
+_DEFAULT_ADDRESSES = TokenNgramMemory.addresses
 
 
 class ByteAddressMemory(nn.Module):
