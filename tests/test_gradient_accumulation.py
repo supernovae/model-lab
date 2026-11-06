@@ -294,6 +294,9 @@ def test_accumulated_dense_updates_match_large_batch_over_schedule(
     tmp_path, padded
 ) -> None:
     base = config(tmp_path)
+    # Direct engine initialization does not apply the trainer's configured seed.
+    # Keep the numerical comparison independent of earlier tests in this worker.
+    torch.manual_seed(base.seed)
     accumulated_cfg = base.model_copy(
         update={
             "training": base.training.model_copy(
