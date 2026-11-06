@@ -261,6 +261,9 @@ def _extension_config(
     comparable = target.model_dump(mode="json")
     comparable["training"]["max_steps"] = source.training.max_steps
     comparable["training"]["max_tokens"] = source.training.max_tokens
+    # Retention terminal/milestone bounds must describe these comparison caps.
+    # Checkpoint bookkeeping is excluded from scientific resume settings.
+    comparable["checkpoint"] = source.checkpoint.model_dump(mode="json")
     comparable["optimizer"]["decay_steps"] = source.optimizer.decay_steps
     if append_data:
         comparable["dataset"] = source.dataset.model_dump(mode="json")

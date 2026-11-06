@@ -498,3 +498,41 @@ def test_try_nonterminal_checkpoint_bracket_preserves_consumed_prefix(
         assert decision["unconsumed_source_preserved_at"] == str(
             root / "data/train.npy"
         )
+
+
+def test_append_extension_with_new_retention_boundary_preserves_full_state(
+    document_parent, tmp_path
+):
+    source, root, generation, _ = document_parent
+    target = append_config(document_parent, tmp_path)
+    raw = target.model_dump(mode="json")
+    raw["checkpoint"].update(
+        keep_periodic=False,
+        retention={
+            "milestones": [],
+            "terminal_step": target.training.max_steps,
+            "terminal_targets": target.training.max_tokens,
+            "max_generations": 4,
+            "max_generation_bytes": 10485760,
+            "max_retained_bytes": 41943040,
+            "max_peak_bytes": 52428800,
+            "reserve_free_bytes": 0,
+        },
+    )
+    target = RunConfig.model_validate(raw)
+    train(
+        target, extend_budget=generation, append_data=True, run_id="retained-extension"
+    )
+    child_root = source.logging.root_dir / "retained-extension"
+    child = CheckpointManager(child_root).load(child_root / "checkpoints/latest.json")
+    parent = CheckpointManager(root).load(generation)
+    assert child.parent_checkpoint_sha256 == parent.checkpoint_sha256
+    assert child.step == target.training.max_steps
+    assert child.tokens_seen == target.training.max_tokens
+    assert child.config["checkpoint"]["retention"]["terminal_step"] == child.step
+    assert {int(v["step"]) for v in child.optimizer["state"].values()} == {child.step}
+    assert (
+        CheckpointManager(child_root)
+        .verify(child_root / "checkpoints/latest.json")
+        .valid
+    )
