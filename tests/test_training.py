@@ -826,8 +826,9 @@ def test_source_drift_requires_explicit_best_effort_resume(
 
 
 @pytest.mark.parametrize("explicit_parent_decay", [False, True])
+@pytest.mark.parametrize("retained_child", [False, True])
 def test_budget_extension_preserves_full_state_and_parent(
-    tmp_path: Path, explicit_parent_decay: bool
+    tmp_path: Path, explicit_parent_decay: bool, retained_child: bool
 ) -> None:
     raw = config(tmp_path).model_dump(mode="json")
     raw["training"].update(max_steps=4, max_tokens=128)
@@ -848,6 +849,20 @@ def test_budget_extension_preserves_full_state_and_parent(
     raw["training"].update(max_steps=8, max_tokens=256)
     raw["optimizer"]["decay_steps"] = 4
     raw["checkpoint"]["steps"] = [0, 4, 8]
+    if retained_child:
+        raw["checkpoint"].update(
+            keep_periodic=False,
+            retention={
+                "milestones": [],
+                "terminal_step": 8,
+                "terminal_targets": 256,
+                "max_generations": 4,
+                "max_generation_bytes": 10485760,
+                "max_retained_bytes": 41943040,
+                "max_peak_bytes": 52428800,
+                "reserve_free_bytes": 0,
+            },
+        )
     if explicit_parent_decay:
         relocated = tmp_path / "relocated-tokenizer.json"
         relocated.write_bytes(parent_config.tokenizer.path.read_bytes())
@@ -873,6 +888,9 @@ def test_budget_extension_preserves_full_state_and_parent(
     )
     assert child.cursor == (0, 10)
     assert child.parent_checkpoint_sha256 == parent.checkpoint_sha256
+    if retained_child:
+        assert child.config["checkpoint"]["retention"] == raw["checkpoint"]["retention"]
+    assert {int(state["step"]) for state in child.optimizer["state"].values()} == {5}
     assert (
         CheckpointManager(child_run).verify(child_run / "checkpoints/latest.json").valid
     )
@@ -895,6 +913,11 @@ def test_budget_extension_preserves_full_state_and_parent(
         extended.logging.root_dir / "resumed/checkpoints/latest.json"
     )
     assert (finished.step, finished.tokens_seen) == (8, 256)
+    if retained_child:
+        assert (
+            finished.config["checkpoint"]["retention"] == raw["checkpoint"]["retention"]
+        )
+    assert {int(state["step"]) for state in finished.optimizer["state"].values()} == {8}
     if explicit_parent_decay:
         from sparselab.training.continuation import _extension_settings
 

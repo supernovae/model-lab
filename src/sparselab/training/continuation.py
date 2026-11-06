@@ -121,6 +121,9 @@ def _extension_settings(
     comparable = target.model_dump(mode="json")
     comparable["training"]["max_steps"] = source.training.max_steps
     comparable["training"]["max_tokens"] = source.training.max_tokens
+    # Retention terminal/milestone bounds must describe these comparison caps.
+    # Checkpoint bookkeeping is excluded from scientific resume settings.
+    comparable["checkpoint"] = source.checkpoint.model_dump(mode="json")
     comparable["optimizer"]["decay_steps"] = source.optimizer.decay_steps
     if parent_tokenizer is not None:
         manifest = read_manifest(parent_tokenizer.parent / "manifest.json")
