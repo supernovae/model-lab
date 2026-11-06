@@ -354,3 +354,51 @@ def test_prefix_preserves_validation_next_token_block_requirement(prefix_fixture
         prepare_data(target, tokenizer)
     with pytest.raises(ValueError, match="full next-token block"):
         prepare_data(target, tokenizer, prefix_from=request(parent))
+
+
+def test_derived_prefix_publishes_reusable_authenticated_proofs(
+    prefix_fixture, tmp_path, monkeypatch
+):
+    from sparselab.verification_proofs import ProofStore
+
+    _source, target, tokenizer, parent = prefix_fixture
+    actual = prepare_data(target, tokenizer, prefix_from=request(parent))
+    # Proof reuse intentionally requires private, root-contained fixture bytes,
+    # independent of the invoking developer or CI umask.
+    actual.root.parent.chmod(0o700)
+    for member in actual.root.iterdir():
+        member.chmod(0o600)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "proof-settings"))
+    store = ProofStore(tmp_path)
+    assert store.key_available(create=True)
+    first = load_prepared_data(
+        actual.root,
+        byte_enabled=False,
+        proof_store=store,
+        verification_mode="verified_reuse",
+    )
+    recorded = store.diagnostics()["recorded"]
+    assert recorded > 0, store.diagnostics()
+    second = load_prepared_data(
+        actual.root,
+        byte_enabled=False,
+        proof_store=store,
+        verification_mode="verified_reuse",
+    )
+    assert store.diagnostics()["hits"] > 0
+    assert store.diagnostics()["recorded"] == recorded
+    assert first.manifest == second.manifest == actual.manifest
+    # A valid signed proof never authenticates changed payload bytes.
+    path = actual.root / "train.npy"
+    with path.open("r+b") as handle:
+        handle.seek(-1, 2)
+        previous = handle.read(1)
+        handle.seek(-1, 2)
+        handle.write(bytes([previous[0] ^ 1]))
+    with pytest.raises(ValueError, match="digest mismatch"):
+        load_prepared_data(
+            actual.root,
+            byte_enabled=False,
+            proof_store=store,
+            verification_mode="verified_reuse",
+        )
