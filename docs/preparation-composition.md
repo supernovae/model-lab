@@ -90,3 +90,6 @@ admitted later work. Historical seed and mixture identity decisions are unchange
 [Portable preparation planning](preparation-recipes.md) now supplies inventoried
 external graphs/configs to this same compiler. It adds no engine admission or
 execution route; the remaining execution/provenance boundaries still apply.
+
+For a smaller whole-document window of an already encoded all-token local corpus,
+use [verified prepared prefixes](prepared-prefix.md) to avoid encoding it again.
