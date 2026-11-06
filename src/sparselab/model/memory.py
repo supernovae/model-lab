@@ -131,9 +131,7 @@ class TokenNgramMemory(nn.Module):
         num_streams = len(addresses)
         gate_mean = gate.mean().detach()
         hidden_norm = hidden.norm(dim=-1).mean().detach()
-        stream_value_norms = (
-            stacked_values.norm(dim=-1).mean(dim=(1, 2)).detach()
-        )
+        stream_value_norms = stacked_values.norm(dim=-1).mean(dim=(1, 2)).detach()
         per_stream_lookups = addresses[0].numel()
         lookup_tensor = torch.tensor(per_stream_lookups, device=hidden.device)
         stream_denom = lookup_tensor.clamp_min(1)
@@ -203,10 +201,10 @@ class TokenNgramMemory(nn.Module):
         required = max(self.ngram_orders)
         suffix = history_ids[:, -max(required + hidden.shape[1] - 1, 1) :]
         addresses = [
-            address[:, -hidden.shape[1] :]
-            for address in self._all_addresses(suffix)
+            address[:, -hidden.shape[1] :] for address in self._all_addresses(suffix)
         ]
         return self._apply_addresses(hidden, addresses)
+
 
 class ByteAddressMemory(nn.Module):
     """Apply precomputed causal byte addresses supplied by prepared data."""

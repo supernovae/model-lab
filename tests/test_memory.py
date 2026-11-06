@@ -67,7 +67,6 @@ def test_multi_stream_collision_diagnostics_aggregate_all_lookups() -> None:
     assert float(diagnostics.bucket_reuse_rate) > 0
 
 
-
 def test_vectorized_stream_diagnostics_match_per_stream_reference() -> None:
     from sparselab.model.memory import _diagnostics
 
@@ -130,6 +129,7 @@ def test_vectorized_stream_diagnostics_match_per_stream_reference() -> None:
             torch.testing.assert_close(
                 getattr(actual_stream, field), getattr(expected_stream, field)
             )
+
 
 def test_disabled_memory_is_absent_and_enabled_memory_runs_backward() -> None:
     plain = ModelConfig(
