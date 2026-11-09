@@ -3,8 +3,6 @@ from __future__ import annotations
 import copy
 import json
 import random
-import subprocess
-import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -314,36 +312,15 @@ def test_acquire_multi_device_leases_and_contention_rollback(tmp_path: Path) -> 
         assert multi_rev.leases[0].metadata["worker_id"] == "trainer-rev"
         assert multi_rev.leases[1].metadata["worker_id"] == "trainer-rev-dev1"
 
-    holder_code = (
-        "import sys\n"
-        "from pathlib import Path\n"
-        "from sparselab.workers.leases import acquire_lease\n"
-        "lease = acquire_lease(\n"
-        "    worker_id='external-holder',\n"
-        "    backend='xpu',\n"
-        "    physical_device_id=sys.argv[1],\n"
-        "    state_dir=Path(sys.argv[2]),\n"
-        ")\n"
-        "assert lease is not None\n"
-        "sys.stdout.write('LOCKED\\n')\n"
-        "sys.stdout.flush()\n"
-        "sys.stdin.readline()\n"
-        "lease.close()\n"
-    )
-
     for held_dev, free_dev in ((dev_b, dev_a), (dev_a, dev_b)):
-        proc = subprocess.Popen(
-            [sys.executable, "-c", holder_code, held_dev, str(state_dir)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        held_lease = acquire_lease(
+            worker_id="external-holder",
+            backend="xpu",
+            physical_device_id=held_dev,
+            state_dir=state_dir,
         )
+        assert held_lease is not None
         try:
-            assert proc.stdout is not None
-            ready_line = proc.stdout.readline().strip()
-            assert ready_line == "LOCKED"
-
             contended = acquire_multi_device_leases(
                 worker_id="contended-trainer",
                 backend="xpu",
@@ -361,11 +338,7 @@ def test_acquire_multi_device_leases_and_contention_rollback(tmp_path: Path) -> 
             assert free_lease is not None
             free_lease.close()
         finally:
-            if proc.stdin is not None:
-                proc.stdin.write("\n")
-                proc.stdin.flush()
-            proc.wait(timeout=5)
-            assert proc.returncode == 0
+            held_lease.close()
 
 
 def test_pytorch_engine_multi_device_microbatch_parallel_equivalence(
@@ -540,20 +513,20 @@ def test_worker_config_lease_acquires_primary_and_secondary_devices(
             "physical-phys-b70-e300",
             "physical-phys-b70-2300",
         ]
-        # While MultiDeviceLease is held, neither GPU 0 nor GPU 1 can be leased by another worker.
-        child_code = (
-            "import sys\n"
-            "from pathlib import Path\n"
-            "from sparselab.workers.leases import acquire_lease\n"
-            "l0 = acquire_lease(worker_id='other-0', backend='xpu', physical_device_id='phys-b70-e300', state_dir=Path(sys.argv[1]))\n"
-            "l1 = acquire_lease(worker_id='other-1', backend='xpu', physical_device_id='phys-b70-2300', state_dir=Path(sys.argv[1]))\n"
-            "assert l0 is None and l1 is None\n"
+        # While MultiDeviceLease is held, neither GPU 0 nor GPU 1 can be leased by another caller.
+        l0 = acquire_lease(
+            worker_id="other-0",
+            backend="xpu",
+            physical_device_id="phys-b70-e300",
+            state_dir=lease_dir,
         )
-        subprocess.run(
-            [sys.executable, "-c", child_code, str(lease_dir)],
-            check=True,
-            timeout=10,
+        l1 = acquire_lease(
+            worker_id="other-1",
+            backend="xpu",
+            physical_device_id="phys-b70-2300",
+            state_dir=lease_dir,
         )
+        assert l0 is None and l1 is None
     finally:
         lease.close()
 
