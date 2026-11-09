@@ -10,6 +10,7 @@ import random
 import re
 import time
 from collections.abc import Iterable, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import cast
@@ -41,7 +42,9 @@ from sparselab.engines.base import (
 )
 from sparselab.engines.multi_device import (
     SecondaryReplica,
-    execute_replica_microbatches,
+    dispatch_replicas_and_primary,
+    reduce_replica_gradients,
+    sync_replicas_weights,
 )
 from sparselab.engram.semantic import SemanticQueryBatch
 from sparselab.memory import MemoryMonitor
@@ -440,6 +443,7 @@ class PyTorchEngine:
         self._learned_audit_parameter: torch.nn.Parameter | None = None
         self._learned_address_collision_targets = 0
         self._secondary_replicas: list[SecondaryReplica] = []
+        self._replica_executor: ThreadPoolExecutor | None = None
         self._replicas_need_sync: bool = True
 
     def validate(
@@ -605,13 +609,21 @@ class PyTorchEngine:
             if config.runtime.memory.activation_offload.enabled
             else None
         )
+        if self._replica_executor is not None:
+            self._replica_executor.shutdown(wait=False)
+            self._replica_executor = None
         self._secondary_replicas = []
         self._replicas_need_sync = True
-        if (
-            config.runtime.secondary_device_indices
-            and portability_run is None
-            and config.dataset.allocation_manifest_path is None
+        if config.runtime.secondary_device_indices and (
+            portability_run is not None
+            or config.dataset.allocation_manifest_path is not None
+            or config.model.semantic_memory_dim is not None
         ):
+            raise ValueError(
+                "runtime.secondary_device_indices cannot be combined with semantic memory, "
+                "allocation sidecars, or portability runs"
+            )
+        if config.runtime.secondary_device_indices:
             saved_replica_rng = _rng_state(device, runtime.backend)
             try:
                 primary_state = model.state_dict()
@@ -639,6 +651,10 @@ class PyTorchEngine:
                             compiled_output_head_loss=compiled_loss,
                         )
                     )
+                self._replica_executor = ThreadPoolExecutor(
+                    max_workers=len(self._secondary_replicas),
+                    thread_name_prefix="sparselab-replica",
+                )
             finally:
                 _restore_rng(saved_replica_rng, device)
 
@@ -1188,95 +1204,113 @@ class PyTorchEngine:
             and self.scaler is None
             and self.offload is None
         ):
-            if self._replicas_need_sync:
-                with torch.no_grad():
-                    for replica in self._secondary_replicas:
-                        for primary_param, rep_param in zip(
-                            model.parameters(),
-                            replica.model.parameters(),
-                            strict=True,
-                        ):
-                            if primary_param.requires_grad:
-                                rep_param.copy_(primary_param.to(replica.device))
-                self._replicas_need_sync = False
-            world_size = 1 + len(self._secondary_replicas)
-            primary_pairs = active_pairs[0::world_size]
             trainable_inputs = [
                 parameter for parameter in model.parameters() if parameter.requires_grad
             ]
-            for batch, chunk_valid in primary_pairs:
-                executed_microbatches += 1
-                x, y = (
-                    torch.from_numpy(batch.inputs).to(device),
-                    torch.from_numpy(batch.targets).to(device),
-                )
-                addresses = (
-                    None
-                    if batch.byte_addresses is None
-                    else torch.from_numpy(batch.byte_addresses).to(device)
-                )
-                semantic_queries = None
-                if batch.semantic_queries is not None:
-                    if self.semantic_encoder is None or batch.semantic_mask is None:
+            if self._replicas_need_sync:
+                sync_replicas_weights(trainable_inputs, self._secondary_replicas)
+                self._replicas_need_sync = False
+
+            def _run_primary_slice(
+                primary_pairs: list[tuple[Microbatch, int]],
+            ) -> tuple[
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                float,
+                int,
+                dict[str, torch.Tensor],
+            ]:
+                p_lang = torch.zeros((), device=device)
+                p_aux = torch.zeros((), device=device)
+                p_diag: dict[str, torch.Tensor] = {}
+                p_finite = torch.ones((), device=device, dtype=torch.bool)
+                p_recomp = 0.0
+                p_exec = 0
+                for batch, chunk_valid in primary_pairs:
+                    if (
+                        batch.semantic_queries is not None
+                        or batch.semantic_mask is not None
+                    ):
                         raise ValueError(
-                            "semantic query sidecars require a verified attached pack"
+                            "secondary_device_indices cannot be combined with semantic query sidecars"
                         )
-                    semantic_queries = SemanticQueryBatch(
-                        self.semantic_encoder,
-                        torch.from_numpy(batch.semantic_queries).to(device),
-                        torch.from_numpy(batch.semantic_mask).to(device),
+                    p_exec += 1
+                    x, y = (
+                        torch.from_numpy(batch.inputs).to(device),
+                        torch.from_numpy(batch.targets).to(device),
                     )
-                valid_target_mask = y != -100
-                with precision_context(config, device):
-                    logits, auxiliary = model.forward_with_aux(
-                        x,
-                        byte_addresses=addresses,
-                        semantic_queries=semantic_queries,
-                        memory_mask=None,
-                        valid_target_mask=valid_target_mask,
-                        activation_checkpointing=config.runtime.memory.activation_checkpointing.enabled,
-                        diagnostics=config.logging.architecture_diagnostics,
-                        return_hidden=config.runtime.compile_output_head_loss,
+                    addresses = (
+                        None
+                        if batch.byte_addresses is None
+                        else torch.from_numpy(batch.byte_addresses).to(device)
                     )
-                diagnostics = architecture_metrics(model)
-                monitor.sample("forward")
-                if config.runtime.compile_output_head_loss:
-                    ce_sum = self._compiled_output_head_loss(
-                        logits, y, model.output.weight
+                    valid_target_mask = y != -100
+                    with precision_context(config, device):
+                        logits, auxiliary = model.forward_with_aux(
+                            x,
+                            byte_addresses=addresses,
+                            semantic_queries=None,
+                            memory_mask=None,
+                            valid_target_mask=valid_target_mask,
+                            activation_checkpointing=config.runtime.memory.activation_checkpointing.enabled,
+                            diagnostics=config.logging.architecture_diagnostics,
+                            return_hidden=config.runtime.compile_output_head_loss,
+                        )
+                    diagnostics = architecture_metrics(model)
+                    monitor.sample("forward")
+                    if config.runtime.compile_output_head_loss:
+                        ce_sum = self._compiled_output_head_loss(
+                            logits, y, model.output.weight
+                        )
+                    else:
+                        ce_sum = functional.cross_entropy(
+                            logits.float().flatten(0, 1),
+                            y.flatten(),
+                            ignore_index=-100,
+                            reduction="sum",
+                        )
+                    auxiliary = auxiliary.float()
+                    p_finite = (
+                        p_finite & torch.isfinite(ce_sum) & torch.isfinite(auxiliary)
                     )
-                else:
-                    ce_sum = functional.cross_entropy(
-                        logits.float().flatten(0, 1),
-                        y.flatten(),
-                        ignore_index=-100,
-                        reduction="sum",
-                    )
-                auxiliary = auxiliary.float()
-                losses_finite = (
-                    losses_finite & torch.isfinite(ce_sum) & torch.isfinite(auxiliary)
-                )
-                backward_loss = (ce_sum + auxiliary * chunk_valid) / valid_targets
-                torch.autograd.backward(backward_loss, inputs=trainable_inputs)
-                monitor.sample("backward")
-                recomputed += model.recomputed_block_call_ratio
-                language_sum = language_sum + ce_sum.detach()
-                aux_sum = aux_sum + auxiliary.detach() * chunk_valid
-                for name, value in diagnostics.items():
-                    diagnostic_sums[name] = (
-                        diagnostic_sums.get(name, value.new_zeros(()))
-                        + value * chunk_valid
-                    )
-            for rep_idx, replica in enumerate(self._secondary_replicas):
-                rep_pairs = active_pairs[rep_idx + 1 :: world_size]
-                if not rep_pairs:
-                    continue
-                rep_out = execute_replica_microbatches(
-                    replica,
-                    config,
-                    rep_pairs,
-                    valid_targets,
-                    output_projection_cross_entropy,
-                )
+                    backward_loss = (ce_sum + auxiliary * chunk_valid) / valid_targets
+                    torch.autograd.backward(backward_loss, inputs=trainable_inputs)
+                    monitor.sample("backward")
+                    p_recomp += model.recomputed_block_call_ratio
+                    p_lang = p_lang + ce_sum.detach()
+                    p_aux = p_aux + auxiliary.detach() * chunk_valid
+                    for name, value in diagnostics.items():
+                        p_diag[name] = (
+                            p_diag.get(name, value.new_zeros(())) + value * chunk_valid
+                        )
+                return p_lang, p_aux, p_finite, p_recomp, p_exec, p_diag
+
+            (
+                (
+                    language_sum,
+                    aux_sum,
+                    losses_finite,
+                    recomputed,
+                    executed_microbatches,
+                    diagnostic_sums,
+                ),
+                replica_outs,
+            ) = dispatch_replicas_and_primary(
+                replicas=self._secondary_replicas,
+                config=config,
+                active_pairs=active_pairs,
+                valid_targets=valid_targets,
+                output_head_loss_fn=output_projection_cross_entropy,
+                primary_fn=_run_primary_slice,
+                executor=self._replica_executor,
+            )
+            active_replicas = [
+                replica
+                for rep_idx, replica in enumerate(self._secondary_replicas)
+                if active_pairs[rep_idx + 1 :: 1 + len(self._secondary_replicas)]
+            ]
+            for replica, rep_out in zip(active_replicas, replica_outs, strict=True):
                 language_sum = language_sum + rep_out["language_sum"].to(device)
                 aux_sum = aux_sum + rep_out["aux_sum"].to(device)
                 losses_finite = losses_finite & rep_out["losses_finite"].to(device)
@@ -1287,17 +1321,7 @@ class PyTorchEngine:
                     diagnostic_sums[name] = (
                         diagnostic_sums.get(name, val_dev.new_zeros(())) + val_dev
                     )
-                for primary_param, rep_param in zip(
-                    model.parameters(), replica.model.parameters(), strict=True
-                ):
-                    if not primary_param.requires_grad or rep_param.grad is None:
-                        continue
-                    rep_grad = rep_param.grad.to(device)
-                    if primary_param.grad is None:
-                        primary_param.grad = rep_grad.clone()
-                    else:
-                        primary_param.grad.add_(rep_grad)
-                replica.model.zero_grad(set_to_none=True)
+                reduce_replica_gradients(trainable_inputs, replica, device)
             if pilot_progress is not None:
                 pilot_progress.emit(
                     "progress",
@@ -1956,6 +1980,9 @@ class PyTorchEngine:
         return {} if self.monitor is None else self.monitor.unavailable_reasons
 
     def close(self) -> None:
+        if self._replica_executor is not None:
+            self._replica_executor.shutdown(wait=True)
+            self._replica_executor = None
         self._secondary_replicas.clear()
         if self.monitor is not None:
             self.monitor.close()

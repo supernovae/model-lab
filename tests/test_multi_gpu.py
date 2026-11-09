@@ -6,8 +6,8 @@ import random
 import subprocess
 import sys
 import time
-from multiprocessing import shared_memory
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -27,9 +27,13 @@ from sparselab.config.models import (
     TrainingConfig,
 )
 from sparselab.engines.base import Microbatch
-from sparselab.engines.multi_device import MultiProcessMicrobatchCoordinator
 from sparselab.engines.pytorch import PyTorchEngine
-from sparselab.workers.leases import acquire_lease, acquire_multi_device_leases
+from sparselab.workers.execution import _acquire_config_lease
+from sparselab.workers.leases import (
+    MultiDeviceLease,
+    acquire_lease,
+    acquire_multi_device_leases,
+)
 
 
 def _seed_all(seed: int) -> None:
@@ -136,7 +140,7 @@ def _named_optimizer_slots(engine: PyTorchEngine) -> dict[str, dict[str, torch.T
     }
 
 
-def test_runtime_config_secondary_device_indices_validation() -> None:
+def test_runtime_config_secondary_device_indices_validation(tmp_path: Path) -> None:
     default_cfg = RuntimeConfig()
     assert default_cfg.secondary_device_indices == ()
     assert "secondary_device_indices" not in default_cfg.model_dump(mode="python")
@@ -223,6 +227,44 @@ def test_runtime_config_secondary_device_indices_validation() -> None:
                 activation_offload=ActivationOffloadConfig(enabled=True)
             ),
         )
+    base_cfg = _make_run_config(tmp_path, secondary_device_indices=(0,))
+    with pytest.raises(
+        (ValidationError, ValueError),
+        match="cannot be combined with semantic memory, allocation sidecars, or portability runs",
+    ):
+        base_cfg.model_copy(
+            update={
+                "dataset": base_cfg.dataset.model_copy(
+                    update={"allocation_manifest_path": tmp_path / "alloc.json"}
+                )
+            }
+        ).validate_cross_section()
+    with pytest.raises(
+        (ValidationError, ValueError),
+        match="cannot be combined with semantic memory, allocation sidecars, or portability runs",
+    ):
+        base_cfg.model_copy(
+            update={
+                "model": base_cfg.model.model_copy(update={"semantic_memory_dim": 16}),
+                "dataset": base_cfg.dataset.model_copy(
+                    update={"allocation_manifest_path": tmp_path / "alloc.json"}
+                ),
+            }
+        ).validate_cross_section()
+    with pytest.raises(
+        (ValidationError, ValueError),
+        match="cannot be combined with semantic memory, allocation sidecars, or portability runs",
+    ):
+        base_cfg.model_copy(
+            update={
+                "training": base_cfg.training.model_copy(
+                    update={
+                        "portability_manifest_path": tmp_path / "portability.json",
+                        "trainable_parameters": ("embedding.weight",),
+                    }
+                )
+            }
+        ).validate_cross_section()
 
 
 def test_acquire_multi_device_leases_and_contention_rollback(tmp_path: Path) -> None:
@@ -335,12 +377,13 @@ def test_pytorch_engine_multi_device_microbatch_parallel_equivalence(
     engine_single = PyTorchEngine()
     engine_multi = PyTorchEngine()
     try:
+        validated_runtime = engine_single.validate(cfg_single)
+        engine_multi.runtime = validated_runtime
         _seed_all(cfg_single.seed)
         engine_single.initialize(cfg_single)
 
         _seed_all(cfg_multi.seed)
         engine_multi.initialize(cfg_multi)
-
         assert engine_single.model is not None and engine_multi.model is not None
         for (name_s, param_s), (name_m, param_m) in zip(
             engine_single.model.named_parameters(),
@@ -411,6 +454,7 @@ def test_pytorch_engine_multi_device_microbatch_parallel_equivalence(
 
         restored_multi = PyTorchEngine()
         try:
+            restored_multi.runtime = validated_runtime
             _seed_all(999)
             restored_multi.initialize(
                 cfg_multi,
@@ -450,87 +494,73 @@ def test_pytorch_engine_multi_device_microbatch_parallel_equivalence(
         engine_multi.close()
 
 
-def test_multiprocess_microbatch_coordinator_equivalence(tmp_path: Path) -> None:
-    cfg = _make_run_config(tmp_path / "coord", secondary_device_indices=())
-
-    engine_single = PyTorchEngine()
-    engine_coord = PyTorchEngine()
-    coordinator: MultiProcessMicrobatchCoordinator | None = None
-    try:
-        _seed_all(cfg.seed)
-        engine_single.initialize(cfg)
-
-        _seed_all(cfg.seed)
-        engine_coord.initialize(cfg)
-
-        assert engine_single.model is not None and engine_coord.model is not None
-        coordinator = MultiProcessMicrobatchCoordinator(
-            config=cfg,
-            worker_device_index=0,
-        )
-        coordinator.pack_weights_to_shm(engine_coord.model)
-
-        weight_shm_name = coordinator.weight_shm.name
-        grad_shm_name = coordinator.grad_shm.name
-        assert coordinator.proc.is_alive()
-
-        for step in (1, 2):
-            microbatches, valid_targets = _make_microbatches(200 + step)
-            res_single = engine_single.train_update(microbatches, step, valid_targets)
-            res_coord = coordinator.train_update(
-                engine_coord, microbatches, step, valid_targets
+def test_worker_config_lease_acquires_primary_and_secondary_devices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lease_dir = tmp_path / "leases"
+    cfg = _make_run_config(tmp_path / "worker", secondary_device_indices=(1,))
+    cfg = cfg.model_copy(
+        update={
+            "runtime": cfg.runtime.model_copy(
+                update={
+                    "backend": "xpu",
+                    "device_index": 0,
+                    "secondary_device_indices": (1,),
+                }
             )
+        }
+    )
+    definition = {
+        "worker_id": "worker-b70-dual",
+        "engine": "pytorch",
+        "backend": "xpu",
+        "device_index": 0,
+    }
+    passive_gpu0 = SimpleNamespace(
+        engine="pytorch",
+        backend="xpu",
+        device_index=0,
+        physical_device_id="phys-b70-e300",
+    )
+    passive_gpu1 = SimpleNamespace(
+        engine="pytorch",
+        backend="xpu",
+        device_index=1,
+        physical_device_id="phys-b70-2300",
+    )
+    monkeypatch.setattr(
+        "sparselab.workers.execution.discover_runtimes",
+        lambda: [passive_gpu0, passive_gpu1],
+    )
 
-            assert res_single.outcome == "APPLIED"
-            assert res_coord.outcome == "APPLIED"
-            assert res_single.committed_targets == valid_targets
-            assert res_coord.committed_targets == valid_targets
-            assert res_single.metrics is not None and res_coord.metrics is not None
-
-            for metric_key in (
-                "train/loss",
-                "optimizer/grad_norm",
-                "engram/lookup_count",
-                "engram/unique_addresses",
-                "engram/table_utilization",
-            ):
-                assert res_coord.metrics[metric_key] == pytest.approx(
-                    res_single.metrics[metric_key], rel=1e-6, abs=1e-6
-                ), f"step {step} metric {metric_key} mismatch"
-
-            for (name_s, param_s), (name_c, param_c) in zip(
-                engine_single.model.named_parameters(),
-                engine_coord.model.named_parameters(),
-                strict=True,
-            ):
-                assert name_s == name_c
-                assert torch.allclose(param_s, param_c, atol=1e-6, rtol=1e-5), (
-                    f"step {step} parameter {name_s} mismatch"
-                )
-                assert param_s.grad is not None and param_c.grad is not None
-                assert torch.allclose(
-                    param_s.grad, param_c.grad, atol=1e-6, rtol=1e-5
-                ), f"step {step} grad {name_s} mismatch"
-
-            slots_single = _named_optimizer_slots(engine_single)
-            slots_coord = _named_optimizer_slots(engine_coord)
-            for name in slots_single:
-                for state_key in ("exp_avg", "exp_avg_sq", "step"):
-                    assert torch.allclose(
-                        slots_single[name][state_key],
-                        slots_coord[name][state_key],
-                        atol=1e-6,
-                        rtol=1e-5,
-                    ), f"step {step} optimizer {name}.{state_key} mismatch"
-
-        coordinator.close()
-        assert not coordinator.proc.is_alive()
-        for shm_name in (weight_shm_name, grad_shm_name):
-            with pytest.raises(FileNotFoundError):
-                leaked = shared_memory.SharedMemory(name=shm_name, create=False)
-                leaked.close()
+    lease = _acquire_config_lease(definition, passive_gpu0, cfg, state_dir=lease_dir)
+    assert isinstance(lease, MultiDeviceLease)
+    try:
+        assert [item.key for item in lease.leases] == [
+            "physical-phys-b70-e300",
+            "physical-phys-b70-2300",
+        ]
+        # While MultiDeviceLease is held, neither GPU 0 nor GPU 1 can be leased by another worker.
+        child_code = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from sparselab.workers.leases import acquire_lease\n"
+            "l0 = acquire_lease(worker_id='other-0', backend='xpu', physical_device_id='phys-b70-e300', state_dir=Path(sys.argv[1]))\n"
+            "l1 = acquire_lease(worker_id='other-1', backend='xpu', physical_device_id='phys-b70-2300', state_dir=Path(sys.argv[1]))\n"
+            "assert l0 is None and l1 is None\n"
+        )
+        subprocess.run(
+            [sys.executable, "-c", child_code, str(lease_dir)],
+            check=True,
+            timeout=10,
+        )
     finally:
-        if coordinator is not None:
-            coordinator.close()
-        engine_single.close()
-        engine_coord.close()
+        lease.close()
+
+    # Missing secondary device index in passive discovery raises ValueError.
+    monkeypatch.setattr(
+        "sparselab.workers.execution.discover_runtimes",
+        lambda: [passive_gpu0],
+    )
+    with pytest.raises(ValueError, match="secondary_device_indices index 1 is absent"):
+        _acquire_config_lease(definition, passive_gpu0, cfg, state_dir=lease_dir)

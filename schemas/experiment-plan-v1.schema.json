@@ -1842,6 +1842,14 @@
           ],
           "title": "Precision",
           "type": "string"
+        },
+        "secondary_device_indices": {
+          "default": [],
+          "items": {
+            "type": "integer"
+          },
+          "title": "Secondary Device Indices",
+          "type": "array"
         }
       },
       "title": "RuntimeConfig",

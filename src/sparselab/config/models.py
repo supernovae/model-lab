@@ -808,6 +808,15 @@ class RunConfig(StrictModel):
             raise ValueError(
                 "allocation ownership currently requires the PyTorch engine"
             )
+        if self.runtime.secondary_device_indices and (
+            self.model.semantic_memory_dim is not None
+            or self.dataset.allocation_manifest_path is not None
+            or self.training.portability_manifest_path is not None
+        ):
+            raise ValueError(
+                "runtime.secondary_device_indices cannot be combined with semantic memory, "
+                "allocation sidecars, or portability runs"
+            )
         return self
 
 
