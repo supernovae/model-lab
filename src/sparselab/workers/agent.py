@@ -83,19 +83,18 @@ def _dispatch(
         from sparselab.runtime_attention import attention_probe
         from sparselab.runtime_profile import authorize_worker
 
-        from .execution import _effective_config, _runtime_for_definition
-        from .leases import acquire_lease
+        from .execution import (
+            _acquire_config_lease,
+            _effective_config,
+            _runtime_for_definition,
+        )
 
         config = _effective_config(
             definition, RunConfig.model_validate(payload["config"])
         )
         authorization = authorize_worker(definition, config)
         runtime = _runtime_for_definition(definition)
-        lease = acquire_lease(
-            worker_id=definition.worker_id,
-            backend=runtime.backend,
-            physical_device_id=runtime.physical_device_id,
-        )
+        lease = _acquire_config_lease(definition, runtime, config)
         if lease is None:
             raise WorkerBusyError("physical device is leased")
         try:

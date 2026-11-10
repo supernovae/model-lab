@@ -343,6 +343,9 @@ class RuntimeConfig(StrictModel):
     engine: Literal["pytorch", "mlx"] = "pytorch"
     backend: Literal["auto", "cpu", "mps", "cuda", "rocm", "xpu", "metal"] = "auto"
     device_index: int = Field(default=0, ge=0)
+    secondary_device_indices: tuple[int, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     precision: Literal["auto", "fp32", "bf16", "fp16"] = "fp32"
     memory: MemoryConfig = MemoryConfig()
     compile_transformer_blocks: bool = Field(
@@ -372,6 +375,28 @@ class RuntimeConfig(StrictModel):
                 "compiled output head and loss require PyTorch XPU BF16 "
                 "without activation offload"
             )
+        if self.secondary_device_indices:
+            if self.engine != "pytorch" or self.backend in {"mps", "metal"}:
+                raise ValueError(
+                    "secondary_device_indices requires PyTorch on cpu, cuda, rocm, or xpu"
+                )
+            if any(idx < 0 for idx in self.secondary_device_indices):
+                raise ValueError("secondary_device_indices must be non-negative")
+            if len(set(self.secondary_device_indices)) != len(
+                self.secondary_device_indices
+            ):
+                raise ValueError("secondary_device_indices must not contain duplicates")
+            if (
+                self.backend != "cpu"
+                and self.device_index in self.secondary_device_indices
+            ):
+                raise ValueError(
+                    "secondary_device_indices must not include the primary device_index"
+                )
+            if self.memory.activation_offload.enabled:
+                raise ValueError(
+                    "secondary_device_indices cannot be combined with activation offload"
+                )
         return self
 
 
@@ -782,6 +807,15 @@ class RunConfig(StrictModel):
         ):
             raise ValueError(
                 "allocation ownership currently requires the PyTorch engine"
+            )
+        if self.runtime.secondary_device_indices and (
+            self.model.semantic_memory_dim is not None
+            or self.dataset.allocation_manifest_path is not None
+            or self.training.portability_manifest_path is not None
+        ):
+            raise ValueError(
+                "runtime.secondary_device_indices cannot be combined with semantic memory, "
+                "allocation sidecars, or portability runs"
             )
         return self
 
