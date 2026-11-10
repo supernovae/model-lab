@@ -649,3 +649,30 @@ def paired_activation_line_figure(
         xaxis_title="token position",
         yaxis_title="RMS",
     )
+
+
+def memory_address_figure(
+    memory: Mapping[str, Any], tokens: list[Mapping[str, Any]]
+) -> go.Figure:
+    """Observed token-to-address edges; table identity keeps equal row IDs distinct."""
+    figure = go.Figure()
+    for stream in memory["streams"]:
+        addresses = stream["addresses"][: len(tokens)]
+        figure.add_trace(
+            go.Scatter(
+                x=list(range(len(addresses))),
+                y=[f"{stream['table']} · row {address}" for address in addresses],
+                text=[str(token["text"]) for token in tokens[: len(addresses)]],
+                mode="markers",
+                name=str(stream["table"]),
+                hovertemplate="Position %{x} · %{text}<br>%{y}<extra></extra>",
+            )
+        )
+    figure.update_yaxes(type="category")
+    return figure_layout(
+        figure,
+        height=420,
+        title="Observed token → memory row lookups",
+        xaxis_title="Token position",
+        yaxis_title="Table and hashed row",
+    )

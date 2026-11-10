@@ -13,14 +13,20 @@ from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from sparselab.dashboard import lab_pages, training_charts
+from sparselab.dashboard import generation, inspection, lab_pages, training_charts, ui
 from sparselab.dashboard.queries import DashboardSnapshot, RunRecord, runs, snapshot
 from sparselab.dashboard.research import learn_page, research_page
+from sparselab.dashboard.stores import (
+    available_stores,
+    discovery_roots,
+    parse_run_store,
+)
 from sparselab.evaluation.post_train_triage import read_triage, triage_summary
 from sparselab.evaluation.surface_overlay import surface_review_status
 from sparselab.training.checkpoints import CheckpointManager, _safe_member
@@ -61,6 +67,9 @@ _ESTIMATE_BUCKETS = (
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--runs-dir", default="sparselab-work/runs")
+    parser.add_argument(
+        "--run-store", action="append", type=parse_run_store, default=[]
+    )
     parser.add_argument("--reports-dir", default="artifacts/research-reports")
     parser.add_argument("--lifecycle")
     parser.add_argument("--evidence-root", default=".")
@@ -148,8 +157,11 @@ def _selection_controls(root: Path) -> None:
     try:
         records = runs(root)
         st.session_state[key] = records
-    except OSError, sqlite3.Error, ValueError:
+    except (OSError, sqlite3.Error, ValueError) as error:
         records = st.session_state.get(key, [])
+        st.sidebar.warning(
+            f"Run list unavailable; cached selection may be stale: {error}"
+        )
     include_pilots = st.sidebar.checkbox(
         "Include smoke and warmup pilots", value=False, key="include_pilot_runs"
     )
@@ -158,9 +170,108 @@ def _selection_controls(root: Path) -> None:
         for record in records
         if include_pilots or record.purpose not in _PILOT_PURPOSES
     ]
-    previous = st.session_state.get("selected_runs", ids[:1])
+    active = [
+        record.run_id
+        for record in records
+        if record.status.lower() == "running" and record.run_id in ids
+    ]
+    requested = st.query_params.get("run")
+    request_key = (str(root), requested)
+    if requested and st.session_state.get("dashboard_link_applied") != request_key:
+        if requested in ids:
+            st.session_state["selected_runs"] = [requested]
+            st.session_state["dashboard_link_applied"] = request_key
+        else:
+            st.sidebar.warning(
+                "Linked run is unavailable or hidden in this store. No substitute selected."
+            )
+            st.session_state["selected_runs"] = []
+    if active:
+        if st.sidebar.button("Focus recorded running runs"):
+            st.session_state["selected_runs"] = active
+            st.query_params.pop("run", None)
+    else:
+        st.sidebar.info("No runs recorded as running in this store.")
+    previous = st.session_state.get("selected_runs", active or ids[:1])
     st.session_state["selected_runs"] = [run_id for run_id in previous if run_id in ids]
-    st.sidebar.multiselect("Runs", ids, key="selected_runs")
+    names = {
+        record.run_id: f"{record.name} · {record.status} · {record.run_id}"
+        for record in records
+    }
+    st.sidebar.multiselect("Runs", ids, key="selected_runs", format_func=names.get)
+    for record in records:
+        if record.run_id in st.session_state["selected_runs"]:
+            st.sidebar.caption(
+                f"{record.name} · Recorded {record.status} · Updated {record.updated_at} UTC"
+            )
+            st.sidebar.markdown(
+                f"[Open this run](training?{urlencode({'store': str(root), 'run': record.run_id})})"
+            )
+    st.sidebar.caption(
+        "Stored status is not a process heartbeat. Verify activity before calling a run live."
+    )
+
+
+def _store_controls(primary: Path, extra: list[tuple[str, str]]) -> Path:
+    """Switch whole read-only projections, keeping selections scoped by directory."""
+    stores, warnings = available_stores(primary, extra)
+    previous_label = st.session_state.get("dashboard_run_store")
+    previous_path = st.session_state.get("dashboard_active_store")
+    if previous_label and previous_label not in stores and previous_path:
+        stores[previous_label] = Path(previous_path)
+        st.sidebar.warning(
+            "Selected store is no longer discoverable; selection retained."
+        )
+    for warning in warnings:
+        st.sidebar.warning(warning)
+    requested_store = st.query_params.get("store")
+    if (
+        requested_store
+        and st.session_state.get("dashboard_store_link_applied") != requested_store
+    ):
+        match = next(
+            (label for label, path in stores.items() if str(path) == requested_store),
+            None,
+        )
+        if match is None:
+            st.error(
+                "Linked run store is unavailable. Configure or restore that store; no substitute is shown."
+            )
+            st.stop()
+        st.session_state["dashboard_run_store"] = match
+        previous_label = match
+        st.session_state["dashboard_store_link_applied"] = requested_store
+    labels = list(stores)
+    label = (
+        st.sidebar.selectbox(
+            "Run store",
+            labels,
+            index=labels.index(previous_label) if previous_label in labels else 0,
+            key="dashboard_run_store",
+        )
+        if len(stores) > 1
+        else next(iter(stores))
+    )
+    root = stores[label]
+    identity = str(root)
+    previous = st.session_state.get("dashboard_active_store")
+    if previous != identity:
+        selections = st.session_state.setdefault("dashboard_store_selections", {})
+        if previous is not None and "selected_runs" in st.session_state:
+            selections[previous] = list(st.session_state["selected_runs"])
+        if identity in selections:
+            st.session_state["selected_runs"] = selections[identity]
+        else:
+            st.session_state.pop("selected_runs", None)
+        # These widgets name values/generations in one store, not global identities.
+        for key in ("training_metrics", "inspect_run", "inspect_checkpoint"):
+            st.session_state.pop(key, None)
+        st.session_state["dashboard_active_store"] = identity
+    if len(stores) > 1:
+        st.sidebar.caption(
+            "Telemetry uses the selected store. Lab records remain separate."
+        )
+    return root
 
 
 def _rows_for(
@@ -276,9 +387,11 @@ def comparison(records: list[RunRecord], view: DashboardSnapshot) -> None:
         )
 
 
-def overview(view: DashboardSnapshot) -> None:
+def overview(view: DashboardSnapshot, root: Path | None = None) -> None:
     st.header("Overview")
     records, selected_ids = selected(view)
+    if root is not None:
+        generation.checkpoint_summary(root, selected_ids, view)
     if not records:
         st.info("No eligible runs yet. Smoke and warmup pilots are hidden by default.")
         return
@@ -396,8 +509,10 @@ def _triage_panel(
 def training(
     view: DashboardSnapshot, root: Path | None = None, surface_dir: Path | None = None
 ) -> None:
-    st.header("Training")
+    ui.page_header("Training", "How is the current run progressing?")
     records, selected_ids = selected(view)
+    inspection.learning_summary(view, selected_ids)
+    inspection.engram_summary(view, selected_ids, compact=True)
     _runtime_forecast_panel(view, selected_ids)
     comparison([record for record in records if record.run_id in selected_ids], view)
     if root is not None:
@@ -425,7 +540,19 @@ def training(
     )
     names = sorted({str(point["name"]) for point in points})
     selected_names = st.multiselect(
-        "Metrics", names, default=names, key="training_metrics"
+        "Metrics",
+        names,
+        default=[
+            name
+            for name in (
+                "train/loss",
+                "validation/loss",
+                "performance/tokens_per_second",
+            )
+            if name in names
+        ],
+        key="training_metrics",
+        help="Start with loss and throughput. Add any recorded metric for deeper inspection.",
     )
     for name in selected_names:
         subset = [point for point in points if point["name"] == name]
@@ -441,6 +568,7 @@ def training(
 
 def architecture_diagnostics(view: DashboardSnapshot) -> None:
     st.header("Architecture diagnostics")
+    st.caption("For per-port memory values, use Engram memory in the navigation.")
     _, selected_ids = selected(view)
     points = _rows_for(view.metrics, selected_ids)
     for title, prefix in {
@@ -715,6 +843,7 @@ def _checkpoint_directory(root: Path, row: dict[str, object]) -> Path:
 def checkpoint_view(view: DashboardSnapshot, root: Path) -> None:
     st.header("Checkpoints")
     records, selected_ids = selected(view)
+    generation.checkpoint_summary(root, selected_ids, view)
     rows = _rows_for(view.checkpoints, selected_ids)
     st.caption(
         "Stored verification describes save time, not current disk integrity. "
@@ -775,7 +904,17 @@ def checkpoint_view(view: DashboardSnapshot, root: Path) -> None:
         )
         if invalid:
             st.error(f"{invalid} checkpoint generation(s) failed local verification.")
-        st.dataframe(rows, width="stretch", hide_index=True)
+        st.dataframe(
+            rows,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "checkpoint_id": st.column_config.NumberColumn(
+                    "Save sequence (within run)",
+                    help="Ordinal save number, not a checkpoint count.",
+                )
+            },
+        )
         local_best: list[dict[str, object]] = []
         for run_id in selected_ids:
             candidates = [
@@ -888,9 +1027,10 @@ def learn() -> None:
 def _read_snapshot(
     root: Path,
 ) -> tuple[DashboardSnapshot | None, datetime | None, str | None]:
-    key = f"dashboard_snapshot:{root.resolve()}"
+    run_ids = tuple(st.session_state.get("selected_runs", []))
+    key = f"dashboard_snapshot:{root.resolve()}:{run_ids}"
     try:
-        fresh = snapshot(root)
+        fresh = snapshot(root, run_ids)
     except (OSError, sqlite3.Error, ValueError) as error:
         previous = st.session_state.get(key)
         if previous is None:
@@ -902,10 +1042,15 @@ def _read_snapshot(
     return fresh, observed_at, None
 
 
-@st.fragment(run_every=2)
 def render(root: Path, page: str, surface_dir: Path | None = None) -> None:
-    if st.button("Refresh now", key="dashboard_refresh"):
-        st.rerun()
+    if page == "generate":
+        generation.generation_page(None, root, [])
+        return
+    st.button(
+        "Refresh now",
+        key="dashboard_refresh",
+        help="Read the current recorded values without reloading the page.",
+    )
     view, observed_at, error = _read_snapshot(root)
     if view is None:
         st.error(f"Dashboard could not read the run store: {error}")
@@ -915,14 +1060,35 @@ def render(root: Path, page: str, surface_dir: Path | None = None) -> None:
         st.error(f"Showing stale data ({_observation_age(observed_at)} old): {error}")
     else:
         st.caption(
-            f"Last observed {_observation_age(observed_at)} ago. Refreshes every 2 seconds."
+            f"Observed at {observed_at:%H:%M:%S} UTC · "
+            + (
+                f"Refreshes every {st.session_state.get('refresh_seconds', 10)} seconds."
+                if page != "generate" and st.session_state.get("refresh_seconds", 10)
+                else "Automatic refresh paused."
+            )
         )
-    _selection_controls(root)
+    _, focused_ids = selected(view)
+    for record in view.runs:
+        if record.run_id in focused_ids:
+            with st.container(border=True):
+                st.markdown(f"**{record.name}** · Recorded status: **{record.status}**")
+                st.caption(f"Run {record.run_id} · Updated {record.updated_at} UTC")
+                if record.status.lower() == "running":
+                    st.caption(
+                        "Activity unverified: stored running status is not a live process heartbeat."
+                    )
     pages = {
-        "overview": overview,
+        "generate": lambda value: generation.generation_page(
+            value, root, selected(value)[1]
+        ),
+        "overview": lambda value: overview(value, root),
         "training": lambda value: training(value, root, surface_dir),
         "evaluation": evaluation,
         "architecture": architecture_diagnostics,
+        "engram": lambda value: inspection.engram_summary(value, selected(value)[1]),
+        "snapshots": lambda value: inspection.snapshot_inspector(
+            value, selected(value)[1]
+        ),
         "runtime": runtime_view,
         "memory": memory_view,
         "checkpoints": lambda value: checkpoint_view(value, root),
@@ -933,24 +1099,52 @@ def render(root: Path, page: str, surface_dir: Path | None = None) -> None:
 
 def _run_page(root: Path, page: str, surface_dir: Path | None = None) -> None:
     """Keep run views unavailable until a read-only projection exists."""
-    key = f"dashboard_snapshot:{root.resolve()}"
+    run_ids = tuple(st.session_state.get("selected_runs", []))
+    key = f"dashboard_snapshot:{root.resolve()}:{run_ids}"
     if not (root / "experiments.sqlite3").is_file() and key not in st.session_state:
         st.info("No runs yet. Run `sparselab train CONFIG --run-id NAME`.")
         return
     if page == "training":
         training_charts.load_plotly()
-    render(root, page, surface_dir)
+    if page == "generate":
+        render(root, page, surface_dir)
+        return
+    interval = st.session_state.get("refresh_seconds", 10)
+    st.fragment(run_every=interval or None)(render)(root, page, surface_dir)
 
 
 def main() -> None:
     st.set_page_config(page_title="Tiny Sparse Lab", page_icon="🔬", layout="wide")
+    ui.style()
     args = arguments()
-    root = Path(args.runs_dir)
+    try:
+        root = _store_controls(Path(args.runs_dir), args.run_store)
+    except ValueError as error:
+        st.error(str(error))
+        st.stop()
+    if discovery_roots():
+
+        @st.fragment(run_every=60)
+        def watch_stores():
+            stores, warnings = available_stores(Path(args.runs_dir), args.run_store)
+            signature = (tuple(stores.items()), warnings)
+            previous = st.session_state.get("store_discovery_signature")
+            st.session_state["store_discovery_signature"] = signature
+            st.caption("New run stores are checked every minute.")
+            if previous is not None and previous != signature:
+                st.rerun()
+
+        with st.sidebar:
+            watch_stores()
     reports_dir = Path(args.reports_dir)
     lifecycle = Path(args.lifecycle) if args.lifecycle else None
     evidence_root = Path(args.evidence_root)
     surface_dir = Path(args.surface_dir) if args.surface_dir else None
-    lab_dir = Path(args.lab_dir) if args.lab_dir else root.parent / "lab"
+    lab_dir = (
+        Path(args.lab_dir)
+        if args.lab_dir
+        else Path(args.runs_dir).expanduser().resolve().parent / "lab"
+    )
     runs_dirs = [root, lab_dir / "runs"]
     pages: dict[str, Any] = {}
     lab = [
@@ -992,12 +1186,25 @@ def main() -> None:
             (lambda name=name: _run_page(root, name, surface_dir))
             if name == "training"
             else (lambda name=name: _run_page(root, name)),
-            title=name.title(),
+            title={
+                "engram": "Engram memory",
+                "snapshots": "Snapshot inspector",
+                "memory": "Device memory",
+            }.get(name, name.title()),
+            icon={
+                "training": ":material/monitoring:",
+                "engram": ":material/memory:",
+                "snapshots": ":material/manage_search:",
+                "checkpoints": ":material/save:",
+            }.get(name, ":material/analytics:"),
             url_path=name,
         )
         for name in (
             "overview",
             "training",
+            "generate",
+            "engram",
+            "snapshots",
             "evaluation",
             "architecture",
             "runtime",
@@ -1021,7 +1228,32 @@ def main() -> None:
         }
     )
     st.sidebar.markdown("### 🔬 Tiny Sparse Lab")
-    st.sidebar.caption(f"lab {lab_dir}  \nruns {root}")
+    st.sidebar.caption("Observe training · Inspect evidence · Compare models")
+    with st.sidebar.expander("Data locations"):
+        st.caption(f"lab {lab_dir}  \nruns {root}")
+    _selection_controls(root)
+    if page.url_path in {item.url_path for item in run_pages}:
+        st.sidebar.selectbox(
+            "Automatic refresh",
+            [10, 2, 30, 0],
+            format_func=lambda value: f"Every {value}s" if value else "Paused",
+            key="refresh_seconds",
+        )
+        with st.container(horizontal=True):
+            for destination in (
+                "training",
+                "generate",
+                "engram",
+                "snapshots",
+                "checkpoints",
+                "explorer",
+            ):
+                target = next(
+                    (item for item in run_pages + lab if item.url_path == destination),
+                    None,
+                )
+                if target is not None:
+                    st.page_link(target, label=target.title)
     page.run()
 
 

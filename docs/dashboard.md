@@ -316,3 +316,157 @@ values but hide deltas (`architecture_matches=False`). Expert routing is shown
 separately for each checkpoint; dense FFNs have no MoE router. Changing a selector
 or sentence hides the previous result until you run again. A failed new comparison
 clears the prior comparison, so old charts cannot appear under a new selection.
+
+### Training, memory and snapshot inspection
+
+Run telemetry includes **Engram memory** (separate from device/RAM memory) and
+**Snapshot inspector**. Training opens with a compact memory summary and three
+curves: training loss, validation loss and throughput, when recorded. Use the
+metric selector to add other curves. The quick navigation links retain the run
+selection across telemetry pages.
+
+Engram memory shows aggregate and recorded per-port gates, value/hidden norms,
+address reuse and table utilization. Every value retains its observation step;
+missing diagnostics say unavailable. These are target-weighted forward diagnostics,
+so counts can be fractional. Address reuse includes repeated inputs and is not
+proof of hash collisions or retrieval quality. The page does not infer gradients,
+parameter updates or quality gains.
+
+Snapshot inspector filters current recorded metric values and their changes from
+the preceding observation, displays the saved configuration, shows recent events,
+and inspects an explicitly selected checkpoint generation (newest by default).
+It reads projected metadata only; no weights are loaded and no inference runs.
+Save-time verification is distinct from a current local file check. Existing
+**Checkpoints** verification and **Explorer** remain available through the quick
+links. Explorer's native size/runtime restrictions still apply.
+
+Automatic refresh defaults to ten seconds and offers two seconds, thirty seconds,
+or paused. **Refresh now** refreshes the telemetry fragment without a full-page
+rerun. The query reads telemetry for selected runs only. A failed read retains
+that selection's last successful snapshot with a visible stale-data warning;
+it never substitutes another selection's data. Charts retain their existing
+interaction-preserving component.
+
+### Browse separate run stores
+
+Keep the existing `--runs-dir` as the primary store and add named directories:
+
+```sh
+sparselab dashboard --runs-dir /data/history/runs \
+  --run-store 'Devmind pilot=/data/devmind/pilot/runs' \
+  --lab-dir /data/history/lab
+```
+
+`--run-store LABEL=DIRECTORY` is repeatable. The **Run store** sidebar selector
+appears only when extra stores are configured. It switches the entire telemetry
+view without merging, copying or migrating databases. Labels and directories
+must be distinct. Missing stores remain unavailable rather than being created or
+falling back to another store. Run selections are remembered per directory;
+checkpoint and metric selectors reset on a store change, and stale snapshots are
+also scoped to that directory. Identical run IDs in different stores stay separate.
+
+The existing `--lab-dir` still selects the Lab records for Home, Experiments,
+Models and Behaviors. Explorer sees the selected run store plus `LAB/runs`, as
+before. Changing the run store does not silently change the Lab records directory.
+With no extra stores, existing single-store commands behave as before.
+
+
+### Focus and evidence
+
+The sidebar shows model names, exact run IDs, recorded status and update timestamps.
+“Focus recorded running runs” selects running records in the chosen store; stored
+status does not verify process liveness. “Open this run” links to Training with the
+configured store path and run ID. Missing linked stores stop rendering; missing or
+hidden runs select nothing instead of silently substituting another model. Store
+links only select configured/discovered stores, never arbitrary filesystem paths.
+
+Training opens with observed training and validation loss, change since the previous
+observation, and their evidence limits. Capabilities require verified checkpoint
+probes; memory activity alone does not demonstrate an improvement. Explorer's memory
+lookup plot maps token positions to recorded table/row addresses. It does not label
+hashed rows as concepts or claim neuron connections. It reads existing exploration
+payloads and adds no model execution.
+
+### Native snapshot completion
+
+**Generate** uses native dashboard controls, with prompt and continuation side by
+side. It lists complete eligible local snapshots across the selected run store,
+newest UTC save time first, independently of telemetry run filters. The **LATEST**
+marker identifies the newest published verified checkpoint, including one from
+an unfinished training run. It does not mean the latest completed training run.
+
+An unpinned session defaults to that newest save. **Refresh snapshots** reads the
+catalog without loading weights. Explicit choices and deep links stay pinned;
+**Use latest** clears the pin and refreshes the list. Stable links accept `store`,
+`run`, and `checkpoint`. Missing links fail without substitution. A new save never
+changes an in-flight request. Archived, missing and incomplete file inventories
+are excluded; native cold verification remains mandatory on Generate.
+
+#### Checkpoint counts
+
+The Overview and Checkpoints summaries distinguish the store-wide available count,
+the selected runs' available count, and the newest saved step. The retained-save
+table and latest recorded retention event show which files remain and why a new
+checkpoint may replace an older one without increasing the count. Save sequence
+numbers (Gen 2 or checkpoint_id 2) identify one run's second save, not the total
+number of checkpoints. Lab Home's **Scored checkpoints** counts sealed lab scores,
+including references, and is separate from training snapshots.
+
+#### CPU sampler setup and boundaries
+
+The dashboard sends bounded JSON requests to a separate loopback CPU sampler.
+`SPARSELAB_SNAPSHOT_SERVICE_CONFIG` points to a JSON file containing the allowed
+`store` and `url`, for example:
+
+```json
+{"store": "/data/experiment/runs", "url": "http://127.0.0.1:8502"}
+```
+
+Set that environment variable for both processes. Run
+`python src/sparselab/dashboard/snapshot_sampler.py` in the compatible provisioned
+inference environment/source, rather than launching that file with Streamlit.
+The historical `run`, `checkpoint`, and `checkpoint_sha256` configuration fields
+are ignored; they are not restrictions or automatic loading instructions.
+
+Keep the sampler's existing 10 GiB memory cap, two CPU threads and 200% CPU quota,
+separate from the dashboard's resource envelope. Checkpoints exceeding 5 GiB of
+inventoried files are refused. The service only binds the configured 127.0.0.1
+port, rejects browser origins and unexpected Host values, and does not log prompts
+or outputs. The dashboard UI never loads a model.
+
+**Generate completion** verifies and loads the exact selected digest through the
+native loader. Cold verification checks finalized contents, manifest, model
+configuration, tokenizer and Engram state. Recorded save-time verification alone
+never replaces it. Partial or staging directories are never loaded.
+
+One shared lock spans verification, eviction, loading and generation. Busy requests
+are refused rather than queued; the old model is released before another loads.
+Failed loading leaves no fallback model. The UI distinguishes the selected snapshot,
+sampler status at observation time and output identity. Cold verification can take
+minutes; generation is token-bounded, not forcibly cancelled at a wall-clock limit.
+
+Historical mappings are consulted before generation reads. Mapped archived
+checkpoints report their archive location as unavailable: the native loader requires
+a generation inside its original run and does not support the relocated archive
+layout. No copy, symlink workaround or stale-source fallback is used. Other stores
+and incompatible model schemas fail explicitly.
+
+#### Prompts and sampling
+
+Prompts start blank. Technical, code and story examples require visible selection;
+no TinyStories text is silently appended. Sampling defaults are temperature **0.7**,
+top-k **40**, seed **42** and **32** new tokens. Temperature 0–2, top-k 0–200
+(0 disables), a seed and 8–512 new tokens are supported. The combined prompt/output
+limit is 1,024 tokens and is checked before generation. Longer requests take longer;
+EOS may end a completion before its cap.
+
+Temperature zero is greedy. A fixed seed helps repeat a sample; changing it explores
+variation, not quality. Exact output can vary across runtimes. **Reset sampling
+defaults** restores the controls, keeps the prompt and snapshot, and clears the
+prior result without inference. Results retain the exact input, controls and
+verified identity, and the continuation can be downloaded.
+
+No prompts or outputs are added to training data. Generate refreshes manually to
+avoid interrupting a request. Explorer remains a separate ≤60M internal-diagnostics
+tool and uses blank sample text by default. No probe-suite prompts or scientific
+settings are changed.
