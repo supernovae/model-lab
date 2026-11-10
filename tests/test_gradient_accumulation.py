@@ -289,8 +289,14 @@ def test_recompute_ratio_counts_only_executed_microbatches(tmp_path) -> None:
     assert update.metrics["recompute/block_call_ratio"] == pytest.approx(1.0)
 
 
-def test_accumulated_dense_updates_match_large_batch_over_schedule(tmp_path) -> None:
+@pytest.mark.parametrize("padded", [False, True])
+def test_accumulated_dense_updates_match_large_batch_over_schedule(
+    tmp_path, padded
+) -> None:
     base = config(tmp_path)
+    # Direct engine initialization does not apply the trainer's configured seed.
+    # Keep the numerical comparison independent of earlier tests in this worker.
+    torch.manual_seed(base.seed)
     accumulated_cfg = base.model_copy(
         update={
             "training": base.training.model_copy(
@@ -314,12 +320,18 @@ def test_accumulated_dense_updates_match_large_batch_over_schedule(tmp_path) -> 
     try:
         for step in range(1, 4):
             microbatches = [_full_batch(step * 10 + offset) for offset in range(4)]
+            if padded:
+                for offset, batch in enumerate(microbatches):
+                    batch.targets[:, 3 + offset * 3 :] = -100
+            valid_targets = sum(
+                int(np.count_nonzero(batch.targets != -100)) for batch in microbatches
+            )
             merged = Microbatch(
                 np.concatenate([batch.inputs for batch in microbatches]),
                 np.concatenate([batch.targets for batch in microbatches]),
             )
-            accumulated.train_update(microbatches, step, 64)
-            large.train_update([merged], step, 64)
+            accumulated.train_update(microbatches, step, valid_targets)
+            large.train_update([merged], step, valid_targets)
         assert accumulated.model is not None and large.model is not None
         for name, parameter in accumulated.model.state_dict().items():
             assert torch.allclose(

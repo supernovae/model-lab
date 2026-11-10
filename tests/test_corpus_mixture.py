@@ -18,7 +18,7 @@ from sparselab.data.packing import TokenBlockDataset, _collect_token_mixture
 
 
 def _fixture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, actual_content=False
 ) -> tuple[Path, Path, Path]:
     release = tmp_path / ("a" * 64)
     (release / "lm").mkdir(parents=True)
@@ -61,6 +61,8 @@ def _fixture(
         },
     ]
     for row in docs:
+        if actual_content:
+            row["content_sha256"] = hashlib.sha256(row["text"].encode()).hexdigest()
         row["domains"] = {
             "gutenberg": ["general"],
             "wikimedia": ["explanatory"],
@@ -336,11 +338,12 @@ def test_native_packing_supervises_exact_exported_quota(
     ]
 
 
-def test_yaml_mixture_consumer_is_independent_of_cwd(
+def test_yaml_mixture_consumer_and_storage_identity_are_independent_of_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Release authentication and tokenizer encoding use the tiny synthetic fixture;
     # mixture materialization, cold replay, dataset binding and packing are real.
+    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
     assets = tmp_path / "source" / "nested"
     assets.mkdir(parents=True)
     declaration, _, release = _fixture(assets, monkeypatch)
@@ -349,7 +352,8 @@ def test_yaml_mixture_consumer_is_independent_of_cwd(
     (release / "lm/validation.jsonl").write_text('{"text":"heldout"}\n')
     fit_dir = assets / "fit"
     fit_dir.mkdir()
-    (fit_dir / "tokenizer.json").write_text("{}")
+    tokenizer = _byte_tokenizer()
+    tokenizer.save(str(fit_dir / "tokenizer.json"))
     monkeypatch.setattr(
         mixture,
         "load_tokenizer_config",
@@ -362,7 +366,9 @@ def test_yaml_mixture_consumer_is_independent_of_cwd(
         Path(__file__).resolve().parents[1] / "configs/runtime_smoke_cpu.yaml"
     ).model_dump(mode="json")
     raw["model"]["vocab_size"] = 260
-    raw["training"]["seq_len"] = 8
+    # The seven-character validation fixture must contain a full next-token block.
+    raw["training"]["seq_len"] = 4
+    raw["logging"]["root_dir"] = "runs"
     raw["tokenizer"]["path"] = "fit/tokenizer.json"
     raw["dataset"] = {
         "source": "local_token_mixture",
@@ -380,9 +386,9 @@ def test_yaml_mixture_consumer_is_independent_of_cwd(
     }
     source = assets / "run.yaml"
     source.write_text(yaml.safe_dump(raw))
-    tokenizer = SimpleNamespace(
-        token_to_id=lambda value: {"<bos>": 2, "<eos>": 3, "<pad>": 0}[value]
-    )
+    from sparselab.data.packing import prepare_data
+    from sparselab.workspace_preflight import training_storage_checks
+
     for cwd in (tmp_path / "cwd-a", tmp_path / "unrelated" / "cwd-b"):
         cwd.mkdir(parents=True)
         monkeypatch.chdir(cwd)
@@ -398,6 +404,35 @@ def test_yaml_mixture_consumer_is_independent_of_cwd(
         assert stats["supervised_target_positions"] == 20
         assert sum(mask) == 20
         assert len(ids) == len(mask)
+        prepared = prepare_data(config, tokenizer)
+        checks = training_storage_checks(
+            config, work_dir=tmp_path / "work", verified_prepared=prepared.receipt
+        )
+        relocated = config.model_copy(
+            update={
+                "dataset": config.dataset.model_copy(
+                    update={
+                        "mixture_declaration_path": cwd / "relocated-mixture.yaml",
+                        "mixture_output_path": cwd / "relocated-output",
+                    }
+                )
+            }
+        )
+        relocated_checks = training_storage_checks(
+            relocated, work_dir=tmp_path / "work", verified_prepared=prepared.receipt
+        )
+        assert [item.projected_bytes for item in relocated_checks] == [
+            item.projected_bytes for item in checks
+        ]
+        changed = config.model_copy(
+            update={
+                "dataset": config.dataset.model_copy(update={"train_max_tokens": 21})
+            }
+        )
+        with pytest.raises(ValueError, match="does not match run configuration"):
+            training_storage_checks(
+                changed, work_dir=tmp_path / "work", verified_prepared=prepared.receipt
+            )
 
 
 def test_native_packing_rejects_malformed_target_row(tmp_path: Path) -> None:
@@ -637,7 +672,8 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
         ("three", "efgh", "e" * 64),
     ]
     with source.open("wb") as stream:
-        for name, text, content in documents:
+        for name, text, _content in documents:
+            content = hashlib.sha256(text.encode()).hexdigest()
             row = {
                 "document_id": name,
                 "source_id": "source",
@@ -704,14 +740,27 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
 
     monkeypatch.setattr(PreparationEncoder, "encode", observe_batch)
 
-    def run(name, *, reuse_tokens=True):
+    def run(name, *, reuse_tokens=True, checkpoint=False):
+        import tempfile
+
+        from sparselab.corpus.admission_inspection_cache import InspectionCache
+        from sparselab.corpus.mixture_pipeline import MixtureFrontier, pipeline_request
+
         staging = root / name
-        staging.mkdir()
-        scratch = staging / "index"
-        scratch.mkdir()
+        staging.mkdir(exist_ok=checkpoint)
+        scratch = Path(tempfile.mkdtemp(dir=staging))
         with RetainedMixtureIndex(
             scratch, root, [cohort], 42, {"source": "general"}
         ) as index:
+            frontier = None
+            if checkpoint:
+                frontier = MixtureFrontier(
+                    staging,
+                    InspectionCache(root),
+                    pipeline_request(
+                        {"tokenizer": "a" * 64, "declaration": "fixture"}, index
+                    ),
+                )
             result = mixture._schedule(
                 spec,
                 b"declaration",
@@ -723,6 +772,7 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
                 index,
                 staging,
                 reuse_tokens=reuse_tokens,
+                frontier=frontier,
             )
         return result, (staging / "train.tokens.jsonl").read_bytes()
 
@@ -733,8 +783,29 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
         "duplicate_train_content",
     ]
     assert result["actual_target_tokens"] == {"general": 10}
+    with monkeypatch.context() as worker_patch:
+        import psutil
+
+        worker_patch.setenv("SPARSELAB_MIXTURE_WORKERS", "3")
+        worker_patch.setattr(psutil, "cpu_count", lambda **kwargs: 4)
+        worker_patch.setattr(psutil.Process, "cpu_affinity", lambda self: [0, 1, 2, 3])
+        assert run("three-workers", reuse_tokens=False) == (result, output)
+        progress = json.loads((root / "three-workers/progress.json").read_bytes())
+        assert (progress["read_workers"], progress["encoder_rayon_threads"]) == (1, 2)
+
     calls.clear()
     warm_result, warm_output = run("warm")
+    original_source = source.read_bytes()
+    source.write_bytes(
+        original_source.replace(
+            b'"training_eligibility":"eligible"',
+            b'"training_eligibility":"blocked!"',
+            1,
+        )
+    )
+    with pytest.raises(ValueError, match="disagrees with executed metadata"):
+        run("warm-ineligible")
+    source.write_bytes(original_source)
     assert (warm_result, warm_output) == (result, output)
     assert calls == []
 
@@ -754,6 +825,38 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
     serial_result, serial_output = run("serial", reuse_tokens=False)
     assert (serial_result, serial_output) == (result, output)
     assert calls == []
+
+    from sparselab.corpus.mixture_pipeline import MixtureFrontier
+
+    monkeypatch.setattr(encoding, "TOKENIZER_BATCH_DOCUMENTS", 1)
+    monkeypatch.setattr(mixture, "MIXTURE_BATCH_SOURCE_BYTES", 64)
+    monkeypatch.setenv("SPARSELAB_MIXTURE_COMMIT_CANDIDATES", "4096")
+    assert run("grouped", checkpoint=True) == (result, output)
+    assert len(list((root / ".grouped.assembly").glob("commit-*.json"))) == 1
+    with monkeypatch.context() as cadence:
+        cadence.setattr(mixture, "MIXTURE_COMMIT_SEGMENT_BYTES", 1)
+        assert run("byte-commits", checkpoint=True) == (result, output)
+        assert len(list((root / ".byte-commits.assembly").glob("commit-*.json"))) > 1
+    with monkeypatch.context() as cadence:
+        cadence.setattr(mixture, "MIXTURE_COMMIT_INTERVAL_SECONDS", 0)
+        assert run("time-commits", checkpoint=True) == (result, output)
+        assert len(list((root / ".time-commits.assembly").glob("commit-*.json"))) > 1
+    monkeypatch.setenv("SPARSELAB_MIXTURE_COMMIT_CANDIDATES", "1")
+    assert run("eager", checkpoint=True) == (result, output)
+    assert len(list((root / ".eager.assembly").glob("commit-*.json"))) > 1
+    commit = MixtureFrontier.commit
+
+    def interrupt(self, *args):
+        commit(self, *args)
+        if self.sequence == 3:
+            raise InterruptedError("retained frontier committed")
+
+    monkeypatch.setattr(MixtureFrontier, "commit", interrupt)
+    with pytest.raises(InterruptedError):
+        run("resumed", checkpoint=True)
+    monkeypatch.setattr(MixtureFrontier, "commit", commit)
+    monkeypatch.setenv("SPARSELAB_MIXTURE_WORKERS", "8")
+    assert run("resumed", checkpoint=True) == (result, output)
 
     # Batched padding changes IDs, so padded tokenizers retain serial semantics.
     tokenizer.enable_padding(pad_id=1, pad_token="<pad>")
@@ -802,3 +905,268 @@ def test_real_batch_cache_survives_interrupted_caller(tmp_path: Path) -> None:
         )
         with pytest.raises(ValueError, match="cached token payload digest mismatch"):
             cache.encode_many(["plain"], unexpected)
+
+
+@pytest.mark.parametrize("after_commit", [False, True])
+def test_mixture_frontier_resumes_without_committed_candidate_replay(
+    tmp_path, monkeypatch, after_commit
+):
+    from sparselab.corpus.mixture_pipeline import MixtureFrontier
+    from sparselab.data import encoding
+
+    declaration, _, _ = _fixture(tmp_path, monkeypatch)
+    baseline = tmp_path / "baseline"
+    expected = mixture._materialize_mixture(declaration, baseline, reuse_tokens=False)
+    monkeypatch.setattr(encoding, "TOKENIZER_BATCH_DOCUMENTS", 1)
+    monkeypatch.setenv("SPARSELAB_MIXTURE_WORKERS", "1")
+    monkeypatch.setenv("SPARSELAB_MIXTURE_COMMIT_CANDIDATES", "1")
+    output = tmp_path / "interrupted"
+    original = MixtureFrontier.commit
+
+    def interrupt(self, *args):
+        if self.sequence == 1 and not after_commit:
+            raise InterruptedError("before durable commit")
+        original(self, *args)
+        if self.sequence == 2 and after_commit:
+            raise InterruptedError("after durable commit")
+
+    monkeypatch.setattr(MixtureFrontier, "commit", interrupt)
+    with pytest.raises(InterruptedError):
+        mixture.materialize_mixture(declaration, output)
+    assert not output.exists()
+    checkpoints = tmp_path / ".interrupted.assembly"
+    last = json.loads(max(checkpoints.glob("commit-*.json")).read_bytes())
+    committed = sum(last["state"]["candidates"].values())
+    visited = []
+    original_cached = mixture.MixtureIndex.cached_document
+
+    def observe(self, doc_id, *args):
+        visited.append(doc_id)
+        return original_cached(self, doc_id, *args)
+
+    monkeypatch.setattr(MixtureFrontier, "commit", original)
+    monkeypatch.setattr(mixture.MixtureIndex, "cached_document", observe)
+
+    def unexpected_inventory_replay(*args):
+        raise AssertionError("authenticated preflight must bypass inventory replay")
+
+    monkeypatch.setattr(
+        mixture.MixtureIndex, "_load_documents", unexpected_inventory_replay
+    )
+    monkeypatch.setenv("SPARSELAB_MIXTURE_WORKERS", "8")
+    actual = mixture.materialize_mixture(declaration, output)
+    assert actual == expected
+    assert (output / "train.tokens.jsonl").read_bytes() == (
+        baseline / "train.tokens.jsonl"
+    ).read_bytes()
+    assert len(visited) == 3 - committed
+
+
+@pytest.mark.parametrize("damage", ["output", "index", "identity", "marker"])
+def test_mixture_frontier_rejects_changed_checkpoint(tmp_path, monkeypatch, damage):
+    from sparselab.corpus.mixture_pipeline import MixtureFrontier
+
+    declaration, _, _ = _fixture(tmp_path, monkeypatch)
+    output = tmp_path / "interrupted"
+    original = MixtureFrontier.commit
+
+    def interrupt(self, *args):
+        original(self, *args)
+        raise InterruptedError("after durable commit")
+
+    monkeypatch.setattr(MixtureFrontier, "commit", interrupt)
+    with pytest.raises(InterruptedError):
+        mixture.materialize_mixture(declaration, output)
+    monkeypatch.setattr(MixtureFrontier, "commit", original)
+    checkpoints = tmp_path / ".interrupted.assembly"
+    marker = next(checkpoints.glob("commit-*.json"))
+    entry = json.loads(marker.read_bytes())
+    if damage in {"output", "index"}:
+        path = Path(entry["directory"]) / f"{damage}.jsonl"
+        path.write_bytes(path.read_bytes() + b"{}\n")
+    elif damage == "identity":
+        declaration.write_bytes(declaration.read_bytes() + b"\n# changed declaration\n")
+    else:
+        entry["state"]["records"] += 1
+        marker.write_bytes(canonical_json(entry))
+    with pytest.raises(ValueError, match="checkpoint"):
+        mixture.materialize_mixture(declaration, output)
+    assert not output.exists()
+
+
+def test_ordered_source_fetch_bounds_reorder_and_propagates_failure(monkeypatch):
+    import threading
+
+    from sparselab.corpus import mixture_pipeline
+
+    assert list(
+        mixture_pipeline.ordered_fetch(range(3), str, workers=0, size=lambda i: 1)
+    ) == [(i, str(i)) for i in range(3)]
+    monkeypatch.setattr(mixture_pipeline, "PREFETCH_BYTES", 3)
+    later = threading.Event()
+    metrics = {}
+
+    def fetch(i):
+        if i == 0:
+            assert later.wait(5)
+        if i == 1:
+            later.set()
+        if i == 4:
+            raise OSError("source read failed")
+        return str(i)
+
+    iterator = mixture_pipeline.ordered_fetch(
+        range(6), fetch, workers=4, size=lambda i: 1, metrics=metrics
+    )
+    assert [next(iterator) for _ in range(4)] == [(i, str(i)) for i in range(4)]
+    with pytest.raises(OSError, match="source read failed"):
+        next(iterator)
+    assert metrics["read_queue_bytes_peak"] <= 3
+    assert metrics["read_queue_records_peak"] <= 3
+    assert metrics["read_active_peak"] >= 2
+
+
+def test_mixture_writer_rejects_concurrent_owner(tmp_path):
+    from sparselab.corpus.mixture_pipeline import mixture_writer
+
+    with (
+        mixture_writer(tmp_path / "output"),
+        pytest.raises(ValueError, match="active writer"),
+        mixture_writer(tmp_path / "output"),
+    ):
+        pytest.fail("two writers acquired the same output")
+
+
+def test_admitted_ordinary_metadata_can_bypass_warm_source_fetch(tmp_path, monkeypatch):
+    declaration, _, _ = _fixture(tmp_path, monkeypatch, actual_content=True)
+    cold = mixture.materialize_mixture(declaration, tmp_path / "cold")
+    warm = mixture.materialize_mixture(declaration, tmp_path / "warm")
+    assert cold == warm
+    progress = json.loads((tmp_path / ".warm.assembly/progress.json").read_bytes())
+    assert progress["cache_hits"] == 3
+    assert progress.get("read_worker_seconds", 0) == 0
+
+
+@pytest.mark.parametrize(
+    "failure", ["children", "cpu_times", "memory_info", "num_threads"]
+)
+def test_child_telemetry_races_do_not_abort_materialization(
+    tmp_path, monkeypatch, failure
+):
+    import psutil
+
+    declaration, _, _ = _fixture(tmp_path, monkeypatch)
+    expected = mixture.materialize_mixture(declaration, tmp_path / "expected")
+
+    def sample(name, value):
+        if name == failure:
+            raise psutil.NoSuchProcess(123456)
+        return value
+
+    child = SimpleNamespace(
+        cpu_times=lambda: sample("cpu_times", SimpleNamespace(user=1.0, system=0.5)),
+        memory_info=lambda: sample("memory_info", SimpleNamespace(rss=1024)),
+        num_threads=lambda: sample("num_threads", 1),
+    )
+    monkeypatch.setattr(
+        psutil.Process, "children", lambda self: sample("children", [child])
+    )
+    actual = mixture.materialize_mixture(declaration, tmp_path / "raced")
+    assert actual == expected
+    progress = json.loads((tmp_path / ".raced.assembly/progress.json").read_bytes())
+    assert progress["process_observation_errors"] == ["NoSuchProcess"]
+    assert not progress["child_sample_complete"]
+    assert progress["encoder_utilization"] is None
+
+
+def test_source_prefetch_continues_while_consumer_is_encoding():
+    import threading
+
+    from sparselab.corpus.mixture_pipeline import ordered_fetch
+
+    ready = threading.Event()
+    lock = threading.Lock()
+    fetched = 0
+
+    def fetch(item):
+        nonlocal fetched
+        with lock:
+            fetched += 1
+            if fetched == 8:
+                ready.set()
+        return item
+
+    iterator = ordered_fetch(range(8), fetch, workers=2, size=lambda item: 1)
+    assert next(iterator) == (0, 0)
+    # Pause the coordinator as encoding does. Both readers must continue
+    # fetching beyond the old four-record window without another next().
+    assert ready.wait(5)
+    assert list(iterator) == [(i, i) for i in range(1, 8)]
+
+
+def test_retained_handle_eviction_does_not_invalidate_active_read(
+    tmp_path, monkeypatch
+):
+    import os
+    import threading
+    from collections import OrderedDict
+    from concurrent.futures import ThreadPoolExecutor
+
+    from sparselab.corpus.retained_mixture import RetainedMixtureIndex
+
+    index = RetainedMixtureIndex.__new__(RetainedMixtureIndex)
+    index.handles = OrderedDict()
+    index.handle_lock = threading.Lock()
+    index.handle_limit = 1
+    sources, references = [], []
+    for i in range(2):
+        path = tmp_path / f"source-{i}.jsonl"
+        raw = (
+            canonical_json(
+                {
+                    "document_id": str(i),
+                    "source_id": "source",
+                    "content_sha256": str(i),
+                    "domains": ["general"],
+                    "rights": {"training_eligibility": "eligible"},
+                    "text": str(i),
+                }
+            )
+            + b"\n"
+        )
+        path.write_bytes(raw)
+        sources.append(path)
+        references.append(
+            ["general", 0, str(i), 0, i, 0, len(raw), str(i), "family", "source"]
+        )
+    index.cohorts = [{"sources": sources}]
+    entered, release = threading.Event(), threading.Event()
+    original = os.pread
+
+    def pause_first(fd, size, offset):
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5)
+        return original(fd, size, offset)
+
+    monkeypatch.setattr(os, "pread", pause_first)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(index._read_document, references[0])
+            assert entered.wait(5)
+            try:
+                assert (
+                    pool.submit(index._read_document, references[1]).result(5)["text"]
+                    == "1"
+                )
+            finally:
+                release.set()
+            assert first.result(5)["text"] == "0"
+        assert len(index.handles) == 1
+        handle = next(iter(index.handles.values()))
+        assert index._read_document(references[1])["text"] == "1"
+        assert next(iter(index.handles.values())) is handle
+    finally:
+        release.set()
+        for handle in index.handles.values():
+            handle.close()

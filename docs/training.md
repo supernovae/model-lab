@@ -25,6 +25,16 @@ sparselab train --runs-dir sparselab-work/runs configs/smoke_combined_cpu.yaml -
 
 A smoke run validates a path through training, checkpointing, evaluation, and metrics. It is not a quality benchmark. Compare runs only when data, tokenizer, device, sequence length, token budget, optimizer, and seed are recorded and intentionally matched.
 
+## Compiled output projection and loss
+
+For PyTorch XPU BF16 runs, `runtime.compile_output_head_loss: true` optionally
+compiles the output projection and summed FP32 cross-entropy together. It keeps
+the same token IDs, tied weights, masking and effective batch; measured speed
+depends on the device and workload. The option is currently unavailable with
+activation offload, allocation ownership or portability runs. The default is
+off. Enabling it on a full-state continuation is an explicit runtime change:
+use `--allow-runtime-optimization` and retain its recorded transition.
+
 ## Runtime forecast and target progress
 
 Planning is available only from compatible historical optimizer timings; without
@@ -65,6 +75,8 @@ sparselab train --runs-dir sparselab-work/runs configs/smoke_moe_cpu.yaml --run-
 ```
 
 Resume creates a child run and retains parent telemetry. It rejects changed model, optimizer, data, tokenizer, budget, engine, or backend configuration. Source or runtime identity drift requires `--allow-runtime-drift` and is recorded as `best_effort`; the flag never bypasses scientific compatibility. Recovery applies the same checks. Completed budgets cannot be resumed. Run-owned data, tokenizer, and memory-package artifacts—including their manifests—are verified before continuation.
+
+For supported dense PyTorch resumes and recovery, `--allow-runtime-optimization` permits a narrow set of execution changes while preserving scientific settings, effective training batch and validation coverage. The child records a best-effort transition; see [explicit runtime optimization on resume](checkpointing.md#explicit-runtime-optimization-on-resume).
 
 An explicit PyTorch/AdamW `--extend-budget CHECKPOINT` is different from ordinary
 resume: only a verified terminal full-state generation may grow both whole-update

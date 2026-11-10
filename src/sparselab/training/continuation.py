@@ -73,6 +73,7 @@ def _runtime_optimization_transition(
         ("evaluation", "batch_size"),
         ("runtime", "memory", "activation_checkpointing", "enabled"),
         ("runtime", "compile_transformer_blocks"),
+        ("runtime", "compile_output_head_loss"),
     )
     changes: list[dict[str, object]] = []
     for path in paths:
@@ -120,6 +121,9 @@ def _extension_settings(
     comparable = target.model_dump(mode="json")
     comparable["training"]["max_steps"] = source.training.max_steps
     comparable["training"]["max_tokens"] = source.training.max_tokens
+    # Retention terminal/milestone bounds must describe these comparison caps.
+    # Checkpoint bookkeeping is excluded from scientific resume settings.
+    comparable["checkpoint"] = source.checkpoint.model_dump(mode="json")
     comparable["optimizer"]["decay_steps"] = source.optimizer.decay_steps
     if parent_tokenizer is not None:
         manifest = read_manifest(parent_tokenizer.parent / "manifest.json")

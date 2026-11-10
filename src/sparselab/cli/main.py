@@ -31,7 +31,7 @@ from sparselab.data.packing import prepare_data
 from sparselab.data.tokenizer import (
     load_tokenizer,
     train_tokenizer,
-    verify_tokenizer_artifact,
+    verify_run_tokenizer,
 )
 from sparselab.data.withheld_facts import (
     audit_manifest,
@@ -757,13 +757,7 @@ def _data_bakeoff(args: argparse.Namespace) -> None:
 def _data_prepare(args: argparse.Namespace) -> None:
     config = load_config(Path(args.config))
     if config.dataset.source != "local_token_mixture":
-        verify_tokenizer_artifact(
-            config.tokenizer.path,
-            source=config.dataset.source,
-            revision=config.dataset.revision,
-            vocab_size=config.model.vocab_size,
-            dataset=config.dataset,
-        )
+        verify_run_tokenizer(config)
     tokenizer = load_tokenizer(config.tokenizer.path)
     print(
         prepare_data(

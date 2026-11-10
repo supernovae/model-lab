@@ -67,6 +67,70 @@ def test_multi_stream_collision_diagnostics_aggregate_all_lookups() -> None:
     assert float(diagnostics.bucket_reuse_rate) > 0
 
 
+def test_vectorized_stream_diagnostics_match_per_stream_reference() -> None:
+    from sparselab.model.memory import _diagnostics
+
+    torch.manual_seed(7)
+    memory = TokenNgramMemory(
+        hidden_dim=8,
+        table_size=31,
+        ngram_size=3,
+        value_dim=5,
+        ngram_orders=(2, 3, 4),
+        hash_heads=2,
+    )
+    hidden = torch.randn(3, 12, 8)
+    input_ids = torch.randint(0, 64, (3, 12))
+    output = memory(hidden, input_ids)
+    actual = memory.last_diagnostics
+    assert actual is not None
+
+    addresses = [
+        memory.addresses(input_ids, order, head)
+        for order in memory.ngram_orders
+        for head in range(memory.hash_heads)
+    ]
+    for left, right in zip(addresses, memory._all_addresses(input_ids), strict=True):
+        assert torch.equal(left, right)
+    tables = (memory.table, *memory.extra_tables)
+    stream_values = [
+        memory.output(table(address))
+        for table, address in zip(tables, addresses, strict=True)
+    ]
+    values = torch.stack(stream_values).mean(dim=0)
+    gate = torch.sigmoid(memory.gate(hidden))
+    expected_streams = tuple(
+        _diagnostics(address, gate, value, hidden, memory.table_size)
+        for address, value in zip(addresses, stream_values, strict=True)
+    )
+    expected = _diagnostics(
+        torch.cat([address.flatten() for address in addresses]),
+        gate,
+        values,
+        hidden,
+        memory.table_size,
+    )
+    torch.testing.assert_close(output, hidden + gate * values, rtol=0, atol=0)
+    for field in (
+        "lookup_count",
+        "unique_addresses",
+        "collision_count",
+        "bucket_reuse_rate",
+        "table_utilization",
+        "maximum_address_fraction",
+        "gate_mean",
+        "value_norm",
+        "hidden_norm",
+    ):
+        torch.testing.assert_close(getattr(actual, field), getattr(expected, field))
+        for actual_stream, expected_stream in zip(
+            actual.streams, expected_streams, strict=True
+        ):
+            torch.testing.assert_close(
+                getattr(actual_stream, field), getattr(expected_stream, field)
+            )
+
+
 def test_disabled_memory_is_absent_and_enabled_memory_runs_backward() -> None:
     plain = ModelConfig(
         vocab_size=512,

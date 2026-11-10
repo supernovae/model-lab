@@ -22,7 +22,9 @@ uv run --locked --extra cpu pytest -q tests/test_hf_auth.py
 Pushes to `main` and all PRs run three non-overlapping Linux jobs: `safe`
 (Ruff, research lint and fast config/authority checks), `lab-loop` (model
 construction, training, checkpointing, resume, `try` + probe, explorer,
-references and generation), and `fast` (the remaining non-slow CPU suite).
+references and generation), and `fast` (the remaining non-slow CPU suite plus
+the focused supervised staging regressions). The staging cases use the same
+four-worker cap in the shorter job; all job time limits remain unchanged.
 See the [workflow](../.github/workflows/ci.yml) for exact nodes and budgets.
 
 Draft PRs receive the same checks. Opening, synchronizing (new commits), or

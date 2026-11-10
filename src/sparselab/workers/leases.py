@@ -14,6 +14,7 @@ import os
 import re
 import socket
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
@@ -190,3 +191,85 @@ def acquire_lease(
             return None
         raise
     return lease
+
+
+@dataclass
+class MultiDeviceLease:
+    worker_id: str
+    backend: str
+    leases: tuple[DeviceLease, ...]
+
+    def heartbeat(self) -> None:
+        for lease in self.leases:
+            lease.heartbeat()
+
+    @property
+    def inherited_fds(self) -> tuple[int, ...]:
+        return tuple(
+            descriptor for lease in self.leases for descriptor in lease.inherited_fds
+        )
+
+    @property
+    def metadata(self) -> list[dict[str, Any]]:
+        return [dict(lease.metadata) for lease in self.leases]
+
+    def close(self) -> None:
+        for lease in reversed(self.leases):
+            lease.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+def acquire_multi_device_leases(
+    *,
+    worker_id: str,
+    backend: str,
+    physical_device_ids: Sequence[str],
+    state_dir: Path | None = None,
+) -> MultiDeviceLease | None:
+    if isinstance(physical_device_ids, (str, bytes)) or not physical_device_ids:
+        raise ValueError(
+            "physical_device_ids must be a nonempty sequence of non-blank strings"
+        )
+    cleaned: list[str] = []
+    for raw in physical_device_ids:
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError("physical_device_ids must contain only non-blank strings")
+        cleaned.append(raw.strip())
+    if len(set(cleaned)) != len(cleaned):
+        raise ValueError("physical_device_ids must not contain duplicates")
+
+    acquired_by_index: dict[int, DeviceLease] = {}
+    try:
+        for orig_idx, phys_id in sorted(enumerate(cleaned), key=lambda item: item[1]):
+            slot_worker_id = (
+                worker_id if orig_idx == 0 else f"{worker_id}-dev{orig_idx}"
+            )
+            lease = acquire_lease(
+                worker_id=slot_worker_id,
+                backend=backend,
+                physical_device_id=phys_id,
+                state_dir=state_dir,
+            )
+            if lease is None:
+                for held in reversed(list(acquired_by_index.values())):
+                    held.close()
+                return None
+            acquired_by_index[orig_idx] = lease
+    except BaseException:
+        for held in reversed(list(acquired_by_index.values())):
+            held.close()
+        raise
+
+    leases_in_caller_order = tuple(
+        acquired_by_index[idx] for idx in range(len(cleaned))
+    )
+    return MultiDeviceLease(
+        worker_id=worker_id,
+        backend=backend,
+        leases=leases_in_caller_order,
+    )

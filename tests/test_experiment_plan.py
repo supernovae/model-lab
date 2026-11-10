@@ -8,7 +8,7 @@ import pytest
 from sparselab.config.loading import load_config
 from sparselab.engines.base import EngineCapabilityError
 from sparselab.experiments.compiler import compare_configs
-from sparselab.experiments.lock import _runtime
+from sparselab.experiments.lock import _runtime, resolve_plan
 from sparselab.experiments.plan import load_plan, schema
 
 
@@ -86,6 +86,88 @@ def test_published_plan_schema_is_current() -> None:
         Path(__file__).resolve().parents[1] / "schemas/experiment-plan-v1.schema.json"
     )
     assert json.loads(published.read_text()) == schema()
+
+
+@pytest.mark.parametrize(
+    ("placement", "patch_path"),
+    [
+        ("inline", None),
+        ("file", None),
+        ("axis", "tokenizer.origin"),
+        ("axis", "tokenizer"),
+        ("phase", "tokenizer.origin"),
+        ("phase", "tokenizer"),
+        ("phase", "tokenizer.origin.sha256"),
+    ],
+)
+def test_plan_refuses_tokenizer_origin_before_artifact_verification(
+    tmp_path: Path, placement: str, patch_path: str | None
+) -> None:
+    config = load_config(
+        Path(__file__).parent / "fixtures/snapshot-comparison/run.yaml"
+    ).model_dump(mode="json")
+    origin = {
+        "dataset": config["dataset"],
+        "sha256": "a" * 64,
+        "manifest_sha256": "b" * 64,
+    }
+    plan = {"plan_version": 1, "id": "origin-refusal", "base_run": config}
+    if placement in {"inline", "file"}:
+        config["tokenizer"]["origin"] = origin
+        if placement == "file":
+            (tmp_path / "run.json").write_text(json.dumps(config))
+            plan["base_run"] = "run.json"
+    else:
+        value = (
+            {**config["tokenizer"], "origin": origin}
+            if patch_path == "tokenizer"
+            else origin["sha256"]
+            if patch_path == "tokenizer.origin.sha256"
+            else origin
+        )
+        patch = {patch_path: value}
+        if placement == "axis":
+            plan["axes"] = [
+                {"name": "source", "choices": [{"label": "shared", "set": patch}]}
+            ]
+        else:
+            plan["phases"] = [{"id": "main", "transition": "fresh", "set": patch}]
+    source = tmp_path / "plan.json"
+    source.write_text(json.dumps(plan))
+    with pytest.raises(
+        ValueError, match="ExperimentPlan does not support tokenizer.origin"
+    ):
+        resolve_plan(load_plan(source), source)
+
+
+@pytest.mark.parametrize("patch_path", ["tokenizer.origin", "tokenizer"])
+def test_plan_without_tokenizer_origin_reaches_input_verification(
+    tmp_path: Path, patch_path: str
+) -> None:
+    config = load_config(
+        Path(__file__).parent / "fixtures/snapshot-comparison/run.yaml"
+    ).model_dump(mode="json")
+    value = None if patch_path == "tokenizer.origin" else config["tokenizer"]
+    source = tmp_path / "plan.json"
+    source.write_text(
+        json.dumps(
+            {
+                "plan_version": 1,
+                "id": "ordinary-tokenizer",
+                "base_run": config,
+                "axes": [
+                    {
+                        "name": "source",
+                        "choices": [{"label": "ordinary", "set": {patch_path: value}}],
+                    }
+                ],
+            }
+        )
+    )
+    with pytest.raises(
+        ValueError, match="no verified external dataset/tokenizer inputs"
+    ):
+        resolve_plan(load_plan(source), source)
 
 
 def test_accelerator_science_resolves_without_local_hardware() -> None:

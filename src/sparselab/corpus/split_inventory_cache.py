@@ -145,12 +145,18 @@ def verified_inventory(
     # existing directories and their permissions remain untouched.
     with tempfile.TemporaryDirectory(prefix=".inventory-check-", dir=root) as folder:
         temporary = Path(folder) / "inventory.jsonl"
-        report = regenerate(project, root, temporary)
+        # Keep the authenticated temporary completion and its signed receipt
+        # inside this operation's scratch lifetime, including on refusal/error.
+        temporary_cache = InventoryCache(root)
+        temporary_cache.directory = Path(folder) / "completion"
+        if temporary_cache.proofs is not None:
+            temporary_cache.proofs.directory = Path(folder) / "proofs"
+        report = regenerate(project, root, temporary, completion_cache=temporary_cache)
         if report["sha256"] != expected_sha256:
             raise ValueError("split inventory differs from verified snapshots")
         unchanged(observed)
         report = {**report, "path": str(path)}
-        produced = cache.completed(project, temporary)
+        produced = temporary_cache.completed(project, temporary)
         if produced is not None:
             native_report, dependencies, completion = produced
             if completion["mode"] != "native_production":

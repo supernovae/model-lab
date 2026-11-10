@@ -15,7 +15,7 @@ from tokenizers.models import BPE
 from tokenizers.pre_tokenizers import ByteLevel
 from tokenizers.trainers import BpeTrainer
 
-from sparselab.config.models import DatasetConfig, TokenizerTrainConfig
+from sparselab.config.models import DatasetConfig, RunConfig, TokenizerTrainConfig
 from sparselab.corpus.export import verify_release_export
 from sparselab.data.datasets import iter_documents
 from sparselab.data.local_stories import verify_snapshot as verify_legacy_snapshot
@@ -276,6 +276,35 @@ def verify_tokenizer_artifact(
                 verification_mode=verification_mode,
             )
         return manifest
+
+
+def verify_run_tokenizer(
+    config: RunConfig,
+    *,
+    proof_store: ProofStore | None = None,
+    verification_mode: VerificationMode = "cold",
+) -> dict[str, object]:
+    """Verify a run's tokenizer against its declared origin, never its consumer."""
+    from sparselab.training.manifest import sha256_file
+
+    origin = config.tokenizer.origin
+    dataset = origin.dataset if origin is not None else config.dataset
+    path = config.tokenizer.path
+    if origin is not None and (
+        sha256_file(path) != origin.sha256
+        or sha256_file(path.with_name("tokenizer_manifest.json"))
+        != origin.manifest_sha256
+    ):
+        raise ValueError("explicit tokenizer origin digest mismatch")
+    return verify_tokenizer_artifact(
+        path,
+        source=dataset.source,
+        revision=dataset.revision,
+        vocab_size=config.model.vocab_size,
+        dataset=dataset,
+        proof_store=proof_store,
+        verification_mode=verification_mode,
+    )
 
 
 def _bounded_documents(

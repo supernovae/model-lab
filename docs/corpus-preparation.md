@@ -20,6 +20,81 @@ encodings are committed even when a supply floor cannot be met. No mixture is
 published until all declared quotas and unique-content floors pass. Retained
 single-exposure schedules avoid the additional temporary encoded spool.
 
+Mixture source reads use an ordered prefetch queue (128 MiB of serialized source
+or cached-token payloads, with a record cap of 256 or twice the reader count,
+whichever is larger), followed by bounded tokenizer batches and one cache
+writer. Ordinary preflight verifies per-record rights before cache hits can use
+its authenticated metadata to avoid schedule-stage source-body reads. Retained
+references lack those rights fields, so retained candidates still read and check
+each source record, including on a warm token cache. A bounded LRU retains up
+to 64 source handles (also limited by the process descriptor budget). Each
+active read duplicates its handle and uses positional I/O, so concurrent reads
+and cache eviction cannot change another reader's position or close its file.
+A single tokenizer subprocess owns its Rayon pool; the measured CPU/RAM plan
+splits capacity between source readers and encoding instead of nesting pools.
+`SPARSELAB_MIXTURE_WORKERS=N` caps that operation's combined worker plan; omitted,
+it uses available physical cores, affinity and measured memory. Ordinary text
+preparation retains its existing default. These byte budgets bound queued
+payloads, not total RSS: decoded objects, the current record, tokenizer native
+memory, SQLite and final receipt storage are additional.
+
+An interrupted materialization resumes automatically at the last authenticated
+assembly frontier for the same output. Immutable segments live beside it in
+`.OUTPUT.assembly`; preserve that directory and the output parent's `cache`.
+Commit cadence is independent of the 256-document/8 MiB tokenizer batches.
+By default a commit becomes due after 4,096 candidates or emitted rows, 64 MiB
+of pending segment data, or 30 seconds, checked at the next batch boundary;
+a completed stratum always commits. `SPARSELAB_MIXTURE_COMMIT_CANDIDATES=N`
+selects a positive candidate/row interval (use `1` for eager commits). Byte and
+time guards still apply. Pending index deltas stream to disk, not a growing RAM
+buffer. This amortizes proof/fsync overhead at the cost of replaying uncommitted
+work after a stop; a long individual batch can exceed the time interval.
+Each committed segment binds source position, dedup/index deltas, counters,
+exclusions and emitted rows to the exact declaration, sources, tokenizer and
+producer. Restart restores SQL lookup structures from deltas and concatenates
+sealed output segments; it does not fetch, encode, select or emit committed
+candidates again. Ordinary source inventory indexes also have authenticated
+preflight reuse. Input verification still runs; restoration and final output
+copying require sequential I/O. Multiple-exposure output has its own committed
+ordinal. A worker-count change is operational and can resume the same frontier.
+Changed identities or corrupt frontiers fail closed; choose a new output for a
+changed request. Only one writer may own an output. Uncommitted directories are
+retained for diagnosis, and completed segments currently remain after publication,
+so budget extra disk space for them and any multi-exposure encoded spool.
+
+`.OUTPUT.assembly/progress.json` records per-stratum candidates, selected and
+committed work, cache lookups, read queue peaks, stage elapsed/worker time and
+parent/child RSS. It is operational telemetry, separate from the scientific
+receipt. Selected counts nonempty deduplicated eligible candidates, including
+supply beyond the output quota; committed target tokens describe output.
+Source-worker utilization is busy wall time divided by available worker time,
+not a CPU-utilization measurement. Peak simultaneous source reads, encoder
+Rayon bounds, observed child thread counts and encoder CPU utilization make
+small concurrency comparisons inspectable. A child that exits during sampling
+records an incomplete observation instead of aborting materialization; unknown
+encoder utilization is reported as null. Three workers allocate one reader and
+two encoder threads, while four workers allocate two of each. Full supply and family accounting
+continues after output quotas fill because those counts remain receipt semantics.
+
+For a small standalone comparison, export `tools/benchmark_mixture.py` from the
+candidate and run that **same file** with each pinned Lab interpreter (no pytest,
+installation, downloads or training). For example:
+
+```sh
+/path/to/pinned-lab/.venv/bin/python /path/to/benchmark_mixture.py \
+  --root /srv/sparselab/synthetic-mixture-UNIQUE --workers 1 \
+  --documents 512 --text-bytes 512
+```
+
+The root must be new. The harness pins affinity, runs cold and warm content-cache
+cases, includes candidate checkpoint costs, and writes `benchmark.json` with code
+revision, fixture/output hashes, complete receipts, timings and scratch usage.
+It uses explicitly synthetic retained-source evidence and exercises index/schedule
+machinery, **not** the release verifier. Compare hashes and semantic receipts
+before timings. Warm means the token cache is warm; it does not claim cold OS or
+ZFS caches for the first case. Use each host's own baseline; cross-host timings
+alone do not establish NVMe causality or a corpus-scale completion estimate.
+
 Ordinary `corpus verify-mixture DECLARATION --output OUTPUT` authenticates native
 completion and current inputs without re-running the schedule. An unchanged
 materialization request returns that verified completion. Missing or changed
@@ -179,6 +254,18 @@ reported as `adopted_execution`, distinct from `native_production` or a fresh
 is a completion proof. Acquisition and admission verification remain required
 before frozen splits publish. Historical timers and resource allowances are not
 execution policy for the adopting run.
+
+The historical signed native-completion fallback also needs the original
+producer checkout at the declaration's source path. It checks the recorded bytes
+of `src/sparselab/corpus/split_inventory_adoption.py` and
+`src/sparselab/corpus/completed_preparation.py`, alongside the authenticated
+completion evidence and the remaining producer authority. Preserve that checkout
+and evidence while relying on the handoff: changing or removing those files can
+refuse later verification. This historical fallback does not record a new
+adopted-completion cache entry, so subsequent verification through this path
+repeats the producer-file checks.
+This is an inventory-completion contract, separate from retained-release
+executor adoption and from any supported release relocation.
 
 Adoption preserves output from the explicitly selected producer revision; it
 does not run that historical code or claim current-code production equivalence.
@@ -715,6 +802,15 @@ foreign keys and unsafe ownership/permissions prevent warm reuse rather than
 relaxing checks. The proof-store trust boundary assumes immutable service-owned
 inputs; it does not protect against a compromised same-UID owner.
 
+Proof-store diagnostics distinguish lookup misses from receipt-publication
+refusals. `key_publication_unavailable` means the key creation/publication check
+refused after successful cold verification; the verified result still stands,
+but no warm-reuse receipt was published. A readable existing key can still fail
+this stricter check (for example, its parent is `0755` instead of the required
+private `0700`). Diagnostics retain the original lookup miss as well; hit/miss
+counters count lookups, while the reason summary also includes publication events.
+Lab does not change existing directory permissions to enable reuse.
+
 The `work` summary counts completed full validation passes for this invocation,
 not partial work from a failed attempt. Source indexing and exact-median queries
 use disposable disk metadata; only successful bounded inspection results are
@@ -723,6 +819,15 @@ authority or evidence that the corpus is scientifically suitable for training.
 
 
 ### Bounded admission metadata and split inventory
+
+`corpus admission-draft`, `corpus split-inventory`, and `corpus freeze-splits`
+verify acquired snapshots through `verification_options(root)`. In a trusted
+work root, matching authenticated proofs can reuse verification of unchanged
+dependencies and verifier authority. Missing or stale proofs fall back to cold
+verification; an untrusted work root uses cold verification directly. The first
+run after a relevant authority change may therefore reread snapshot bytes.
+Proof reuse does not waive integrity checks: changed snapshot bytes that no
+longer match their manifest refuse rather than becoming a new trusted snapshot.
 
 `corpus admission-draft`, admission inspection/reverification, and split inventory
 use disposable SQLite storage for allowlisted JSON inventory arrays (positions listed below)
@@ -877,23 +982,29 @@ selections; the modulus is not an adjustable sampling or automatic retry knob.
 
 Mixture materialization and cold replay index document offsets, family/content
 constraints, deterministic ranks and encoded-token offsets in disposable SQLite
-storage. Encoded documents are spooled on disk and replayed in the same stratum,
-rank and exposure order. Token JSONL bytes and schema-1 receipt meanings are
+storage. Ordinary and multi-exposure schedules spool encoded documents on disk
+and replay them in the same stratum, rank and exposure order. Retained
+single-exposure schedules write directly to the output stream without that
+additional encoded spool; committed assembly segments still consume disk.
+Token JSONL bytes and schema-1 receipt meanings are
 unchanged. The existing contiguous-EOS packer writes train and validation arrays
 through disk spools and opens the completed arrays read-only with memory mapping;
 it does not allocate arrays for the entire scheduled training quota in RAM.
 
 This bounds retained Python data by individual records and finite metadata, not
-by total corpus tokens. Individual source/encoded JSONL records are limited to
-64 MiB, receipts to 256 MiB, and exclusion entries to 128 MiB of canonical JSON. An
+by total corpus tokens. Individual mixture source/encoded JSONL records are limited
+to 64 MiB, receipts to 256 MiB, and exclusion entries to 128 MiB of canonical JSON.
+Raw validation JSONL follows the local-text packer instead: at the default
+1 MiB tokenizer source batch, its per-row cap is 6,292,480 bytes
+(`6 * source_batch_bytes + 1024`), not the mixture's 64 MiB cap. An
 oversized record or receipt refuses publication without dropping evidence from a
 successful receipt. SQLite uses a 4 MiB page cache and disk temporary storage;
 these are not hard RSS enforcement. Tokenizer internals and release verification
 have their own resource requirements.
 
-Scratch is real storage: document indexes, all eligible encoded candidates,
-output schedules, cold-replay output, raw array spools and completed arrays can
-coexist. Keep native workspace/resource monitoring and cumulative accounting;
+Scratch is real storage: document indexes, encoded candidates where spooling is
+used, retained assembly segments, output schedules, cold-replay output, raw array
+spools and completed arrays can coexist. Keep native workspace/resource monitoring and cumulative accounting;
 cleanup is not a refund. This implementation does not reduce acquisition
 reservations, authorize a larger disk budget or establish that a full corpus fits.
 
@@ -1012,13 +1123,29 @@ source-step admission does not certify downstream build, tokenizer, packing or
 training capacity. Keep every step's JSON/stdout/stderr and supervisor receipts.
 No real corpus acquisition or model run is part of the offline fixture evidence.
 
-To finalize only already verified snapshots without fetching or reconstructing a
-missing source, use `corpus acquire PROJECT --require-existing`. It publishes
-the full lock only after every selected snapshot verifies, and refuses a missing
-or invalid snapshot before attempting a new acquisition. This option does not
-replace the snapshot integrity checks or apply to a single source step. Do not
-combine it with `--offline`, which verifies an already published lock rather
-than publishing one.
+To finalize eligible existing snapshots without fetching or reconstructing a
+missing source, use `corpus acquire PROJECT --require-existing`. Eligibility
+depends on the source and lock state:
+
+| Source path | Existing matching lock | Stale or absent lock |
+| --- | --- | --- |
+| Ordinary pinned `git`, `huggingface_dataset`, or `wikimedia_dump` | Reverify the referenced snapshot and its declaration/adapter compatibility. | Discover verified compatible snapshots under the project's source snapshot directory and rebuild the lock; refuse if no eligible snapshot exists. A stale reference can also fall through to discovery. |
+| Ordinary `local` or `http_document` | Excluded from old-lock reuse; refuse without reacquiring. | Excluded from immutable snapshot discovery; refuse without reacquiring. |
+| Ordinary `deterministic_generator` or `inference_generator` | Reuse requires a verified snapshot with a matching declaration and exact adapter identity, including its module digest. | Excluded from snapshot discovery; refuse without regenerating if the lock cannot supply an eligible reference. |
+| Declared `reuse_only` source effect | Verify retained origin rights/permissions and bytes, and the matching snapshot already in the destination project. | The same checks apply independently of the lock. A valid origin alone is insufficient: a missing destination snapshot refuses instead of being copied. |
+| HF `retained_subset` project | An existing lock takes the dedicated verification path; an invalid or stale lock refuses instead of entering ordinary discovery. | With no lock, existing compatible snapshots can be discovered; missing snapshots refuse. Retained-subset project restrictions still apply. |
+
+Rejected sources are recorded as rejected rather than requiring an acquired
+snapshot. A replacement full lock publishes only after all applicable source
+checks succeed; failure preserves the prior active lock. Do not delete a live
+lock to work around a refusal. This command can write metadata and the completed
+lock, so it is not a read-only check. Its bounded output reports `lock_path`,
+`project_id`, `source_count`, and `complete`; `--summary` remains an alias for
+that output.
+
+The flag does not replace snapshot integrity checks and cannot be combined with
+`--source-id`, `--plan`, or `--offline`. Use `--offline` to verify an already
+published lock rather than finalize one.
 
 
 ### Local network observation
@@ -1205,8 +1332,11 @@ Unfinished phases can still require recomputation. Native output/copy hashing an
 actual free-space monitoring remain; tiny tests make no full-corpus throughput or
 capacity claim.
 
-Within a private owner-only work root, owner-group-writable declarations are
-mutable inputs, not immutable artifact members. Inspection cache proofs bind
+Within a trusted private work root, group write is eligible when the group is
+the owner's user-private group as checked by `writable_by_others`; shared-group
+or world write does not qualify an immutable artifact as trusted. The separate
+mutable-declaration path can bind eligible owner-group-writable declarations
+under its ownership and path checks. Inspection cache proofs bind
 their captured fingerprints in the signed
 closure and recheck them on load, without changing filesystem permissions. A
 same-size input change still invalidates reuse. World-writable, foreign-owned,
@@ -1215,7 +1345,8 @@ linked or unsafe mutable dependencies remain ineligible.
 For native split/build phases, an owned atomic completion record can also recover
 a checkpoint whose optional cache proof was never published. The current request
 identity, completion digest and cached result must agree; all outputs must retain
-their recorded stamps and owned paths without group or world write access. This is local native
+their recorded stamps and trusted owned paths. User-private group write is
+eligible; shared-group and world write are refused. This is local native
 completion evidence, reported as `owned_native_completion`, not a newly invented
 execution signature. Corrupt present proofs and incomplete or changed native
 records refuse reuse. A present proof rejected for changed verifier authority is
@@ -1285,11 +1416,18 @@ fingerprints. It authenticates each historical proof using the existing store,
 requires an unchanged native producer and every non-authority binding, and
 records the exact old proof, old/current binding and authority hashes. It does
 not re-sign old execution, claim a new cold render, or read corpus bodies.
+`--from-source` and `--to-source` are operator assertions with distinct
+40-character hexadecimal values; this path does not resolve Git commits or
+verify that a checkout matches either label. The operator's assessment remains
+necessary.
 The decision binds the parsed project and a fixed set of source-stage requests.
-Changed requests, inputs, outputs, proofs or current authority refuse continuation
-instead of silently rerendering. Original proofs and completion records remain
+Within the declared source-stage root, changed requests, inputs, outputs, proofs
+or current authority refuse continuation instead of silently rerendering.
+Directories outside that root follow ordinary cache behavior; the option is not
+a global no-rerender guarantee. Original proofs and completion records remain
 untouched. Each adopted render appends a durable `retained-renders.uses-*.jsonl`
-entry next to the declaration; keep it with the run evidence. The option applies
+entry next to the declaration; keep it with the run evidence. This journal records
+actual adoptions, not proof that every declared entry was consumed. The option applies
 only to that build invocation and does not change future default cache behavior.
 
 ### Add a separately prepared release

@@ -257,7 +257,7 @@ def _family_hint(
 
 
 def write_split_inventory_stored(
-    project: Project, work_root: Path, output: Path
+    project: Project, work_root: Path, output: Path, *, completion_cache=None
 ) -> dict[str, Any]:
     """Write metadata-only IDs from cold-verified immutable acquisition bytes.
 
@@ -277,7 +277,13 @@ def write_split_inventory_stored(
         dependencies = inventory_inputs(project, root, lock)
     except OSError:
         dependencies = None
-    cache = InventoryCache(root) if dependencies is not None else None
+    cache = (
+        (completion_cache if completion_cache is not None else InventoryCache(root))
+        if dependencies is not None
+        else None
+    )
+    if cache is not None and cache.root != root:
+        raise ValueError("inventory completion cache work root differs")
     destination.parent.mkdir(parents=True, exist_ok=True)
     counts: Counter[str] = Counter()
     temporary: str | None = None
@@ -371,10 +377,12 @@ def write_split_inventory_stored(
 
 
 def write_split_inventory(
-    project: Project, work_root: Path, output: Path
+    project: Project, work_root: Path, output: Path, *, completion_cache=None
 ) -> dict[str, Any]:
     with metadata_operation(
         Path(work_root) / "corpora" / project.config.id / "metadata-scratch",
         max_database_bytes=None,
     ):
-        return write_split_inventory_stored(project, work_root, output)
+        return write_split_inventory_stored(
+            project, work_root, output, completion_cache=completion_cache
+        )

@@ -12,9 +12,9 @@ image build still does not establish GPU availability, precision or performance.
 | --- | --- |
 | OS | Ubuntu 26.04, immutable amd64 image digest |
 | Python | CPython 3.14.8, Astral standalone release 20261013, SHA256 |
-| PyTorch | 2.14.1+xpu, stable CPython 3.14 manylinux_2_28 wheel |
-| Triton XPU | 3.8.0, stable CPython 3.14 wheel |
-| Intel SYCL runtimes | 2026.1.0 and exact transitive wheel pins |
+| PyTorch | 2.15.0+xpu, stable CPython 3.14 manylinux_2_28 wheel |
+| Triton XPU | 3.9.0, stable CPython 3.14 wheel |
+| Intel SYCL runtimes | 2026.1.2 and exact transitive wheel pins |
 | Level Zero loader | 1.34.0, official Ubuntu 24.04 binary |
 | Intel Level Zero GPU driver | 26.35.39758.10-0 |
 | Intel graphics compiler | 2.41.5, release build 22716 |
@@ -24,7 +24,11 @@ image build still does not establish GPU availability, precision or performance.
 The [dependency recipe](../container/backends/xpu/dependencies.Dockerfile)
 contains immutable base, interpreter and package checksums.
 [Userspace package pins](../container/backends/xpu/userspace.lock.json) record
-nine exact Intel/Ubuntu archive URLs and SHA256 values. The
+nine exact Intel/Ubuntu archive URLs and SHA256 values. Ubuntu packages use the
+[Ubuntu snapshot service](https://snapshot.ubuntu.com/) at `20261015T160000Z`,
+matching the original recipe date, because superseded versions can disappear
+from the live archive. The snapshot URLs retain the same package versions and
+SHA256 checks; a different response still refuses the build. The
 [wheel lock](../container/backends/xpu/requirements.lock) pins all 93 packages,
 including public Lab dependencies. Nothing installs or modifies a host driver.
 
@@ -37,7 +41,7 @@ loader, GPU driver and compiler libraries before checking the installed XPU
 framework. All package URLs were verified, but no package was installed during
 recipe preparation.
 
-Official references: [stable PyTorch XPU](https://docs.pytorch.org/docs/2.14/notes/get_start_xpu.html),
+Official references: [stable PyTorch XPU](https://docs.pytorch.org/docs/2.15/notes/get_start_xpu.html),
 [Intel compute runtime](https://github.com/intel/compute-runtime/releases/tag/26.35.39758.10),
 [Level Zero loader](https://github.com/oneapi-src/level-zero/releases/tag/v1.34.0),
 [Python standalone release](https://github.com/astral-sh/python-build-standalone/releases/tag/20261013).

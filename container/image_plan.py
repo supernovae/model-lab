@@ -47,20 +47,39 @@ def validate_lock(path):
         "--find-links https://download.pytorch.org/whl/xpu/triton-xpu/",
     }
     allowed_indexes.update(
-        "--find-links https://stable.repo.amd.com/rocm/whl-next/" + name + "/"
+        "--find-links https://download.pytorch.org/whl/rocm10.0/" + name + "/"
         for name in (
             "torch",
-            "triton",
-            "amd-torch-device-gfx1100",
-            "amd-torch-device-gfx110x",
-            "rocm-bootstrap",
-            "rocm-sdk-device-gfx1100",
-            "rocm-sdk-libraries",
+            "triton-rocm",
+            "rocm",
             "rocm-sdk-core",
+            "rocm-sdk-device-gfx1010",
+            "rocm-sdk-device-gfx1011",
+            "rocm-sdk-device-gfx1012",
+            "rocm-sdk-device-gfx1030",
+            "rocm-sdk-device-gfx1031",
+            "rocm-sdk-device-gfx1032",
+            "rocm-sdk-device-gfx1033",
+            "rocm-sdk-device-gfx1034",
+            "rocm-sdk-device-gfx1035",
+            "rocm-sdk-device-gfx1036",
+            "rocm-sdk-device-gfx1100",
+            "rocm-sdk-device-gfx1101",
+            "rocm-sdk-device-gfx1102",
+            "rocm-sdk-device-gfx1103",
+            "rocm-sdk-device-gfx1150",
+            "rocm-sdk-device-gfx1151",
+            "rocm-sdk-device-gfx1152",
+            "rocm-sdk-device-gfx1153",
+            "rocm-sdk-device-gfx1200",
+            "rocm-sdk-device-gfx1201",
+            "rocm-sdk-device-gfx1250",
+            "rocm-sdk-device-gfx908",
+            "rocm-sdk-device-gfx90a",
+            "rocm-sdk-device-gfx942",
+            "rocm-sdk-device-gfx950",
+            "rocm-sdk-libraries",
         )
-    )
-    allowed_indexes.add(
-        "--find-links https://stable.repo.amd.com/rocm/core/whl-next/rocm/"
     )
     for line in text.splitlines():
         line = line.strip()
@@ -94,6 +113,32 @@ def validate_application_pins(root, path):
             )
 
 
+def validate_rocm_pins(root):
+    """Require the full declared SDK closure in the hashed binary/source locks."""
+    recipe = root / "requirements/rocm-gfx1100.txt"
+    binary = root / "container/backends/rocm/requirements.lock"
+    source = root / "container/backends/rocm/source-requirements.lock"
+    pinned = dict(
+        re.findall(
+            r"^([A-Za-z0-9_.-]+)==([^\s]+)",
+            binary.read_text() + source.read_text(),
+            re.MULTILINE,
+        )
+    )
+    for name, version in re.findall(
+        r"^([A-Za-z0-9_.-]+)(?:\[[^]]+\])?==([^\s]+)",
+        recipe.read_text(),
+        re.MULTILINE,
+    ):
+        if pinned.get(name) != version:
+            raise ValueError(
+                f"ROCm recipe dependency missing or mismatched: {name}=={version}"
+            )
+    expected = config(root / "container/backends/rocm/config.json")["torch_version"]
+    if pinned.get("torch") != expected:
+        raise ValueError("ROCm framework lock differs from image config")
+
+
 def dependency_recipe(root, backend):
     custom = f"container/backends/{backend}/dependencies.Dockerfile"
     return custom if (root / custom).exists() else "container/dependencies.Dockerfile"
@@ -113,6 +158,8 @@ def identity(root, backend):
             raise ValueError(f"Symlink input refused: {path}")
         if path.is_file():
             backend_inputs.append(path.relative_to(root).as_posix())
+    if backend == "rocm":
+        backend_inputs.append("requirements/rocm-gfx1100.txt")
     for name in (*INPUTS, *backend_inputs):
         path = root / name
         if path.is_symlink() or not path.is_file():
@@ -124,6 +171,8 @@ def identity(root, backend):
     source_lock = root / directory / "source-requirements.lock"
     if backend == "rocm" or source_lock.exists():
         validate_lock(source_lock)
+    if backend == "rocm":
+        validate_rocm_pins(root)
     validate_lock(root / "container/build-requirements.txt")
     return digest.hexdigest()
 

@@ -8,6 +8,7 @@ SQLite's bounded cache is not a hard process RSS limit.
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -33,16 +34,24 @@ def rows(path: Path):
 class MixtureIndex:
     """Index source offsets, family constraints and token-spool offsets on disk."""
 
-    def __init__(self, root: Path, documents: Path):
+    def __init__(self, root: Path, documents: Path, *, prepared=None):
         self.input_digests = {documents: sha256_file(documents)}
         self.documents = documents.open("rb")
         self.tokens = (root / "encoded.jsonl").open("xb+")
+        self.prepared = prepared is not None
+        if prepared is not None:
+            shutil.copyfile(prepared, root / "mixture.sqlite")
         self.db = sqlite3.connect(root / "mixture.sqlite")
+        if self.prepared:
+            self.db.executescript(
+                "PRAGMA cache_size=-4096; PRAGMA temp_store=FILE; PRAGMA journal_mode=OFF;"
+            )
+            return
         self.db.executescript("""
             PRAGMA cache_size=-4096;
             PRAGMA temp_store=FILE;
             PRAGMA journal_mode=OFF;
-            CREATE TABLE docs(id TEXT PRIMARY KEY, offset INTEGER, split TEXT,
+            CREATE TABLE docs(id TEXT PRIMARY KEY, offset INTEGER, size INTEGER, split TEXT,
                 content TEXT, source TEXT, family TEXT, stratum TEXT, rank TEXT,
                 inventoried INTEGER DEFAULT 0, selected INTEGER DEFAULT 0);
             CREATE TABLE families(id TEXT PRIMARY KEY, split TEXT);
@@ -69,11 +78,12 @@ class MixtureIndex:
             if doc["drop_reason"] is None:
                 # Match the old mapping's last-value behavior for duplicate IDs.
                 self.db.execute(
-                    "INSERT OR REPLACE INTO docs(id,offset,split,content,source) "
-                    "VALUES(?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO docs(id,offset,size,split,content,source) "
+                    "VALUES(?,?,?,?,?,?)",
                     (
                         doc["document_id"],
                         offset,
+                        len(line),
                         doc["split"],
                         doc["content_sha256"],
                         doc["source_id"],
@@ -82,7 +92,8 @@ class MixtureIndex:
 
     def __enter__(self):
         try:
-            self._load_documents()
+            if not self.prepared:
+                self._load_documents()
         except BaseException:
             self.__exit__()
             raise
@@ -181,25 +192,90 @@ class MixtureIndex:
                 raise ValueError("train document lacks admitted file or record rights")
         self.db.commit()
 
-    def candidates(self, stratum):
-        self.db.execute("DELETE FROM seen")
+    def candidates(self, stratum, frontier=None, *, workers=1):
+        if frontier is None:
+            self.db.execute("DELETE FROM seen")
+        from sparselab.corpus.mixture_pipeline import ordered_fetch
+
         cursor = self.db.execute(
-            "SELECT offset,family FROM docs WHERE selected=1 AND stratum=? ORDER BY rank,id",
-            (stratum,),
+            "SELECT offset,family,rank,id,size,content,source FROM docs WHERE selected=1 AND stratum=? "
+            "AND (rank,id) > (?,?) ORDER BY rank,id",
+            (stratum, *(frontier or ["", ""])),
         )
+
+        def fetch(row):
+            # Independent file descriptions: seek positions are never shared.
+            with open(self.documents.name, "rb") as stream:
+                stream.seek(row[0])
+                raw = stream.readline(MAX_ROW_BYTES + 1)
+            if len(raw) > MAX_ROW_BYTES:
+                raise ValueError("mixture record-byte cap exceeded")
+            return json.loads(raw)
+
         try:
-            for offset, family in cursor:
-                yield self.document(offset), family
+            for row, doc in ordered_fetch(
+                cursor,
+                fetch,
+                workers=workers,
+                size=lambda row: self.candidate_bytes(row[4], row[5]),
+                metrics=getattr(self, "pipeline_metrics", None),
+                cached=lambda row: self.cached_document(row[3], row[6], row[5]),
+            ):
+                self.frontier = [row[2], row[3]]
+                yield doc, row[1]
         finally:
             cursor.close()
 
+    def candidate_bytes(self, source_bytes, content):
+        lookup = getattr(self, "token_bytes", None)
+        return max(source_bytes, lookup(content) if lookup is not None else 0)
+
+    def cached_document(self, doc_id, source, content):
+        lookup = getattr(self, "token_lookup", None)
+        ids = (
+            lookup(content, count_miss=False, decode=False)
+            if lookup is not None
+            else None
+        )
+        if ids is None:
+            return None
+        return {
+            "document_id": doc_id,
+            "source_id": source,
+            "content_sha256": content,
+            "text": "",
+            "cached_payload": ids,
+        }
+
     def seen(self, digest):
-        return (
+        duplicate = (
             self.db.execute("INSERT OR IGNORE INTO seen VALUES(?)", (digest,)).rowcount
             == 0
         )
+        if not duplicate:
+            self.record_event(["seen", digest])
+        return duplicate
+
+    def record_event(self, event):
+        sink = getattr(self, "event_sink", None)
+        if sink is not None:
+            sink(event)
+
+    def restore_event(self, event):
+        kind, value = event
+        if kind == "seen":
+            self.db.execute("INSERT OR IGNORE INTO seen VALUES(?)", (value,))
+        elif kind == "append":
+            self.append(value)
+        elif kind == "family":
+            self.record_family(*value)
+        elif kind == "reset":
+            self.db.execute("DELETE FROM seen")
+        else:
+            raise ValueError("invalid mixture checkpoint index event")
 
     def append(self, row):
+        self.record_event(["append", row])
         encoded = canonical_json(row) + b"\n"
         if len(encoded) > MAX_ROW_BYTES:
             raise ValueError("mixture encoded record-byte cap exceeded")
@@ -211,13 +287,15 @@ class MixtureIndex:
             (offset, row["family_id"], row["stratum"]),
         )
 
-    def encoded(self, stratum):
+    def encoded(self, stratum, after=0):
         self.tokens.flush()
         cursor = self.db.execute(
-            "SELECT offset FROM encoded WHERE stratum=? ORDER BY ordinal", (stratum,)
+            "SELECT offset,ordinal FROM encoded WHERE stratum=? AND ordinal>? ORDER BY ordinal",
+            (stratum, after),
         )
         try:
-            for (offset,) in cursor:
+            for offset, ordinal in cursor:
+                self.encoded_frontier = ordinal
                 self.tokens.seek(offset)
                 yield json.loads(self.tokens.readline(MAX_ROW_BYTES + 1))
         finally:

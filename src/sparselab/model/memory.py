@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import torch
 from torch import Tensor, nn
@@ -79,26 +79,55 @@ class TokenNgramMemory(nn.Module):
         self.gate = nn.Linear(hidden_dim, 1, bias=False)
         self.last_diagnostics: MemoryDiagnostics | None = None
 
+    def _shifted_inputs(self, input_ids: Tensor, max_order: int) -> list[Tensor]:
+        length = input_ids.shape[1]
+        shifts = [input_ids]
+        for offset in range(1, max_order):
+            shifted = torch.zeros_like(input_ids)
+            if offset < length:
+                shifted[:, offset:] = input_ids[:, :-offset]
+            shifts.append(shifted)
+        return shifts
+
+    def _addresses_from_shifts(
+        self, shifts: list[Tensor], order: int, seed: int
+    ) -> Tensor:
+        base = shifts[0]
+        address = torch.full(
+            base.shape,
+            token_address_init(seed),
+            dtype=torch.long,
+            device=base.device,
+        )
+        for offset in range(order):
+            address = token_address_step(address, shifts[offset], self.table_size, seed)
+        return token_address_finish(address, self.table_size, seed)
+
     def addresses(
         self, input_ids: Tensor, order: int | None = None, seed: int = 0
     ) -> Tensor:
         """Hash only IDs at or before each position for one order/hash head."""
-        batch, length = input_ids.shape
-        address = torch.full(
-            (batch, length),
-            token_address_init(seed),
-            dtype=torch.long,
-            device=input_ids.device,
-        )
         order = self.ngram_size if order is None else order
-        for offset in range(order):
-            shifted = torch.zeros_like(input_ids)
-            if offset == 0:
-                shifted = input_ids
-            elif offset < length:
-                shifted[:, offset:] = input_ids[:, :-offset]
-            address = token_address_step(address, shifted, self.table_size, seed)
-        return token_address_finish(address, self.table_size, seed)
+        shifts = self._shifted_inputs(input_ids, order)
+        return self._addresses_from_shifts(shifts, order, seed)
+
+    def _all_addresses(self, input_ids: Tensor) -> list[Tensor]:
+        if (
+            "addresses" in self.__dict__
+            or getattr(type(self).addresses, "__func__", type(self).addresses)
+            is not _DEFAULT_ADDRESSES
+        ):
+            return [
+                self.addresses(input_ids, order, head)
+                for order in self.ngram_orders
+                for head in range(self.hash_heads)
+            ]
+        shifts = self._shifted_inputs(input_ids, max(self.ngram_orders))
+        return [
+            self._addresses_from_shifts(shifts, order, head)
+            for order in self.ngram_orders
+            for head in range(self.hash_heads)
+        ]
 
     def _apply_addresses(self, hidden: Tensor, addresses: list[Tensor]) -> Tensor:
         tables = (self.table, *self.extra_tables)
@@ -106,33 +135,70 @@ class TokenNgramMemory(nn.Module):
             self.output(table(address))
             for table, address in zip(tables, addresses, strict=True)
         ]
-        values = torch.stack(stream_values).mean(dim=0)
+        stacked_values = torch.stack(stream_values)
+        values = stacked_values.mean(dim=0)
         gate = torch.sigmoid(self.gate(hidden))
-        stream_diagnostics = tuple(
-            _diagnostics(address, gate, value, hidden, self.table_size)
-            for address, value in zip(addresses, stream_values, strict=True)
+        num_streams = len(addresses)
+        gate_mean = gate.mean().detach()
+        hidden_norm = hidden.norm(dim=-1).mean().detach()
+        stream_value_norms = stacked_values.norm(dim=-1).mean(dim=(1, 2)).detach()
+        per_stream_lookups = addresses[0].numel()
+        lookup_tensor = torch.tensor(per_stream_lookups, device=hidden.device)
+        stream_denom = lookup_tensor.clamp_min(1)
+        flat_addresses = torch.stack([address.flatten() for address in addresses])
+        stream_offsets = (
+            torch.arange(num_streams, device=hidden.device)[:, None] * self.table_size
         )
-        self.last_diagnostics = replace(
-            _diagnostics(
-                torch.cat([address.flatten() for address in addresses]),
-                gate,
-                values,
-                hidden,
-                self.table_size,
-            ),
+        counts_by_stream = torch.bincount(
+            (flat_addresses + stream_offsets).flatten(),
+            minlength=num_streams * self.table_size,
+        ).view(num_streams, self.table_size)
+        uniques = (counts_by_stream > 0).sum(dim=-1)
+        collisions = lookup_tensor - uniques
+        reuse_rates = (collisions.float() / stream_denom).detach()
+        utilizations = (uniques.float() / self.table_size).detach()
+        max_fractions = (
+            counts_by_stream.max(dim=-1).values.float() / stream_denom
+        ).detach()
+        stream_diagnostics = tuple(
+            MemoryDiagnostics(
+                lookup_count=lookup_tensor.detach(),
+                unique_addresses=uniques[index].detach(),
+                collision_count=collisions[index].detach(),
+                bucket_reuse_rate=reuse_rates[index],
+                table_utilization=utilizations[index],
+                maximum_address_fraction=max_fractions[index],
+                gate_mean=gate_mean,
+                value_norm=stream_value_norms[index],
+                hidden_norm=hidden_norm,
+            )
+            for index in range(num_streams)
+        )
+        combined_counts = counts_by_stream.sum(dim=0)
+        total_lookups = torch.tensor(
+            per_stream_lookups * num_streams, device=hidden.device
+        )
+        total_unique = (combined_counts > 0).sum()
+        total_collisions = total_lookups - total_unique
+        total_denom = total_lookups.clamp_min(1)
+        self.last_diagnostics = MemoryDiagnostics(
+            lookup_count=total_lookups.detach(),
+            unique_addresses=total_unique.detach(),
+            collision_count=total_collisions.detach(),
+            bucket_reuse_rate=(total_collisions.float() / total_denom).detach(),
+            table_utilization=(total_unique.float() / self.table_size).detach(),
+            maximum_address_fraction=(
+                combined_counts.max().float() / total_denom
+            ).detach(),
+            gate_mean=gate_mean,
+            value_norm=values.norm(dim=-1).mean().detach(),
+            hidden_norm=hidden_norm,
             streams=stream_diagnostics,
         )
         return hidden + gate * values
 
     def forward(self, hidden: Tensor, input_ids: Tensor) -> Tensor:
-        return self._apply_addresses(
-            hidden,
-            [
-                self.addresses(input_ids, order, head)
-                for order in self.ngram_orders
-                for head in range(self.hash_heads)
-            ],
-        )
+        return self._apply_addresses(hidden, self._all_addresses(input_ids))
 
     def forward_last(self, hidden: Tensor, history_ids: Tensor) -> Tensor:
         """Apply causal n-gram memory to appended hidden states only.
@@ -145,11 +211,12 @@ class TokenNgramMemory(nn.Module):
         required = max(self.ngram_orders)
         suffix = history_ids[:, -max(required + hidden.shape[1] - 1, 1) :]
         addresses = [
-            self.addresses(suffix, order, head)[:, -hidden.shape[1] :]
-            for order in self.ngram_orders
-            for head in range(self.hash_heads)
+            address[:, -hidden.shape[1] :] for address in self._all_addresses(suffix)
         ]
         return self._apply_addresses(hidden, addresses)
+
+
+_DEFAULT_ADDRESSES = TokenNgramMemory.addresses
 
 
 class ByteAddressMemory(nn.Module):

@@ -16,7 +16,7 @@ from test_surface_review import cells
 from test_training import config
 
 from sparselab.campaign.state import publish_immutable
-from sparselab.canonical import canonical_json
+from sparselab.canonical import canonical_digest, canonical_json
 from sparselab.evaluation import inference
 from sparselab.evaluation.capabilities import describe_capability_card
 from sparselab.evaluation.suite import (
@@ -71,6 +71,386 @@ def evaluated_run(tmp_path_factory):
         )
     )
     return source, small.logging.root_dir
+
+
+@pytest.fixture(scope="module")
+def fixed_panel_run(tmp_path_factory):
+    from sparselab.config.models import RunConfig
+    from sparselab.data.packing import prepare_data
+    from sparselab.data.tokenizer import load_tokenizer
+    from sparselab.training.manifest import sha256_file
+
+    root = tmp_path_factory.mktemp("fixed-panel-evidence")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("SPARSELAB_WORK_DIR", str(root / "work"))
+        base = config(root)
+        values = base.model_dump(mode="json")
+        values["training"].update(max_steps=1, max_tokens=32)
+        values["optimizer"]["warmup_steps"] = 0
+        values["evaluation"].update(every_steps=1, max_batches=1)
+        values["checkpoint"]["every_steps"] = 1
+        base = RunConfig.model_validate(values)
+        tokenizer = load_tokenizer(base.tokenizer.path)
+        panels = []
+        for seed, name in ((8, "first"), (9, "second")):
+            source = base.model_copy(
+                update={
+                    "dataset": base.dataset.model_copy(
+                        update={
+                            "synthetic_seed": seed,
+                            "train_max_documents": 8,
+                            "validation_max_documents": 4,
+                            "train_max_tokens": 256,
+                            "validation_max_tokens": 256,
+                        }
+                    )
+                }
+            )
+            prepared = prepare_data(source, tokenizer)
+            panels.append(
+                {
+                    "name": name,
+                    "prepared_path": str(prepared.root),
+                    "prepared_manifest_sha256": prepared.manifest["manifest_sha256"],
+                    "tokenizer_file_sha256": sha256_file(base.tokenizer.path),
+                    "tokenizer_canonical_sha256": prepared.manifest["tokenizer_sha256"],
+                    "split": "validation",
+                    "sampling": "first_eligible_blocks",
+                    "sequence_length": 16,
+                    "blocks": 3,
+                    "supervised_targets": 48,
+                    "batch_size": 2,
+                    "max_forward_positions": 48,
+                }
+            )
+        values["evaluation"]["panels"] = panels
+        measured = RunConfig.model_validate(values)
+        train(measured, run_id="fixed-panels")
+    return measured.logging.root_dir / "fixed-panels"
+
+
+def _panel_run_config(fixed_panel_run, root):
+    from sparselab.config.models import RunConfig
+    from sparselab.training.manifest import read_manifest
+
+    values = read_manifest(fixed_panel_run / "manifest.json")["effective_config"]
+    values["logging"]["root_dir"] = str(root / "runs")
+    values["dataset"]["cache_dir"] = str(root / "cache")
+    return RunConfig.model_validate(values)
+
+
+@pytest.mark.parametrize("field", ["valid_targets", "batches"])
+def test_active_fixed_panels_refuse_incomplete_evaluation(
+    fixed_panel_run, tmp_path, monkeypatch, field
+):
+    from sparselab.engines.pytorch import PyTorchEngine
+
+    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path))
+    measured = _panel_run_config(fixed_panel_run, tmp_path)
+    original = PyTorchEngine.evaluate
+    observed = []
+
+    def incomplete(self, batches):
+        result = original(self, batches)
+        observed.append(result)
+        return replace(result, **{field: getattr(result, field) - 1})
+
+    monkeypatch.setattr(PyTorchEngine, "evaluate", incomplete)
+    with pytest.raises(
+        ValueError, match="active evaluation did not complete panel coverage"
+    ):
+        train(measured, run_id="incomplete")
+    assert len(observed) == 1
+    assert observed[0].valid_targets == 48 and observed[0].batches == 2
+    assert not list(
+        (measured.logging.root_dir / "incomplete" / "evaluations").glob(
+            "validation_step_*.json"
+        )
+    )
+
+
+@pytest.fixture
+def aliased_panel_inputs(fixed_panel_run, tmp_path, monkeypatch):
+    from sparselab.config.models import RunConfig
+    from sparselab.data.packing import prepare_data
+    from sparselab.data.tokenizer import load_tokenizer
+
+    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path))
+    measured = _panel_run_config(fixed_panel_run, tmp_path)
+
+    def local_config(values, train_name, train_text, validation_name, validation_text):
+        for name, text in (
+            (train_name, train_text),
+            (validation_name, validation_text),
+        ):
+            (tmp_path / name).write_bytes(canonical_json({"text": text}) + b"\n")
+        values["dataset"].update(
+            source="local_text",
+            train_path=str(tmp_path / train_name),
+            validation_path=str(tmp_path / validation_name),
+            license="CC0-1.0",
+            train_max_documents=1,
+            validation_max_documents=1,
+            train_max_tokens=256,
+            validation_max_tokens=256,
+        )
+        return RunConfig.model_validate(values)
+
+    shared_text = "A neutral fixture sentence about X. " * 4
+    panel_config = local_config(
+        measured.model_dump(mode="json"),
+        "panel-train.jsonl",
+        "Other text for Y. " * 8,
+        "panel-validation.jsonl",
+        shared_text,
+    )
+    tokenizer = load_tokenizer(measured.tokenizer.path)
+    prepared = prepare_data(panel_config, tokenizer)
+    values = measured.model_dump(mode="json")
+    values["evaluation"]["panels"][0].update(
+        prepared_path=str(prepared.root),
+        prepared_manifest_sha256=prepared.manifest["manifest_sha256"],
+        tokenizer_canonical_sha256=prepared.manifest["tokenizer_sha256"],
+    )
+    measured = local_config(
+        values,
+        "run-train.jsonl",
+        shared_text,
+        "run-validation.jsonl",
+        "Third unrelated text Z. " * 8,
+    )
+    training = prepare_data(measured, tokenizer)
+    # Each bundle has disjoint splits; the forbidden alias crosses bundles.
+    assert (
+        training.manifest["train"]["sha256"]
+        == prepared.manifest["validation"]["sha256"]
+    )
+
+    return measured, training
+
+
+@pytest.mark.parametrize("consumer", ["train", "stage"])
+def test_fixed_panel_training_alias_refused_at_public_consumers(
+    aliased_panel_inputs, tmp_path, monkeypatch, consumer
+):
+    from sparselab.engines.pytorch import PyTorchEngine
+    from sparselab.staging import materialize_prepared_inputs
+
+    measured, _ = aliased_panel_inputs
+
+    def no_model(*args, **kwargs):
+        pytest.fail("aliased inputs must be refused before model initialization")
+
+    monkeypatch.setattr(PyTorchEngine, "initialize", no_model)
+    destination = tmp_path / "stage"
+    with pytest.raises(
+        ValueError, match="fixed panel validation aliases the training array"
+    ):
+        if consumer == "train":
+            train(measured, run_id="aliased")
+        else:
+            materialize_prepared_inputs(measured, destination)
+    assert not destination.exists()
+    assert not (measured.logging.root_dir / "aliased").exists()
+
+
+def test_artifact_copy_refuses_training_alias_before_copying_panels(
+    aliased_panel_inputs, fixed_panel_run, tmp_path
+):
+    from sparselab.training.trainer import _copy_artifacts
+
+    measured, training = aliased_panel_inputs
+    # The original synthetic panels do not alias this local-text training array.
+    # First prove the real copier accepts the same training bundle with them.
+    allowed = measured.model_copy(
+        update={"evaluation": _panel_run_config(fixed_panel_run, tmp_path).evaluation}
+    )
+    control = tmp_path / "accepted-copy"
+    control.mkdir()
+    artifacts = _copy_artifacts(control, allowed, training)
+    for panel in allowed.evaluation.panels:
+        name = f"panels/{panel.name}/validation.npy"
+        assert any(artifact.relative_path == name for artifact in artifacts)
+        assert (control / name).is_file()
+
+    refused = tmp_path / "refused-copy"
+    refused.mkdir()
+    with pytest.raises(
+        ValueError, match="fixed panel validation aliases the training array"
+    ):
+        _copy_artifacts(refused, measured, training)
+    assert not (refused / "panels").exists()
+
+
+def test_run_input_panel_check_refuses_alias_after_earlier_checks_are_bypassed(
+    aliased_panel_inputs, fixed_panel_run, tmp_path, monkeypatch
+):
+    from sparselab.training import trainer
+
+    measured, _ = aliased_panel_inputs
+    original_load = trainer.load_fixed_panels
+    original_copy = trainer.copy_fixed_panels
+
+    # Fault injection: omit alias validation at the two earlier boundaries,
+    # retaining native preparation, panel authentication and artifact copying.
+    # Only the final run-owned input loader can refuse this alias now.
+    def load_before_run(config, **kwargs):
+        if kwargs.get("inputs_root") is None:
+            kwargs.pop("training_manifest", None)
+        return original_load(config, **kwargs)
+
+    def copy_without_alias_check(config, destination, **kwargs):
+        kwargs.pop("training_manifest", None)
+        return original_copy(config, destination, **kwargs)
+
+    monkeypatch.setattr(trainer, "load_fixed_panels", load_before_run)
+    monkeypatch.setattr(trainer, "copy_fixed_panels", copy_without_alias_check)
+    allowed = measured.model_copy(
+        update={"evaluation": _panel_run_config(fixed_panel_run, tmp_path).evaluation}
+    )
+    train(allowed, run_id="post-copy-control")
+    with pytest.raises(
+        ValueError, match="fixed panel validation aliases the training array"
+    ):
+        train(measured, run_id="post-copy-alias")
+    refused = measured.logging.root_dir / "post-copy-alias"
+    assert (refused / "panels/first/validation.npy").is_file()
+    assert not list((refused / "checkpoints").glob("step_*"))
+    assert not list((refused / "evaluations").glob("validation_step_*.json"))
+
+
+def test_staged_panel_training_and_resume_use_owned_inputs(
+    fixed_panel_run, tmp_path, monkeypatch
+):
+    from sparselab.config.models import RunConfig
+    from sparselab.evaluation.evidence import experiment_evidence
+    from sparselab.staging import stage
+    from sparselab.training.manifest import read_manifest
+
+    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    values = _panel_run_config(fixed_panel_run, tmp_path).model_dump(mode="json")
+    values["training"].update(max_steps=2, max_tokens=64)
+    caller_inputs = tmp_path / "caller-inputs"
+    caller_inputs.mkdir()
+    shutil.copy2(values["tokenizer"]["path"], caller_inputs / "tokenizer.json")
+    values["tokenizer"]["path"] = str(caller_inputs / "tokenizer.json")
+    for panel in values["evaluation"]["panels"]:
+        target = caller_inputs / panel["name"]
+        shutil.copytree(panel["prepared_path"], target)
+        panel["prepared_path"] = str(target)
+    measured = RunConfig.model_validate(values)
+    bundle = stage(measured, tmp_path / "stage", through="validate")
+    caller_inputs.rename(tmp_path / "removed-caller-inputs")
+    measured.dataset.cache_dir.rename(tmp_path / "removed-cache")
+
+    train(measured, run_id="staged-panels", stage_bundle=bundle, stop_after_step=1)
+    parent = measured.logging.root_dir / "staged-panels"
+    bundle.rename(tmp_path / "removed-stage")
+    train(
+        measured,
+        run_id="resumed-panels",
+        resume=parent / "checkpoints/latest.json",
+    )
+    for name in ("staged-panels", "resumed-panels"):
+        run = measured.logging.root_dir / name
+        evidence = experiment_evidence(run)
+        assert evidence["evidence_level"] == "checkpointed_held_out"
+        assert not evidence["rejected_reports"]
+        manifest = read_manifest(run / "manifest.json")
+        owned = {item["relative_path"] for item in manifest["artifacts"]}
+        for panel in measured.evaluation.panels:
+            path = f"panels/{panel.name}/validation.npy"
+            assert path in owned and (run / path).is_file()
+        reports = list((run / "evaluations").glob("validation_step_*_gen_*.json"))
+        assert reports
+        for path in reports:
+            report = json.loads(path.read_text())
+            assert report["valid_targets"] == 96 and report["batches"] == 4
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ("protocol", "fixed-panel report protocol mismatch"),
+        ("ownership", "fixed-panel inputs are not owned run artifacts"),
+        ("artifact", "fixed-panel artifact identity mismatch"),
+        ("data", "fixed-panel data identity mismatch"),
+    ],
+)
+def test_fixed_panel_evidence_refuses_resealed_metadata(
+    fixed_panel_run, tmp_path, change, reason
+):
+    from sparselab.evaluation.evidence import (
+        experiment_evidence,
+        validate_held_out_report,
+    )
+    from sparselab.evaluation.post_train_triage import read_triage
+    from sparselab.training.manifest import read_manifest
+
+    run = fixed_panel_run
+    evidence = experiment_evidence(run)
+    assert evidence["evidence_level"] == "checkpointed_held_out"
+    assert not evidence["rejected_reports"]
+    manifest = read_manifest(run / "manifest.json")
+    artifacts = {
+        item["relative_path"]: item["sha256"] for item in manifest["artifacts"]
+    }
+    checkpoints = {
+        item["path"]: item for item in evidence["checkpoints"] if item["verified"]
+    }
+    original = next((run / "evaluations").glob("validation_step_*_gen_*.json"))
+    accepted, error = validate_held_out_report(
+        original, checkpoints, artifacts, manifest, 96, 4
+    )
+    assert error is None
+    assert accepted["valid_targets"] == 96 and accepted["batches"] == 4
+    triage = read_triage(run.name, run.parent)
+    assert triage["core"]["evidence"]["expected_validation_targets"] == 96
+
+    payload = json.loads(original.read_text())
+    if change == "protocol":
+        payload["panels"]["first"]["protocol"]["blocks"] = 2
+    elif change == "ownership":
+        del artifacts["panels/first/manifest.json"]
+    elif change == "artifact":
+        payload["identities"]["panels/first/manifest.json"] = "0" * 64
+    else:
+        payload["panels"]["first"]["data_identity"]["validation_sha256"] = "0" * 64
+    payload.pop("sha256")
+    payload["sha256"] = canonical_digest(payload)
+    report = tmp_path / "resealed.json"
+    report.write_bytes(canonical_json(payload))
+    rejected, error = validate_held_out_report(
+        report, checkpoints, artifacts, manifest, 96, 4
+    )
+    assert rejected is None
+    assert error == reason
+
+
+def test_ordinary_run_refuses_resealed_unexpected_panel_results(
+    evaluated_run, tmp_path
+):
+    from sparselab.evaluation.evidence import experiment_evidence
+
+    _, runs = evaluated_run
+    run = tmp_path / "suite-run"
+    shutil.copytree(runs / "suite-run", run)
+    assert experiment_evidence(run)["evidence_level"] == "checkpointed_held_out"
+    report = next((run / "evaluations").glob("validation_step_*_gen_*.json"))
+    payload = json.loads(report.read_text())
+    payload["panels"] = {"undeclared": {}}
+    payload.pop("sha256")
+    payload["sha256"] = canonical_digest(payload)
+    report.write_bytes(canonical_json(payload))
+    result = experiment_evidence(run)
+    assert {"path": report.name, "reason": "unexpected fixed-panel results"} in result[
+        "rejected_reports"
+    ]
+    assert payload["checkpoint"] in result["missing_reports"]
+    assert all(
+        item["checkpoint"] != payload["checkpoint"]
+        for item in result["quality_observations"]
+    )
 
 
 def test_run_evidence_signed_reuse_across_process_and_restored_mtime(
@@ -550,12 +930,13 @@ def test_pending_surface_review_preserves_completed_numeric_gate(
 
 
 def test_suite_signed_replay_reuses_payload_and_preserves_canonical_index(
-    evaluated_run, monkeypatch
+    evaluated_run, tmp_path, monkeypatch
 ):
     from sparselab.data import verification
     from sparselab.verification_proofs import ProofStore
 
     source, runs = evaluated_run
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     options = {
         "proof_store": ProofStore(source.parent),
         "verification_mode": "verified_reuse",

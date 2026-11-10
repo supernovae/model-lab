@@ -1,0 +1,153 @@
+# Matched story packing
+
+Opt in through `training.matched_stories`; omit it to preserve default fixed-block
+packing, shuffling and config identity. This experiment uses the native trainer,
+checkpoint cursor and summed cross-entropy / total valid targets normalization.
+No attention API changes are required. Only plain all-token EOS-delimited data
+and models without external memory are supported. EOS must be reserved for
+story boundaries; source text containing literal EOS special tokens is unsuitable.
+Prepared bytes and validation packing remain unchanged.
+
+Both arms walk source-order documents, repeating that order each pass. A group
+closes at the first document end reaching `targets_per_update` (4096 by default),
+or at the corpus end. A long document can therefore make a larger group. Each
+update uses the same group in both arms; `micro_batch_size` only partitions rows
+within the update. `gradient_accumulation` does not size matched groups. Do not
+interpret the requested group target as an exact fixed effective batch.
+
+`layout: story` starts independent right-padded rows for each story. Long stories
+continue in ordered chunks of at most `seq_len` targets with the preceding token
+as context. `layout: contiguous` fills rows across story boundaries within the
+same group. Both include all stored tokens (first token and every EOS included),
+using a virtual preceding EOS for the first stored token. Padded labels are
+`-100`; a clipped final update retains exactly the same target prefix in each
+arm. Padding and context tokens do not count toward the budget. This matched
+control is a new protocol, not a replay of the default shuffled block loader.
+
+## Freeze the common plan before launch
+
+Use the already prepared training array and matching tokenizer on the runner.
+This only indexes tokens; it does not train or fetch data:
+
+```python
+import json
+import numpy as np
+from sparselab.data.story_packing import MatchedStoryDataset
+from sparselab.data.tokenizer import load_tokenizer
+from sparselab.training.manifest import sha256_file
+
+tokens_path = prepared_root / "train.npy"  # Path to verified prepared inputs
+ids = np.load(tokens_path, mmap_mode="r")
+eos = load_tokenizer(tokenizer_path).token_to_id("<eos>")
+plan = MatchedStoryDataset(ids, 512, eos, layout="contiguous", targets_per_update=4096)
+manifest = plan.group_manifest(
+    100_003_840, train_tokens_sha256=sha256_file(tokens_path)
+)
+print(json.dumps(manifest, indent=2))
+```
+
+Retain this manifest with the experiment declaration, compare it across arms,
+and set **both** `training.max_steps` to its `max_steps`. The trainer rejects an
+incorrect horizon; do not assume 24,415 updates. Set `optimizer.decay_steps` to
+that same common horizon and freeze a shared `optimizer.warmup_steps` before
+calibration. `full_pass_layout_costs` contains both layouts' total rows and padded
+slots per pass, maximum rows and padded slots per update, and the index of a
+maximum-row group. These full-pass bounds are useful for worst-case calibration,
+even when the requested budget stops earlier. Padding counts describe uncut
+full-pass groups; final clipping may add padding within its last retained row.
+These are counts, not GPU memory
+or throughput measurements. `update_rows(max_rows_group_index, len(ids))`
+materializes that calibration group through the same public API.
+
+The existing `micro_batch_size` supports multiple rows per native microbatch.
+Calibrate a shared value greater than one when it fits: single-row microbatches
+can require many serial passes for the story arm. Do not assume 16 or 32 fits,
+or claim a speedup without ROCm measurements. Freeze the same measured value in
+both arms before the full pair. Variable row-length padding is deferred because
+it would change this fixed-512-shape comparison.
+
+Public configuration overlay (replace `HORIZON`, `WARMUP`, and `MICROBATCH` with integers):
+
+```yaml
+training:
+  seq_len: 512
+  micro_batch_size: MICROBATCH
+  gradient_accumulation: 1
+  max_tokens: 100003840
+  max_steps: HORIZON
+  matched_stories:
+    layout: contiguous  # story in the other arm; sole experimental delta
+    targets_per_update: 4096
+optimizer:
+  name: adamw
+  peak: 0.00006
+  floor: 0.000006
+  warmup_steps: WARMUP
+  decay_steps: HORIZON
+```
+
+Apply these fields to the full runner-owned configuration. Use the existing
+native weight-promotion path for each fresh arm, not full-state resume from the
+parent: fresh matched optimizer, RNG and counters; identical seed and all other
+settings. Parent checkpoint SHA:
+`085adc01f1512dc41570be869d471b184d84decb3a80e453bb83d3bef43ccc89`;
+weights SHA:
+`e667a81daa8df8f3feaf72fd5a7cff3b7bce95473cf3518515600fef3d66db4d`.
+Keep the 50,556,800-parameter model, BF16 reference attention and runner-frozen
+evaluation unchanged. This guide does not launch training or alter evaluation.
+
+Within an arm, ordinary full-state resume restores `(epoch, next_group)` in the
+existing cursor. Config identity binds layout and target grouping; prepared
+input identity binds token bytes. Changed layout/group size/horizon is rejected.
+Exposure records identify this protocol and its group-offset digest separately
+from default packed-block exposure. The legacy exposure `eligible_blocks` and
+cursor field `next_block` count **groups** under this opt-in protocol.
+
+Native smoke/warmup staging preserves the configured number of pilot updates.
+For matched packing it derives the pilot token budget from the first complete
+matched groups in the verified staged array (`targets_for_updates(steps)`),
+including repeated passes when needed. Budget derivation enters the authenticated
+`stage_bundle_verification` progress phase beneath `input_validation`; the native
+supervisor still rejects counters outside the active phase. It does not use microbatch row capacity
+as a target count. Pilot LR warmup/decay are clipped to that short pilot horizon;
+the full experiment budget, horizon and frozen evaluation remain unchanged.
+
+## Reusing prepared arrays after operational fixes
+
+Ordinary prepared-cache identity includes all top-level `data/*.py` modules
+(except the publication-only snapshot writer) and `config/models.py`. Adding or
+changing story-index helpers therefore invalidates that conservative preparation
+fingerprint, even when packed bytes would be identical. Do not rewrite old cache
+identities or exclude modules to force a hit.
+
+A change confined to staging/progress code leaves that preparation fingerprint
+unchanged. Keep the same verified dataset/tokenizer declarations and canonical
+`dataset.cache_dir`, then create a fresh stage output through the normal native
+preparation path. `prepare_data` can authenticate and reuse the matching canonical
+cache while the new stage records the current full package source identity.
+An older `--prepared-inputs` bundle has an additional exact package-source binding
+and is not interchangeable with that canonical cache across source changes.
+Do not bypass it with runtime/source drift. If the matching canonical cache is
+absent, ordinary preparation must rebuild it; any broader historical-source reuse
+requires the separately reviewed native operational-compatibility workflow.
+
+## Validation and limits
+
+The supervised staging regression launches real smoke/warmup subprocesses for
+both layouts in cold and verified-reuse modes and replays their authenticated
+accepted events through `PilotDeadlineState`. A sparse 64 MiB auxiliary fixture
+asset reaches the production hash-progress threshold without enlarging the token
+corpus or model. Direct `run_pilot()` calls alone do not activate that channel and
+cannot establish supervisor compatibility.
+
+Synthetic tests cover target coverage, long-story endings, clipping across
+passes, matched per-update counts, padding loss/gradient and native interrupted
+resume. They establish wiring, not quality or accelerator throughput. The local
+NumPy-only check covered 249 budgets. On a 200,000-token synthetic array (1,000
+stories of 200 tokens), both layouts used 48 groups with 8,392 bytes of NumPy
+indices; story layout emitted 1,000 rows in 0.0069 s, contiguous 429 in 0.0027 s.
+These are illustrative indexing measurements, not model-throughput estimates.
+Index construction also temporarily holds document ends in a Python list.
+Rows for one update are materialized; exceptionally long documents increase
+host memory and padding can substantially increase model compute. The ROCm
+runner must calibrate the frozen shapes before the full pair.

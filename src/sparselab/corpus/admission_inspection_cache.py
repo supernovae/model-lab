@@ -91,7 +91,7 @@ class InspectionCache:
             self._unavailable("verifier_authority_unavailable")
             return
         try:
-            key_available = self.proofs._key(create=True) is not None
+            key_available = self.proofs.key_available(create=True)
         except OSError, ValueError:
             key_available = False
         if not key_available:

@@ -128,8 +128,25 @@ class ModelConfig(StrictModel):
         return self
 
 
+class TokenizerOrigin(StrictModel):
+    """Explicit immutable origin of a tokenizer reused across frozen snapshots."""
+
+    dataset: DatasetConfig
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_origin(self) -> TokenizerOrigin:
+        if self.dataset.source not in {"snapshot", "local_stories"}:
+            raise ValueError("explicit tokenizer origin requires a frozen snapshot")
+        return self
+
+
 class TokenizerConfig(StrictModel):
     path: Path
+    origin: TokenizerOrigin | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class DatasetConfig(StrictModel):
@@ -326,9 +343,15 @@ class RuntimeConfig(StrictModel):
     engine: Literal["pytorch", "mlx"] = "pytorch"
     backend: Literal["auto", "cpu", "mps", "cuda", "rocm", "xpu", "metal"] = "auto"
     device_index: int = Field(default=0, ge=0)
+    secondary_device_indices: tuple[int, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     precision: Literal["auto", "fp32", "bf16", "fp16"] = "fp32"
     memory: MemoryConfig = MemoryConfig()
     compile_transformer_blocks: bool = Field(
+        default=False, exclude_if=lambda value: not value
+    )
+    compile_output_head_loss: bool = Field(
         default=False, exclude_if=lambda value: not value
     )
 
@@ -342,7 +365,46 @@ class RuntimeConfig(StrictModel):
             raise ValueError(
                 "block compilation requires PyTorch without activation checkpointing or offload"
             )
+        if self.compile_output_head_loss and (
+            self.engine != "pytorch"
+            or self.backend != "xpu"
+            or self.precision != "bf16"
+            or self.memory.activation_offload.enabled
+        ):
+            raise ValueError(
+                "compiled output head and loss require PyTorch XPU BF16 "
+                "without activation offload"
+            )
+        if self.secondary_device_indices:
+            if self.engine != "pytorch" or self.backend in {"mps", "metal"}:
+                raise ValueError(
+                    "secondary_device_indices requires PyTorch on cpu, cuda, rocm, or xpu"
+                )
+            if any(idx < 0 for idx in self.secondary_device_indices):
+                raise ValueError("secondary_device_indices must be non-negative")
+            if len(set(self.secondary_device_indices)) != len(
+                self.secondary_device_indices
+            ):
+                raise ValueError("secondary_device_indices must not contain duplicates")
+            if (
+                self.backend != "cpu"
+                and self.device_index in self.secondary_device_indices
+            ):
+                raise ValueError(
+                    "secondary_device_indices must not include the primary device_index"
+                )
+            if self.memory.activation_offload.enabled:
+                raise ValueError(
+                    "secondary_device_indices cannot be combined with activation offload"
+                )
         return self
+
+
+class MatchedStoryConfig(StrictModel):
+    """Shared document grouping; layout is the sole arm-specific setting."""
+
+    layout: Literal["contiguous", "story"]
+    targets_per_update: int = Field(default=4096, gt=0)
 
 
 class TrainingConfig(StrictModel):
@@ -354,6 +416,9 @@ class TrainingConfig(StrictModel):
     grad_clip_norm: float = Field(default=1.0, gt=0)
     neural_loss_weight: float = Field(default=1.0, ge=0, le=1)
     deterministic: bool = True
+    matched_stories: MatchedStoryConfig | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
     trainable_parameters: tuple[str, ...] | None = None
     portability_manifest_path: Path | None = None
 
@@ -619,6 +684,19 @@ class RunConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_cross_section(self) -> RunConfig:
+        if self.runtime.compile_output_head_loss and (
+            self.dataset.allocation_manifest_path is not None
+            or self.training.portability_manifest_path is not None
+        ):
+            raise ValueError(
+                "compiled output head and loss do not support allocation "
+                "or portability runs"
+            )
+        if self.tokenizer.origin is not None and self.dataset.source not in {
+            "snapshot",
+            "local_stories",
+        }:
+            raise ValueError("explicit tokenizer origin requires a snapshot consumer")
         if self.evaluation.panels:
             if (
                 self.runtime.engine != "pytorch"
@@ -729,6 +807,15 @@ class RunConfig(StrictModel):
         ):
             raise ValueError(
                 "allocation ownership currently requires the PyTorch engine"
+            )
+        if self.runtime.secondary_device_indices and (
+            self.model.semantic_memory_dim is not None
+            or self.dataset.allocation_manifest_path is not None
+            or self.training.portability_manifest_path is not None
+        ):
+            raise ValueError(
+                "runtime.secondary_device_indices cannot be combined with semantic memory, "
+                "allocation sidecars, or portability runs"
             )
         return self
 

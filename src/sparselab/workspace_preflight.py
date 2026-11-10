@@ -162,7 +162,7 @@ def training_storage_checks(
         run_copy = projected_data_bytes(config)
         cache_growth = run_copy
     else:
-        from sparselab.data.packing import _tokenizer_sha256
+        from sparselab.data.packing import _tokenizer_sha256, prepared_dataset_identity
         from sparselab.data.tokenizer import load_tokenizer
         from sparselab.data.verification import (
             VerifiedPreparedData,
@@ -180,19 +180,7 @@ def training_storage_checks(
         if proof.manifest_sha256 != verified_prepared.manifest_sha256:
             raise ValueError("prepared receipt manifest changed")
         identity = manifest.get("cache_identity")
-        expected_dataset = {
-            key: value
-            for key, value in config.dataset.model_dump(mode="json").items()
-            if key
-            not in {
-                "cache_dir",
-                "train_path",
-                "validation_path",
-                "source_manifest_path",
-                "corpus_release_path",
-                "corpus_export_path",
-            }
-        }
+        expected_dataset = prepared_dataset_identity(config.dataset)
         expected_packing = {
             "memory": config.model.memory,
             "memory_table_size": config.model.memory_table_size,

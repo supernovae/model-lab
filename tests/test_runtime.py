@@ -198,6 +198,21 @@ def test_cpu_fp16_is_rejected_before_probe() -> None:
         runtime.validate_runtime(_config(precision="fp16"))
 
 
+def test_mps_inventory_does_not_offer_rejected_fp16(monkeypatch):
+    import sparselab.runtime_profile as profiles
+
+    monkeypatch.setattr(
+        profiles, "require_authorization", lambda config, authorization: None
+    )
+    monkeypatch.setattr(runtime, "_backend_available", lambda backend: backend == "mps")
+    monkeypatch.setattr(runtime.importlib.util, "find_spec", lambda _: None)
+    info = next(item for item in runtime.discover_runtimes() if item.backend == "mps")
+    assert info.precision_capabilities == ("fp32", "bf16")
+    assert info.tested_precisions == ()
+    with pytest.raises(ValueError, match="fp16 requires a supported GradScaler on mps"):
+        runtime.validate_runtime(_config(backend="mps", precision="fp16"))
+
+
 def test_state_offload_stays_explicitly_unsupported() -> None:
     config = _config()
     config.optimizer.state_offload = True

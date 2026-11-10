@@ -208,7 +208,11 @@ class ProofStore:
         return _trusted(self.root, path)
 
     def diagnostics(self) -> dict[str, object]:
-        """Operational lookup outcomes, separate from artifact identity."""
+        """Operational verification outcomes, separate from artifact identity.
+
+        Hit/miss counters count lookups; reasons also include cold requests and
+        receipt-publication failures.
+        """
         return {
             "hits": self.hits,
             "misses": self.misses,
@@ -399,6 +403,16 @@ class ProofStore:
         with self.key_path.open("rb") as stream:
             key = stream.read(33)
         return key if len(key) == 32 else None
+
+    def key_available(self, *, create: bool = False) -> bool:
+        """Check key access without exposing key bytes; read-only by default.
+
+        ``create=True`` uses the existing publication trust checks and may create
+        the private key and its directories. A readable existing key does not
+        imply that those stricter publication checks will succeed. This checks
+        only key access, not receipt-directory availability.
+        """
+        return self._key(create=create) is not None
 
     def migration_signature(self, observation: dict[str, object]) -> str:
         """Authenticate a relocation observation, not a native execution proof.
@@ -608,6 +622,7 @@ class ProofStore:
         try:
             key = self._key(create=True)
             if key is None:
+                self._event(binding, "key_publication_unavailable")
                 return
             self.directory.parent.mkdir(mode=0o700, exist_ok=True)
             if not _trusted(self.root, self.directory.parent):

@@ -144,6 +144,58 @@ sparselab data budget --prepared-root "$PREPARED" --config run.yaml \
   --passes 1 --no-require-full --output one-pass.yaml --json
 ```
 
+### Share a tokenizer across snapshot datasets
+
+For a controlled lab comparison, each run may retain the same tokenizer while
+its top-level `dataset` selects a different training snapshot. Add an explicit
+`tokenizer.origin` to each run configuration:
+
+```yaml
+tokenizer:
+  path: ../shared-tokenizer/tokenizer.json
+  origin:
+    sha256: <64-hex tokenizer file digest>
+    manifest_sha256: <64-hex tokenizer_manifest.json file digest>
+    dataset:
+      # Copy the complete dataset declaration from the original tokenizer fit.
+      source: snapshot
+      revision: <original pinned Hub revision>
+      dataset_config: default
+      license: <original declared license>
+      source_manifest_path: ../origin-snapshot/manifest.json
+      train_path: ../origin-snapshot/train.jsonl
+      validation_path: ../origin-snapshot/validation.jsonl
+      cache_dir: ../origin-cache
+      train_max_documents: 500000
+      validation_max_documents: 10000
+      train_max_tokens: 1000000000
+      validation_max_tokens: 10000000
+```
+
+The bounds above are illustrative: retain the original fit declaration's actual
+values. Obtain the two digests from `sparselab tokenizer verify ORIGINAL_RUN.yaml
+--json` before changing the consuming dataset. Relative paths are anchored to the
+new run YAML, including the nested origin paths. Keep the original tokenizer and
+manifest bytes unchanged; do not relabel their source or refit the tokenizer.
+
+Run `sparselab tokenizer verify RUN.yaml --json`, then `sparselab data prepare
+RUN.yaml`. Verification authenticates the pinned tokenizer bytes and manifest
+against the original snapshot; preparation independently verifies the consuming
+snapshot, including on cache reuse. The origin snapshot must remain available.
+The origin binding participates in run configuration identity; moving its files
+does not change that identity. An omitted origin preserves the existing binding
+to the run's own dataset and serialization.
+
+This opt-in currently supports lab runs consuming `snapshot` or `local_stories`
+with tokenizer origins of those same frozen source types. It does not change
+Forge release/export, token-mixture, or release ExperimentPlan artifact binding
+contracts. ExperimentPlan resolution rejects `tokenizer.origin` in the base run,
+axis choices, or phase patches before verifying input artifacts; use a tokenizer
+bound to the consuming dataset for those plans. Cross-source release locking
+remains unsupported. Reusing an origin
+does not establish train/evaluation disjointness across datasets: audit those
+splits separately before making a comparison.
+
 Coverage distinguishes source exhaustion, exclusions, retained documents,
 truncation, packed tokens, complete usable blocks, tails and supervised targets.
 Passes are over usable prepared blocks; they are not raw-document epochs.

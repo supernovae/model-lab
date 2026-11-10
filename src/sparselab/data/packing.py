@@ -14,6 +14,7 @@ from collections import Counter
 from collections.abc import Iterator
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -40,6 +41,10 @@ from sparselab.data.encoding import (
 from sparselab.data.local_stories import verify_snapshot
 from sparselab.data.preparation_chunks import PreparationChunks
 from sparselab.data.preparation_telemetry import PreparationTelemetry
+from sparselab.data.preparation_workers import (
+    PreparationWorkers,
+    collect_parallel_stream,
+)
 from sparselab.data.verification import (
     HashingWriter,
     VerifiedFile,
@@ -91,6 +96,37 @@ class PreparedData:
     allocation: AllocationManifest | None
     manifest: dict[str, object]
     receipt: VerifiedPreparedData
+
+
+@dataclass(frozen=True)
+class PreparedPrefix:
+    """Explicitly pinned immutable parent for a whole-document token prefix.
+
+    The parent must have the same preparation source fingerprint. A pin binds
+    bytes; it does not establish equivalence between different producers.
+    """
+
+    root: Path
+    manifest_sha256: str
+
+
+def prepared_dataset_identity(dataset: DatasetConfig) -> dict[str, object]:
+    """Dataset selection identity; verified content binds operational locations."""
+    return {
+        key: value
+        for key, value in dataset.model_dump(mode="json").items()
+        if key
+        not in {
+            "cache_dir",
+            "train_path",
+            "validation_path",
+            "source_manifest_path",
+            "corpus_release_path",
+            "corpus_export_path",
+            "mixture_declaration_path",
+            "mixture_output_path",
+        }
+    }
 
 
 def preparation_source_identity(inventory: dict[str, str] | None = None) -> str:
@@ -855,6 +891,24 @@ class _ArraySpool:
         return _written_file(self.path, writer.digest.hexdigest(), writer.size)
 
 
+def _streaming_values(
+    tokenizer, encoded_ids, text, *, eos, byte_table_size=None, byte_ngram_size=None
+):
+    values = {"ids": encoded_ids + [eos]}
+    if byte_table_size is not None:
+        assert byte_ngram_size is not None
+        prefix = bytearray()
+        addresses = []
+        for piece in _encoded_token_bytes(tokenizer, encoded_ids, text):
+            prefix.extend(piece)
+            addresses.append(
+                table_address(bytes(prefix[-byte_ngram_size:]), byte_table_size)
+            )
+        addresses.append(0)
+        values["byte_addresses"] = addresses
+    return values
+
+
 def _collect_streaming(
     config: DatasetConfig,
     tokenizer: Tokenizer,
@@ -1028,36 +1082,26 @@ def _collect_streaming(
                 pending, encodings, strict=True
             ):
                 bookkeeping_started = time.monotonic()
-                selected = encoded_ids + [eos]
+                values = _streaming_values(
+                    tokenizer,
+                    encoded_ids,
+                    rendered.text,
+                    eos=eos,
+                    byte_table_size=byte_table_size,
+                    byte_ngram_size=byte_ngram_size,
+                )
+                selected = values["ids"]
                 if output_tokens + len(selected) > max_tokens:
                     raise ValueError(
                         f"{split} token cap would truncate selected story "
                         f"{acquired_index}: {output_tokens + len(selected)} > {max_tokens}"
                     )
-                if byte_table_size is not None:
-                    assert byte_ngram_size is not None and byte_table_size is not None
-                    prefix = bytearray()
-                    addresses: list[int] = []
-                    for piece in _encoded_token_bytes(
-                        tokenizer, encoded_ids, rendered.text
-                    ):
-                        prefix.extend(piece)
-                        addresses.append(
-                            table_address(
-                                bytes(prefix[-byte_ngram_size:]), byte_table_size
-                            )
-                        )
-                    addresses.append(0)
-                    if chunks is None:
-                        assert byte_addresses is not None
-                        byte_addresses.append(addresses)
                 if chunks is None:
                     assert ids is not None
                     ids.append(selected)
+                    if byte_addresses is not None:
+                        byte_addresses.append(values["byte_addresses"])
                 else:
-                    values = {"ids": selected}
-                    if byte_table_size is not None:
-                        values["byte_addresses"] = addresses
                     chunks.append_record(acquired_index, values)
                 output_tokens += len(selected)
                 stats["retained_documents"] += 1
@@ -1288,6 +1332,191 @@ def _publish_prepared_directory(staged: Path, destination: Path) -> None:
         )
 
 
+def _prepare_verified_prefix(
+    config: RunConfig,
+    tokenizer: Tokenizer,
+    request: PreparedPrefix,
+    *,
+    identity: dict,
+    root: Path,
+    telemetry: PreparationTelemetry,
+    resource_envelope: ResourceEnvelope | None,
+) -> PreparedData:
+    """Derive exact IDs from a cold-verified parent, without calling an encoder."""
+    if (
+        config.dataset.source != "local_text"
+        or config.dataset.corpus_release_path is not None
+        or config.dataset.allocation_manifest_path is not None
+        or config.model.memory in {"byte", "portable"}
+    ):
+        raise ValueError("prepared prefix requires plain all-token local_text")
+    parent_manifest = json.loads((request.root / "manifest.json").read_text())
+    if parent_manifest.get("manifest_sha256") != request.manifest_sha256:
+        raise ValueError("prepared prefix parent manifest pin mismatch")
+    parent = load_prepared_data(request.root, byte_enabled=False)
+    manifest = parent.manifest
+    if manifest["manifest_sha256"] != request.manifest_sha256:
+        raise ValueError(
+            "prepared prefix parent manifest pin changed during verification"
+        )
+    if (
+        manifest["packing_version"] != PACKING_VERSION
+        or manifest.get("supervision") != {"kind": "all_tokens"}
+        or manifest.get("allocation") is not None
+    ):
+        raise ValueError(
+            "prepared prefix requires current all-token arrays without sidecars"
+        )
+    parent_identity = manifest["cache_identity"]
+    expected = {**identity, "dataset": dict(identity["dataset"])}
+    # Only selection size may differ. A pin alone cannot authorize relabeling
+    # another producer's IDs under the current ordinary preparation cache key.
+    for key in ("train_max_documents", "train_max_tokens"):
+        expected["dataset"][key] = parent_identity["dataset"][key]
+    if expected != parent_identity:
+        raise ValueError("prepared prefix source/tokenizer/selection identity mismatch")
+    count = config.dataset.train_max_documents
+    tokens = config.dataset.train_max_tokens
+    parent_count = parent_identity["dataset"]["train_max_documents"]
+    if not (0 < count < parent_count and 0 < tokens < len(parent.train)):
+        raise ValueError("prepared prefix must reduce both document and token counts")
+    for split, values in (("train", parent.train), ("validation", parent.validation)):
+        stats = manifest[split]
+        documents = parent_identity["dataset"][f"{split}_max_documents"]
+        if (
+            stats.get("acquired_documents") != documents
+            or stats.get("retained_documents") != documents
+            or stats.get("skipped_documents") != 0
+            or stats.get("truncated_documents") != 0
+            or stats.get("tokens") != len(values)
+        ):
+            raise ValueError(
+                "prepared prefix requires complete unskipped parent documents"
+            )
+    eos = tokenizer.token_to_id("<eos>")
+    if eos is None or parent.train[tokens - 1] != eos:
+        raise ValueError(
+            "prepared prefix token cap is not a whole-document EOS boundary"
+        )
+    # Bound temporary memory even for billion-token parents. Counting the whole
+    # parent also rejects embedded EOS tokens, which cannot identify documents.
+    parent_eos = prefix_eos = 0
+    for start in range(0, len(parent.train), 1_048_576):
+        end = min(start + 1_048_576, len(parent.train))
+        parent_eos += int(np.count_nonzero(parent.train[start:end] == eos))
+        if start < tokens:
+            prefix_eos += int(
+                np.count_nonzero(parent.train[start : min(end, tokens)] == eos)
+            )
+        if resource_envelope is not None:
+            check_envelope(
+                resource_envelope,
+                workspace=root.parent,
+                rss_bytes=current_process_rss_bytes(),
+            )
+    if parent_eos != parent_count or prefix_eos != count:
+        raise ValueError("prepared prefix document count/EOS boundary mismatch")
+    if (
+        tokens < config.training.seq_len + 1
+        or len(parent.validation) < config.training.seq_len + 1
+    ):
+        raise ValueError("prepared split lacks a full next-token block")
+    if (root / "manifest.json").is_file():
+        return load_prepared_data(root, byte_enabled=False, expected_identity=identity)
+    if root.exists() or root.is_symlink():
+        raise RuntimeError(f"unverified prepared-data destination exists: {root}")
+    from sparselab.workspace_preflight import check_storage, require_storage
+
+    require_storage(
+        [
+            check_storage(
+                root, projected_bytes=(tokens + len(parent.validation)) * 4 + 65536
+            )
+        ]
+    )
+    root.parent.mkdir(parents=True, exist_ok=True)
+    # Separate staging leaves any failed streaming chunks intact and auditable.
+    staged = Path(tempfile.mkdtemp(prefix=root.name + ".prefix-", dir=root.parent))
+    proofs = {}
+    result = dict(manifest)
+    for split, values in (
+        ("train", parent.train[:tokens]),
+        ("validation", parent.validation),
+    ):
+        if resource_envelope is not None:
+            check_envelope(
+                resource_envelope,
+                workspace=staged,
+                rss_bytes=current_process_rss_bytes(),
+            )
+        proof = _atomic_array(staged / f"{split}.npy", values)
+        telemetry.logical_output_bytes += proof.size_bytes
+        telemetry.output_tokens += len(values)
+        proofs[f"{split}.npy"] = proof
+        result[split] = {
+            **manifest[split],
+            "shape": [len(values)],
+            "tokens": len(values),
+            "sha256": proof.sha256,
+            "size_bytes": proof.size_bytes,
+            "artifact_bytes": proof.size_bytes,
+            "output_tokens": len(values),
+        }
+        if split == "train":
+            result[split].update(acquired_documents=count, retained_documents=count)
+    # Revalidate the sealed parent's file fingerprints after reading/copying.
+    load_prepared_data(
+        request.root,
+        byte_enabled=False,
+        verification="structural",
+        receipt=parent.receipt,
+    )
+    result.update(
+        cache_identity=identity,
+        settings_sha256=hashlib.sha256(canonical_json(identity)).hexdigest(),
+        source_identity_sha256=source_identity()["sha256"],
+        prefix_derivation={
+            "kind": "verified-whole-document-prefix-v1",
+            "parent_manifest_sha256": request.manifest_sha256,
+            "parent_cache_identity": parent_identity,
+            "parent_train_sha256": manifest["train"]["sha256"],
+            "train_documents": count,
+            "train_tokens": tokens,
+        },
+    )
+    result.pop("manifest_sha256", None)
+    result["manifest_sha256"] = hashlib.sha256(canonical_json(result)).hexdigest()
+    with (staged / "manifest.json").open("xb") as handle:
+        handle.write(canonical_json(result) + b"\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    fd = os.open(staged, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    if resource_envelope is not None:
+        check_envelope(
+            resource_envelope, workspace=staged, rss_bytes=current_process_rss_bytes()
+        )
+    _publish_prepared_directory(staged, root)
+    fd = os.open(root.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    sealed = _receipt_from_proofs(root, result, _relocate_proofs(root, proofs))
+    prepared = load_prepared_data(
+        root,
+        byte_enabled=False,
+        expected_identity=identity,
+        verification="structural",
+        receipt=sealed,
+    )
+    _write_preparation_receipt(root, result["manifest_sha256"], telemetry, reused=False)
+    return prepared
+
+
 def _prepare_data(
     config: RunConfig,
     tokenizer: Tokenizer,
@@ -1298,6 +1527,7 @@ def _prepare_data(
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
     observer: BottleneckObserver | None = None,
+    prefix_from: PreparedPrefix | None = None,
 ) -> PreparedData:
     """Prepare immutable IDs and causal sidecars with an optional allocation."""
     tokenizer_batch_documents, tokenizer_batch_source_bytes = (
@@ -1345,17 +1575,13 @@ def _prepare_data(
             )
     if config.dataset.source == "snapshot":
         from sparselab.data.sources import verify_snapshot as verify_generic_snapshot
-        from sparselab.data.tokenizer import verify_tokenizer_artifact
 
         generic_snapshot = verify_generic_snapshot(config.dataset)
-        verify_tokenizer_artifact(
-            config.tokenizer.path,
-            source="snapshot",
-            revision=config.dataset.revision,
-            vocab_size=config.model.vocab_size,
-            dataset=config.dataset,
-            proof_store=proof_store,
-            verification_mode=verification_mode,
+    if config.dataset.source == "snapshot" or config.tokenizer.origin is not None:
+        from sparselab.data.tokenizer import verify_run_tokenizer
+
+        verify_run_tokenizer(
+            config, proof_store=proof_store, verification_mode=verification_mode
         )
         if (
             tokenizer.to_str()
@@ -1404,21 +1630,7 @@ def _prepare_data(
                 "allocation manifest corpus digests do not match local_chat"
             )
     cache_identity = {
-        "dataset": {
-            key: value
-            for key, value in config.dataset.model_dump(mode="json").items()
-            if key
-            not in {
-                "cache_dir",
-                "train_path",
-                "validation_path",
-                "source_manifest_path",
-                "corpus_release_path",
-                "corpus_export_path",
-                "mixture_declaration_path",
-                "mixture_output_path",
-            }
-        },
+        "dataset": prepared_dataset_identity(config.dataset),
         "local_chat_source": local_chat,
         **(
             {
@@ -1461,6 +1673,8 @@ def _prepare_data(
     from sparselab.experiments.source_compatibility import active_source_compatibility
 
     compatibility = active_source_compatibility()
+    if compatibility is not None and prefix_from is not None:
+        raise ValueError("prepared prefix cannot use source compatibility override")
     if compatibility is not None:
         baseline = compatibility["baseline_source_identity"]
         historical_source = (
@@ -1531,6 +1745,16 @@ def _prepare_data(
         config.dataset.cache_dir
         / hashlib.sha256(canonical_json(cache_identity)).hexdigest()[:16]
     )
+    if prefix_from is not None:
+        return _prepare_verified_prefix(
+            config,
+            tokenizer,
+            prefix_from,
+            identity=cache_identity,
+            root=root,
+            telemetry=telemetry,
+            resource_envelope=resource_envelope,
+        )
     manifest_path = root / "manifest.json"
     _train_path, _validation_path = root / "train.npy", root / "validation.npy"
     _train_supervision_path, _validation_supervision_path = (
@@ -1676,64 +1900,99 @@ def _prepare_data(
         if config.dataset.source == "local_stories":
             assert local_stories is not None
         assert chunks_owner is not None
+        tokenizer_spec = json.loads(tokenizer.to_str())
+        bpe = tokenizer_spec.get("model", {})
+        parallel_supported = (
+            bpe.get("type") == "BPE"
+            and bpe.get("dropout") in (None, 0.0)
+            and not bpe.get("byte_fallback", False)
+            and bpe.get("continuing_subword_prefix") in (None, "")
+            and bpe.get("end_of_word_suffix") in (None, "")
+            and tokenizer_spec.get("pre_tokenizer", {}).get("type") == "ByteLevel"
+            and tokenizer_spec.get("normalizer") is None
+            and tokenizer_spec.get("pre_tokenizer", {}).get("add_prefix_space") is False
+            and tokenizer_spec.get("padding") is None
+        )
+        results = {}
         with (
             chunks_owner,
-            PreparationEncoder(
+            PreparationWorkers(
                 tokenizer,
                 temporary_root,
-                max_workers=None
-                if resource_envelope is None
-                else resource_envelope.max_workers,
-            ) as encoder,
+                envelope=resource_envelope,
+                parallel_supported=parallel_supported,
+            ) as workers,
         ):
-            train_stats = _collect_streaming(
-                config.dataset,
-                tokenizer,
-                "train",
-                temporary_root,
-                selected_documents=(
-                    min(
-                        config.dataset.train_max_documents,
-                        selected_snapshot["splits"]["train"]["count"],
-                    )
-                    if selected_snapshot is not None
-                    else config.dataset.train_max_documents
-                ),
-                resource_envelope=resource_envelope,
-                telemetry=telemetry,
-                encoder=encoder,
-                tokenizer_batch_documents=tokenizer_batch_documents,
-                tokenizer_batch_source_bytes=tokenizer_batch_source_bytes,
-                proofs=proofs,
-                chunks=chunks_owner.open_split("train")
-                if chunks_owner is not None
-                else None,
-                **settings,
+            telemetry.shard_workers = workers.count
+            telemetry.tokenizer_host_work_plan = asdict(workers.plan)
+            telemetry.tokenizer_rayon_threads = sum(
+                e.rayon_threads for e in workers.encoders
             )
-            validation_stats = _collect_streaming(
-                config.dataset,
-                tokenizer,
-                "validation",
-                temporary_root,
-                selected_documents=(
-                    min(
-                        config.dataset.validation_max_documents,
-                        selected_snapshot["splits"]["validation"]["count"],
+            for split in ("train", "validation"):
+                chunks = chunks_owner.open_split(split)
+                measured = PreparationTelemetry(temporary_root)
+                chunks.telemetry = measured
+                count = getattr(config.dataset, f"{split}_max_documents")
+                if selected_snapshot is not None:
+                    count = min(count, selected_snapshot["splits"][split]["count"])
+                diagnostics = {}
+                if workers.count > 1:
+                    eos = tokenizer.token_to_id("<eos>")
+                    if eos is None:
+                        raise ValueError("tokenizer has no <eos> special token")
+                    stats, shard_proofs, diagnostics = collect_parallel_stream(
+                        _source_documents(
+                            config.dataset,
+                            split,
+                            local_text_source_bytes=tokenizer_batch_source_bytes
+                            if config.dataset.source == "local_text"
+                            else None,
+                        ),
+                        chunks,
+                        workers,
+                        selected_documents=count,
+                        max_tokens=getattr(config.dataset, f"{split}_max_tokens"),
+                        batch_documents=tokenizer_batch_documents,
+                        batch_source_bytes=tokenizer_batch_source_bytes,
+                        transform=partial(_streaming_values, eos=eos, **settings),
+                        telemetry=measured,
                     )
-                    if selected_snapshot is not None
-                    else config.dataset.validation_max_documents
-                ),
-                resource_envelope=resource_envelope,
-                telemetry=telemetry,
-                encoder=encoder,
-                tokenizer_batch_documents=tokenizer_batch_documents,
-                tokenizer_batch_source_bytes=tokenizer_batch_source_bytes,
-                proofs=proofs,
-                chunks=chunks_owner.open_split("validation")
-                if chunks_owner is not None
-                else None,
-                **settings,
-            )
+                    proofs.update(shard_proofs)
+                else:
+                    stats = _collect_streaming(
+                        config.dataset,
+                        tokenizer,
+                        split,
+                        temporary_root,
+                        selected_documents=count,
+                        resource_envelope=resource_envelope,
+                        telemetry=measured,
+                        encoder=workers.encoders[0],
+                        tokenizer_batch_documents=tokenizer_batch_documents,
+                        tokenizer_batch_source_bytes=tokenizer_batch_source_bytes,
+                        proofs=proofs,
+                        chunks=chunks,
+                        **settings,
+                    )
+                results[split] = stats
+                telemetry.shards[split] = {**measured.snapshot(), **diagnostics}
+                for name in (
+                    "records",
+                    "source_bytes",
+                    "output_tokens",
+                    "logical_input_bytes",
+                    "logical_output_bytes",
+                ):
+                    setattr(
+                        telemetry,
+                        name,
+                        getattr(telemetry, name) + getattr(measured, name),
+                    )
+                for name, elapsed in measured.durations.items():
+                    telemetry.add(name, elapsed)
+            telemetry.workers = workers.snapshot()
+        train_stats = results["train"]
+        validation_stats = results["validation"]
         train = np.load(temporary_root / "train.npy", mmap_mode="r", allow_pickle=False)
         validation = np.load(
             temporary_root / "validation.npy", mmap_mode="r", allow_pickle=False
@@ -2087,8 +2346,15 @@ def prepare_data(
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
     observer: BottleneckObserver | None = None,
+    prefix_from: PreparedPrefix | None = None,
 ) -> PreparedData:
-    """Prepare data and mark only new caches owned by the selected workspace."""
+    """Prepare data and mark only new caches owned by the selected workspace.
+
+    ``prefix_from`` explicitly derives a smaller, whole-document local_text
+    selection from a pinned parent cache. Sources and parent bytes are verified;
+    validation is unchanged and no document is re-encoded. Other dataset kinds,
+    masks, sidecars and source-compatibility overrides are deliberately rejected.
+    """
     tokenizer_batch_documents, tokenizer_batch_source_bytes = (
         validate_tokenizer_batch_limits(
             tokenizer_batch_documents, tokenizer_batch_source_bytes
@@ -2127,6 +2393,7 @@ def prepare_data(
                 proof_store=proof_store,
                 verification_mode=verification_mode,
                 observer=observer,
+                prefix_from=prefix_from,
             )
     with (
         campaign_lock(base),
@@ -2143,6 +2410,7 @@ def prepare_data(
             proof_store=proof_store,
             verification_mode=verification_mode,
             observer=observer,
+            prefix_from=prefix_from,
         )
         if prepared.root.name not in existing:
             mark_prepared_cache(workspace, prepared.root)
