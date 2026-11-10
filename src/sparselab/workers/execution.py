@@ -323,11 +323,8 @@ def _acquire_config_lease(
             state_dir=state_dir,
         )
     if not passive.physical_device_id or not str(passive.physical_device_id).strip():
-        return acquire_lease(
-            worker_id=worker_id,
-            backend=passive.backend,
-            physical_device_id=None,
-            state_dir=state_dir,
+        raise ValueError(
+            "secondary_device_indices requires a reported physical_device_id on the primary device"
         )
     engine = _definition_value(definition, "engine")
     infos_by_index = {
@@ -346,11 +343,8 @@ def _acquire_config_lease(
             not sec_info.physical_device_id
             or not str(sec_info.physical_device_id).strip()
         ):
-            return acquire_lease(
-                worker_id=worker_id,
-                backend=passive.backend,
-                physical_device_id=None,
-                state_dir=state_dir,
+            raise ValueError(
+                f"secondary_device_indices index {sec_idx} lacks a reported physical_device_id"
             )
         physical_ids.append(str(sec_info.physical_device_id).strip())
     return acquire_multi_device_leases(

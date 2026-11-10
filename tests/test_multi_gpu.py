@@ -312,6 +312,8 @@ def test_acquire_multi_device_leases_and_contention_rollback(tmp_path: Path) -> 
         assert multi_rev.leases[0].metadata["worker_id"] == "trainer-rev"
         assert multi_rev.leases[1].metadata["worker_id"] == "trainer-rev-dev1"
 
+    # In-process contention is valid because leases.py calls os.open() per acquire,
+    # and fcntl.flock() locks bind to the kernel open file description, not the PID.
     for held_dev, free_dev in ((dev_b, dev_a), (dev_a, dev_b)):
         held_lease = acquire_lease(
             worker_id="external-holder",
@@ -537,3 +539,32 @@ def test_worker_config_lease_acquires_primary_and_secondary_devices(
     )
     with pytest.raises(ValueError, match="secondary_device_indices index 1 is absent"):
         _acquire_config_lease(definition, passive_gpu0, cfg, state_dir=lease_dir)
+
+    # Blank physical_device_id on secondary (or primary) raises ValueError instead of dropping physical leases.
+    passive_gpu1_blank = SimpleNamespace(
+        engine="pytorch",
+        backend="xpu",
+        device_index=1,
+        physical_device_id="",
+    )
+    monkeypatch.setattr(
+        "sparselab.workers.execution.discover_runtimes",
+        lambda: [passive_gpu0, passive_gpu1_blank],
+    )
+    with pytest.raises(
+        ValueError,
+        match="secondary_device_indices index 1 lacks a reported physical_device_id",
+    ):
+        _acquire_config_lease(definition, passive_gpu0, cfg, state_dir=lease_dir)
+
+    passive_gpu0_blank = SimpleNamespace(
+        engine="pytorch",
+        backend="xpu",
+        device_index=0,
+        physical_device_id=None,
+    )
+    with pytest.raises(
+        ValueError,
+        match="secondary_device_indices requires a reported physical_device_id on the primary device",
+    ):
+        _acquire_config_lease(definition, passive_gpu0_blank, cfg, state_dir=lease_dir)
