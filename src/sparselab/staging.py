@@ -111,10 +111,21 @@ def inspect_runtime(config: RunConfig) -> RuntimeInfo:
             if info.engine == "pytorch" and info.torch_device == selected
         )
     runtime = next(
-        info
-        for info in runtimes
-        if info.engine == config.runtime.engine and info.backend == backend
+        (
+            info
+            for info in runtimes
+            if info.engine == config.runtime.engine
+            and info.backend == backend
+            and info.device_index == config.runtime.device_index
+        ),
+        None,
     )
+    if runtime is None:
+        runtime = next(
+            info
+            for info in runtimes
+            if info.engine == config.runtime.engine and info.backend == backend
+        )
     if config.runtime.device_index != runtime.device_index:
         runtime = replace(
             runtime,

@@ -10,6 +10,7 @@ import platform
 import random
 import subprocess
 import sys
+import uuid as _uuid_mod
 from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
@@ -214,8 +215,31 @@ def _declared_precisions(backend: str, available: bool) -> tuple[str, ...]:
 def _safe_call(callable_: Any) -> tuple[Any | None, str | None]:
     try:
         return callable_(), None
-    except (RuntimeError, OSError, AttributeError, ValueError, TypeError) as error:
+    except (
+        RuntimeError,
+        OSError,
+        AttributeError,
+        ValueError,
+        TypeError,
+        AssertionError,
+    ) as error:
         return None, f"{type(error).__name__}: {error}"
+
+
+def _format_device_uuid(raw_uuid: object) -> str | None:
+    if raw_uuid is None:
+        return None
+    if isinstance(raw_uuid, (list, tuple)) and all(
+        isinstance(b, int) and 0 <= b <= 255 for b in raw_uuid
+    ):
+        raw_uuid = bytes(raw_uuid)
+    if isinstance(raw_uuid, (bytes, bytearray)):
+        if len(raw_uuid) == 16:
+            return str(_uuid_mod.UUID(bytes=bytes(raw_uuid)))
+        hex_str = bytes(raw_uuid).hex()
+        return hex_str or None
+    text = str(raw_uuid).strip()
+    return text or None
 
 
 def discover_runtimes(
@@ -232,151 +256,203 @@ def discover_runtimes(
             and measurement_device is not None
             and torch_device_for(backend).type == measurement_device.type
         )
-        index = (measurement_device.index or 0) if measure else 0
-        limitations: list[str] = []
-        if (
-            torch is not None
-            and backend in {"cuda", "rocm"}
-            and ((backend == "rocm") != bool(torch.version.hip))
-        ):
-            limitations.append("PyTorch build targets the other CUDA/HIP API")
-        elif not supported:
-            limitations.append("runtime unavailable")
-        name = physical_device_id = device_total = device_free = recommended = (
-            driver_allocated
-        ) = None
-        if supported and backend != "cpu":
-            limitations.append("driver version unavailable through safe PyTorch APIs")
-        if (
-            supported
-            and backend != "cpu"
-            and not (
-                getattr(torch.version, "xpu", None)
+        count_val = None
+        if measure:
+            indices: tuple[int, ...] = (measurement_device.index or 0,)
+        elif supported and torch is not None and backend in {"cuda", "rocm", "xpu"}:
+            api = (
+                getattr(torch, "xpu", None)
                 if backend == "xpu"
-                else (torch.version.hip or torch.version.cuda)
+                else getattr(torch, "cuda", None)
             )
-        ):
-            limitations.append(
-                "accelerator runtime version unavailable through safe PyTorch APIs"
+            if api is not None and hasattr(api, "device_count"):
+                count_val, _ = _safe_call(api.device_count)
+            indices = (
+                tuple(range(int(count_val)))
+                if isinstance(count_val, int) and count_val > 1
+                else (0,)
             )
-        source = None
-        if supported and backend != "cpu" and not measure:
-            name = "Apple Metal" if backend == "mps" else None
-            limitations.append(
-                "device properties and memory deferred to isolated validation"
-            )
-        elif supported and backend in {"cuda", "rocm"}:
-            properties, reason = _safe_call(
-                lambda i=index: torch.cuda.get_device_properties(i)
-            )
-            if properties is None:
-                limitations.append(f"device properties unavailable: {reason}")
+        else:
+            indices = (0,)
+
+        for index in indices:
+            limitations: list[str] = []
+            if (
+                torch is not None
+                and backend in {"cuda", "rocm"}
+                and ((backend == "rocm") != bool(torch.version.hip))
+            ):
+                limitations.append("PyTorch build targets the other CUDA/HIP API")
+            elif not supported:
+                limitations.append("runtime unavailable")
+            name = physical_device_id = device_total = device_free = recommended = (
+                driver_allocated
+            ) = None
+            if supported and backend != "cpu":
                 limitations.append(
-                    "physical device identity unavailable through safe PyTorch APIs"
+                    "driver version unavailable through safe PyTorch APIs"
                 )
-            else:
-                name, device_total = properties.name, int(properties.total_memory)
-                uuid = getattr(properties, "uuid", None)
-                physical_device_id = str(uuid) if uuid else None
-                if physical_device_id is None:
-                    limitations.append(
-                        "physical device identity unavailable through safe PyTorch APIs"
-                    )
-            memory, reason = _safe_call(lambda i=index: torch.cuda.mem_get_info(i))
-            if memory is None:
-                limitations.append(f"free-memory reading unavailable: {reason}")
-            else:
-                device_free, source = int(memory[0]), "torch.cuda.mem_get_info"
-        elif supported and backend == "mps":
-            limitations.append(
-                "physical device identity unavailable through safe PyTorch APIs"
-            )
-            name, source = "Apple Metal", "torch.mps"
-            mps = torch.mps
-            if hasattr(mps, "recommended_max_memory"):
-                value, reason = _safe_call(mps.recommended_max_memory)
-                recommended = int(value) if value is not None else None
-                if reason:
-                    limitations.append(
-                        f"recommended-memory reading unavailable: {reason}"
-                    )
-            else:
-                limitations.append("recommended-memory API unavailable")
-            if hasattr(mps, "driver_allocated_memory"):
-                value, reason = _safe_call(mps.driver_allocated_memory)
-                driver_allocated = int(value) if value is not None else None
-                if reason:
-                    limitations.append(f"driver-memory reading unavailable: {reason}")
-            else:
-                limitations.append("driver-memory API unavailable")
-        elif supported and backend == "xpu":
-            limitations.append(
-                "physical device identity unavailable through safe PyTorch APIs"
-            )
-            xpu = torch.xpu
-            if hasattr(xpu, "get_device_name"):
-                value, reason = _safe_call(
-                    lambda api=xpu, i=index: api.get_device_name(i)
-                )
-                name = str(value) if value is not None else None
-                if reason:
-                    limitations.append(f"device-name reading unavailable: {reason}")
-            else:
-                limitations.append("device-name API unavailable")
-            if hasattr(xpu, "get_device_properties"):
-                properties, reason = _safe_call(
-                    lambda api=xpu, i=index: api.get_device_properties(i)
-                )
-                device_total = (
-                    int(properties.total_memory) if properties is not None else None
-                )
-                if reason:
-                    limitations.append(f"device properties unavailable: {reason}")
-            else:
-                limitations.append("device-properties API unavailable")
-            if hasattr(xpu, "mem_get_info"):
-                memory, reason = _safe_call(
-                    lambda api=xpu, i=index: api.mem_get_info(i)
-                )
-                if memory is None:
-                    limitations.append(f"free-memory reading unavailable: {reason}")
-                else:
-                    device_free, source = int(memory[0]), "torch.xpu.mem_get_info"
-            else:
-                limitations.append("free-memory API unavailable")
-        infos.append(
-            RuntimeInfo(
-                engine="pytorch",
-                backend=backend,
-                torch_device=str(torch_device_for(backend, index))
-                if supported
-                else None,
-                device_index=index,
-                device_name=name,
-                physical_device_id=physical_device_id,
-                framework_version=torch.__version__ if torch is not None else None,
-                runtime_version=(
+            if (
+                supported
+                and backend != "cpu"
+                and not (
                     getattr(torch.version, "xpu", None)
                     if backend == "xpu"
                     else (torch.version.hip or torch.version.cuda)
                 )
-                if torch is not None
-                else None,
-                driver_version=None,
-                os=_os_identity(),
-                system_total_bytes=total,
-                system_available_bytes=available,
-                device_total_bytes=device_total,
-                device_free_bytes=device_free,
-                device_recommended_bytes=recommended,
-                measurement_source=source,
-                measured_at=_now(),
-                precision_capabilities=_declared_precisions(backend, supported),
-                limitations=tuple(limitations),
-                device_driver_allocated_bytes=driver_allocated,
-                **host,
+            ):
+                limitations.append(
+                    "accelerator runtime version unavailable through safe PyTorch APIs"
+                )
+            source = None
+            if supported and backend != "cpu" and not measure:
+                name = "Apple Metal" if backend == "mps" else None
+                if (
+                    torch is not None
+                    and backend in {"cuda", "rocm", "xpu"}
+                    and isinstance(count_val, int)
+                    and count_val > 0
+                ):
+                    api = (
+                        getattr(torch, "xpu", None)
+                        if backend == "xpu"
+                        else getattr(torch, "cuda", None)
+                    )
+                    if api is not None and hasattr(api, "get_device_properties"):
+                        props, _ = _safe_call(
+                            lambda a=api, i=index: a.get_device_properties(i)
+                        )
+                        if props is not None:
+                            prop_name = getattr(props, "name", None)
+                            if prop_name:
+                                name = str(prop_name)
+                            physical_device_id = _format_device_uuid(
+                                getattr(props, "uuid", None)
+                            )
+                if name is not None and backend != "mps":
+                    limitations.append("device memory deferred to isolated validation")
+                else:
+                    limitations.append(
+                        "device properties and memory deferred to isolated validation"
+                    )
+            elif supported and backend in {"cuda", "rocm"}:
+                properties, reason = _safe_call(
+                    lambda i=index: torch.cuda.get_device_properties(i)
+                )
+                if properties is None:
+                    limitations.append(f"device properties unavailable: {reason}")
+                    limitations.append(
+                        "physical device identity unavailable through safe PyTorch APIs"
+                    )
+                else:
+                    name, device_total = properties.name, int(properties.total_memory)
+                    physical_device_id = _format_device_uuid(
+                        getattr(properties, "uuid", None)
+                    )
+                    if physical_device_id is None:
+                        limitations.append(
+                            "physical device identity unavailable through safe PyTorch APIs"
+                        )
+                memory, reason = _safe_call(lambda i=index: torch.cuda.mem_get_info(i))
+                if memory is None:
+                    limitations.append(f"free-memory reading unavailable: {reason}")
+                else:
+                    device_free, source = int(memory[0]), "torch.cuda.mem_get_info"
+            elif supported and backend == "mps":
+                limitations.append(
+                    "physical device identity unavailable through safe PyTorch APIs"
+                )
+                name, source = "Apple Metal", "torch.mps"
+                mps = torch.mps
+                if hasattr(mps, "recommended_max_memory"):
+                    value, reason = _safe_call(mps.recommended_max_memory)
+                    recommended = int(value) if value is not None else None
+                    if reason:
+                        limitations.append(
+                            f"recommended-memory reading unavailable: {reason}"
+                        )
+                else:
+                    limitations.append("recommended-memory API unavailable")
+                if hasattr(mps, "driver_allocated_memory"):
+                    value, reason = _safe_call(mps.driver_allocated_memory)
+                    driver_allocated = int(value) if value is not None else None
+                    if reason:
+                        limitations.append(
+                            f"driver-memory reading unavailable: {reason}"
+                        )
+                else:
+                    limitations.append("driver-memory API unavailable")
+            elif supported and backend == "xpu":
+                xpu = torch.xpu
+                if hasattr(xpu, "get_device_name"):
+                    value, reason = _safe_call(
+                        lambda api=xpu, i=index: api.get_device_name(i)
+                    )
+                    name = str(value) if value is not None else None
+                    if reason:
+                        limitations.append(f"device-name reading unavailable: {reason}")
+                else:
+                    limitations.append("device-name API unavailable")
+                if hasattr(xpu, "get_device_properties"):
+                    properties, reason = _safe_call(
+                        lambda api=xpu, i=index: api.get_device_properties(i)
+                    )
+                    if properties is not None:
+                        device_total = int(properties.total_memory)
+                        physical_device_id = _format_device_uuid(
+                            getattr(properties, "uuid", None)
+                        )
+                    if reason:
+                        limitations.append(f"device properties unavailable: {reason}")
+                else:
+                    limitations.append("device-properties API unavailable")
+                if physical_device_id is None:
+                    limitations.append(
+                        "physical device identity unavailable through safe PyTorch APIs"
+                    )
+                if hasattr(xpu, "mem_get_info"):
+                    memory, reason = _safe_call(
+                        lambda api=xpu, i=index: api.mem_get_info(i)
+                    )
+                    if memory is None:
+                        limitations.append(f"free-memory reading unavailable: {reason}")
+                    else:
+                        device_free, source = int(memory[0]), "torch.xpu.mem_get_info"
+                else:
+                    limitations.append("free-memory API unavailable")
+            infos.append(
+                RuntimeInfo(
+                    engine="pytorch",
+                    backend=backend,
+                    torch_device=str(torch_device_for(backend, index))
+                    if supported
+                    else None,
+                    device_index=index,
+                    device_name=name,
+                    physical_device_id=physical_device_id,
+                    framework_version=torch.__version__ if torch is not None else None,
+                    runtime_version=(
+                        getattr(torch.version, "xpu", None)
+                        if backend == "xpu"
+                        else (torch.version.hip or torch.version.cuda)
+                    )
+                    if torch is not None
+                    else None,
+                    driver_version=None,
+                    os=_os_identity(),
+                    system_total_bytes=total,
+                    system_available_bytes=available,
+                    device_total_bytes=device_total,
+                    device_free_bytes=device_free,
+                    device_recommended_bytes=recommended,
+                    measurement_source=source,
+                    measured_at=_now(),
+                    precision_capabilities=_declared_precisions(backend, supported),
+                    limitations=tuple(limitations),
+                    device_driver_allocated_bytes=driver_allocated,
+                    **host,
+                )
             )
-        )
     mlx_spec = importlib.util.find_spec("mlx")
     if mlx_spec is None:
         infos.append(

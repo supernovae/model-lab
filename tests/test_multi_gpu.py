@@ -568,3 +568,108 @@ def test_worker_config_lease_acquires_primary_and_secondary_devices(
         match="secondary_device_indices requires a reported physical_device_id on the primary device",
     ):
         _acquire_config_lease(definition, passive_gpu0_blank, cfg, state_dir=lease_dir)
+
+
+def test_discover_runtimes_enumerates_multi_xpu_indices_and_physical_uuids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sparselab import runtime
+
+    uuid0_bytes = bytes.fromhex("868023e200000000e300000000000000")
+    uuid1_bytes = bytes.fromhex("868023e2000000002300000000000000")
+    props_by_index = {
+        0: SimpleNamespace(
+            name="Intel(R) Arc(TM) Pro B70 Graphics",
+            total_memory=32 * 1024**3,
+            uuid=uuid0_bytes,
+        ),
+        1: SimpleNamespace(
+            name="Intel(R) Arc(TM) Pro B70 Graphics",
+            total_memory=32 * 1024**3,
+            uuid=uuid1_bytes,
+        ),
+    }
+    fake_xpu = SimpleNamespace(
+        is_available=lambda: True,
+        device_count=lambda: 2,
+        get_device_name=lambda i=0: props_by_index[i].name,
+        get_device_properties=lambda i=0: props_by_index[i],
+        mem_get_info=lambda i=0: (30 * 1024**3, 32 * 1024**3),
+    )
+    monkeypatch.setattr(torch, "xpu", fake_xpu)
+    monkeypatch.setattr(runtime, "_backend_available", lambda b: b in {"cpu", "xpu"})
+
+    infos = [info for info in runtime.discover_runtimes() if info.backend == "xpu"]
+    assert [
+        (i.device_index, i.torch_device, i.device_name, i.physical_device_id)
+        for i in infos
+    ] == [
+        (
+            0,
+            "xpu:0",
+            "Intel(R) Arc(TM) Pro B70 Graphics",
+            "868023e2-0000-0000-e300-000000000000",
+        ),
+        (
+            1,
+            "xpu:1",
+            "Intel(R) Arc(TM) Pro B70 Graphics",
+            "868023e2-0000-0000-2300-000000000000",
+        ),
+    ]
+    assert "device memory deferred to isolated validation" in infos[0].limitations
+
+    measured1 = next(
+        info
+        for info in runtime.discover_runtimes(measurement_device=torch.device("xpu:1"))
+        if info.backend == "xpu"
+    )
+    assert measured1.device_index == 1
+    assert measured1.physical_device_id == "868023e2-0000-0000-2300-000000000000"
+    assert (
+        "physical device identity unavailable through safe PyTorch APIs"
+        not in measured1.limitations
+    )
+
+    lease_dir = tmp_path / "leases"
+    cfg = _make_run_config(tmp_path / "worker", secondary_device_indices=(1,))
+    cfg = cfg.model_copy(
+        update={
+            "runtime": cfg.runtime.model_copy(
+                update={
+                    "backend": "xpu",
+                    "device_index": 0,
+                    "secondary_device_indices": (1,),
+                }
+            )
+        }
+    )
+    definition = {
+        "worker_id": "worker-b70-dual-real-discovery",
+        "engine": "pytorch",
+        "backend": "xpu",
+        "device_index": 0,
+    }
+    lease = _acquire_config_lease(definition, infos[0], cfg, state_dir=lease_dir)
+    assert isinstance(lease, MultiDeviceLease)
+    try:
+        assert [item.key for item in lease.leases] == [
+            "physical-868023e2-0000-0000-e300-000000000000",
+            "physical-868023e2-0000-0000-2300-000000000000",
+        ]
+    finally:
+        lease.close()
+
+    from sparselab.staging import inspect_runtime
+
+    cfg_idx1 = cfg.model_copy(
+        update={"runtime": cfg.runtime.model_copy(update={"device_index": 1})}
+    )
+    inspected1 = inspect_runtime(cfg_idx1)
+    assert inspected1.device_index == 1
+    assert inspected1.torch_device == "xpu:1"
+    assert inspected1.physical_device_id == "868023e2-0000-0000-2300-000000000000"
+    assert (
+        "passive memory readings for this device index are unavailable"
+        not in inspected1.limitations
+    )
