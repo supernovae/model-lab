@@ -387,9 +387,11 @@ def comparison(records: list[RunRecord], view: DashboardSnapshot) -> None:
         )
 
 
-def overview(view: DashboardSnapshot) -> None:
+def overview(view: DashboardSnapshot, root: Path | None = None) -> None:
     st.header("Overview")
     records, selected_ids = selected(view)
+    if root is not None:
+        generation.checkpoint_summary(root, selected_ids, view)
     if not records:
         st.info("No eligible runs yet. Smoke and warmup pilots are hidden by default.")
         return
@@ -841,6 +843,7 @@ def _checkpoint_directory(root: Path, row: dict[str, object]) -> Path:
 def checkpoint_view(view: DashboardSnapshot, root: Path) -> None:
     st.header("Checkpoints")
     records, selected_ids = selected(view)
+    generation.checkpoint_summary(root, selected_ids, view)
     rows = _rows_for(view.checkpoints, selected_ids)
     st.caption(
         "Stored verification describes save time, not current disk integrity. "
@@ -901,7 +904,17 @@ def checkpoint_view(view: DashboardSnapshot, root: Path) -> None:
         )
         if invalid:
             st.error(f"{invalid} checkpoint generation(s) failed local verification.")
-        st.dataframe(rows, width="stretch", hide_index=True)
+        st.dataframe(
+            rows,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "checkpoint_id": st.column_config.NumberColumn(
+                    "Save sequence (within run)",
+                    help="Ordinal save number, not a checkpoint count.",
+                )
+            },
+        )
         local_best: list[dict[str, object]] = []
         for run_id in selected_ids:
             candidates = [
@@ -1030,6 +1043,9 @@ def _read_snapshot(
 
 
 def render(root: Path, page: str, surface_dir: Path | None = None) -> None:
+    if page == "generate":
+        generation.generation_page(None, root, [])
+        return
     st.button(
         "Refresh now",
         key="dashboard_refresh",
@@ -1065,7 +1081,7 @@ def render(root: Path, page: str, surface_dir: Path | None = None) -> None:
         "generate": lambda value: generation.generation_page(
             value, root, selected(value)[1]
         ),
-        "overview": overview,
+        "overview": lambda value: overview(value, root),
         "training": lambda value: training(value, root, surface_dir),
         "evaluation": evaluation,
         "architecture": architecture_diagnostics,

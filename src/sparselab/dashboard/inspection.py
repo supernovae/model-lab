@@ -208,9 +208,11 @@ def snapshot_inspector(view: DashboardSnapshot, selected_ids: list[str]) -> None
             st.info("No checkpoint metadata recorded for this run.")
         else:
             row = st.selectbox(
-                "Saved generation",
+                "Saved checkpoint (save sequence within run)",
                 rows,
-                format_func=lambda row: f"Step {row['step']} · {row['checkpoint_id']}",
+                format_func=lambda row: (
+                    f"Step {row['step']:,} · Save {row['checkpoint_id']}"
+                ),
                 key="inspect_checkpoint",
             )
             columns = st.columns(3)

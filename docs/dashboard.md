@@ -449,3 +449,32 @@ so embedded and standalone views use the same native widgets and status palettes
 Output length now supports 8–512 new tokens, in steps of eight; default stays 32.
 The combined 1,024-token CPU context limit still applies and is checked before
 generation. Longer requests take longer; EOS may end a completion before its cap.
+
+
+### Native snapshot completion
+
+The Generate page uses native dashboard controls, with prompt and continuation side
+by side. It lists complete eligible local snapshots across the selected store, newest
+UTC save time first, independently of telemetry run filters. Refresh snapshots reads
+the catalog without loading weights. Explicit choices and deep links stay pinned;
+Use latest selects the newest available save. A new save never changes an in-flight
+request. Missing links are refused rather than substituted.
+
+The Overview and Checkpoints summaries distinguish the store-wide available count,
+the selected runs' available count, and the newest saved step. The retained-save
+table and latest recorded retention event show which files remain and why a new
+checkpoint may replace an older one without increasing the count. Save sequence numbers
+(Gen 2 or checkpoint_id 2) identify one run's second save, not the total number of
+checkpoints. Lab Home's Scored checkpoints counts sealed lab scores, including
+references, and is separate from training snapshots.
+
+The dashboard sends bounded JSON requests to the configured loopback CPU sampler.
+Run `python src/sparselab/dashboard/snapshot_sampler.py` in the existing pinned
+inference environment with `SPARSELAB_SNAPSHOT_SERVICE_CONFIG` set, rather than
+launching that file with Streamlit. Keep the existing 2-thread, 200% CPU, 10 GiB
+sampler service envelope and the dashboard's separate envelope. The sampler owns
+one model, serializes verification/loading/generation, refuses concurrent work,
+and verifies the exact digest on load. It only binds the configured 127.0.0.1 port,
+rejects browser origins and unexpected Host values, and does not log prompts or
+outputs. The UI never loads a model. Sampling defaults remain 0.7 / top-k 40 /
+seed 42 / 32 new tokens, with the same 512-output and 1,024-context limits.

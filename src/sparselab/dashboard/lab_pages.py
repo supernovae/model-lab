@@ -168,9 +168,9 @@ def home_page(lab_dir: Path, runs_dirs: Sequence[Path], pages: PageLinks) -> Non
         help="Probe results (from tries and `sparselab probe`)",
     )
     cols[2].metric(
-        "Checkpoints",
+        "Scored checkpoints",
         len(checkpoints - {None}),
-        help="Distinct verified checkpoints, references included",
+        help="Checkpoints with sealed lab scores, including public references. Not the count of available training snapshots.",
     )
     cols[3].metric(
         "Reference models",
