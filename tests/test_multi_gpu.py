@@ -600,10 +600,24 @@ def test_discover_runtimes_enumerates_multi_xpu_indices_and_physical_uuids(
     monkeypatch.setattr(runtime, "_backend_available", lambda b: b in {"cpu", "xpu"})
 
     infos = [info for info in runtime.discover_runtimes() if info.backend == "xpu"]
-    assert [(i.device_index, i.torch_device, i.physical_device_id) for i in infos] == [
-        (0, "xpu:0", "868023e2-0000-0000-e300-000000000000"),
-        (1, "xpu:1", "868023e2-0000-0000-2300-000000000000"),
+    assert [
+        (i.device_index, i.torch_device, i.device_name, i.physical_device_id)
+        for i in infos
+    ] == [
+        (
+            0,
+            "xpu:0",
+            "Intel(R) Arc(TM) Pro B70 Graphics",
+            "868023e2-0000-0000-e300-000000000000",
+        ),
+        (
+            1,
+            "xpu:1",
+            "Intel(R) Arc(TM) Pro B70 Graphics",
+            "868023e2-0000-0000-2300-000000000000",
+        ),
     ]
+    assert "device memory deferred to isolated validation" in infos[0].limitations
 
     measured1 = next(
         info
@@ -645,3 +659,17 @@ def test_discover_runtimes_enumerates_multi_xpu_indices_and_physical_uuids(
         ]
     finally:
         lease.close()
+
+    from sparselab.staging import inspect_runtime
+
+    cfg_idx1 = cfg.model_copy(
+        update={"runtime": cfg.runtime.model_copy(update={"device_index": 1})}
+    )
+    inspected1 = inspect_runtime(cfg_idx1)
+    assert inspected1.device_index == 1
+    assert inspected1.torch_device == "xpu:1"
+    assert inspected1.physical_device_id == "868023e2-0000-0000-2300-000000000000"
+    assert (
+        "passive memory readings for this device index are unavailable"
+        not in inspected1.limitations
+    )

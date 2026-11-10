@@ -229,6 +229,10 @@ def _safe_call(callable_: Any) -> tuple[Any | None, str | None]:
 def _format_device_uuid(raw_uuid: object) -> str | None:
     if raw_uuid is None:
         return None
+    if isinstance(raw_uuid, (list, tuple)) and all(
+        isinstance(b, int) and 0 <= b <= 255 for b in raw_uuid
+    ):
+        raw_uuid = bytes(raw_uuid)
     if isinstance(raw_uuid, (bytes, bytearray)):
         if len(raw_uuid) == 16:
             return str(_uuid_mod.UUID(bytes=bytes(raw_uuid)))
@@ -314,17 +318,38 @@ def discover_runtimes(
                         if backend == "xpu"
                         else getattr(torch, "cuda", None)
                     )
-                    if api is not None and hasattr(api, "get_device_properties"):
+                    # On uninitialized CUDA, prefer _raw_device_uuid_nvml so passive
+                    # discovery does not trigger torch.cuda._lazy_init() in the caller.
+                    if (
+                        backend == "cuda"
+                        and api is not None
+                        and hasattr(api, "_raw_device_uuid_nvml")
+                        and hasattr(api, "is_initialized")
+                        and not api.is_initialized()
+                        and "get_device_properties" not in getattr(api, "__dict__", {})
+                    ):
+                        nvml_uuids, _ = _safe_call(api._raw_device_uuid_nvml)
+                        if isinstance(nvml_uuids, (list, tuple)) and index < len(
+                            nvml_uuids
+                        ):
+                            physical_device_id = _format_device_uuid(nvml_uuids[index])
+                    elif api is not None and hasattr(api, "get_device_properties"):
                         props, _ = _safe_call(
                             lambda a=api, i=index: a.get_device_properties(i)
                         )
                         if props is not None:
+                            prop_name = getattr(props, "name", None)
+                            if prop_name:
+                                name = str(prop_name)
                             physical_device_id = _format_device_uuid(
                                 getattr(props, "uuid", None)
                             )
-                limitations.append(
-                    "device properties and memory deferred to isolated validation"
-                )
+                if name is not None and backend != "mps":
+                    limitations.append("device memory deferred to isolated validation")
+                else:
+                    limitations.append(
+                        "device properties and memory deferred to isolated validation"
+                    )
             elif supported and backend in {"cuda", "rocm"}:
                 properties, reason = _safe_call(
                     lambda i=index: torch.cuda.get_device_properties(i)
