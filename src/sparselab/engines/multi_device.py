@@ -58,7 +58,11 @@ def reduce_replica_gradients(
     primary_device: torch.device,
 ) -> None:
     """Reduce a replica's gradients onto the primary device in a single flat transfer."""
-    if not primary_params or not replica.trainable_params:
+    if (
+        not primary_params
+        or not replica.trainable_params
+        or all(p.grad is None for p in replica.trainable_params)
+    ):
         return
     rep_grads = [
         p.grad.detach()
@@ -66,8 +70,6 @@ def reduce_replica_gradients(
         else torch.zeros_like(p, memory_format=torch.preserve_format)
         for p in replica.trainable_params
     ]
-    if all(p.grad is None for p in replica.trainable_params):
-        return
     with torch.no_grad():
         flat_rep_grads = _flatten_dense_tensors(rep_grads)
         flat_on_primary = flat_rep_grads.to(primary_device, non_blocking=True)
