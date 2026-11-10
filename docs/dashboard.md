@@ -387,94 +387,86 @@ lookup plot maps token positions to recorded table/row addresses. It does not la
 hashed rows as concepts or claim neuron connections. It reads existing exploration
 payloads and adds no model execution.
 
-### Generate from the selected saved snapshot
-
-**Generate** shares the telemetry store/run selection and offers checkpoint metadata
-without opening weights. Stable links accept `store`, `run`, and `checkpoint`.
-The loopback CPU sampler offers **Try latest complete saved checkpoint**: the newest
-published verified checkpoint, including a checkpoint from an unfinished training
-run. This is distinct from the latest completed training run. Select a recorded
-checkpoint and press **Generate completion** to verify and load it. Browsing does
-not load weights. Links pin exact store/run/checkpoint; missing or unverified links
-fail without substitution. The sampler freezes its catalog for the browser session;
-**Refresh available snapshots** explicitly discovers newer saved generations.
-The list is ordered by UTC save time descending across runs, with a **NEWEST**
-marker and date, step, generation and run labels. An unpinned session defaults to
-the newest eligible saved checkpoint; an explicit choice or deep link stays pinned.
-**Use newest available** clears that pin and refreshes the list. These actions do
-not load weights. Missing files, incomplete inventories and unsupported archived
-generations are excluded; native cold verification remains mandatory on Generate.
-
-`SPARSELAB_SNAPSHOT_SERVICE_CONFIG` identifies the allowed `store` and loopback `url`.
-The existing `run`, `checkpoint`, and `checkpoint_sha256` fields are retained as
-legacy configuration metadata, not restrictions or automatic loading instructions.
-Run `dashboard/snapshot_sampler.py` with the compatible provisioned runtime/source.
-Native cold verification checks finalized generation contents, manifest, model
-configuration, tokenizer and Engram state before loading. The catalog's recorded
-verification alone never replaces this check. No partial/staging directory loads.
-
-One shared lock spans verification, eviction, loading, and generation. Requests
-while busy are rejected rather than queued; the old model is released before a
-new model loads. Failed loading leaves no fallback model. Outputs retain the exact
-identity and controls used. The UI distinguishes selected snapshot, sampler status
-at observation time, and output identity. Checkpoints exceeding 5 GiB inventoried
-size are refused; retain the service's 10 GiB memory cap, two CPU threads and 200%
-CPU quota. Cold verification can take minutes; generation is limited by tokens,
-not a hard wall-clock cancellation that could leave a worker running.
-
-Historical mappings are consulted before generation reads. Mapped archived
-checkpoints currently report their archive location as unavailable: the native
-loader requires a generation inside its original run and does not support the
-relocated archive layout. No copy, symlink workaround, or stale-source fallback is
-used. Other stores and incompatible model schemas fail explicitly.
-
-Prompts default to blank. Technical, code and story examples require visible choice;
-no TinyStories text is silently appended. Temperature 0–2, top-k 0–200 (0 disables),
-seed, and 8–512 new tokens are supported. Combined prompt/output is limited to 1024
-tokens for this CPU preview. Temperature zero is greedy. Requests retain the exact
-input, settings and verified identity with their output. No prompt/response is added
-to training data. Generate has manual refresh to avoid interrupting an embedded
-request; Explorer remains a distinct ≤60M internal-diagnostics tool and uses blank
-sample text by default. No probe-suite prompts or scientific settings are changed.
-
-Sampling defaults are temperature **0.7**, top-k **40**, seed **42**, and **32**
-new tokens. Reset sampling defaults restores those controls, keeps the prompt and
-snapshot selection, and clears the prior result without inference. Seed controls
-repeatability, not quality; vary it to explore alternative completions. Exact output
-can vary across runtimes. Temperature zero remains available for greedy decoding.
-The sampler service uses Streamlit's light base and the dashboard's existing
-`#0969da` primary color (STREAMLIT_THEME_BASE / STREAMLIT_THEME_PRIMARY_COLOR),
-so embedded and standalone views use the same native widgets and status palettes.
-
-Output length now supports 8–512 new tokens, in steps of eight; default stays 32.
-The combined 1,024-token CPU context limit still applies and is checked before
-generation. Longer requests take longer; EOS may end a completion before its cap.
-
-
 ### Native snapshot completion
 
-The Generate page uses native dashboard controls, with prompt and continuation side
-by side. It lists complete eligible local snapshots across the selected store, newest
-UTC save time first, independently of telemetry run filters. Refresh snapshots reads
-the catalog without loading weights. Explicit choices and deep links stay pinned;
-Use latest selects the newest available save. A new save never changes an in-flight
-request. Missing links are refused rather than substituted.
+**Generate** uses native dashboard controls, with prompt and continuation side by
+side. It lists complete eligible local snapshots across the selected run store,
+newest UTC save time first, independently of telemetry run filters. The **LATEST**
+marker identifies the newest published verified checkpoint, including one from
+an unfinished training run. It does not mean the latest completed training run.
+
+An unpinned session defaults to that newest save. **Refresh snapshots** reads the
+catalog without loading weights. Explicit choices and deep links stay pinned;
+**Use latest** clears the pin and refreshes the list. Stable links accept `store`,
+`run`, and `checkpoint`. Missing links fail without substitution. A new save never
+changes an in-flight request. Archived, missing and incomplete file inventories
+are excluded; native cold verification remains mandatory on Generate.
+
+#### Checkpoint counts
 
 The Overview and Checkpoints summaries distinguish the store-wide available count,
 the selected runs' available count, and the newest saved step. The retained-save
 table and latest recorded retention event show which files remain and why a new
-checkpoint may replace an older one without increasing the count. Save sequence numbers
-(Gen 2 or checkpoint_id 2) identify one run's second save, not the total number of
-checkpoints. Lab Home's Scored checkpoints counts sealed lab scores, including
-references, and is separate from training snapshots.
+checkpoint may replace an older one without increasing the count. Save sequence
+numbers (Gen 2 or checkpoint_id 2) identify one run's second save, not the total
+number of checkpoints. Lab Home's **Scored checkpoints** counts sealed lab scores,
+including references, and is separate from training snapshots.
 
-The dashboard sends bounded JSON requests to the configured loopback CPU sampler.
-Run `python src/sparselab/dashboard/snapshot_sampler.py` in the existing pinned
-inference environment with `SPARSELAB_SNAPSHOT_SERVICE_CONFIG` set, rather than
-launching that file with Streamlit. Keep the existing 2-thread, 200% CPU, 10 GiB
-sampler service envelope and the dashboard's separate envelope. The sampler owns
-one model, serializes verification/loading/generation, refuses concurrent work,
-and verifies the exact digest on load. It only binds the configured 127.0.0.1 port,
-rejects browser origins and unexpected Host values, and does not log prompts or
-outputs. The UI never loads a model. Sampling defaults remain 0.7 / top-k 40 /
-seed 42 / 32 new tokens, with the same 512-output and 1,024-context limits.
+#### CPU sampler setup and boundaries
+
+The dashboard sends bounded JSON requests to a separate loopback CPU sampler.
+`SPARSELAB_SNAPSHOT_SERVICE_CONFIG` points to a JSON file containing the allowed
+`store` and `url`, for example:
+
+```json
+{"store": "/data/experiment/runs", "url": "http://127.0.0.1:8502"}
+```
+
+Set that environment variable for both processes. Run
+`python src/sparselab/dashboard/snapshot_sampler.py` in the compatible provisioned
+inference environment/source, rather than launching that file with Streamlit.
+The historical `run`, `checkpoint`, and `checkpoint_sha256` configuration fields
+are ignored; they are not restrictions or automatic loading instructions.
+
+Keep the sampler's existing 10 GiB memory cap, two CPU threads and 200% CPU quota,
+separate from the dashboard's resource envelope. Checkpoints exceeding 5 GiB of
+inventoried files are refused. The service only binds the configured 127.0.0.1
+port, rejects browser origins and unexpected Host values, and does not log prompts
+or outputs. The dashboard UI never loads a model.
+
+**Generate completion** verifies and loads the exact selected digest through the
+native loader. Cold verification checks finalized contents, manifest, model
+configuration, tokenizer and Engram state. Recorded save-time verification alone
+never replaces it. Partial or staging directories are never loaded.
+
+One shared lock spans verification, eviction, loading and generation. Busy requests
+are refused rather than queued; the old model is released before another loads.
+Failed loading leaves no fallback model. The UI distinguishes the selected snapshot,
+sampler status at observation time and output identity. Cold verification can take
+minutes; generation is token-bounded, not forcibly cancelled at a wall-clock limit.
+
+Historical mappings are consulted before generation reads. Mapped archived
+checkpoints report their archive location as unavailable: the native loader requires
+a generation inside its original run and does not support the relocated archive
+layout. No copy, symlink workaround or stale-source fallback is used. Other stores
+and incompatible model schemas fail explicitly.
+
+#### Prompts and sampling
+
+Prompts start blank. Technical, code and story examples require visible selection;
+no TinyStories text is silently appended. Sampling defaults are temperature **0.7**,
+top-k **40**, seed **42** and **32** new tokens. Temperature 0–2, top-k 0–200
+(0 disables), a seed and 8–512 new tokens are supported. The combined prompt/output
+limit is 1,024 tokens and is checked before generation. Longer requests take longer;
+EOS may end a completion before its cap.
+
+Temperature zero is greedy. A fixed seed helps repeat a sample; changing it explores
+variation, not quality. Exact output can vary across runtimes. **Reset sampling
+defaults** restores the controls, keeps the prompt and snapshot, and clears the
+prior result without inference. Results retain the exact input, controls and
+verified identity, and the continuation can be downloaded.
+
+No prompts or outputs are added to training data. Generate refreshes manually to
+avoid interrupting a request. Explorer remains a separate ≤60M internal-diagnostics
+tool and uses blank sample text by default. No probe-suite prompts or scientific
+settings are changed.
