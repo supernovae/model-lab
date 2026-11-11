@@ -10,6 +10,7 @@ from tokenizers import Tokenizer
 from klab.data.byte_hash import table_address, token_bytes
 from klab.engines.mlx import MLXEngine, preserve_rng_state
 from klab.engram.semantic import SemanticQueryBatch
+from klab.evaluation.speculation import PromptLookupSpeculation
 
 
 def _addresses_from_ids(
@@ -238,6 +239,7 @@ def generate(
     semantic_queries: SemanticQueryBatch
     | Mapping[str, SemanticQueryBatch]
     | None = None,
+    speculation: PromptLookupSpeculation | None = None,
 ) -> str:
     """Continue ``prompt`` using locally seeded sampled decoding."""
     text, _ = generate_with_token_ids(
@@ -255,6 +257,7 @@ def generate(
         use_cache=use_cache,
         engine=engine,
         semantic_queries=semantic_queries,
+        speculation=speculation,
     )
     return text
 
@@ -277,6 +280,7 @@ def generate_with_token_ids(
     semantic_queries: SemanticQueryBatch
     | Mapping[str, SemanticQueryBatch]
     | None = None,
+    speculation: PromptLookupSpeculation | None = None,
 ) -> tuple[str, list[int]]:
     """Continue ``prompt`` using locally seeded sampled decoding.
 
@@ -284,6 +288,11 @@ def generate_with_token_ids(
     queries track context truncation and repeat their final position across generated
     tokens; cached and full-prefix PyTorch paths preserve the same query trajectory.
     Native MLX does not implement semantic attachments.
+
+    ``speculation`` drafts several tokens per cached forward and keeps only those
+    the model confirms, so greedy output is unchanged while model calls drop on
+    repetitive text. It requires greedy decoding on the PyTorch KV-cache path
+    without byte-addressed memory or semantic queries.
 
     Returned IDs are sampled completion tokens (not prompt or EOS), before any
     text-only stop-sequence trimming. They preserve the exact decoding trajectory
@@ -345,6 +354,62 @@ def generate_with_token_ids(
         generator.manual_seed(seed)
     cache_enabled = engine is None and use_cache and _cache_capability(model)[0]
     cache: Any = None
+    if speculation is not None:
+        if (
+            not cache_enabled
+            or temperature != 0
+            or byte_memory
+            or semantic_queries is not None
+        ):
+            raise ValueError(
+                "speculation requires greedy PyTorch KV-cache decoding without "
+                "byte-addressed memory or semantic queries"
+            )
+        speculation.begin()
+    # Drafted tokens already in the cache, each with the logits that follow it.
+    lookahead: list[tuple[int, torch.Tensor]] = []
+    # Cache length and rolling memory state before the latest speculative feed,
+    # and how many of that feed's tokens the model has confirmed since.
+    feed_start: tuple[int, Any, dict[str, Any]] | None = None
+    confirmed = 0
+
+    def speculative_logits(token: int) -> torch.Tensor:
+        """Feed ``token`` plus a fresh draft; rewind any rejected draft first."""
+        nonlocal cache, lookahead, feed_start, confirmed
+        assert speculation is not None
+        resend = 1
+        if lookahead:
+            assert feed_start is not None
+            length, history, histories = feed_start
+            if history is None and not histories:
+                cache.rewind(
+                    length + confirmed, memory_history=None, memory_histories={}
+                )
+            else:
+                # Rolling memory state exists only at feed boundaries: return to
+                # the last one and resend the confirmed tokens with this one.
+                cache.rewind(length, memory_history=history, memory_histories=histories)
+                resend += confirmed
+            lookahead = []
+        remaining = max_new_tokens - len(generated)
+        if cache.length + resend > cache.capacity:
+            feed_start = None
+            return rebuild_cache(remaining)
+        draft = speculation.draft(
+            ids, min(remaining - 1, cache.capacity - cache.length - resend)
+        )
+        feed_start = (cache.length, cache.memory_history, dict(cache.memory_histories))
+        confirmed = resend
+        step_logits, cache = model.forward_cached(  # type: ignore[attr-defined]
+            torch.tensor([ids[-resend:] + draft], device=device), cache=cache
+        )
+        speculation.model_calls += 1
+        speculation.drafted_tokens += len(draft)
+        lookahead = [
+            (drafted, step_logits[0, resend + offset])
+            for offset, drafted in enumerate(draft)
+        ]
+        return step_logits[0, resend - 1]
 
     def full_prefix_logits() -> Any:
         active_ids = ids[-max_seq_len:]
@@ -440,7 +505,14 @@ def generate_with_token_ids(
                         break
                 if len(generated) == max_new_tokens:
                     break
-                if not cache_enabled:
+                if speculation is not None:
+                    if lookahead and lookahead[0][0] == token:
+                        logits = lookahead.pop(0)[1]
+                        confirmed += 1
+                        speculation.accepted_tokens += 1
+                    else:
+                        logits = speculative_logits(token)
+                elif not cache_enabled:
                     logits = full_prefix_logits()
                 elif cache.length >= cache.capacity:
                     logits = rebuild_cache(max_new_tokens - len(generated))

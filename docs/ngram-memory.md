@@ -155,3 +155,9 @@ restores the full configuration only from matching verified manifest bytes.
 Runtime forecast signatures bind the complete map by its content digest instead
 of repeating the vocabulary array in each event. Neither optimization changes
 the model's mapping or raises the 64 KiB event limit.
+
+## Related: n-gram drafts at inference
+
+Token n-gram memory changes what the model computes. For using n-gram repeats to
+cut the number of model calls during generation without changing its output, see
+[speculative decoding](speculative-decoding.md).
