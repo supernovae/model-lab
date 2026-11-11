@@ -2288,6 +2288,15 @@ def _train_impl(
                         next_cursor = BatchCursor(
                             next_cursor.epoch, next_cursor.next_block + count
                         )
+                    # Start reading the following update's blocks now, so that
+                    # disk I/O overlaps with this update instead of delaying it.
+                    upcoming = epoch_order(len(dataset), config.seed, next_cursor.epoch)
+                    dataset.advise(
+                        upcoming[
+                            next_cursor.next_block : next_cursor.next_block
+                            + window_size
+                        ].tolist()
+                    )
                     records = []
                     valid_targets = 0
                     committed_cursor = cursor
