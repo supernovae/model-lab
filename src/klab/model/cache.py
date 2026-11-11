@@ -124,3 +124,25 @@ class GenerationCache:
             )
         self.input_ids[:, self.length : end].copy_(input_ids.detach())
         self.length = end
+
+    def rewind(
+        self,
+        length: int,
+        *,
+        memory_history: Tensor | None,
+        memory_histories: dict[str, Tensor],
+    ) -> None:
+        """Drop appended positions, for a caller that fed tokens speculatively.
+
+        Stored K/V and IDs past ``length`` become unused and are overwritten by
+        the next append. Rolling memory state cannot be shortened, so the caller
+        supplies the histories that belong to ``length``.
+        """
+        if type(length) is not int or not 0 <= length <= self.length:
+            raise ValueError("rewind length must be within the cached positions")
+        self.length = length
+        for layer in self.layers:
+            layer.length = length
+            layer.position = length
+        self.memory_history = memory_history
+        self.memory_histories = dict(memory_histories)

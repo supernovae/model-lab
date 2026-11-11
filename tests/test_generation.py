@@ -746,3 +746,122 @@ def test_context_memory_cache_bfloat16_keeps_fp32_residual_history() -> None:
         with pytest.raises(ValueError, match="memory convolution history is invalid"):
             model.forward_cached(ids[:, :1], cache=cache)
         assert cache.length == 6
+
+
+@pytest.mark.parametrize(
+    ("model_options", "attention", "max_seq_len"),
+    [
+        ({}, AttentionConfig(), 256),
+        ({}, AttentionConfig(), 40),
+        ({}, AttentionConfig(kind="sliding_window", window_size=4), 256),
+        ({}, AttentionConfig(kind="mla", latent_dim=8), 256),
+        (
+            {
+                "memory": "ngram",
+                "memory_table_size": 97,
+                "memory_ngram_size": 3,
+                "memory_dim": 8,
+                "memory_ngram_orders": (2, 3),
+                "memory_injection": "after_block",
+                "memory_block_index": 0,
+                "memory_variant": "context_key",
+                "memory_conv_kernel_size": 4,
+            },
+            AttentionConfig(),
+            40,
+        ),
+    ],
+)
+def test_speculation_keeps_greedy_tokens_when_drafts_are_partly_wrong(
+    model_options: dict[str, object], attention: AttentionConfig, max_seq_len: int
+) -> None:
+    from klab.evaluation.speculation import PromptLookupSpeculation
+
+    torch.manual_seed(0)
+    tokenizer = _tokenizer()
+    model = DenseLM(
+        ModelConfig(
+            vocab_size=tokenizer.get_vocab_size(),
+            hidden_dim=16,
+            num_layers=2,
+            num_heads=2,
+            ffn_dim=32,
+            max_seq_len=max_seq_len,
+            **model_options,
+        ),
+        attention,
+    ).eval()
+    prompt = "hello world\nhi"
+    prompt_length = len(tokenizer.encode(prompt, add_special_tokens=False).ids)
+    _, reference = generate_with_token_ids(
+        model, tokenizer, prompt, max_seq_len, 60, torch.device("cpu")
+    )
+
+    class PartlyWrong(PromptLookupSpeculation):
+        """Draft the true continuation with one wrong token at a moving position."""
+
+        calls = 0
+
+        def draft(self, ids, limit):
+            done = len(ids) - prompt_length
+            proposal = list(reference[done : done + min(limit, 8)])
+            self.calls += 1
+            wrong = self.calls % (len(proposal) + 1)
+            if wrong < len(proposal):
+                proposal[wrong] = (proposal[wrong] + 1) % 250 + 5
+            return proposal
+
+    speculation = PartlyWrong()
+    _, speculative = generate_with_token_ids(
+        model,
+        tokenizer,
+        prompt,
+        max_seq_len,
+        60,
+        torch.device("cpu"),
+        speculation=speculation,
+    )
+
+    assert speculative == reference
+    assert len(reference) == 60
+    assert 0 < speculation.accepted_tokens < speculation.drafted_tokens
+    assert speculation.model_calls < len(reference)
+
+
+def test_prompt_lookup_drafts_what_followed_the_latest_repeat() -> None:
+    from klab.evaluation.speculation import PromptLookupSpeculation
+
+    speculation = PromptLookupSpeculation(ngram=2, max_draft_tokens=3)
+    assert speculation.draft([1, 2, 3], 8) == []
+    assert speculation.draft([1, 2, 7, 8, 9, 1, 2, 5, 6, 1, 2], 8) == [5, 6, 1]
+    assert speculation.draft([1, 2, 7, 8, 9, 1, 2, 5, 6, 1, 2], 1) == [5]
+    speculation.begin()
+    assert speculation.draft([4, 1, 2], 8) == []
+
+
+def test_speculation_refuses_sampling() -> None:
+    from klab.evaluation.speculation import PromptLookupSpeculation
+
+    tokenizer = _tokenizer()
+    model = DenseLM(
+        ModelConfig(
+            vocab_size=tokenizer.get_vocab_size(),
+            hidden_dim=16,
+            num_layers=1,
+            num_heads=2,
+            ffn_dim=32,
+            max_seq_len=16,
+        ),
+        AttentionConfig(),
+    ).eval()
+    with pytest.raises(ValueError, match="speculation requires greedy"):
+        generate(
+            model,
+            tokenizer,
+            "hello",
+            16,
+            4,
+            torch.device("cpu"),
+            temperature=0.8,
+            speculation=PromptLookupSpeculation(),
+        )

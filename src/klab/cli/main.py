@@ -1127,6 +1127,13 @@ def _generate(args: argparse.Namespace) -> None:
         "context_length": context,
         "strict_context": args.strict_context,
     }
+    speculation = None
+    if args.prompt_lookup is not None:
+        from klab.evaluation.speculation import PromptLookupSpeculation
+
+        speculation = PromptLookupSpeculation(
+            ngram=args.prompt_lookup, max_draft_tokens=args.draft_tokens
+        )
     if args.show_prompt:
         print(json.dumps({"format": "raw", "prompt": args.prompt}), file=sys.stderr)
     text = generate(
@@ -1143,6 +1150,19 @@ def _generate(args: argparse.Namespace) -> None:
         use_cache=not args.no_cache,
         strict_context=args.strict_context,
         engine=loaded.engine,
+        speculation=speculation,
+    )
+    speculation_report = (
+        None
+        if speculation is None
+        else {
+            "drafter": "prompt_lookup",
+            "ngram": speculation.ngram,
+            "max_draft_tokens": speculation.max_draft_tokens,
+            "model_calls": speculation.model_calls,
+            "drafted_tokens": speculation.drafted_tokens,
+            "accepted_tokens": speculation.accepted_tokens,
+        }
     )
     if args.json:
         print(
@@ -1162,12 +1182,19 @@ def _generate(args: argparse.Namespace) -> None:
                     ),
                     "response": text[len(args.prompt) :],
                     "text": text,
+                    **(
+                        {"speculation": speculation_report}
+                        if speculation_report is not None
+                        else {}
+                    ),
                 },
                 sort_keys=True,
             )
         )
     else:
         print(text)
+        if speculation_report is not None:
+            print(json.dumps({"speculation": speculation_report}), file=sys.stderr)
 
 
 def _model_exercise(args: argparse.Namespace) -> None:
@@ -3989,6 +4016,19 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         "--context-length",
         type=int,
         help="Context cap, at most the checkpoint native context",
+    )
+    generation.add_argument(
+        "--prompt-lookup",
+        type=int,
+        metavar="N",
+        help="Draft tokens from earlier N-gram repeats in the context and verify "
+        "them in one model call; greedy output is unchanged",
+    )
+    generation.add_argument(
+        "--draft-tokens",
+        type=int,
+        default=8,
+        help="Most tokens drafted per model call with --prompt-lookup",
     )
     generation.add_argument(
         "--show-prompt",
