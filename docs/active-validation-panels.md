@@ -1,7 +1,7 @@
 # Fixed panels during training
 
-`evaluation.panels` optionally declares exactly two distinct named development
-panels. When present, those two panels replace the ordinary validation sample.
+`evaluation.panels` optionally declares one or more distinct named development
+panels. When present, these panels replace the ordinary validation sample.
 The trainer evaluates them using its already initialized engine at the existing
 baseline, `evaluation.every_steps`, and terminal/stop evaluation boundaries.
 It does not create additional training stops, model reloads or checkpoint
@@ -27,7 +27,7 @@ evaluation:
       supervised_targets: 262144
       batch_size: 2
       max_forward_positions: 262144
-    # A second, separately authenticated technical panel has the same fields.
+    # Add separately authenticated panels with the same fields as needed.
 ```
 
 Use native prepared bundles containing the fixed held-out material; the example
@@ -35,16 +35,17 @@ digests are placeholders, not runnable identities. The manifest authenticates
 the arrays, source identity, supervision and tokenizer. Selection uses the first
 declared number of eligible blocks and must score exactly `supervised_targets`.
 Loss masks can make that count smaller than forward positions. Sequence length
-must match training; the current hook supports the dense PyTorch path without
-memory or allocation sidecars. `evaluation.max_batches` applies only to ordinary
+must match training; the current hook supports dense PyTorch with no memory or
+token n-gram memory, including context-key Engram. Byte/portable memory and
+allocation sidecars are refused. `evaluation.max_batches` applies only to ordinary
 validation. Fixed panels use their own complete block and batch declarations.
-The pair must have distinct prepared manifests and validation arrays. An exact
+All panels must have distinct prepared manifests and validation arrays. An exact
 alias of the authenticated training array is refused. These cheap identity
 checks do not detect shared subsets, overlapping windows or common seed data;
-construct both panels from the verified held-out split. A legitimate ordinary
+construct all panels from the verified held-out split. A legitimate ordinary
 validation-array alias is not itself training leakage.
 
-The existing explicitly budgeted Lab workflow counts the sum of both panels'
+The existing explicitly budgeted Lab workflow counts the sum of all panels'
 batches through `evaluation.batch_limit`; no new campaign limit is added.
 Separate probe/try scorers retain their own ordinary validation protocol.
 
@@ -62,7 +63,7 @@ digests. Metrics include `validation/<name>/loss` and perplexity. The existing
 checkpoint-bound evaluation report includes those same named results whenever
 the trainer saves that evaluation boundary. Its top-level loss is
 `sum(panel NLL) / sum(panel scored targets)`, and perplexity is the exponential of
-that loss. The aggregate requires no third forward pass. Aggregate `batch_size`
+that loss. The aggregate requires no additional forward pass. Aggregate `batch_size`
 and `max_batches` are null because each panel carries its own batching protocol.
 The existing held-out evidence reader checks named coverage, artifact identities
 and weighting before accepting the report.
