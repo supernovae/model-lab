@@ -1046,6 +1046,7 @@ def _train(args: argparse.Namespace) -> None:
         resource_envelope=args.resource_envelope_value,
         tokenizer_batch_documents=args.tokenizer_batch_documents,
         tokenizer_batch_source_bytes=args.tokenizer_batch_source_bytes,
+        require_prepared=args.require_prepared,
     )
     print(run_id)
     progress = config.logging.root_dir / run_id / "progress.json"
@@ -3500,6 +3501,12 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     )
     training.add_argument("--stop-after-step", type=int)
     training.add_argument("--stage-bundle")
+    training.add_argument(
+        "--require-prepared",
+        action="store_true",
+        help="never tokenize or pack in this process: fail before the model is "
+        "built unless `data prepare` already published this config's cache",
+    )
     train_runtime = training.add_mutually_exclusive_group()
     train_runtime.add_argument("--runtime-profile", type=Path)
     train_runtime.add_argument("--runtime", metavar="ID")

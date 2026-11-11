@@ -1849,6 +1849,7 @@ def _prepare_data(
     observer: BottleneckObserver | None = None,
     prefix_from: PreparedPrefix | None = None,
     append_from: PreparedAppend | None = None,
+    require_prepared: bool = False,
 ) -> PreparedData:
     """Prepare immutable IDs and causal sidecars with an optional allocation."""
     tokenizer_batch_documents, tokenizer_batch_source_bytes = (
@@ -2167,6 +2168,11 @@ def _prepare_data(
                 },
             )
             return cached
+    if require_prepared:
+        raise PreparedDataMissing(
+            f"prepared data is not published at {root}; run `klab data prepare` "
+            "with this config before training with --require-prepared"
+        )
     if root.exists() or root.is_symlink():
         raise RuntimeError(f"unverified prepared-data destination exists: {root}")
     _assert_local_chat_disjoint(
@@ -2702,6 +2708,7 @@ def prepare_data(
     observer: BottleneckObserver | None = None,
     prefix_from: PreparedPrefix | None = None,
     append_from: PreparedAppend | None = None,
+    require_prepared: bool = False,
 ) -> PreparedData:
     """Prepare data and mark only new caches owned by the selected workspace.
 
@@ -2714,6 +2721,9 @@ def prepare_data(
     copies historical IDs unchanged and encodes only the fresh complete tail.
     Matched-story callers must freeze the parent update boundary; full-state
     continuation additionally verifies the historical group settings/cursor.
+
+    ``require_prepared`` refuses to tokenize or pack: an already published cache
+    is verified and returned, and a miss raises ``PreparedDataMissing``.
     """
     if prefix_from is not None and append_from is not None:
         raise ValueError("prepared prefix and append are mutually exclusive")
@@ -2772,6 +2782,7 @@ def prepare_data(
                 observer=observer,
                 prefix_from=prefix_from,
                 append_from=append_from,
+                require_prepared=require_prepared,
             )
     with (
         campaign_lock(base),
@@ -2790,6 +2801,7 @@ def prepare_data(
             observer=observer,
             prefix_from=prefix_from,
             append_from=append_from,
+            require_prepared=require_prepared,
         )
         if prepared.root.name not in existing:
             mark_prepared_cache(workspace, prepared.root)
@@ -2950,6 +2962,10 @@ class TokenBlockDataset:
             torch.from_numpy(targets),
             torch.from_numpy(addresses),
         )
+
+
+class PreparedDataMissing(RuntimeError):
+    """Training required an already prepared cache and none is published."""
 
 
 @dataclass(frozen=True)
