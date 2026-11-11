@@ -84,3 +84,26 @@ def test_full_routing_snapshot_contains_only_supervised_tokens() -> None:
         original, altered = getattr(first, name), getattr(second, name)
         assert original.shape[0] == 2
         torch.testing.assert_close(original, altered, rtol=0, atol=0)
+
+
+def test_dispatch_matches_dense_weighted_expert_sum_with_idle_experts() -> None:
+    torch.manual_seed(0)
+    moe = TopKMoE(hidden_dim=8, ffn_dim=16, num_experts=16, experts_per_token=2)
+    values = torch.randn(1, 3, 8)
+    output = moe(values)
+    tokens = values.reshape(-1, 8)
+    probabilities = torch.softmax(moe.router(tokens), dim=-1)
+    weights, selected = probabilities.topk(2, dim=-1)
+    dense = torch.zeros(tokens.shape[0], 16).scatter(
+        1, selected, weights / weights.sum(dim=-1, keepdim=True)
+    )
+    expected = sum(
+        dense[:, index : index + 1] * expert(tokens)
+        for index, expert in enumerate(moe.experts)
+    )
+    assert torch.allclose(output.reshape(-1, 8), expected, atol=1e-6)
+    output.sum().backward()
+    # Three tokens choose at most six of sixteen experts; the rest never run.
+    used = set(selected.flatten().tolist())
+    for index, expert in enumerate(moe.experts):
+        assert (expert.down.weight.grad is not None) == (index in used)
