@@ -18,6 +18,28 @@ work items and their status. It is not a second task board or a release promise.
 
 ## Current direction
 
+- **A general model-building lab.** Lab is the engine for building consistent,
+  repeatable and comparable models at any size; experiments are one use of it.
+  Model projects and recipes live in
+  [Kybern Workshop](https://github.com/supernovae/kybern-workshop). Pending work:
+  pluggable components, per-layer schedules and named architecture presets
+  ([#352](https://github.com/supernovae/model-lab/issues/352)), and moving
+  study- and corpus-specific schema out of the core
+  ([#359](https://github.com/supernovae/model-lab/issues/359)).
+- **Scale without idle accelerators.** Prepare data completely on CPU with the
+  whole host, then keep devices busy: preparation at 10B to 100B tokens
+  ([#356](https://github.com/supernovae/model-lab/issues/356)), checkpoint and
+  evaluation dead time ([#354](https://github.com/supernovae/model-lab/issues/354))
+  and several devices on one host
+  ([#355](https://github.com/supernovae/model-lab/issues/355)), across CPU, CUDA,
+  ROCm, Intel XPU and Apple MLX.
+- **Long context and sparse attention.** 32k to 256k context without dense
+  attention memory ([#353](https://github.com/supernovae/model-lab/issues/353)).
+- **The loop after pretraining.** Distillation, preference optimization,
+  adapters, chat templates and export
+  ([#357](https://github.com/supernovae/model-lab/issues/357)), plus speculative
+  decoding with n-gram and draft-model drafters
+  ([#358](https://github.com/supernovae/model-lab/issues/358)).
 - **Trustworthy evaluation.** [PR #72](https://github.com/supernovae/model-lab/pull/72)
   has landed: held-back final evaluation, text-level needle comparisons, recall
   diagnostics and verdict safeguards are available. Suite-v4 reference resealing
@@ -39,9 +61,9 @@ work items and their status. It is not a second task board or a release promise.
 
 Shared read-only experiment-ledger views, served-checkpoint provenance and
 broader hardware/provider qualification remain conditional on concrete needs.
-Native CUDA sparse attention, a real TPU backend and managed-provider lifecycle
-support need their own implementation and measured validation. Distributed
-training remains deferred under the
+A real TPU backend and managed-provider lifecycle support need their own
+implementation and measured validation. Multi-host distributed training remains
+deferred under the
 [single-host decision](docs/decisions/0015-single-host-extension-boundaries.md).
 
 The distinct [scientific research roadmap](docs/research/roadmap.md) and
