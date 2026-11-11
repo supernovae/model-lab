@@ -16,6 +16,7 @@ attention:
   window_size: 256    # always-visible previous tokens; a multiple of block_size
   selected_blocks: 8  # further-back blocks chosen per head
   latent_dim: 128     # optional: MLA latent keys and values
+  selector: learned   # optional: train the block summaries (default mean_key)
 ```
 
 Each query attends to its own block (causally), the `window_size / block_size`
@@ -33,22 +34,47 @@ and no per-position loop exist. When the local window and selected blocks cover
 every earlier block, the output equals dense attention (or MLA with
 `latent_dim`) with the same weights, which is how the implementation is tested.
 
+### Block selectors
+
+`selector: mean_key` (the default) summarizes a block by its mean key. Nothing is
+learned for selection.
+
+`selector: learned` adds a coarse attention branch. Every query also attends to
+one learned summary per complete earlier block, and a per-head gate adds that
+result to the output. A summary is a learned weighting of the positions in a
+block, applied to keys and values. Because the summaries now contribute to the
+output, they receive gradient from the loss, and block selection reuses them.
+The weighting starts uniform and the gate at zero, so a fresh layer computes
+exactly what `mean_key` computes, and a `mean_key` checkpoint can be promoted by
+adding the two new tensors (`pool_logits`, `coarse_gate`). The branch scores
+`T / block_size` summaries per query. Whether learned selection improves quality
+over `mean_key` or approaches dense attention has not been measured.
+
+### Generation
+
+Generation uses an incremental cache. Beside keys and values it stores one
+summary per completed block and each block's selection, made when the block's
+first token arrives. A new token then reads only its local window and selected
+blocks. Cached, prefix-recomputed and draft-and-verify decoding produce the same
+tokens. On a 4-layer MoE model with a 16,384-token prompt on CPU, a new token
+took 5.7 ms with the cache against 1.32 s for one prefix recomputation.
+
 Limits today:
 
-- Generation recomputes the active prefix; there is no incremental KV cache yet.
 - Grouped-query heads and the MLX engine are not supported.
-- The selector is a fixed mean-key rule, not a learned indexer, and no quality
-  comparison with dense attention has been run. Treat `selected_blocks` and
-  `window_size` as settings to measure, not as tuned defaults.
+- No quality comparison with dense attention has been run, for either selector.
+  Treat `selected_blocks` and `window_size` as settings to measure, not as tuned
+  defaults.
 - With training retained for backward, each layer holds its gathered keys and
   values; enable activation checkpointing for deep models at long context.
+- No accelerator measurement exists yet.
 
 `configs/smoke_local_selected_cpu.yaml` and
 `configs/smoke_moe_sparse_latent_cpu.yaml` are CPU smokes.
 `configs/long_context_32k_moe_sparse_latent.yaml` trains a small MoE model with
-latent keys and values at 32,768 tokens of context on CPU. On a 24-core
-workstation its eight single-threaded updates took about 22 s each with an
-11.1 GiB peak, against an 11.9 GiB estimate from `klab inspect`.
+latent keys and values and the learned selector at 32,768 tokens of context on
+CPU. On a 24-core workstation its eight single-threaded updates took about 24 s
+each with a 12.3 GiB peak, against a 14.2 GiB estimate from `klab inspect`.
 
 ## Block-sparse reference
 

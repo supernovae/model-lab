@@ -11,6 +11,7 @@ from tokenizers import Tokenizer
 
 from klab.config.models import AttentionConfig, ModelConfig
 from klab.evaluation.generation import generate_with_token_ids
+from klab.evaluation.speculation import PromptLookupSpeculation
 from klab.model.attention.dense import DenseAttention
 from klab.model.attention.latent import LatentAttention
 from klab.model.attention.local_selected import LocalSelectedAttention
@@ -38,6 +39,14 @@ ATTENTIONS = {
         "window_size": 32,
         "selected_blocks": 2,
         "latent_dim": 16,
+    },
+    "local_selected_learned": {
+        "kind": "local_selected",
+        "block_size": 16,
+        "window_size": 32,
+        "selected_blocks": 2,
+        "latent_dim": 16,
+        "selector": "learned",
     },
 }
 FFNS = {
@@ -75,23 +84,92 @@ def test_local_selected_limits_what_distant_queries_see() -> None:
     attention = LocalSelectedAttention(32, 4, 512, 10000.0, 8, 8, 1)
     values = torch.randn(1, 160, 32)
     query, key, _ = attention._project(values)
-    indices, real = attention.visible_blocks(
-        query.reshape(4, 20, 8, 8), key.reshape(4, 20, 8, 8)
-    )
-    # Own block, one local block and one selected block per head.
+    query, key = query.reshape(1, 4, 20, 8, 8), key.reshape(1, 4, 20, 8, 8)
+    indices = attention.visible_blocks(query, attention._summarize(key))[0]
+    # One local block, the own block and one selected block per head.
     assert indices.shape == (4, 20, 3)
-    assert real[:, -1].all() and not real[:, 0, 0].any() and not real[:, 1, 2].any()
+    assert (indices[:, 0] == torch.tensor([-1, 0, -1])).all()
+    assert (indices[:, 1] == torch.tensor([0, 1, -1])).all()
     assert (indices[:, -1, :2] == torch.tensor([18, 19])).all()
-    assert (indices[:, -1, 2] < 18).all()
+    assert ((indices[:, -1, 2] >= 0) & (indices[:, -1, 2] < 18)).all()
     seen = set(indices[:, -1].flatten().tolist())
     hidden = next(block for block in range(18) if block not in seen)
     changed = values.clone()
     changed[:, hidden * 8 : (hidden + 1) * 8] += 5.0
-    # The last block still selects from the same summaries unless the edit moves
-    # them; either way nothing before the edited block may change.
+    # Nothing before an edited block may change, whatever later blocks select.
     assert torch.equal(
         attention(changed)[:, : hidden * 8], attention(values)[:, : hidden * 8]
     )
+
+
+@pytest.mark.parametrize("selector", ["mean_key", "learned"])
+@pytest.mark.parametrize("latent", [None, 16])
+def test_local_selected_cached_decoding_matches_full_forward_and_survives_rewind(
+    selector: str, latent: int | None
+) -> None:
+    torch.manual_seed(0)
+    attention = LocalSelectedAttention(
+        32, 4, 512, 10000.0, 8, 16, 2, latent, selector=selector
+    ).eval()
+    if selector == "learned":
+        with torch.no_grad():
+            attention.pool_logits.normal_()
+            attention.coarse_gate.normal_()
+    values = torch.randn(2, 203, 32)
+    with torch.no_grad():
+        full = attention(values)
+        for width in (1, 7, 203):
+            cache = attention.create_cache(
+                2, 256, device=values.device, dtype=values.dtype
+            )
+            steps = []
+            for start in range(0, 203, width):
+                step, cache = attention.forward_cached(
+                    values[:, start : start + width], cache
+                )
+                steps.append(step)
+            torch.testing.assert_close(torch.cat(steps, 1), full, atol=5e-6, rtol=1e-5)
+        # Dropping speculative positions and decoding them again gives the same.
+        for cut in (202, 100, 9):
+            cache.length = cache.position = cut
+            step, cache = attention.forward_cached(values[:, cut:], cache)
+            torch.testing.assert_close(step, full[:, cut:], atol=5e-6, rtol=1e-5)
+    # A token reads its window and selected blocks, not the whole prefix.
+    assert cache.extra["selected"].shape == (2, 4, 32, 2)
+    # A request smaller than one block still decodes.
+    with torch.no_grad():
+        small = attention.create_cache(2, 5, device=values.device, dtype=values.dtype)
+        step, small = attention.forward_cached(values[:, :5], small)
+    torch.testing.assert_close(step, full[:, :5], atol=5e-6, rtol=1e-5)
+
+
+def test_learned_selector_starts_as_mean_key_and_trains_through_its_gate() -> None:
+    torch.manual_seed(0)
+    fixed = LocalSelectedAttention(32, 4, 512, 10000.0, 8, 8, 2)
+    learned = LocalSelectedAttention(32, 4, 512, 10000.0, 8, 8, 2, selector="learned")
+    assert learned.load_state_dict(fixed.state_dict(), strict=False).missing_keys == [
+        "pool_logits",
+        "coarse_gate",
+    ]
+    values = torch.randn(2, 150, 32)
+    torch.testing.assert_close(learned(values), fixed(values), atol=1e-6, rtol=1e-5)
+
+    learned(values).square().sum().backward()
+    assert learned.coarse_gate.grad.abs().sum() > 0
+    assert learned.pool_logits.grad.abs().sum() == 0
+    with torch.no_grad():
+        learned.coarse_gate.fill_(0.5)
+        learned.pool_logits.normal_()
+    learned.zero_grad()
+    learned(values).square().sum().backward()
+    assert learned.pool_logits.grad.abs().sum() > 0
+
+    # The coarse branch sees complete earlier blocks only, so it stays causal.
+    with torch.no_grad():
+        before = learned(values)
+        changed = values.clone()
+        changed[:, 77] += 5.0
+        torch.testing.assert_close(learned(changed)[:, :77], before[:, :77])
 
 
 @pytest.mark.parametrize(
@@ -201,6 +279,7 @@ def test_local_selected_trains_checkpoints_and_generates(
                 window_size=4,
                 selected_blocks=1,
                 latent_dim=8,
+                selector="learned",
             ),
             "training": base.training.model_copy(
                 update={"max_steps": 3, "max_tokens": 96}
@@ -213,9 +292,23 @@ def test_local_selected_trains_checkpoints_and_generates(
 
     loaded = load_run(run_id, run.logging.root_dir, None, "cpu")
     assert isinstance(loaded.model.blocks[0].attention, LocalSelectedAttention)
-    assert not loaded.model.incremental_cache_capability.supported
+    assert loaded.model.incremental_cache_capability.backend == "local_selected"
     tokenizer = Tokenizer.from_file(str(run.tokenizer.path))
-    _, tokens = generate_with_token_ids(
-        loaded.model, tokenizer, "a", run.model.max_seq_len, 6, loaded.device
-    )
-    assert 0 < len(tokens) <= 6
+
+    def tokens(**options: object) -> list[int]:
+        return generate_with_token_ids(
+            loaded.model,
+            tokenizer,
+            "a b a b a",
+            run.model.max_seq_len,
+            40,
+            loaded.device,
+            **options,
+        )[1]
+
+    # The KV cache, prefix recomputation and draft-and-verify decoding agree,
+    # across several context rollovers of this 32-token model.
+    cached = tokens()
+    assert len(cached) == 40
+    assert cached == tokens(use_cache=False)
+    assert cached == tokens(speculation=PromptLookupSpeculation(ngram=1))

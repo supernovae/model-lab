@@ -42,6 +42,9 @@ from klab.model.portable_engram import PortableEngramAdapter, load_portable_engr
 SemanticQueryInput = SemanticQueryBatch | Mapping[str, SemanticQueryBatch] | None
 
 
+# Attention modules with ``create_cache``/``forward_cached`` for incremental decoding.
+_CACHED_ATTENTION = (DenseAttention, LatentAttention, LocalSelectedAttention)
+
 AttentionBuilder = Callable[[ModelConfig, AttentionConfig], nn.Module]
 
 
@@ -93,6 +96,7 @@ def _local_selected_attention(
         attention.window_size,
         attention.selected_blocks,
         attention.latent_dim,
+        selector=attention.selector,
     )
 
 
@@ -174,7 +178,7 @@ class DecoderBlock(nn.Module):
     ) -> tuple[Tensor, AttentionKVCache]:
         """Inference-only incremental block evaluation without auxiliary diagnostics."""
         attention_input = self.norm1(x)
-        if not isinstance(self.attention, (DenseAttention, LatentAttention)):
+        if not isinstance(self.attention, _CACHED_ATTENTION):
             raise TypeError("block-sparse attention requires prefix recomputation")
         attention, next_cache = self.attention.forward_cached(attention_input, cache)
         x = x + attention
@@ -662,16 +666,13 @@ class DenseLM(nn.Module):
                 "block_sparse selection is prefix-dependent; generation recomputes "
                 "the active prefix for exact reference semantics",
             )
-        if any(
-            isinstance(block.attention, LocalSelectedAttention) for block in self.blocks
-        ):
-            return IncrementalCacheCapability(
-                False,
-                "local_selected attention has no incremental cache yet; generation "
-                "recomputes the active prefix",
-            )
         mode = (
-            "mla"
+            "local_selected"
+            if any(
+                isinstance(block.attention, LocalSelectedAttention)
+                for block in self.blocks
+            )
+            else "mla"
             if any(
                 isinstance(block.attention, LatentAttention) for block in self.blocks
             )
@@ -736,7 +737,7 @@ class DenseLM(nn.Module):
                     dtype=projection_dtype,
                 )
                 for block in self.blocks
-                if isinstance(block.attention, (DenseAttention, LatentAttention))
+                if isinstance(block.attention, _CACHED_ATTENTION)
             ]
             cache = GenerationCache(
                 layers=layers,
@@ -786,7 +787,7 @@ class DenseLM(nn.Module):
                 raise ValueError("generation cache layers are inconsistent")
             for block, layer in zip(self.blocks, cache.layers, strict=True):
                 attention = block.attention
-                if not isinstance(attention, (DenseAttention, LatentAttention)):
+                if not isinstance(attention, _CACHED_ATTENTION):
                     raise TypeError("generation cache contains a non-incremental layer")
                 value_dim = (
                     attention.head_dim

@@ -59,6 +59,9 @@ its first query against the mean key of each earlier block, so no position sees
 a later token. All queries of a block share one gather; there is no per-position
 loop and no `[T, T]` tensor. With `latent_dim`, keys and values use the MLA
 latent projections, combining sparse selection with latent K/V compression.
+`selector: learned` trains the block summaries through a gated coarse attention
+branch, and generation decodes from an incremental cache of keys, values, block
+summaries and block selections.
 See [sparse attention](sparse-attention.md#local-plus-selected-blocks).
 
 ## Composing attention and feed-forward kinds

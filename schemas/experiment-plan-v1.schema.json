@@ -408,6 +408,15 @@
           "default": null,
           "title": "Selected Blocks"
         },
+        "selector": {
+          "default": "mean_key",
+          "enum": [
+            "mean_key",
+            "learned"
+          ],
+          "title": "Selector",
+          "type": "string"
+        },
         "window_size": {
           "anyOf": [
             {

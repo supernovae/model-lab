@@ -29,6 +29,7 @@ attention:
   window_size: 8
   selected_blocks: 1
   latent_dim: 16
+  selector: learned
 training:
   seq_len: 32
   max_steps: 40
