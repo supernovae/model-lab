@@ -12,7 +12,7 @@ import pytest
 import torch
 from torch.utils.checkpoint import checkpoint
 
-from sparselab.training.offload import (
+from klab.training.offload import (
     ActivationOffload,
     probe_activation_offload,
 )

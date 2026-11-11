@@ -22,15 +22,15 @@ fetch models or datasets. Keep each active experiment's checkout pinned until
 its run finishes; use a separate checkout when trying a new Lab revision.
 
 ```sh
-git clone https://github.com/supernovae/tiny-sparse-lab.git
-cd tiny-sparse-lab
+git clone https://github.com/supernovae/model-lab.git
+cd model-lab
 export UV_PYTHON_DOWNLOADS=never
 uv sync --locked --python python3.14 --no-dev --extra cpu --extra mlx \
   --no-build-package mlx --no-build-package mlx-metal --no-build-package torch
 . .venv/bin/activate
-export SPARSELAB_WORK_DIR="$HOME/.local/share/sparselab"
-sparselab --help
-sparselab runtime env discover --json
+export KLAB_WORK_DIR="$HOME/.local/share/klab"
+klab --help
+klab runtime env discover --json
 ```
 
 The wheel-only restrictions on the three framework packages fail if a compatible
@@ -62,8 +62,8 @@ Open the native viewer in a separate terminal using the same work root:
 
 ```sh
 . .venv/bin/activate
-export SPARSELAB_WORK_DIR="$HOME/.local/share/sparselab"
-sparselab dashboard
+export KLAB_WORK_DIR="$HOME/.local/share/klab"
+klab dashboard
 ```
 
 The viewer binds to localhost and reads the local work store. Each Mac keeps its

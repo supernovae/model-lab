@@ -10,12 +10,12 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from sparselab.canonical import canonical_json
-from sparselab.corpus import split_freeze
-from sparselab.corpus.mixture import _rank
-from sparselab.corpus.mixture_index import MixtureIndex
-from sparselab.corpus.project import SplitDeclaration
-from sparselab.training.manifest import sha256_file
+from klab.canonical import canonical_json
+from klab.corpus import split_freeze
+from klab.corpus.mixture import _rank
+from klab.corpus.mixture_index import MixtureIndex
+from klab.corpus.project import SplitDeclaration
+from klab.training.manifest import sha256_file
 
 
 def _assignments(path):
@@ -119,7 +119,7 @@ def _fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, family_count=10):
     )
     monkeypatch.setattr(split_freeze, "source_declaration_payload", lambda _: {})
     monkeypatch.setattr(
-        "sparselab.corpus.split_inventory_cache.source_declaration_payload",
+        "klab.corpus.split_inventory_cache.source_declaration_payload",
         lambda _: {},
     )
     monkeypatch.setattr(split_freeze, "verify_record_admission", lambda *_: decisions)

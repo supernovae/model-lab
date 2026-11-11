@@ -82,7 +82,7 @@ observations; it replaces the earlier test-only 16 MiB example.
 
 ```json
 {
-  "format": "sparselab-lab-job-v1",
+  "format": "klab-lab-job-v1",
   "job_id": "cpu-native-001",
   "attempt_id": "cpu-native-authorized-001",
   "source_sha": "<exact merged validated 40-character SHA>",
@@ -126,7 +126,7 @@ imports; `-B` suppresses bytecode writes. Do not add `-I` here (it ignores
 
 ```sh
 env PYTHONPATH=/absolute/selected/controller/src \
-  /absolute/provisioned/bin/python -P -B -m sparselab lab-job seal /absolute/draft.json --output /absolute/job.json
+  /absolute/provisioned/bin/python -P -B -m klab lab-job seal /absolute/draft.json --output /absolute/job.json
 ```
 
 Seal validates native declarations, fingerprints the current selected interpreter,
@@ -143,11 +143,11 @@ values refuse; manifest identity ignores JSON whitespace.
 
 ```sh
 env PYTHONPATH=/absolute/selected/controller/src \
-  /absolute/provisioned/bin/python -P -B -m sparselab lab-job admit /absolute/job.json
+  /absolute/provisioned/bin/python -P -B -m klab lab-job admit /absolute/job.json
 env PYTHONPATH=/absolute/selected/controller/src \
-  /absolute/provisioned/bin/python -P -B -m sparselab lab-job status /absolute/job.json
+  /absolute/provisioned/bin/python -P -B -m klab lab-job status /absolute/job.json
 env PYTHONPATH=/absolute/selected/controller/src \
-  /absolute/provisioned/bin/python -P -B -m sparselab lab-job collect /absolute/job.json
+  /absolute/provisioned/bin/python -P -B -m klab lab-job collect /absolute/job.json
 ```
 
 Admission exclusively reserves the job and unique attempt index, seals the
@@ -234,7 +234,7 @@ Cleanup is **preview only**:
 
 ```sh
 env PYTHONPATH=/absolute/selected/controller/src \
-  /absolute/provisioned/bin/python -P -B -m sparselab lab-job cleanup-preview /absolute/job.json \
+  /absolute/provisioned/bin/python -P -B -m klab lab-job cleanup-preview /absolute/job.json \
   --candidate /absolute/disposable-work/scratch/cpu-native-authorized-001
 ```
 

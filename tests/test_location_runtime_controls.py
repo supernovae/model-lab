@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from sparselab.explore_config import load_explore_config
-from sparselab.probes.config import load_probe_config
-from sparselab.try_config import load_try_config
+from klab.explore_config import load_explore_config
+from klab.probes.config import load_probe_config
+from klab.try_config import load_try_config
 
 
 @pytest.mark.parametrize(
@@ -47,7 +47,7 @@ def test_declaration_locations_do_not_follow_cwd_or_work_root(
     cwd = tmp_path / invoking_dir
     cwd.mkdir(parents=True)
     monkeypatch.chdir(cwd)
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(cwd / "work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(cwd / "work"))
     selected = Path(os.path.relpath(source, cwd)) if relative_source else source
     # Explore takes a Path; try/probe take a selection string (preset or path).
     config = loader(str(selected) if loader != load_explore_config else selected)
@@ -60,7 +60,7 @@ def test_declaration_locations_do_not_follow_cwd_or_work_root(
 def test_runtime_registry_and_install_root_do_not_follow_scientific_work_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.runtime_environments import (
+    from klab.runtime_environments import (
         RuntimeEntry,
         profile_for_id,
         register_runtime,
@@ -70,8 +70,8 @@ def test_runtime_registry_and_install_root_do_not_follow_scientific_work_root(
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    monkeypatch.delenv("SPARSELAB_RUNTIME_DIR", raising=False)
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "first-work"))
+    monkeypatch.delenv("KLAB_RUNTIME_DIR", raising=False)
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "first-work"))
     register_runtime(
         "retained-cpu",
         RuntimeEntry(
@@ -85,9 +85,9 @@ def test_runtime_registry_and_install_root_do_not_follow_scientific_work_root(
     before = registry.read_bytes()
     profile = profile_for_id("retained-cpu")
     for name in ("first-work", "second-work"):
-        monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / name))
+        monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / name))
         assert resolve_registry_path() == registry
-        assert resolve_runtime_dir() == tmp_path / "data/sparselab/runtimes"
+        assert resolve_runtime_dir() == tmp_path / "data/klab/runtimes"
         assert profile_for_id("retained-cpu") == profile
         assert not (tmp_path / name).exists()
     assert registry.read_bytes() == before
@@ -118,7 +118,7 @@ import sys
 
 class RefuseExecutionImports(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname == 'torch' or fullname.startswith('torch.') or fullname == 'sparselab.cli.main':
+        if fullname == 'torch' or fullname.startswith('torch.') or fullname == 'klab.cli.main':
             raise AssertionError('environment help imported execution: ' + fullname)
 
 sys.meta_path.insert(0, RefuseExecutionImports())
@@ -129,19 +129,19 @@ def refuse_children(event, args):
     }:
         raise AssertionError('environment help started execution: ' + event)
 sys.addaudithook(refuse_children)
-from sparselab.cli.entry import main
+from klab.cli.entry import main
 command, work_prefix, work_dir = sys.argv[1:]
 prefix = []
 if work_prefix == 'split':
     prefix = ['--work-dir', work_dir]
 elif work_prefix == 'equals':
     prefix = ['--work-dir=' + work_dir]
-sys.argv = ['sparselab', *prefix, 'runtime', 'env', command, '--help']
+sys.argv = ['klab', *prefix, 'runtime', 'env', command, '--help']
 main()
 """
     settings = {
-        "SPARSELAB_WORK_DIR": str(tmp_path / "work"),
-        "SPARSELAB_RUNTIME_DIR": str(tmp_path / "runtimes"),
+        "KLAB_WORK_DIR": str(tmp_path / "work"),
+        "KLAB_RUNTIME_DIR": str(tmp_path / "runtimes"),
         "XDG_CONFIG_HOME": str(tmp_path / "config"),
         "XDG_DATA_HOME": str(tmp_path / "data"),
     }
@@ -161,7 +161,7 @@ main()
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert f"sparselab runtime env {command}" in result.stdout
+    assert f"klab runtime env {command}" in result.stdout
     assert all(not Path(path).exists() for path in settings.values())
     assert not (tmp_path / "selected-work").exists()
 
@@ -169,24 +169,24 @@ main()
 def test_environment_work_prefix_preserves_separate_runtime_locations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab import runtime_env_cli
-    from sparselab.cli import entry
-    from sparselab.runtime_environments import (
+    from klab import runtime_env_cli
+    from klab.cli import entry
+    from klab.runtime_environments import (
         resolve_registry_path,
         resolve_runtime_dir,
     )
-    from sparselab.workdir import resolve_work_dir
+    from klab.workdir import resolve_work_dir
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "original-work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "original-work"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    monkeypatch.setenv("SPARSELAB_RUNTIME_DIR", str(tmp_path / "runtimes"))
+    monkeypatch.setenv("KLAB_RUNTIME_DIR", str(tmp_path / "runtimes"))
     seen = []
 
     def observe(argv):
         seen.append(argv)
         assert resolve_work_dir() == tmp_path / "selected-work"
-        assert resolve_registry_path() == tmp_path / "config/sparselab/runtimes.yaml"
+        assert resolve_registry_path() == tmp_path / "config/klab/runtimes.yaml"
         assert resolve_runtime_dir() == tmp_path / "runtimes"
 
     monkeypatch.setattr(runtime_env_cli, "main", observe)
@@ -194,7 +194,7 @@ def test_environment_work_prefix_preserves_separate_runtime_locations(
         sys,
         "argv",
         [
-            "sparselab",
+            "klab",
             "--work-dir",
             "selected-work",
             "runtime",
@@ -211,14 +211,14 @@ def test_environment_work_prefix_preserves_separate_runtime_locations(
 
 
 def test_runtime_help_exposes_environment_management(tmp_path: Path) -> None:
-    from sparselab.cli.main import build_parser
+    from klab.cli.main import build_parser
 
     commands = next(
         action.choices
         for action in build_parser(tmp_path / "work")._actions
         if isinstance(action, argparse._SubParsersAction)
     )
-    assert "sparselab runtime env --help" in commands["runtime"].format_help()
+    assert "klab runtime env --help" in commands["runtime"].format_help()
     assert not (tmp_path / "work").exists()
 
 
@@ -226,12 +226,12 @@ def test_runtime_help_exposes_environment_management(tmp_path: Path) -> None:
 def test_environment_work_prefix_drives_native_runtime_root_refusal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, work_prefix: str
 ) -> None:
-    from sparselab.cli import entry
+    from klab.cli import entry
 
     monkeypatch.chdir(tmp_path)
     locations = {
-        "SPARSELAB_WORK_DIR": tmp_path / "original-work",
-        "SPARSELAB_RUNTIME_DIR": tmp_path / "selected-work",
+        "KLAB_WORK_DIR": tmp_path / "original-work",
+        "KLAB_RUNTIME_DIR": tmp_path / "selected-work",
         "XDG_CONFIG_HOME": tmp_path / "config",
         "XDG_DATA_HOME": tmp_path / "data",
     }
@@ -243,7 +243,7 @@ def test_environment_work_prefix_drives_native_runtime_root_refusal(
         else ["--work-dir=selected-work"]
     )
     monkeypatch.setattr(
-        sys, "argv", ["sparselab", *prefix, "runtime", "env", "list", "--json"]
+        sys, "argv", ["klab", *prefix, "runtime", "env", "list", "--json"]
     )
     # Exercise the real manager and native root check, not a mocked handoff.
     with pytest.raises(SystemExit) as error:

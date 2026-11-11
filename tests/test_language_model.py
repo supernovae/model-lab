@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 import torch
 
-from sparselab.data.packing import TokenBlockDataset
-from sparselab.evaluation.language_model import evaluate
+from klab.data.packing import TokenBlockDataset
+from klab.evaluation.language_model import evaluate
 
 
 class UniformModel(torch.nn.Module):

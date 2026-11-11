@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sparselab.config.loading import load_config
-from sparselab.lab_mode import eval_protocol
-from sparselab.model.inspection import inspection_report
+from klab.config.loading import load_config
+from klab.lab_mode import eval_protocol
+from klab.model.inspection import inspection_report
 
 CUDA = Path("configs/first_model_20m_cuda.yaml")
 CPU = Path("configs/first_model_20m_cpu.yaml")

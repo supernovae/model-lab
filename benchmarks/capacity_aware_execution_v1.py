@@ -69,8 +69,8 @@ def check_identities(cases: list[dict], paths: dict) -> dict:
 
 
 def metadata() -> dict:
-    from sparselab.host_capacity import hardware_observation
-    from sparselab.training.manifest import source_identity
+    from klab.host_capacity import hardware_observation
+    from klab.training.manifest import source_identity
 
     hardware = hardware_observation()
     versions = {}
@@ -104,14 +104,14 @@ def metadata() -> dict:
 def fixture(root: Path, medium: bool) -> dict:
     from preparation_benchmark import corpus
 
-    from sparselab.config.models import RunConfig, TokenizerTrainConfig
-    from sparselab.data.packing import prepare_data
-    from sparselab.data.tokenizer import load_tokenizer, train_tokenizer
-    from sparselab.experiments.lock import publish_lock, resolve_plan
-    from sparselab.experiments.plan import ExperimentPlan
-    from sparselab.staging import stage
-    from sparselab.training.manifest import sha256_file
-    from sparselab.workers.controller import Controller
+    from klab.config.models import RunConfig, TokenizerTrainConfig
+    from klab.data.packing import prepare_data
+    from klab.data.tokenizer import load_tokenizer, train_tokenizer
+    from klab.experiments.lock import publish_lock, resolve_plan
+    from klab.experiments.plan import ExperimentPlan
+    from klab.staging import stage
+    from klab.training.manifest import sha256_file
+    from klab.workers.controller import Controller
 
     root.mkdir(mode=0o700)
     train = corpus(root / "train.jsonl", (64 * MIB if medium else 16 * 1024), 1701)
@@ -176,7 +176,7 @@ def fixture(root: Path, medium: bool) -> dict:
                 "tokenizer": {
                     "kind": "tokenizer",
                     "version": 1,
-                    "producer": "sparselab",
+                    "producer": "klab",
                     "identifier": tokenizer.parent.name,
                     "sha256": sha256_file(tokenizer),
                     "path": str(tokenizer),
@@ -184,7 +184,7 @@ def fixture(root: Path, medium: bool) -> dict:
                 "packed": {
                     "kind": "prepared_data",
                     "version": 1,
-                    "producer": "sparselab",
+                    "producer": "klab",
                     "identifier": prepared.manifest["settings_sha256"],
                     "sha256": prepared.manifest["manifest_sha256"],
                     "path": str(prepared.root),
@@ -200,8 +200,8 @@ def fixture(root: Path, medium: bool) -> dict:
     config_path.write_text(config.model_dump_json())
     bundle = stage(config, root / "stage", through="validate")
     controller = Controller(root / "controller")
-    from sparselab.verification_proofs import verification_options
-    from sparselab.workers.bundles import (
+    from klab.verification_proofs import verification_options
+    from klab.workers.bundles import (
         install_dispatch_bundle,
         prepare_dispatch_bundle,
     )
@@ -221,8 +221,8 @@ def fixture(root: Path, medium: bool) -> dict:
         **verification_options(root),
     )
     # Prime in this process; all measured warm consumers run in new processes.
-    from sparselab.data.packing import load_prepared_data
-    from sparselab.experiments.lock import open_lock
+    from klab.data.packing import load_prepared_data
+    from klab.experiments.lock import open_lock
 
     options = verification_options(root)
     load_prepared_data(prepared.root, byte_enabled=False, **options)
@@ -275,16 +275,16 @@ def fixture(root: Path, medium: bool) -> dict:
 
 
 def operation(case: str, paths: dict, destination: Path, workers: int) -> dict:
-    from sparselab.config.models import RunConfig
-    from sparselab.data.packing import load_prepared_data
-    from sparselab.experiments.lock import open_lock, resolve_plan
-    from sparselab.experiments.plan import load_plan
-    from sparselab.staging import materialize_prepared_inputs, verify_stage_bundle
-    from sparselab.training.manifest import sha256_file
-    from sparselab.workers.controller import Controller
+    from klab.config.models import RunConfig
+    from klab.data.packing import load_prepared_data
+    from klab.experiments.lock import open_lock, resolve_plan
+    from klab.experiments.plan import load_plan
+    from klab.staging import materialize_prepared_inputs, verify_stage_bundle
+    from klab.training.manifest import sha256_file
+    from klab.workers.controller import Controller
 
     if case == "campaign_read":
-        from sparselab.campaign.engine import CampaignEngine
+        from klab.campaign.engine import CampaignEngine
 
         engine = CampaignEngine(Path(paths["campaign"]), Path(paths["work_dir"]))
         result = engine.inspect("status")
@@ -345,17 +345,17 @@ def extended_operation(case: str, paths: dict, destination: Path, workers: int) 
     from contextlib import ExitStack
     from unittest.mock import patch
 
-    from sparselab.config.models import RunConfig
-    from sparselab.data.packing import load_prepared_data
-    from sparselab.experiments.lock import open_lock, resolve_plan
-    from sparselab.experiments.plan import load_plan
-    from sparselab.host_capacity import sha_work_plan
-    from sparselab.staging import (
+    from klab.config.models import RunConfig
+    from klab.data.packing import load_prepared_data
+    from klab.experiments.lock import open_lock, resolve_plan
+    from klab.experiments.plan import load_plan
+    from klab.host_capacity import sha_work_plan
+    from klab.staging import (
         materialize_prepared_inputs,
         verify_stage_bundle,
     )
-    from sparselab.verification_proofs import verification_options
-    from sparselab.workers.bundles import (
+    from klab.verification_proofs import verification_options
+    from klab.workers.bundles import (
         install_dispatch_bundle,
         materialize_dispatch_bundle,
         prepare_dispatch_bundle,
@@ -365,7 +365,7 @@ def extended_operation(case: str, paths: dict, destination: Path, workers: int) 
     root = Path(paths["prepared"])
     options = verification_options(Path(paths["proof_root"]))
     if case == "real_owned_copy":
-        from sparselab.owned_copy import owned_copy
+        from klab.owned_copy import owned_copy
 
         data = load_prepared_data(root, byte_enabled=False)
         destination.mkdir(mode=0o700)
@@ -392,7 +392,7 @@ def extended_operation(case: str, paths: dict, destination: Path, workers: int) 
         }
     if case.startswith("prepared_"):
         plan = sha_work_plan(operator_cap=workers)
-        with patch("sparselab.data.packing.sha_work_plan", return_value=plan):
+        with patch("klab.data.packing.sha_work_plan", return_value=plan):
             data = load_prepared_data(
                 root,
                 byte_enabled=False,
@@ -417,7 +417,7 @@ def extended_operation(case: str, paths: dict, destination: Path, workers: int) 
     config = RunConfig.model_validate_json(Path(paths["config"]).read_text())
     observations: list[dict[str, object]] = []
     if case in {"worker_install_warm", "worker_install_transfer"}:
-        from sparselab.workers.models import BundleManifest
+        from klab.workers.models import BundleManifest
 
         manifest = BundleManifest.model_validate_json(
             (Path(paths["dispatch"]) / "bundle.json").read_text()
@@ -456,21 +456,21 @@ def extended_operation(case: str, paths: dict, destination: Path, workers: int) 
         if case.endswith("buffered"):
             stack.enter_context(
                 patch(
-                    "sparselab.owned_copy.fcntl.ioctl",
+                    "klab.owned_copy.fcntl.ioctl",
                     side_effect=OSError(errno.EOPNOTSUPP, "benchmark forced fallback"),
                 )
             )
             if hasattr(os, "copy_file_range"):
                 stack.enter_context(
                     patch(
-                        "sparselab.owned_copy.os.copy_file_range",
+                        "klab.owned_copy.os.copy_file_range",
                         side_effect=OSError(
                             errno.EOPNOTSUPP, "benchmark forced fallback"
                         ),
                     )
                 )
         if case.startswith("stage_copy"):
-            from sparselab.owned_copy import owned_copy
+            from klab.owned_copy import owned_copy
 
             source = Path(paths["stage"])
             destination.mkdir(mode=0o700)
@@ -538,8 +538,8 @@ def measured_extended_operation(
     """Count logical SHA work, not physical I/O; preserve cold baseline boundaries."""
     from unittest.mock import patch
 
-    from sparselab import owned_copy as copy_module
-    from sparselab.training import manifest as manifest_module
+    from klab import owned_copy as copy_module
+    from klab.training import manifest as manifest_module
 
     digests = set(paths.get("array_sha256", {}).values())
     counters = {
@@ -562,10 +562,10 @@ def measured_extended_operation(
         return original_fd_hash(fd)
 
     with (
-        patch("sparselab.training.manifest.sha256_file", counted),
-        patch("sparselab.staging.sha256_file", counted),
-        patch("sparselab.workers.bundles.sha256_file", counted),
-        patch("sparselab.owned_copy._hash_fd", counted_fd),
+        patch("klab.training.manifest.sha256_file", counted),
+        patch("klab.staging.sha256_file", counted),
+        patch("klab.workers.bundles.sha256_file", counted),
+        patch("klab.owned_copy._hash_fd", counted_fd),
     ):
         result = extended_operation(case, paths, destination, workers)
     payload_bytes = sum(

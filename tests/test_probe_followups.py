@@ -11,17 +11,17 @@ from typing import Any
 import numpy as np
 import pytest
 
-from sparselab.data.withheld_facts import (
+from klab.data.withheld_facts import (
     diagnostic_manifest,
     split_facts,
     training_documents,
 )
-from sparselab.lab_records import write_sealed
-from sparselab.probes import compare as compare_mod
-from sparselab.probes import lm_eval_adapter, metrics, runner, scoring
-from sparselab.probes import verdict as verdict_mod
-from sparselab.probes.points import collect_points, metric_points
-from sparselab.probes.suite import BY_ID, parametric_items
+from klab.lab_records import write_sealed
+from klab.probes import compare as compare_mod
+from klab.probes import lm_eval_adapter, metrics, runner, scoring
+from klab.probes import verdict as verdict_mod
+from klab.probes.points import collect_points, metric_points
+from klab.probes.suite import BY_ID, parametric_items
 
 
 class _Words:
@@ -317,7 +317,7 @@ def test_lm_eval_overrides_make_a_new_benchmark_never_a_new_suite(
 
 
 def test_probe_cli_rejects_bad_lm_eval_options_before_any_work(tmp_path: Path) -> None:
-    from sparselab.probes.cli import run_probe
+    from klab.probes.cli import run_probe
 
     with pytest.raises(ValueError, match="at least 1"):
         run_probe("missing-run", None, lab_dir=tmp_path, lm_eval_limit=0)
@@ -338,7 +338,7 @@ def _record(lab: Path, probe_id: str, row: dict[str, Any], sha: str) -> None:
         "eval_group": None,
     }
     record = {
-        "format": "sparselab-probe-v1",
+        "format": "klab-probe-v1",
         "probe_id": probe_id,
         "created_at": "2026-10-10T12:00:00+00:00",
         "target": target,

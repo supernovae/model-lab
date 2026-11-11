@@ -16,13 +16,13 @@ scientific binding is unambiguous.
 git switch main
 git pull --ff-only
 git switch -c feat/<task>
-export SPARSELAB_WORK_DIR=/data/sparselab
+export KLAB_WORK_DIR=/data/klab
 # Commit authored scientific inputs before corpus acquisition, tokenizer fit,
 # experiment preparation or model training.
 git add <declarations> && git commit -m "Declare scientific inputs"
-uv run --locked sparselab research snapshot <plan-or-campaign> --json
-uv run --locked sparselab recovery inspect <recovery.yaml> --json
-uv run --locked sparselab recovery plan <recovery.yaml> --json
+uv run --locked klab research snapshot <plan-or-campaign> --json
+uv run --locked klab recovery inspect <recovery.yaml> --json
+uv run --locked klab recovery plan <recovery.yaml> --json
 ```
 
 `research snapshot` is read-only and reports Git closure status, fresh prerequisite verification, declared evaluation and runtime, and available storage. `BLOCKED` is not a request to proceed blindly: inspect the reason codes and commit the corrected declarations. A mutation with `--allow-uncommitted-declaration` explicitly records exact dirty/untracked hashes but does not relax immutable artifact, runtime, approval or pinned source checks. `RecoveryManifest.source_commit` pins the earlier input commit, not the commit containing its own self-reference. A historic expected digest is a comparison target, not present-byte proof. There is no automatic Git commit, push, network retrieval, training or scientific decision.
@@ -41,9 +41,9 @@ remain hard failures. A pending review does not abort independent numeric gates.
 3. Publish a compact verified reference, for example:
 
    ```sh
-   uv run --locked sparselab research evidence export --kind corpus_release <verified-release-dir> \
+   uv run --locked klab research evidence export --kind corpus_release <verified-release-dir> \
      --declaration <recovery.yaml> --output <tracked-evidence/release.json> --json
-   uv run --locked sparselab research evidence export --kind experiment_lock <verified-lock.json> \
+   uv run --locked klab research evidence export --kind experiment_lock <verified-lock.json> \
      --declaration <recovery.yaml> --output <tracked-evidence/lock.json> --json
    git add <tracked-evidence> && git commit -m "Record verified scientific identities"
    ```
@@ -71,12 +71,12 @@ remain hard failures. A pending review does not abort independent numeric gates.
 5. Run the locked ExperimentPlan on a selected local/SSH worker and verify one immutable checkpoint generation. Run a declared suite, not an implicit collection of tests:
 
    ```sh
-   uv run --locked sparselab evaluation suite run <suite.yaml> <run-id> \
-     --checkpoint <step_N_gen_M> --runs-dir "$SPARSELAB_WORK_DIR/runs" --json
-   uv run --locked sparselab readiness model <policy.yaml> <suite-index.json> --json
-   uv run --locked sparselab readiness review <suite-index.json> --reviewer <human-id> \
+   uv run --locked klab evaluation suite run <suite.yaml> <run-id> \
+     --checkpoint <step_N_gen_M> --runs-dir "$KLAB_WORK_DIR/runs" --json
+   uv run --locked klab readiness model <policy.yaml> <suite-index.json> --json
+   uv run --locked klab readiness review <suite-index.json> --reviewer <human-id> \
      --decision approve --note 'Reviewed checkpoint-bound evidence' --output <review.json>
-   uv run --locked sparselab readiness model <policy.yaml> <suite-index.json> \
+   uv run --locked klab readiness model <policy.yaml> <suite-index.json> \
      --review <review.json> --json
    ```
 
@@ -107,7 +107,7 @@ algorithm changes, and no source bytes are added to thin archives.
 including the archived release manifest, after relocation and without accessing
 original sources. The explanation records
 `verification_scope: declared_digest_payloads_only`; its metadata-only Python
-validator, `sparselab.corpus.identity.verify_corpus_identity`, also reports
+validator, `klab.corpus.identity.verify_corpus_identity`, also reports
 `source_contents_verified: false` and `release_contents_verified: false`.
 These checks explain the declared identity; they do not verify unavailable file
 contents, reconstruct a corpus, or establish scientific validity. File digests
@@ -129,20 +129,20 @@ metadata records and aggregate retained metadata.
 ## What happens if the persistent state root disappears?
 
 ```sh
-export SPARSELAB_WORK_DIR=/data/sparselab
-uv run --locked sparselab recovery inspect <recovery.yaml> --json
-uv run --locked sparselab recovery plan <recovery.yaml> --json
-uv run --locked sparselab research snapshot <plan-or-campaign> --json
+export KLAB_WORK_DIR=/data/klab
+uv run --locked klab recovery inspect <recovery.yaml> --json
+uv run --locked klab recovery plan <recovery.yaml> --json
+uv run --locked klab research snapshot <plan-or-campaign> --json
 # Only after checking source availability, storage and network permission:
-uv run --locked sparselab recovery reconstruct <recovery.yaml> --json
+uv run --locked klab recovery reconstruct <recovery.yaml> --json
 # For pinned remote sources, explicitly add --allow-network after rights review.
-uv run --locked sparselab campaign reconstruct <campaign.yaml> --json
-uv run --locked sparselab campaign status <campaign.yaml> --json
+uv run --locked klab campaign reconstruct <campaign.yaml> --json
+uv run --locked klab campaign status <campaign.yaml> --json
 ```
 
 The first three commands must not create the root or scratch. `reconstruct` only replays declared deterministic corpus acquisition/build/freeze, export, tokenizer training, data preparation and experiment lock, comparing rebuilt bytes to expected digests. It **never** trains, evaluates, approves or promotes a model. `UNSEALED_RESULT` needs a new explicitly reviewed and committed identity; a different digest is a discrepancy, never an alias for the old release. `campaign reconstruct` cannot recreate lost historical Campaign receipts and does not dispatch training. Fresh recoverability differs from historic last-committed stage outcome.
 
-Recoverable: committed local inputs and deterministic outputs with verified dependencies. Externally required: inaccessible pinned downloads, explicit tokenizer/model/runtime/evaluation decisions not yet authored, or unresolved redistribution rights. Nonreconstructable: a lost checkpoint generation and optimizer state unless a verified independent copy exists. A family parent checkpoint does not recreate a lost child or make unrun planned nodes complete. Restore such bytes from a verified portable archive if rights allow; otherwise retain their pinned missing identity, do **not** silently retrain under it. A deliberately relocated state root needs new location binding/manifest and re-verification of original referenced bytes—not editing old receipts or assuming paths moved. `scratch/` and optional `cache/` are disposable, never scientific evidence. Explicit old output/cache/run paths retain their original meaning, including legacy `sparselab-work/`; selecting an external root does not migrate them.
+Recoverable: committed local inputs and deterministic outputs with verified dependencies. Externally required: inaccessible pinned downloads, explicit tokenizer/model/runtime/evaluation decisions not yet authored, or unresolved redistribution rights. Nonreconstructable: a lost checkpoint generation and optimizer state unless a verified independent copy exists. A family parent checkpoint does not recreate a lost child or make unrun planned nodes complete. Restore such bytes from a verified portable archive if rights allow; otherwise retain their pinned missing identity, do **not** silently retrain under it. A deliberately relocated state root needs new location binding/manifest and re-verification of original referenced bytes—not editing old receipts or assuming paths moved. `scratch/` and optional `cache/` are disposable, never scientific evidence. Explicit old output/cache/run paths retain their original meaning, including legacy `klab-work/`; selecting an external root does not migrate them.
 
 A recovery declaration can be partial. If source access, rights, tokenizer,
 model configuration, runtime or evaluation bindings are absent, report those
@@ -172,11 +172,11 @@ materialize a tree, create an environment, or create the selected state root.
 Review that inventory and source rights before explicitly authorizing replay:
 
 ```sh
-export SPARSELAB_WORK_DIR=/data/sparselab
-uv run --locked --extra cpu sparselab recovery inspect recovery.yaml --json
-uv run --locked --extra cpu sparselab recovery plan recovery.yaml --json
+export KLAB_WORK_DIR=/data/klab
+uv run --locked --extra cpu klab recovery inspect recovery.yaml --json
+uv run --locked --extra cpu klab recovery plan recovery.yaml --json
 # Explicit code-execution authorization; --allow-network separately authorizes sources:
-uv run --locked --extra cpu sparselab recovery reconstruct recovery.yaml \
+uv run --locked --extra cpu klab recovery reconstruct recovery.yaml \
   --replay-pinned-implementation --allow-network --json
 ```
 
@@ -195,7 +195,7 @@ resulting snapshots/build/release. No current producer receives substituted
 historical hashes. Operational receipts distinguish the current orchestrator,
 historical source tree/environment, and each artifact's recorded provenance.
 Existing partial current-code acquisition stays untouched. Historical products
-live under `$SPARSELAB_WORK_DIR/replay/work/<commit>/`; recovery can resolve the
+live under `$KLAB_WORK_DIR/replay/work/<commit>/`; recovery can resolve the
 verified release there without rewriting earlier location receipts.
 
 An optional `expected_build_sha256` on a `corpus_release` recovery step adds a
@@ -217,7 +217,7 @@ reason code. Its `failed_replay` object identifies that exact attempt:
 ```
 
 Pass `receipt_path` directly to
-`sparselab.recovery.implementation_replay.verify_replay_receipt(Path(receipt_path))`
+`klab.recovery.implementation_replay.verify_replay_receipt(Path(receipt_path))`
 and compare the returned `record_sha256` with this reference. This is the
 receipt's canonical record digest, not a hash of the pretty-printed JSON file
 or an expected corpus identity. Verification does not retry producers or scan
@@ -229,8 +229,8 @@ creation or during receipt publication do not claim a published reference.
 
 Replay integration tests install real locked environments. Use adequately sized
 external scratch rather than a small `/tmp` tmpfs, for example
-`TMPDIR="$SPARSELAB_WORK_DIR/scratch/replay-tests/tmp"` with pytest's
-`--basetemp="$SPARSELAB_WORK_DIR/scratch/replay-tests/pytest"`. Create the temporary
+`TMPDIR="$KLAB_WORK_DIR/scratch/replay-tests/tmp"` with pytest's
+`--basetemp="$KLAB_WORK_DIR/scratch/replay-tests/pytest"`. Create the temporary
 directory first; pytest owns and replaces its explicitly selected base directory.
 The fixtures remove their dedicated environments after each test while retaining
 small source/artifact/receipt diagnostics.

@@ -11,15 +11,15 @@ from urllib.request import Request, urlopen
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from sparselab.dashboard import generation, snapshot_sampler
-from sparselab.dashboard.snapshot_catalog import SavedSnapshot
-from sparselab.dashboard.snapshot_controls import validate_controls
+from klab.dashboard import generation, snapshot_sampler
+from klab.dashboard.snapshot_catalog import SavedSnapshot
+from klab.dashboard.snapshot_controls import validate_controls
 
 
 def _page(root):
     from pathlib import Path
 
-    from sparselab.dashboard.generation import generation_page
+    from klab.dashboard.generation import generation_page
 
     generation_page(None, Path(root), [])
 
@@ -29,7 +29,7 @@ def setup(tmp_path, monkeypatch):
     config = {"url": "http://127.0.0.1:8502", "store": str(tmp_path)}
     path = tmp_path / "service.json"
     path.write_text(json.dumps(config))
-    monkeypatch.setenv("SPARSELAB_SNAPSHOT_SERVICE_CONFIG", str(path))
+    monkeypatch.setenv("KLAB_SNAPSHOT_SERVICE_CONFIG", str(path))
     item = SavedSnapshot(
         "a", "checkpoints/step_0001_gen_0001", "a" * 64, 1, "2026-01-01", 100
     )
@@ -162,7 +162,7 @@ def test_sampling_bounds(args):
 
 
 def test_sampler_native_generation_reuse_and_context_limit(setup, monkeypatch):
-    from sparselab.evaluation import generation as native
+    from klab.evaluation import generation as native
 
     root, _, item, _ = setup
     sampler = snapshot_sampler.Sampler(root)
@@ -272,7 +272,7 @@ def _summary(root, selected_ids, events):
     from pathlib import Path
     from types import SimpleNamespace
 
-    from sparselab.dashboard.generation import checkpoint_summary
+    from klab.dashboard.generation import checkpoint_summary
 
     checkpoint_summary(Path(root), selected_ids, SimpleNamespace(events=events))
 

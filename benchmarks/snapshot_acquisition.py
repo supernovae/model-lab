@@ -18,7 +18,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 from test_dataset_sources import acquire, declaration, inventory
 
-from sparselab.data import snapshot_writer, sources
+from klab.data import snapshot_writer, sources
 
 
 def main():

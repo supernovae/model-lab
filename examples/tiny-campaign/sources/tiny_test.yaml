@@ -5,7 +5,7 @@ acquisition:
   - name: tiny_test-1.txt
     path: texts/tiny_test-1.txt
   max_bytes: 100000
-canonical_uri: sparselab://examples/tiny-campaign/tiny_test
+canonical_uri: klab://examples/tiny-campaign/tiny_test
 document_kinds:
 - text
 domains:

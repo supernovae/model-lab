@@ -46,8 +46,8 @@ class ImagePlanTests(unittest.TestCase):
     def test_publication_rejects_other_repositories_before_commands(self):
         for repository in (
             "ghcr.io/supernovae/lab-harness",
-            "ghcr.io/someone/tiny-sparse-lab",
-            "ghcr.io/supernovae/tiny-sparse-lab-extra",
+            "ghcr.io/someone/model-lab",
+            "ghcr.io/supernovae/model-lab-extra",
         ):
             with (
                 self.subTest(repository=repository),
@@ -78,7 +78,7 @@ class ImagePlanTests(unittest.TestCase):
                     image_plan.publish(
                         self.root,
                         "cuda",
-                        "ghcr.io/supernovae/tiny-sparse-lab",
+                        "ghcr.io/supernovae/model-lab",
                         revision,
                     )
                 lookup.assert_not_called()
@@ -163,13 +163,13 @@ class ImagePlanTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "application digest unavailable"):
                 image_plan.publish(
-                    self.root, "cuda", "ghcr.io/supernovae/tiny-sparse-lab", "c" * 40
+                    self.root, "cuda", "ghcr.io/supernovae/model-lab", "c" * 40
                 )
             self.assertEqual(run.call_args_list[-1].args[0][:2], ["docker", "push"])
             write.assert_not_called()
 
     def test_buildx_missing_exact_reference_allows_bootstrap(self):
-        reference = "ghcr.io/supernovae/tiny-sparse-lab:deps-cuda-123"
+        reference = "ghcr.io/supernovae/model-lab:deps-cuda-123"
         with patch(
             "image_plan.subprocess.run",
             return_value=subprocess.CompletedProcess(
@@ -259,7 +259,7 @@ class ImagePlanTests(unittest.TestCase):
             patch("image_plan.Path.write_text"),
         ):
             image_plan.publish(
-                self.root, "cuda", "ghcr.io/supernovae/tiny-sparse-lab", "c" * 40
+                self.root, "cuda", "ghcr.io/supernovae/model-lab", "c" * 40
             )
         calls = [call.args[0] for call in run.call_args_list]
         builds = [argv for argv in calls if argv[:3] == ["docker", "buildx", "build"]]
@@ -273,7 +273,7 @@ class ImagePlanTests(unittest.TestCase):
             smokes[0][-4:],
             ["python", "/opt/image_plan.py", "verify", "/opt/backend.json"],
         )
-        self.assertEqual(smokes[1][-2:], ["sparselab", "--help"])
+        self.assertEqual(smokes[1][-2:], ["klab", "--help"])
         for argv in smokes:
             for flag in (
                 "--network=none",
@@ -294,7 +294,7 @@ class ImagePlanTests(unittest.TestCase):
             self.assertRaisesRegex(RuntimeError, "dependency digest unavailable"),
         ):
             image_plan.publish(
-                self.root, "cuda", "ghcr.io/supernovae/tiny-sparse-lab", "c" * 40
+                self.root, "cuda", "ghcr.io/supernovae/model-lab", "c" * 40
             )
         calls = [call.args[0] for call in run.call_args_list]
         self.assertEqual(
@@ -387,13 +387,13 @@ class ImagePlanTests(unittest.TestCase):
             patch("image_plan.Path.write_text"),
         ):
             image_plan.publish(
-                self.root, "cuda", "ghcr.io/supernovae/tiny-sparse-lab", "c" * 40
+                self.root, "cuda", "ghcr.io/supernovae/model-lab", "c" * 40
             )
         calls = [call.args[0] for call in run.call_args_list]
         builds = [cmd for cmd in calls if cmd[:3] == ["docker", "buildx", "build"]]
         self.assertEqual(len(builds), 1)
         self.assertIn(
-            "DEPENDENCY_IMAGE=ghcr.io/supernovae/tiny-sparse-lab@" + digest, builds[0]
+            "DEPENDENCY_IMAGE=ghcr.io/supernovae/model-lab@" + digest, builds[0]
         )
         self.assertEqual(calls[-1][:2], ["docker", "push"])
 
@@ -409,7 +409,7 @@ class ImagePlanTests(unittest.TestCase):
             self.assertRaises(RuntimeError),
         ):
             image_plan.publish(
-                self.root, "cuda", "ghcr.io/supernovae/tiny-sparse-lab", "c" * 40
+                self.root, "cuda", "ghcr.io/supernovae/model-lab", "c" * 40
             )
         self.assertFalse(
             any(c.args[0][:2] == ["docker", "push"] for c in run.call_args_list)

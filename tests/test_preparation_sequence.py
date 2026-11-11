@@ -15,37 +15,37 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 
-from sparselab.canonical import canonical_digest, canonical_json
-from sparselab.config.loading import load_config, load_tokenizer_config
-from sparselab.corpus.acquisition import (
+from klab.canonical import canonical_digest, canonical_json
+from klab.config.loading import load_config, load_tokenizer_config
+from klab.corpus.acquisition import (
     _adapter,
     _project_sha,
     declaration_sha256,
     verify_acquisition,
     verify_snapshot,
 )
-from sparselab.corpus.admission_draft import draft_admission_manifest
-from sparselab.corpus.declaration_render import render_declaration
-from sparselab.corpus.export import (
+from klab.corpus.admission_draft import draft_admission_manifest
+from klab.corpus.declaration_render import render_declaration
+from klab.corpus.export import (
     _licenses,
     _split_stats,
     export_release,
     verify_release_export,
 )
-from sparselab.corpus.pipeline import build
-from sparselab.corpus.project import load_project, source_declaration_payload
-from sparselab.corpus.protected_lineage import audit_protected_lineage
-from sparselab.corpus.release import freeze, verify_release
-from sparselab.corpus.release_review import verify_admission_review
-from sparselab.corpus.split_freeze import finalize_family_inventory, freeze_splits
-from sparselab.corpus.split_inventory import write_split_inventory
-from sparselab.training.attempt_budget import AttemptBudget, AttemptContract
-from sparselab.training.attempt_commands import (
+from klab.corpus.pipeline import build
+from klab.corpus.project import load_project, source_declaration_payload
+from klab.corpus.protected_lineage import audit_protected_lineage
+from klab.corpus.release import freeze, verify_release
+from klab.corpus.release_review import verify_admission_review
+from klab.corpus.split_freeze import finalize_family_inventory, freeze_splits
+from klab.corpus.split_inventory import write_split_inventory
+from klab.training.attempt_budget import AttemptBudget, AttemptContract
+from klab.training.attempt_commands import (
     classify_attempt_command,
     phase_output_paths,
 )
-from sparselab.training.manifest import sha256_file
-from sparselab.training.preparation import compile_phase
+from klab.training.manifest import sha256_file
+from klab.training.preparation import compile_phase
 
 _PACKET = Path(__file__).resolve().parent / "fixtures/preparation"
 _PLAN = _PACKET / "preparation.json"
@@ -141,7 +141,7 @@ def test_render_declaration_substitutes_exactly_and_refuses_unsafe_outputs(
     assert (
         classify_attempt_command(
             [
-                "sparselab",
+                "klab",
                 "corpus",
                 "render-declaration",
                 "--template",
@@ -187,7 +187,7 @@ def test_reviewed_admission_cannot_substitute_an_edited_draft(tmp_path: Path) ->
     (tmp_path / "admission.json.review.json").write_bytes(
         canonical_json(
             {
-                "format": "sparselab-admission-review-v2",
+                "format": "klab-admission-review-v2",
                 "decision": "ACCEPTED",
                 "reviewer": "Fixture reviewer",
                 "reviewed_on": "2026-10-09",
@@ -243,7 +243,7 @@ def _sources(root: Path, project_id: str) -> tuple[Path, dict[str, str]]:
                 rendered.append(
                     {
                         **record,
-                        "_sparselab_source": {
+                        "_klab_source": {
                             "id": record["id"],
                             "dataset_revision": "a" * 40,
                             "source_shard_path": shard,
@@ -676,7 +676,7 @@ def _native(root: Path, *words: str) -> list[str]:
         "run",
         "--locked",
         "--no-sync",
-        "sparselab",
+        "klab",
         "--work-dir",
         str(root),
         *words,
@@ -1089,7 +1089,7 @@ def test_offline_preparation_sequence_through_native_supervision(
     inspection_selection.write_bytes(
         canonical_json(
             {
-                "format": "sparselab-admission-inspection-selection-v1",
+                "format": "klab-admission-inspection-selection-v1",
                 "seed": "fixture-pre-admission-review-v1",
                 "normalizer": "normalizer-structure-v3",
                 "sources": [
@@ -1647,8 +1647,8 @@ def test_real_lineage_audit_blocks_protected_family_moved_to_train(
         _clusters(clusters, inventory, strata, seed=f"different-{index}")
         frozen = recipe / f"splits-{index}.yaml"
         freeze_splits(project, root, inventory, clusters, frozen)
-        from sparselab.corpus.bounded_metadata import metadata_operation
-        from sparselab.corpus.split_assignments import Assignments, assignment_path
+        from klab.corpus.bounded_metadata import metadata_operation
+        from klab.corpus.split_assignments import Assignments, assignment_path
 
         reference = yaml.safe_load(frozen.read_text())["assignment_file"]
         with metadata_operation(root / "test-split-lookup"):
@@ -1714,7 +1714,7 @@ def test_real_lineage_audit_blocks_protected_family_moved_to_train(
 def test_split_preparation_reuses_verified_snapshots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.corpus import acquisition
+    from klab.corpus import acquisition
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "settings"))
     root = tmp_path / "work"
@@ -1748,10 +1748,10 @@ def test_split_preparation_reuses_verified_snapshots(
 def test_native_inventory_handoff_reuses_completed_proof_and_rejects_changed_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.corpus.split_inventory_adoption import (
+    from klab.corpus.split_inventory_adoption import (
         _native_completion_without_lock_binding,
     )
-    from sparselab.corpus.split_inventory_cache import InventoryCache
+    from klab.corpus.split_inventory_cache import InventoryCache
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "settings"))
     root = tmp_path / "work"
@@ -1769,7 +1769,7 @@ def test_native_inventory_handoff_reuses_completed_proof_and_rejects_changed_loc
     admission.write_text("{}\n")
     _reviewed_release(recipe, admission)
     consumer = load_project(recipe / "pre-freeze.yaml")
-    from sparselab.corpus.completed_preparation import _check_completed_producer
+    from klab.corpus.completed_preparation import _check_completed_producer
 
     # Inventory-only production has no admission; the later frozen split binds
     # the consumer's real reviewed admission. Existing admitted producers still
@@ -1822,11 +1822,11 @@ def test_native_inventory_handoff_reuses_completed_proof_and_rejects_changed_loc
     # A different producer checkout or a modified signed proof cannot be used.
     other_source = tmp_path / "changed-producer"
     for module in ("split_inventory_adoption", "completed_preparation"):
-        relative = Path("src/sparselab/corpus") / (module + ".py")
+        relative = Path("src/klab/corpus") / (module + ".py")
         destination = other_source / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source / relative, destination)
-    with (other_source / "src/sparselab/corpus/completed_preparation.py").open(
+    with (other_source / "src/klab/corpus/completed_preparation.py").open(
         "ab"
     ) as stream:
         stream.write(b"\n")
@@ -1856,7 +1856,7 @@ def test_native_inventory_handoff_reuses_completed_proof_and_rejects_changed_loc
 def test_cold_inventory_completion_has_operation_owned_lifetime(
     tmp_path, monkeypatch, outcome
 ):
-    from sparselab.corpus.split_inventory_cache import (
+    from klab.corpus.split_inventory_cache import (
         InventoryCache,
         verified_inventory,
     )

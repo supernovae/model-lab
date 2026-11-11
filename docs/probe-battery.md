@@ -18,19 +18,19 @@ data split, a longer run, more seeds) for any claim that an idea is better.
 
 ```sh
 # Every lab try runs the fast tier automatically (disable with --config no-probes).
-sparselab try wider-ffn.yaml --vs BASELINE.yaml
+klab try wider-ffn.yaml --vs BASELINE.yaml
 
 # Any run or checkpoint, any tier.
-sparselab probe RUN_OR_CHECKPOINT --vs BASELINE_RUN --backend cpu --config standard
-sparselab probe RUN --vs BASE --backend cpu --json      # stable schema
-sparselab report probe-20261010T150839Z-ece5a739
+klab probe RUN_OR_CHECKPOINT --vs BASELINE_RUN --backend cpu --config standard
+klab probe RUN --vs BASE --backend cpu --json      # stable schema
+klab report probe-20261010T150839Z-ece5a739
 
 # Standard lm-eval tasks (optional extra).
 uv sync --locked --extra cpu --extra lmeval
-sparselab probe RUN --vs BASE --backend cpu --config full
+klab probe RUN --vs BASE --backend cpu --config full
 
 # Place a result on the reference curve (reads records; no download, no compute).
-sparselab compare TRY_OR_PROBE_ID --references
+klab compare TRY_OR_PROBE_ID --references
 ```
 
 `--extra cpu` selects dependencies, not the saved checkpoint backend. These
@@ -47,12 +47,12 @@ restored or a different input explicitly chosen. See [result lookup](result-look
 Results land in
 `WORK_DIR/lab/probes/<probe-id>/probe.json`, sealed with `record_sha256` by
 the same lab-record writer as `try.json`. `report`, `probe` and the dashboard
-read every record through one verified reader (`sparselab.lab_records`), so an
+read every record through one verified reader (`klab.lab_records`), so an
 edited record is rejected everywhere. A try stores its result in `try.json`
 under `probe`.
 
 ```text
-PROBE BATTERY  sparselab-probe-battery v4 · suite b24f01ec · tier full (ran fast → standard → full) · 22.6s
+PROBE BATTERY  klab-probe-battery v5 · suite b7f7b01d · tier full (ran fast → standard → full) · 22.6s
   candidate lab-try-20261010T191906Z-6a192ff3  step 60 · 7.7k tokens · 98.7k params (43.4k active)
   baseline  lab-base-43194de82c467490-try-20261010T191906Z-6a192ff3  step 60 · 7.7k tokens · 43.2k params
 
@@ -129,7 +129,7 @@ fact is stated, then asked in other words), because a tiny model knows no
 facts. **Fact recall (from weights)** is the closed-book counterpart. It is
 bound to the facts the run actually trained on: the `withheld_facts` source
 trains on `split_facts(dataset.synthetic_seed)`
-(`sparselab.data.withheld_facts`), so the probe reads that seed from the run's
+(`klab.data.withheld_facts`), so the probe reads that seed from the run's
 resolved config, checks it against the run's prepared-data provenance
 (`data/manifest.json`) and builds the same seed's manifest. The held-out split
 asks each trained fact with its own prompt, the dev split rewords it, and the
@@ -159,7 +159,7 @@ records each task, the chance level and this caveat in the result.
   (see below), never a pass.
 
 The lm-eval adapter scores through the same token-scoring path as the probes
-(`sparselab.probes.scoring`). It follows the harness boundary rules (trailing
+(`klab.probes.scoring`). It follows the harness boundary rules (trailing
 context whitespace moves to the continuation; context and continuation are
 encoded together and split at the context's token count; an empty context is
 the end-of-text token) and scores every continuation token, windowing with
@@ -175,7 +175,7 @@ lm_eval_tasks: [hellaswag, arc_challenge, winogrande]
 lm_eval_limit: 500
 ```
 
-`sparselab probe RUN --config benchmark.yaml` runs any
+`klab probe RUN --config benchmark.yaml` runs any
 lm-eval tasks at any limit through the same adapter. Bad options (duplicate
 tasks, a limit below 1) are refused before any work. The probe suite and its
 digest do not change. The tasks, limit, task versions and per-item
@@ -268,7 +268,7 @@ final split exists for the one verdict that must not be selected on:
 
 ```sh
 # Once, for a candidate you have already chosen. Never to pick between candidates.
-sparselab probe CANDIDATE --vs BASELINE --backend cpu --config final
+klab probe CANDIDATE --vs BASELINE --backend cpu --config final
 ```
 
 `--config final` (or declaration `final: true`) scores the text probes, agreement and generations on the final split
@@ -281,7 +281,7 @@ kept out of every selection view: points carry `final`/`verdict_split`
 provenance, and ordinary `compare` (subjects, others and the same-checkpoint
 enrichment), the Pareto view, the Models page, dashboard history, trends,
 behaviors and next steps exclude final results (Home activity lists them as
-`final`). `sparselab compare --final A B` is the explicit report of two final
+`final`). `klab compare --final A B` is the explicit report of two final
 results (no references, no ordinary evidence). Arms cache item-scored probes per
 split, so reusing an Arm across an ordinary and a final battery always
 scores each split afresh. A completed final verdict's action is `report`.
@@ -294,7 +294,7 @@ v2 introduced fractional tie credit and the declared uncertainty methods).
 Compare results only within one suite digest; the dashboard warns when history
 mixes suites.
 
-## Result schema (`sparselab-probe-v1`)
+## Result schema (`klab-probe-v1`)
 
 Top level: `format`, `created_at`, `suite` (`name`, `version`, `sha256`, split
 digests, `verdict_split`), `tier`, `tiers_run`, `stop` (`stopped`, `kind`, `at`,
@@ -326,11 +326,11 @@ tokens, the same bins ECE is computed from. Suite v3 added fact recall from
 weights, the item records and the reliability bins; results from older suites
 keep their own digest and are compared only with each other.
 
-## Reference models and `sparselab compare`
+## Reference models and `klab compare`
 
 Our runs should sit on a known curve, not only next to each other. Four public
 checkpoints in the 70M–360M range are pinned in
-`sparselab.reference_models` (immutable Hugging Face commits, safe snapshots
+`klab.reference_models` (immutable Hugging Face commits, safe snapshots
 only: static metadata and `*.safetensors`, no pickles, remote code or
 quantization configs; the same rules as the Pythia trajectory adapter):
 
@@ -346,12 +346,12 @@ same lm-eval adapter as our checkpoints:
 
 ```sh
 uv sync --locked --extra cpu --extra reference --extra lmeval
-sparselab probe ref:SmolLM2-135M --config full
-sparselab compare --list-references
+klab probe ref:SmolLM2-135M --config full
+klab compare --list-references
 ```
 
 For a machine-readable registry listing, use
-`sparselab compare --list-references --json`. This reads existing records only;
+`klab compare --list-references --json`. This reads existing records only;
 it does not download or score models and needs no subject/result ID. The JSON
 listing has its own schema, separate from a comparison report:
 
@@ -389,7 +389,7 @@ baseline. Without the optional extras the command stops before any work with
 `uv sync --extra reference --extra lmeval`.
 
 **Packaged results.** The sealed probe records of all four references ship in
-`src/sparselab/probes/reference_results/` and are verified on read like any lab
+`src/klab/probes/reference_results/` and are verified on read like any lab
 record, so `compare`, the dashboard and CI use them without downloading a
 model. Measured on CPU (fp32, lm-eval 0.4.13, transformers 4.57.6) with the
 `full` tier's tasks at `limit=50`, zero-shot; two independent runs gave
@@ -410,7 +410,7 @@ held-out items with 4 candidates each (chance 0.25). Fact recall from weights
 is recorded as `skipped` (inapplicable): a public model was never trained on a
 withheld-facts manifest, so there are no trained facts to ask about. To refresh
 them, run
-`sparselab probe ref:NAME --config full` for each reference and copy the sealed
+`klab probe ref:NAME --config full` for each reference and copy the sealed
 `probe.json` to `reference_results/NAME.json`; `tests/test_references.py`
 checks every packaged record against the pinned registry.
 
@@ -420,7 +420,7 @@ way:
 - held-out loss within one `eval_group` (validation data, tokenizer, loss mask,
   eval protocol), as before;
 - lm-eval accuracy within one `benchmark_group`: a digest of the harness, the
-  scoring-protocol version (`sparselab-lmeval-scoring-v1`), tasks, task
+  scoring-protocol version (`klab-lmeval-scoring-v1`), tasks, task
   versions, shots, `limit`, the metric used per task and, per item, a hash of
   its document, its rendered requests (context and continuation) and its
   target(s) (`details.benchmark`), so a reworded prompt or a changed target is a
@@ -430,13 +430,13 @@ way:
   The battery's own lm-eval row uses the same paired SE, and refuses a
   baseline in another benchmark group (`not_comparable`).
 
-`sparselab compare RESULT [RESULT…] [--references] [--json]` reads sealed
+`klab compare RESULT [RESULT…] [--references] [--json]` reads sealed
 records only (a try/probe id, a record path or `ref:NAME`; the first is the
 subject). Each point is completed with compatible evidence for the **same
 checkpoint** (same checkpoint sha256) from every verified record in the lab:
 per (comparison group, checkpoint) each field keeps its newest available value
 and its source. So when `compare TRY --references` reports missing lm-eval
-evidence and suggests `sparselab probe TRY --config full`, rerunning the same
+evidence and suggests `klab probe TRY --config full`, rerunning the same
 `compare TRY` picks up that probe and says where the number came from. It and prints one table of points and, per metric, each pair as
 better/worse/within noise (|Δ| ≤ 2 paired SE), **NOT COMPARABLE** with the
 reason, or **MISSING EVIDENCE** with the command that produces it:
@@ -501,7 +501,7 @@ resident or active weight bytes, training tokens or scoring latency (ms/token).
 *Resident* counts every weight in memory; *active* counts what one token
 touches (one embedding row, the routed experts, the looked-up memory rows), and
 a grey bar spans each checkpoint's active → resident range. Points come from
-every verified lab record through `sparselab.probes.points` (shared with
+every verified lab record through `klab.probes.points` (shared with
 `compare`): each scored arm of every `try`, including tries run with
 `--config no-probes`, every probe target and baseline, and the packaged
 reference results (purple diamonds, lm-eval and fact recall). One point per
@@ -515,8 +515,8 @@ without the chosen cost and older records without a group are counted in a
 caption, never mixed in. The dotted frontier respects the metric's direction,
 the dashed line is the chance level, a log cost axis is on by default when
 references are present, and "How to read the Pareto view" explains it for
-learners. Plain `sparselab train` runs join the view once
-`sparselab probe DIR/RUN` scores them; the Models page lists the
+learners. Plain `klab train` runs join the view once
+`klab probe DIR/RUN` scores them; the Models page lists the
 ones still unscored, with that command.
 
 ![Pareto view: lab runs on the reference curve](assets/dashboard-models-pareto.png)

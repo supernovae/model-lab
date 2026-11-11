@@ -15,23 +15,23 @@ from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 from tokenizers.models import BPE
 from tokenizers.pre_tokenizers import ByteLevel
 
-from sparselab.canonical import canonical_digest
-from sparselab.config.loading import load_config
-from sparselab.config.models import AttentionConfig
-from sparselab.data.tokenizer import SPECIAL_TOKENS, load_tokenizer
-from sparselab.engram.packs import compile_pack, verify_pack
-from sparselab.evaluation.generation import _prompt_byte_addresses
-from sparselab.experiments.reporting import _validate_research
-from sparselab.experiments.study import plan_study
-from sparselab.research.catalog import (
+from klab.canonical import canonical_digest
+from klab.config.loading import load_config
+from klab.config.models import AttentionConfig
+from klab.data.tokenizer import SPECIAL_TOKENS, load_tokenizer
+from klab.engram.packs import compile_pack, verify_pack
+from klab.evaluation.generation import _prompt_byte_addresses
+from klab.experiments.reporting import _validate_research
+from klab.experiments.study import plan_study
+from klab.research.catalog import (
     ResearchEntry,
     list_research,
     load_datasets,
     load_recipe,
     load_research,
 )
-from sparselab.research.probe import probe_model
-from sparselab.research.scaffold import scaffold_lesson, scaffold_research
+from klab.research.probe import probe_model
+from klab.research.scaffold import scaffold_lesson, scaffold_research
 
 
 def _write_byte_tokenizer(path: Path) -> None:
@@ -106,7 +106,7 @@ def test_learned_runner_catalog_rejects_generic_recipe_and_scaffold(
 def test_catalog_rejects_duplicate_json_and_lists_unknown_ids(tmp_path: Path) -> None:
     duplicate = tmp_path / "duplicate.json"
     duplicate.write_text(
-        '{"format":"sparselab-research-entry","version":1,"version":1}',
+        '{"format":"klab-research-entry","version":1,"version":1}',
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="duplicate JSON key"):
@@ -157,8 +157,8 @@ def test_canonical_research_scaffold_uses_campaign_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = make_study_resources(tmp_path)
-    work = tmp_path / "sparselab-work"
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(work))
+    work = tmp_path / "klab-work"
+    monkeypatch.setenv("KLAB_WORK_DIR", str(work))
     output = scaffold_research(
         "neutral-study",
         tmp_path / "experiments/research/new-campaign",
@@ -169,7 +169,7 @@ def test_canonical_research_scaffold_uses_campaign_workspace(
     config = load_config(output / "base.yaml")
     assert config.logging.root_dir == work / "experiments/new-campaign/runs"
     readme = (output / "README.md").read_text(encoding="utf-8")
-    assert "sparselab-work/experiments/new-campaign" in readme
+    assert "klab-work/experiments/new-campaign" in readme
     assert "checkpoint verify" in readme
     assert "| `$WORK/runs/`, `$WORK/receipt.json` |" in readme
 
@@ -182,7 +182,7 @@ def test_fineweb_edu_scaffold_is_pinned_and_does_not_prepare_data(
     def forbid_download(*_: object, **__: object) -> None:
         raise AssertionError("scaffolding must not access remote datasets")
 
-    monkeypatch.setattr("sparselab.data.datasets.load_dataset", forbid_download)
+    monkeypatch.setattr("klab.data.datasets.load_dataset", forbid_download)
     profile = load_datasets().datasets["fineweb_edu"]
     output = scaffold_research(
         "neutral-study",
@@ -267,7 +267,7 @@ def test_research_scaffold_rebases_paths_from_symlinked_destination(
 
     assert config.tokenizer.path == root / "artifacts/tokenizer/tokenizer.json"
     assert config.dataset.cache_dir == root / "artifacts/data"
-    from sparselab.experiments.study import study_workspace
+    from klab.experiments.study import study_workspace
 
     assert config.logging.root_dir == study_workspace("neutral-study") / "runs"
     readme = (output / "README.md").read_text()
@@ -414,8 +414,8 @@ def test_semantic_retrieval_lesson_builds_verified_pack_and_runnable_workspace(
         "demo.py",
     } <= {item["path"] for item in payload["inputs"]}
 
-    from sparselab.engram.packs import load_pack
-    from sparselab.engram.semantic import SemanticRetriever
+    from klab.engram.packs import load_pack
+    from klab.engram.semantic import SemanticRetriever
 
     pack = load_pack(lesson / pack_info["path"], expected_pack_id=pack_info["pack_id"])
     assert pack.manifest.semantic is not None

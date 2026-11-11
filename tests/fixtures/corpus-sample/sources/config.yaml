@@ -2,7 +2,7 @@ schema_version: 1
 id: sample_config
 kind: local
 origin: human_authored
-canonical_uri: sparselab://corpora/devmind-sample-v0/settings.yaml
+canonical_uri: klab://corpora/devmind-sample-v0/settings.yaml
 revision: sample-v0
 license: MIT
 redistribution: redistributable

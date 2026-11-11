@@ -4,8 +4,8 @@ import sqlite3
 
 import pytest
 
-from sparselab.resource_envelope import ResourceEnvelope
-from sparselab.workers.store import ControllerStore
+from klab.resource_envelope import ResourceEnvelope
+from klab.workers.store import ControllerStore
 
 
 def _entry(index: int) -> dict[str, object]:
@@ -71,7 +71,7 @@ def test_durable_cancel_survives_running_receipt_and_connection_loss(tmp_path) -
 def test_rejected_envelope_does_not_create_attempt_or_dispatch_bundle(tmp_path) -> None:
     from test_training import config as training_config
 
-    from sparselab.workers.controller import Controller
+    from klab.workers.controller import Controller
 
     controller = Controller(tmp_path / "controller")
     config = training_config(tmp_path / "inputs")
@@ -86,7 +86,7 @@ def test_rejected_envelope_does_not_create_attempt_or_dispatch_bundle(tmp_path) 
 def test_queue_limit_rejects_second_submission_before_dispatch(tmp_path) -> None:
     from test_training import config as training_config
 
-    from sparselab.workers.controller import Controller
+    from klab.workers.controller import Controller
 
     controller = Controller(tmp_path / "controller")
     config = training_config(tmp_path / "inputs")
@@ -104,8 +104,8 @@ def test_queue_limit_rejects_second_submission_before_dispatch(tmp_path) -> None
 def test_receipt_for_another_attempt_cannot_change_durable_assignment(tmp_path) -> None:
     from test_training import config as training_config
 
-    from sparselab.workers.controller import Controller
-    from sparselab.workers.transport import ProtocolError
+    from klab.workers.controller import Controller
+    from klab.workers.transport import ProtocolError
 
     controller = Controller(tmp_path / "controller")
     submission = controller.submit(training_config(tmp_path / "inputs"))
@@ -133,7 +133,7 @@ def test_receipt_for_another_attempt_cannot_change_durable_assignment(tmp_path) 
 
 
 def test_failure_before_run_creation_finishes_ingestion(tmp_path) -> None:
-    from sparselab.workers.controller import Controller
+    from klab.workers.controller import Controller
 
     controller = Controller(tmp_path)
     controller.store.enqueue_many([_entry(1)])
@@ -157,7 +157,7 @@ def test_failure_before_run_creation_finishes_ingestion(tmp_path) -> None:
 def test_recovery_preserves_receipt_and_fences_stale_observations(tmp_path) -> None:
     from test_training import config as training_config
 
-    from sparselab.workers.controller import Controller
+    from klab.workers.controller import Controller
 
     controller = Controller(tmp_path / "controller")
     submission = controller.submit(training_config(tmp_path / "inputs"))

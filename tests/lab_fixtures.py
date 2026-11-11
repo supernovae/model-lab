@@ -4,8 +4,8 @@ from pathlib import Path
 
 import yaml
 
-from sparselab.config.loading import load_tokenizer_config
-from sparselab.data.tokenizer import train_tokenizer
+from klab.config.loading import load_tokenizer_config
+from klab.data.tokenizer import train_tokenizer
 
 ROOT = Path(__file__).resolve().parents[1]
 

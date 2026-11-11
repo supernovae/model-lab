@@ -4,10 +4,10 @@ Keep the record ID printed by `try` or `probe`. It works across the everyday
 result commands:
 
 ```sh
-sparselab report TRY_ID
-sparselab compare TRY_ID --references
-sparselab probe TRY_ID --vs BASELINE_RUN --backend cpu --config standard
-sparselab explore TRY_ID
+klab report TRY_ID
+klab compare TRY_ID --references
+klab probe TRY_ID --vs BASELINE_RUN --backend cpu --config standard
+klab explore TRY_ID
 ```
 
 `report` reads the whole sealed record. `compare` reads its candidate's
@@ -24,7 +24,7 @@ To use the same baseline the try scored, copy its `arms.baseline.run_dir` and
 `arms.baseline.checkpoint` from `report TRY_ID --json` and combine them:
 
 ```sh
-sparselab probe TRY_ID --vs /path/to/BASELINE_RUN/checkpoints/GENERATION --backend cpu --config standard
+klab probe TRY_ID --vs /path/to/BASELINE_RUN/checkpoints/GENERATION --backend cpu --config standard
 ```
 
 This pins both sides; there is no record selector for a try's baseline arm.

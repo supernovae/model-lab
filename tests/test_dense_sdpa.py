@@ -6,9 +6,9 @@ from typing import Literal
 import pytest
 import torch
 
-from sparselab.config.loading import load_config
-from sparselab.config.models import AttentionConfig, RunConfig
-from sparselab.model.attention.dense import DenseAttention
+from klab.config.loading import load_config
+from klab.config.models import AttentionConfig, RunConfig
+from klab.model.attention.dense import DenseAttention
 
 
 def _attention(implementation: Literal["reference", "sdpa"]) -> DenseAttention:

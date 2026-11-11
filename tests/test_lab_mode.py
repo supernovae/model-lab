@@ -1,4 +1,4 @@
-"""Lab mode (`sparselab try`): fast local loop with retained safety rails.
+"""Lab mode (`klab try`): fast local loop with retained safety rails.
 
 These tests train two-layer, 32-wide synthetic CPU models for a few dozen
 steps. They check wiring and the retained rails (record, data identity,
@@ -19,19 +19,19 @@ import pytest
 import yaml
 from lab_fixtures import write_smoke_inputs
 
-from sparselab.cli.main import FAST_PATH_COMMANDS, RELEASE_COMMANDS, build_parser
-from sparselab.lab_mode import (
+from klab.cli.main import FAST_PATH_COMMANDS, RELEASE_COMMANDS, build_parser
+from klab.lab_mode import (
     EXIT_INTERRUPTED,
     EXIT_NOT_COMPARABLE,
     read_candidate,
     read_record,
     run_try,
 )
-from sparselab.resource_envelope import ResourceEnvelope
-from sparselab.training.trainer import train
+from klab.resource_envelope import ResourceEnvelope
+from klab.training.trainer import train
 
 # Generous: the TODO target is 15 minutes on CPU; a quiet laptop needs ~15 s.
-LOOP_BUDGET_SECONDS = float(os.environ.get("SPARSELAB_LAB_LOOP_BUDGET_SECONDS", "900"))
+LOOP_BUDGET_SECONDS = float(os.environ.get("KLAB_LAB_LOOP_BUDGET_SECONDS", "900"))
 
 
 def _delta(root: Path, name: str, settings: dict[str, object]) -> Path:
@@ -42,7 +42,7 @@ def _delta(root: Path, name: str, settings: dict[str, object]) -> Path:
 
 @pytest.fixture
 def lab(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
     return tmp_path, write_smoke_inputs(tmp_path)
 
 
@@ -202,8 +202,8 @@ def test_sigint_from_the_cli_stops_safely_and_records_interruption(
     delta = _delta(tmp_path, "s.yaml", {"model.ffn_dim": 128})
     work = tmp_path / "work"
     process = subprocess.Popen(
-        [sys.executable, "-m", "sparselab", "try", str(delta), "--vs", str(baseline)],
-        env={**os.environ, "SPARSELAB_WORK_DIR": str(work)},
+        [sys.executable, "-m", "klab", "try", str(delta), "--vs", str(baseline)],
+        env={**os.environ, "KLAB_WORK_DIR": str(work)},
         cwd=tmp_path,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -344,11 +344,11 @@ def test_cpu_smoke_loop_yaml_to_report_within_budget(tmp_path: Path) -> None:
     )
     request = tmp_path / "try-policy.yaml"
     request.write_text("seed: 7\nresource_envelope: bounds.yaml\n")
-    environment = {**os.environ, "SPARSELAB_WORK_DIR": str(tmp_path / "work")}
+    environment = {**os.environ, "KLAB_WORK_DIR": str(tmp_path / "work")}
 
     def cli(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, "-m", "sparselab", *args],
+            [sys.executable, "-m", "klab", *args],
             env=environment,
             cwd=tmp_path,
             text=True,
@@ -439,7 +439,7 @@ def _local_text_baseline(root: Path) -> Path:
 def test_edited_training_data_retrains_instead_of_reusing_stale_baseline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
     baseline = _local_text_baseline(tmp_path)
     first, _ = run_try(
         _delta(tmp_path, "a.yaml", {"model.ffn_dim": 128}),
@@ -508,7 +508,7 @@ def test_shared_eval_protocol_holds_context_windows_fixed(
 def test_cancel_during_baseline_scoring_is_never_reused(
     lab: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.evaluation import inference
+    from klab.evaluation import inference
 
     root, baseline = lab
     original = inference.InferenceRun.evaluate
@@ -581,7 +581,7 @@ def _portable_memory_baseline(root: Path) -> tuple[Path, Path]:
     """A baseline that trains with an external portable Engram package."""
     import torch
 
-    from sparselab.model.portable_engram import export_portable_engram
+    from klab.model.portable_engram import export_portable_engram
 
     baseline = write_smoke_inputs(root)
     package = root / "memory.engram"
@@ -609,9 +609,9 @@ def test_changed_memory_package_retrains_baseline_and_is_recorded(
 ) -> None:
     import torch
 
-    from sparselab.model.portable_engram import export_portable_engram
+    from klab.model.portable_engram import export_portable_engram
 
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
     baseline, package = _portable_memory_baseline(tmp_path)
     first, _ = run_try(
         _delta(tmp_path, "a.yaml", {"model.ffn_dim": 128}),
@@ -704,7 +704,7 @@ def _chat_baseline(root: Path) -> Path:
 def test_supervision_mask_is_part_of_the_eval_protocol(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
     baseline = _chat_baseline(tmp_path)
     record, _ = run_try(
         _delta(
@@ -736,9 +736,9 @@ def test_supervision_mask_is_part_of_the_eval_protocol(
 def test_cancel_during_setup_finalizes_the_started_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import sparselab.lab_mode as lab
+    import klab.lab_mode as lab
 
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
     baseline = _local_text_baseline(tmp_path)
     original = lab._path_digest
     seen: list[dict[str, object]] = []
@@ -780,10 +780,10 @@ def test_cancel_during_setup_finalizes_the_started_record(
 def test_terminal_checkpoint_bracket_preserves_full_state_and_fresh_baselines(lab):
     from test_training import equal
 
-    from sparselab.config.loading import load_config
-    from sparselab.training.checkpoints import CheckpointManager
-    from sparselab.training.manifest import sha256_file
-    from sparselab.try_config import TryContinuation
+    from klab.config.loading import load_config
+    from klab.training.checkpoints import CheckpointManager
+    from klab.training.manifest import sha256_file
+    from klab.try_config import TryContinuation
 
     root, baseline = lab
     config = load_config(baseline)

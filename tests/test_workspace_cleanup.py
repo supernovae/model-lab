@@ -10,10 +10,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from sparselab.canonical import canonical_digest, canonical_json
-from sparselab.training.checkpoints import CheckpointManager
-from sparselab.training.metrics import ExperimentStore
-from sparselab.workspace_cleanup import (
+from klab.canonical import canonical_digest, canonical_json
+from klab.training.checkpoints import CheckpointManager
+from klab.training.metrics import ExperimentStore
+from klab.workspace_cleanup import (
     apply_cleanup,
     mark_prepared_cache,
     plan_cleanup,
@@ -126,14 +126,14 @@ def test_cleanup_skips_cache_during_worker_attempt(tmp_path: Path) -> None:
 def test_prepared_data_marks_new_campaign_cache(tmp_path: Path, monkeypatch) -> None:
     from test_training import config
 
-    from sparselab.data.packing import prepare_data
-    from sparselab.data.tokenizer import load_tokenizer
+    from klab.data.packing import prepare_data
+    from klab.data.tokenizer import load_tokenizer
 
     workspace = tmp_path / "campaign"
     configured = config(workspace)
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(workspace))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(workspace))
     prepared = prepare_data(configured, load_tokenizer(configured.tokenizer.path))
-    marker = json.loads((prepared.root / ".sparselab-cache-owner.json").read_text())
+    marker = json.loads((prepared.root / ".klab-cache-owner.json").read_text())
     assert marker["workspace"] == str(workspace)
     assert (
         prepare_data(configured, load_tokenizer(configured.tokenizer.path)).root
@@ -204,19 +204,19 @@ def test_cli_keeps_persistent_root_separate_from_all_temporary_factories(
         TMPDIR=str(platform_temp),
         TEMP=str(platform_temp),
         TMP=str(platform_temp),
-        SPARSELAB_WORK_DIR=str(tmp_path / "overridden") if explicit else str(root),
+        KLAB_WORK_DIR=str(tmp_path / "overridden") if explicit else str(root),
     )
     options = ["--work-dir", str(root)] if explicit else []
     script = (
         "import json, os, subprocess, sys, tempfile; "
-        "from sparselab.cli.main import main; main(); "
+        "from klab.cli.main import main; main(); "
         "parent = tempfile.mkdtemp(); "
         "child = subprocess.check_output([sys.executable, '-c', "
         "'import tempfile; print(tempfile.mkdtemp())'], text=True).strip(); "
         "external = subprocess.check_output(['mktemp', '-d', "
         "os.path.join(os.environ['TMPDIR'], 'tool.XXXXXXXX')], text=True).strip(); "
         "print(json.dumps({'parent': parent, 'child': child, 'external': external, "
-        "'persistent': os.environ['SPARSELAB_WORK_DIR']})); "
+        "'persistent': os.environ['KLAB_WORK_DIR']})); "
         "os.rmdir(parent); os.rmdir(child); os.rmdir(external)"
     )
     result = subprocess.run(

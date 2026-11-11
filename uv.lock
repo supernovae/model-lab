@@ -1661,7 +1661,7 @@ wheels = [
 ]
 
 [[package]]
-name = "tiny-sparse-lab"
+name = "kybern-model-lab"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
@@ -1715,7 +1715,7 @@ requires-dist = [
     { name = "safetensors", specifier = ">=0.5,<1" },
     { name = "streamlit", specifier = ">=1.64,<2" },
     { name = "tokenizers", specifier = "==0.22.2" },
-    { name = "torch", marker = "sys_platform == 'linux' and extra == 'cpu'", specifier = "==2.15.0", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "tiny-sparse-lab", extra = "cpu" } },
+    { name = "torch", marker = "sys_platform == 'linux' and extra == 'cpu'", specifier = "==2.15.0", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "kybern-model-lab", extra = "cpu" } },
     { name = "torch", marker = "sys_platform != 'linux' and extra == 'cpu'", specifier = "==2.15.0" },
     { name = "transformers", marker = "extra == 'reference'", specifier = ">=4.45,<5" },
 ]

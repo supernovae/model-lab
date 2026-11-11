@@ -9,30 +9,30 @@ forward.
 Treat this as follow-up work to the existing preprocessing progress, workdir,
 staging, memory-planning, and research-lifecycle implementation.
 
-- `src/sparselab/data/progress.py` already emits flushed JSON-Line
+- `src/klab/data/progress.py` already emits flushed JSON-Line
   start/heartbeat/finish records around preprocessing phases. Extend or replace
   that contract; do not build an unrelated second progress system.
 - Tokenizer and packing paths already identify several coarse preprocessing
   phases. They do not yet report meaningful counters, rates, or ETA.
-- `sparselab inspect` already reports architecture inventory, runtime identity,
+- `klab inspect` already reports architecture inventory, runtime identity,
   a calibrated memory estimate, and a separate resource proposal.
-- `sparselab stage --through smoke|warmup` already runs disposable pilots without
+- `klab stage --through smoke|warmup` already runs disposable pilots without
   advancing the eventual run's optimizer, cursor, counters, schedule, or RNG.
 - The `fast` memory policy can propose a larger divisible microbatch while
   preserving effective batch. It is a capacity-based proposal, not a measured
   throughput search.
-- `--work-dir` / `SPARSELAB_WORK_DIR` already redirects SparseLab-managed
-  temporary work into the ignored project-local `sparselab-work/` by default.
+- `--work-dir` / `KLAB_WORK_DIR` already redirects Model Lab-managed
+  temporary work into the ignored project-local `klab-work/` by default.
 - The research lifecycle already separates findings, next tests, evidence
   availability, and reviewed baseline decisions.
 
 Do not interrupt, mutate, or reuse the directory of an active experiment. Use a
-new named directory beneath `sparselab-work/` and confirm its free bytes and
+new named directory beneath `klab-work/` and confirm its free bytes and
 inodes before launching anything expensive.
 
 ## Goal
 
-Make long SparseLab operations predictable enough that a user can answer:
+Make long Model Lab operations predictable enough that a user can answer:
 
 - Is this seconds, minutes, hours, or days before launch?
 - What did a bounded warmup change about that estimate?
@@ -152,7 +152,7 @@ or unknown only when telemetry supports the label.
 
 Extend existing inspection/resource accounting rather than duplicating it. Add a
 read-only explicit command or option consistent with the CLI, such as
-`sparselab inspect CONFIG --estimate-runtime`.
+`klab inspect CONFIG --estimate-runtime`.
 
 Use information genuinely available before execution: active/trainable/total
 parameters, layer and attention shapes, sparse/MoE/MLA/Engram active work,
@@ -218,7 +218,7 @@ Add deterministic focused tests for at least:
 - raw JSON uses null/unavailable rather than missing telemetry as zero;
 - estimation and dashboard reads cannot mutate run state;
 - prediction records cannot become scientific evidence automatically;
-- workspace selection and capacity checks honor `SPARSELAB_WORK_DIR`.
+- workspace selection and capacity checks honor `KLAB_WORK_DIR`.
 
 Avoid wall-clock-sensitive CI assertions and live hardware requirements in the
 portable suite. Add separately marked backend tests for real devices.

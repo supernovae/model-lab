@@ -2,15 +2,15 @@
 
 Commands below use the [activated, provisioned environment](../README.md#first-run).
 
-`sparselab dashboard` opens a local, read-only Streamlit app. The **Lab** pages
+`klab dashboard` opens a local, read-only Streamlit app. The **Lab** pages
 come first. Each one answers a single researcher question, opens with the
 verdict, explains its numbers in plain words and, when it has nothing to show,
 names the command that would fill it. Run telemetry (training curves, runtime,
 memory, checkpoints) and the Learn/Research pages follow in their own sections.
 
 ```sh
-sparselab dashboard               # WORK_DIR/runs + WORK_DIR/lab
-sparselab dashboard --lab-dir DIR --runs-dir DIR
+klab dashboard               # WORK_DIR/runs + WORK_DIR/lab
+klab dashboard --lab-dir DIR --runs-dir DIR
 ```
 
 The default bind address is `127.0.0.1`. A container viewer may explicitly use
@@ -27,13 +27,13 @@ with Streamlit so stop signals and the server's exit status are preserved.
 | **Explorer** | What is inside this model, and how does it process a sentence? | architecture diagram, per-token loss and top-k, attention maps, weight stats, residual activation RMS, expert routing, memory lookups, paired checkpoint comparison |
 
 Every page reads lab records through the same verified reader as
-`sparselab report` (`sparselab.lab_records`). A record that fails its seal is
+`klab report` (`klab.lab_records`). A record that fails its seal is
 listed as rejected, never shown as a result. Numbers are only put next to each
 other inside one comparison group (`eval_group` for held-out loss,
 `benchmark_group` for lm-eval, `item_group` for fact recall). A value from
 another group is labelled **not comparable** and never silently mixed in.
 
-Colors follow one palette (`sparselab.dashboard.ui`). Status colors pass WCAG
+Colors follow one palette (`klab.dashboard.ui`). Status colors pass WCAG
 AA contrast against white text, and they always come with an icon (✔ ▲ ✖ ≠ ⊘),
 so color is never the only signal. Charts use colorblind-safe series colors and
 a perceptually uniform heatmap scale (Viridis). The layout is wide and its
@@ -49,17 +49,17 @@ on purpose. The point is how the pages read, not the scores.
 
 ![Home: latest verdict, next steps, recent activity](assets/dashboard-home.png)
 
-The newest probe verdict leads (the same banner as `sparselab probe`). Next to
+The newest probe verdict leads (the same banner as `klab probe`). Next to
 it, **Next steps** turns the lab's state into commands, each with a reason:
 
 - the latest verdict, when it names a command (escalate, compare, rerun);
 - candidate checkpoints that have held-out loss but no fact-recall or needle
-  evidence yet (`sparselab probe RUN --config standard`);
+  evidence yet (`klab probe RUN --config standard`);
 - no lab checkpoint has lm-eval accuracy yet, so none sits on the reference
   curve (`--config full`);
-- plain `sparselab train` runs that no lab record has scored
-  (`sparselab probe DIR/RUN`);
-- runs nobody has looked inside yet (`sparselab explore RUN`).
+- plain `klab train` runs that no lab record has scored
+  (`klab probe DIR/RUN`);
+- runs nobody has looked inside yet (`klab explore RUN`).
 
 At most four steps are shown, in this order.
 
@@ -71,7 +71,7 @@ shows the two commands that get you started.
 
 ![Experiments: verdict, probe table and comparison charts](assets/dashboard-experiments.png)
 
-Pick a result (a try's arms or a `sparselab probe` record). The page shows:
+Pick a result (a try's arms or a `klab probe` record). The page shows:
 
 - the banner (verdict, next action, held-out guard, tiers run);
 - four headline metrics;
@@ -90,7 +90,7 @@ lists tries that never ran a probe battery, each with the command to probe it.
 
 ![Compare: paired deltas, refused across groups](assets/dashboard-compare.png)
 
-**Compare** runs the same engine as `sparselab compare`: paired deltas ± SE for
+**Compare** runs the same engine as `klab compare`: paired deltas ± SE for
 each metric against other results and, optionally, the reference models. Cells
 read **better**, **worse** or **within noise** (|Δ| ≤ 2 SE). **Not comparable**
 gives the reason (for example, held-out loss against a reference with another
@@ -115,8 +115,8 @@ never our held-out loss). Details: [probe battery](probe-battery.md#dashboard).
 
 **Reference models** lists the pinned public checkpoints and their packaged
 scores, and explains what they can and cannot tell you. **Not yet scored**
-lists plain `sparselab train` runs in the run directories that no try or probe
-has measured, each with the `sparselab probe DIR/RUN` command that
+lists plain `klab train` runs in the run directories that no try or probe
+has measured, each with the `klab probe DIR/RUN` command that
 places it in the catalog and on the frontier.
 
 ## Behaviors
@@ -157,7 +157,7 @@ places it in the catalog and on the frontier.
 ## Explorer
 
 The explorer looks inside a small checkpoint: up to
-`sparselab.explorer.MAX_PARAMETERS` (60M) parameters and `MAX_TOKENS` (128)
+`klab.explorer.MAX_PARAMETERS` (60M) parameters and `MAX_TOKENS` (128)
 tokens of sample text. Bigger models get a clear message and only the
 architecture diagram, which comes from the config alone, so nothing is loaded.
 Explore from the page by selecting an immutable `step_*_gen_*` checkpoint
@@ -175,8 +175,8 @@ text: Once upon a time
 ```
 
 ```sh
-sparselab explore RUN --config explore.yaml
-sparselab explore RUN --json        # the full payload
+klab explore RUN --config explore.yaml
+klab explore RUN --json        # the full payload
 ```
 
 Results are cached as sealed records under
@@ -197,8 +197,8 @@ remain readable in place, labeled "historical: re-explore for activations", and
 are excluded from paired comparison. New format-bound paths do not overwrite
 legacy cache bytes. The dashboard can display sealed legacy diagnostics, explicitly
 labeling missing/malformed provenance or key mismatches as unverified.
-Exploration goes through the same runtime preparation as `sparselab probe` and
-`sparselab try`: the run is resolved, the CPU default or
+Exploration goes through the same runtime preparation as `klab probe` and
+`klab try`: the run is resolved, the CPU default or
 `--runtime`/`--runtime-profile` is applied and authorized by the run's runtime
 policy (an accelerator needs a runtime profile, exactly as for probe), and the
 checkpoint loads through the verified loader. `--resource-envelope FILE` is
@@ -262,19 +262,19 @@ attached semantic packs are refused with a reason.
   this caught a real problem: with `memory_table_size: 257` the legacy n-gram
   hash multiplier (257) was a multiple of the row count, so the order-2 and
   order-3 tables read the previous token and the one before it, not n-grams.
-  The hash now switches to a mixed scheme at such sizes (`sparselab.address_hash`;
+  The hash now switches to a mixed scheme at such sizes (`klab.address_hash`;
   see [re-baselining guidance](first-model.md#re-baseline-the-hash-affected-configs));
   the screenshot predates the fix.
 
 ## For developers
 
-- `sparselab.dashboard.lab_data`: everything the lab pages show, with no
+- `klab.dashboard.lab_data`: everything the lab pages show, with no
   Streamlit import (tested in `tests/test_dashboard_lab.py`).
-- `sparselab.dashboard.lab_pages`: the five pages. `probes.py` keeps the
+- `klab.dashboard.lab_pages`: the five pages. `probes.py` keeps the
   shared probe components (banner, table, charts, Pareto). `explorer_view.py`
   turns an exploration into figures and HTML. `ui.py` holds the palette, chips,
   page headers and empty states.
-- `sparselab.explorer`: the explorer data layer. It reads architecture from
+- `klab.explorer`: the explorer data layer. It reads architecture from
   the config, and weights and activations from the verified loader. Attention
   comes from the module's own softmax, memory reads from forward hooks on the
   tables (the hash is never re-implemented), and routing from
@@ -296,7 +296,7 @@ these files or launches work.
 
 For a `NOT_COMPARABLE` try, the plan instead carries its failed comparison
 checks and sealed try inputs. Diagnose and explicitly repair those inputs
-before a new `sparselab try`; an unchanged rerun cannot fix comparability.
+before a new `klab try`; an unchanged rerun cannot fix comparability.
 Probe-only settings absent from TryConfig are labelled separately from
 historical missing fields. Recorded verdict tier advice is labelled as such;
 a bare named tier does not retain the sealed effective policy.
@@ -352,7 +352,7 @@ interaction-preserving component.
 Keep the existing `--runs-dir` as the primary store and add named directories:
 
 ```sh
-sparselab dashboard --runs-dir /data/history/runs \
+klab dashboard --runs-dir /data/history/runs \
   --run-store 'Devmind pilot=/data/devmind/pilot/runs' \
   --lab-dir /data/history/lab
 ```
@@ -415,7 +415,7 @@ including references, and is separate from training snapshots.
 #### CPU sampler setup and boundaries
 
 The dashboard sends bounded JSON requests to a separate loopback CPU sampler.
-`SPARSELAB_SNAPSHOT_SERVICE_CONFIG` points to a JSON file containing the allowed
+`KLAB_SNAPSHOT_SERVICE_CONFIG` points to a JSON file containing the allowed
 `store` and `url`, for example:
 
 ```json
@@ -423,7 +423,7 @@ The dashboard sends bounded JSON requests to a separate loopback CPU sampler.
 ```
 
 Set that environment variable for both processes. Run
-`python src/sparselab/dashboard/snapshot_sampler.py` in the compatible provisioned
+`python src/klab/dashboard/snapshot_sampler.py` in the compatible provisioned
 inference environment/source, rather than launching that file with Streamlit.
 The historical `run`, `checkpoint`, and `checkpoint_sha256` configuration fields
 are ignored; they are not restrictions or automatic loading instructions.

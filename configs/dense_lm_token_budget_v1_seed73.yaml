@@ -62,7 +62,7 @@ evaluation:
   every_steps: 200
   max_batches: 64
 logging:
-  root_dir: ../sparselab-work/experiments/dense-lm-token-budget-v1/runs
+  root_dir: ../klab-work/experiments/dense-lm-token-budget-v1/runs
   every_steps: 1
   architecture_diagnostics: scalar
 staging:

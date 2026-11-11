@@ -11,10 +11,10 @@ import torch
 import torch.nn.functional as F
 from test_training import config
 
-from sparselab.canonical import canonical_digest, canonical_json
-from sparselab.data.packing import TokenBlockDataset, load_prepared_data, prepare_data
-from sparselab.data.tokenizer import load_tokenizer
-from sparselab.training.manifest import sha256_file
+from klab.canonical import canonical_digest, canonical_json
+from klab.data.packing import TokenBlockDataset, load_prepared_data, prepare_data
+from klab.data.tokenizer import load_tokenizer
+from klab.training.manifest import sha256_file
 
 
 def _resign(manifest: dict[str, object]) -> None:
@@ -192,8 +192,8 @@ def test_supervision_never_crosses_roles_or_teaches_truncated_prompt_eos(
 ):
     from tokenizers import Tokenizer, models, pre_tokenizers
 
-    from sparselab.data.conversations import iter_rendered_conversations
-    from sparselab.data.packing import _collect
+    from klab.data.conversations import iter_rendered_conversations
+    from klab.data.packing import _collect
 
     configured = config(tmp_path)
     path = tmp_path / "masked.jsonl"

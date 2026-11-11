@@ -3,10 +3,10 @@
 The common journeys need no custom file:
 
 ```sh
-sparselab probe RESULT                         # fast checks, saved device
-sparselab probe RESULT --vs BASE --backend cpu --config standard
-sparselab probe RESULT --config full            # optional lm-eval extra
-sparselab probe RESULT --vs BASE --backend cpu --config final
+klab probe RESULT                         # fast checks, saved device
+klab probe RESULT --vs BASE --backend cpu --config standard
+klab probe RESULT --config full            # optional lm-eval extra
+klab probe RESULT --vs BASE --backend cpu --config final
 ```
 
 `--config` selects a validated named declaration (`fast`, `standard`, `full`,
@@ -29,7 +29,7 @@ fast_fail: false
 # resource_envelope: ../bounds.yaml
 ```
 
-Then run `sparselab probe RESULT --vs BASE --config probe.yaml --json`.
+Then run `klab probe RESULT --vs BASE --config probe.yaml --json`.
 `--vs` always names the baseline explicitly; a record selects its candidate,
 never its baseline arm. Use an explicit checkpoint path to pin a baseline.
 Paths in a declaration expand `~` and anchor to that file. Bare preset names

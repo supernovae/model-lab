@@ -7,24 +7,24 @@ from pathlib import Path
 
 import pytest
 
-from sparselab.config.loading import load_config, load_tokenizer_config
-from sparselab.corpus.export import export_release, verify_release_export
-from sparselab.corpus.measurement import capability_matrix
-from sparselab.data.packing import prepare_data
-from sparselab.data.tokenizer import (
+from klab.config.loading import load_config, load_tokenizer_config
+from klab.corpus.export import export_release, verify_release_export
+from klab.corpus.measurement import capability_matrix
+from klab.data.packing import prepare_data
+from klab.data.tokenizer import (
     load_tokenizer,
     train_tokenizer,
     verify_tokenizer_artifact,
 )
-from sparselab.evaluation.capabilities import (
+from klab.evaluation.capabilities import (
     capability_card,
     evaluate_capability,
     write_capability_result,
 )
-from sparselab.evaluation.evidence import experiment_evidence
-from sparselab.evaluation.inference import load_run
-from sparselab.training.manifest import read_manifest
-from sparselab.training.trainer import train
+from klab.evaluation.evidence import experiment_evidence
+from klab.evaluation.inference import load_run
+from klab.training.manifest import read_manifest
+from klab.training.trainer import train
 
 pytest_plugins = ("test_corpus_exports",)
 

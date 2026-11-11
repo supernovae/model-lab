@@ -1,16 +1,16 @@
 # Continuation/source overlap diagnostic
 
-`src/sparselab/corpus/memorization.py` exposes a **read-only, descriptive** comparison of one generated continuation to explicitly supplied source passages. It does not decide whether text is memorized, licensed, infringing, eligible for training, or releasable; there is no copyright threshold and no corpus-construction gate.
+`src/klab/corpus/memorization.py` exposes a **read-only, descriptive** comparison of one generated continuation to explicitly supplied source passages. It does not decide whether text is memorized, licensed, infringing, eligible for training, or releasable; there is no copyright threshold and no corpus-construction gate.
 
 ## Native interface
 
 Run the native adapter with:
 
 ```sh
-sparselab memorization analyze INPUT.yaml --json
+klab memorization analyze INPUT.yaml --json
 ```
 
-The input is a strict YAML or JSON mapping with `format: sparselab-memorization-input-v1`. Its `continuation` is exactly one of:
+The input is a strict YAML or JSON mapping with `format: klab-memorization-input-v1`. Its `continuation` is exactly one of:
 
 ```yaml
 continuation:
@@ -33,7 +33,7 @@ A file continuation must be a regular, non-symlink UTF-8 file whose raw bytes ma
 `sources` is a nonempty list of unique nonempty IDs and explicitly supplied text, for example:
 
 ```yaml
-format: sparselab-memorization-input-v1
+format: klab-memorization-input-v1
 continuation:
   kind: file
   path: continuation.txt
@@ -45,7 +45,7 @@ ngram_size: 3        # optional; 1 through 10
 max_edit_chars: 512  # optional; 1 through 2048
 ```
 
-Supplied passages are comparison material, not authenticated claims about external authorship. The report is `sparselab-memorization-report-v1` with role `descriptive_not_quality_gate`; it retains declaration binding, file or authenticated-panel provenance, the raw continuation digest, raw source digests, normalized overlap diagnostics, and the edit bound. JSON input or verifier failures return `{ "status": "error", "error": "..." }` and exit 2. Text output presents the same provenance and measures without policy interpretation.
+Supplied passages are comparison material, not authenticated claims about external authorship. The report is `klab-memorization-report-v1` with role `descriptive_not_quality_gate`; it retains declaration binding, file or authenticated-panel provenance, the raw continuation digest, raw source digests, normalized overlap diagnostics, and the edit bound. JSON input or verifier failures return `{ "status": "error", "error": "..." }` and exit 2. Text output presents the same provenance and measures without policy interpretation.
 
 Each `SourceMatch` contains the caller's source ID, SHA-256 of the **original UTF-8 passage bytes**, longest exact contiguous normalized substring (text and character count), and overlap fractions between 0 and 1. `MemorizationDiagnostic.sources` includes every source, sorted by ID. Best-source selection is deterministic: longest exact substring, then n-gram, word, character and available edit similarity, with lexicographically smallest ID breaking ties. Duplicate or empty IDs and an empty passage list are rejected.
 

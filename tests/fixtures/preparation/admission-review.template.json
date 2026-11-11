@@ -1,5 +1,5 @@
 {
-  "format": "sparselab-admission-review-v2",
+  "format": "klab-admission-review-v2",
   "decision": "ACCEPTED",
   "reviewer": "${REVIEWER}",
   "reviewed_on": "${REVIEWED_ON}",

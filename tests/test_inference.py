@@ -8,9 +8,9 @@ import pytest
 import torch
 from test_training import config
 
-from sparselab.cli.main import main
-from sparselab.evaluation.inference import load_run
-from sparselab.training.trainer import train
+from klab.cli.main import main
+from klab.evaluation.inference import load_run
+from klab.training.trainer import train
 
 
 @pytest.fixture(scope="module")
@@ -78,7 +78,7 @@ def _chat_cli(monkeypatch, capsys, cwd, *options):
         sys,
         "argv",
         [
-            "sparselab",
+            "klab",
             "chat",
             "original",
             "--message",
@@ -102,7 +102,7 @@ def test_chat_uses_selected_store_from_any_checkout_directory(
     (checkout / "pyproject.toml").write_text("")
     store = tmp_path / "persistent-state"
     shutil.copytree(trained_run.logging.root_dir / "original", store / "runs/original")
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(store))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(store))
 
     from_root = _chat_cli(monkeypatch, capsys, checkout)
     from_source = _chat_cli(monkeypatch, capsys, source)

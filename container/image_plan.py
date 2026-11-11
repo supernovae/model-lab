@@ -257,7 +257,7 @@ def verify(path):
 
 
 def publish(root, backend, repository, revision):
-    if not re.fullmatch(r"ghcr.io/supernovae/tiny-sparse-lab", repository):
+    if not re.fullmatch(r"ghcr.io/supernovae/model-lab", repository):
         raise ValueError("Only the public Lab package is supported")
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("An exact source commit is required")
@@ -312,7 +312,7 @@ def publish(root, backend, repository, revision):
     )
     for command in (
         ["python", "/opt/image_plan.py", "verify", "/opt/backend.json"],
-        ["sparselab", "--help"],
+        ["klab", "--help"],
     ):
         name = "lab-image-smoke-" + uuid.uuid4().hex
         try:
@@ -384,7 +384,7 @@ def main():
         publish(
             root,
             args.backend,
-            "ghcr.io/supernovae/tiny-sparse-lab",
+            "ghcr.io/supernovae/model-lab",
             os.environ["GITHUB_SHA"],
         )
 

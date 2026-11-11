@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-import sparselab.memory as memory_module
-from sparselab.config.loading import load_config
-from sparselab.memory import (
+import klab.memory as memory_module
+from klab.config.loading import load_config
+from klab.memory import (
     MemoryMonitor,
     calibrated_estimate,
     calibration_key,
@@ -20,10 +20,10 @@ from sparselab.memory import (
     registered_runtime_buffers_bytes,
     write_resource_proposal,
 )
-from sparselab.model.inspection import inspection_report, named_tensor_inventory
-from sparselab.runtime import RuntimeInfo
-from sparselab.training.manifest import config_sha256
-from sparselab.training.metrics import ExperimentStore
+from klab.model.inspection import inspection_report, named_tensor_inventory
+from klab.runtime import RuntimeInfo
+from klab.training.manifest import config_sha256
+from klab.training.metrics import ExperimentStore
 
 
 def _runtime(
@@ -540,7 +540,7 @@ def test_policy_cannot_discard_measured_uncertainty_to_claim_a_fit() -> None:
 def test_sdpa_buffer_estimate_matches_registered_runtime_allocations():
     import torch
 
-    from sparselab.model.transformer import DenseLM
+    from klab.model.transformer import DenseLM
 
     config = load_config(Path("configs/smoke_cpu.yaml"))
     config = config.model_copy(

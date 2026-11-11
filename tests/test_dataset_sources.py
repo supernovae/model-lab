@@ -10,8 +10,8 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from sparselab.config.models import DatasetConfig
-from sparselab.data import snapshot_writer, sources
+from klab.config.models import DatasetConfig
+from klab.data import snapshot_writer, sources
 
 
 def test_published_source_schema_is_current():
@@ -476,7 +476,7 @@ def test_bounded_parquet_subprocess_exits(tmp_path):
 import io, json, sys
 from pathlib import Path
 from unittest.mock import patch
-from sparselab.data.sources import DatasetSource, _stream_parquet
+from klab.data.sources import DatasetSource, _stream_parquet
 path = Path(sys.argv[1])
 source = DatasetSource.model_validate(json.loads(sys.argv[2]))
 with patch('datasets.utils.file_utils.xopen',
@@ -521,11 +521,11 @@ def test_forge_locations_do_not_change_scientific_lock(tmp_path, offline, monkey
 
 
 def test_import_dispatch_preserves_distinct_verifier(tmp_path, monkeypatch):
-    from sparselab.data import snapshot_import
+    from klab.data import snapshot_import
 
     manifest = tmp_path / "manifest.json"
     payload = sources.seal_snapshot_payload(
-        {"format": "sparselab-dataset-import-v1"}, "manifest_sha256"
+        {"format": "klab-dataset-import-v1"}, "manifest_sha256"
     )
     manifest.write_text(json.dumps(payload))
     monkeypatch.setattr(
@@ -748,10 +748,10 @@ def test_batch_allowance_shrinks_to_available_work_budget(tmp_path, offline):
 
 @pytest.fixture
 def shared_tokenizer(tmp_path, offline):
-    from sparselab.config.loading import load_config
-    from sparselab.config.models import RunConfig, TokenizerTrainConfig
-    from sparselab.data.tokenizer import train_tokenizer
-    from sparselab.training.manifest import sha256_file
+    from klab.config.loading import load_config
+    from klab.config.models import RunConfig, TokenizerTrainConfig
+    from klab.data.tokenizer import train_tokenizer
+    from klab.training.manifest import sha256_file
 
     origin = runtime(acquire(tmp_path / "origin"))
     path = train_tokenizer(
@@ -792,9 +792,9 @@ def test_shared_tokenizer_verification_and_public_preparation(
 ):
     import sys
 
-    from sparselab.cli.main import main
-    from sparselab.data.tokenizer_cli import verify_configured_tokenizer
-    from sparselab.training.manifest import sha256_file
+    from klab.cli.main import main
+    from klab.data.tokenizer_cli import verify_configured_tokenizer
+    from klab.training.manifest import sha256_file
 
     config, path = shared_tokenizer
     before = sha256_file(config.tokenizer.path)
@@ -806,7 +806,7 @@ def test_shared_tokenizer_verification_and_public_preparation(
         sys,
         "argv",
         [
-            "sparselab",
+            "klab",
             "--work-dir",
             str(tmp_path / "work"),
             "data",
@@ -817,7 +817,7 @@ def test_shared_tokenizer_verification_and_public_preparation(
     main()
     packed = Path(capsys.readouterr().out.strip().splitlines()[-1])
     manifest = json.loads((packed / "manifest.json").read_text())
-    from sparselab.training.manifest import canonical_digest
+    from klab.training.manifest import canonical_digest
 
     assert manifest["cache_identity"]["snapshot_source_sha256"] == canonical_digest(
         sources.verify_snapshot(config.dataset)
@@ -831,8 +831,8 @@ def test_shared_tokenizer_verification_and_public_preparation(
 
 @pytest.mark.parametrize("target", ["tokenizer", "manifest", "origin", "consumer"])
 def test_shared_tokenizer_rejects_tampered_inputs(shared_tokenizer, target):
-    from sparselab.data.packing import prepare_data
-    from sparselab.data.tokenizer import load_tokenizer
+    from klab.data.packing import prepare_data
+    from klab.data.tokenizer import load_tokenizer
 
     config, _ = shared_tokenizer
     tokenizer = load_tokenizer(config.tokenizer.path)
@@ -848,8 +848,8 @@ def test_shared_tokenizer_rejects_tampered_inputs(shared_tokenizer, target):
 
 
 def test_shared_tokenizer_requires_correct_explicit_origin(shared_tokenizer):
-    from sparselab.config.models import RunConfig
-    from sparselab.data.tokenizer import verify_run_tokenizer
+    from klab.config.models import RunConfig
+    from klab.data.tokenizer import verify_run_tokenizer
 
     config, _ = shared_tokenizer
     raw = config.model_dump(mode="json")

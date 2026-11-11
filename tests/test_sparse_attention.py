@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from sparselab.model.attention.dense import DenseAttention
-from sparselab.model.attention.sparse import BlockSparseAttention, select_sparse_backend
+from klab.model.attention.dense import DenseAttention
+from klab.model.attention.sparse import BlockSparseAttention, select_sparse_backend
 
 
 def test_sparse_backend_dispatches_cpu_and_torch_devices() -> None:

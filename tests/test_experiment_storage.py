@@ -6,11 +6,11 @@ from types import SimpleNamespace
 import pytest
 from test_training import config as training_config
 
-from sparselab.config.models import RunConfig
-from sparselab.data.packing import prepare_data
-from sparselab.data.tokenizer import load_tokenizer
-from sparselab.experiments.storage import storage_preview
-from sparselab.workspace_preflight import require_storage, training_storage_checks
+from klab.config.models import RunConfig
+from klab.data.packing import prepare_data
+from klab.data.tokenizer import load_tokenizer
+from klab.experiments.storage import storage_preview
+from klab.workspace_preflight import require_storage, training_storage_checks
 
 
 def configured(tmp_path: Path, *, updates: int = 20, **cadence: object) -> RunConfig:
@@ -116,7 +116,7 @@ def test_verified_cache_is_existing_but_run_copy_is_new(tmp_path: Path) -> None:
 def test_authenticated_cache_changes_actual_free_space_acceptance(
     tmp_path, monkeypatch
 ):
-    import sparselab.workspace_preflight as preflight
+    import klab.workspace_preflight as preflight
 
     cfg = configured(tmp_path, every_steps=5)
     prepared = prepare_data(cfg, load_tokenizer(cfg.tokenizer.path))
@@ -150,7 +150,7 @@ def test_insufficient_future_growth_is_not_excused_by_existing_cache(
 ) -> None:
     cfg = configured(tmp_path, every_steps=5)
     prepared = prepare_data(cfg, load_tokenizer(cfg.tokenizer.path))
-    import sparselab.workspace_preflight as preflight
+    import klab.workspace_preflight as preflight
 
     real = preflight.os.statvfs
 
@@ -174,7 +174,7 @@ def test_insufficient_future_growth_is_not_excused_by_existing_cache(
 
 
 def test_resumed_storage_counts_only_future_target_cadence(tmp_path):
-    from sparselab.experiments.storage import checkpoint_generation_bounds
+    from klab.experiments.storage import checkpoint_generation_bounds
 
     cfg = configured(tmp_path, updates=14087, every_tokens=5000000, keep_periodic=True)
     cfg = cfg.model_copy(

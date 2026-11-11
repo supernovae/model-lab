@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sparselab.experiments.matrix import expand
+from klab.experiments.matrix import expand
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE_CONFIG = ROOT / "configs" / "runtime_smoke_cpu.yaml"

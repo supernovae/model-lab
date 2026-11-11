@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from sparselab.evaluation.surface_review import (
+from klab.evaluation.surface_review import (
     complete_surface_review,
     create_surface_bundle,
     open_surface_bundle,

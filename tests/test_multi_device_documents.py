@@ -5,8 +5,8 @@ import pytest
 import torch
 from test_document_batching import configured, rows_for
 
-from sparselab.data.document_batching import collate_document_update
-from sparselab.engines.pytorch import PyTorchEngine
+from klab.data.document_batching import collate_document_update
+from klab.engines.pytorch import PyTorchEngine
 
 
 @pytest.mark.parametrize("memory", [False, True])

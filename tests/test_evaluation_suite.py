@@ -15,24 +15,24 @@ import torch
 from test_surface_review import cells
 from test_training import config
 
-from sparselab.campaign.state import publish_immutable
-from sparselab.canonical import canonical_digest, canonical_json
-from sparselab.evaluation import inference
-from sparselab.evaluation.capabilities import describe_capability_card
-from sparselab.evaluation.suite import (
+from klab.campaign.state import publish_immutable
+from klab.canonical import canonical_digest, canonical_json
+from klab.evaluation import inference
+from klab.evaluation.capabilities import describe_capability_card
+from klab.evaluation.suite import (
     EvaluationSuite,
     run_suite,
     verify_evaluation_index,
 )
-from sparselab.evaluation.surface_review import (
+from klab.evaluation.surface_review import (
     complete_surface_review,
     create_surface_bundle,
     open_surface_bundle,
     record_surface_judgment,
     reveal_surface_review,
 )
-from sparselab.runtime_profile import _seal
-from sparselab.training.trainer import train
+from klab.runtime_profile import _seal
+from klab.training.trainer import train
 
 
 @pytest.fixture(scope="module")
@@ -75,14 +75,14 @@ def evaluated_run(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def fixed_panel_run(tmp_path_factory, request):
-    from sparselab.config.models import RunConfig
-    from sparselab.data.packing import prepare_data
-    from sparselab.data.tokenizer import load_tokenizer
-    from sparselab.training.manifest import sha256_file
+    from klab.config.models import RunConfig
+    from klab.data.packing import prepare_data
+    from klab.data.tokenizer import load_tokenizer
+    from klab.training.manifest import sha256_file
 
     root = tmp_path_factory.mktemp("fixed-panel-evidence")
     with pytest.MonkeyPatch.context() as patch:
-        patch.setenv("SPARSELAB_WORK_DIR", str(root / "work"))
+        patch.setenv("KLAB_WORK_DIR", str(root / "work"))
         base = config(root)
         values = base.model_dump(mode="json")
         values["training"].update(max_steps=1, max_tokens=32)
@@ -131,8 +131,8 @@ def fixed_panel_run(tmp_path_factory, request):
 
 
 def _panel_run_config(fixed_panel_run, root):
-    from sparselab.config.models import RunConfig
-    from sparselab.training.manifest import read_manifest
+    from klab.config.models import RunConfig
+    from klab.training.manifest import read_manifest
 
     values = read_manifest(fixed_panel_run / "manifest.json")["effective_config"]
     values["logging"]["root_dir"] = str(root / "runs")
@@ -144,9 +144,9 @@ def _panel_run_config(fixed_panel_run, root):
 def test_active_fixed_panels_refuse_incomplete_evaluation(
     fixed_panel_run, tmp_path, monkeypatch, field
 ):
-    from sparselab.engines.pytorch import PyTorchEngine
+    from klab.engines.pytorch import PyTorchEngine
 
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path))
     measured = _panel_run_config(fixed_panel_run, tmp_path)
     original = PyTorchEngine.evaluate
     observed = []
@@ -172,11 +172,11 @@ def test_active_fixed_panels_refuse_incomplete_evaluation(
 
 @pytest.fixture
 def aliased_panel_inputs(fixed_panel_run, tmp_path, monkeypatch):
-    from sparselab.config.models import RunConfig
-    from sparselab.data.packing import prepare_data
-    from sparselab.data.tokenizer import load_tokenizer
+    from klab.config.models import RunConfig
+    from klab.data.packing import prepare_data
+    from klab.data.tokenizer import load_tokenizer
 
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path))
     measured = _panel_run_config(fixed_panel_run, tmp_path)
 
     def local_config(values, train_name, train_text, validation_name, validation_text):
@@ -234,8 +234,8 @@ def aliased_panel_inputs(fixed_panel_run, tmp_path, monkeypatch):
 def test_fixed_panel_training_alias_refused_at_public_consumers(
     aliased_panel_inputs, tmp_path, monkeypatch, consumer
 ):
-    from sparselab.engines.pytorch import PyTorchEngine
-    from sparselab.staging import materialize_prepared_inputs
+    from klab.engines.pytorch import PyTorchEngine
+    from klab.staging import materialize_prepared_inputs
 
     measured, _ = aliased_panel_inputs
 
@@ -258,7 +258,7 @@ def test_fixed_panel_training_alias_refused_at_public_consumers(
 def test_artifact_copy_refuses_training_alias_before_copying_panels(
     aliased_panel_inputs, fixed_panel_run, tmp_path
 ):
-    from sparselab.training.trainer import _copy_artifacts
+    from klab.training.trainer import _copy_artifacts
 
     measured, training = aliased_panel_inputs
     # The original synthetic panels do not alias this local-text training array.
@@ -286,7 +286,7 @@ def test_artifact_copy_refuses_training_alias_before_copying_panels(
 def test_run_input_panel_check_refuses_alias_after_earlier_checks_are_bypassed(
     aliased_panel_inputs, fixed_panel_run, tmp_path, monkeypatch
 ):
-    from sparselab.training import trainer
+    from klab.training import trainer
 
     measured, _ = aliased_panel_inputs
     original_load = trainer.load_fixed_panels
@@ -323,12 +323,12 @@ def test_run_input_panel_check_refuses_alias_after_earlier_checks_are_bypassed(
 def test_staged_panel_training_and_resume_use_owned_inputs(
     fixed_panel_run, tmp_path, monkeypatch
 ):
-    from sparselab.config.models import RunConfig
-    from sparselab.evaluation.evidence import experiment_evidence
-    from sparselab.staging import stage
-    from sparselab.training.manifest import read_manifest
+    from klab.config.models import RunConfig
+    from klab.evaluation.evidence import experiment_evidence
+    from klab.staging import stage
+    from klab.training.manifest import read_manifest
 
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
     values = _panel_run_config(fixed_panel_run, tmp_path).model_dump(mode="json")
     values["training"].update(max_steps=2, max_tokens=64)
     caller_inputs = tmp_path / "caller-inputs"
@@ -381,12 +381,12 @@ def test_staged_panel_training_and_resume_use_owned_inputs(
 def test_fixed_panel_evidence_refuses_resealed_metadata(
     fixed_panel_run, tmp_path, change, reason
 ):
-    from sparselab.evaluation.evidence import (
+    from klab.evaluation.evidence import (
         experiment_evidence,
         validate_held_out_report,
     )
-    from sparselab.evaluation.post_train_triage import read_triage
-    from sparselab.training.manifest import read_manifest
+    from klab.evaluation.post_train_triage import read_triage
+    from klab.training.manifest import read_manifest
 
     run = fixed_panel_run
     evidence = experiment_evidence(run)
@@ -431,7 +431,7 @@ def test_fixed_panel_evidence_refuses_resealed_metadata(
 def test_ordinary_run_refuses_resealed_unexpected_panel_results(
     evaluated_run, tmp_path
 ):
-    from sparselab.evaluation.evidence import experiment_evidence
+    from klab.evaluation.evidence import experiment_evidence
 
     _, runs = evaluated_run
     run = tmp_path / "suite-run"
@@ -457,8 +457,8 @@ def test_ordinary_run_refuses_resealed_unexpected_panel_results(
 def test_run_evidence_signed_reuse_across_process_and_restored_mtime(
     evaluated_run, tmp_path, monkeypatch
 ):
-    from sparselab.evaluation.evidence import experiment_evidence
-    from sparselab.verification_proofs import ProofStore
+    from klab.evaluation.evidence import experiment_evidence
+    from klab.verification_proofs import ProofStore
 
     _, runs = evaluated_run
     root = tmp_path / "trusted"
@@ -473,9 +473,9 @@ def test_run_evidence_signed_reuse_across_process_and_restored_mtime(
     script = """
 import json, sys
 from pathlib import Path
-from sparselab.evaluation.evidence import experiment_evidence
-from sparselab.data.verification import manifest_module
-from sparselab.verification_proofs import ProofStore
+from klab.evaluation.evidence import experiment_evidence
+from klab.data.verification import manifest_module
+from klab.verification_proofs import ProofStore
 calls = []
 original = manifest_module.sha256_file
 def counted(path):
@@ -747,7 +747,7 @@ def test_checkpoint_runtime_binding_and_cpu_override(evaluated_run, monkeypatch)
         "source_sha256": "f" * 64,
     }
     authorization = _seal("profile", {"python": "/mock/interpreter"}, probe)
-    monkeypatch.setattr("sparselab.runtime_profile._check_current", lambda *_: None)
+    monkeypatch.setattr("klab.runtime_profile._check_current", lambda *_: None)
     monkeypatch.setattr(inference, "select_device", lambda *_: torch.device("cuda"))
     monkeypatch.setattr(inference, "torch_device_for", lambda *_: torch.device("cpu"))
     monkeypatch.setattr(inference.torch.version, "hip", "6.0")
@@ -933,8 +933,8 @@ def test_pending_surface_review_preserves_completed_numeric_gate(
 def test_suite_signed_replay_reuses_payload_and_preserves_canonical_index(
     evaluated_run, tmp_path, monkeypatch
 ):
-    from sparselab.data import verification
-    from sparselab.verification_proofs import ProofStore
+    from klab.data import verification
+    from klab.verification_proofs import ProofStore
 
     source, runs = evaluated_run
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
@@ -960,7 +960,7 @@ def test_suite_signed_replay_reuses_payload_and_preserves_canonical_index(
     verify_evaluation_index(replay, **options)
     assert hashed_payloads == [], options["proof_store"].diagnostics()
     assert replay.read_bytes() == original_index
-    from sparselab.training.checkpoints import CheckpointManager
+    from klab.training.checkpoints import CheckpointManager
 
     checkpoint_root = runs / "suite-run" / "checkpoints"
     rejected = CheckpointManager(checkpoint_root).verify(
@@ -979,7 +979,7 @@ def test_group_write_is_trusted_only_for_a_user_private_group(
     import grp
     import os
 
-    from sparselab import verification_proofs
+    from klab import verification_proofs
 
     directory = tmp_path / "work"
     directory.mkdir()
@@ -1011,10 +1011,10 @@ def test_group_write_is_trusted_only_for_a_user_private_group(
 def test_context_memory_fixed_panels_preserve_coverage(
     fixed_panel_run, tmp_path, monkeypatch
 ):
-    from sparselab.config.models import RunConfig
-    from sparselab.evaluation.evidence import experiment_evidence
+    from klab.config.models import RunConfig
+    from klab.evaluation.evidence import experiment_evidence
 
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
     values = _panel_run_config(fixed_panel_run, tmp_path).model_dump(mode="json")
     values["model"].update(
         memory="ngram",

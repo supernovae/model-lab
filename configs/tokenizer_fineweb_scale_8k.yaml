@@ -2,12 +2,12 @@ schema_version: 1
 vocab_size: 8192
 min_frequency: 2
 max_documents: 20000
-output_dir: ../sparselab-work/experiments/dense-scale/tokenizer
+output_dir: ../klab-work/experiments/dense-scale/tokenizer
 dataset:
   source: fineweb_edu
   revision: 87f09149ef4734204d70ed1d046ddc9ca3f2b8f9
   dataset_config: sample-10BT
-  cache_dir: ../sparselab-work/experiments/dense-scale/data
+  cache_dir: ../klab-work/experiments/dense-scale/data
   train_max_documents: 20000
   validation_max_documents: 500
   train_max_tokens: 2000000

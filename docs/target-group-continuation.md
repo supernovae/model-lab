@@ -3,7 +3,7 @@
 Whole-document training can explicitly change the target count per optimizer
 update at an immutable checkpoint boundary. This is a scientific transition,
 not a runtime batching optimization and not a fresh schedule. Fresh runs use
-[`sparselab config schedule`](document-microbatching.md#author-a-fresh-schedule-from-prepared-groups).
+[`klab config schedule`](document-microbatching.md#author-a-fresh-schedule-from-prepared-groups).
 
 ## Checkpoint-bound contract
 
@@ -58,7 +58,7 @@ checkpoint/data identities, not a mutable `latest` selection made earlier. This
 operation must not race an active owner of the same run or devices.
 
 ```sh
-sparselab train target.yaml \
+klab train target.yaml \
   --resume "$COMPLETED_GENERATION" \
   --run-id "$NEW_RUN_ID"
 ```

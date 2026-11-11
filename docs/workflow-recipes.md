@@ -11,9 +11,9 @@ The execution and CLI sections below describe the supported contract.
 Use three explicit operations:
 
 ```sh
-sparselab experiment recipe workflow inspect recipe/workflow.yaml --bindings local.yaml --json
-sparselab experiment recipe workflow resolve recipe/workflow.yaml --bindings local.yaml --json
-sparselab experiment recipe workflow publish recipe/workflow.yaml --bindings local.yaml --workspace /absolute/work/experiment --json
+klab experiment recipe workflow inspect recipe/workflow.yaml --bindings local.yaml --json
+klab experiment recipe workflow resolve recipe/workflow.yaml --bindings local.yaml --json
+klab experiment recipe workflow publish recipe/workflow.yaml --bindings local.yaml --workspace /absolute/work/experiment --json
 ```
 
 `inspect` reads bounded metadata only, validates native config expansion and
@@ -44,13 +44,13 @@ artifacts:
   token:
     kind: tokenizer
     version: 1
-    producer: sparselab tokenizer train
+    producer: klab tokenizer train
     identifier: tokenizer
     sha256: <native tokenizer SHA-256>
   packed:
     kind: prepared_data
     version: 1
-    producer: sparselab data prepare
+    producer: klab data prepare
     identifier: <native settings SHA-256>
     sha256: <native manifest SHA-256>
 ```
@@ -97,7 +97,7 @@ the explicit Campaign contract below. Native APIs retain their existing capabili
 
 ## Identity, context and admission
 
-The new recipe fingerprint is SHA-256 of `sparselab-portable-workflow-v1\0` plus
+The new recipe fingerprint is SHA-256 of `klab-portable-workflow-v1\0` plus
 canonical validated descriptor JSON, with inventory sorted by path. It includes
 member byte hashes and typed artifact identities. Descriptor formatting has a
 separate byte digest. Bindings have their own byte digest and are excluded from
@@ -191,7 +191,7 @@ alternate evaluation kinds remain unavailable. The controlled snapshot pair belo
 uses the same admission contract and graph validator.
 
 ```python
-from sparselab.experiments.workflow_execution import (
+from klab.experiments.workflow_execution import (
     WorkflowAdmission,
     WorkflowExecution,
 )
@@ -340,10 +340,10 @@ probes in the admitted resource envelope and monitoring. Help and metadata
 verified native artifacts.
 
 ```sh
-sparselab experiment recipe workflow apply recipe/workflow.yaml --bindings local.yaml --admission admission.json --work-dir /absolute/work --json
-sparselab experiment recipe workflow approve recipe/workflow.yaml gate --bindings local.yaml --admission admission.json --work-dir /absolute/work --note "authorized bounded CPU experiment" --json
-sparselab experiment recipe workflow apply recipe/workflow.yaml --bindings local.yaml --admission admission.json --work-dir /absolute/work --execute-runs --max-wait-seconds 540 --json
-sparselab experiment recipe workflow resume recipe/workflow.yaml --bindings local.yaml --admission admission.json --work-dir /absolute/work --json
+klab experiment recipe workflow apply recipe/workflow.yaml --bindings local.yaml --admission admission.json --work-dir /absolute/work --json
+klab experiment recipe workflow approve recipe/workflow.yaml gate --bindings local.yaml --admission admission.json --work-dir /absolute/work --note "authorized bounded CPU experiment" --json
+klab experiment recipe workflow apply recipe/workflow.yaml --bindings local.yaml --admission admission.json --work-dir /absolute/work --execute-runs --max-wait-seconds 540 --json
+klab experiment recipe workflow resume recipe/workflow.yaml --bindings local.yaml --admission admission.json --work-dir /absolute/work --json
 ```
 
 Replace `gate` with the authored approval-stage ID. `approve --decision reject`
@@ -374,14 +374,14 @@ work/token options do not select execution resources on this route.
 `apply` and `resume` default to `execute_runs=false` and a 120-second native
 controller wait. `--max-wait-seconds` accepts finite nonnegative seconds; zero
 can queue without ticking a worker. It is not a whole-process resource limit.
-Use the existing `sparselab monitor --policy POLICY --log-dir LOGS --workspace
+Use the existing `klab monitor --policy POLICY --log-dir LOGS --workspace
 WORK -- COMMAND ...` around admitted work. Pilots and probes remain additional
 work beyond the main run's update budget. `resume` delegates native Campaign
 replay/recovery; it does not assert full-state training resume was verified.
 
 Execution and report commands emit one JSON object to stdout (with or without
 `--json`); adapter progress goes to stderr. The envelope is
-`sparselab-workflow-command-v1`, with `command` and native result fields.
+`klab-workflow-command-v1`, with `command` and native result fields.
 Validation/I/O errors and native FAILED stages exit 1. Argument errors exit 2
 with argparse diagnostics on stderr. As with native Campaign commands, waiting,
 blocked, rejected or running stages can exit 0: inspect stage states; exit 0
@@ -396,8 +396,8 @@ index), **not** the evaluation-stage index. Report rendering never recollects or
 selects a newer snapshot automatically.
 
 ```sh
-sparselab experiment recipe workflow report /work/plan.lock.json --workspace /work/experiment --index /work/evidence/index.json --output /work/report.json --json
-sparselab experiment recipe workflow report /work/plan.lock.json --workspace /work/experiment --index /work/evidence/index.json --output /work/report.md --format markdown
+klab experiment recipe workflow report /work/plan.lock.json --workspace /work/experiment --index /work/evidence/index.json --output /work/report.json --json
+klab experiment recipe workflow report /work/plan.lock.json --workspace /work/experiment --index /work/evidence/index.json --output /work/report.md --format markdown
 ```
 
 The example paths are placeholders: use paths from native results. Supply both
@@ -488,7 +488,7 @@ For a single cell, use that cell's run and evaluation IDs. No other stage may
 depend on terminal collection. Stage IDs remain authored; the native Campaign
 executor owns dispatch, approval, cancellation and replay.
 
-Evidence has one current shape: `format: sparselab-experiment-evidence-index`,
+Evidence has one current shape: `format: klab-experiment-evidence-index`,
 `diagnostic_status` (`not_collected` or `collected`) and `diagnostic_evaluations`
 (always an array), alongside native execution coverage. It has no selectable
 numeric version. Interim collection records an empty array and `not_collected`;
@@ -497,14 +497,14 @@ cell. It verifies run/checkpoint, locked suite, index/record and result bytes wi
 the native verifier. Missing or changed evidence refuses; `UNAVAILABLE` stays
 unavailable and projects no metrics. Reopen and receipt replay reverify identity.
 
-The report format is always `sparselab-publication-report`. JSON and Markdown use
+The report format is always `klab-publication-report`. JSON and Markdown use
 the same report object's format, diagnostic status and observations, including
 planned-only reports. Reporting is read-only: no training, scoring, acquisition,
 controller advancement or implicit collection. Select the final stage's explicit
 index when reporting final diagnostic coverage:
 
 ```sh
-sparselab experiment recipe workflow report /work/experiment/locks/LOCK.json \
+klab experiment recipe workflow report /work/experiment/locks/LOCK.json \
   --workspace /work/experiment --index /work/experiment/evidence/FINAL.json \
   --output /work/report.json --format json
 ```

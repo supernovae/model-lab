@@ -50,7 +50,7 @@ jobs:
       - name: Full CPU suite (slow included)
         env:
           UV_OFFLINE: "1"
-          SPARSELAB_WORK_DIR: ${{ runner.temp }}/nightly-work
+          KLAB_WORK_DIR: ${{ runner.temp }}/nightly-work
         run: >-
           uv run --locked --no-sync pytest -q -p no:cacheprovider
           --basetemp "$RUNNER_TEMP/nightly-pytest"

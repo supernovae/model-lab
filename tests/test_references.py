@@ -2,7 +2,7 @@
 
 Runs in CI without transformers/lm-eval and without downloads: the reference
 battery uses a tiny in-memory model through ``ReferenceRun``, and comparisons
-use the sealed reference results packaged with SparseLab.
+use the sealed reference results packaged with Model Lab.
 """
 
 from __future__ import annotations
@@ -17,11 +17,11 @@ from typing import Any
 import numpy as np
 import pytest
 
-from sparselab import reference_models
-from sparselab.lab_records import comparison_group, read_lab_record, write_sealed
-from sparselab.probes import compare as compare_mod
-from sparselab.probes import lm_eval_adapter, metrics, runner
-from sparselab.probes.points import (
+from klab import reference_models
+from klab.lab_records import comparison_group, read_lab_record, write_sealed
+from klab.probes import compare as compare_mod
+from klab.probes import lm_eval_adapter, metrics, runner
+from klab.probes.points import (
     METRICS,
     collect_points,
     metric_points,
@@ -30,8 +30,8 @@ from sparselab.probes.points import (
     points_from_record,
     probe_points,
 )
-from sparselab.probes.suite import BY_ID
-from sparselab.reference_models import (
+from klab.probes.suite import BY_ID
+from klab.reference_models import (
     REFERENCES,
     ReferenceRun,
     ReferenceUnavailable,
@@ -45,7 +45,7 @@ LM_TASKS = BY_ID["lm_eval"].params["tasks"]
 
 
 def test_registry_pins_immutable_commits_and_declared_facts() -> None:
-    from sparselab.research.pythia import checkpoint_for_step
+    from klab.research.pythia import checkpoint_for_step
 
     assert set(REFERENCES) == {
         "pythia-70m-deduped",
@@ -111,7 +111,7 @@ def test_missing_optional_stack_fails_early_with_install_hint(
 ) -> None:
     import importlib.util
 
-    from sparselab.probes.cli import run_probe
+    from klab.probes.cli import run_probe
 
     real = importlib.util.find_spec
     monkeypatch.setattr(
@@ -127,7 +127,7 @@ def test_missing_optional_stack_fails_early_with_install_hint(
 
 
 def test_probe_cli_refuses_reference_misuse(tmp_path: Path) -> None:
-    from sparselab.probes.cli import run_probe
+    from klab.probes.cli import run_probe
 
     with pytest.raises(ValueError, match="use --config full"):
         run_probe("ref:SmolLM2-135M", None, lab_dir=tmp_path, tier="fast")
@@ -201,7 +201,7 @@ def _summary(
 def test_reference_arm_runs_text_level_probes_and_lm_eval_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from sparselab.probes.scoring import eot
+    from klab.probes.scoring import eot
 
     loaded = _fake_reference()
     assert eot(loaded) == 0
@@ -231,9 +231,9 @@ def test_reference_arm_runs_text_level_probes_and_lm_eval_only(
     assert row["status"] == "info" and row["value"] == pytest.approx(38 / 50)
     assert result["verdict"]["status"] == "info"
     assert result["verdict"]["action"] == "compare"
-    assert "sparselab compare" in row["note"]
+    assert "klab compare" in row["note"]
     assert row["details"]["benchmark_group"]
-    assert "sparselab compare RESULT --references" in result["verdict"]["suggestion"]
+    assert "klab compare RESULT --references" in result["verdict"]["suggestion"]
     target = result["target"]
     assert target["reference"]["revision"] == REFERENCES["SmolLM2-135M"].revision
     assert target["parameters"] == 27 and target["active_parameters"] == 19
@@ -383,7 +383,7 @@ def _try_record(
         }
 
     record = {
-        "format": "sparselab-lab-try-v1",
+        "format": "klab-lab-try-v1",
         "try_id": try_id,
         "created_at": "2026-10-10T12:00:00+00:00",
         "question": "does it help?",
@@ -424,7 +424,7 @@ def _probe_record(
         "eval_group": group,
     }
     record = {
-        "format": "sparselab-probe-v1",
+        "format": "klab-probe-v1",
         "probe_id": probe_id,
         "created_at": created_at,
         "target": target,
@@ -474,7 +474,7 @@ def test_compare_never_crosses_groups_and_names_missing_evidence(
         lm = by_other[name]["lm_eval"]
         assert lm["status"] == "missing_evidence"
         assert (
-            f"sparselab probe {tmp_path / 'tries/try-1/try.json'} --config full"
+            f"klab probe {tmp_path / 'tries/try-1/try.json'} --config full"
             in lm["note"]
         )
     text = compare_mod.render(report)
@@ -520,7 +520,7 @@ def test_compare_pairs_lm_eval_with_references_in_the_same_benchmark_group(
 def test_compare_cli_lists_references_and_renders(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    from sparselab.cli.main import main
+    from klab.cli.main import main
 
     _try_record(tmp_path / "lab", "try-1", eval_group="g" * 64)
     monkeypatch.setenv("NO_COLOR", "1")
@@ -529,17 +529,13 @@ def test_compare_cli_lists_references_and_renders(
         ["compare", "try-1", "--references"],
         ["compare", "try-1", "--references", "--json"],
     ):
-        monkeypatch.setattr(
-            sys, "argv", ["sparselab", "--work-dir", str(tmp_path), *argv]
-        )
+        monkeypatch.setattr(sys, "argv", ["klab", "--work-dir", str(tmp_path), *argv])
         main()
     out = capsys.readouterr().out
     assert "REFERENCE MODELS" in out and "ref:SmolLM2-360M" in out
     assert "COMPARE" in out and "MISSING EVIDENCE" in out
     assert '"comparisons"' in out
-    monkeypatch.setattr(
-        sys, "argv", ["sparselab", "--work-dir", str(tmp_path), "compare"]
-    )
+    monkeypatch.setattr(sys, "argv", ["klab", "--work-dir", str(tmp_path), "compare"])
     with pytest.raises(SystemExit, match="name a result"):
         main()
 
@@ -551,8 +547,8 @@ def test_compare_cli_reference_listing_json(
     capsys: pytest.CaptureFixture,
     populated: bool,
 ) -> None:
-    from sparselab.cli.main import main
-    from sparselab.probes import points
+    from klab.cli.main import main
+    from klab.probes import points
 
     names = list(REFERENCES)
     pool = []
@@ -596,7 +592,7 @@ def test_compare_cli_reference_listing_json(
     monkeypatch.setattr(reference_models, "load_reference", forbidden)
     monkeypatch.setattr(reference_models, "safe_snapshot", forbidden)
     monkeypatch.setenv("NO_COLOR", "1")
-    argv = ["sparselab", "--work-dir", str(tmp_path), "compare", "--list-references"]
+    argv = ["klab", "--work-dir", str(tmp_path), "compare", "--list-references"]
     monkeypatch.setattr(sys, "argv", [*argv, "--json"])
     main()
     captured = capsys.readouterr()
@@ -632,8 +628,8 @@ def test_dashboard_pareto_renders_references_and_try_points(tmp_path: Path) -> N
     def app(lab: str) -> None:
         from pathlib import Path
 
-        from sparselab.dashboard.probes import _pareto
-        from sparselab.probes.points import collect_points
+        from klab.dashboard.probes import _pareto
+        from klab.probes.points import collect_points
 
         _pareto(collect_points(Path(lab)), None)
 
@@ -672,7 +668,7 @@ def test_compare_picks_up_a_later_probe_of_the_same_checkpoint(tmp_path: Path) -
     report, lm = lm_pairs()
     assert {p["status"] for p in lm.values()} == {"missing_evidence"}
     assert (
-        f"sparselab probe {tmp_path / 'tries/try-1/try.json'} --config full"
+        f"klab probe {tmp_path / 'tries/try-1/try.json'} --config full"
         in lm["SmolLM2-135M"]["note"]
     )
 
@@ -752,11 +748,11 @@ def _reference_battery(monkeypatch: pytest.MonkeyPatch, outcome: Any) -> dict:
 def _assert_reference_rerun(result: dict[str, Any], tasks: list[str]) -> None:
     verdict = result["verdict"]
     assert (verdict["status"], verdict["action"]) == ("incomplete", "rerun")
-    assert "sparselab compare" not in verdict["suggestion"]
+    assert "klab compare" not in verdict["suggestion"]
     assert "unscored tasks: " + ", ".join(sorted(tasks)) in verdict["reasons"]
     (row,) = [r for r in result["probes"] if r["id"] == "lm_eval"]
     assert row["status"] in {"error", "skipped"}
-    assert "sparselab compare" not in (row.get("note") or "")
+    assert "klab compare" not in (row.get("note") or "")
     # Never a point on the reference curve.
     points = probe_points(result, source="p", path=None, packaged=False)
     assert "lm_eval" not in points[0]["metrics"]
@@ -847,8 +843,8 @@ def test_custom_task_without_chance_compares_with_references_and_no_chance_line(
     Pareto figure omit the chance line (never a mean over the known tasks)."""
     import pandas as pd
 
-    from sparselab.cli.main import main
-    from sparselab.dashboard.probes import _pareto_figure
+    from klab.cli.main import main
+    from klab.dashboard.probes import _pareto_figure
 
     spec = runner.lm_eval_spec(["piqa", "winogrande"], 20)
     assert spec.params["chance"] == {"piqa": 0.5, "winogrande": None}
@@ -882,7 +878,7 @@ def test_custom_task_without_chance_compares_with_references_and_no_chance_line(
         sys,
         "argv",
         [
-            "sparselab",
+            "klab",
             "--work-dir",
             str(tmp_path),
             "compare",
@@ -901,7 +897,7 @@ def test_custom_task_without_chance_compares_with_references_and_no_chance_line(
     figure = _pareto_figure(mine, "active_parameters", METRICS["lm_eval"], False)
     assert not figure.layout.shapes
     # Shared rule: unknown anywhere means no line; known everywhere is the mean.
-    from sparselab.probes.points import mean_chance
+    from klab.probes.points import mean_chance
 
     assert mean_chance({"piqa": 0.5, "winogrande": None}) is None
     assert mean_chance({"piqa": 0.5, "arc_easy": 0.25}) == pytest.approx(0.375)

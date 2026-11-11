@@ -1,6 +1,6 @@
 # Known-good baselines
 
-A known-good baseline is a reviewed, reproducible, explicitly bounded lifecycle and behavior reference. It is not a best model, evidence of general intelligence, or an automatic replacement when a loss is lower. Declarations live in the lifecycle sidecar; `sparselab research validate` separately reports what is currently verified, unavailable, or invalid.
+A known-good baseline is a reviewed, reproducible, explicitly bounded lifecycle and behavior reference. It is not a best model, evidence of general intelligence, or an automatic replacement when a loss is lower. Declarations live in the lifecycle sidecar; `klab research validate` separately reports what is currently verified, unavailable, or invalid.
 
 ## Historical personal references
 
@@ -33,9 +33,9 @@ evidence_root: /path/to/evidence
 ```
 
 ```sh
-uv run --locked --extra cpu sparselab report --kind research --config "$REPORT_CONFIG" --json
-uv run --locked --extra cpu sparselab research baseline describe "$BASELINE_ID" --lifecycle "$LIFECYCLE" --evidence-root "$EVIDENCE_ROOT"
-uv run --locked --extra cpu sparselab research validate --baseline "$BASELINE_ID" --lifecycle "$LIFECYCLE" --evidence-root "$EVIDENCE_ROOT"
+uv run --locked --extra cpu klab report --kind research --config "$REPORT_CONFIG" --json
+uv run --locked --extra cpu klab research baseline describe "$BASELINE_ID" --lifecycle "$LIFECYCLE" --evidence-root "$EVIDENCE_ROOT"
+uv run --locked --extra cpu klab research validate --baseline "$BASELINE_ID" --lifecycle "$LIFECYCLE" --evidence-root "$EVIDENCE_ROOT"
 ```
 
 `report` takes these selectors through `--config`; the research subcommands take
@@ -62,4 +62,4 @@ A Finding records conditions, evidence, bounded claims, reviewer attribution, di
 
 Use the explicitly selected report and baseline commands above to inspect declared branches and evidence availability. `report --kind research` is a declared next-test view, not optimal planning. A prior-design advisory never blocks planning; changing the sealed study/protocol identity can make equivalence unassessed.
 
-Promotion is an explicit reviewed lifecycle JSON change, never a metric trigger. A known-good baseline needs an accepted promotion and complete preparation, training, checkpoint, validation, capability, generation, resources, and static-report evidence. A replacement also needs its parent’s required regressions, identity-bound passed outcomes, a resource tradeoff, and explicit `supersedes`; parallel promotion leaves its parent active. Run `sparselab research validate --lifecycle "$LIFECYCLE" --evidence-root "$EVIDENCE_ROOT" --json` before relying on a declaration. Keep independent mechanism branches interpretable; a combined candidate needs its own campaign and regressions.
+Promotion is an explicit reviewed lifecycle JSON change, never a metric trigger. A known-good baseline needs an accepted promotion and complete preparation, training, checkpoint, validation, capability, generation, resources, and static-report evidence. A replacement also needs its parent’s required regressions, identity-bound passed outcomes, a resource tradeoff, and explicit `supersedes`; parallel promotion leaves its parent active. Run `klab research validate --lifecycle "$LIFECYCLE" --evidence-root "$EVIDENCE_ROOT" --json` before relying on a declaration. Keep independent mechanism branches interpretable; a combined candidate needs its own campaign and regressions.

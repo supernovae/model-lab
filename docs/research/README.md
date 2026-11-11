@@ -1,6 +1,6 @@
 # Research workbench
 
-SparseLab has two non-executing entry points: `sparselab learn list` for one initialized mechanism, and `sparselab research list` for declared controlled studies. Listing, describing, and scaffolding package metadata/configuration only: they do not train, fit a tokenizer, prepare data, open a run store, or access the network.
+Model Lab has two non-executing entry points: `klab learn list` for one initialized mechanism, and `klab research list` for declared controlled studies. Listing, describing, and scaffolding package metadata/configuration only: they do not train, fit a tokenizer, prepare data, open a run store, or access the network.
 
 Current authoring uses an explicitly supplied resource closure. Prepare a current
 entry, recipe with explicit seed options, base, profiles, datasets, source pins,
@@ -10,11 +10,11 @@ capability cards and lifecycle registry as described in the
 `/path/to/resources` must be your complete local resource root.
 
 ```sh
-sparselab learn list
-sparselab research list
-sparselab research scaffold neutral-study --resource-root /path/to/resources \
+klab learn list
+klab research list
+klab research scaffold neutral-study --resource-root /path/to/resources \
   --scale smoke --data offline --backend cpu --output experiments/new-study
-sparselab study plan experiments/new-study/study.yaml
+klab study plan experiments/new-study/study.yaml
 ```
 
 The packaged research list retains three historical cards pending separate
@@ -39,7 +39,7 @@ quality. Author new campaigns using the resource contract above. The
 [retained research index](../../experiments/research/README.md) describes remaining
 local records; this documentation change does not remove engine behavior.
 Mutable output belongs in the
-external persistent root (`$SPARSELAB_WORK_DIR/experiments/`, or the XDG/home default);
+external persistent root (`$KLAB_WORK_DIR/experiments/`, or the XDG/home default);
 declarations and compact verified evidence belong in Git. Report missing code through the
 [contribution workflow](../../CONTRIBUTING.md#planning-and-contributions). Verified semantic retrieval accepts pre-encoded
 vectors; a teacher-representation compiler and natural-language query encoder are
@@ -50,7 +50,7 @@ not shipped.
 The [declaration-to-artifact lifecycle](lifecycle-recovery.md) explains commit-before-compute, read-only `research snapshot`, recovery manifests, checkpoint-bound EvaluationSuite/ModelReadiness, human-reviewed ModelFamily actions, and thin/portable archives. Publish small verified references without checking in data/checkpoints:
 
 ```sh
-uv run --locked sparselab research evidence export --kind corpus_release <verified-release-dir> \
+uv run --locked klab research evidence export --kind corpus_release <verified-release-dir> \
   --declaration <recovery.yaml> --output <evidence/release.json> --json
 git add <evidence/release.json> && git commit -m "Record verified corpus identity"
 ```
@@ -65,7 +65,7 @@ study, run, or report artifacts. Start with the [known-good baseline
 guide](known-good-baselines.md) for the exact dense reference commands, gates,
 capture requirements, branch workflow, and the distinction between archival
 report verification and locally runnable checkpoint files.
-The packaged lifecycle registry is empty. `sparselab report --kind research --json`
+The packaged lifecycle registry is empty. `klab report --kind research --json`
 and `research validate --json` therefore provide no historical baseline clearance.
 Select a current explicit registry to assess its declared evidence; historical
 findings and baseline guides remain evidence of their recorded conditions only.

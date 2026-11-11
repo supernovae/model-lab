@@ -12,7 +12,7 @@ import pytest
 import torch
 from pydantic import ValidationError
 
-from sparselab.config.models import (
+from klab.config.models import (
     ActivationOffloadConfig,
     AdamWConfig,
     DatasetConfig,
@@ -24,10 +24,10 @@ from sparselab.config.models import (
     TokenizerConfig,
     TrainingConfig,
 )
-from sparselab.engines.base import Microbatch
-from sparselab.engines.pytorch import PyTorchEngine
-from sparselab.workers.execution import _acquire_config_lease
-from sparselab.workers.leases import (
+from klab.engines.base import Microbatch
+from klab.engines.pytorch import PyTorchEngine
+from klab.workers.execution import _acquire_config_lease
+from klab.workers.leases import (
     MultiDeviceLease,
     acquire_lease,
     acquire_multi_device_leases,
@@ -504,7 +504,7 @@ def test_worker_config_lease_acquires_primary_and_secondary_devices(
         physical_device_id="phys-b70-2300",
     )
     monkeypatch.setattr(
-        "sparselab.workers.execution.discover_runtimes",
+        "klab.workers.execution.discover_runtimes",
         lambda: [passive_gpu0, passive_gpu1],
     )
 
@@ -534,7 +534,7 @@ def test_worker_config_lease_acquires_primary_and_secondary_devices(
 
     # Missing secondary device index in passive discovery raises ValueError.
     monkeypatch.setattr(
-        "sparselab.workers.execution.discover_runtimes",
+        "klab.workers.execution.discover_runtimes",
         lambda: [passive_gpu0],
     )
     with pytest.raises(ValueError, match="secondary_device_indices index 1 is absent"):
@@ -548,7 +548,7 @@ def test_worker_config_lease_acquires_primary_and_secondary_devices(
         physical_device_id="",
     )
     monkeypatch.setattr(
-        "sparselab.workers.execution.discover_runtimes",
+        "klab.workers.execution.discover_runtimes",
         lambda: [passive_gpu0, passive_gpu1_blank],
     )
     with pytest.raises(
@@ -573,7 +573,7 @@ def test_worker_config_lease_acquires_primary_and_secondary_devices(
 def test_discover_runtimes_enumerates_multi_xpu_indices_and_physical_uuids(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab import runtime
+    from klab import runtime
 
     uuid0_bytes = bytes.fromhex("868023e200000000e300000000000000")
     uuid1_bytes = bytes.fromhex("868023e2000000002300000000000000")
@@ -660,7 +660,7 @@ def test_discover_runtimes_enumerates_multi_xpu_indices_and_physical_uuids(
     finally:
         lease.close()
 
-    from sparselab.staging import inspect_runtime
+    from klab.staging import inspect_runtime
 
     cfg_idx1 = cfg.model_copy(
         update={"runtime": cfg.runtime.model_copy(update={"device_index": 1})}

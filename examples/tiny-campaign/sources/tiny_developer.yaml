@@ -11,7 +11,7 @@ acquisition:
   - name: tiny_developer-4.txt
     path: texts/tiny_developer-4.txt
   max_bytes: 100000
-canonical_uri: sparselab://examples/tiny-campaign/tiny_developer
+canonical_uri: klab://examples/tiny-campaign/tiny_developer
 document_kinds:
 - text
 domains:

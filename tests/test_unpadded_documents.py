@@ -4,9 +4,9 @@ import numpy as np
 import pytest
 import torch
 
-from sparselab.config.models import AttentionConfig, ModelConfig, RunConfig
-from sparselab.data.story_packing import MatchedStoryDataset
-from sparselab.model.transformer import DenseLM
+from klab.config.models import AttentionConfig, ModelConfig, RunConfig
+from klab.data.story_packing import MatchedStoryDataset
+from klab.model.transformer import DenseLM
 
 
 def test_unpadded_ngram_has_no_cross_document_attention_or_history():
@@ -72,10 +72,10 @@ def test_unpadded_targets_resume_and_overlength_refusal():
 def test_unpadded_native_train_resume(tmp_path, multiport, width):
     from test_training import config, equal
 
-    from sparselab.data.packing import prepare_data
-    from sparselab.data.tokenizer import load_tokenizer
-    from sparselab.training.checkpoints import CheckpointManager
-    from sparselab.training.trainer import train
+    from klab.data.packing import prepare_data
+    from klab.data.tokenizer import load_tokenizer
+    from klab.training.checkpoints import CheckpointManager
+    from klab.training.trainer import train
 
     base = config(tmp_path)
     tokenizer = load_tokenizer(base.tokenizer.path)
@@ -100,8 +100,8 @@ def test_unpadded_native_train_resume(tmp_path, multiport, width):
         memory_dim=8,
     )
     if multiport:
-        from sparselab.address_hash import engram_table_sizes
-        from sparselab.memory_tokenizer import build_memory_token_map
+        from klab.address_hash import engram_table_sizes
+        from klab.memory_tokenizer import build_memory_token_map
 
         raw["model"].update(
             num_layers=2,

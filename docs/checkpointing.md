@@ -7,14 +7,14 @@ A checkpoint generation is a durable, immutable local snapshot shared by the PyT
 ## Verify before reuse
 
 ```sh
-sparselab train --runs-dir sparselab-work/runs configs/runtime_smoke_cpu.yaml --run-id runtime-part --stop-after-step 10
-sparselab checkpoint inspect sparselab-work/runs/runtime-part/checkpoints/latest.json --json
-sparselab checkpoint verify sparselab-work/runs/runtime-part/checkpoints/latest.json --json
-sparselab train --runs-dir sparselab-work/runs configs/runtime_smoke_cpu.yaml --run-id runtime-resumed \
-  --resume sparselab-work/runs/runtime-part/checkpoints/latest.json
+klab train --runs-dir klab-work/runs configs/runtime_smoke_cpu.yaml --run-id runtime-part --stop-after-step 10
+klab checkpoint inspect klab-work/runs/runtime-part/checkpoints/latest.json --json
+klab checkpoint verify klab-work/runs/runtime-part/checkpoints/latest.json --json
+klab train --runs-dir klab-work/runs configs/runtime_smoke_cpu.yaml --run-id runtime-resumed \
+  --resume klab-work/runs/runtime-part/checkpoints/latest.json
 ```
 
-Both engines store generations under `sparselab-work/runs/<run-id>/checkpoints/step_<step>_gen_<generation>/`. Each finalized generation has a manifest and canonical safetensor weight shards/index; its engine selects the native training-state codec. `latest.json` and `best.json` are atomic lookup indexes; verified generation manifests and file digests are the durable truth. `checkpoint inspect` reports inventory and lineage, not a standalone integrity claim. `checkpoint verify` validates the selected path and returns structured failures with a nonzero exit when invalid.
+Both engines store generations under `klab-work/runs/<run-id>/checkpoints/step_<step>_gen_<generation>/`. Each finalized generation has a manifest and canonical safetensor weight shards/index; its engine selects the native training-state codec. `latest.json` and `best.json` are atomic lookup indexes; verified generation manifests and file digests are the durable truth. `checkpoint inspect` reports inventory and lineage, not a standalone integrity claim. `checkpoint verify` validates the selected path and returns structured failures with a nonzero exit when invalid.
 
 The checkpoint manager writes a temporary sibling, verifies the completed generation, atomically publishes it, then updates lookup pointers. A writer lease prevents concurrent writers/recovery in the same run. Recovery scans finalized generations and can repair stale projections/pointers, but an explicit corrupt `--resume` selection fails rather than silently falling back.
 
@@ -61,15 +61,15 @@ controller-side artifact ingestion are separate contracts.
 ## Import compatible external weights
 
 `weights import` accepts closed, validated source formats:
-`sparselab_legacy_v1` and `hf_llama_safetensors`. The latter is a narrow
+`klab_legacy_v1` and `hf_llama_safetensors`. The latter is a narrow
 bias-free dense Llama mapping with compatible attention/RoPE/tokenizer semantics,
 including exact dense or grouped-query layouts when the destination's
 `num_kv_heads` exactly matches the source `num_key_value_heads`. It is not a
 general Hugging Face, quantization, or chat-template importer.
 
 ```sh
-sparselab weights import SOURCE OUTPUT_RUN \
-  --config COMPATIBLE_V2.yaml --format sparselab_legacy_v1 \
+klab weights import SOURCE OUTPUT_RUN \
+  --config COMPATIBLE_V2.yaml --format klab_legacy_v1 \
   --source-tokenizer SOURCE_TOKENIZER.json --provenance PROVENANCE.json
 ```
 
@@ -86,7 +86,7 @@ full-resumable by supplying `--config`.
 
 ## Training-state comparison API
 
-For offline diagnostics, `sparselab.training.state_digest` provides
+For offline diagnostics, `klab.training.state_digest` provides
 `canonical_training_state(snapshot, observation=observed_update)` and
 `compare_training_states(left, right)`. Load independently verified native
 `TrainingSnapshot` objects at matching committed update boundaries and supply
@@ -128,7 +128,7 @@ remains explicitly unavailable as a local checkpoint.
 
 `checkpoint.keep_periodic: false` prunes only after successful publication and protects latest, best, and the immediately previous verified generation. Keeping fewer generations reduces recovery/history options; it never makes old state safer.
 
-In [actual signal/recovery acceptance](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/signal_recovery_2026_09_22.json),
+In [actual signal/recovery acceptance](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/signal_recovery_2026_09_22.json),
 SIGTERM ended cleanly at a committed update; deliberate latest-generation
 corruption made explicit resume fail before child creation. Explicit recovery
 selected the previous verified generation and completed a new child update,
@@ -150,9 +150,9 @@ state, never an optimizer conversion.
 
 ## Optional spot-safety policy
 
-The canonical `sparselab train CONFIG --spot-policy POLICY.json` accepts a
+The canonical `klab train CONFIG --spot-policy POLICY.json` accepts a
 separate operational policy; Python callers pass `spot_policy=SpotSafetyPolicy(...)`
-to `train`. Read-only `sparselab checkpoint plan-spot POLICY.json --workspace RUNS_DIR`
+to `train`. Read-only `klab checkpoint plan-spot POLICY.json --workspace RUNS_DIR`
 prints the decision and capacity without creating a run. Queued worker declarations
 do not implicitly inherit this host policy; this interface is explicit direct training.
 It adds checkpoint boundaries without editing RunConfig, evaluation
@@ -163,7 +163,7 @@ Operational saves retain scientific cadence watermarks; separate child-local
 operational time starts at child initialization and resets on every save.
 Historical generations and their identities remain unchanged.
 
-The strict JSON fields are `format: "sparselab-spot-safety-v1"`,
+The strict JSON fields are `format: "klab-spot-safety-v1"`,
 `observation_reference` (retained measurement reference),
 `checkpoint_write_seconds`, `boundary_seconds`, `restart_seconds`,
 `interruption_notice_seconds`, `max_recovery_seconds`, `checkpoint_bytes`,

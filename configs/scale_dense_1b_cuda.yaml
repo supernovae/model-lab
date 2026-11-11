@@ -9,12 +9,12 @@ model:
   ffn_dim: 4864
   max_seq_len: 2048
 tokenizer:
-  path: ../sparselab-work/experiments/dense-scale/tokenizer/tokenizer.json
+  path: ../klab-work/experiments/dense-scale/tokenizer/tokenizer.json
 dataset:
   source: fineweb_edu
   revision: 87f09149ef4734204d70ed1d046ddc9ca3f2b8f9
   dataset_config: sample-10BT
-  cache_dir: ../sparselab-work/experiments/dense-scale/data
+  cache_dir: ../klab-work/experiments/dense-scale/data
   train_max_documents: 200000
   validation_max_documents: 1000
   train_max_tokens: 24000000
@@ -40,7 +40,7 @@ evaluation:
   every_steps: 500
   max_batches: 32
 logging:
-  root_dir: ../sparselab-work/experiments/dense-scale/runs
+  root_dir: ../klab-work/experiments/dense-scale/runs
   every_steps: 10
 runtime:
   engine: pytorch

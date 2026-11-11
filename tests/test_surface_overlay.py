@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-from sparselab.evaluation import surface_overlay
-from sparselab.evaluation.surface_review import (
+from klab.evaluation import surface_overlay
+from klab.evaluation.surface_review import (
     complete_surface_review,
     create_surface_bundle,
     open_surface_bundle,
@@ -27,14 +27,14 @@ def test_review_status_requires_matching_verified_endpoint_and_complete_votes(
     bundles = tmp_path / "bundles"
     bundles.mkdir()
     source = {
-        "kind": "sparselab_checkpoint",
+        "kind": "klab_checkpoint",
         "run_id": "run-one",
         "checkpoint_digest": "a" * 64,
         "run_manifest_sha256": "b" * 64,
         "tokenizer_sha256": "c" * 64,
     }
     other = {
-        "kind": "sparselab_checkpoint",
+        "kind": "klab_checkpoint",
         "run_id": "run-two",
         "checkpoint_digest": "d" * 64,
     }

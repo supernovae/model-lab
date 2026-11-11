@@ -31,7 +31,7 @@ additional ports use `extra_memories.<block>.*`.
 ## Bind an address-only vocabulary map
 
 ```sh
-sparselab tokenizer memory-map "$TOKENIZER" --mode deepseek_v1 \
+klab tokenizer memory-map "$TOKENIZER" --mode deepseek_v1 \
   --output "$WORK/map.json" --bind-config "$WORK/prime-base.yaml" \
   --config-output "$WORK/prime-canonical.yaml"
 ```
@@ -53,7 +53,7 @@ first. This setting is explicit so old initialization behavior remains available
 ## Reuse a verified dense checkpoint
 
 ```sh
-sparselab train "$TARGET" --promote "$IMMUTABLE_GENERATION" \
+klab train "$TARGET" --promote "$IMMUTABLE_GENERATION" \
   --add-ngram-memory --run-id NEW_CHILD_RUN
 ```
 
@@ -92,7 +92,7 @@ an experiment, not a recommended result. Gradients and AdamW states are dense.
 ## Inspect the actual packed addresses and work outcomes
 
 ```sh
-sparselab research corpus mine --prepared-train "$PREPARED" \
+klab research corpus mine --prepared-train "$PREPARED" \
   --model-config "$TARGET" --memory-block 1 \
   --sequence-length 256 --max-blocks 128 --output "$WORK/addresses.json"
 ```

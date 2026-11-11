@@ -11,8 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from sparselab import host_capacity as host
-from sparselab.resource_envelope import ResourceEnvelope, check_envelope
+from klab import host_capacity as host
+from klab.resource_envelope import ResourceEnvelope, check_envelope
 
 # Bound at import, before tests/conftest.py's per-test pin replaces it.
 _REAL_MEASURE_MEMORY = host.measure_memory
@@ -138,7 +138,7 @@ def test_native_sha_and_canonical_bytes_match(capacity, tmp_path):
     def worker(path):
         return (path.name, hashlib.sha256(path.read_bytes()).hexdigest())
 
-    from sparselab.canonical import canonical_json
+    from klab.canonical import canonical_json
 
     reference = canonical_json(
         list(host.run_ordered(paths, worker, plan=replace(plan, workers=1)))
@@ -183,8 +183,8 @@ def test_suite_ram_fixture_is_consistent_on_a_physical_host_above_480_gib(
     import psutil
     from tokenizers import Tokenizer, models
 
-    from sparselab.corpus import large_build
-    from sparselab.data import encoding
+    from klab.corpus import large_build
+    from klab.data import encoding
 
     gib = 1024**3
     physical = psutil._psplatform.virtual_memory
@@ -231,7 +231,7 @@ def _child_memory(environment: dict[str, str]) -> list[str]:
             sys.executable,
             "-c",
             (
-                "import psutil; from sparselab.host_capacity import measure_memory;"
+                "import psutil; from klab.host_capacity import measure_memory;"
                 "print(measure_memory().total, psutil.virtual_memory().total)"
             ),
         ],
@@ -258,7 +258,7 @@ def test_ram_env_cannot_change_production_measurement() -> None:
         for entry in environment.get("PYTHONPATH", "").split(os.pathsep)
         if entry and entry != bootstrap
     )
-    environment["SPARSELAB_TEST_HOST_RAM"] = f"{1 << 50}:{1 << 50}"
+    environment["KLAB_TEST_HOST_RAM"] = f"{1 << 50}:{1 << 50}"
     measured, real = _child_memory(environment)
     assert measured == real != str(1 << 50)
 
@@ -275,7 +275,7 @@ def test_ram_env_cannot_bypass_low_memory_limits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: dict, rss: int | None
 ) -> None:
     """A 1 GiB-available / 2 GiB host stays low-memory whatever the env says."""
-    monkeypatch.setenv("SPARSELAB_TEST_HOST_RAM", f"{64 * 1024**3}:{48 * 1024**3}")
+    monkeypatch.setenv("KLAB_TEST_HOST_RAM", f"{64 * 1024**3}:{48 * 1024**3}")
     monkeypatch.setattr(host, "measure_memory", _REAL_MEASURE_MEMORY)
     small = SimpleNamespace(total=2 * 1024**3, available=1024**3)
     monkeypatch.setattr(host.psutil, "virtual_memory", lambda: small)
@@ -290,8 +290,8 @@ def test_ram_env_cannot_bypass_low_memory_limits(
 def test_corpus_encoder_budget_keeps_preparation_pool_cap(capacity, tmp_path):
     from tokenizers import Tokenizer, models
 
-    from sparselab.data.encoding import tokenizer_work_plan
-    from sparselab.data.preparation_workers import PreparationWorkers
+    from klab.data.encoding import tokenizer_work_plan
+    from klab.data.preparation_workers import PreparationWorkers
 
     capacity.total = 64 * 1024**3
     capacity.available = 48 * 1024**3

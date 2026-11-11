@@ -7,12 +7,12 @@ import sys
 
 import pytest
 
-from sparselab.cli import main as cli
+from klab.cli import main as cli
 
 
 def _report(monkeypatch, work, *words):
     monkeypatch.setattr(
-        sys, "argv", ["sparselab", "--work-dir", str(work), "report", *words]
+        sys, "argv", ["klab", "--work-dir", str(work), "report", *words]
     )
     cli.main()
 
@@ -123,7 +123,7 @@ def test_run_report_retains_negative_and_rejected_observations_with_overlay(
     _report(monkeypatch, work, *words, "--json")
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
-        "format": "sparselab-run-report-v1",
+        "format": "klab-run-report-v1",
         "run_id": "run",
         "evidence": evidence,
         "triage": triage,
@@ -148,7 +148,7 @@ def test_research_report_retains_native_availability_and_next_tests(
 ):
     from test_research_lifecycle import _evidence, _finding, _root
 
-    from sparselab.research.lifecycle import (
+    from klab.research.lifecycle import (
         LifecycleRegistry,
         next_experiments,
         research_status,
@@ -232,7 +232,7 @@ def test_unexpected_triage_reader_bugs_propagate(
 ):
     from test_post_train_triage import _triage_shape_fixture, _write_triage_shape
 
-    from sparselab.evaluation import post_train_triage as triage
+    from klab.evaluation import post_train_triage as triage
 
     if source == "_checkpoint_metadata":
         from test_post_train_triage import _triage_pass_fixture
@@ -277,10 +277,10 @@ def test_nonobject_manifest_renders_invalid_evidence_and_unknown_triage(
 ):
     from test_post_train_triage import _triage_shape_fixture, _write_triage_shape
 
-    from sparselab.engines.pytorch import PyTorchEngine
-    from sparselab.evaluation import post_train_triage as triage
-    from sparselab.training import trainer
-    from sparselab.training.metrics import ExperimentStore
+    from klab.engines.pytorch import PyTorchEngine
+    from klab.evaluation import post_train_triage as triage
+    from klab.training import trainer
+    from klab.training.metrics import ExperimentStore
 
     path = _write_triage_shape(tmp_path, _triage_shape_fixture(tmp_path))
     (path.parent.parent / "manifest.json").write_text(json.dumps(manifest))
@@ -320,10 +320,10 @@ def test_nonobject_manifest_renders_invalid_evidence_and_unknown_triage(
 
 
 def test_attempt_grammar_uses_current_report_path():
-    from sparselab.training.attempt_commands import classify_attempt_command
+    from klab.training.attempt_commands import classify_attempt_command
 
     command = [
-        "sparselab",
+        "klab",
         "report",
         "run",
         "--kind",
@@ -334,10 +334,10 @@ def test_attempt_grammar_uses_current_report_path():
     ]
     assert classify_attempt_command(command).effect == "inspection"
     with pytest.raises(ValueError, match="unreviewed native attempt operation"):
-        classify_attempt_command(["sparselab", "evidence", "run"])
+        classify_attempt_command(["klab", "evidence", "run"])
     with pytest.raises(ValueError, match="missing native positional input"):
         classify_attempt_command(
-            ["sparselab", "report", "--kind", "research", "--config", "/report.yaml"]
+            ["klab", "report", "--kind", "research", "--config", "/report.yaml"]
         )
 
 
@@ -376,11 +376,11 @@ def test_tiny_cpu_run_report_uses_native_readers_without_retraining(
 ):
     from test_training import config
 
-    from sparselab.evaluation.evidence import experiment_evidence
-    from sparselab.evaluation.post_train_triage import read_triage
-    from sparselab.training import trainer
+    from klab.evaluation.evidence import experiment_evidence
+    from klab.evaluation.post_train_triage import read_triage
+    from klab.training import trainer
 
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "training-work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "training-work"))
     declaration = config(tmp_path)
     declaration = declaration.model_copy(
         update={

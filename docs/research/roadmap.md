@@ -1,11 +1,11 @@
 # Capability status and evidence roadmap
 
-This roadmap describes what SparseLab can execute, what has been smoke-tested, what outcomes have been observed, and what still blocks stronger claims. Progress is organized by capability and evidence—not release phases. **Implemented** means the path exists; **smoke-tested** means it ran; neither means a model is useful or an architecture is better. Missing code belongs in [GitHub issues](https://github.com/supernovae/tiny-sparse-lab/issues); scientific questions and next experiments remain here and in the versioned lifecycle.
+This roadmap describes what Model Lab can execute, what has been smoke-tested, what outcomes have been observed, and what still blocks stronger claims. Progress is organized by capability and evidence—not release phases. **Implemented** means the path exists; **smoke-tested** means it ran; neither means a model is useful or an architecture is better. Missing code belongs in [GitHub issues](https://github.com/supernovae/model-lab/issues); scientific questions and next experiments remain here and in the versioned lifecycle.
 
 Durable experiment definitions use the [`experiments/`](../../experiments/)
 layout: copyable teaching material under `samples/`, actual campaigns under
 `research/`, and mutable execution output under the external persistent
-`$SPARSELAB_WORK_DIR/experiments/` tree. GitHub's Code task and Research experiment
+`$KLAB_WORK_DIR/experiments/` tree. GitHub's Code task and Research experiment
 issue templates preserve the same boundary.
 
 The [experiment ledger](experiment-ledger.md) is the compact index of retained
@@ -56,7 +56,7 @@ questions are:
 
 - **Useful tasks:** establish one low-risk real task against an independent test population and a simple baseline, with declared error handling and human review.
 - **Corpus shape and synthetic fraction:** preregister paired releases from the same licensed source snapshots with declared shape/fraction filters, held-out source/world/template units, fixed tokenizer/target token budget and controlled model/seed/evaluation suites. Compare recall, paraphrase, troubleshooting, tool use and abstention separately; report negative and mixed effects rather than a universal synthetic percentage or shape ranking. The [Corpus Forge ledger](../corpus-provenance.md) provides measurement inputs, not an observed outcome.
-- **Historical DevMind work:** source expansion, failed recovery and the unpromoted MODEL-0 endpoint are archived in the [research history](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/README.md). The [lessons](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/LESSONS_LEARNED.md#devmind-source-supply-and-recovery) retain unresolved quality, rights, exposure and reproducibility limits. These archived successor proposals are not the current execution plan.
+- **Historical DevMind work:** source expansion, failed recovery and the unpromoted MODEL-0 endpoint are archived in the [research history](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/README.md). The [lessons](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/LESSONS_LEARNED.md#devmind-source-supply-and-recovery) retain unresolved quality, rights, exposure and reproducibility limits. These archived successor proposals are not the current execution plan.
 - **Lexical Engram:** test transfer/generalization across independent task data, held-out wording/facts, seeds, and collision/capacity controls; keep token and byte results distinct.
 - **Portable byte Engram:** extend the negative two-case result to multiple recipient configurations and held-out cases; prove adapter updates leave source table bytes unchanged and retain disabled/random/frozen-only controls.
 - **Semantic EngramPack:** distinguish exact retrieval of supplied vectors from natural-language understanding. Any text-query capability first needs a reproducible encoder/space contract, an exercised query path, leakage-audited tasks, pack controls, and measured encoder/retrieval cost.
@@ -67,8 +67,8 @@ questions are:
 ## Archived dense and TinyStories findings
 
 The completed token-budget, model-scale, decoding and data-rich TinyStories
-studies now live in [research history](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/README.md).
-Their [source-linked lessons](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/LESSONS_LEARNED.md)
+studies now live in [research history](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/README.md).
+Their [source-linked lessons](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/LESSONS_LEARNED.md)
 separate lower held-out loss from mixed prose behavior, repetition from coherence,
 and changed exposure from new source supply. Retained reports and identities are
 unchanged; old executable study drivers have been removed. An archive is not a
@@ -82,7 +82,7 @@ sets and historical source revisions remain historical evidence.
 
 **Status: not implemented.** Verified semantic retrieval consumes already encoded canonical vectors; it does not encode prompt text. Current toy worlds use structured keys, not natural-language embeddings. Standard training and generation do not construct semantic query batches. These interfaces and tests establish bounded retrieval mechanics only.
 
-The existing `sparselab engram pack compile` command packages caller-supplied vectors. It does not load a teacher, extract hidden states, choose layers, pool source text, or account for teacher compute. Do not describe manual vectors, record compilation, or the structured toy encoder as teacher knowledge distillation.
+The existing `klab engram pack compile` command packages caller-supplied vectors. It does not load a teacher, extract hidden states, choose layers, pool source text, or account for teacher compute. Do not describe manual vectors, record compilation, or the structured toy encoder as teacher knowledge distillation.
 
 A teacher-derived pack remains gated until all of the following are exercised:
 
@@ -129,14 +129,14 @@ The intended walkthrough makes the feature path explicit:
 
 `D_T`, key width `K`, value width `V`, and recipient width `D_S` are independent. The teacher is an offline producer; the pack is frozen; the recipient adapter is trainable only where the experiment says so. Explain which components run at pack-build time, student-training time, and inference time. Do not imply the teacher is absent at query time unless the query path actually avoids loading it.
 
-Current source boundaries: `SemanticQueryBatch` in `src/sparselab/engram/semantic.py` accepts pre-encoded vectors; `SemanticRetriever` verifies and retrieves from pack assets; `SemanticMemoryAdapter` applies the retrieved values. `src/sparselab/data/toy_worlds.py` encodes canonical structured keys for deterministic synthetic controls. These are useful interfaces and test fixtures, not a macro-model compiler. See [the current runtime contract](semantic-memory.md) for exact limits and testable behavior.
+Current source boundaries: `SemanticQueryBatch` in `src/klab/engram/semantic.py` accepts pre-encoded vectors; `SemanticRetriever` verifies and retrieves from pack assets; `SemanticMemoryAdapter` applies the retrieved values. `src/klab/data/toy_worlds.py` encodes canonical structured keys for deterministic synthetic controls. These are useful interfaces and test fixtures, not a macro-model compiler. See [the current runtime contract](semantic-memory.md) for exact limits and testable behavior.
 
 ## Historical research: Kernel Memory Lab
 
-[Kernel Memory Lab](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/README.md) was
+[Kernel Memory Lab](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/README.md) was
 retired from the active showcase on 2026-10-18. Its retained
-[status](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/STATUS.md) and
-[bootstrap](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/BOOTSTRAP.md) describe
+[status](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/STATUS.md) and
+[bootstrap](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/BOOTSTRAP.md) describe
 historical cards, stopped attempts and scope, not a current release assignment.
 Fresh rerun ideas belong to the coordinated backlog with new identities and
 current frameworks. The old project is not awaiting qualification as an active

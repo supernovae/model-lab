@@ -1,6 +1,6 @@
 # Portable experiment ownership
 
-Tiny Sparse Lab supplies reusable experiment tools. A recipe supplies the
+Kybern Model Lab supplies reusable experiment tools. A recipe supplies the
 scientific choices: model and data declarations, seeds, budgets, comparisons,
 artifact references and supporting documentation. Keep recipes in a local
 directory or a Git repository of your choice.

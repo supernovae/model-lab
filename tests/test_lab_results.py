@@ -11,8 +11,8 @@ from typing import Any
 import pytest
 import yaml
 
-from sparselab.lab_records import KINDS, seal
-from sparselab.lab_results import (
+from klab.lab_records import KINDS, seal
+from klab.lab_results import (
     ResultLookupError,
     resolve_checkpoint,
     resolve_record,
@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_compare_missing_lm_eval_hint_pins_exported_record_after_latest_moves(
     tmp_path: Path, kind: str, missing_subject: bool
 ) -> None:
-    from sparselab.probes.compare import as_json, compare, render
+    from klab.probes.compare import as_json, compare, render
 
     lab = tmp_path / "lab"
     run = _run(lab)
@@ -46,7 +46,7 @@ def test_compare_missing_lm_eval_hint_pins_exported_record_after_latest_moves(
     row = next(p for p in report["comparisons"][0]["pairs"] if p["metric"] == "lm_eval")
     assert row["status"] == "missing_evidence"
     command = shlex.split(row["note"].split("`")[1])
-    assert command == ["sparselab", "probe", str(exported), "--config", "full"]
+    assert command == ["klab", "probe", str(exported), "--config", "full"]
     target = resolve_checkpoint(command[2], lab_dir=lab)
     assert target.checkpoint == str(run / "checkpoints/step-1")
     assert target.expected_sha256 == "a" * 64
@@ -58,7 +58,7 @@ def test_compare_missing_lm_eval_hint_pins_exported_record_after_latest_moves(
 
 
 def test_needle_and_reference_curve_hints_use_record_targets(tmp_path: Path) -> None:
-    from sparselab.probes.compare import as_json, compare, render
+    from klab.probes.compare import as_json, compare, render
 
     lab = tmp_path / "lab"
     run = _run(lab)
@@ -71,21 +71,21 @@ def test_needle_and_reference_curve_hints_use_record_targets(tmp_path: Path) -> 
     row = next(p for p in report["comparisons"][0]["pairs"] if p["metric"] == "needle")
     assert row["status"] == "missing_evidence"
     command = shlex.split(row["note"].split("`")[1])
-    assert command == ["sparselab", "probe", str(exported), "--config", "standard"]
+    assert command == ["klab", "probe", str(exported), "--config", "standard"]
     target = resolve_checkpoint(command[2], lab_dir=lab)
     assert target.checkpoint == str(run / "checkpoints/step-1")
     assert target.expected_sha256 == "a" * 64
     assert row["note"] in render(report)
     assert row in as_json(report)["comparisons"][0]["pairs"]
     curve_hint = report["curve"]["note"]
-    assert "sparselab probe RECORD --config full" in curve_hint
+    assert "klab probe RECORD --config full" in curve_hint
     assert "probe RUN" not in render(report)
     assert curve_hint in render(report)
     assert as_json(report)["curve"]["note"] == curve_hint
 
 
 def _run(lab: Path, name: str = "candidate", backend: str = "cpu") -> Path:
-    from sparselab.config.models import RunConfig
+    from klab.config.models import RunConfig
 
     run = lab / "runs" / name
     run.mkdir(parents=True)
@@ -266,10 +266,10 @@ def test_folder_with_two_records_is_ambiguous(tmp_path: Path) -> None:
 
 
 def _cli(monkeypatch: pytest.MonkeyPatch, work: Path, *args: str) -> None:
-    from sparselab.cli.main import main
+    from klab.cli.main import main
 
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(work))
-    monkeypatch.setattr(sys, "argv", ["sparselab", "--work-dir", str(work), *args])
+    monkeypatch.setenv("KLAB_WORK_DIR", str(work))
+    monkeypatch.setattr(sys, "argv", ["klab", "--work-dir", str(work), *args])
     main()
 
 
@@ -319,7 +319,7 @@ def test_probe_saved_backend_error_is_explicit_in_text_and_json(
 def test_explicit_cpu_override_reaches_native_authorization_without_changing_saved_config(
     tmp_path: Path,
 ) -> None:
-    from sparselab.cli.main import _prepare_runtime_command, build_parser
+    from klab.cli.main import _prepare_runtime_command, build_parser
 
     run = _run(tmp_path / "lab", backend="cuda")
     original = (run / "resolved_config.yaml").read_bytes()
@@ -337,8 +337,8 @@ def test_record_digest_is_forwarded_to_native_loader(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from sparselab.evaluation import inference
-    from sparselab.probes.cli import load_target
+    from klab.evaluation import inference
+    from klab.probes.cli import load_target
 
     run = _run(tmp_path)
     path = _record(tmp_path, run)
@@ -363,7 +363,7 @@ def test_native_loader_rejects_record_digest_mismatch_before_device_or_model_wor
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from sparselab.evaluation import inference
+    from klab.evaluation import inference
 
     monkeypatch.setattr(
         inference,
@@ -413,7 +413,7 @@ def test_record_cli_dispatch_preserves_explicit_backend_and_envelope(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from sparselab import explorer
+    from klab import explorer
 
     lab = tmp_path / "lab"
     record = _record(lab, _run(lab, backend="cuda"))
@@ -472,8 +472,8 @@ def test_record_cli_dispatch_preserves_explicit_backend_and_envelope(
 def test_explore_declaration_fails_before_runtime_or_lookup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declaration: str
 ) -> None:
-    from sparselab import runtime_environments
-    from sparselab.cli.main import _prepare_runtime_command, build_parser
+    from klab import runtime_environments
+    from klab.cli.main import _prepare_runtime_command, build_parser
 
     request = tmp_path / "explore.yaml"
     request.write_text(declaration)
@@ -492,7 +492,7 @@ def test_explore_declaration_fails_before_runtime_or_lookup(
 def test_explore_option_bound_removes_executable_flags(tmp_path: Path) -> None:
     import argparse
 
-    from sparselab.cli.main import build_parser
+    from klab.cli.main import build_parser
 
     parser = build_parser(tmp_path)
     commands = next(
@@ -525,7 +525,7 @@ def test_explore_option_bound_removes_executable_flags(tmp_path: Path) -> None:
 def test_explore_declaration_anchors_roots_and_reaches_native_handler(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from sparselab import explorer
+    from klab import explorer
 
     declarations = tmp_path / "requests"
     declarations.mkdir()
@@ -555,9 +555,9 @@ def test_explore_declaration_anchors_roots_and_reaches_native_handler(
 def test_explore_explicit_profile_selects_backend_before_native_authorization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selector: str
 ) -> None:
-    import sparselab.cli.main as cli
-    from sparselab import runtime_environments
-    from sparselab.runtime_profile import RuntimeProfile
+    import klab.cli.main as cli
+    from klab import runtime_environments
+    from klab.runtime_profile import RuntimeProfile
 
     run = _run(tmp_path / "lab")
     original = (run / "resolved_config.yaml").read_bytes()
@@ -599,7 +599,7 @@ def test_explore_explicit_profile_selects_backend_before_native_authorization(
 
 @pytest.mark.parametrize("document", ["", "# use defaults\n", "null\n", "{}\n"])
 def test_explore_empty_declaration_uses_defaults(tmp_path: Path, document: str) -> None:
-    from sparselab.explore_config import ExploreConfig, load_explore_config
+    from klab.explore_config import ExploreConfig, load_explore_config
 
     request = tmp_path / "explore.yaml"
     request.write_text(document)
@@ -609,7 +609,7 @@ def test_explore_empty_declaration_uses_defaults(tmp_path: Path, document: str) 
 def test_explore_declaration_expands_home_and_preserves_exact_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.explore_config import load_explore_config
+    from klab.explore_config import load_explore_config
 
     task_home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(task_home))
@@ -639,7 +639,7 @@ def test_lookup_hint_rewrites_only_exact_declaration_selector(
 ) -> None:
     import argparse
 
-    from sparselab.cli.main import _lab_lookup_failure
+    from klab.cli.main import _lab_lookup_failure
 
     error = ResultLookupError("fixture", "missing_evidence", "fixture reason", hint)
     expected = (
@@ -660,5 +660,5 @@ def test_lookup_hint_rewrites_only_exact_declaration_selector(
     else:
         assert (
             str(stopped.value)
-            == f"sparselab {command}: missing_evidence: fixture: fixture reason; {expected}"
+            == f"klab {command}: missing_evidence: fixture: fixture reason; {expected}"
         )

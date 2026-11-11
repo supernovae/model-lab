@@ -1,7 +1,7 @@
 # xpu-arc-v1: Linux x86_64 / CPython 3.14 / upstream PyTorch XPU.
 # Official wheel metadata pins the Intel SYCL runtime closure below.
 # Drivers and Level Zero device access must already be provisioned on the host.
-# Install SparseLab separately with --no-deps; never CPU-sync this environment.
+# Install Model Lab separately with --no-deps; never CPU-sync this environment.
 --index-url https://pypi.org/simple
 --find-links https://download.pytorch.org/whl/xpu/torch/
 --find-links https://download.pytorch.org/whl/xpu/triton-xpu/

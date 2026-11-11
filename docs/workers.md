@@ -3,10 +3,10 @@
 One worker executes a whole experiment with its own optimizer, RNG, local database, checkpoints, and immutable inputs. The controller owns a separate local queue and read-only-result projection. Local and SSH workers use the same versioned, finite stdio endpoint; neither is a persistent GPU daemon. This is independent experiment scheduling, not distributed training.
 
 The global `--work-dir PATH` option (before the command) selects the persistent
-root ahead of `SPARSELAB_WORK_DIR`; the implicit root is
-`${XDG_DATA_HOME}/sparselab` for an absolute, nonempty XDG setting, otherwise
-`~/.local/share/sparselab`. For substantial work use, for example,
-`export SPARSELAB_WORK_DIR=/data/sparselab` on a sufficiently sized filesystem.
+root ahead of `KLAB_WORK_DIR`; the implicit root is
+`${XDG_DATA_HOME}/klab` for an absolute, nonempty XDG setting, otherwise
+`~/.local/share/klab`. For substantial work use, for example,
+`export KLAB_WORK_DIR=/data/klab` on a sufficiently sized filesystem.
 Study submission and research scaffolding use that root for implicit
 `<work-dir>/experiments/<study-name>` workspaces, and generic controller commands
 use `<work-dir>/runs`. Local worker child processes inherit temporary-directory
@@ -16,7 +16,7 @@ so configure their environment separately. Explicit `--store`, `--runs-dir`,
 `--output`, cache and configured logging paths keep their exact meaning; they
 are not relocated by the selected root. An in-checkout persistent root or
 explicit long-lived output/cache path warns `STORAGE_INSIDE_GIT_CHECKOUT` but
-continues. Legacy `sparselab-work/` is selectable explicitly and never migrated
+continues. Legacy `klab-work/` is selectable explicitly and never migrated
 automatically; branches or worktrees do not create scientific or storage IDs.
 
 
@@ -31,21 +31,21 @@ does not introduce another scheduler.
 Prepare the tokenizer and use a concrete configuration whose backend and precision the worker supports:
 
 ```sh
-export SPARSELAB_WORK_DIR=/data/sparselab
-WORK="$SPARSELAB_WORK_DIR/experiments/runtime-smoke"
+export KLAB_WORK_DIR=/data/klab
+WORK="$KLAB_WORK_DIR/experiments/runtime-smoke"
 mkdir -p "$WORK"
-sparselab worker register cpu-one --backend cpu --store "$WORK/runs"
-sparselab worker status cpu-one --json --store "$WORK/runs"
-sparselab experiment submit configs/runtime_smoke_cpu.yaml --worker cpu-one --store "$WORK/runs"
-sparselab controller run --store "$WORK/runs"
+klab worker register cpu-one --backend cpu --store "$WORK/runs"
+klab worker status cpu-one --json --store "$WORK/runs"
+klab experiment submit configs/runtime_smoke_cpu.yaml --worker cpu-one --store "$WORK/runs"
+klab controller run --store "$WORK/runs"
 ```
 
 Run the controller in its own terminal. From another terminal, use the same `--store`:
 
 ```sh
-sparselab experiment list --json --store "$WORK/runs"
-sparselab experiment cancel RUN_ID --store "$WORK/runs"
-sparselab experiment resume RUN_ID --worker cpu-one --store "$WORK/runs"
+klab experiment list --json --store "$WORK/runs"
+klab experiment cancel RUN_ID --store "$WORK/runs"
+klab experiment resume RUN_ID --worker cpu-one --store "$WORK/runs"
 ```
 
 `--worker NAME` is a hard binding. Without one, queued submissions use eligible idle registered workers; a preferred worker is only a tie-breaker. Eligibility checks engine, backend, features, tested precision, required schema/codecs, source identity, and measured memory requirements. Unknown capacity never satisfies a numeric minimum. No eligible worker means `QUEUED` with a reason, not a silently changed configuration.
@@ -59,7 +59,7 @@ registers a controller-scoped local endpoint; `--runtime ID` or
 `--runtime-profile PROFILE` selects an authorized local interpreter. Runtime
 selection also supports submission without waiting: the submission stays queued
 until a controller processes that store. If none is running, execute
-`sparselab controller run --store ROOT` with the same store to process the
+`klab controller run --store ROOT` with the same store to process the
 existing queue entry. Submitting again creates another experiment; it does not
 resume processing the queued entry. If another controller owns the store lock,
 waiting observes it rather than competing for assignments.
@@ -80,25 +80,25 @@ preparation interfaces.
 
 ## Machine-local runtime selection
 
-`sparselab runtime env` manages a host-local interpreter registry, not worker
+`klab runtime env` manages a host-local interpreter registry, not worker
 registrations or scientific locks. Inspect hardware and installed Python environments
 separately; inventory alone does not authorize a backend. A CPU checkout example:
 
 ```sh
-sparselab runtime env discover --json
-sparselab runtime env register cpu-py314 --python "$PWD/.venv/bin/python" --backend cpu --json
-sparselab runtime env list --json
-sparselab runtime env doctor cpu-py314 --json
-sparselab stage configs/runtime_smoke_cpu.yaml --through inspect \
+klab runtime env discover --json
+klab runtime env register cpu-py314 --python "$PWD/.venv/bin/python" --backend cpu --json
+klab runtime env list --json
+klab runtime env doctor cpu-py314 --json
+klab stage configs/runtime_smoke_cpu.yaml --through inspect \
   --runtime cpu-py314 --output /absolute/disposable/stage
 ```
 
-The provision-created runtime root is `SPARSELAB_RUNTIME_DIR` if explicitly
-absolute, else `$XDG_DATA_HOME/sparselab/runtimes` if XDG is absolute/nonblank,
-else `~/.local/share/sparselab/runtimes`. The registry uses the corresponding
-`$XDG_CONFIG_HOME/sparselab/runtimes.yaml` or
-`~/.config/sparselab/runtimes.yaml`. Both are independent of
-`SPARSELAB_WORK_DIR` and the scientific lock. Existing interpreters can be
+The provision-created runtime root is `KLAB_RUNTIME_DIR` if explicitly
+absolute, else `$XDG_DATA_HOME/klab/runtimes` if XDG is absolute/nonblank,
+else `~/.local/share/klab/runtimes`. The registry uses the corresponding
+`$XDG_CONFIG_HOME/klab/runtimes.yaml` or
+`~/.config/klab/runtimes.yaml`. Both are independent of
+`KLAB_WORK_DIR` and the scientific lock. Existing interpreters can be
 registered outside the runtime root. Never copy registry entries to another
 host: register and doctor the actual interpreter there; remote worker capabilities
 remain authoritative on that host. `--runtime ID` resolves a local profile,
@@ -107,20 +107,20 @@ while `--worker NAME` selects a worker endpoint; they are not interchangeable.
 The following **user-provisioned** registrations select the framework/device
 used to execute a workload. They are setup examples, not experiment definitions.
 Each interpreter
-must already contain a compatible SparseLab source and actual working device;
+must already contain a compatible Model Lab source and actual working device;
 registration runs a real optimizer doctor and refuses unavailable backends.
 MLX uses `--backend metal` (its profile engine is MLX).
 
 ```sh
-sparselab runtime env register cuda-local --python /absolute/cuda/bin/python --backend cuda --json
-sparselab runtime env register xpu-local --python /absolute/xpu/bin/python --backend xpu --json
-sparselab runtime env register mps-local --python /absolute/mps/bin/python --backend mps --json
-sparselab runtime env register mlx-local --python /absolute/mlx/bin/python --backend metal --json
-sparselab runtime env doctor cuda-local --json
+klab runtime env register cuda-local --python /absolute/cuda/bin/python --backend cuda --json
+klab runtime env register xpu-local --python /absolute/xpu/bin/python --backend xpu --json
+klab runtime env register mps-local --python /absolute/mps/bin/python --backend mps --json
+klab runtime env register mlx-local --python /absolute/mlx/bin/python --backend metal --json
+klab runtime env doctor cuda-local --json
 ```
 
 The sole automatic vendor recipe is the **candidate** `rocm-gfx1100-v1`:
-`sparselab runtime env provision rocm-7900xtx --recipe rocm-gfx1100-v1 --json`.
+`klab runtime env provision rocm-7900xtx --recipe rocm-gfx1100-v1 --json`.
 It requires verified host/driver support, Linux x86_64, an existing Python 3.14
 executable, writable local runtime storage with at least 20 GiB free and 100,000
 free inodes. This command installs into a new runtime-root path, not the checkout
@@ -134,16 +134,16 @@ installation success as confirmation that the selected workload will run. Detail
 The following is an example for an already provisioned host, not evidence that such a host is available:
 
 ```sh
-sparselab worker register amd --backend rocm --ssh amd-host \
-  --python /opt/sparselab/bin/python --root /srv/sparselab/amd \
+klab worker register amd --backend rocm --ssh amd-host \
+  --python /opt/klab/bin/python --root /srv/klab/amd \
   --store "$WORK/runs"
 ```
 
 The SSH alias must already be configured in the user's SSH environment. Transport uses strict host-key checking and `BatchMode=yes`; it does not store passwords, accept unknown host keys, install software remotely, or execute commands from experiment configurations. Interpreter and worker-root paths are absolute. The endpoint runs a fixed, shell-quoted agent command. Worker roots are private and bound to an immutable registration.
 
 Provision each target with its vendor-compatible PyTorch/runtime and the
-project wheel. Base SparseLab is Torch-free; `--extra cpu` explicitly opts into
-CPU PyTorch for development and CI. The lightweight `sparselab runtime env`
+project wheel. Base Model Lab is Torch-free; `--extra cpu` explicitly opts into
+CPU PyTorch for development and CI. The lightweight `klab runtime env`
 entry works without Torch, but the full CLI still imports a backend framework.
 Do not apply the CPU extra to accelerator workers. **Select the provisioned
 interpreter directly, or set `UV_PROJECT_ENVIRONMENT` to its environment prefix
@@ -172,7 +172,7 @@ explicit device-specific provisioning input, not a Linux or WSL2 default and
 not a prescription for every AMD GPU. Other AMD devices, NVIDIA CUDA, and Intel
 XPU workers use their own compatible vendor stack. The base project wheel has
 no PyTorch dependency; provision the vendor framework separately and install
-SparseLab without resolving or replacing that framework (for example, with
+Model Lab without resolving or replacing that framework (for example, with
 `uv pip install --python /absolute/vendor/bin/python --no-deps --editable .`
 from the checkout). Keep the vendor package constraints when resolving other
 dependencies. On Apple arm64, MLX remains opt-in; the full CLI currently needs
@@ -182,8 +182,8 @@ both `--extra mlx` and `--extra cpu` in a managed project environment.
 
 Colab is a user-supplied, single foreground notebook kernel, not an SSH host,
 daemon, or scheduler. Before any automatic kernel execution, generate the
-fixed enrollment cell with `sparselab hosted notebook-cell --root
-/content/sparselab --output ABSOLUTE_PATH --json`, then run that cell manually
+fixed enrollment cell with `klab hosted notebook-cell --root
+/content/klab --output ABSOLUTE_PATH --json`, then run that cell manually
 in a dedicated notebook. The observer records boot, PID, and process-start
 identity through the Contents API. Unknown or `BUSY` occupancy refuses work; it
 is never queued behind another cell.
@@ -244,8 +244,8 @@ Native state codecs are engine-specific: PyTorch uses `pytorch_native/v2`; MLX u
 A version-1 matrix names a base configuration and insertion-ordered axes. Each option has a label and explicit dotted-path `set` patch. Expansion rejects duplicate labels, overlapping paths, unknown keys, invalid resulting configurations, and more than 1000 coordinates unless `--max-runs` is explicitly increased.
 
 ```sh
-sparselab experiment submit --matrix MATRIX.yaml --dry-run --store "$WORK/runs"
-sparselab experiment submit --matrix MATRIX.yaml --store "$WORK/runs"
+klab experiment submit --matrix MATRIX.yaml --dry-run --store "$WORK/runs"
+klab experiment submit --matrix MATRIX.yaml --store "$WORK/runs"
 ```
 
 Dry-run resolves the complete coordinates, configuration hashes, and scheduling constraints without creating the controller store, preparing data, probing devices, or enqueueing. Non-dry-run preparation must succeed for every coordinate before the queue transaction. Each coordinate receives independent IDs and retains the matrix digest and labels in its spec and resulting manifest.
@@ -264,14 +264,14 @@ No worker shares optimizer state or exchanges gradients/expert tokens with anoth
 
 ## Observed acceptance — 2026-09-23
 
-[Worker gate record](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/independent_workers_2026_09_23.json) binds the execution wheel, source identity, commands, native checkpoints, counters, independent checks and retained evidence hashes. The acceptance-time suite passed 335 tests and Ruff lint/format checks; later regression results remain with their evidence records and commits.
+[Worker gate record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/independent_workers_2026_09_23.json) binds the execution wheel, source identity, commands, native checkpoints, counters, independent checks and retained evidence hashes. The acceptance-time suite passed 335 tests and Ruff lint/format checks; later regression results remain with their evidence records and commits.
 
 - Three genuine CPU workers overlapped with FP32 AdamW, FP32 Adafactor and BF16 AdamW. Their updates continued while the controller was stopped; reconnect imported contiguous, deduplicated records with no echo outbox.
 - Replaying launch retained the original process identity. Cancellation stopped at update 26,943; an explicit child reached 32,768 updates / 2,097,152 targets. Its model, optimizer, RNG, cursor, scaler, schedule and counters matched an uninterrupted baseline bitwise. Wall-clock checkpoint cadence was not compared bitwise.
 - A separate identity-checked executor SIGKILL left an immutable UNKNOWN attempt. Its verified step-256 checkpoint resumed only through a new child, reaching exactly 32,768 updates / 1,048,576 targets without changing parent files.
 - Installed CLI matrix submission executed all three coordinates at exactly 2 updates / 64 targets. Actual incompatible engine/capacity and a worker with genuinely different installed source remained queued without an executor.
 - Core-only installed execution after removing owned original inputs proved offline promotion, fresh optimizer/RNG/counters, evaluation, generation, unchanged parent files, and composed local `run` without prior registration. An actual MLX/Metal worker completed 4 updates / 128 targets; its full native checkpoint also verified from the core-only installation without MLX.
-- [Captured dashboard curves](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/workers_training_2026_09_23.svg) contain actual browser WebGL pixels and SVG overlays, not regenerated series. Standard screenshot capture and runtime-table rasterization stalled, including independent browser attempts. The real Runtime view was additionally exercised through Streamlit's app harness: all three CPU/worker/precision/optimizer rows were correct and the database data version was unchanged.
+- [Captured dashboard curves](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/workers_training_2026_09_23.svg) contain actual browser WebGL pixels and SVG overlays, not regenerated series. Standard screenshot capture and runtime-table rasterization stalled, including independent browser attempts. The real Runtime view was additionally exercised through Streamlit's app harness: all three CPU/worker/precision/optimizer rows were correct and the database data version was unchanged.
 
 These synthetic workloads establish orchestration and state-transition behavior, not model quality. Worker labels do not establish AMD/Intel hardware execution. No actual SSH target, CUDA/HIP kernel, ROCm/XPU acceptance, or overlapping real three-host result is claimed.
 

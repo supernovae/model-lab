@@ -51,7 +51,7 @@ evaluation:
   every_steps: 5
   max_batches: 4
 logging:
-  root_dir: ../sparselab-work/experiments/runtime-smoke/runs
+  root_dir: ../klab-work/experiments/runtime-smoke/runs
   every_steps: 1
   architecture_diagnostics: scalar
 staging:

@@ -12,14 +12,14 @@ from test_dataset_sources import (
 )
 from test_training import config
 
-from sparselab.config.models import TokenizerTrainConfig
-from sparselab.data import packing
-from sparselab.data.tokenizer import load_tokenizer, train_tokenizer
+from klab.config.models import TokenizerTrainConfig
+from klab.data import packing
+from klab.data.tokenizer import load_tokenizer, train_tokenizer
 
 
 @pytest.fixture(autouse=True)
 def isolated_workdir(tmp_path, monkeypatch):
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
 
 
 @pytest.mark.usefixtures("offline")

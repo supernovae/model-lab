@@ -6,7 +6,7 @@ from typing import cast
 
 import pytest
 
-from sparselab.research.lifecycle import (
+from klab.research.lifecycle import (
     Baseline,
     LifecycleRegistry,
     _baseline_scoped_diagnostics,
@@ -16,7 +16,7 @@ from sparselab.research.lifecycle import (
     prior_evidence_warnings,
     validate_lifecycle,
 )
-from sparselab.training.manifest import sha256_file
+from klab.training.manifest import sha256_file
 
 _ENTRY = "catalog/neutral-study.json"
 
@@ -33,7 +33,7 @@ def _rows(value: object) -> list[dict[str, object]]:
 
 def _root(**updates: object) -> dict[str, object]:
     return {
-        "format": "sparselab-research-lifecycle",
+        "format": "klab-research-lifecycle",
         "version": 1,
         "evidence": [],
         "baselines": [],
@@ -163,7 +163,7 @@ def test_learning_reference_requires_fixed_32_token_generation_panel() -> None:
         "config": {"model": {"max_seq_len": 128}},
     }
     capture = {
-        "format": "sparselab-generation-capture",
+        "format": "klab-generation-capture",
         "version": 1,
         "identity": {
             "run_id": "run-42",
@@ -206,7 +206,7 @@ def test_generation_capture_binds_checkpoint_and_caps_fixed_greedy_options() -> 
         "config": {"model": {"max_seq_len": 128}},
     }
     capture = {
-        "format": "sparselab-generation-capture",
+        "format": "klab-generation-capture",
         "version": 1,
         "identity": {
             "run_id": "run-42",
@@ -298,19 +298,19 @@ def test_generation_capture_binds_checkpoint_and_caps_fixed_greedy_options() -> 
 def test_lifecycle_json_rejects_duplicate_nonfinite_and_non_integer_versions(
     tmp_path: Path,
 ) -> None:
-    from sparselab.research.lifecycle import load_lifecycle
+    from klab.research.lifecycle import load_lifecycle
 
     cases = (
         (
-            '{"format":"sparselab-research-lifecycle","version":1,"version":1}',
+            '{"format":"klab-research-lifecycle","version":1,"version":1}',
             "duplicate JSON key",
         ),
         (
-            '{"format":"sparselab-research-lifecycle","version":true,"evidence":[],"baselines":[],"entries":[],"findings":[],"promotions":[]}',
+            '{"format":"klab-research-lifecycle","version":true,"evidence":[],"baselines":[],"entries":[],"findings":[],"promotions":[]}',
             "version must be integer 1",
         ),
         (
-            '{"format":"sparselab-research-lifecycle","version":1,"evidence":[],"baselines":[],"entries":[],"findings":[],"promotions":[],"extra":NaN}',
+            '{"format":"klab-research-lifecycle","version":1,"evidence":[],"baselines":[],"entries":[],"findings":[],"promotions":[],"extra":NaN}',
             "nonfinite JSON number",
         ),
     )
@@ -374,7 +374,7 @@ def test_evidence_status_distinguishes_verified_missing_tampered_and_symlink(
 
 
 def test_default_registry_is_empty_and_grants_no_scientific_clearance(tmp_path: Path):
-    from sparselab.research.lifecycle import load_lifecycle, research_status
+    from klab.research.lifecycle import load_lifecycle, research_status
 
     registry = load_lifecycle()
     assert not registry.entries
@@ -391,7 +391,7 @@ def test_default_registry_is_empty_and_grants_no_scientific_clearance(tmp_path: 
 def test_explicit_registry_evidence_is_selected_and_missing_registry_refuses(
     tmp_path: Path,
 ):
-    from sparselab.research.lifecycle import load_lifecycle
+    from klab.research.lifecycle import load_lifecycle
 
     artifact = tmp_path / "note.txt"
     artifact.write_text("Synthetic historical evidence, not a current claim.\n")
@@ -547,9 +547,9 @@ def test_prior_design_warning_matches_exact_identity_and_includes_positive_findi
 def test_lessons_do_not_depend_on_personal_registry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    from sparselab.research import lifecycle
-    from sparselab.research.catalog import list_lessons
-    from sparselab.research.scaffold import scaffold_lesson
+    from klab.research import lifecycle
+    from klab.research.catalog import list_lessons
+    from klab.research.scaffold import scaffold_lesson
 
     empty_resources = tmp_path / "empty-resources"
     empty_resources.mkdir()

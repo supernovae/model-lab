@@ -11,16 +11,16 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 
-from sparselab.canonical import canonical_json
-from sparselab.config.models import AttentionConfig, ModelConfig
-from sparselab.engram.packs import compile_pack
-from sparselab.engram.semantic import (
+from klab.canonical import canonical_json
+from klab.config.models import AttentionConfig, ModelConfig
+from klab.engram.packs import compile_pack
+from klab.engram.semantic import (
     SemanticMemoryAdapter,
     SemanticQueryBatch,
     SemanticRetriever,
 )
-from sparselab.evaluation.generation import generate
-from sparselab.model.transformer import DenseLM
+from klab.evaluation.generation import generate
+from klab.model.transformer import DenseLM
 
 _CREATED_AT = "2026-09-23T00:00:00Z"
 
@@ -79,7 +79,7 @@ def _retriever(
     metadata_path.write_bytes(
         canonical_json(
             {
-                "format": "sparselab-semantic-assets",
+                "format": "klab-semantic-assets",
                 "format_version": 1,
                 "record_ids": record_ids,
                 "key_encoder": identity(key_name),
@@ -176,7 +176,7 @@ def test_exact_dot_cosine_ties_thresholds_and_comparison_bounds(
             torch.tensor([[1.0, 0, 0], [0, 1, 0]]),
             key_encoder=bounded.key_encoder,
         )
-    monkeypatch.setattr("sparselab.engram.semantic.MAX_SEMANTIC_RESULT_BYTES", 4)
+    monkeypatch.setattr("klab.engram.semantic.MAX_SEMANTIC_RESULT_BYTES", 4)
     with pytest.raises(ValueError, match="semantic results need up to"):
         dot.retrieve(_query([1, 0, 0]), key_encoder=dot.key_encoder, top_k=1)
 

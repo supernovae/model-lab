@@ -2,24 +2,24 @@
 
 Commands below use the [activated, provisioned environment](../README.md#first-run).
 
-SparseLab is a small-model workbench: train a narrow capability, exercise it through the same chat interface a person uses, and measure whether an architectural change helped. A trained checkpoint is reusable experimental material, not a disposable demo. Keep positive, negative, and inconclusive results.
+Model Lab is a model workbench: train a narrow capability, exercise it through the same chat interface a person uses, and measure whether an architectural change helped. A trained checkpoint is reusable experimental material, not a disposable demo. Keep positive, negative, and inconclusive results.
 
 The aliases below are invented flashcards, not useful world knowledge. For their plain-language meaning and the progression to ordinary chat and domain tasks, read [From flashcards to a useful local assistant](from-toy-to-useful.md).
 
 ## A runnable chat-native experiment
 
 ```sh
-sparselab tokenizer train configs/tokenizer_chat_recall.yaml
-sparselab inspect configs/chat_recall_dense_cpu.yaml --json
-sparselab train --runs-dir sparselab-work/runs configs/chat_recall_dense_cpu.yaml --run-id chat-dense
-sparselab train --runs-dir sparselab-work/runs configs/chat_recall_engram_cpu.yaml --run-id chat-engram
-sparselab capability list
-sparselab capability describe chat-alias-recall-v1
-sparselab capability compare chat-dense chat-engram chat-alias-retention-v1 --runs-dir sparselab-work/runs
-sparselab capability evaluate chat-dense chat-alias-recall-v1 --runs-dir sparselab-work/runs
-sparselab capability compare chat-dense chat-engram chat-alias-recall-v1 --vary memory --runs-dir sparselab-work/runs
-sparselab capability compare chat-dense chat-engram chat-context-override-v1 --vary memory --runs-dir sparselab-work/runs
-sparselab chat chat-engram --system "Answer the requested alias with only its value." --max-new-tokens 12 --transcript sparselab-work/chat-engram.json --runs-dir sparselab-work/runs
+klab tokenizer train configs/tokenizer_chat_recall.yaml
+klab inspect configs/chat_recall_dense_cpu.yaml --json
+klab train --runs-dir klab-work/runs configs/chat_recall_dense_cpu.yaml --run-id chat-dense
+klab train --runs-dir klab-work/runs configs/chat_recall_engram_cpu.yaml --run-id chat-engram
+klab capability list
+klab capability describe chat-alias-recall-v1
+klab capability compare chat-dense chat-engram chat-alias-retention-v1 --runs-dir klab-work/runs
+klab capability evaluate chat-dense chat-alias-recall-v1 --runs-dir klab-work/runs
+klab capability compare chat-dense chat-engram chat-alias-recall-v1 --vary memory --runs-dir klab-work/runs
+klab capability compare chat-dense chat-engram chat-context-override-v1 --vary memory --runs-dir klab-work/runs
+klab chat chat-engram --system "Answer the requested alias with only its value." --max-new-tokens 12 --transcript klab-work/chat-engram.json --runs-dir klab-work/runs
 ```
 
 These configurations deliberately train small models on a bounded task rather than promise general conversation. The dataset and evaluator share the ordinary `User:` / `Assistant:` formatter. There is no lookup-tool shortcut at inference: responses come from trained model logits. The tokenizer is trained on the training split only.
@@ -40,8 +40,8 @@ The bundled pair trains for up to 1,536 steps/393,216 targets. Epoch-end short b
 Each result retains every prompt, expected answer, generated response, score, and generation settings. Identity includes the exact resolved checkpoint digest, actual step and trained target tokens, run configuration, run-owned tokenizer and data hashes, code identity, runtime, and parameter inventory. Content-addressed filenames preserve earlier checkpoints and reruns instead of overwriting the latest score. The comparison itself is saved too.
 
 ```sh
-sparselab capability evaluate chat-engram chat-alias-recall-v1 --checkpoint best.json --runs-dir sparselab-work/runs
-sparselab report --kind run chat-engram --json --runs-dir sparselab-work/runs
+klab capability evaluate chat-engram chat-alias-recall-v1 --checkpoint best.json --runs-dir klab-work/runs
+klab report --kind run chat-engram --json --runs-dir klab-work/runs
 ```
 
 `best.json` means best **validation loss**, not best capability score. Select a checkpoint on validation, not by searching test scores. For a learning curve, evaluate explicit generation directories at preregistered token budgets; preserve the step-zero result as the untrained control. Compare architectures at the same actual budget, not just the same configured maximum.
@@ -63,7 +63,7 @@ Outputs show exact changed fields, paired gains/losses, score delta, and scope-l
 Export a built-in card as a declarative starting point:
 
 ```sh
-sparselab capability describe chat-alias-recall-v1
+klab capability describe chat-alias-recall-v1
 ```
 
 Save that JSON, remove its `digest` when editing, and choose a new versioned `name`, hypothesis, limitations, cases, expected responses, and response-token budget. Keep the declared normalization and greedy protocol; update the categorical-answer controls to reflect the cases. Pass the JSON path wherever a card name is accepted. The strict schema rejects unknown fields; custom executable scorers are not loaded. Changing prompts, scorer, or decoding creates a different digest. Never compare it as if it were the old card.
@@ -82,19 +82,19 @@ KV-cached PyTorch decoding and native MLX sparse attention are available within 
 
 ## Additional task and review workflows
 
-Set `SPARSELAB_WORK_DIR` to your external persistent root before these commands.
+Set `KLAB_WORK_DIR` to your external persistent root before these commands.
 Here `RUN_ID`, `base` and `variant` stand for existing runs in
-`$SPARSELAB_WORK_DIR/runs`; pass their actual store if it differs. The chat pair
-above explicitly uses `sparselab-work/runs` instead. Use new output destinations
+`$KLAB_WORK_DIR/runs`; pass their actual store if it differs. The chat pair
+above explicitly uses `klab-work/runs` instead. Use new output destinations
 for each task bundle.
 
-Inspect the outcome groups with `sparselab capability suite`. Held-out language-model loss remains separate from exact-answer behavior-card scores. The suite has distinct cards for canonical lexical recall, paraphrase, multi-turn follow-up, Python API behavior, novel-operand math, application, composition, long-context retrieval, conversation override, instruction-over-memory, and stale/conflicting/missing evidence. Lexical, paraphrase, and conversation cards share the synthetic alias domain; treat them as task conditions, not independent knowledge samples. Wikidata factual and paraphrase cards are generated from the explicitly built local source bundle.
+Inspect the outcome groups with `klab capability suite`. Held-out language-model loss remains separate from exact-answer behavior-card scores. The suite has distinct cards for canonical lexical recall, paraphrase, multi-turn follow-up, Python API behavior, novel-operand math, application, composition, long-context retrieval, conversation override, instruction-over-memory, and stale/conflicting/missing evidence. Lexical, paraphrase, and conversation cards share the synthetic alias domain; treat them as task conditions, not independent knowledge samples. Wikidata factual and paraphrase cards are generated from the explicitly built local source bundle.
 
 Build the deterministic synthetic task splits without network access:
 
 ```sh
-sparselab research tasks build math-identities --output "$SPARSELAB_WORK_DIR/experiments/capability-tasks/math"
-sparselab research tasks build python-stdlib --output "$SPARSELAB_WORK_DIR/experiments/capability-tasks/python"
+klab research tasks build math-identities --output "$KLAB_WORK_DIR/experiments/capability-tasks/math"
+klab research tasks build python-stdlib --output "$KLAB_WORK_DIR/experiments/capability-tasks/python"
 ```
 
 Each bundle contains `train.jsonl`, `validation.jsonl`, a held-out test card under `cards/`, test cases, and a hash-bound manifest. The JSONL files use the existing `local_chat` format; configure `dataset.source: local_chat`, point `train_path` and `validation_path` at the respective files, and declare the manifest's `MIT` license. Math identities use disjoint operand pools across train, validation, and test. Python tasks compute outputs through a finite allowlist of trusted standard-library calls; they never evaluate generated source, execute user code, or execute a benchmark project. No benchmark solutions are imported or extracted.
@@ -102,8 +102,8 @@ Each bundle contains `train.jsonl`, `validation.jsonl`, a held-out test card und
 The optional factual miniature downloads data only when explicitly requested:
 
 ```sh
-sparselab research tasks build wikidata-mini --output "$SPARSELAB_WORK_DIR/experiments/capability-tasks/wikidata"
-sparselab capability evaluate RUN_ID "$SPARSELAB_WORK_DIR/experiments/capability-tasks/wikidata/cards/wikidata-mini-factual-recall-v1.json" --runs-dir "$SPARSELAB_WORK_DIR/runs"
+klab research tasks build wikidata-mini --output "$KLAB_WORK_DIR/experiments/capability-tasks/wikidata"
+klab capability evaluate RUN_ID "$KLAB_WORK_DIR/experiments/capability-tasks/wikidata/cards/wikidata-mini-factual-recall-v1.json" --runs-dir "$KLAB_WORK_DIR/runs"
 ```
 
 The answer-free packaged source manifest pins Q42 and Q937 to training, Q7259 to validation, and Q7186 to test, each at a fixed Wikidata revision. The builder makes four serial requests to the revision-specific `Special:EntityData` endpoint, sends a descriptive User-Agent, caps each response at 8 MiB, and does not retry a rate-limited request. It downloads each complete entity JSON, extracts an English label or (when absent) a language-neutral `mul` label recorded as `label_language`, and extracts P569/P570 dates at day precision. It verifies each entity ID and revision, hashes the canonical response, and retains no raw entity JSON. Wikidata structured data is [CC0](https://www.wikidata.org/wiki/Wikidata:Reuse); the [data-access guidance](https://www.wikidata.org/wiki/Wikidata:Data_access) recommends specific revisions and considerate request rates. The manifest labels source facts `CC0-1.0` and generated prompts/format `MIT`; set the combined local-chat license to `MIT prompts/format; CC0-1.0 Wikidata facts`. Train/validation/test membership is entity-disjoint, and test answers are absent from training. This four-entity fixture is not a broad factual-knowledge benchmark.
@@ -111,11 +111,11 @@ The answer-free packaged source manifest pins Q42 and Q937 to training, Q7259 to
 Mine lexical statistics using only the explicitly supplied training corpus:
 
 ```sh
-sparselab research corpus mine \
-  --train-jsonl "$SPARSELAB_WORK_DIR/experiments/capability-tasks/math/train.jsonl" \
-  --tokenizer "$SPARSELAB_WORK_DIR/runs/RUN_ID/tokenizer/tokenizer.json" \
+klab research corpus mine \
+  --train-jsonl "$KLAB_WORK_DIR/experiments/capability-tasks/math/train.jsonl" \
+  --tokenizer "$KLAB_WORK_DIR/runs/RUN_ID/tokenizer/tokenizer.json" \
   --table-size 65536 --memory-dim 64 --ngram-orders 2 4 --hash-heads 1 \
-  --output "$SPARSELAB_WORK_DIR/experiments/capability-tasks/math-lexical-analysis.json"
+  --output "$KLAB_WORK_DIR/experiments/capability-tasks/math-lexical-analysis.json"
 ```
 
 The report binds the train-file and tokenizer hashes and contains token/document frequencies, empirical unigram entropy, exact per-order/head address occupancy, and storage estimates. Collisions count distinct zero-padded token n-gram keys that share an address (`collisions / distinct_ngram_count`); repeat lookups are reported separately. Exact key tracking is bounded to one million distinct keys and eight million key components. The estimator opens one explicit training JSONL and no validation/test path. It tokenizes each rendered train conversation independently, without packing, EOS insertion, or trainer truncation; address statistics are a source-document estimate, not the exact packed training run. Its table-byte estimate excludes the output projection and gate.
@@ -123,11 +123,11 @@ The report binds the train-file and tokenizer hashes and contains token/document
 For addresses as seen by the trainer, use the native prepared-data directory:
 
 ```sh
-sparselab research corpus mine \
+klab research corpus mine \
   --prepared-train "$PREPARED_DATA" \
   --sequence-length 256 --max-blocks 128 \
   --table-size 65536 --memory-dim 64 --ngram-orders 2 3 --hash-heads 2 \
-  --output "$SPARSELAB_WORK_DIR/packed-train-lexical-analysis.json"
+  --output "$KLAB_WORK_DIR/packed-train-lexical-analysis.json"
 ```
 
 This mode cold-verifies the complete prepared closure (including held-out file
@@ -147,13 +147,13 @@ this analysis does not verify their upper bound against a model vocabulary.
 Create a blinded comparison directly from content-addressed capability results:
 
 ```sh
-sparselab review bundle \
-  --base-result "$SPARSELAB_WORK_DIR/runs/base/evaluations/BASE_RESULT.json" \
-  --variant-result "$SPARSELAB_WORK_DIR/runs/variant/evaluations/VARIANT_RESULT.json" \
+klab review bundle \
+  --base-result "$KLAB_WORK_DIR/runs/base/evaluations/BASE_RESULT.json" \
+  --variant-result "$KLAB_WORK_DIR/runs/variant/evaluations/VARIANT_RESULT.json" \
   --criteria rubric.json --seed 17 \
   --bundle artifacts/review/rater-bundle.json \
   --reveal-map private/reveal-map.json
-sparselab review validate \
+klab review validate \
   --bundle artifacts/review/rater-bundle.json \
   --judgments artifacts/review/judgments.json \
   --output artifacts/review/validated-judgments.json

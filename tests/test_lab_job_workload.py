@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sparselab.config.loading import load_config
-from sparselab.training.manifest import sha256_file
+from klab.config.loading import load_config
+from klab.training.manifest import sha256_file
 
 
 def _evaluation_config(tmp_path, blocks, batch_size, max_batches):
@@ -64,7 +64,7 @@ def test_tiny_profile_effective_evaluation_limit(
     expected_batches: int,
     accepted: bool,
 ) -> None:
-    from sparselab.lab_job_workload import TryWorkload, declarations
+    from klab.lab_job_workload import TryWorkload, declarations
 
     baseline = _evaluation_config(tmp_path, blocks, batch_size, max_batches)
     root = baseline.parent

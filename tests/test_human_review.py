@@ -4,7 +4,7 @@ import copy
 
 import pytest
 
-from sparselab.evaluation.human_review import (
+from klab.evaluation.human_review import (
     create_review_bundle,
     validate_review_judgments,
 )
@@ -65,7 +65,7 @@ RECORDS = [
 
 def _judgments(bundle: dict[str, object]) -> dict[str, object]:
     return {
-        "format": "sparselab-human-review-judgments",
+        "format": "klab-human-review-judgments",
         "version": 1,
         "bundle_digest": bundle["bundle_digest"],
         "criteria_digest": bundle["criteria_digest"],

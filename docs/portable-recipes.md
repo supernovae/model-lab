@@ -1,6 +1,6 @@
 # Portable recipe inspection
 
-`sparselab experiment recipe inspect RECIPE.yaml --json` inspects a directory
+`klab experiment recipe inspect RECIPE.yaml --json` inspects a directory
 outside the installed lab checkout using the existing native configuration matrix
 compiler. It reads bounded, inventoried declaration bytes and prints a preview.
 It never executes the recipe or produces a resolved lock. The result explicitly
@@ -74,7 +74,7 @@ omit their work or claim to have compiled a full workflow.
 
 ## Identity and compatibility
 
-The new recipe fingerprint is SHA-256 of `sparselab-portable-recipe-v1\0` followed
+The new recipe fingerprint is SHA-256 of `klab-portable-recipe-v1\0` followed
 by native canonical JSON of the validated descriptor, with `files` sorted by
 path. Member byte digests and expected artifact digests participate. Descriptor
 formatting alone does not change this fingerprint; its separate
@@ -110,10 +110,10 @@ Validate an authored native section without probing a runtime or opening model
 or corpus payloads:
 
 ```sh
-sparselab config validate model.json --kind model --json
-sparselab config validate optimizer.yaml --kind optimizer --json
-sparselab config validate run.yaml --kind run --json
-sparselab config validate tokenizer.yaml --kind tokenizer --json
+klab config validate model.json --kind model --json
+klab config validate optimizer.yaml --kind optimizer --json
+klab config validate run.yaml --kind run --json
+klab config validate tokenizer.yaml --kind tokenizer --json
 ```
 
 These commands use the existing ModelConfig, optimizer union, RunConfig and
@@ -121,14 +121,14 @@ TokenizerTrainConfig schemas. They reject unknown fields and malformed YAML/JSON
 including duplicate keys. A valid individual section does not prove its compatibility
 with other sections, artifact availability, hardware capacity or scientific readiness.
 They do not allocate a model, train, download or evaluate anything. Unlike
-`sparselab inspect CONFIG`, which inspects a full run configuration through its
+`klab inspect CONFIG`, which inspects a full run configuration through its
 runtime-aware path, `config validate` only checks the selected native schema.
 
 For an existing inventoried matrix, preparation or workflow descriptor:
 
 ```sh
-sparselab experiment recipe export /source/recipe.yaml --output /my/new-recipe
-sparselab experiment recipe inspect /my/new-recipe/recipe.yaml --json
+klab experiment recipe export /source/recipe.yaml --output /my/new-recipe
+klab experiment recipe inspect /my/new-recipe/recipe.yaml --json
 ```
 
 Export copies exactly the authenticated descriptor and its declared metadata
@@ -189,12 +189,12 @@ For a matrix plan whose native `base_run` names `configs/run.json` relative to t
 recipe root, explicitly select the metadata to publish:
 
 ```sh
-sparselab experiment recipe create /my/authored-inputs --profile matrix \
+klab experiment recipe create /my/authored-inputs --profile matrix \
   --id new-study --entrypoint plans/plan.yaml \
   --file experiment_plan:plans/plan.yaml --file run_config:configs/run.json \
   --file metadata:notes.json --artifacts /my/expected-input-identities.json \
   --output /my/new-recipe
-sparselab experiment recipe inspect /my/new-recipe/recipe.json --json
+klab experiment recipe inspect /my/new-recipe/recipe.json --json
 ```
 
 `expected-input-identities.json` uses the existing matrix artifact mapping (native

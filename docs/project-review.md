@@ -64,8 +64,8 @@ The interactive transcript is preserved at `runs/review-chat-engram-long/evaluat
 ```sh
 uv run --locked ruff check src tests
 uv run --locked pytest -m "not cuda and not rocm and not xpu and not network"
-uv run --locked sparselab data prepare configs/chat_recall_dense_cpu.yaml
-uv run --locked sparselab eval review-local-corpus
+uv run --locked klab data prepare configs/chat_recall_dense_cpu.yaml
+uv run --locked klab eval review-local-corpus
 ```
 
 The local suite includes available MPS/MLX coverage; it is not CUDA, ROCm or XPU acceptance. All local file links in the 40 Markdown documents were checked. Temporary corpus/configuration/card fixtures were removed after retaining the run-owned evidence.
@@ -80,7 +80,7 @@ The local suite includes available MPS/MLX coverage; it is not CUDA, ROCm or XPU
 | Add missing training/runtime mechanisms | Assistant-only objectives and versioned inert tool-call transcripts, bounded PyTorch KV caches, native MLX sparse components, block recomputation, accumulation, measured activation offload, and PyTorch Adafactor are implemented within their explicit support boundaries. |
 | Make experiments reproducible and independently schedulable | Immutable native checkpoints, full-state child resume, fresh-state promotion, isolated pilots, explicit matrices, local/SSH worker contracts, device leases, and verified controller-local ingestion passed the recorded local acceptance gates. |
 
-The [scientific acceptance record](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/scientific_studies_2026_09_22.json) independently verifies preserved inputs, native endpoints, responses and comparisons. The [single-host](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/single_host_gate_2026_09_22.json) and [worker](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/independent_workers_2026_09_23.json) gates cover actual execution/recovery/installation scenarios; the suite at that acceptance revision passed 335 tests. A passing engineering gate does not make a negative learning result positive.
+The [scientific acceptance record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/scientific_studies_2026_09_22.json) independently verifies preserved inputs, native endpoints, responses and comparisons. The [single-host](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/single_host_gate_2026_09_22.json) and [worker](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/independent_workers_2026_09_23.json) gates cover actual execution/recovery/installation scenarios; the suite at that acceptance revision passed 335 tests. A passing engineering gate does not make a negative learning result positive.
 
 Further curriculum or scale experiments need a new explicit hypothesis and frozen evaluation; inspected cases must not become “untouched” again. Generic statistically justified model selection and open-ended response grading are not established by these studies. Current hardware boundaries are maintained in the [runtime guide](runtime.md);
 the historical review is not an up-to-date support matrix. Distributed training

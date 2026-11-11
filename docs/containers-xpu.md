@@ -82,12 +82,12 @@ placeholders:
 
 ```sh
 # IMAGE is a published immutable image reference; RENDER_NODE is the existing Intel node.
-IMAGE='ghcr.io/supernovae/tiny-sparse-lab@sha256:REPLACE_WITH_PUBLISHED_DIGEST'
+IMAGE='ghcr.io/supernovae/model-lab@sha256:REPLACE_WITH_PUBLISHED_DIGEST'
 RENDER_NODE='/dev/dri/REPLACE_WITH_INTEL_RENDER_NODE'
 docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
   --device "$RENDER_NODE:$RENDER_NODE" --group-add "$(stat -c %g "$RENDER_NODE")" \
   --mount type=volume,src=lab-xpu-job,dst=/state \
-  "$IMAGE" sparselab runtime env discover --json
+  "$IMAGE" klab runtime env discover --json
 ```
 
 Discovery is a passive availability check, not a model workload. Do not use

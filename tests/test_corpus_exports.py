@@ -11,18 +11,18 @@ from typing import Any
 import pytest
 import yaml
 
-from sparselab.canonical import canonical_json
-from sparselab.config.loading import load_config, load_tokenizer_config
-from sparselab.corpus.acquisition import acquire
-from sparselab.corpus.export import export_release, verify_release_export
-from sparselab.corpus.pipeline import build
-from sparselab.corpus.project import load_project
-from sparselab.corpus.release import freeze
-from sparselab.data.conversations import iter_rendered_conversations
-from sparselab.data.datasets import iter_documents
-from sparselab.data.packing import prepare_data
-from sparselab.data.tokenizer import load_tokenizer, train_tokenizer
-from sparselab.training.manifest import sha256_file
+from klab.canonical import canonical_json
+from klab.config.loading import load_config, load_tokenizer_config
+from klab.corpus.acquisition import acquire
+from klab.corpus.export import export_release, verify_release_export
+from klab.corpus.pipeline import build
+from klab.corpus.project import load_project
+from klab.corpus.release import freeze
+from klab.data.conversations import iter_rendered_conversations
+from klab.data.datasets import iter_documents
+from klab.data.packing import prepare_data
+from klab.data.tokenizer import load_tokenizer, train_tokenizer
+from klab.training.manifest import sha256_file
 
 
 @pytest.fixture(scope="module")
@@ -450,9 +450,9 @@ def test_cli_export_authenticates_release_once(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    from sparselab.cli.main import build_parser
-    from sparselab.corpus import release as publication
-    from sparselab.corpus.cli import _handle
+    from klab.cli.main import build_parser
+    from klab.corpus import release as publication
+    from klab.corpus.cli import _handle
 
     release, _ = frozen_sample
     real_files = publication._files

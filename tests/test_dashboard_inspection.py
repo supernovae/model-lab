@@ -2,10 +2,10 @@ from dataclasses import replace
 
 from streamlit.testing.v1 import AppTest
 
-from sparselab.dashboard.inspection import latest_metrics
-from sparselab.dashboard.queries import snapshot
-from sparselab.training.metric_registry import metric_spec
-from sparselab.training.metrics import ExperimentStore
+from klab.dashboard.inspection import latest_metrics
+from klab.dashboard.queries import snapshot
+from klab.training.metric_registry import metric_spec
+from klab.training.metrics import ExperimentStore
 
 
 def _store(root):
@@ -38,8 +38,8 @@ def test_selected_snapshot_and_observation_deltas(tmp_path):
 def _inspector(root):
     from pathlib import Path
 
-    from sparselab.dashboard.inspection import engram_summary, snapshot_inspector
-    from sparselab.dashboard.queries import snapshot
+    from klab.dashboard.inspection import engram_summary, snapshot_inspector
+    from klab.dashboard.queries import snapshot
 
     view = snapshot(Path(root))
     engram_summary(view, ["memory", "dense"])
@@ -69,7 +69,7 @@ def test_failed_refresh_retains_only_same_selection(tmp_path, monkeypatch):
     import sqlite3
     from types import SimpleNamespace
 
-    from sparselab.dashboard import app
+    from klab.dashboard import app
 
     _store(tmp_path)
     state = {"selected_runs": ["memory"]}
@@ -93,7 +93,7 @@ def _telemetry(root):
 
     import streamlit as st
 
-    from sparselab.dashboard.app import _run_page, _selection_controls
+    from klab.dashboard.app import _run_page, _selection_controls
 
     _selection_controls(Path(root))
     st.selectbox("Refresh", [10, 0], key="refresh_seconds")
@@ -119,7 +119,7 @@ def test_telemetry_manual_refresh_and_selection_survive_page_change(tmp_path):
 
 
 def test_memory_lookup_plot_preserves_table_identity_and_token_positions():
-    from sparselab.dashboard.explorer_view import memory_address_figure
+    from klab.dashboard.explorer_view import memory_address_figure
 
     figure = memory_address_figure(
         {
@@ -138,8 +138,8 @@ def test_memory_lookup_plot_preserves_table_identity_and_token_positions():
 def _learning(root):
     from pathlib import Path
 
-    from sparselab.dashboard.inspection import learning_summary
-    from sparselab.dashboard.queries import snapshot
+    from klab.dashboard.inspection import learning_summary
+    from klab.dashboard.queries import snapshot
 
     learning_summary(snapshot(Path(root)), ["memory", "dense"])
 

@@ -14,10 +14,10 @@ from tokenizers.models import BPE
 from tokenizers.pre_tokenizers import ByteLevel
 from tokenizers.trainers import BpeTrainer
 
-from sparselab.config.models import RunConfig
-from sparselab.model.transformer import DenseLM
-from sparselab.training.checkpoints import CheckpointManager
-from sparselab.training.weight_import import import_weights
+from klab.config.models import RunConfig
+from klab.model.transformer import DenseLM
+from klab.training.checkpoints import CheckpointManager
+from klab.training.weight_import import import_weights
 
 
 def _tokenizer(path: Path, *, add_prefix_space: bool = False) -> None:
@@ -359,7 +359,7 @@ def test_legacy_v1_import_migrates_config_and_stays_promotion_only(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from sparselab.cli.main import build_parser
+    from klab.cli.main import build_parser
 
     tokenizer = tmp_path / "tokenizer.json"
     _tokenizer(tokenizer)
@@ -431,7 +431,7 @@ def test_legacy_v1_import_migrates_config_and_stays_promotion_only(
         source,
         tmp_path / "legacy-import",
         config,
-        source_format="sparselab_legacy_v1",
+        source_format="klab_legacy_v1",
         source_tokenizer=tokenizer,
         provenance=_provenance(tmp_path / "provenance.json"),
     )

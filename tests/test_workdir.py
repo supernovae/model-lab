@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from sparselab.workdir import (
+from klab.workdir import (
     CHECKOUT_STORAGE_REASON,
     WORK_DIR_ENV,
     ensure_scratch_dir,
@@ -19,8 +19,8 @@ from sparselab.workdir import (
     storage_checks,
     warn_storage_checks,
 )
-from sparselab.workers import transport
-from sparselab.workers.models import WorkerDefinition
+from klab.workers import transport
+from klab.workers.models import WorkerDefinition
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -230,19 +230,19 @@ def test_default_work_dir_uses_external_xdg_or_home_without_creating_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = tmp_path / "project"
-    nested = project / "src" / "sparselab"
+    nested = project / "src" / "klab"
     nested.mkdir(parents=True)
     (project / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.delenv(WORK_DIR_ENV, raising=False)
-    assert resolve_work_dir(cwd=nested) == tmp_path / "data" / "sparselab"
+    assert resolve_work_dir(cwd=nested) == tmp_path / "data" / "klab"
     assert not (tmp_path / "data").exists()
     monkeypatch.setenv("XDG_DATA_HOME", "relative-data")
-    assert resolve_work_dir(cwd=nested) == home / ".local" / "share" / "sparselab"
+    assert resolve_work_dir(cwd=nested) == home / ".local" / "share" / "klab"
     monkeypatch.setenv("XDG_DATA_HOME", " ")
-    assert resolve_work_dir(cwd=nested) == home / ".local" / "share" / "sparselab"
+    assert resolve_work_dir(cwd=nested) == home / ".local" / "share" / "klab"
     assert not home.exists()
 
 
@@ -250,8 +250,8 @@ def test_explicit_path_precedes_environment_and_retains_relative_semantics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    monkeypatch.setenv(WORK_DIR_ENV, "legacy/sparselab-work")
-    assert resolve_work_dir(cwd=tmp_path) == tmp_path / "legacy" / "sparselab-work"
+    monkeypatch.setenv(WORK_DIR_ENV, "legacy/klab-work")
+    assert resolve_work_dir(cwd=tmp_path) == tmp_path / "legacy" / "klab-work"
     assert resolve_work_dir("chosen", cwd=tmp_path) == tmp_path / "chosen"
     assert (
         resolve_work_dir(tmp_path / "absolute", cwd=tmp_path) == tmp_path / "absolute"
@@ -278,7 +278,7 @@ def test_configured_relative_work_dir_redirects_tempfile_allocations(
         os.environ[name] == str(work_dir / "scratch")
         for name in ("TMPDIR", "TEMP", "TMP")
     )
-    with tempfile.TemporaryDirectory(prefix="sparselab-test-") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix="klab-test-") as temp_dir:
         assert Path(temp_dir).parent == work_dir / "scratch"
 
 
@@ -333,7 +333,7 @@ def test_research_scaffold_cli_uses_explicit_work_dir(tmp_path: Path) -> None:
         [
             sys.executable,
             "-c",
-            "from sparselab.cli.main import main; main()",
+            "from klab.cli.main import main; main()",
             "--work-dir",
             str(work_dir),
             "research",
@@ -409,7 +409,7 @@ def test_two_checkouts_share_external_root_without_checkout_warning(
 def test_implicit_runs_follow_selected_root_and_explicit_destination_is_stable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.cli.main import build_parser
+    from klab.cli.main import build_parser
 
     environment = tmp_path / "environment-state"
     explicit = tmp_path / "flag-state"
@@ -432,7 +432,7 @@ def test_storage_observation_replay_keeps_original_bytes_and_detects_tamper(
 ) -> None:
     import json
 
-    from sparselab.campaign.state import read_canonical
+    from klab.campaign.state import read_canonical
 
     root = tmp_path / "persistent-state"
     checks = [

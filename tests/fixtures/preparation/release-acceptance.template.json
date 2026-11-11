@@ -1,5 +1,5 @@
 {
-  "format": "sparselab-release-review-v1",
+  "format": "klab-release-review-v1",
   "decision": "ACCEPTED",
   "reviewer": "${REVIEWER}",
   "reviewed_on": "${REVIEWED_ON}",

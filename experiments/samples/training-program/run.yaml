@@ -9,10 +9,10 @@ model:
   ffn_dim: 32
   max_seq_len: 32
 tokenizer:
-  path: ../../../sparselab-work/experiments/offline-training-chain-v1/tokenizer/tokenizer.json
+  path: ../../../klab-work/experiments/offline-training-chain-v1/tokenizer/tokenizer.json
 dataset:
   source: synthetic
-  cache_dir: ../../../sparselab-work/experiments/offline-training-chain-v1/data
+  cache_dir: ../../../klab-work/experiments/offline-training-chain-v1/data
   train_max_documents: 100
   validation_max_documents: 100
   train_max_tokens: 129
@@ -51,7 +51,7 @@ evaluation:
   every_steps: 5
   max_batches: 4
 logging:
-  root_dir: ../../../sparselab-work/experiments/offline-training-chain-v1/runs
+  root_dir: ../../../klab-work/experiments/offline-training-chain-v1/runs
   every_steps: 1
   architecture_diagnostics: scalar
 staging:

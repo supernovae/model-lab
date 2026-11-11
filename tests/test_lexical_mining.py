@@ -11,10 +11,10 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
 
-from sparselab.canonical import canonical_digest
-from sparselab.data import lexical_mining
-from sparselab.data.lexical_mining import analyze_training_corpus
-from sparselab.model.memory import TokenNgramMemory
+from klab.canonical import canonical_digest
+from klab.data import lexical_mining
+from klab.data.lexical_mining import analyze_training_corpus
+from klab.model.memory import TokenNgramMemory
 
 
 def _write_conversations(path: Path, pairs: list[tuple[str, str]]) -> None:
@@ -311,8 +311,8 @@ def test_exact_unique_ngram_tracking_is_bounded(
 def packed_training(tmp_path):
     from test_training import config
 
-    from sparselab.data.packing import prepare_data
-    from sparselab.data.tokenizer import load_tokenizer
+    from klab.data.packing import prepare_data
+    from klab.data.tokenizer import load_tokenizer
 
     configured = config(tmp_path)
     paths = [tmp_path / "packed-train.jsonl", tmp_path / "packed-validation.jsonl"]
@@ -356,7 +356,7 @@ def packed_training(tmp_path):
 
 
 def test_prepared_addresses_match_native_blocks_and_masked_context(packed_training):
-    from sparselab.data.packing import TokenBlockDataset
+    from klab.data.packing import TokenBlockDataset
 
     prepared = packed_training
     dataset = TokenBlockDataset(
@@ -400,7 +400,7 @@ def test_prepared_addresses_match_native_blocks_and_masked_context(packed_traini
 
 
 def test_prepared_analysis_uses_no_validation_tokens(packed_training, monkeypatch):
-    from sparselab.data.packing import TokenBlockDataset
+    from klab.data.packing import TokenBlockDataset
 
     prepared = packed_training
     original = TokenBlockDataset.numpy_block
@@ -463,7 +463,7 @@ def test_prepared_analysis_refuses_unbounded_sample_before_read(tmp_path, kwargs
 def test_packed_candidate_limit_precedes_dataset_allocation(
     packed_training, monkeypatch
 ):
-    from sparselab.data import packing
+    from klab.data import packing
 
     def forbidden(*args, **kwargs):
         pytest.fail("candidate enumeration must not start")
@@ -492,8 +492,8 @@ def _configured_tokenizer(path: Path) -> None:
 def _prime_model(
     tokenizer_path: Path, *, mapped: bool = True, addressing: str = "prime_xor_v1"
 ):
-    from sparselab.config.models import ModelConfig
-    from sparselab.memory_tokenizer import build_memory_token_map
+    from klab.config.models import ModelConfig
+    from klab.memory_tokenizer import build_memory_token_map
 
     tokenizer = Tokenizer.from_file(str(tokenizer_path))
     mapping = (
@@ -523,7 +523,7 @@ def _prime_model(
 
 
 def _assert_model_analysis(analysis, sequences, model):
-    from sparselab.model.memory import build_token_memory
+    from klab.model.memory import build_token_memory
 
     memory = build_token_memory(model)
     mapping = model.memory_token_mapping
@@ -611,7 +611,7 @@ def test_model_configured_document_mining_separates_mapping_equivalence_from_has
 def test_model_configured_packed_mining_matches_prime_streams_and_mapped_padding(
     packed_training, tmp_path, mapped
 ):
-    from sparselab.data.packing import TokenBlockDataset
+    from klab.data.packing import TokenBlockDataset
 
     tokenizer_path = tmp_path / "tokenizer" / "tokenizer.json"
     model = _prime_model(tokenizer_path, mapped=mapped)

@@ -31,22 +31,22 @@ jobs:
           load: true
           push: false
           platforms: linux/amd64
-          tags: sparselab-cpu:test
+          tags: klab-cpu:test
           build-args: SOURCE_REVISION=${{ github.sha }}
-          cache-from: type=gha,scope=sparselab-cpu-main
-          cache-to: type=gha,mode=max,scope=sparselab-cpu-${{ github.event.pull_request.number || 'main' }}
+          cache-from: type=gha,scope=klab-cpu-main
+          cache-to: type=gha,mode=max,scope=klab-cpu-${{ github.event.pull_request.number || 'main' }}
       - name: Direct CLI, CPU tensor, native web and live WAL smoke
-        run: python3 container/smoke.py --image sparselab-cpu:test --revision "$GITHUB_SHA"
+        run: python3 container/smoke.py --image klab-cpu:test --revision "$GITHUB_SHA"
       - name: Retain exact tested image for main publication
         if: github.event_name == 'push'
         run: |
           set -euo pipefail
           mkdir tested-image
-          docker save sparselab-cpu:test | gzip -1 > tested-image/image.tar.gz
+          docker save klab-cpu:test | gzip -1 > tested-image/image.tar.gz
           python3 - <<'PY'
           import hashlib,json,os,subprocess
           with open('tested-image/image.tar.gz','rb') as f: digest=hashlib.file_digest(f,'sha256').hexdigest()
-          image=json.loads(subprocess.check_output(['docker','image','inspect','sparselab-cpu:test']))[0]['Id']
+          image=json.loads(subprocess.check_output(['docker','image','inspect','klab-cpu:test']))[0]['Id']
           with open('tested-image/identity.json','w') as f: json.dump({'revision':os.environ['GITHUB_SHA'],'image':image,'sha256':digest},f)
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -82,7 +82,7 @@ jobs:
           assert identity['revision']==os.environ['GITHUB_SHA']
           with open('tested-image/image.tar.gz','rb') as f: assert hashlib.file_digest(f,'sha256').hexdigest()==identity['sha256']
           subprocess.run(['docker','load','-i','tested-image/image.tar.gz'],check=True)
-          image=json.loads(subprocess.check_output(['docker','image','inspect','sparselab-cpu:test']))[0]
+          image=json.loads(subprocess.check_output(['docker','image','inspect','klab-cpu:test']))[0]
           assert image['Id']==identity['image']
           assert image['Config']['Labels']['org.opencontainers.image.revision']==os.environ['GITHUB_SHA']
           PY
@@ -95,9 +95,9 @@ jobs:
         run: |
           set -euo pipefail
           image="ghcr.io/$GITHUB_REPOSITORY"
-          docker tag sparselab-cpu:test "$image:cpu-sha-$GITHUB_SHA"
-          docker tag sparselab-cpu:test "$image:cpu"
+          docker tag klab-cpu:test "$image:cpu-sha-$GITHUB_SHA"
+          docker tag klab-cpu:test "$image:cpu"
           docker push "$image:cpu-sha-$GITHUB_SHA"
           docker push "$image:cpu"
           docker image inspect "$image:cpu-sha-$GITHUB_SHA" --format '{{json .RepoDigests}}' >> "$GITHUB_STEP_SUMMARY"
-          echo 'For anonymous pulls, the owner must set this new tiny-sparse-lab package to Public in package settings. This workflow does not change visibility.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'For anonymous pulls, the owner must set this new model-lab package to Public in package settings. This workflow does not change visibility.' >> "$GITHUB_STEP_SUMMARY"

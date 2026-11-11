@@ -71,7 +71,7 @@ before it selects a runtime or creates a work root. Keep it outside the
 prepared cache, stage output, Campaign state, and declared inputs; a sibling
 `observations/` directory in an external task workspace is a suitable location.
 
-The published `sparselab-phase-observations-v1` envelope contains an outer
+The published `klab-phase-observations-v1` envelope contains an outer
 operation phase, the native nested phase records, controller-host coverage,
 runtime-selection metadata, and generic snapshot-verification counters. It is
 operational evidence only: the destination and records never enter prepared,

@@ -46,7 +46,7 @@ def make_resources(tmp_path: Path) -> Path:
         "optimizer": {"name": "adamw", "warmup_steps": 2},
         "logging": {"root_dir": "runs"},
     }
-    from sparselab.config.models import RunConfig
+    from klab.config.models import RunConfig
 
     base = RunConfig.model_validate(base).model_dump(mode="json")
     (root / "base.yaml").write_text(yaml.safe_dump(base), encoding="utf-8")
@@ -69,7 +69,7 @@ def make_resources(tmp_path: Path) -> Path:
     _json(
         root / "profiles.json",
         {
-            "format": "sparselab-research-profiles",
+            "format": "klab-research-profiles",
             "version": 1,
             "scales": {scale: profile for scale in scales},
         },
@@ -96,13 +96,13 @@ def make_resources(tmp_path: Path) -> Path:
     _json(
         root / "datasets.json",
         {
-            "format": "sparselab-research-datasets",
+            "format": "klab-research-datasets",
             "version": 1,
             "datasets": {"neutral": dataset},
         },
     )
     entry = {
-        "format": "sparselab-research-entry",
+        "format": "klab-research-entry",
         "version": 1,
         "id": "neutral-study",
         "title": "Neutral comparison",
@@ -164,14 +164,14 @@ def make_resources(tmp_path: Path) -> Path:
     _json(
         root / "recipes/neutral-study.json",
         {
-            "format": "sparselab-research-recipe",
+            "format": "klab-research-recipe",
             "version": 1,
             "id": "neutral-study",
             "designs": {"default": {scale: recipe for scale in scales}},
         },
     )
     # Capability implementation is generic Lab code, independent of research resources.
-    from sparselab.evaluation.capabilities import (
+    from klab.evaluation.capabilities import (
         capability_card,
         capability_card_payload,
     )
@@ -183,7 +183,7 @@ def make_resources(tmp_path: Path) -> Path:
     _json(
         root / "lifecycle.json",
         {
-            "format": "sparselab-research-lifecycle",
+            "format": "klab-research-lifecycle",
             "version": 1,
             "entries": [],
             "evidence": [],
@@ -199,7 +199,7 @@ def make_study_resources(tmp_path: Path) -> Path:
     """Two neutral factors and two explicit seeds; retain dataset adapter coverage."""
     import shutil
 
-    from sparselab.research import catalog
+    from klab.research import catalog
 
     root = make_resources(tmp_path)
     for name in ("datasets.json", "dataset_sources"):
@@ -221,7 +221,7 @@ def make_study_resources(tmp_path: Path) -> Path:
         ]
         recipe["factorial_designs"] = [
             {
-                "format": "sparselab-factorial-design",
+                "format": "klab-factorial-design",
                 "version": 1,
                 "id": "width-depth",
                 "factors": [

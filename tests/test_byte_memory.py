@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from sparselab.config.models import AttentionConfig, ModelConfig
-from sparselab.evaluation.byte_memory_transfer import transfer_byte_memory
-from sparselab.model.transformer import DenseLM
+from klab.config.models import AttentionConfig, ModelConfig
+from klab.evaluation.byte_memory_transfer import transfer_byte_memory
+from klab.model.transformer import DenseLM
 
 
 def test_byte_memory_requires_prepared_addresses() -> None:

@@ -2,7 +2,7 @@
 
 Commands below use the [activated, provisioned environment](../README.md#first-run).
 
-SparseLab uses upstream PyTorch's `torch.xpu` backend for Intel GPUs. The
+Model Lab uses upstream PyTorch's `torch.xpu` backend for Intel GPUs. The
 `xpu-arc-v1` recipe provisions an isolated Linux x86_64 / Python 3.14 environment
 with `torch==2.15.0+xpu` and the Intel runtime pins in
 [`requirements/xpu-arc.txt`](../requirements/xpu-arc.txt). It follows the same
@@ -14,7 +14,7 @@ PyTorch's [Intel GPU guide](https://docs.pytorch.org/docs/2.15/notes/get_start_x
 lists Arc A-series and B-series on supported Ubuntu and WSL2 environments.
 The A380 is an A-series device. Arc Pro B60/B70 use the same XPU execution path,
 but support for each SKU, host and precision must be checked against the current
-vendor driver matrix and a fresh SparseLab doctor/stage; this guide does not
+vendor driver matrix and a fresh Model Lab doctor/stage; this guide does not
 record hardware acceptance for those cards. The recipe selects device index 0
 and requires a discrete Intel Arc A-series or B-series SKU in the device name;
 integrated `Intel(R) Arc(TM) Graphics` does not match. Check
@@ -51,7 +51,7 @@ the separately pinned driver userspace is unchanged and requires native testing.
 Start with the [Intel GPU driver installation guide](https://www.intel.com/content/www/us/en/developer/articles/tool/pytorch-prerequisites-for-intel-gpus.html)
 linked by PyTorch. Install the appropriate kernel driver, firmware and Intel
 Level Zero user-space driver for the actual distro/card. Follow the vendor's
-WSL-specific instructions when applicable. SparseLab provisions Python packages;
+WSL-specific instructions when applicable. Model Lab provisions Python packages;
 it does not modify kernel drivers, boot settings, permissions or the OS stack.
 Do not replace an existing AMD/NVIDIA stack to install Intel support.
 
@@ -61,7 +61,7 @@ Check the host before downloading framework packages:
 lspci -Dnnk
 ls -l /dev/dri
 id
-sparselab runtime env discover --json
+klab runtime env discover --json
 ```
 
 An Intel PCI display device is only a passive observation. Executing on native
@@ -83,13 +83,13 @@ succeeds. Existing ROCm runtimes and Colab/CUDA bootstrap continue to use their
 own recipes and runtime IDs.
 
 ```sh
-export SPARSELAB_WORK_DIR="$HOME/.local/share/sparselab"
-export SPARSELAB_RUNTIME_DIR="$HOME/.local/share/sparselab/runtimes"
-sparselab runtime env provision intel-arc \
+export KLAB_WORK_DIR="$HOME/.local/share/klab"
+export KLAB_RUNTIME_DIR="$HOME/.local/share/klab/runtimes"
+klab runtime env provision intel-arc \
   --recipe xpu-arc-v1 --json
-sparselab runtime env doctor intel-arc \
+klab runtime env doctor intel-arc \
   --precision fp32 --json
-sparselab runtime env show intel-arc --json
+klab runtime env show intel-arc --json
 ```
 
 Provision uses an existing Python 3.14 executable; supply
@@ -103,7 +103,7 @@ for receipts, roots and source repair.
 To use an already provisioned XPU interpreter instead:
 
 ```sh
-sparselab runtime env register intel-existing \
+klab runtime env register intel-existing \
   --python /absolute/xpu-env/bin/python --backend xpu \
   --device-index 0 --device-name-regex '(?i)Intel.*Arc.*\b(?:A\d{3}|B\d{2,3})\b' --json
 ```
@@ -111,12 +111,12 @@ sparselab runtime env register intel-existing \
 Use FP32 first on the A380. BF16 is optional and needs its own check:
 
 ```sh
-sparselab runtime env doctor intel-arc \
+klab runtime env doctor intel-arc \
   --precision bf16 --json
 ```
 
 PyTorch documents that GradScaler training requires FP64 support and flags its
-absence on Arc A-series. SparseLab's FP16 training requires an enabled scaler;
+absence on Arc A-series. Model Lab's FP16 training requires an enabled scaler;
 it does not silently disable scaling. Prefer FP32 or validated BF16 on the A380.
 Neither discovery's precision declarations nor a different Intel card establish
 that FP16 works. A failed precision pilot is an error, never CPU fallback.
@@ -138,17 +138,17 @@ runtime:
 Use the registered interpreter for the baseline and candidate:
 
 ```sh
-sparselab try DELTA.yaml \
+klab try DELTA.yaml \
   --vs /absolute/intel-baseline.yaml --runtime intel-arc
-sparselab report TRY_ID
-sparselab probe TRY_ID \
+klab report TRY_ID
+klab probe TRY_ID \
   --backend xpu --runtime intel-arc --config standard --json
 ```
 
 The CPU environment here launches the native handoff into `intel-arc`; its CPU
 setup does not install into the selected vendor environment. When invoking that
-vendor interpreter directly, use its `bin/sparselab`, or activate that environment
-and run `sparselab`. Never synchronize `--extra cpu` into it.
+vendor interpreter directly, use its `bin/klab`, or activate that environment
+and run `klab`. Never synchronize `--extra cpu` into it.
 Explicit `xpu` requests fail if unavailable. CPU evaluation of a saved XPU run
 remains explicit via `--backend cpu` and a CPU runtime.
 

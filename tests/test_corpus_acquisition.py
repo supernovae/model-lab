@@ -14,14 +14,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sparselab.corpus.acquisition import (
+from klab.corpus.acquisition import (
     acquire,
     declaration_sha256,
     verify_acquisition,
     verify_snapshot,
 )
-from sparselab.corpus.project import load_project, source_declaration_payload
-from sparselab.corpus.transport_budget import TransportBudget
+from klab.corpus.project import load_project, source_declaration_payload
+from klab.corpus.transport_budget import TransportBudget
 
 
 def _yaml(path: Path, value: dict) -> None:
@@ -170,7 +170,7 @@ def test_git_pinned_revision_and_symlink(tmp_path: Path) -> None:
 def test_verified_pinned_git_snapshot_survives_adapter_module_edit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.corpus import acquisition
+    from klab.corpus import acquisition
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -681,8 +681,8 @@ def test_bounded_git_rejects_ambiguous_declaration(tmp_path: Path) -> None:
 def test_admission_reuses_verified_snapshot_and_rejects_changed_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.corpus import acquisition
-    from sparselab.corpus.admission_draft import draft_admission_manifest
+    from klab.corpus import acquisition
+    from klab.corpus.admission_draft import draft_admission_manifest
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "settings"))
 

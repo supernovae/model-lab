@@ -9,8 +9,8 @@ import yaml
 from context_fixtures import write_composition_fixture
 from tokenizers import Tokenizer
 
-from sparselab.evaluation.capabilities import load_capability_card
-from sparselab.experiments.study import (
+from klab.evaluation.capabilities import load_capability_card
+from klab.experiments.study import (
     ArchitectureStudy,
     StudyComparison,
     StudyPair,
@@ -18,7 +18,7 @@ from sparselab.experiments.study import (
     plan_study,
     study_plan_payload,
 )
-from sparselab.model.inspection import parameter_inventory
+from klab.model.inspection import parameter_inventory
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = ROOT / "configs" / "runtime_smoke_cpu.yaml"
@@ -357,15 +357,15 @@ def test_three_seed_cli_submission_uses_one_workspace(
     from tokenizers.models import BPE
     from tokenizers.pre_tokenizers import ByteLevel
 
-    from sparselab.cli.main import main
-    from sparselab.config.loading import load_config
-    from sparselab.workers.controller import Controller
+    from klab.cli.main import main
+    from klab.config.loading import load_config
+    from klab.workers.controller import Controller
 
     monkeypatch.setattr(tempfile, "tempdir", tempfile.tempdir)
     for name in ("TMPDIR", "TEMP", "TMP"):
         monkeypatch.setenv(name, str(tmp_path))
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "sparselab-work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "klab-work"))
     tokenizer_path = tmp_path / "tokenizer.json"
     vocabulary = {
         token: index
@@ -412,14 +412,12 @@ def test_three_seed_cli_submission_uses_one_workspace(
         )
     )
     work = tmp_path / (
-        "external-disk/dense-lm-v1"
-        if external
-        else "sparselab-work/experiments/dense-lm-v1"
+        "external-disk/dense-lm-v1" if external else "klab-work/experiments/dense-lm-v1"
     )
     args = ["study", "submit", "study.yaml"]
     if external:
         args.extend(["--store", str(work / "runs")])
-    monkeypatch.setattr("sys.argv", ["sparselab", *args])
+    monkeypatch.setattr("sys.argv", ["klab", *args])
     main()
     output = json.loads(capsys.readouterr().out)
     receipt = json.loads((work / "receipt.json").read_text())
@@ -486,7 +484,7 @@ def test_three_seed_cli_submission_uses_one_workspace(
 def test_study_paths_preserve_explicit_overrides(tmp_path: Path) -> None:
     from types import SimpleNamespace
 
-    from sparselab.experiments.study import study_execution_paths
+    from klab.experiments.study import study_execution_paths
 
     study = SimpleNamespace(name="any-study")
     receipt = tmp_path / "custom" / "submission.json"

@@ -7,18 +7,18 @@ import numpy as np
 import pytest
 from test_training import config, equal
 
-from sparselab.config.models import RunConfig
-from sparselab.data.document_batching import collate_document_update
-from sparselab.data.packing import prepare_data
-from sparselab.data.story_packing import MatchedStoryDataset
-from sparselab.data.tokenizer import load_tokenizer
-from sparselab.training.checkpoints import CheckpointManager
-from sparselab.training.continuation import (
+from klab.config.models import RunConfig
+from klab.data.document_batching import collate_document_update
+from klab.data.packing import prepare_data
+from klab.data.story_packing import MatchedStoryDataset
+from klab.data.tokenizer import load_tokenizer
+from klab.training.checkpoints import CheckpointManager
+from klab.training.continuation import (
     target_group_transition,
     verify_regroup_cursor,
 )
-from sparselab.training.manifest import read_manifest
-from sparselab.training.trainer import train
+from klab.training.manifest import read_manifest
+from klab.training.trainer import train
 
 
 def test_suffix_masks_order_boundaries_and_envelope():

@@ -11,13 +11,13 @@ Original protocols, artifacts, failed observations and identities remain authori
 
 ### Historical baseline
 
-[Compact baseline](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/benchmarks/capacity-aware-execution-v1-baseline.json)
+[Compact baseline](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/benchmarks/capacity-aware-execution-v1-baseline.json)
 binds exact JSON pointers into versioned
-[execution records](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/devmind-pretrain-v5/model0-execution.md),
-[preparation](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/devmind-pretrain-v5/model0-preparation-verification.json),
-[lock acceptance](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/devmind-pretrain-v5/model0-plan-lock-acceptance.json),
-[current-source readiness](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/devmind-pretrain-v5/model0-current-source-full-shape-readiness.json)
-and [completed result](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/devmind-pretrain-v5/model0-result.json).
+[execution records](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/devmind-pretrain-v5/model0-execution.md),
+[preparation](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/devmind-pretrain-v5/model0-preparation-verification.json),
+[lock acceptance](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/devmind-pretrain-v5/model0-plan-lock-acceptance.json),
+[current-source readiness](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/devmind-pretrain-v5/model0-current-source-full-shape-readiness.json)
+and [completed result](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/devmind-pretrain-v5/model0-result.json).
 These are retrospective operational evidence, not new scientific results.
 
 | Boundary | Observed wall seconds | Interpretation |
@@ -103,7 +103,7 @@ medium process RSS differs by only a few MiB across 1/2/4 workers.
 `run_ordered` keeps at most the selected worker count outstanding, reduces in
 input ordinal order and cancels/joins on failure or iterator close.
 
-[Before measurements](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/benchmarks/capacity-aware-execution-v1-before.json)
+[Before measurements](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/benchmarks/capacity-aware-execution-v1-before.json)
 use independent processes and uncontrolled OS cache, not evicted-cache claims.
 Their elapsed times include package imports. Threaded SHA did not demonstrate a
 material end-to-end benefit; production cold SHA defaults to one worker.
@@ -115,8 +115,8 @@ presence is not an acceleration result; no custom hashing or dependency added.
 
 `verification_proofs.ProofStore(work_root)` stores HMAC-SHA256 receipts under
 `cache/verification-v1/`. The separate 32-byte secret is
-`$XDG_CONFIG_HOME/sparselab/verification-key-v1` (absolute XDG only), otherwise
-`~/.config/sparselab/verification-key-v1`. Receipt/key files are 0600 and their
+`$XDG_CONFIG_HOME/klab/verification-key-v1` (absolute XDG only), otherwise
+`~/.config/klab/verification-key-v1`. Receipt/key files are 0600 and their
 private directories 0700. No proof is written inside an inventoried artifact.
 
 Bindings include typed kind/version/identifier/SHA, canonical absolute path,
@@ -177,7 +177,7 @@ only within that invocation; no trust decision survives a lookup/publication.
 Tokenizer selection passes the explicit verification context to its nested
 release verifier. Recovery/archive callers retain their cold defaults.
 
-The [pre-MODEL-1 hash comparison](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/benchmarks/pre-model1-hash.json)
+The [pre-MODEL-1 hash comparison](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/benchmarks/pre-model1-hash.json)
 uses fresh processes and equally pre-read inputs; it is not a disk-cold result.
 On the 3,937,267,228-byte retained training array, median SHA-256/1 MiB was
 1.921 seconds, BLAKE3/single-thread 1.109 seconds, bounded four-thread BLAKE3
@@ -539,7 +539,7 @@ exact frozen array SHA. Frozen-stage native/buffered medians
 1.945728/1.962605 s and dispatch-create 2.000095/2.002844 s have overlapping
 ranges: the earlier no-end-to-end-native-speedup conclusion remains.
 
-Independent current-source `sparselab experiment lock`, warm `explain` and
+Independent current-source `klab experiment lock`, warm `explain` and
 `explain --cold-verify` returned identical scientific/plan digests. A separate
 instrumented CLI interpreter observed no warm `.npy` SHA reads, and exactly
 train/validation reads when cold. Signed-proof mutation, stale implementation,
@@ -557,7 +557,7 @@ Corrected raw references under the task-owned external root:
 
 The retained measurements above used an opt-in internal observer. Current
 `data prepare`, `stage` and Campaign commands expose `--observations-output`;
-see [native diagnostic interfaces](../using-sparselab.md#native-diagnostic-interfaces)
+see [native diagnostic interfaces](../using-klab.md#native-diagnostic-interfaces)
 for the supported commands and output boundaries.
 Without an observer, these phase samples are unavailable.
 Records remain operational; endpoint RSS is not a lifetime/phase peak and
@@ -569,7 +569,7 @@ The DevMind-only committed-evidence flags and trust implementation were removed
 in the lifecycle cleanup. Current measurement uses cold release/tokenizer
 verification, with an explicit tokenizer-origin release when reusing a retained
 tokenizer. The earlier proof and measurements remain unchanged in the
-[history archive](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/README.md); their existence
+[history archive](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/README.md); their existence
 does not authorize replay or replace verification of current inputs.
 
 ## Generation-panel integration history
@@ -584,7 +584,7 @@ The `engram-ffn-substitution-v1` micro study uses the pinned [FineWeb-Edu sample
 
 The 18-run FFN-width × lookup matrix ran on Apple Silicon through PyTorch MPS. It uses 320 hidden dimensions, six layers, four heads, and 128-token training sequences. It varies dense FFN width (5,120 / 2,560 / 1,280), the repository's lexical `ngram` memory ([Engram reference](../engram.md), off / on), and seed (17 / 41 / 73). The lexical variant uses a three-token address, an 8,191-row table, and a 32-dimensional latent value. Each arm has a 262,144-target-token ceiling (1,024 steps at the configured effective batch); seven declared contrasts are repeated across three matched seeds (21 descriptive pairings), without preregistered thresholds or inferential claims. The study also reports the fixed alias-retention, held-out-recall, and context-override cards separately as out-of-domain stress tests, not FineWeb quality metrics. Lookup adds 272,672 parameters at each width, so these are not parameter-matched controls. The micro study does not establish transfer to a 1B model.
 
-The external [Pythia-70M-deduped](https://huggingface.co/EleutherAI/pythia-70m-deduped) observer scored 62,318 FineWeb-Edu validation targets from 60 documents: mean next-token loss 11.0523 at `step0` (commit `c913ae980de9355947d0bf73f9f10d580eb79301`), 4.0516 at `step10000` (`c890c8f6d8f86c36b2af66c3012a14ef1d35d3f3`), and 4.0215 at `step143000` (`9a7c847e93250c8f24d4b7e7134dbf369e8fc9cb`). The ignored local artifact `artifacts/phase-g/pythia-trajectory.json` records snapshot checksums and evaluation identities. This is an external training-trajectory observation, not a controlled comparison with SparseLab models or tokenizers.
+The external [Pythia-70M-deduped](https://huggingface.co/EleutherAI/pythia-70m-deduped) observer scored 62,318 FineWeb-Edu validation targets from 60 documents: mean next-token loss 11.0523 at `step0` (commit `c913ae980de9355947d0bf73f9f10d580eb79301`), 4.0516 at `step10000` (`c890c8f6d8f86c36b2af66c3012a14ef1d35d3f3`), and 4.0215 at `step143000` (`9a7c847e93250c8f24d4b7e7134dbf369e8fc9cb`). The ignored local artifact `artifacts/phase-g/pythia-trajectory.json` records snapshot checksums and evaluation identities. This is an external training-trajectory observation, not a controlled comparison with Model Lab models or tokenizers.
 
 Nemotron-CC was excluded: NVIDIA's [agreement](https://huggingface.co/datasets/nvidia/Nemotron-CC-v2/blob/main/LICENSE.md) permits internal AI-solution training only, bars transfer or distribution of the dataset and any use that would place it under open-source terms, and grants no rights to underlying copyrighted material. FineWeb-Edu is released under the [ODC-BY-1.0 license](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) and is subject to [Common Crawl's terms](https://commoncrawl.org/terms-of-use); no blanket rights clearance for individual web documents is claimed. No raw corpus text will be included in the local weight package.
 
@@ -619,7 +619,7 @@ The narrower FFNs had higher validation loss than 4x in every matched seed. The 
 
 Collection and report artifacts are local under `artifacts/phase-g/study-budgeted/`: terminal evidence `reports/architecture-24ec6aa377b2-5c5109b2fb96e1fcd53164ae35f387a6b385f717b99be9f2010f8e8a3fbdf222.json`; static report bundle `research-reports/31131bff510bfde30c1e2a169909870904eb5b469bab949a530a7d5a700abf1e/`. Collection explicitly selected each run's `latest.json`; intermediate checkpoints were not included in the card comparisons.
 
-The optional local reference package is `artifacts/phase-g/micro-reference/`: three 4x/none fp32 safetensors weights for seeds 17, 41, and 73, the tokenizer, portable architecture metadata, source checkpoint manifests, and provenance hashes. The 414,909,288 weight bytes and all package hashes were verified; each source checkpoint passed `sparselab checkpoint verify`. No raw corpus text, token arrays, or optimizer states are included. Publishing remains unavailable because no external destination was supplied.
+The optional local reference package is `artifacts/phase-g/micro-reference/`: three 4x/none fp32 safetensors weights for seeds 17, 41, and 73, the tokenizer, portable architecture metadata, source checkpoint manifests, and provenance hashes. The 414,909,288 weight bytes and all package hashes were verified; each source checkpoint passed `klab checkpoint verify`. No raw corpus text, token arrays, or optimizer states are included. Publishing remains unavailable because no external destination was supplied.
 
 ## Early controlled comparisons
 
@@ -628,7 +628,7 @@ The optional local reference package is `artifacts/phase-g/micro-reference/`: th
 - [Context/Engram study](../context-engram-study.md#execution-results--2026-09-22): 24 endpoints spanning seeds 17/41/73, two exact target budgets, dense/backbone and dense-total comparisons, and collision/address-order diagnostics. Every untouched override endpoint remained 0/8. Added memory capacity and observed bucket collisions are not evidence of a generalization advantage.
 - [Domain adaptation](../path-domain-corpus.md#2026-09-22-execution-record): three pretraining/adaptation pairs with frozen supervision, provenance, semantic leakage checks, per-case results, and static-retention measurements. Training-case acquisition improved, but held-out reliability remained poor and retention worsened sharply.
 
-[Independent acceptance](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/scientific_studies_2026_09_22.json) binds the input inventories, endpoint identities, stored responses, paired deltas, and retention observations. These studies retain all declared seeds/endpoints and their negative outcomes; they are not a general model-selection or significance framework.
+[Independent acceptance](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/scientific_studies_2026_09_22.json) binds the input inventories, endpoint identities, stored responses, paired deltas, and retention observations. These studies retain all declared seeds/endpoints and their negative outcomes; they are not a general model-selection or significance framework.
 
 ### Historical controlled dense runs
 
@@ -649,7 +649,7 @@ Dense attention, sliding-window attention, MLA, MoE, and byte memory alter diffe
 
 ## Partial recovery declaration example
 
-The [DevMind v4 recovery declaration](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/devmind-pretrain-v4/recovery.yaml) is intentionally partial: its historical release SHA is expected only. Missing remote inputs/rights and MODEL-0 tokenizer, architecture/budget, runtime and evaluation declarations prevent any claim of recovered v4 model weights.
+The [DevMind v4 recovery declaration](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/devmind-pretrain-v4/recovery.yaml) is intentionally partial: its historical release SHA is expected only. Missing remote inputs/rights and MODEL-0 tokenizer, architecture/budget, runtime and evaluation declarations prevent any claim of recovered v4 model weights.
 
 ## Task-scoped ancestry replay
 
@@ -659,7 +659,7 @@ gates; each invocation attempts only the named next stage, re-verifies parents,
 and preserves the first failure without automatic retry:
 
 The original invocation is retained with the
-[ancestry replay record](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/devmind-pretrain-v4/ancestry-replay-report.md).
+[ancestry replay record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/devmind-pretrain-v4/ancestry-replay-report.md).
 It is a historical recovery procedure, not a general native lab workflow.
 Current `corpus_release` recovery steps support
 [declared snapshot inheritance](lifecycle-recovery.md#declared-snapshot-inheritance)

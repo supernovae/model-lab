@@ -3,11 +3,11 @@
 Commands below use the [activated, provisioned environment](../README.md#first-run).
 
 > For a quick local comparison, use [lab mode](lab-mode.md)
-> (`sparselab try DELTA.yaml --vs BASELINE.yaml`) instead. Training programs
+> (`klab try DELTA.yaml --vs BASELINE.yaml`) instead. Training programs
 > are the release path: locked, multi-phase and reviewable.
 
 An authored YAML program can describe inputs, bounded axes, controlled changes
-and a sequence of checkpoints. SparseLab resolves it into an immutable lock,
+and a sequence of checkpoints. Model Lab resolves it into an immutable lock,
 executes each cell through a worker, and collects evidence with the selected
 parent generation attached to each child. This guide runs a small offline
 synthetic fixture through fresh training followed by a full-state AdamW budget
@@ -79,22 +79,22 @@ this root setting does not relocate those paths. Author new configurations if
 you need external input storage, without editing an active or frozen sample:
 
 ```sh
-export SPARSELAB_WORK_DIR="$HOME/.local/share/sparselab"
+export KLAB_WORK_DIR="$HOME/.local/share/klab"
 SAMPLE=experiments/samples/training-program
-WORK="$SPARSELAB_WORK_DIR/experiments/offline-training-chain-v1"
-DECLARATIONS="$PWD/sparselab-work/experiments/offline-training-chain-v1/inputs"
+WORK="$KLAB_WORK_DIR/experiments/offline-training-chain-v1"
+DECLARATIONS="$PWD/klab-work/experiments/offline-training-chain-v1/inputs"
 mkdir -p "$WORK" "$DECLARATIONS"
 df -h "$WORK"
 df -i "$WORK"
-sparselab tokenizer train "$SAMPLE/tokenizer.yaml"
-PREPARED=$(sparselab data prepare "$SAMPLE/run.yaml")
+klab tokenizer train "$SAMPLE/tokenizer.yaml"
+PREPARED=$(klab data prepare "$SAMPLE/run.yaml")
 ```
 
 `WORK` selects the external experiment/controller store. `DECLARATIONS` stays
 inside this checkout so standalone binding resolves the template's repository-
 relative evaluation suite to the same file. The run and tokenizer declarations
-also explicitly select in-checkout `sparselab-work` preparation destinations;
-`SPARSELAB_WORK_DIR` does not relocate them. Use a fresh task-owned destination
+also explicitly select in-checkout `klab-work` preparation destinations;
+`KLAB_WORK_DIR` does not relocate them. Use a fresh task-owned destination
 for each invocation; do not overwrite existing plans or active inputs. Tokenizer
 training and data preparation require separately authorized resources.
 
@@ -130,18 +130,18 @@ Relative external checkpoint locations are anchored to the template before
 export, so moving the authored output does not select another parent.
 
 ```sh
-sparselab experiment bind-inputs \
+klab experiment bind-inputs \
   "$SAMPLE/run.yaml" "$SAMPLE/offline-chain.yaml" \
   --prepared-root "$PREPARED" \
   --output "$DECLARATIONS/plan.yaml" --json
 PLAN="$DECLARATIONS/plan.yaml"
-sparselab experiment validate "$PLAN" --json
-sparselab experiment inspect "$PLAN" --json
-LOCK=$(sparselab experiment lock "$PLAN" --json | jq -r '.lock')
-sparselab experiment explain "$LOCK" --json
+klab experiment validate "$PLAN" --json
+klab experiment inspect "$PLAN" --json
+LOCK=$(klab experiment lock "$PLAN" --json | jq -r '.lock')
+klab experiment explain "$LOCK" --json
 ```
 
-`PREPARED` is the actual directory printed by `sparselab data prepare`,
+`PREPARED` is the actual directory printed by `klab data prepare`,
 under the run's configured `dataset.cache_dir`; do not infer its name.
 `jq` extracts the emitted lock path without reimplementing lock parsing.
 Each `--output` destination must not exist.
@@ -265,9 +265,9 @@ integration paths are eligible; eligibility is not proof of semantic equivalence
 Review the concrete diff before publishing the record.
 
 The operator pins all three environment variables:
-`SPARSELAB_SOURCE_COMPATIBILITY` (absolute committed record path),
-`SPARSELAB_SOURCE_COMPATIBILITY_SHA256` (reviewed record byte digest), and
-`SPARSELAB_SOURCE_COMPATIBILITY_COMMIT` (trusted commit containing those exact
+`KLAB_SOURCE_COMPATIBILITY` (absolute committed record path),
+`KLAB_SOURCE_COMPATIBILITY_SHA256` (reviewed record byte digest), and
+`KLAB_SOURCE_COMPATIBILITY_COMMIT` (trusted commit containing those exact
 bytes). Partial, changed, symlinked, uncommitted or incorrectly inventoried records
 fail closed. Git authentication and actual installed-package identity remain
 mandatory. Local runtime children inherit these pins; a remote worker must
@@ -297,7 +297,7 @@ are not supported. The output parent must already exist without symlinked
 components. Neither output can be overwritten.
 
 ```sh
-sparselab experiment derive "$PLAN" \
+klab experiment derive "$PLAN" \
   --set 'id="offline-training-chain-v2"' \
   --set retention.keep_periodic=false \
   --output "$DECLARATIONS/plan-v2.yaml" --json
@@ -321,7 +321,7 @@ rebasing corpus, suite, capability, or prompt declarations. Then create the
 immutable runnable identity through the ordinary `experiment lock` command:
 
 ```sh
-LOCK=$(sparselab experiment lock \
+LOCK=$(klab experiment lock \
   "$DECLARATIONS/plan-v2.yaml" --json | jq -r '.lock')
 ```
 
@@ -336,15 +336,15 @@ The locked cells contain the effective run configs after input binding and
 phase overrides. Extract them for explicit local inspection and pilots:
 
 ```sh
-sparselab experiment export-config "$LOCK" \
+klab experiment export-config "$LOCK" \
   --cell pretrain:single --output "$WORK/pretrain-effective.yaml" --json
-sparselab experiment export-config "$LOCK" \
+klab experiment export-config "$LOCK" \
   --cell continue:single --output "$WORK/continue-effective.yaml" --json
-sparselab inspect "$WORK/pretrain-effective.yaml" --json
-sparselab stage "$WORK/pretrain-effective.yaml" \
+klab inspect "$WORK/pretrain-effective.yaml" --json
+klab stage "$WORK/pretrain-effective.yaml" \
   --through warmup --output "$WORK/stages/pretrain"
-sparselab inspect "$WORK/continue-effective.yaml" --json
-sparselab stage "$WORK/continue-effective.yaml" \
+klab inspect "$WORK/continue-effective.yaml" --json
+klab stage "$WORK/continue-effective.yaml" \
   --through warmup --output "$WORK/stages/continue"
 ```
 
@@ -356,9 +356,9 @@ the checkpoint transition or establish model quality.
 Submit the root phase and start the controller:
 
 ```sh
-sparselab experiment run "$LOCK" --phase pretrain \
+klab experiment run "$LOCK" --phase pretrain \
   --allow-uncommitted-declaration --json
-sparselab controller run --store "$WORK/controller"
+klab controller run --store "$WORK/controller"
 ```
 
 The first command registers a local worker when none is specified and enqueues
@@ -366,7 +366,7 @@ the selected cell. The controller stays in the foreground. In a second terminal
 with the same `WORK` and `LOCK`, monitor the parent:
 
 ```sh
-sparselab experiment list --store "$WORK/controller"
+klab experiment list --store "$WORK/controller"
 ```
 
 Wait for the parent's `status: COMPLETE` and `ingestion_status: COMPLETE`.
@@ -374,9 +374,9 @@ Then explicitly submit the dependent phase; the same running controller will
 dispatch it:
 
 ```sh
-sparselab experiment run "$LOCK" --phase continue \
+klab experiment run "$LOCK" --phase continue \
   --allow-uncommitted-declaration --json
-sparselab experiment list --store "$WORK/controller"
+klab experiment list --store "$WORK/controller"
 ```
 
 `experiment run` enqueues work; it does not wait or automatically schedule
@@ -392,10 +392,10 @@ include their axis labels in the returned cell IDs.
 After both phases complete and ingest:
 
 ```sh
-sparselab experiment collect "$LOCK" --json > "$WORK/collection-result.json"
+klab experiment collect "$LOCK" --json > "$WORK/collection-result.json"
 INDEX=$(jq -r '.index_path' "$WORK/collection-result.json")
-sparselab experiment reconstruct "$LOCK" --index "$INDEX" --json
-sparselab dashboard --runs-dir "$WORK/controller"
+klab experiment reconstruct "$LOCK" --index "$INDEX" --json
+klab dashboard --runs-dir "$WORK/controller"
 ```
 
 The index retains pending, failed, interrupted and invalid cells as distinct
@@ -409,9 +409,9 @@ Use the run IDs returned by submission/list for checkpoint verification,
 held-out evaluation and generation, with `--runs-dir "$WORK/controller"`:
 
 ```sh
-sparselab eval RETURNED_RUN_ID --runs-dir "$WORK/controller"
-sparselab report --kind run RETURNED_RUN_ID --runs-dir "$WORK/controller" --json
-sparselab generate RETURNED_RUN_ID --runs-dir "$WORK/controller" \
+klab eval RETURNED_RUN_ID --runs-dir "$WORK/controller"
+klab report --kind run RETURNED_RUN_ID --runs-dir "$WORK/controller" --json
+klab generate RETURNED_RUN_ID --runs-dir "$WORK/controller" \
   --prompt "A path" --max-new-tokens 8
 ```
 
@@ -419,7 +419,7 @@ Keep the declaration and small protocols under version control; keep mutable
 sources, workers, stores, stages and reports at their declared locations:
 controller outputs under the external work root,
 and this fixture’s explicit prepared inputs and bound plans under the ignored
-in-checkout `sparselab-work` directory.
+in-checkout `klab-work` directory.
 Preserve failed and interrupted runs, and retain verified previous/best/terminal
 checkpoints under the declared policy. Only remove task-owned output after
 confirming no worker is active. For exact comparison contracts, typed external

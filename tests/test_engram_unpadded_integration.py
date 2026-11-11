@@ -4,10 +4,10 @@ import numpy as np
 import torch
 from test_engram_integration import model_config
 
-from sparselab.address_hash import engram_table_sizes
-from sparselab.config.models import AttentionConfig
-from sparselab.data.story_packing import MatchedStoryDataset
-from sparselab.model.transformer import DenseLM
+from klab.address_hash import engram_table_sizes
+from klab.config.models import AttentionConfig
+from klab.data.story_packing import MatchedStoryDataset
+from klab.model.transformer import DenseLM
 
 
 def test_unpadded_multiport_convolution_and_cached_rows_reset_at_document_boundary(

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sparselab.dashboard.snapshot_catalog import (
+from klab.dashboard.snapshot_catalog import (
     SavedSnapshot,
     SnapshotOwner,
     available_catalog,

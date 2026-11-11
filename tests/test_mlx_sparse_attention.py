@@ -10,8 +10,8 @@ mx = pytest.importorskip("mlx.core")
 from mlx import nn
 from mlx.utils import tree_flatten
 
-from sparselab.model.attention.mlx_sparse import MLXBlockSparseAttention
-from sparselab.model.attention.sparse import BlockSparseAttention
+from klab.model.attention.mlx_sparse import MLXBlockSparseAttention
+from klab.model.attention.sparse import BlockSparseAttention
 
 pytestmark = pytest.mark.mlx
 

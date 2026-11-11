@@ -6,13 +6,13 @@ Use a version-controlled external resource directory when authoring a study
 outside the Lab repository:
 
 ```console
-sparselab research scaffold neutral-study --resource-root /path/to/resources --scale smoke --data neutral --output /path/to/new-study
+klab research scaffold neutral-study --resource-root /path/to/resources --scale smoke --data neutral --output /path/to/new-study
 ```
 
 The selected directory uses the existing research schemas and layout:
 
-- `catalog/<id>.json`: `sparselab-research-entry` version 1.
-- The entry's relative `recipe` path: `sparselab-research-recipe` version 1.
+- `catalog/<id>.json`: `klab-research-entry` version 1.
+- The entry's relative `recipe` path: `klab-research-recipe` version 1.
 - `base.yaml`: native run configuration, overlaid by the selected scale and recipe.
 - `profiles.json`: native research profiles for smoke, nano, micro, and tiny.
 - `datasets.json`: named native dataset profiles. Names need not match Lab's bundled catalog.
@@ -110,4 +110,4 @@ card paths share a namespace; collisions fail without publishing the destination
 These limitations do not justify changing archived card paths or hashes.
 
 [tinystories-config]: https://github.com/supernovae/kybern-workshop/blob/1aa84218a95fabafc96f2cc7d667c0c969eb8d5e/provenance/lab/configs/tinystories_dense_30m_data_rich_v1.yaml
-[tinystories-card]: https://github.com/supernovae/kybern-workshop/blob/1aa84218a95fabafc96f2cc7d667c0c969eb8d5e/provenance/lab/src/sparselab/research/resources/catalog/tinystories-dense-30m-data-rich-v1.json
+[tinystories-card]: https://github.com/supernovae/kybern-workshop/blob/1aa84218a95fabafc96f2cc7d667c0c969eb8d5e/provenance/lab/src/klab/research/resources/catalog/tinystories-dense-30m-data-rich-v1.json

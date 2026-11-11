@@ -23,7 +23,7 @@ for run in ['fixture-a','fixture-b']:
    c.execute('INSERT INTO metrics VALUES(?,?,?,?,?,?)',(run,step,step*32,step*2.,name,val))
 c.commit()
 `,database]);
-const server=spawn(python,['-m','streamlit','run','src/sparselab/dashboard/app.py',
+const server=spawn(python,['-m','streamlit','run','src/klab/dashboard/app.py',
  '--server.address','127.0.0.1','--server.port',port,'--server.headless','true',
  '--','--runs-dir',scratch,'--lab-dir',path.join(scratch,'lab')],
  {env:{...process.env,PYTHONPATH:path.resolve('src')},stdio:'ignore'});
@@ -135,11 +135,11 @@ const server=spawn(python,['-m','streamlit','run','src/sparselab/dashboard/app.p
   const remove=window.removeEventListener.bind(window);
   window.readyListeners=new Set();
   window.addEventListener=(type,fn,...rest)=>{
-   if(type==='sparselab-plotly-ready') window.readyListeners.add(fn);
+   if(type==='klab-plotly-ready') window.readyListeners.add(fn);
    return add(type,fn,...rest);
   };
   window.removeEventListener=(type,fn,...rest)=>{
-   if(type==='sparselab-plotly-ready') window.readyListeners.delete(fn);
+   if(type==='klab-plotly-ready') window.readyListeners.delete(fn);
    return remove(type,fn,...rest);
   };
   window.draws=0;
@@ -150,7 +150,7 @@ const server=spawn(python,['-m','streamlit','run','src/sparselab/dashboard/app.p
   window.renderFixture=n=>render({parentElement:document.querySelector('#fixture'),
    data:JSON.stringify({data:[],layout:{uirevision:'fixture',datarevision:n}})});
   window.renderFixture(1);
- },fs.readFileSync('src/sparselab/dashboard/training_charts.js','utf8'));
+ },fs.readFileSync('src/klab/dashboard/training_charts.js','utf8'));
  await readiness.clock.fastForward(14999);
  assert.equal(await readiness.locator('[role="alert"]').count(),0);
  assert.equal(await readiness.evaluate(()=>window.readyListeners.size),1);
@@ -170,7 +170,7 @@ const server=spawn(python,['-m','streamlit','run','src/sparselab/dashboard/app.p
   window.renderFixture(3);
   await Promise.resolve();
   window.Plotly=window.plotlyStub;
-  window.dispatchEvent(new Event('sparselab-plotly-ready'));
+  window.dispatchEvent(new Event('klab-plotly-ready'));
   await document.querySelector('.training-live-plot').pending;
  });
  assert.equal(await readiness.evaluate(()=>window.readyListeners.size),0);

@@ -3,14 +3,14 @@ import argparse
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from sparselab.dashboard.stores import PRIMARY_STORE, configured_stores, parse_run_store
-from sparselab.training.metrics import ExperimentStore
+from klab.dashboard.stores import PRIMARY_STORE, configured_stores, parse_run_store
+from klab.training.metrics import ExperimentStore
 
 
 def _stores_page(primary, pilot):
     from pathlib import Path
 
-    from sparselab.dashboard.app import _run_page, _selection_controls, _store_controls
+    from klab.dashboard.app import _run_page, _selection_controls, _store_controls
 
     root = _store_controls(Path(primary), [("Pilot", pilot)])
     _selection_controls(root)
@@ -75,7 +75,7 @@ def test_single_store_and_invalid_store_configuration(tmp_path):
 def test_native_dashboard_forwards_named_stores_without_opening_them(
     tmp_path, monkeypatch
 ):
-    from sparselab.cli import main as cli
+    from klab.cli import main as cli
 
     parser = cli.build_parser(work_dir=tmp_path)
     primary, pilot = tmp_path / "history", tmp_path / "pilot"

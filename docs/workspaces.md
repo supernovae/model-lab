@@ -13,18 +13,18 @@ IDs and immutable manifests; they are not peer repository-root directories.
 Name every workspace for its task or experiment, independently of its execution
 backend. CPU, ROCm, CUDA, and other backends are runtime parameters recorded in
 configs and manifests. For example, runtime acceptance across devices shares
-`$SPARSELAB_WORK_DIR/experiments/runtime-acceptance/runs/`; runtime smoke configs
-share `$SPARSELAB_WORK_DIR/experiments/runtime-smoke/runs/`. Use distinct run IDs
+`$KLAB_WORK_DIR/experiments/runtime-acceptance/runs/`; runtime smoke configs
+share `$KLAB_WORK_DIR/experiments/runtime-smoke/runs/`. Use distinct run IDs
 for each execution, including backend labels when useful, rather than separate
 `runs-rocm` or `runs-cpu` stores. Worker environments remain backend-specific.
 
-The implicit persistent root is `${XDG_DATA_HOME}/sparselab` when
+The implicit persistent root is `${XDG_DATA_HOME}/klab` when
 `XDG_DATA_HOME` is nonempty and absolute; otherwise it is
-`~/.local/share/sparselab`. For large campaigns, explicitly choose an adequately
-sized filesystem, for example `export SPARSELAB_WORK_DIR=/data/sparselab`.
+`~/.local/share/klab`. For large campaigns, explicitly choose an adequately
+sized filesystem, for example `export KLAB_WORK_DIR=/data/klab`.
 The global `--work-dir PATH` overrides that environment variable, which overrides
 the implicit root. An explicit relative path remains relative to the current
-directory, including legacy `SPARSELAB_WORK_DIR=sparselab-work`. The root is not
+directory, including legacy `KLAB_WORK_DIR=klab-work`. The root is not
 derived from the repository, branch, or worktree. Merely resolving it does not
 create it; read-only inspection does not need to initialize it.
 
@@ -44,14 +44,14 @@ create it; read-only inspection does not need to initialize it.
 
 The `scratch/` child must be a real directory contained in the resolved work
 root; scratch symlinks, including links within that root, are refused. Choose
-a different `--work-dir` or `SPARSELAB_WORK_DIR` if the selected root has a
+a different `--work-dir` or `KLAB_WORK_DIR` if the selected root has a
 symlinked scratch child. Symlink aliases for the work root itself remain supported.
 
 The source tree holds source, tests, configs, documentation, and declarative
 research/lifecycle records. The persistent root holds downloads, prepared arrays,
 checkpoints, immutable execution evidence, receipts, and logs. Its `scratch/`
 directory contains disposable temporary files; `cache/` is reserved for optional
-reconstructable caches. The old ignored in-checkout `sparselab-work/` remains
+reconstructable caches. The old ignored in-checkout `klab-work/` remains
 selectable explicitly, but is not moved or pruned automatically. A selected
 persistent root or explicit long-lived output/cache destination inside any Git
 checkout receives a `STORAGE_INSIDE_GIT_CHECKOUT` warning: execution is permitted,
@@ -63,16 +63,16 @@ identities and locations; they need not be duplicated into each experiment.
 
 ## Guarding one operational command
 
-`sparselab monitor` launches one command once, records versioned launch,
+`klab monitor` launches one command once, records versioned launch,
 per-sample and completion JSON under a new exclusive log directory, and returns
 a nonzero exit code on any guard violation, monitor error or command failure.
 For example:
 
 ```sh
-sparselab monitor --policy monitor.yaml --workspace /data/sparselab \
-  --log-dir /data/sparselab/logs/unique-launch \
+klab monitor --policy monitor.yaml --workspace /data/klab \
+  --log-dir /data/klab/logs/unique-launch \
   --reserve-bytes 1073741824 --reserve-inodes 100 --json -- \
-  sparselab corpus measure-tokens ...
+  klab corpus measure-tokens ...
 ```
 
 For a 12 GiB owned-tree RSS cap, 8 GiB host available-RAM floor, 1 GiB
@@ -153,7 +153,7 @@ stable lock identity.
 Inspect the **existing agreed triplet** without launching or provisioning anything:
 
 ```sh
-sparselab runner-status --json \
+klab runner-status --json \
   --runner-lock "$RUNNER_LOCK" --runner-state "$RUNNER_STATE" \
   --runner-blocked "$RUNNER_BLOCKED"
 ```
@@ -186,8 +186,8 @@ does not grant an automatic retry.
 For a CPU command already authorized by the owner (use a fresh log directory):
 
 ```sh
-sparselab monitor --policy /data/sparselab/monitor.yaml \
-  --workspace /data/sparselab --log-dir /data/sparselab/logs/unique-launch \
+klab monitor --policy /data/klab/monitor.yaml \
+  --workspace /data/klab --log-dir /data/klab/logs/unique-launch \
   --runner-lock "$HOME/src/.lab-cpu-runner.lock" \
   --runner-state "$HOME/src/.lab-cpu-runner-state" \
   --runner-blocked "$HOME/src/.lab-cpu-runner.blocked" -- \
@@ -199,7 +199,7 @@ same lock again. Contention refuses immediately; there is no queue, retry,
 takeover, unblock command or lock-keeper process. Omitting all three flags keeps
 the existing monitor CLI behavior. Supplying a subset is an error.
 
-The minimal local contract is `contract.json` (format `sparselab-runner-v1`,
+The minimal local contract is `contract.json` (format `klab-runner-v1`,
 canonical lock path, device/inode and blocked path) plus one UUID directory per
 attempt. Its exclusive, fsynced `pending.json` records the command, policy,
 owner PID and canonical log directory **before** the native monitor spawns. Its
@@ -243,15 +243,15 @@ Choose the campaign workspace under the selected persistent root when preparing
 campaign-local data caches. New prepared-data caches inside that workspace receive
 an ownership marker; existing caches without a marker and caches outside it are
 never cleanup candidates. Shared data and worker dispatch caches are outside this
-workflow. Keep `SPARSELAB_WORK_DIR` pointing at the persistent root, not a nested
+workflow. Keep `KLAB_WORK_DIR` pointing at the persistent root, not a nested
 experiment: explicit cache locations remain separate.
 
 ```sh
-WORK="${SPARSELAB_WORK_DIR:-$HOME/.local/share/sparselab}/experiments/dense-lm-v1"
-sparselab workspace cleanup plan "$WORK" \
+WORK="${KLAB_WORK_DIR:-$HOME/.local/share/klab}/experiments/dense-lm-v1"
+klab workspace cleanup plan "$WORK" \
   --output "$WORK/local-reports/cleanup-plan.json"
 # Review the JSON paths, identities, and reclaimable bytes before applying.
-sparselab workspace cleanup apply \
+klab workspace cleanup apply \
   "$WORK/local-reports/cleanup-plan.json"
 ```
 
@@ -273,13 +273,13 @@ Use one variable for a study, including worker registration, submission,
 controller operation, collection, and resume:
 
 ```sh
-WORK="${SPARSELAB_WORK_DIR:-$HOME/.local/share/sparselab}/experiments/dense-lm-v1"
+WORK="${KLAB_WORK_DIR:-$HOME/.local/share/klab}/experiments/dense-lm-v1"
 mkdir -p "$WORK"
-sparselab study submit configs/references/dense-lm-v1/study.yaml \
+klab study submit configs/references/dense-lm-v1/study.yaml \
   --store "$WORK/runs" --receipt "$WORK/receipt.json"
-sparselab controller run --store "$WORK/runs"
+klab controller run --store "$WORK/runs"
 # After completion and verified ingestion:
-sparselab study collect configs/references/dense-lm-v1/study.yaml \
+klab study collect configs/references/dense-lm-v1/study.yaml \
   "$WORK/receipt.json" --runs-dir "$WORK/runs"
 ```
 
@@ -290,11 +290,11 @@ required; separate seed stores are not required. Resume a controller run using
 that store, linked by IDs and checkpoint identities. Keep the original submission
 receipt as history; do not replace its submitted run IDs with resumed child IDs.
 
-Choose `export SPARSELAB_WORK_DIR=/data/sparselab` on a disk sized for the
-campaign, then set `WORK="$SPARSELAB_WORK_DIR/experiments/dense-lm-v1"`.
+Choose `export KLAB_WORK_DIR=/data/klab` on a disk sized for the
+campaign, then set `WORK="$KLAB_WORK_DIR/experiments/dense-lm-v1"`.
 Explicit `--store`, `--runs-dir`, `--output`, transcript destinations, old
 `logging.root_dir`, and `dataset.cache_dir` retain their supplied meaning.
-The global `--work-dir /data/sparselab` (before the subcommand) overrides the
+The global `--work-dir /data/klab` (before the subcommand) overrides the
 environment for implicit stores and scratch but never relocates explicit paths.
 Direct training should pass `--runs-dir "$WORK/runs"` on every parent and child
 command when using a task-specific store.
@@ -355,7 +355,7 @@ consolidation, preserved history, verification results, and remaining unrelated
 lifecycle availability limits.
 
 On 2026-09-27, the remaining local `runs-rocm/` store was relocated to
-`sparselab-work/experiments/runtime-acceptance/runs/`. Its sole completed run,
+`klab-work/experiments/runtime-acceptance/runs/`. Its sole completed run,
 `rocm-wsl2-acceptance-20260926T035145Z`, retains its original ID, backend metadata,
 and historical paths. All 34 run files retained their hashes, inodes, sizes, and
 modification times; all five checkpoint generations verified before and after

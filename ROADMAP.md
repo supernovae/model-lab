@@ -6,11 +6,11 @@ second checklist or a record of shipped capabilities. See the
 
 ## Where work is tracked
 
-Use [GitHub issues](https://github.com/supernovae/tiny-sparse-lab/issues) for
+Use [GitHub issues](https://github.com/supernovae/model-lab/issues) for
 feature requests, bug reports and proposed code work. Search existing issues
 before opening a new one, and describe the use case or expected behavior.
 Implementation, review and CI live in
-[GitHub pull requests](https://github.com/supernovae/tiny-sparse-lab/pulls) and
+[GitHub pull requests](https://github.com/supernovae/model-lab/pulls) and
 their checks. See [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
 
 This roadmap summarizes direction; issues and pull requests track individual
@@ -18,7 +18,7 @@ work items and their status. It is not a second task board or a release promise.
 
 ## Current direction
 
-- **Trustworthy evaluation.** [PR #72](https://github.com/supernovae/tiny-sparse-lab/pull/72)
+- **Trustworthy evaluation.** [PR #72](https://github.com/supernovae/model-lab/pull/72)
   has landed: held-back final evaluation, text-level needle comparisons, recall
   diagnostics and verdict safeguards are available. Suite-v4 reference resealing
   and across-seed uncertainty intervals remain follow-up work. Keep within-run

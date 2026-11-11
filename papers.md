@@ -1,6 +1,6 @@
-# Papers and experiments in Tiny Sparse Lab
+# Papers and experiments in Kybern Model Lab
 
-Use papers to choose a question, a control and a measurement. Tiny Sparse Lab
+Use papers to choose a question, a control and a measurement. Kybern Model Lab
 implements small reference mechanisms and declared experiments; it does not
 reproduce every training system or headline result below. Pick by what you want
 to learn, not a prescribed reading or execution order.
@@ -29,9 +29,9 @@ placeholder with your own resource root and recipe-backed entry ID. This command
 only scaffolds declarations; it does not train or authorize execution.
 
 ```sh
-sparselab research scaffold neutral-study --resource-root /path/to/resources \
+klab research scaffold neutral-study --resource-root /path/to/resources \
   --scale smoke --data offline --backend cpu --output experiments/new-study
-sparselab study plan experiments/new-study/study.yaml
+klab study plan experiments/new-study/study.yaml
 ```
 
 Follow the generated README for tokenizer preparation, actual-config inspection,

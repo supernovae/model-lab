@@ -11,19 +11,19 @@ from tokenizers.models import BPE
 from tokenizers.pre_tokenizers import ByteLevel
 from tokenizers.trainers import BpeTrainer
 
-from sparselab.config.migrate import migrate_v1
-from sparselab.config.models import AttentionConfig, ModelConfig, RunConfig
-from sparselab.data.byte_hash import table_address, token_bytes
-from sparselab.data.packing import prepare_data
-from sparselab.evaluation.chat import chat_turn
-from sparselab.evaluation.generation import (
+from klab.config.migrate import migrate_v1
+from klab.config.models import AttentionConfig, ModelConfig, RunConfig
+from klab.data.byte_hash import table_address, token_bytes
+from klab.data.packing import prepare_data
+from klab.evaluation.chat import chat_turn
+from klab.evaluation.generation import (
     _prompt_byte_addresses,
     generate,
     generate_with_token_ids,
 )
-from sparselab.model.attention.dense import DenseAttention
-from sparselab.model.portable_engram import export_portable_engram
-from sparselab.model.transformer import DenseLM
+from klab.model.attention.dense import DenseAttention
+from klab.model.portable_engram import export_portable_engram
+from klab.model.transformer import DenseLM
 
 
 def _tokenizer() -> Tokenizer:
@@ -285,7 +285,7 @@ def test_prepare_data_unicode_addresses_match_generation_helper(
         )
     )
     monkeypatch.setattr(
-        "sparselab.data.packing.iter_documents",
+        "klab.data.packing.iter_documents",
         lambda _config, _split: iter([document]),
     )
 
@@ -722,7 +722,7 @@ def test_long_completion_respects_token_budget_and_strict_context():
 
 
 def test_context_memory_cache_bfloat16_keeps_fp32_residual_history() -> None:
-    from sparselab.config.loading import load_config
+    from klab.config.loading import load_config
 
     base = load_config(Path("configs/smoke_memory_cpu.yaml"))
     configured = base.model.model_copy(

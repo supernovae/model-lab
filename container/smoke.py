@@ -11,7 +11,7 @@ from pathlib import Path
 def smoke(engine, image, output, revision):
     output.mkdir(parents=True, exist_ok=False)
     names = [
-        "sparselab-smoke-" + uuid.uuid4().hex[:10] + suffix
+        "klab-smoke-" + uuid.uuid4().hex[:10] + suffix
         for suffix in (
             "-cli",
             "-web",
@@ -82,14 +82,14 @@ def smoke(engine, image, output, revision):
                 "-c",
                 """import json,os,subprocess
 from pathlib import Path
-import sparselab,torch
-assert sparselab.__file__.startswith('/opt/venv/')
+import klab,torch
+assert klab.__file__.startswith('/opt/venv/')
 assert os.getuid()==10001
 assert torch.version.cuda is None and torch.version.hip is None
 assert (torch.tensor([1,2])+1).tolist()==[2,3]
-subprocess.run(['sparselab','--help'],check=True)
+subprocess.run(['klab','--help'],check=True)
 Path('/state/work/runs').mkdir()
-print(json.dumps({'module':sparselab.__file__,'torch':torch.__version__,'uid':os.getuid()}))
+print(json.dumps({'module':klab.__file__,'torch':torch.__version__,'uid':os.getuid()}))
 """,
             ],
         )
@@ -105,10 +105,7 @@ print(json.dumps({'module':sparselab.__file__,'torch':torch.__version__,'uid':os
             wait(index, expected)
             if index in (6, 7):
                 # ImageMagick compare and the shell eval builtin must not win.
-                assert (
-                    f"usage: sparselab {command[0]}"
-                    in call("logs", names[index]).stdout
-                )
+                assert f"usage: klab {command[0]}" in call("logs", names[index]).stdout
             state = json.loads(call("inspect", names[index]).stdout)[0]["State"]
             assert not state.get("Health"), state
         start(
@@ -161,7 +158,7 @@ for n in range(40):
         )
         counts = []
         query = """from pathlib import Path
-from sparselab.dashboard.queries import _connect
+from klab.dashboard.queries import _connect
 with _connect(Path('/observe/work/runs')) as c:
  print(c.execute('select count(*) from fixture').fetchone()[0])
 """

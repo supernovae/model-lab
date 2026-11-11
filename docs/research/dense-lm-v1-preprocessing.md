@@ -19,7 +19,7 @@ A final serialized rebuild after the stderr telemetry change completed in 16.40s
 
 Train rates from this final run: 1,688 documents/s, 1.51 MB source bytes/s, 940k pre-EOS tokenizer IDs/s, and 372k packed IDs/s. Validation: 160 documents/s, 137k source bytes/s, 971k pre-EOS IDs/s, and 33.8k packed IDs/s. Write/fsync and each array-hash stage rounded to 0.0s in emitted telemetry; treat these as below timer resolution, not zero-cost operations.
 
-These are operational timings only. No preprocessing optimization has been accepted. Per the requested sequencing, comparative performance profiling and A–E optimization experiments remain deferred until the reference reaches a completed/failed lifecycle state. Progress JSON-lines and 30-second heartbeats are emitted to stderr so command stdout remains available for machine-readable result payloads. `sparselab data prepare` now requires a matching, complete tokenizer manifest before it initializes the dataset stream.
+These are operational timings only. No preprocessing optimization has been accepted. Per the requested sequencing, comparative performance profiling and A–E optimization experiments remain deferred until the reference reaches a completed/failed lifecycle state. Progress JSON-lines and 30-second heartbeats are emitted to stderr so command stdout remains available for machine-readable result payloads. `klab data prepare` now requires a matching, complete tokenizer manifest before it initializes the dataset stream.
 
 ## Deferred profiling
 

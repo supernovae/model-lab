@@ -29,7 +29,7 @@ for this fixture, but time-triggered flushes can increase them on slower systems
 Reproduce in the provisioned locked CPU environment:
 
 ```sh
-git show b3a1630ec09dbddae36301b0acef4122623ed939:src/sparselab/data/sources.py > /tmp/snapshot-base.py
+git show b3a1630ec09dbddae36301b0acef4122623ed939:src/klab/data/sources.py > /tmp/snapshot-base.py
 uv run --locked --no-sync python benchmarks/snapshot_acquisition.py --baseline-source /tmp/snapshot-base.py
 uv run --locked --no-sync python benchmarks/snapshot_acquisition.py
 ```

@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 from test_training import config
 
-from sparselab.data.encoding import PreparationEncoder
-from sparselab.data.packing import PreparedPrefix, load_prepared_data, prepare_data
-from sparselab.data.tokenizer import load_tokenizer
+from klab.data.encoding import PreparationEncoder
+from klab.data.packing import PreparedPrefix, load_prepared_data, prepare_data
+from klab.data.tokenizer import load_tokenizer
 
 
 @pytest.fixture
@@ -216,8 +216,8 @@ def test_embedded_eos_cannot_masquerade_as_document_boundary(prefix_fixture):
 def test_pin_checked_again_after_parent_verification(prefix_fixture, monkeypatch):
     import hashlib
 
-    from sparselab.canonical import canonical_json
-    from sparselab.data import packing
+    from klab.canonical import canonical_json
+    from klab.data import packing
 
     _source, target, tokenizer, parent = prefix_fixture
     original_load = packing.load_prepared_data
@@ -236,7 +236,7 @@ def test_pin_checked_again_after_parent_verification(prefix_fixture, monkeypatch
 
 
 def test_parent_mutation_during_copy_refuses_publication(prefix_fixture, monkeypatch):
-    from sparselab.data import packing
+    from klab.data import packing
 
     _source, target, tokenizer, parent = prefix_fixture
     original_write = packing._atomic_array
@@ -256,7 +256,7 @@ def test_parent_mutation_during_copy_refuses_publication(prefix_fixture, monkeyp
 
 
 def test_publication_failure_preserves_staging_and_parent(prefix_fixture, monkeypatch):
-    from sparselab.data import packing
+    from klab.data import packing
 
     _source, target, tokenizer, parent = prefix_fixture
     original = (parent.root / "train.npy").read_bytes()
@@ -284,7 +284,7 @@ def test_byte_sidecars_are_outside_prefix_scope(prefix_fixture):
 def test_historical_producer_cannot_populate_current_preparation_cache(
     prefix_fixture, monkeypatch
 ):
-    from sparselab.data import packing
+    from klab.data import packing
 
     source, target, tokenizer, _parent = prefix_fixture
     # A valid pinned cache from a different preparation producer is insufficient
@@ -359,7 +359,7 @@ def test_prefix_preserves_validation_next_token_block_requirement(prefix_fixture
 def test_derived_prefix_publishes_reusable_authenticated_proofs(
     prefix_fixture, tmp_path, monkeypatch
 ):
-    from sparselab.verification_proofs import ProofStore
+    from klab.verification_proofs import ProofStore
 
     _source, target, tokenizer, parent = prefix_fixture
     actual = prepare_data(target, tokenizer, prefix_from=request(parent))
@@ -406,7 +406,7 @@ def test_derived_prefix_publishes_reusable_authenticated_proofs(
 
 @pytest.mark.parametrize("seq_len", [64, 2])
 def test_prefix_checks_unpadded_document_lengths(prefix_fixture, seq_len):
-    from sparselab.config.models import MatchedStoryConfig
+    from klab.config.models import MatchedStoryConfig
 
     _source, target, tokenizer, parent = prefix_fixture
     first_end = (

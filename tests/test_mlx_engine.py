@@ -16,12 +16,12 @@ mx = pytest.importorskip("mlx.core")
 from mlx import nn, optimizers
 from mlx.utils import tree_flatten
 
-from sparselab.config.models import AttentionConfig, ModelConfig, RunConfig
-from sparselab.engines.base import EngineNonFiniteError, EngineState, Microbatch
-from sparselab.engines.mlx import MLXEngine
-from sparselab.evaluation.generation import generate
-from sparselab.model.mlx_dense import MLXDenseLM
-from sparselab.runtime_profile import RuntimeProfile, authorize_profile
+from klab.config.models import AttentionConfig, ModelConfig, RunConfig
+from klab.engines.base import EngineNonFiniteError, EngineState, Microbatch
+from klab.engines.mlx import MLXEngine
+from klab.evaluation.generation import generate
+from klab.model.mlx_dense import MLXDenseLM
+from klab.runtime_profile import RuntimeProfile, authorize_profile
 
 pytestmark = pytest.mark.mlx
 

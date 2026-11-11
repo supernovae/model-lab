@@ -12,12 +12,12 @@ from test_document_budget_extension import (
 from test_prepared_prefix import prefix_fixture as prefix_fixture  # noqa: PLC0414
 from test_training import equal
 
-from sparselab.data.encoding import PreparationEncoder
-from sparselab.data.packing import PreparedAppend, load_prepared_data, prepare_data
-from sparselab.data.story_packing import MatchedStoryDataset
-from sparselab.training.checkpoints import CheckpointManager
-from sparselab.training.manifest import sha256_file
-from sparselab.training.trainer import train
+from klab.data.encoding import PreparationEncoder
+from klab.data.packing import PreparedAppend, load_prepared_data, prepare_data
+from klab.data.story_packing import MatchedStoryDataset
+from klab.training.checkpoints import CheckpointManager
+from klab.training.manifest import sha256_file
+from klab.training.trainer import train
 
 
 @pytest.fixture
@@ -141,7 +141,7 @@ def test_append_refuses_changed_history_and_invalid_tail(
         )
     elif damage == "producer":
         monkeypatch.setattr(
-            "sparselab.data.packing.preparation_source_identity", lambda: "f" * 64
+            "klab.data.packing.preparation_source_identity", lambda: "f" * 64
         )
     elif damage == "embedded_eos":
         path = target.dataset.train_path
@@ -176,7 +176,7 @@ def test_publication_failure_leaves_no_reusable_cache(append_fixture, monkeypatc
     def fail(*_):
         raise OSError("fixture publication failure")
 
-    monkeypatch.setattr("sparselab.data.packing._publish_prepared_directory", fail)
+    monkeypatch.setattr("klab.data.packing._publish_prepared_directory", fail)
     with pytest.raises(OSError, match="publication failure"):
         prepare_data(target, tokenizer, append_from=request(parent))
     assert list(target.dataset.cache_dir.glob("*.append-*/manifest.json"))
@@ -318,7 +318,7 @@ def test_append_requires_frozen_parent_boundary(document_parent, tmp_path):
 
 
 def test_append_signed_reuse_then_tamper_refusal(append_fixture, tmp_path):
-    from sparselab.verification_proofs import ProofStore
+    from klab.verification_proofs import ProofStore
 
     target, tokenizer, parent, _ = append_fixture
     derived = prepare_data(target, tokenizer, append_from=request(parent))
@@ -346,7 +346,7 @@ def test_append_signed_reuse_then_tamper_refusal(append_fixture, tmp_path):
 
 @pytest.mark.parametrize("mode", ["byte", "compatibility", "both"])
 def test_append_rejects_unsupported_producer_paths(append_fixture, monkeypatch, mode):
-    from sparselab.data.packing import PreparedPrefix
+    from klab.data.packing import PreparedPrefix
 
     target, tokenizer, parent, _ = append_fixture
     options = {"append_from": request(parent)}
@@ -356,7 +356,7 @@ def test_append_rejects_unsupported_producer_paths(append_fixture, monkeypatch, 
         )
     elif mode == "compatibility":
         monkeypatch.setattr(
-            "sparselab.experiments.source_compatibility.active_source_compatibility",
+            "klab.experiments.source_compatibility.active_source_compatibility",
             dict,
         )
     else:

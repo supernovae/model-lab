@@ -123,8 +123,8 @@ its native release and fit-tokenizer closure, including an explicitly recorded
 post-run observation when applicable. It does not replay the consumer mixture
 or assert that its schedule completed. A post-run observation remains bounded
 metadata/current-byte evidence, not a historical output-digest attestation.
-`sparselab tokenizer verify CONFIG --json` checks the actual vocabulary and
-special IDs, and `sparselab data prepare CONFIG` uses the same origin check.
+`klab tokenizer verify CONFIG --json` checks the actual vocabulary and
+special IDs, and `klab data prepare CONFIG` uses the same origin check.
 Existing service verification context is required for authenticated relocated
 releases; do not replace keys or rewrite historical receipts.
 

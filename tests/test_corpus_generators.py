@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sparselab.corpus.acquisition import acquire
-from sparselab.corpus.pipeline import (
+from klab.corpus.acquisition import acquire
+from klab.corpus.pipeline import (
     _path_scenario,
     _records_for_file,
     _scenario,
@@ -20,9 +20,9 @@ from sparselab.corpus.pipeline import (
     _sections,
     build,
 )
-from sparselab.corpus.project import load_project
-from sparselab.corpus.release import freeze
-from sparselab.data.conversations import iter_rendered_conversations
+from klab.corpus.project import load_project
+from klab.corpus.release import freeze
+from klab.data.conversations import iter_rendered_conversations
 
 PROJECT = Path(__file__).resolve().parents[1] / "tests/fixtures/corpus-sample"
 
@@ -449,7 +449,7 @@ def test_compact_generator_partition_and_chat_tool_lineage(tmp_path: Path) -> No
     source_path = root / "sources/scenarios.yaml"
     source = yaml.safe_load(source_path.read_text())
     source["acquisition"]["generator"] = "filesystem_judgment_v1"
-    source["canonical_uri"] = "sparselab://generators/filesystem_judgment_v1"
+    source["canonical_uri"] = "klab://generators/filesystem_judgment_v1"
     source_path.write_text(yaml.safe_dump(source))
     path = root / "transforms/scenarios.yaml"
     transform = yaml.safe_load(path.read_text())
@@ -604,7 +604,7 @@ def test_v2_compact_build_binds_generator_version_and_world_facts(
     source = yaml.safe_load(source_path.read_text())
     source["acquisition"]["generator"] = generator
     source["acquisition"]["generator_version"] = "2"
-    source["canonical_uri"] = f"sparselab://generators/{generator}"
+    source["canonical_uri"] = f"klab://generators/{generator}"
     source_path.write_text(yaml.safe_dump(source))
     transform_path = root / "transforms/scenarios.yaml"
     transform = yaml.safe_load(transform_path.read_text())

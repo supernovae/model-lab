@@ -1,6 +1,6 @@
 # Try declarations
 
-The default loop is unchanged: `sparselab try DELTA.yaml --vs BASELINE.yaml`.
+The default loop is unchanged: `klab try DELTA.yaml --vs BASELINE.yaml`.
 Five executable options remain: `--vs`, `--config`, `--backend`, `--runtime`,
 `--json`. `--config` selects `fast` (default), `standard`, `full`, `no-probes`,
 or a YAML path. Presets use the same validated schema as files. Preset names
@@ -143,9 +143,9 @@ separately using the native continuation rules above.
 
 ```python
 from pathlib import Path
-from sparselab.config.loading import load_config
-from sparselab.data.packing import PreparedPrefix, prepare_data
-from sparselab.data.tokenizer import load_tokenizer
+from klab.config.loading import load_config
+from klab.data.packing import PreparedPrefix, prepare_data
+from klab.data.tokenizer import load_tokenizer
 
 config = load_config(Path("bounded-baseline.yaml"))
 data = prepare_data(

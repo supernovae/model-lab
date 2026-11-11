@@ -10,10 +10,10 @@ from typing import Any
 
 import pytest
 
-from sparselab.probes import compare as compare_mod
-from sparselab.probes import runner, scoring
-from sparselab.probes import suite as suite_mod
-from sparselab.probes.suite import (
+from klab.probes import compare as compare_mod
+from klab.probes import runner, scoring
+from klab.probes import suite as suite_mod
+from klab.probes.suite import (
     BY_ID,
     FinalSplitLocked,
     fact_items,
@@ -22,13 +22,13 @@ from sparselab.probes.suite import (
     parametric_items,
     prompts,
 )
-from sparselab.probes.verdict import (
+from klab.probes.verdict import (
     SEED_CAVEAT,
     decide,
     respect_try_comparison,
 )
 
-SRC = Path(__file__).resolve().parents[1] / "src" / "sparselab"
+SRC = Path(__file__).resolve().parents[1] / "src" / "klab"
 READ_FILTERS = {"compare", "collect_points", "resolve_point"}
 
 
@@ -121,7 +121,7 @@ def test_selection_paths_never_open_the_final_split() -> None:
 def test_try_probe_battery_is_a_selection_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from sparselab import lab_mode
+    from klab import lab_mode
 
     seen: dict[str, Any] = {}
 
@@ -138,7 +138,7 @@ def test_try_probe_battery_is_a_selection_path(
         },
         "comparison": {"verdict": "CANDIDATE_LOWER_LOSS"},
     }
-    from sparselab.lab_context import LabContext
+    from klab.lab_context import LabContext
 
     lab_mode._probe_arms(
         record,
@@ -211,7 +211,7 @@ def test_not_comparable_try_never_escalates() -> None:
 def test_dashboard_activity_shows_not_comparable_tries_as_not_escalating(
     tmp_path: Path,
 ) -> None:
-    from sparselab.dashboard import lab_data
+    from klab.dashboard import lab_data
 
     record = {
         "try_id": "t1",
@@ -251,7 +251,7 @@ def test_single_seed_win_recommends_paired_seeds() -> None:
 
 
 def test_rendered_loss_error_bar_is_labelled_eval_noise() -> None:
-    from sparselab.probes.render import _delta
+    from klab.probes.render import _delta
 
     row = {"id": "heldout_loss", "delta": -0.01, "delta_se": 0.002, "thresholds": {}}
     assert "(eval noise, 1 seed)" in _delta(row)
@@ -366,7 +366,7 @@ def _final_probe(target: str, baseline: str, score: float) -> dict[str, Any]:
         "details": {"item_group": FACT_GROUP, "items": items, "chance": 0.25},
     }
     return {
-        "format": "sparselab-probe-v1",
+        "format": "klab-probe-v1",
         "probe_id": f"probe-final-{target}",
         "created_at": f"2026-10-10T20:00:0{len(target) % 10}+00:00",
         "suite": {"sha256": suite_mod.suite_identity()["sha256"]},
@@ -385,7 +385,7 @@ def _final_probe(target: str, baseline: str, score: float) -> dict[str, Any]:
 @pytest.fixture
 def final_lab(tmp_path: Path) -> Path:
     """Ordinary fast tries A and B, then `probe --config final` records for both."""
-    from sparselab.lab_records import write_sealed
+    from klab.lab_records import write_sealed
 
     for name, loss in (("aaa", 3.2), ("bbb", 3.3)):
         path = tmp_path / f"tries/try-{name}/try.json"
@@ -393,7 +393,7 @@ def final_lab(tmp_path: Path) -> Path:
         write_sealed(
             path,
             {
-                "format": "sparselab-lab-try-v1",
+                "format": "klab-lab-try-v1",
                 "try_id": f"try-{name}",
                 "created_at": "2026-10-10T18:00:00+00:00",
                 "arms": {
@@ -411,7 +411,7 @@ def final_lab(tmp_path: Path) -> Path:
 
 
 def test_ordinary_compare_never_acquires_final_evidence(final_lab: Path) -> None:
-    from sparselab.probes.points import collect_points
+    from klab.probes.points import collect_points
 
     report = compare_mod.compare("try-aaa", ["try-bbb"], lab_dir=final_lab)
     assert report["final"] is False
@@ -451,7 +451,7 @@ def test_final_results_are_reported_only_explicitly(final_lab: Path) -> None:
 
 
 def test_dashboard_never_ranks_final_results(final_lab: Path) -> None:
-    from sparselab.dashboard import lab_data
+    from klab.dashboard import lab_data
 
     snap = lab_data.snapshot(final_lab)
     assert snap.points and not any(p["final"] for p in snap.points)
@@ -541,7 +541,7 @@ def test_reused_arms_score_each_split_afresh(
 
 @pytest.mark.parametrize("improved", [True, False], ids=["improved", "unchanged"])
 def test_completed_final_verdict_is_report_only(improved: bool) -> None:
-    from sparselab.probes.verdict import final_verdict
+    from klab.probes.verdict import final_verdict
 
     ordinary = decide(
         [_loss_row(improved=improved)],
@@ -562,7 +562,7 @@ def test_completed_final_verdict_is_report_only(improved: bool) -> None:
 
 
 def test_incomplete_final_verdict_reruns_unchanged() -> None:
-    from sparselab.probes.verdict import final_verdict
+    from klab.probes.verdict import final_verdict
 
     out = final_verdict(
         {
@@ -588,7 +588,7 @@ LM_EVAL_MISSING = {
 
 
 def _decide_final(results: list[dict[str, Any]], *, has_baseline: bool) -> Any:
-    from sparselab.probes.verdict import final_verdict
+    from klab.probes.verdict import final_verdict
 
     ordinary = decide(
         results,

@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from sparselab.training.manifest import ArtifactIdentity, sha256_file
-from sparselab.workers.artifacts import (
+from klab.training.manifest import ArtifactIdentity, sha256_file
+from klab.workers.artifacts import (
     _download,
     artifact_inventory,
     read_artifact_chunk,
@@ -59,7 +59,7 @@ def test_artifact_inventory_rejects_post_receipt_mutation(tmp_path: Path) -> Non
 def test_download_uses_scoped_wire_chunks_and_verifies_final_digest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.workers import transport
+    from klab.workers import transport
 
     receipt = _receipt(tmp_path, b"abcdefgh")
     item = receipt.artifacts[0]
@@ -93,8 +93,8 @@ def test_download_uses_scoped_wire_chunks_and_verifies_final_digest(
 def test_check_install_race_accepts_verified_redundant_assets(tmp_path: Path) -> None:
     from test_training import config as training_config
 
-    from sparselab.staging import verify_prepared_inputs
-    from sparselab.workers.bundles import (
+    from klab.staging import verify_prepared_inputs
+    from klab.workers.bundles import (
         install_dispatch_bundle,
         materialize_dispatch_bundle,
         prepare_dispatch_bundle,
@@ -136,8 +136,8 @@ def test_resume_and_promotion_bundle_survive_original_input_removal(
 
     from test_training import config as training_config
 
-    from sparselab.training.trainer import train
-    from sparselab.workers.bundles import prepare_dispatch_bundle
+    from klab.training.trainer import train
+    from klab.workers.bundles import prepare_dispatch_bundle
 
     config = training_config(tmp_path / "source")
     parent_id = train(config, run_id="parent")
@@ -160,8 +160,8 @@ def test_resume_and_promotion_bundle_survive_original_input_removal(
 
 
 def test_aggregate_receipt_limit_rejects_before_disk_or_rpc(tmp_path: Path) -> None:
-    from sparselab.workers.artifacts import ingest_attempt_artifacts
-    from sparselab.workers.transport import MAX_ATTACHMENT_BYTES
+    from klab.workers.artifacts import ingest_attempt_artifacts
+    from klab.workers.transport import MAX_ATTACHMENT_BYTES
 
     receipt = SimpleNamespace(
         run_id="oversized",
@@ -185,8 +185,8 @@ def test_continuation_honors_pointer_digest_and_requested_tokenizer(
 
     from test_training import config as training_config
 
-    from sparselab.training.trainer import train
-    from sparselab.workers.bundles import prepare_dispatch_bundle
+    from klab.training.trainer import train
+    from klab.workers.bundles import prepare_dispatch_bundle
 
     config = training_config(tmp_path / "source")
     train(config, run_id="parent", stop_after_step=1)
@@ -218,13 +218,13 @@ def test_publication_binds_native_run_to_dispatch_and_replica(
 
     from test_training import config as training_config
 
-    from sparselab.training.checkpoints import CheckpointManager
-    from sparselab.training.metrics import ExperimentStore
-    from sparselab.training.trainer import train
-    from sparselab.workers import artifacts
-    from sparselab.workers.controller import Controller
-    from sparselab.workers.execution import _final_artifacts, _receipt_payload
-    from sparselab.workers.models import AttemptReceipt, WorkerDefinition
+    from klab.training.checkpoints import CheckpointManager
+    from klab.training.metrics import ExperimentStore
+    from klab.training.trainer import train
+    from klab.workers import artifacts
+    from klab.workers.controller import Controller
+    from klab.workers.execution import _final_artifacts, _receipt_payload
+    from klab.workers.models import AttemptReceipt, WorkerDefinition
 
     config = training_config(tmp_path / "worker")
     controller = Controller(tmp_path / "controller")

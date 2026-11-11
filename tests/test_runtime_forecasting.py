@@ -4,9 +4,9 @@ from copy import deepcopy
 
 import pytest
 
-from sparselab.config.models import RunConfig
-from sparselab.runtime import RuntimeInfo
-from sparselab.runtime_forecasting import (
+from klab.config.models import RunConfig
+from klab.runtime import RuntimeInfo
+from klab.runtime_forecasting import (
     match_runtime_observations,
     optimizer_only_estimate,
     runtime_forecast_planning,
@@ -14,7 +14,7 @@ from sparselab.runtime_forecasting import (
     runtime_signature_key,
     warmup_estimate,
 )
-from sparselab.training.metrics import ExperimentStore
+from klab.training.metrics import ExperimentStore
 
 
 def _config() -> RunConfig:
@@ -287,9 +287,9 @@ def test_runtime_signature_binds_large_mapping_without_embedding_it(tmp_path):
 
     from tokenizers import Tokenizer, models
 
-    from sparselab.canonical import canonical_digest
-    from sparselab.config.models import RunConfig
-    from sparselab.memory_tokenizer import build_memory_token_map
+    from klab.canonical import canonical_digest
+    from klab.config.models import RunConfig
+    from klab.memory_tokenizer import build_memory_token_map
 
     path = tmp_path / "tokenizer.json"
     Tokenizer(models.WordLevel({f"token{i}": i for i in range(32768)})).save(str(path))

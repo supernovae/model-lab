@@ -11,12 +11,12 @@ import numpy as np
 import pytest
 import torch
 
-from sparselab.canonical import canonical_digest
-from sparselab.config.loading import load_config
-from sparselab.config.models import RunConfig
-from sparselab.engines.base import CanonicalTensor
-from sparselab.model.transformer import DenseLM
-from sparselab.training.checkpoints import (
+from klab.canonical import canonical_digest
+from klab.config.loading import load_config
+from klab.config.models import RunConfig
+from klab.engines.base import CanonicalTensor
+from klab.model.transformer import DenseLM
+from klab.training.checkpoints import (
     CheckpointManager,
     LineageBest,
     TrainingSnapshot,
@@ -24,8 +24,8 @@ from sparselab.training.checkpoints import (
     load_legacy_checkpoint,
     verify_legacy_checkpoint,
 )
-from sparselab.training.manifest import config_sha256
-from sparselab.training.optimizer import (
+from klab.training.manifest import config_sha256
+from klab.training.optimizer import (
     learning_rate_for_step,
     make_optimizer,
     schedule_payload,
@@ -296,7 +296,7 @@ def test_selected_parent_excludes_later_same_step_and_future_best(tmp_path) -> N
 
 
 def test_weight_source_saves_with_bounded_host_staging(tmp_path, monkeypatch) -> None:
-    from sparselab.training import checkpoints
+    from klab.training import checkpoints
 
     snapshot = _snapshot(1)
     original = snapshot.model

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sparselab.config.loading import load_config
+from klab.config.loading import load_config
 
 
 def test_instruction_reference_config_declares_reproducible_training_contract() -> None:

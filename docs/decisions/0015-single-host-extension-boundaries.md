@@ -8,7 +8,7 @@ Accepted for the per-experiment execution boundary; the original exclusion of re
 
 ## Context
 
-Tiny Sparse Lab now includes the dense decoder baseline, local MoE, several attention reference paths, token/byte/portable Engram memory, local checkpoint lifecycle, and optional MLX dense training. The project needs a clear public boundary while new Engram variants and scale experiments are added: breadth must not silently turn the reference laboratory into a distributed systems framework or reinterpret prior run artifacts.
+Kybern Model Lab now includes the dense decoder baseline, local MoE, several attention reference paths, token/byte/portable Engram memory, local checkpoint lifecycle, and optional MLX dense training. The project needs a clear public boundary while new Engram variants and scale experiments are added: breadth must not silently turn the reference laboratory into a distributed systems framework or reinterpret prior run artifacts.
 
 ## Decision
 

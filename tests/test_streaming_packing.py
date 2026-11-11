@@ -13,16 +13,16 @@ import numpy as np
 import pytest
 from test_training import config
 
-from sparselab.data.conversations import RenderedConversation
-from sparselab.data.encoding import PreparationEncoder, validate_tokenizer_batch_limits
-from sparselab.data.local_stories import LICENSE, REVISION
-from sparselab.data.packing import _collect, _collect_streaming, prepare_data
-from sparselab.data.tokenizer import load_tokenizer
+from klab.data.conversations import RenderedConversation
+from klab.data.encoding import PreparationEncoder, validate_tokenizer_batch_limits
+from klab.data.local_stories import LICENSE, REVISION
+from klab.data.packing import _collect, _collect_streaming, prepare_data
+from klab.data.tokenizer import load_tokenizer
 
 
 def _stories(monkeypatch: pytest.MonkeyPatch, texts: list[str]) -> None:
     monkeypatch.setattr(
-        "sparselab.data.packing._source_documents",
+        "klab.data.packing._source_documents",
         lambda _config, _split, **_kwargs: (
             RenderedConversation(text, ((0, len(text)),), "all_tokens")
             for text in texts
@@ -110,10 +110,10 @@ def test_batched_preparation_matches_scalar_across_fresh_rayon_processes(
     script = """
 import hashlib, json, sys
 from pathlib import Path
-from sparselab.config.models import RunConfig
-from sparselab.data.packing import prepare_data
-from sparselab.data.tokenizer import load_tokenizer
-from sparselab.resource_envelope import ResourceEnvelope
+from klab.config.models import RunConfig
+from klab.data.packing import prepare_data
+from klab.data.tokenizer import load_tokenizer
+from klab.resource_envelope import ResourceEnvelope
 run = RunConfig.model_validate_json(Path(sys.argv[1]).read_text())
 run = run.model_copy(update={"dataset": run.dataset.model_copy(
     update={"cache_dir": Path(sys.argv[2])})})
@@ -147,7 +147,7 @@ print(json.dumps({
             HF_DATASETS_OFFLINE="1",
             UV_OFFLINE="1",
             RAYON_NUM_THREADS=str(workers),
-            SPARSELAB_WORK_DIR=str(tmp_path),
+            KLAB_WORK_DIR=str(tmp_path),
         )
         result = subprocess.run(
             [
@@ -318,7 +318,7 @@ def test_real_child_uses_scalar_encode_for_single_document(
     script = """
 import json, sys
 from pathlib import Path
-import sparselab.preparation_encoder as child
+import klab.preparation_encoder as child
 from tokenizers import Tokenizer
 real_from_file = Tokenizer.from_file
 class Recording:
@@ -403,7 +403,7 @@ def test_token_cap_failure_does_not_acquire_subsequent_source_record(
             acquired.append(text)
             yield RenderedConversation(text, ((0, len(text)),), "all_tokens")
 
-    monkeypatch.setattr("sparselab.data.packing._source_documents", documents)
+    monkeypatch.setattr("klab.data.packing._source_documents", documents)
     first = len(tokenizer.encode(texts[0], add_special_tokens=False).ids)
     dataset = run.dataset.model_copy(
         update={"train_max_documents": 3, "train_max_tokens": first + 2}
@@ -434,9 +434,9 @@ def test_source_verified_before_cached_packing_is_reused(
             "validation": {"count": len(validation), "sha256": "original"},
         }
     }
-    monkeypatch.setattr("sparselab.data.packing.verify_snapshot", lambda _cfg: snapshot)
+    monkeypatch.setattr("klab.data.packing.verify_snapshot", lambda _cfg: snapshot)
     monkeypatch.setattr(
-        "sparselab.data.packing._source_documents",
+        "klab.data.packing._source_documents",
         lambda _cfg, split, **_kwargs: (
             RenderedConversation(text, ((0, len(text)),), "all_tokens")
             for text in (train if split == "train" else validation)
@@ -460,7 +460,7 @@ def test_source_verified_before_cached_packing_is_reused(
     def corrupted(_cfg):
         raise ValueError("snapshot content digest mismatch")
 
-    monkeypatch.setattr("sparselab.data.packing.verify_snapshot", corrupted)
+    monkeypatch.setattr("klab.data.packing.verify_snapshot", corrupted)
     with pytest.raises(ValueError, match="snapshot content digest mismatch"):
         prepare_data(local, tokenizer)
 
@@ -547,7 +547,7 @@ def test_cached_local_stories_rejects_corrupted_saved_source(
 def test_empty_records_resume_in_order_without_encoding_or_overconsuming(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.data.preparation_chunks import PreparationChunks
+    from klab.data.preparation_chunks import PreparationChunks
 
     run = config(tmp_path)
     tokenizer = load_tokenizer(run.tokenizer.path)
@@ -559,7 +559,7 @@ def test_empty_records_resume_in_order_without_encoding_or_overconsuming(
             acquired.append(text)
             yield RenderedConversation(text, ((0, len(text)),), "all_tokens")
 
-    monkeypatch.setattr("sparselab.data.packing._source_documents", documents)
+    monkeypatch.setattr("klab.data.packing._source_documents", documents)
     encoded = []
     encode = PreparationEncoder.encode
 
@@ -644,10 +644,10 @@ def test_parallel_shards_join_on_failure_and_resume_verified_chunks(
     from dataclasses import replace
     from threading import Barrier
 
-    from sparselab.data import encoding, preparation_chunks
-    from sparselab.resource_envelope import ResourceEnvelope
+    from klab.data import encoding, preparation_chunks
+    from klab.resource_envelope import ResourceEnvelope
 
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
 
     run = config(tmp_path)
     paths = {}
@@ -678,7 +678,7 @@ def test_parallel_shards_join_on_failure_and_resume_verified_chunks(
     # Pin a tiny two-worker capacity so this also tests concurrency on CI hosts.
     plan = encoding.tokenizer_work_plan(1)
     monkeypatch.setattr(
-        "sparselab.data.preparation_workers.tokenizer_work_plan",
+        "klab.data.preparation_workers.tokenizer_work_plan",
         lambda cap: replace(plan, workers=min(2, cap or 2)),
     )
     initialize = preparation_chunks.PreparationChunks.__init__
@@ -763,13 +763,13 @@ def test_parallel_shards_join_on_failure_and_resume_verified_chunks(
 def test_parallel_token_cap_stops_before_next_record_and_preserves_frontier(
     tmp_path: Path,
 ):
-    from sparselab.data.preparation_chunks import PreparationChunks
-    from sparselab.data.preparation_telemetry import PreparationTelemetry
-    from sparselab.data.preparation_workers import (
+    from klab.data.preparation_chunks import PreparationChunks
+    from klab.data.preparation_telemetry import PreparationTelemetry
+    from klab.data.preparation_workers import (
         PreparationWorkers,
         collect_parallel_stream,
     )
-    from sparselab.resource_envelope import ResourceEnvelope
+    from klab.resource_envelope import ResourceEnvelope
 
     run = config(tmp_path)
     tokenizer = load_tokenizer(run.tokenizer.path)
@@ -828,7 +828,7 @@ def test_parallel_token_cap_stops_before_next_record_and_preserves_frontier(
 
 
 def test_worker_scratch_cleanup_preserves_unexpected_files(tmp_path: Path):
-    from sparselab.data.preparation_chunks import PreparationChunks
+    from klab.data.preparation_chunks import PreparationChunks
 
     root = tmp_path / "owned.tmp"
     settings = {
@@ -849,7 +849,7 @@ def test_worker_scratch_cleanup_preserves_unexpected_files(tmp_path: Path):
 
 
 def test_worker_adoption_refuses_changed_raw_bytes(tmp_path: Path):
-    from sparselab.data.preparation_chunks import PreparationChunks
+    from klab.data.preparation_chunks import PreparationChunks
 
     with PreparationChunks(
         tmp_path / "changed.tmp",
@@ -878,9 +878,9 @@ def test_unsafe_parallel_tokenizer_uses_reported_serial_fallback(
 ):
     from tokenizers import Tokenizer
 
-    from sparselab.resource_envelope import ResourceEnvelope
+    from klab.resource_envelope import ResourceEnvelope
 
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
     run = config(tmp_path)
     spec = json.loads(load_tokenizer(run.tokenizer.path).to_str())
     spec["model"].update(model_change)

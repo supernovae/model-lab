@@ -10,11 +10,11 @@ import pytest
 import yaml
 from corpus_fixtures import neutral_corpus
 
-from sparselab.corpus.acquisition import acquire
-from sparselab.corpus.pipeline import _records_for_file, _split, build
-from sparselab.corpus.project import SourceDeclaration, load_project
-from sparselab.corpus.release import freeze, lineage, review, sample, verify_release
-from sparselab.corpus.rights import resolve_file_rights
+from klab.corpus.acquisition import acquire
+from klab.corpus.pipeline import _records_for_file, _split, build
+from klab.corpus.project import SourceDeclaration, load_project
+from klab.corpus.release import freeze, lineage, review, sample, verify_release
+from klab.corpus.rights import resolve_file_rights
 
 PROJECT = (
     Path(__file__).resolve().parents[1] / "tests/fixtures/corpus-sample/corpus.yaml"
@@ -130,7 +130,7 @@ def test_prospective_hf_rows_keep_provenance_and_exclude_private_material(
         "deployments with concrete examples across several paragraphs. " * 2,
         "url": "https://example.org/tutorial",
         "id": "warc-record-1",
-        "_sparselab_source": {
+        "_klab_source": {
             "source_shard_path": "sample/10BT/000_00000.parquet",
             "source_row_index": 882,
             "source_row_sha256": "a" * 64,
@@ -190,7 +190,7 @@ def test_scholarly_abstracts_and_full_papers_keep_distinct_kinds_and_corpus_ids(
                     "source": origin,
                     "text": "A scholarly discussion of operating systems and rigorous evidence. "
                     * 3,
-                    "_sparselab_source": {"source_row_index": index},
+                    "_klab_source": {"source_row_index": index},
                 }
             ).encode()
             + b"\n"
@@ -221,7 +221,7 @@ def test_wikimedia_rows_keep_page_revision_not_jsonl_envelope(tmp_path: Path) ->
     raw = json.dumps(
         {
             "text": "Compiler construction begins with tokens and grammar definitions.",
-            "_sparselab_source": {
+            "_klab_source": {
                 "page_title": "Compiler Construction",
                 "page_id": "1234",
                 "revision_id": "9876",

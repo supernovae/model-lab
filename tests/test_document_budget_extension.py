@@ -7,13 +7,13 @@ import numpy as np
 import pytest
 from test_training import config, equal
 
-from sparselab.config.models import RunConfig
-from sparselab.data.packing import prepare_data
-from sparselab.data.story_packing import MatchedStoryDataset
-from sparselab.data.tokenizer import load_tokenizer
-from sparselab.training.checkpoints import CheckpointManager
-from sparselab.training.manifest import read_manifest, sha256_file
-from sparselab.training.trainer import train
+from klab.config.models import RunConfig
+from klab.data.packing import prepare_data
+from klab.data.story_packing import MatchedStoryDataset
+from klab.data.tokenizer import load_tokenizer
+from klab.training.checkpoints import CheckpointManager
+from klab.training.manifest import read_manifest, sha256_file
+from klab.training.trainer import train
 
 
 @pytest.fixture
@@ -408,8 +408,8 @@ def test_try_bracket_append_uses_same_parent_and_target_groups(
 ):
     import yaml
 
-    from sparselab.lab_mode import run_try
-    from sparselab.try_config import TryContinuation
+    from klab.lab_mode import run_try
+    from klab.try_config import TryContinuation
 
     source, parent_root, generation, _ = document_parent
     target = append_config(document_parent, tmp_path)
@@ -452,8 +452,8 @@ def test_try_nonterminal_checkpoint_bracket_preserves_consumed_prefix(
 ):
     import yaml
 
-    from sparselab.lab_mode import run_try
-    from sparselab.try_config import TryContinuation
+    from klab.lab_mode import run_try
+    from klab.try_config import TryContinuation
 
     source, target, root, parent, prior = checkpoint_phase
     baseline = tmp_path / "bounded-baseline.yaml"

@@ -5,15 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from sparselab.config.models import DatasetConfig, TokenizerTrainConfig
-from sparselab.data import tokenizer as tokenizer_module
+from klab.config.models import DatasetConfig, TokenizerTrainConfig
+from klab.data import tokenizer as tokenizer_module
 
 
 def test_data_prepare_rejects_missing_tokenizer_before_packing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from sparselab.cli import main as cli
-    from sparselab.config.loading import load_config
+    from klab.cli import main as cli
+    from klab.config.loading import load_config
 
     root = Path(__file__).resolve().parents[1]
     base = load_config(root / "configs/runtime_smoke_cpu.yaml")
@@ -186,10 +186,10 @@ def test_tokenizer_byte_budget_does_not_split_utf8_codepoint(
 def test_mixture_origin_rejects_changed_declaration_before_verification(tmp_path):
     from pathlib import Path
 
-    from sparselab.config.loading import load_config
-    from sparselab.config.models import RunConfig
-    from sparselab.data.tokenizer import verify_run_tokenizer
-    from sparselab.training.manifest import sha256_file
+    from klab.config.loading import load_config
+    from klab.config.models import RunConfig
+    from klab.data.tokenizer import verify_run_tokenizer
+    from klab.training.manifest import sha256_file
 
     raw = load_config(
         Path(__file__).resolve().parents[1] / "configs/smoke_cpu.yaml"

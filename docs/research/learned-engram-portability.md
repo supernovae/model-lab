@@ -22,7 +22,7 @@ Source templates: `Lookup the stored symbol.` and `Recall the stored symbol.` Ad
 
 ### Run-owned v2 manifest
 
-Every coordinate owns a canonical, SHA-256-bound `sparselab-portability-run` version-2 manifest. Its exact top-level fields are `format`, `version`, `experiment`, `protocol`, `world_manifest`, `coordinate`, `seed`, `initialization`, `initial_backbone`, `memory`, `source`, `observations`, `training_fact_ids`, and `sha256`. The external coordinate contains only `role`, `recipient`, `representation`, and `condition`; the paired seed remains a separate field. Observation descriptors bind the schedule, query records, scorer, and ownership map.
+Every coordinate owns a canonical, SHA-256-bound `klab-portability-run` version-2 manifest. Its exact top-level fields are `format`, `version`, `experiment`, `protocol`, `world_manifest`, `coordinate`, `seed`, `initialization`, `initial_backbone`, `memory`, `source`, `observations`, `training_fact_ids`, and `sha256`. The external coordinate contains only `role`, `recipient`, `representation`, and `condition`; the paired seed remains a separate field. Observation descriptors bind the schedule, query records, scorer, and ownership map.
 
 Initialization uses `init-v1` with explicit family, width, pair seed, purpose, and canonical tensor name. Source real/dense runs share the `source-backbone` initialization; source memory, preparation backbones, recipient adapters, and native memory use their separately named families. Preparation and native runs bind the matching preparation checkpoint. Transferred recipients bind the source run, checkpoint, original table digest, provenance, and passed source gate, but never bind source weights.
 
@@ -63,11 +63,11 @@ Learned coordinates save full-state checkpoints at registered observation bounda
 `build` and `plan` do not train. Learned `build` accepts smoke/nano and auto/cpu/mps; it creates candidate data inventories and immutable design inputs. `plan` is read-only and reports uncalibrated timing until real pilots exist. Run/continue execute the fixed dependency graph under the remaining sealed allowance; a cooperative deadline may overrun only by a current update/bounded item and safe checkpoint/receipt publication. Continue uses verified new child run IDs, restores checkpoint-owned asset paths while rejecting changed scientific settings, and never resets optimizer state or increases total allowance. Report is read-only and does not infer or train.
 
 ```sh
-uv run sparselab research describe learned-engram-portability-v1 --json
-uv run sparselab research portability build --experiment learned-engram-portability-v1 --scale nano --backend auto --output artifacts/learned-engram-portability-v1/behavioral
-uv run sparselab research portability plan --campaign-root artifacts/learned-engram-portability-v1/behavioral
-uv run sparselab research portability run --campaign-root artifacts/learned-engram-portability-v1/behavioral --max-wall-seconds 43200
-uv run sparselab research portability report --campaign-root artifacts/learned-engram-portability-v1/behavioral
+uv run klab research describe learned-engram-portability-v1 --json
+uv run klab research portability build --experiment learned-engram-portability-v1 --scale nano --backend auto --output artifacts/learned-engram-portability-v1/behavioral
+uv run klab research portability plan --campaign-root artifacts/learned-engram-portability-v1/behavioral
+uv run klab research portability run --campaign-root artifacts/learned-engram-portability-v1/behavioral --max-wall-seconds 43200
+uv run klab research portability report --campaign-root artifacts/learned-engram-portability-v1/behavioral
 ```
 
 Use `continue --campaign-root ROOT --max-wall-seconds SECONDS` only with the emitted remaining allowance. The separately labeled wiring smoke uses 128 facts and its fixed small budgets; it cannot close behavioral criteria or select behavior settings. Existing artifact roots fail closed on conflicting contents.

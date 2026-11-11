@@ -7,7 +7,7 @@ from tokenizers.models import BPE
 from tokenizers.pre_tokenizers import ByteLevel
 from tokenizers.trainers import BpeTrainer
 
-from sparselab.evaluation.chat import (
+from klab.evaluation.chat import (
     ChatMessage,
     assistant_reply,
     format_chat_prompt,

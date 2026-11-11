@@ -19,12 +19,12 @@ The example selects CPU; accelerator execution needs its provisioned environment
 and the supported [runtime setup](runtime.md).
 
 ```sh
-sparselab checkpoint verify "$GENERATION_A" --json
-sparselab checkpoint verify "$GENERATION_B" --json
-sparselab surface chat \
+klab checkpoint verify "$GENERATION_A" --json
+klab checkpoint verify "$GENERATION_B" --json
+klab surface chat \
   --cell "first=$GENERATION_A" --cell "second=$GENERATION_B" \
   --backend cpu --seed 11 \
-  --work-dir "$SPARSELAB_WORK_DIR/experiments/checkpoint-exploration"
+  --work-dir "$KLAB_WORK_DIR/experiments/checkpoint-exploration"
 ```
 
 Surface chat uses each model's native tokenizer and shows anonymous response
@@ -34,7 +34,7 @@ response difference to a single architectural feature.
 
 ## Review existing outputs
 
-For a sealed comparison, use `sparselab surface import triage` on compatible
+For a sealed comparison, use `klab surface import triage` on compatible
 retained triage outputs, then `surface review` on the new bundle. The
 [Surface Review guide](research/surface-review-v1.md) owns the complete commands,
 required inputs, study-specific importers, privacy limits and verified dashboard

@@ -104,15 +104,15 @@ explicit `--allow-uncommitted-declaration` override records exact declaration
 statuses and hashes but does not bypass artifact, approval, or runtime checks.
 
 ```sh
-export SPARSELAB_WORK_DIR=/data/sparselab
-sparselab campaign validate examples/tiny-campaign.yaml --json
-sparselab campaign plan examples/tiny-campaign.yaml --json
-sparselab campaign status examples/tiny-campaign.yaml --json
-sparselab campaign next examples/tiny-campaign.yaml --json
-sparselab campaign apply examples/tiny-campaign.yaml --json
-sparselab campaign explain examples/tiny-campaign.yaml --json
-sparselab campaign approve examples/tiny-campaign.yaml corpus-approval --note 'Reviewed these bound inputs' --json
-sparselab campaign resume examples/tiny-campaign.yaml --json
+export KLAB_WORK_DIR=/data/klab
+klab campaign validate examples/tiny-campaign.yaml --json
+klab campaign plan examples/tiny-campaign.yaml --json
+klab campaign status examples/tiny-campaign.yaml --json
+klab campaign next examples/tiny-campaign.yaml --json
+klab campaign apply examples/tiny-campaign.yaml --json
+klab campaign explain examples/tiny-campaign.yaml --json
+klab campaign approve examples/tiny-campaign.yaml corpus-approval --note 'Reviewed these bound inputs' --json
+klab campaign resume examples/tiny-campaign.yaml --json
 ```
 
 `validate` performs static checks only. `plan`, `next` and `explain` verify requisite
@@ -128,7 +128,7 @@ replay campaign approvals, stage receipts, or training. Before initialization
 `status` projects unexecuted stages without creating a workspace.
 The campaign CLI's own `PATH` is normalized; authored artifact references still
 cannot contain parent traversal. All verbs accept `--json`; stdout is one sorted
-`sparselab-campaign-command-v1` object. Progress and in-checkout storage warnings
+`klab-campaign-command-v1` object. Progress and in-checkout storage warnings
 go to stderr. Text mode lists stage ID/kind/scope/state/outcome, reasons, deficits,
 identities and next action.
 
@@ -218,9 +218,9 @@ An absent measurement produces a typed deficit, not a pass.
 counts returned by `corpus describe` or Campaign `token_measurement`:
 
 ```sh
-sparselab --work-dir /data/sparselab \
+klab --work-dir /data/klab \
   corpus measure-tokens RELEASE --tokenizer TOKENIZER --policy POLICY.yaml \
-  --output /data/sparselab/experiments/TASK/source-tokens.json --json
+  --output /data/klab/experiments/TASK/source-tokens.json --json
 ```
 
 The command streams raw `documents.jsonl` bytes, authenticates them at EOF,
@@ -370,7 +370,7 @@ must identify the same evaluation index and checkpoint; a missing or different
 receipt cannot authorize readiness. If Campaign already committed an
 `INCONCLUSIVE` assessment because the review was not available, do not replace
 that receipt or silently redispatch the stage. Issue the named human review and
-assess it explicitly with `sparselab readiness model POLICY INDEX --review RECEIPT`;
+assess it explicitly with `klab readiness model POLICY INDEX --review RECEIPT`;
 author a new Campaign declaration identity if a later Campaign assessment is
 needed.
 

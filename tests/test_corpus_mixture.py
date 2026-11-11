@@ -10,11 +10,11 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from sparselab.canonical import canonical_json
-from sparselab.config.loading import load_config
-from sparselab.config.models import DatasetConfig
-from sparselab.corpus import mixture
-from sparselab.data.packing import TokenBlockDataset, _collect_token_mixture
+from klab.canonical import canonical_json
+from klab.config.loading import load_config
+from klab.config.models import DatasetConfig
+from klab.corpus import mixture
+from klab.data.packing import TokenBlockDataset, _collect_token_mixture
 
 
 def _fixture(
@@ -343,7 +343,7 @@ def test_yaml_mixture_consumer_and_storage_identity_are_independent_of_cwd(
 ) -> None:
     # Release authentication and tokenizer encoding use the tiny synthetic fixture;
     # mixture materialization, cold replay, dataset binding and packing are real.
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
     assets = tmp_path / "source" / "nested"
     assets.mkdir(parents=True)
     declaration, _, release = _fixture(assets, monkeypatch)
@@ -359,7 +359,7 @@ def test_yaml_mixture_consumer_and_storage_identity_are_independent_of_cwd(
         "load_tokenizer_config",
         lambda *args: SimpleNamespace(output_dir=fit_dir, vocab_size=260),
     )
-    from sparselab.corpus import export
+    from klab.corpus import export
 
     monkeypatch.setattr(export, "_licenses", lambda path: "local research")
     raw = load_config(
@@ -386,8 +386,8 @@ def test_yaml_mixture_consumer_and_storage_identity_are_independent_of_cwd(
     }
     source = assets / "run.yaml"
     source.write_text(yaml.safe_dump(raw))
-    from sparselab.data.packing import prepare_data
-    from sparselab.workspace_preflight import training_storage_checks
+    from klab.data.packing import prepare_data
+    from klab.workspace_preflight import training_storage_checks
 
     for cwd in (tmp_path / "cwd-a", tmp_path / "unrelated" / "cwd-b"):
         cwd.mkdir(parents=True)
@@ -516,7 +516,7 @@ def test_mixture_records_and_rechecks_opt_in_tokenizer_observation(
             token_to_id=lambda token: 3 if token == "<eos>" else None,
         ),
     )
-    from sparselab.corpus import tokenizer_observation
+    from klab.corpus import tokenizer_observation
 
     calls = []
 
@@ -587,7 +587,7 @@ def test_mixture_dataset_binds_train_validation_and_tokenizer(
         "load_tokenizer_config",
         lambda *args: SimpleNamespace(output_dir=fit_dir, vocab_size=260),
     )
-    from sparselab.corpus import export
+    from klab.corpus import export
 
     monkeypatch.setattr(export, "_licenses", lambda path: "local research")
     dataset = DatasetConfig(
@@ -639,10 +639,10 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
 ) -> None:
     import struct
 
-    from sparselab.corpus.retained_mixture import RetainedMixtureIndex
-    from sparselab.corpus.split_runs import write_rows
-    from sparselab.data import encoding
-    from sparselab.data.encoding import PreparationEncoder
+    from klab.corpus.retained_mixture import RetainedMixtureIndex
+    from klab.corpus.split_runs import write_rows
+    from klab.data import encoding
+    from klab.data.encoding import PreparationEncoder
 
     root = tmp_path / "work"
     root.mkdir(mode=0o700)
@@ -743,8 +743,8 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
     def run(name, *, reuse_tokens=True, checkpoint=False):
         import tempfile
 
-        from sparselab.corpus.admission_inspection_cache import InspectionCache
-        from sparselab.corpus.mixture_pipeline import MixtureFrontier, pipeline_request
+        from klab.corpus.admission_inspection_cache import InspectionCache
+        from klab.corpus.mixture_pipeline import MixtureFrontier, pipeline_request
 
         staging = root / name
         staging.mkdir(exist_ok=checkpoint)
@@ -786,7 +786,7 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
     with monkeypatch.context() as worker_patch:
         import psutil
 
-        worker_patch.setenv("SPARSELAB_MIXTURE_WORKERS", "3")
+        worker_patch.setenv("KLAB_MIXTURE_WORKERS", "3")
         worker_patch.setattr(psutil, "cpu_count", lambda **kwargs: 4)
         worker_patch.setattr(psutil.Process, "cpu_affinity", lambda self: [0, 1, 2, 3])
         assert run("three-workers", reuse_tokens=False) == (result, output)
@@ -826,11 +826,11 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
     assert (serial_result, serial_output) == (result, output)
     assert calls == []
 
-    from sparselab.corpus.mixture_pipeline import MixtureFrontier
+    from klab.corpus.mixture_pipeline import MixtureFrontier
 
     monkeypatch.setattr(encoding, "TOKENIZER_BATCH_DOCUMENTS", 1)
     monkeypatch.setattr(mixture, "MIXTURE_BATCH_SOURCE_BYTES", 64)
-    monkeypatch.setenv("SPARSELAB_MIXTURE_COMMIT_CANDIDATES", "4096")
+    monkeypatch.setenv("KLAB_MIXTURE_COMMIT_CANDIDATES", "4096")
     assert run("grouped", checkpoint=True) == (result, output)
     assert len(list((root / ".grouped.assembly").glob("commit-*.json"))) == 1
     with monkeypatch.context() as cadence:
@@ -841,7 +841,7 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
         cadence.setattr(mixture, "MIXTURE_COMMIT_INTERVAL_SECONDS", 0)
         assert run("time-commits", checkpoint=True) == (result, output)
         assert len(list((root / ".time-commits.assembly").glob("commit-*.json"))) > 1
-    monkeypatch.setenv("SPARSELAB_MIXTURE_COMMIT_CANDIDATES", "1")
+    monkeypatch.setenv("KLAB_MIXTURE_COMMIT_CANDIDATES", "1")
     assert run("eager", checkpoint=True) == (result, output)
     assert len(list((root / ".eager.assembly").glob("commit-*.json"))) > 1
     commit = MixtureFrontier.commit
@@ -855,7 +855,7 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
     with pytest.raises(InterruptedError):
         run("resumed", checkpoint=True)
     monkeypatch.setattr(MixtureFrontier, "commit", commit)
-    monkeypatch.setenv("SPARSELAB_MIXTURE_WORKERS", "8")
+    monkeypatch.setenv("KLAB_MIXTURE_WORKERS", "8")
     assert run("resumed", checkpoint=True) == (result, output)
 
     # Batched padding changes IDs, so padded tokenizers retain serial semantics.
@@ -875,8 +875,8 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
 
 
 def test_real_batch_cache_survives_interrupted_caller(tmp_path: Path) -> None:
-    from sparselab.corpus.token_cache import TokenCache
-    from sparselab.data.encoding import PreparationEncoder
+    from klab.corpus.token_cache import TokenCache
+    from klab.data.encoding import PreparationEncoder
 
     tokenizer = _byte_tokenizer()
     texts = ["plain", "café", "plain", "other"]
@@ -911,15 +911,15 @@ def test_real_batch_cache_survives_interrupted_caller(tmp_path: Path) -> None:
 def test_mixture_frontier_resumes_without_committed_candidate_replay(
     tmp_path, monkeypatch, after_commit
 ):
-    from sparselab.corpus.mixture_pipeline import MixtureFrontier
-    from sparselab.data import encoding
+    from klab.corpus.mixture_pipeline import MixtureFrontier
+    from klab.data import encoding
 
     declaration, _, _ = _fixture(tmp_path, monkeypatch)
     baseline = tmp_path / "baseline"
     expected = mixture._materialize_mixture(declaration, baseline, reuse_tokens=False)
     monkeypatch.setattr(encoding, "TOKENIZER_BATCH_DOCUMENTS", 1)
-    monkeypatch.setenv("SPARSELAB_MIXTURE_WORKERS", "1")
-    monkeypatch.setenv("SPARSELAB_MIXTURE_COMMIT_CANDIDATES", "1")
+    monkeypatch.setenv("KLAB_MIXTURE_WORKERS", "1")
+    monkeypatch.setenv("KLAB_MIXTURE_COMMIT_CANDIDATES", "1")
     output = tmp_path / "interrupted"
     original = MixtureFrontier.commit
 
@@ -953,7 +953,7 @@ def test_mixture_frontier_resumes_without_committed_candidate_replay(
     monkeypatch.setattr(
         mixture.MixtureIndex, "_load_documents", unexpected_inventory_replay
     )
-    monkeypatch.setenv("SPARSELAB_MIXTURE_WORKERS", "8")
+    monkeypatch.setenv("KLAB_MIXTURE_WORKERS", "8")
     actual = mixture.materialize_mixture(declaration, output)
     assert actual == expected
     assert (output / "train.tokens.jsonl").read_bytes() == (
@@ -964,7 +964,7 @@ def test_mixture_frontier_resumes_without_committed_candidate_replay(
 
 @pytest.mark.parametrize("damage", ["output", "index", "identity", "marker"])
 def test_mixture_frontier_rejects_changed_checkpoint(tmp_path, monkeypatch, damage):
-    from sparselab.corpus.mixture_pipeline import MixtureFrontier
+    from klab.corpus.mixture_pipeline import MixtureFrontier
 
     declaration, _, _ = _fixture(tmp_path, monkeypatch)
     output = tmp_path / "interrupted"
@@ -997,7 +997,7 @@ def test_mixture_frontier_rejects_changed_checkpoint(tmp_path, monkeypatch, dama
 def test_ordered_source_fetch_bounds_reorder_and_propagates_failure(monkeypatch):
     import threading
 
-    from sparselab.corpus import mixture_pipeline
+    from klab.corpus import mixture_pipeline
 
     assert list(
         mixture_pipeline.ordered_fetch(range(3), str, workers=0, size=lambda i: 1)
@@ -1027,7 +1027,7 @@ def test_ordered_source_fetch_bounds_reorder_and_propagates_failure(monkeypatch)
 
 
 def test_mixture_writer_rejects_concurrent_owner(tmp_path):
-    from sparselab.corpus.mixture_pipeline import mixture_writer
+    from klab.corpus.mixture_pipeline import mixture_writer
 
     with (
         mixture_writer(tmp_path / "output"),
@@ -1082,7 +1082,7 @@ def test_child_telemetry_races_do_not_abort_materialization(
 def test_source_prefetch_continues_while_consumer_is_encoding():
     import threading
 
-    from sparselab.corpus.mixture_pipeline import ordered_fetch
+    from klab.corpus.mixture_pipeline import ordered_fetch
 
     ready = threading.Event()
     lock = threading.Lock()
@@ -1112,7 +1112,7 @@ def test_retained_handle_eviction_does_not_invalidate_active_read(
     from collections import OrderedDict
     from concurrent.futures import ThreadPoolExecutor
 
-    from sparselab.corpus.retained_mixture import RetainedMixtureIndex
+    from klab.corpus.retained_mixture import RetainedMixtureIndex
 
     index = RetainedMixtureIndex.__new__(RetainedMixtureIndex)
     index.handles = OrderedDict()

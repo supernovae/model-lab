@@ -10,14 +10,14 @@ split and writes one compact record. For a complete input setup, start with
 RunConfig and tokenizer:
 
 ```sh
-export SPARSELAB_WORK_DIR="$HOME/.local/share/sparselab"
+export KLAB_WORK_DIR="$HOME/.local/share/klab"
 cat > wider-ffn.yaml <<'YAML'
 question: Does a wider FFN lower held-out loss at a fixed token budget?
 set:
   model.ffn_dim: 128
 YAML
-sparselab try wider-ffn.yaml --vs BASELINE.yaml
-sparselab report TRY_ID      # reread later, no compute
+klab try wider-ffn.yaml --vs BASELINE.yaml
+klab report TRY_ID      # reread later, no compute
 ```
 
 `BASELINE.yaml` is any RunConfig whose tokenizer already exists. The candidate is
@@ -48,14 +48,14 @@ probing marks the try `interrupted` at `phase: probing` and keeps both scored
 arms, the comparison and the finalized partial battery (completed probes kept,
 unrun probes listed as missing evidence).
 
-Each scored arm also records what the Pareto view and `sparselab compare`
+Each scored arm also records what the Pareto view and `klab compare`
 need, whether or not probes ran: `eval_group` (the same digest a probe battery
 records for that checkpoint and protocol), resident and active parameters and
 weight bytes (`parameters`, `active_parameters`, `parameter_bytes`,
 `active_parameter_bytes`) and, under `heldout`, `ms_per_token` plus the
 per-window loss sums and counts that give a paired standard error against any
 other result in the same eval group. See
-[reference models and compare](probe-battery.md#reference-models-and-sparselab-compare).
+[reference models and compare](probe-battery.md#reference-models-and-klab-compare).
 
 Use `--json` for the full record. A baseline is reused only when an earlier try
 *completed* with the same reuse key: effective config, code (source identity)
@@ -110,4 +110,4 @@ accelerators exactly as with `train`. Remote and multi-seed sweeps still go
 through workers or Campaigns. The `lab-loop` CI job runs
 `tests/test_lab_mode.py::test_cpu_smoke_loop_yaml_to_report_within_budget`, which
 times this path on CPU (tokenizer → try → report) against a generous budget
-(`SPARSELAB_LAB_LOOP_BUDGET_SECONDS`, 900 s).
+(`KLAB_LAB_LOOP_BUDGET_SECONDS`, 900 s).

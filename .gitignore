@@ -3,7 +3,7 @@ __pycache__/
 .venv/
 artifacts/
 runs/
-sparselab-work/
+klab-work/
 dist/
 .pytest_cache/
 .ruff_cache/

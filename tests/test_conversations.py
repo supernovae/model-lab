@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from sparselab.data.conversations import iter_conversations
+from klab.data.conversations import iter_conversations
 
 
 def _write_jsonl(path: Path, records: list[object]) -> None:
@@ -119,7 +119,7 @@ def test_v2_assistant_only_renders_versioned_tool_transcript_and_spans(
         ],
     )
 
-    from sparselab.data.conversations import iter_rendered_conversations
+    from klab.data.conversations import iter_rendered_conversations
 
     rendered = next(iter_rendered_conversations(path))
     assert rendered.loss_mode == "assistant_only"

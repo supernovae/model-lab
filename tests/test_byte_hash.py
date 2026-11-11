@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from sparselab.data.byte_hash import hash_bytes, hash_text, table_address
+from klab.data.byte_hash import hash_bytes, hash_text, table_address
 
 
 def test_equal_utf8_bytes_share_address_across_segment_boundaries() -> None:

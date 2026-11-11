@@ -2,7 +2,7 @@
 
 Commands below use the [activated, provisioned environment](../README.md#first-run).
 
-Use SparseLab's declared inputs, native verifiers and retained evidence between
+Use Model Lab's declared inputs, native verifiers and retained evidence between
 runs. A passing check establishes its stated scope; it does not approve model
 quality or promote a child. Keep the baseline and parent generation immutable.
 Record the intended scientific delta before compute, then read the native lab
@@ -14,8 +14,8 @@ For a normal authorized local experiment, skip the sections below and run
 [lab mode](lab-mode.md):
 
 ```sh
-sparselab try DELTA.yaml --vs "$CONFIG"
-sparselab report TRY_ID
+klab try DELTA.yaml --vs "$CONFIG"
+klab report TRY_ID
 ```
 
 It derives the candidate, trains both arms, scores both on the same held-out
@@ -30,24 +30,24 @@ compute.
 Use one external persistent work root and a fixed, tested source revision.
 Examples below use shell variables `WORK`, `CONFIG`, `CAMPAIGN`, `GENERATION`
 and `RUN_ID` for your actual paths and identifiers; they are not literal inputs.
-Set `SPARSELAB_WORK_DIR` to `WORK`, independently of checkout and branch.
+Set `KLAB_WORK_DIR` to `WORK`, independently of checkout and branch.
 
 Bash setup:
 
 ```sh
-export SPARSELAB_WORK_DIR="$HOME/.local/share/sparselab"
-WORK="$SPARSELAB_WORK_DIR"
+export KLAB_WORK_DIR="$HOME/.local/share/klab"
+WORK="$KLAB_WORK_DIR"
 ```
 
 PowerShell setup:
 
 ```powershell
-$env:SPARSELAB_WORK_DIR = Join-Path $env:USERPROFILE '.local/share/sparselab'
-$WORK = $env:SPARSELAB_WORK_DIR
-sparselab readiness smoke --family dense --output "$WORK/experiments/session-check-001"
+$env:KLAB_WORK_DIR = Join-Path $env:USERPROFILE '.local/share/klab'
+$WORK = $env:KLAB_WORK_DIR
+klab readiness smoke --family dense --output "$WORK/experiments/session-check-001"
 ```
 
-In PowerShell use `$env:SPARSELAB_WORK_DIR` for the environment variable and
+In PowerShell use `$env:KLAB_WORK_DIR` for the environment variable and
 `$CONFIG`, `$CAMPAIGN`, `$GENERATION`, `$RUN_ID` for shell variables. Write
 continued Bash commands on one line instead of using `\`. For a recipe copy, create a fresh
 `$WORK/inputs` directory with `New-Item -ItemType Directory`, and use `Copy-Item`
@@ -58,7 +58,7 @@ For a dense-model session, run the bounded CPU wiring check once into a new,
 task-owned output directory:
 
 ```sh
-sparselab readiness smoke --family dense \
+klab readiness smoke --family dense \
   --output "$WORK/experiments/session-check-001"
 ```
 
@@ -76,9 +76,9 @@ full-suite opt-in.
 ## Check the actual proposed configuration
 
 ```sh
-sparselab inspect "$CONFIG"
-sparselab workspace preflight "$CONFIG"
-sparselab stage "$CONFIG" --through smoke \
+klab inspect "$CONFIG"
+klab workspace preflight "$CONFIG"
+klab stage "$CONFIG" --through smoke \
   --output "$WORK/experiments/candidate-001-stage"
 ```
 
@@ -91,7 +91,7 @@ Provide the declared runtime profile using `--runtime-profile PROFILE` where
 appropriate. Use a new stage output for changed intent.
 
 On a provisioned vendor environment, use the documented
-`sparselab ...` commands instead of synchronizing the
+`klab ...` commands instead of synchronizing the
 CPU extra into that environment. Follow [runtime acceptance](runtime.md).
 Neither a memory estimate nor the session smoke proves that the actual model
 fits or that its selected backend is stable.
@@ -99,12 +99,12 @@ fits or that its selected backend is stable.
 ## Let Campaign explain the next action
 
 ```sh
-sparselab campaign status "$CAMPAIGN"
-sparselab campaign next "$CAMPAIGN"
-sparselab campaign explain "$CAMPAIGN"
-sparselab campaign apply "$CAMPAIGN"
+klab campaign status "$CAMPAIGN"
+klab campaign next "$CAMPAIGN"
+klab campaign explain "$CAMPAIGN"
+klab campaign apply "$CAMPAIGN"
 # Once state exists, reconcile or continue it:
-sparselab campaign resume "$CAMPAIGN"
+klab campaign resume "$CAMPAIGN"
 ```
 
 Every Campaign verb above accepts `--json`: agents should consume the native
@@ -129,8 +129,8 @@ Use the finalized generation directory, not a moving `latest.json` or `best.json
 pointer, as the parent/evaluation binding:
 
 ```sh
-sparselab checkpoint verify "$GENERATION" --json
-sparselab report --kind run "$RUN_ID" --runs-dir "$WORK/runs" --json
+klab checkpoint verify "$GENERATION" --json
+klab report --kind run "$RUN_ID" --runs-dir "$WORK/runs" --json
 ```
 
 These commands also have human-readable text mode: omit `--json`.
@@ -147,7 +147,7 @@ none automatically promotes a model. See [checkpointing](checkpointing.md),
 
 | Change | Repeat before the next run |
 |---|---|
-| Lab-mode idea (one YAML delta, local) | Nothing extra: `sparselab try` derives, trains, scores and records it; an identical completed baseline is verified and reused. |
+| Lab-mode idea (one YAML delta, local) | Nothing extra: `klab try` derives, trains, scores and records it; an identical completed baseline is verified and reused. |
 | Only inspecting completed results | Native status/evidence/triage reads; do not train again to reconstruct evidence. |
 | Training budget or other scientific config | Inspect the effective config and declared comparison; resolve a new immutable declaration/lock; check parent compatibility, storage, and candidate stage/runtime gates. Preserve unchanged identities. |
 | Corpus, tokenizer or prepared bytes | Authenticate the changed artifact and affected dependency closure; prepare/resolve affected outputs and rerun config/runtime gates. Never relabel changed bytes as the baseline. |
@@ -168,10 +168,10 @@ for exact support and trust limitations.
 ## Read-only iteration check
 
 ```sh
-sparselab iteration check "$DECLARATION_OR_LOCK" \
+klab iteration check "$DECLARATION_OR_LOCK" \
   --parent "$GENERATION" --json
 # At a new host or trust boundary:
-sparselab iteration check "$DECLARATION_OR_LOCK" \
+klab iteration check "$DECLARATION_OR_LOCK" \
   --parent "$GENERATION" --json --cold-verify
 ```
 For a single fresh phase, omit `--parent` to inspect its authored changes against
@@ -195,7 +195,7 @@ compatibility mapping does not authorize optimizer source drift. The command
 never grants either authorization.
 
 JSON and text expose the same versioned result
-(`format: sparselab-iteration-check-v1`): `state`, `parent`, `declared_delta`, `delta`,
+(`format: klab-iteration-check-v1`): `state`, `parent`, `declared_delta`, `delta`,
 `artifacts`, `verification`, `storage`, `runtime`, `ingestion`, `campaign`,
 `missing_gates` and `next_command`. `declared_delta` lists authored phase
 patches where available; `delta` lists observed parent-to-child values, or

@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-import sparselab.owned_copy as copy_module
-from sparselab.data.verification import _owned_file, verify_file
+import klab.owned_copy as copy_module
+from klab.data.verification import _owned_file, verify_file
 
 
 @pytest.fixture

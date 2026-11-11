@@ -3,9 +3,9 @@
 Catalog membership is optional; ordinary configs remain usable. A forked catalog entry is an explicit local JSON path, not a package ID:
 
 ```sh
-sparselab research describe experiments/my-entry.json --json
-sparselab research scaffold experiments/my-entry.json --scale smoke --data offline --backend cpu --output experiments/my-study
-sparselab study plan experiments/my-study/study.yaml
+klab research describe experiments/my-entry.json --json
+klab research scaffold experiments/my-entry.json --scale smoke --data offline --backend cpu --output experiments/my-study
+klab study plan experiments/my-study/study.yaml
 ```
 
 A local entry must validate against the packaged strict schema, and its recipe is resolved from the fork root's sibling `recipes/` directory. Unknown fields, duplicate JSON keys, non-finite values, invalid scales/designs, absolute/traversing paths, and unsafe resource paths are rejected. Scaffold publication refuses an existing destination and atomically publishes only validated config files; it never downloads data, trains, opens a worker/store, or overwrites an output.
@@ -29,5 +29,5 @@ response to lower loss. An accepted known-good reference requires identity-bound
 preparation, training, checkpoint, validation, capability, generation,
 resources, and static-report evidence. Replacement records also enumerate
 parent-required regression checks and an explicit resource tradeoff. Run
-`sparselab research validate --json`; missing evidence blocks eligibility, while
+`klab research validate --json`; missing evidence blocks eligibility, while
 documentary citations remain visible without becoming measured proof.

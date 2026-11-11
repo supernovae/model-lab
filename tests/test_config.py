@@ -5,10 +5,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sparselab.config.loading import load_config
-from sparselab.config.migrate import migrate_file
-from sparselab.config.models import ModelConfig, RunConfig
-from sparselab.derivation import derive_config
+from klab.config.loading import load_config
+from klab.config.migrate import migrate_file
+from klab.config.models import ModelConfig, RunConfig
+from klab.derivation import derive_config
 
 
 def _v1() -> dict[str, object]:
@@ -42,7 +42,7 @@ def _v1() -> dict[str, object]:
 def test_v1_loading_gives_migration_guidance(tmp_path: Path) -> None:
     source = tmp_path / "legacy.yaml"
     source.write_text(yaml.safe_dump(_v1()), encoding="utf-8")
-    with pytest.raises(ValueError, match="sparselab config migrate"):
+    with pytest.raises(ValueError, match="klab config migrate"):
         load_config(source)
 
 
@@ -162,7 +162,7 @@ def test_mixture_paths_preserve_source_targets(
         mixture_output_path=str(mixture_output) if absolute else "assets/mixture",
     )
     if publication != "migrate":
-        from sparselab.config.migrate import migrate_v1
+        from klab.config.migrate import migrate_v1
 
         raw = migrate_v1(raw)
     source.write_text(yaml.safe_dump(raw), encoding="utf-8")
@@ -385,7 +385,7 @@ def origin_bound_config():
 def test_origin_binding_resolves_paths_and_preserves_default_identity(
     tmp_path, origin_bound_config
 ):
-    from sparselab.training.manifest import config_sha256
+    from klab.training.manifest import config_sha256
 
     path = tmp_path / "run.yaml"
     path.write_text(yaml.safe_dump(origin_bound_config))
@@ -479,7 +479,7 @@ def test_context_memory_roundtrip_preserves_distinct_architecture():
 def test_mixture_tokenizer_origin_requires_one_pinned_declaration(
     tmp_path, origin_bound_config
 ):
-    from sparselab.training.manifest import config_sha256
+    from klab.training.manifest import config_sha256
 
     raw = origin_bound_config
     raw["tokenizer"]["origin"] = {

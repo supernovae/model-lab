@@ -1,21 +1,21 @@
 # Surface Review: local self-blind comparisons
 
-Surface Review separates **exploratory checkpoint chat** from a **sealed review of existing, verified generations**. Both are local single-reviewer tools, not an automatic model selector. A sealed import reads already generated text; it does not load weights, rerun a cell, replace missing output or alter the original study. Work from the repository root. Put new bundles and votes under the task-owned `$SPARSELAB_WORK_DIR/experiments/surface-review/bundles/` (or another explicit `--output`); do not edit the original studies' review, test or checkpoint files.
+Surface Review separates **exploratory checkpoint chat** from a **sealed review of existing, verified generations**. Both are local single-reviewer tools, not an automatic model selector. A sealed import reads already generated text; it does not load weights, rerun a cell, replace missing output or alter the original study. Work from the repository root. Put new bundles and votes under the task-owned `$KLAB_WORK_DIR/experiments/surface-review/bundles/` (or another explicit `--output`); do not edit the original studies' review, test or checkpoint files.
 
 ## Import existing generations
 
 Each import requires a new, nonexistent output directory and verifies indexed
 source bytes before selection. The current importer consumes native triage
 reports. Experiment-specific decoding and data-rich import adapters are retired;
-their findings remain in the [inactive research history](https://github.com/supernovae/tiny-sparse-lab/tree/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history).
+their findings remain in the [inactive research history](https://github.com/supernovae/model-lab/tree/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history).
 
 To compare compatible Tier-1 outputs from at least two verified, immutable post-train triage reports, provide the runs explicitly; no matching report/prompt/settings cells means no bundle:
 
 ```sh
-uv run --locked sparselab surface import triage \
+uv run --locked klab surface import triage \
   --triage-run RUN_ID_1 /path/to/runs --triage-run RUN_ID_2 /path/to/runs \
   --sample standard --selection-seed 2026 --presentation-seed 2027 \
-  --output "$SPARSELAB_WORK_DIR/experiments/surface-review/bundles/triage-standard-2026"
+  --output "$KLAB_WORK_DIR/experiments/surface-review/bundles/triage-standard-2026"
 ```
 
 `--sample quick` selects up to 12 eligible pairs, `standard` up to 32, and `full` all eligible pairs. No vote affects the sample size. Candidate IDs are sorted canonically by prompt, decoder, RNG and unordered source pair; a seeded, deterministic greedy rule favors underrepresented category, source pairing, decoder, RNG and prompt in that order, then hashes the selection seed and candidate ID to break ties. A separate presentation seed deterministically shuffles the selected cases, makes opaque case IDs and assigns A/B orientation. Both seeds are signed decimal integers in private provenance; changing either requires a new output directory. No quality judgment enters selection. These are balanced *descriptive* subsets, not a random population estimate.
@@ -35,18 +35,18 @@ These seven IDs are the available canonical dimensions; only the declared applic
 
 The v1 integrity chain is:
 
-1. `manifest.json` (`sparselab_surface_manifest_v1`) records eligible/selected counts and SHA-256 of the exact canonical `blind.json` and `provenance.json` bytes, without identities. Blind format is `sparselab_surface_blind_v1`; private provenance format is `sparselab_surface_provenance_v1` and records indexed source file SHA-256/size, prompt-set digest, selected/eligible keys, both seeds, decoder coordinates, original and displayed A/B source mapping and checkpoint/run/tokenizer identities where available. Import verifies source files; later opening verifies the sealed files without needing those source files mounted.
-2. Each exclusive `answers/<opaque-case-id>.json` is a `sparselab_surface_judgment_v1` record bound to the blind digest and its own canonical content digest, with choices, optional issue tags/note and UTC timestamp. Missing, changed, unexpected or malformed answers invalidate completion rather than being silently repaired.
-3. `review.json` is a write-once `sparselab_surface_review_v1` record with a digest of its contents, case-ordered judgments, `single_reviewer_self_blind`, blind digest and `reveal_state: false`. Only after completion can a separate write-once `reveal.json` bind the review digest and private provenance digest to the exact source mapping with `reveal_state: true`.
+1. `manifest.json` (`klab_surface_manifest_v1`) records eligible/selected counts and SHA-256 of the exact canonical `blind.json` and `provenance.json` bytes, without identities. Blind format is `klab_surface_blind_v1`; private provenance format is `klab_surface_provenance_v1` and records indexed source file SHA-256/size, prompt-set digest, selected/eligible keys, both seeds, decoder coordinates, original and displayed A/B source mapping and checkpoint/run/tokenizer identities where available. Import verifies source files; later opening verifies the sealed files without needing those source files mounted.
+2. Each exclusive `answers/<opaque-case-id>.json` is a `klab_surface_judgment_v1` record bound to the blind digest and its own canonical content digest, with choices, optional issue tags/note and UTC timestamp. Missing, changed, unexpected or malformed answers invalidate completion rather than being silently repaired.
+3. `review.json` is a write-once `klab_surface_review_v1` record with a digest of its contents, case-ordered judgments, `single_reviewer_self_blind`, blind digest and `reveal_state: false`. Only after completion can a separate write-once `reveal.json` bind the review digest and private provenance digest to the exact source mapping with `reveal_state: true`.
 
 Do not use a revealed bundle for another supposedly blind review: make a new bundle and predeclare its selection instead.
 
 ## Exploratory chat is not sealed review
 
-For two to four *available* SparseLab generation paths, use separate `--cell ALIAS=GENERATION_PATH` arguments; the alias is a local selection aid, not a trusted model identity:
+For two to four *available* Model Lab generation paths, use separate `--cell ALIAS=GENERATION_PATH` arguments; the alias is a local selection aid, not a trusted model identity:
 
 ```sh
-uv run --locked sparselab surface chat \
+uv run --locked klab surface chat \
   --cell old=/path/to/runs/OLD_RUN/checkpoints/GENERATION_PATH \
   --cell new=/path/to/runs/NEW_RUN/checkpoints/GENERATION_PATH \
   --backend cpu --seed 11 --port 8502
@@ -58,4 +58,4 @@ Replace the illustrative generation paths with paths to real checkpoint generati
 
 `single_reviewer_self_blind` means one person's judgments about a prespecified local batch. Self-blinding does not establish inter-rater agreement, population preference, a general model-quality ranking or a causal effect. Response style can unblind a reviewer informally. TinyStories study prompt train-disjointness is not established merely by a held-out prompt label; investigate overlap before making generalization claims. The data-rich 30M and older 50M differ in source/data variety, tokenizer, context, model depth/width, target budget and precision; their difference cannot isolate a data-versus-depth cause. Tier-1 triage prose and mechanical repetition are diagnostics; Tier-2 recommendations are post-hoc hypotheses, not subjective votes or promotion gates. Immutable triage reports and their promotion criteria remain unchanged; the [optional verified overlay](post-train-triage.md#optional-surface-review-overlay) may report review availability or a completed single-reviewer observation only.
 
-For larger standardized task evaluation, design an independent protocol using [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) or [LightEval](https://github.com/huggingface/lighteval) with pinned model/tokenizer, tasks and evaluation settings; neither is silently executed by Surface Review. [Open WebUI Arena](https://docs.openwebui.com/features/evaluation/) is an optional future interface for broader local human comparisons, not the sealed v1 importer and not a requirement for this workflow. The separate [`sparselab serve` local API](../local-api.md) now provides a bounded, nonstreaming integration for one pinned checkpoint; it does not replace sealed review or add multi-model routing. The [model guide](../tinytext-model-guide.md) covers raw-prompt comparison, prompt visibility, stop/context/cache controls and reproducibility.
+For larger standardized task evaluation, design an independent protocol using [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) or [LightEval](https://github.com/huggingface/lighteval) with pinned model/tokenizer, tasks and evaluation settings; neither is silently executed by Surface Review. [Open WebUI Arena](https://docs.openwebui.com/features/evaluation/) is an optional future interface for broader local human comparisons, not the sealed v1 importer and not a requirement for this workflow. The separate [`klab serve` local API](../local-api.md) now provides a bounded, nonstreaming integration for one pinned checkpoint; it does not replace sealed review or add multi-model routing. The [model guide](../tinytext-model-guide.md) covers raw-prompt comparison, prompt visibility, stop/context/cache controls and reproducibility.

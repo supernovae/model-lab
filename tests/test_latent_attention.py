@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from sparselab.model.attention.latent import LatentAttention
+from klab.model.attention.latent import LatentAttention
 
 
 def test_latent_attention_is_causal_and_shape_preserving() -> None:

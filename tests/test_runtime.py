@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sparselab import runtime
+from klab import runtime
 
 
 @pytest.mark.parametrize(
@@ -166,7 +166,7 @@ def test_explicit_unavailable_backend_never_falls_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(runtime, "_backend_available", lambda backend: backend == "cpu")
-    import sparselab.runtime_profile as profiles
+    import klab.runtime_profile as profiles
 
     monkeypatch.setattr(
         profiles, "require_authorization", lambda config, authorization: None
@@ -199,7 +199,7 @@ def test_cpu_fp16_is_rejected_before_probe() -> None:
 
 
 def test_mps_inventory_does_not_offer_rejected_fp16(monkeypatch):
-    import sparselab.runtime_profile as profiles
+    import klab.runtime_profile as profiles
 
     monkeypatch.setattr(
         profiles, "require_authorization", lambda config, authorization: None

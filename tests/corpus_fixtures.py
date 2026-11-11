@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from sparselab.corpus.project import Project
+from klab.corpus.project import Project
 
 
 def neutral_corpus(root: Path) -> Project:
