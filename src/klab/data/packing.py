@@ -2256,6 +2256,8 @@ def _prepare_data(
                 temporary_root,
                 envelope=resource_envelope,
                 parallel_supported=parallel_supported,
+                token_budget=config.dataset.train_max_tokens
+                + config.dataset.validation_max_tokens,
             ) as workers,
         ):
             telemetry.shard_workers = workers.count

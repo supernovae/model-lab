@@ -721,7 +721,8 @@ story. Batch 1 uses scalar `Tokenizer.encode`; larger batches use Rust
 `encode_batch` in source order, preserving EOS and byte-address semantics.
 Preparation uses a fresh, Torch-free tokenizer child with
 `TOKENIZERS_PARALLELISM=true` and a Rayon cap installed before its first encode:
-`min(4, os.cpu_count() or 1)`, or the explicit envelope's `max_workers`.
+four threads for one child, or the explicit envelope's `max_workers`, always
+bounded by measured CPU and RAM capacity.
 Tokenizer training remains scalar with its existing parallelism policy.
 Document and byte caps, resource policies, timings, and profiles do not enter
 the scientific manifest or cache identity.
@@ -809,10 +810,15 @@ max_queue_depth: 4
 spill_to_disk: true
 ```
 
-`preparation_shard_workers` defaults to 1, retaining one tokenizer child shared
-across sequential splits. The capacity planner bounds total native threads to
-at most four. Requested chunk workers (1–32) are reduced by that budget and the
-queue cap. An odd native budget is fully assigned: three threads with two workers
+Inside an envelope, `preparation_shard_workers` defaults to 1, retaining one
+tokenizer child shared across sequential splits, and `max_workers` is the total
+native thread budget (four when omitted). The capacity planner bounds that
+budget by available CPUs and RAM. Requested chunk workers (1–32) are reduced by
+that budget and the queue cap. Without any envelope, preparation sizes itself:
+one child of four threads per 32M declared tokens, up to measured capacity, so
+small preparations keep one child and large ones use the host. One child stops
+scaling near eight threads, which is why capacity is spread over children.
+Worker counts never change prepared arrays or cache identity. An odd native budget is fully assigned: three threads with two workers
 uses pools of two and one. Receipts disclose requested/effective counts, actual
 per-child threads, capacity and fallback reasons. Native CPU tokenization uses
 the existing Rust-backed `tokenizers` package; no CUDA or NVIDIA dependency is added.
