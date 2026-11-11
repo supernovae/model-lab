@@ -86,6 +86,44 @@ def _deterministic_host_ram(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(host_capacity, "measure_memory", measured)
 
 
+# Every ``train``/``try`` validates its runtime with ``klab.runtime_probe`` in a
+# fresh interpreter that imports the framework: about 1.5 s on a workstation and
+# far more on a loaded 4-vCPU runner. Tests start hundreds of tiny runs, so that
+# probe was most of the suite's wall time (9 probes and 14 of 16 s in one resume
+# test). Within one test process the answer for an identical request does not
+# change, so the real probe runs once per distinct request and is reused.
+# Failures are never reused, tests/test_runtime.py always probes for real, and a
+# test that replaces ``subprocess.run`` gets its own result. Shipped code is
+# untouched: every production run still probes.
+_PROBE_RESULTS: dict[str, dict[str, object]] = {}
+
+
+@pytest.fixture(autouse=True)
+def _reuse_runtime_probe(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import copy
+    import json
+    import subprocess
+
+    from klab import runtime
+
+    if request.module.__name__ == "test_runtime":
+        return
+    probe = runtime._probe_runtime
+    real_run = subprocess.run
+
+    def reused(**options: object) -> dict[str, object]:
+        if subprocess.run is not real_run:
+            return probe(**options)
+        key = json.dumps([sys.executable, options], sort_keys=True)
+        if key not in _PROBE_RESULTS:
+            _PROBE_RESULTS[key] = probe(**options)
+        return copy.deepcopy(_PROBE_RESULTS[key])
+
+    monkeypatch.setattr(runtime, "_probe_runtime", reused)
+
+
 # Fast/full split. Tests listed in tests/slow_tests.txt (by base node id, so
 # every parametrized case follows) get the `slow` marker; `-m "not slow"` is
 # the fast suite. See docs/test-speed.md.

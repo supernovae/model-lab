@@ -138,6 +138,22 @@ covers both directions. Tests that
 monkeypatch `psutil.virtual_memory` themselves still see their own values,
 which is how `tests/test_host_capacity.py` covers the reserve logic.
 
+## Runtime probe reuse in tests
+
+Every `train` and `try` validates its runtime with `klab.runtime_probe` in a
+fresh interpreter that imports the framework. That costs about 1.5 s on a
+workstation and much more on a loaded 4-vCPU runner, and tests start hundreds
+of tiny runs: the probe was most of the suite's wall time. The root
+`conftest.py` therefore runs the real probe once per distinct request in each
+test process and reuses the successful result. Failures are never reused,
+`tests/test_runtime.py` always probes for real, a test that replaces
+`subprocess.run` gets its own result, and children launched by a test still
+probe. Shipped code is unchanged: every real run probes.
+
+When a test is slow, profile it before shrinking it
+(`python -m cProfile -m pytest -n 0 TEST`): repeated subprocess startup is the
+usual cause, not model size.
+
 ## CPU worker limits and stall diagnosis
 
 The root test `conftest.py` sets `OMP_NUM_THREADS`, `MKL_NUM_THREADS`,
@@ -192,7 +208,7 @@ Always pass `-n 0` for MLX/MPS or run another accelerator test/training process 
 
 The full CPU jobs on Linux and macOS retain their tests, hardware exclusions,
 and existing 30-minute safety limits, but are manual-only while their long
-native integrations are paused as automatic build gates. The automatic `safe`, `lab-loop` and `fast` jobs have 8-, 18- and 18-minute limits; the nightly full suite has 25 minutes. The manual hosted
+native integrations are paused as automatic build gates. The automatic `safe`, `lab-loop`, `fast` and `staging` jobs have 8-, 12-, 12- and 12-minute limits; the nightly full suite has 25 minutes. The manual hosted
 CPU jobs use up to four workers with work-stealing, as local runs do by default.
 
 The [historical CI run 36380519748](https://github.com/supernovae/model-lab/actions/runs/36380519748)
