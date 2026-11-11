@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 from test_training import config
 
-from sparselab.data.packing import prepare_data
-from sparselab.data.tokenizer import load_tokenizer
+from klab.data.packing import prepare_data
+from klab.data.tokenizer import load_tokenizer
 
 
 def conversation(question, answer):

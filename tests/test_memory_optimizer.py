@@ -6,8 +6,8 @@ import pytest
 import torch
 from torch import nn
 
-from sparselab.model.memory import TokenNgramMemory
-from sparselab.training.optimizer import (
+from klab.model.memory import TokenNgramMemory
+from klab.training.optimizer import (
     is_ngram_table_parameter,
     learning_rate_for_step,
     make_optimizer,

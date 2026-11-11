@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from sparselab.evaluation import surface_triage_import
-from sparselab.evaluation.surface_review import open_surface_bundle
+from klab.evaluation import surface_triage_import
+from klab.evaluation.surface_review import open_surface_bundle
 
 
 def _report(run_id: str, digest: str, text: str):

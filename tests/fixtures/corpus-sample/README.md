@@ -8,22 +8,22 @@ native JSON output; you can instead copy that ID from `corpus sample`. Choose a
 fresh persistent workspace for a new copy of the sample:
 
 ```sh
-export SPARSELAB_WORK_DIR="$HOME/.local/share/sparselab"
-WORK="$SPARSELAB_WORK_DIR/experiments/corpus-teaching"
-uv run --locked --extra cpu sparselab --work-dir "$WORK" corpus acquire tests/fixtures/corpus-sample/corpus.yaml
-BUILD=$(uv run --locked --extra cpu sparselab --work-dir "$WORK" corpus build tests/fixtures/corpus-sample/corpus.yaml --offline)
-RELEASE=$(uv run --locked --extra cpu sparselab --work-dir "$WORK" corpus freeze "$BUILD")
-uv run --locked --extra cpu sparselab --work-dir "$WORK" corpus describe "$RELEASE"
-uv run --locked --extra cpu sparselab --work-dir "$WORK" corpus sources "$RELEASE"
-uv run --locked --extra cpu sparselab --work-dir "$WORK" corpus audit "$RELEASE"
-SAMPLE_ID=$(uv run --locked --extra cpu sparselab --work-dir "$WORK" corpus sample "$RELEASE" --domain technical_docs | jq -er '.records[0].record_id')
-uv run --locked --extra cpu sparselab --work-dir "$WORK" corpus lineage "$RELEASE" "$SAMPLE_ID"
-uv run --locked --extra cpu sparselab --work-dir "$WORK" corpus review "$RELEASE" --kind chat
-EXPORT=$(uv run --locked --extra cpu sparselab --work-dir "$WORK" corpus export "$RELEASE" --view lm --base-run-config configs/runtime_smoke_cpu.yaml --vocab-size 300)
-uv run --locked --extra cpu sparselab --work-dir "$WORK" tokenizer train "$EXPORT/tokenizer.yaml"
-uv run --locked --extra cpu sparselab --work-dir "$WORK" data prepare "$EXPORT/run.yaml"
-uv run --locked --extra cpu sparselab --work-dir "$WORK" corpus describe "$RELEASE" --tokenizer "$EXPORT/tokenizer/tokenizer.json"
-uv run --locked --extra cpu sparselab --work-dir "$WORK" corpus export "$RELEASE" --view chat --base-run-config configs/runtime_smoke_cpu.yaml --vocab-size 300
+export KLAB_WORK_DIR="$HOME/.local/share/klab"
+WORK="$KLAB_WORK_DIR/experiments/corpus-teaching"
+uv run --locked --extra cpu klab --work-dir "$WORK" corpus acquire tests/fixtures/corpus-sample/corpus.yaml
+BUILD=$(uv run --locked --extra cpu klab --work-dir "$WORK" corpus build tests/fixtures/corpus-sample/corpus.yaml --offline)
+RELEASE=$(uv run --locked --extra cpu klab --work-dir "$WORK" corpus freeze "$BUILD")
+uv run --locked --extra cpu klab --work-dir "$WORK" corpus describe "$RELEASE"
+uv run --locked --extra cpu klab --work-dir "$WORK" corpus sources "$RELEASE"
+uv run --locked --extra cpu klab --work-dir "$WORK" corpus audit "$RELEASE"
+SAMPLE_ID=$(uv run --locked --extra cpu klab --work-dir "$WORK" corpus sample "$RELEASE" --domain technical_docs | jq -er '.records[0].record_id')
+uv run --locked --extra cpu klab --work-dir "$WORK" corpus lineage "$RELEASE" "$SAMPLE_ID"
+uv run --locked --extra cpu klab --work-dir "$WORK" corpus review "$RELEASE" --kind chat
+EXPORT=$(uv run --locked --extra cpu klab --work-dir "$WORK" corpus export "$RELEASE" --view lm --base-run-config configs/runtime_smoke_cpu.yaml --vocab-size 300)
+uv run --locked --extra cpu klab --work-dir "$WORK" tokenizer train "$EXPORT/tokenizer.yaml"
+uv run --locked --extra cpu klab --work-dir "$WORK" data prepare "$EXPORT/run.yaml"
+uv run --locked --extra cpu klab --work-dir "$WORK" corpus describe "$RELEASE" --tokenizer "$EXPORT/tokenizer/tokenizer.json"
+uv run --locked --extra cpu klab --work-dir "$WORK" corpus export "$RELEASE" --view chat --base-run-config configs/runtime_smoke_cpu.yaml --vocab-size 300
 ```
 
 Frozen test rows are held out of tokenizer fitting and training exports. Assistant/tool messages are inert transcript examples; corpus derivation does not execute tool calls. A successful smoke proves local execution and provenance wiring, not source rights outside this MIT fixture, model usefulness or scientific performance.

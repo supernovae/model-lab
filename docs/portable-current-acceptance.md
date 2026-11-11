@@ -36,7 +36,7 @@ For the synthetic creation above, `INPUT` is an absolute copy of Workshop's
 whose parent exists. The exact recipe arguments are:
 
 ```sh
-sparselab experiment recipe create "$INPUT" --profile preparation \
+klab experiment recipe create "$INPUT" --profile preparation \
   --id workshop-synthetic-cpu-preparation --entrypoint preparation-campaign.json \
   --file campaign:preparation-campaign.json --file run_config:run.json \
   --file tokenizer_config:tokenizer-config.json --file metadata:monitor.json \

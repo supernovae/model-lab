@@ -6,8 +6,8 @@ from pathlib import Path
 import yaml
 from tokenizers import Tokenizer, models
 
-from sparselab.canonical import canonical_digest
-from sparselab.config.loading import load_config
+from klab.canonical import canonical_digest
+from klab.config.loading import load_config
 
 
 def test_native_memory_map_binds_complete_validated_config(tmp_path):
@@ -35,7 +35,7 @@ def test_native_memory_map_binds_complete_validated_config(tmp_path):
     command = [
         sys.executable,
         "-m",
-        "sparselab",
+        "klab",
         "tokenizer",
         "memory-map",
         str(tokenizer),
@@ -64,7 +64,7 @@ def test_native_memory_map_binds_complete_validated_config(tmp_path):
 def test_native_code_work_records_missing_executor_without_loading_model(tmp_path):
     # The unit adapter suite mocks sandbox outcomes; this public path verifies
     # a refused local backend does not try to open a model or run generated code.
-    from sparselab.evaluation.code_work import (
+    from klab.evaluation.code_work import (
         CodeWorkDeclaration,
         ExecutorUnavailable,
         preflight_executor,
@@ -105,7 +105,7 @@ def test_native_code_work_records_missing_executor_without_loading_model(tmp_pat
         [
             sys.executable,
             "-m",
-            "sparselab",
+            "klab",
             "capability",
             "code-work",
             "no-model",

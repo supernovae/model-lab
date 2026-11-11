@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from sparselab.config.models import DatasetConfig
-from sparselab.data import datasets
-from sparselab.data.engram_recall import recall_case
-from sparselab.data.instruction_reference import iter_instruction_reference
+from klab.config.models import DatasetConfig
+from klab.data import datasets
+from klab.data.engram_recall import recall_case
+from klab.data.instruction_reference import iter_instruction_reference
 
 
 class Stream:

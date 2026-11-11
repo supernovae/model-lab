@@ -5,11 +5,11 @@ import pytest
 import torch
 from test_engram_integration import model_config
 
-from sparselab.address_hash import engram_table_sizes
-from sparselab.config.models import AttentionConfig
-from sparselab.data.story_packing import MatchedStoryDataset
-from sparselab.model.attention.dense import DenseAttention
-from sparselab.model.transformer import DenseLM
+from klab.address_hash import engram_table_sizes
+from klab.config.models import AttentionConfig
+from klab.data.story_packing import MatchedStoryDataset
+from klab.model.attention.dense import DenseAttention
+from klab.model.transformer import DenseLM
 
 
 def test_sdpa_avoids_unused_dense_masks_and_keeps_reference_diagnostics():
@@ -81,7 +81,7 @@ def test_context_transfer_cli_rejects_implicit_or_unbound_promotion():
         [
             sys.executable,
             "-m",
-            "sparselab",
+            "klab",
             "train",
             "configs/smoke_cpu.yaml",
             "--extend-context",
@@ -97,10 +97,10 @@ def test_context_transfer_cli_rejects_implicit_or_unbound_promotion():
 def test_native_preparation_accepts_short_whole_document_splits(tmp_path):
     from lab_fixtures import write_smoke_inputs
 
-    from sparselab.config.loading import load_config
-    from sparselab.config.models import RunConfig
-    from sparselab.data.packing import prepare_data
-    from sparselab.data.tokenizer import load_tokenizer
+    from klab.config.loading import load_config
+    from klab.config.models import RunConfig
+    from klab.data.packing import prepare_data
+    from klab.data.tokenizer import load_tokenizer
 
     config = load_config(write_smoke_inputs(tmp_path))
     train = tmp_path / "train.jsonl"

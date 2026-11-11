@@ -1,7 +1,7 @@
 # Accelerator image builds
 
 Linux accelerator variants are independent images in the public
-`ghcr.io/supernovae/tiny-sparse-lab` package. A backend participates only when
+`ghcr.io/supernovae/model-lab` package. A backend participates only when
 `container/backends/NAME/config.json` and its complete hashed wheel lock exist.
 Blocked backend status documents do not activate builds. macOS Metal needs native
 delivery and is not provided by these Linux images.

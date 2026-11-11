@@ -37,7 +37,7 @@ def main():
         os.sched_setaffinity(0, sorted(os.sched_getaffinity(0))[: args.workers])
     for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
         os.environ[name] = "1"
-    os.environ["SPARSELAB_MIXTURE_WORKERS"] = str(args.workers)
+    os.environ["KLAB_MIXTURE_WORKERS"] = str(args.workers)
     root = args.root.resolve()
     root.mkdir(mode=0o700, parents=True, exist_ok=False)
     os.environ["XDG_CONFIG_HOME"] = str(root / "config")
@@ -45,11 +45,11 @@ def main():
     import psutil
     from tokenizers import Tokenizer, models, pre_tokenizers
 
-    from sparselab.canonical import canonical_json
-    from sparselab.corpus.mixture import _schedule
-    from sparselab.corpus.retained_mixture import RetainedMixtureIndex
-    from sparselab.corpus.split_runs import write_rows
-    from sparselab.training.manifest import sha256_file
+    from klab.canonical import canonical_json
+    from klab.corpus.mixture import _schedule
+    from klab.corpus.retained_mixture import RetainedMixtureIndex
+    from klab.corpus.split_runs import write_rows
+    from klab.training.manifest import sha256_file
 
     workspace = root / "corpora" / "synthetic"
     release = workspace / "builds" / "build"
@@ -167,8 +167,8 @@ def main():
 
             options = {}
             if "frontier" in inspect.signature(_schedule).parameters:
-                from sparselab.corpus.mixture import _native_mixture_completion
-                from sparselab.corpus.mixture_pipeline import (
+                from klab.corpus.mixture import _native_mixture_completion
+                from klab.corpus.mixture_pipeline import (
                     MixtureFrontier,
                     pipeline_request,
                 )
@@ -218,11 +218,11 @@ def main():
         or results[0]["output_sha256"] != results[1]["output_sha256"]
     ):
         raise ValueError("cold/warm outputs differ")
-    import sparselab
+    import klab
 
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD"],
-        cwd=Path(sparselab.__file__).parents[2],
+        cwd=Path(klab.__file__).parents[2],
         capture_output=True,
         text=True,
         check=True,

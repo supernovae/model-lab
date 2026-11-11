@@ -3,18 +3,18 @@ from pathlib import Path
 import pytest
 import torch
 
-from sparselab.config.loading import load_config
-from sparselab.config.models import AdafactorConfig, ModelConfig
-from sparselab.memory import parameter_inventory
-from sparselab.model.inspection import (
+from klab.config.loading import load_config
+from klab.config.models import AdafactorConfig, ModelConfig
+from klab.memory import parameter_inventory
+from klab.model.inspection import (
     architecture_metrics,
     inspect_model,
     inspection_report,
     named_tensor_inventory,
 )
-from sparselab.model.transformer import DenseLM
-from sparselab.training.manifest import config_sha256
-from sparselab.training.metric_registry import metric_spec
+from klab.model.transformer import DenseLM
+from klab.training.manifest import config_sha256
+from klab.training.metric_registry import metric_spec
 
 
 @pytest.mark.parametrize(
@@ -334,8 +334,8 @@ def test_independent_memory_initialization_preserves_trunk_and_future_rng(
 
 @pytest.mark.parametrize("ports", [(), (0, 1)])
 def test_token_mapping_buffer_bytes_match_registered_tensor(ports) -> None:
-    from sparselab.canonical import canonical_digest
-    from sparselab.memory import registered_runtime_buffers_bytes
+    from klab.canonical import canonical_digest
+    from klab.memory import registered_runtime_buffers_bytes
 
     base = load_config(Path("configs/smoke_memory_cpu.yaml"))
     vocabulary = base.model.vocab_size

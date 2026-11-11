@@ -4,16 +4,16 @@ A corpus release is a frozen, verified collection of derived views. Its source s
 
 ## Preparing an input
 
-Read the project declarations before acquiring a source. Use `sparselab corpus acquire` to copy declared bytes into an immutable snapshot.
+Read the project declarations before acquiring a source. Use `klab corpus acquire` to copy declared bytes into an immutable snapshot.
 
 - A declaration names a source revision and license.
 - The acquisition lock records the selected blob hashes.
 - A released view is verified again before tokenizer fitting.
 
 ```sh
-sparselab corpus build corpora/devmind-sample-v0/corpus.yaml --offline
+klab corpus build corpora/devmind-sample-v0/corpus.yaml --offline
 ```
 
 ## Inspecting lineage
 
-Use `sparselab corpus lineage` with a record identifier to inspect its parent documents, split and evidence spans. This command does not execute a tool or approve a generated answer.
+Use `klab corpus lineage` with a record identifier to inspect its parent documents, split and evidence spans. This command does not execute a tool or approve a generated answer.

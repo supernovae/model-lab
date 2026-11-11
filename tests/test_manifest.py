@@ -7,11 +7,11 @@ from typing import cast
 
 import pytest
 
-from sparselab.canonical import canonical_digest, canonical_json
-from sparselab.config.loading import load_config
-from sparselab.runtime import RuntimeInfo
-from sparselab.training import manifest
-from sparselab.training.manifest import (
+from klab.canonical import canonical_digest, canonical_json
+from klab.config.loading import load_config
+from klab.runtime import RuntimeInfo
+from klab.training import manifest
+from klab.training.manifest import (
     ArtifactIdentity,
     RunManifest,
     architecture_sha256,
@@ -24,7 +24,7 @@ from sparselab.training.manifest import (
 def test_source_identity_excludes_only_self_referential_lifecycle_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    package_root = tmp_path / "sparselab"
+    package_root = tmp_path / "klab"
     lifecycle = package_root / "research" / "resources" / "lifecycle.json"
     implementation = package_root / "training" / "implementation.py"
     lifecycle.parent.mkdir(parents=True)
@@ -101,7 +101,7 @@ def test_legacy_final_memory_injection_preserves_hashes_and_embedding_binds() ->
     expected = {
         "runtime_smoke_cpu.yaml": (
             "2843e32cd3b64ec6049a20881ada0512e561b9fa4c1b05dcc8910dde01390c4f",
-            "abee11a5910dcd65942047b98a65b1c600125c7142fae5099c80771d9eebc949",
+            "094e562b3dddcca70c53ad9bd66d7e8f82807f2998b51696e2773510621fa598",
         ),
     }
     for filename, digests in expected.items():

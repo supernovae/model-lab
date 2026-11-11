@@ -3,7 +3,7 @@
 A report consumes one explicit collected report; it does not choose the latest/best result, train, load a model, generate, or evaluate cards.
 
 ```sh
-sparselab study report experiments/ffn-memory/study.yaml RECEIPT.json \
+klab study report experiments/ffn-memory/study.yaml RECEIPT.json \
   --evidence COLLECTED.json --research experiments/ffn-memory/research.json \
   --output artifacts/research-reports
 ```
@@ -17,7 +17,7 @@ Historical v1 receipts created before `model.semantic_memory_dim` and `training.
 
 For research-scaffolded studies, the configured endpoint policy is the first configured limit. An endpoint is complete only when it reaches either configured `max_steps` or `max_tokens` without exceeding either cap and has complete identities. Earlier interruption is partial. Pair deltas require complete matched endpoints; partial, unavailable, invalid, and inconclusive contexts stay visible and are not converted to a score or zero. Raw card cases, including zero and negative deltas, are retained.
 
-Recipe-declared `sparselab-factorial-design` version 1 records extend the recipe, not the study v1 schema. A complete 2×2 context reports `y00`, `y10`, `y01`, and `y11`, with factor-A effect `((y10-y00)+(y11-y01))/2`, factor-B effect `((y01-y00)+(y11-y10))/2`, and `interaction_delta=y11-y10-y01+y00` on each catalog metric's raw scale. Each outcome requires all four committed cells to match at endpoint step/tokens, tokenizer, data, source, runtime, and training-runtime identity. Missing, partial, invalid, duplicated, or mismatched cells are inconclusive; no missing value is replaced with zero and no effect is emitted.
+Recipe-declared `klab-factorial-design` version 1 records extend the recipe, not the study v1 schema. A complete 2×2 context reports `y00`, `y10`, `y01`, and `y11`, with factor-A effect `((y10-y00)+(y11-y01))/2`, factor-B effect `((y01-y00)+(y11-y10))/2`, and `interaction_delta=y11-y10-y01+y00` on each catalog metric's raw scale. Each outcome requires all four committed cells to match at endpoint step/tokens, tokenizer, data, source, runtime, and training-runtime identity. Missing, partial, invalid, duplicated, or mismatched cells are inconclusive; no missing value is replaced with zero and no effect is emitted.
 
 Packaged factorials cover FFN width (`4x` versus `1x`) × memory, MLA attention (`dense` versus `mla-half`) × memory, sparse attention (`dense` versus `sparse-2`) × memory, and MoE capacity (`dense-2x` versus `moe`) × memory. The `latent-sweep` and `budget-sweep` recipes also retain their other declared axis levels for boundary inspection; the factorial effect uses only its declared two-level subset.
 

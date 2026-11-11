@@ -4,7 +4,7 @@ import hashlib
 
 import pytest
 
-from sparselab.corpus.tokenizer_observation import _read, _relocation_mapper
+from klab.corpus.tokenizer_observation import _read, _relocation_mapper
 
 
 def test_tokenizer_relocation_maps_both_roots_and_detects_changed_bytes(tmp_path):
@@ -59,8 +59,8 @@ def test_tokenizer_relocation_maps_both_roots_and_detects_changed_bytes(tmp_path
 def test_observed_tokenizer_refuses_malformed_split_metadata(tmp_path, case):
     from tokenizer_observation_fixtures import observed_tokenizer
 
-    from sparselab.corpus.export import _export_binding
-    from sparselab.corpus.tokenizer_observation import verify_observed_tokenizer
+    from klab.corpus.export import _export_binding
+    from klab.corpus.tokenizer_observation import verify_observed_tokenizer
 
     observation, path, config, release, manifest, export, token_manifest, write = (
         observed_tokenizer(tmp_path)

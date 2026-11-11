@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from sparselab.corpus.admission_inspection_cache import capture
-from sparselab.corpus.completed_preparation import _producer
-from sparselab.corpus.retained_mixture import _phase
-from sparselab.corpus.split_runs import SplitStages, write_rows
+from klab.corpus.admission_inspection_cache import capture
+from klab.corpus.completed_preparation import _producer
+from klab.corpus.retained_mixture import _phase
+from klab.corpus.split_runs import SplitStages, write_rows
 
 
 def test_owned_native_stage_fallback_refuses_changed_or_present_bad_proof(
@@ -18,7 +18,7 @@ def test_owned_native_stage_fallback_refuses_changed_or_present_bad_proof(
     root.mkdir(mode=0o700)
     config = tmp_path / "config"
     config.mkdir(mode=0o700)
-    key_dir = config / "sparselab"
+    key_dir = config / "klab"
     key_dir.mkdir(mode=0o700)
     key = key_dir / "verification-key-v1"
     key.write_bytes(bytes(range(32)))
@@ -87,8 +87,8 @@ def test_stage_migration_reuses_real_files_and_refuses_tampering(tmp_path, monke
     import hashlib
     import shutil
 
-    from sparselab.canonical import canonical_digest, canonical_json
-    from sparselab.corpus.release_migration import (
+    from klab.canonical import canonical_digest, canonical_json
+    from klab.corpus.release_migration import (
         _SOURCE,
         _TARGET,
         _authority,
@@ -97,13 +97,13 @@ def test_stage_migration_reuses_real_files_and_refuses_tampering(tmp_path, monke
         attest_mixture_stages,
         verify_mixture_stage_migration,
     )
-    from sparselab.verification_proofs import ProofStore
+    from klab.verification_proofs import ProofStore
 
     root = tmp_path / "source" / "work"
     root.mkdir(parents=True, mode=0o700)
     config_root = tmp_path / "private-config"
     config_root.mkdir(mode=0o700)
-    key_dir = config_root / "sparselab"
+    key_dir = config_root / "klab"
     key_dir.mkdir(mode=0o700)
     key = key_dir / "verification-key-v1"
     key.write_bytes(bytes(range(32)))

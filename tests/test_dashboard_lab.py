@@ -10,11 +10,11 @@ from typing import Any
 import pytest
 from test_explorer import MOE_NGRAM, TEXT, _loaded
 
-from sparselab import explorer
-from sparselab.dashboard import explorer_view as xv
-from sparselab.dashboard import lab_data
-from sparselab.lab_records import jsonable, seal, write_json_atomic, write_sealed
-from sparselab.probes.suite import suite_identity
+from klab import explorer
+from klab.dashboard import explorer_view as xv
+from klab.dashboard import lab_data
+from klab.lab_records import jsonable, seal, write_json_atomic, write_sealed
+from klab.probes.suite import suite_identity
 
 pytest.importorskip("streamlit")
 from streamlit.testing.v1 import AppTest
@@ -60,7 +60,7 @@ def _probe_result() -> dict[str, Any]:
         {"low": 0.1, "high": 0.2, "confidence": 0.15, "accuracy": 0.2, "share": 0.4},
     ]
     return {
-        "format": "sparselab-probe-v1",
+        "format": "klab-probe-v1",
         "created_at": "2026-10-10T19:00:00+00:00",
         "suite": {"sha256": suite_identity()["sha256"]},
         "tier": "standard",
@@ -137,7 +137,7 @@ def lab(tmp_path_factory: pytest.TempPathFactory) -> Path:
     write_sealed(
         _mk(root / "tries/try-0/try.json"),
         {
-            "format": "sparselab-lab-try-v1",
+            "format": "klab-lab-try-v1",
             "try_id": "try-0",
             "created_at": "2026-10-10T18:00:00+00:00",
             "question": "Do 4 experts beat the dense FFN?",
@@ -180,14 +180,14 @@ def test_activity_and_next_steps_are_verdict_first(lab: Path) -> None:
     steps = lab_data.next_steps(snap)
     # "tweak" names no command (the verdict banner says it); the rest do.
     assert not any(s["title"].startswith("Latest verdict") for s in steps)
-    assert all(s["why"] and s["command"].startswith("sparselab ") for s in steps)
-    assert steps[-1]["command"] == "sparselab explore lab-try-1"
+    assert all(s["why"] and s["command"].startswith("klab ") for s in steps)
+    assert steps[-1]["command"] == "klab explore lab-try-1"
     with_runs = lab_data.next_steps(snap, [lab / "runs"])
     assert any(
-        s["command"] == f"sparselab probe {lab / 'runs/plain-run'}" for s in with_runs
+        s["command"] == f"klab probe {lab / 'runs/plain-run'}" for s in with_runs
     )
     empty = lab_data.next_steps(lab_data.snapshot(lab / "nowhere"))
-    assert empty[0]["command"].startswith("sparselab try")
+    assert empty[0]["command"].startswith("klab try")
 
 
 def test_catalog_unscored_runs_and_behaviors(lab: Path) -> None:
@@ -199,7 +199,7 @@ def test_catalog_unscored_runs_and_behaviors(lab: Path) -> None:
     assert any(r["kind"] == "reference" for r in catalog.values())
     unscored = lab_data.unscored_runs([lab / "runs"], snap.points)
     assert [u["run_id"] for u in unscored] == ["plain-run"]
-    assert unscored[0]["command"] == f"sparselab probe {lab / 'runs/plain-run'}"
+    assert unscored[0]["command"] == f"klab probe {lab / 'runs/plain-run'}"
     entry = snap.entries[0]
     assert lab_data.generations(entry) == [
         {"prompt": "One day", "candidate": " the the bird", "baseline": " 1 1 1 1"}
@@ -247,7 +247,7 @@ def test_explorer_figures_follow_the_exploration(lab: Path) -> None:
 def _page(name: str, lab: str) -> None:
     from pathlib import Path
 
-    from sparselab.dashboard import lab_pages
+    from klab.dashboard import lab_pages
 
     root = Path(lab)
     runs = [root / "runs"]
@@ -279,11 +279,11 @@ def _text(test: AppTest) -> str:
 @pytest.mark.parametrize(
     ("page", "command"),
     [
-        ("home", "sparselab try DELTA.yaml --vs BASELINE.yaml"),
-        ("experiments", "sparselab try DELTA.yaml --vs BASELINE.yaml"),
-        ("models", "sparselab try DELTA.yaml --vs BASELINE.yaml"),
-        ("behaviors", "sparselab probe RUN --config standard"),
-        ("explorer", "sparselab explore RUN"),
+        ("home", "klab try DELTA.yaml --vs BASELINE.yaml"),
+        ("experiments", "klab try DELTA.yaml --vs BASELINE.yaml"),
+        ("models", "klab try DELTA.yaml --vs BASELINE.yaml"),
+        ("behaviors", "klab probe RUN --config standard"),
+        ("explorer", "klab explore RUN"),
     ],
 )
 def test_empty_pages_name_the_command_to_run(
@@ -318,7 +318,7 @@ def test_models_page_lists_catalog_references_and_unscored_runs(lab: Path) -> No
     test = _render("models", lab)
     assert len(test.dataframe) >= 2  # catalog + references
     text = _text(test)
-    assert f"sparselab probe {lab / 'runs/plain-run'}" in text
+    assert f"klab probe {lab / 'runs/plain-run'}" in text
 
 
 def test_behaviors_page_shows_generations_misses_and_reliability(lab: Path) -> None:
@@ -369,7 +369,7 @@ def test_explorer_page_renders_a_cached_moe_memory_exploration(lab: Path) -> Non
 def test_explorer_dashboard_labels_unverified_cache(
     lab: Path, runtime: Any, reason: str
 ) -> None:
-    from sparselab.lab_records import seal, write_json_atomic
+    from klab.lab_records import seal, write_json_atomic
 
     entry = lab_data.snapshot(lab).explorations[0]
     path = Path(entry["path"])
@@ -390,7 +390,7 @@ def test_explorer_dashboard_labels_unverified_cache(
 def test_explorer_picker_distinguishes_runtime_and_legacy_entries(
     lab: Path, tmp_path: Path
 ) -> None:
-    from sparselab.lab_records import seal, write_json_atomic
+    from klab.lab_records import seal, write_json_atomic
 
     entry = lab_data.snapshot(lab).explorations[0]
     stored = explorer.read_cached(Path(entry["path"]))
@@ -431,7 +431,7 @@ def test_explorer_page_names_the_size_limit(lab: Path) -> None:
     exploration = lab_data.snapshot(lab).explorations[0]
 
     def app(payload: dict) -> None:
-        from sparselab.dashboard.lab_pages import render_exploration
+        from klab.dashboard.lab_pages import render_exploration
 
         render_exploration(payload)
 
@@ -453,7 +453,7 @@ def test_full_app_opens_on_lab_home(lab: Path, monkeypatch: pytest.MonkeyPatch) 
         sys, "argv", ["app", "--runs-dir", str(lab / "runs"), "--lab-dir", str(lab)]
     )
     test = AppTest.from_file(
-        str(ROOT / "src/sparselab/dashboard/app.py"), default_timeout=60
+        str(ROOT / "src/klab/dashboard/app.py"), default_timeout=60
     )
     test.run()
     assert not test.exception
@@ -608,7 +608,7 @@ def test_needle_chart_never_overlays_item_groups(tmp_path: Path) -> None:
 def test_needle_chance_is_omitted_when_the_group_disagrees(tmp_path: Path) -> None:
     import json
 
-    from sparselab.probes.points import consistent_chance
+    from klab.probes.points import consistent_chance
 
     assert consistent_chance([0.25, 0.25]) == pytest.approx(0.25)
     assert consistent_chance([0.25, 0.2]) is None
@@ -639,11 +639,11 @@ def test_setup_probes_do_not_replace_scored_dashboard_history(
 ) -> None:
     from test_lab_results import _run
 
-    from sparselab.dashboard.probe_data import load_history
-    from sparselab.lab_records import is_setup_record, read_lab_record
-    from sparselab.lab_results import ResultLookupError
-    from sparselab.probes.cli import run_probe
-    from sparselab.probes.render import render
+    from klab.dashboard.probe_data import load_history
+    from klab.lab_records import is_setup_record, read_lab_record
+    from klab.lab_results import ResultLookupError
+    from klab.probes.cli import run_probe
+    from klab.probes.render import render
 
     # Real failed lookup produces the setup shape; started/interrupted are
     # retained fixture states of the same attempt, without executing a model.
@@ -695,13 +695,11 @@ def test_setup_only_dashboard_keeps_empty_result_guidance(
 ) -> None:
     write_sealed(
         _mk(tmp_path / "probes/setup/probe.json"),
-        {"format": "sparselab-probe-v1", "probe_id": "setup", "status": "started"},
+        {"format": "klab-probe-v1", "probe_id": "setup", "status": "started"},
     )
     snap = lab_data.snapshot(tmp_path)
     assert snap.empty and not snap.entries and not lab_data.activity(snap)
-    assert "sparselab try DELTA.yaml --vs BASELINE.yaml" in _text(
-        _render(page, tmp_path)
-    )
+    assert "klab try DELTA.yaml --vs BASELINE.yaml" in _text(_render(page, tmp_path))
 
 
 @pytest.mark.parametrize("action", ["rerun", "escalate"])
@@ -710,9 +708,9 @@ def test_followup_plan_preserves_sealed_policy_and_ui_text(
 ) -> None:
     import copy
 
-    from sparselab.dashboard.probe_hints import followup_plan, render_followup
-    from sparselab.probes import cli as probe_cli
-    from sparselab.probes import config as probe_config
+    from klab.dashboard.probe_hints import followup_plan, render_followup
+    from klab.probes import cli as probe_cli
+    from klab.probes import config as probe_config
 
     def forbidden(*args: Any, **kwargs: Any) -> None:
         pytest.fail("rendering must not load current declarations or execute probes")
@@ -820,8 +818,8 @@ def test_followup_plan_preserves_sealed_policy_and_ui_text(
 
 
 def test_historical_followup_is_explicit_about_missing_policy(tmp_path: Path) -> None:
-    from sparselab.dashboard.probe_data import ProbeEntry
-    from sparselab.dashboard.probe_hints import followup_plan
+    from klab.dashboard.probe_data import ProbeEntry
+    from klab.dashboard.probe_hints import followup_plan
 
     result = _probe_result()
     result["verdict"]["action"] = "rerun"
@@ -839,8 +837,8 @@ def test_historical_followup_is_explicit_about_missing_policy(tmp_path: Path) ->
 
 
 def test_embedded_try_followup_uses_owner_policy(tmp_path: Path) -> None:
-    from sparselab.dashboard.probe_data import ProbeEntry
-    from sparselab.dashboard.probe_hints import followup_plan
+    from klab.dashboard.probe_data import ProbeEntry
+    from klab.dashboard.probe_hints import followup_plan
 
     result = _probe_result()
     result["verdict"].update(action="escalate", next_tier="full")
@@ -869,8 +867,8 @@ def test_embedded_try_followup_uses_owner_policy(tmp_path: Path) -> None:
 def test_not_comparable_try_next_step_requires_repaired_new_try(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.dashboard.probe_hints import render_followup
-    from sparselab.try_config import TryConfig
+    from klab.dashboard.probe_hints import render_followup
+    from klab.try_config import TryConfig
 
     probe = _probe_result()
     probe["verdict"].update(action="escalate", next_tier="full")
@@ -884,7 +882,7 @@ def test_not_comparable_try_next_step_requires_repaired_new_try(
         "resource_envelope_path": None,
     }
     record = {
-        "format": "sparselab-lab-try-v1",
+        "format": "klab-lab-try-v1",
         "try_id": "incomparable",
         "created_at": probe["created_at"],
         "probe": probe,
@@ -928,10 +926,10 @@ def test_not_comparable_try_next_step_requires_repaired_new_try(
         "runs_dir",
     }
     assert not set(plan["not_in_try_schema"]) & set(plan["missing_fields"])
-    assert "sparselab try" in plan["preparation"]
+    assert "klab try" in plan["preparation"]
     assert (
         "ProbeConfig" not in plan["preparation"]
-        and "sparselab probe" not in plan["preparation"]
+        and "klab probe" not in plan["preparation"]
     )
     assert "rerun changes nothing" not in plan["preparation"]
     assert "unchanged rerun cannot fix comparability" in plan["preparation"]
@@ -946,7 +944,7 @@ def test_explorer_v1_historical_tab_contract_and_compare_generations(
 ) -> None:
     import torch
 
-    from sparselab.dashboard import lab_pages
+    from klab.dashboard import lab_pages
 
     lab_dir = tmp_path / "lab"
     runs_dir = tmp_path / "runs"
@@ -974,7 +972,7 @@ def test_explorer_v1_historical_tab_contract_and_compare_generations(
     )
     v2_a = jsonable(explorer.explore_loaded(loaded_a, TEXT))
     v1_body = {k: v for k, v in v2_a.items() if k != "activation"}
-    v1_body["format"] = "sparselab-explorer-v1"
+    v1_body["format"] = "klab-explorer-v1"
     v1_path = explorer._v1_cache_path(lab_dir, "1" * 64, TEXT, v1_body["runtime"])
     v1_path.parent.mkdir(parents=True, exist_ok=True)
     write_json_atomic(v1_path, seal(v1_body))
@@ -1013,7 +1011,7 @@ def test_explorer_v1_historical_tab_contract_and_compare_generations(
     def run_explorer(lab_root: str, runs_root: str) -> None:
         from pathlib import Path
 
-        from sparselab.dashboard import lab_pages
+        from klab.dashboard import lab_pages
 
         lab_pages.explorer_page(Path(lab_root), [Path(runs_root)])
 
@@ -1145,7 +1143,7 @@ def test_explorer_v1_historical_tab_contract_and_compare_generations(
 
 
 def test_explorer_selectors_include_sealed_records_and_deduplicate_roots(tmp_path):
-    from sparselab.dashboard.lab_pages import _explorable_runs
+    from klab.dashboard.lab_pages import _explorable_runs
 
     lab = tmp_path / "lab"
     root = lab / "runs"
@@ -1162,8 +1160,8 @@ def test_explorer_selectors_include_sealed_records_and_deduplicate_roots(tmp_pat
         }
     ]
     for kind, folder, fmt, target_key in (
-        ("try", "tries", "sparselab-lab-try-v1", "arms"),
-        ("probe", "probes", "sparselab-probe-v1", "target"),
+        ("try", "tries", "klab-lab-try-v1", "arms"),
+        ("probe", "probes", "klab-probe-v1", "target"),
     ):
         for suffix, extra in (
             ("local", {}),

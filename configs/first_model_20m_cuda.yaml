@@ -13,12 +13,12 @@ model:
   max_seq_len: 512
 tokenizer:
   # Built by configs/tokenizer_fineweb_scale_8k.yaml (same FineWeb-Edu revision).
-  path: ../sparselab-work/experiments/dense-scale/tokenizer/tokenizer.json
+  path: ../klab-work/experiments/dense-scale/tokenizer/tokenizer.json
 dataset:
   source: fineweb_edu
   revision: 87f09149ef4734204d70ed1d046ddc9ca3f2b8f9
   dataset_config: sample-10BT
-  cache_dir: ../sparselab-work/experiments/dense-scale/data
+  cache_dir: ../klab-work/experiments/dense-scale/data
   train_max_documents: 60000
   validation_max_documents: 1000
   train_max_tokens: 60000000
@@ -45,7 +45,7 @@ evaluation:
   every_steps: 500
   max_batches: 32
 logging:
-  root_dir: ../sparselab-work/experiments/first-model/runs
+  root_dir: ../klab-work/experiments/first-model/runs
   every_steps: 10
 runtime:
   engine: pytorch

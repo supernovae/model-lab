@@ -9,7 +9,7 @@ import pytest
 import yaml
 from test_lab_results import _cli, _record, _run
 
-from sparselab.probes.config import ProbeConfig, load_probe_config
+from klab.probes.config import ProbeConfig, load_probe_config
 
 
 @pytest.mark.parametrize(
@@ -69,8 +69,8 @@ def test_empty_declaration_uses_default_policy(tmp_path: Path, document: str) ->
 def test_invalid_declaration_fails_before_runtime_or_lookup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, document: str
 ) -> None:
-    from sparselab import runtime_environments
-    from sparselab.cli.main import _prepare_runtime_command, build_parser
+    from klab import runtime_environments
+    from klab.cli.main import _prepare_runtime_command, build_parser
 
     request = tmp_path / "probe.yaml"
     request.write_text(document)
@@ -107,7 +107,7 @@ def test_paths_expand_home_and_anchor_to_declaration(
 def test_probe_has_five_executable_options_and_removes_old_flags(
     tmp_path: Path,
 ) -> None:
-    from sparselab.cli.main import build_parser
+    from klab.cli.main import build_parser
 
     parser = build_parser(tmp_path)
     commands = next(
@@ -136,7 +136,7 @@ def test_probe_has_five_executable_options_and_removes_old_flags(
 
 
 def test_runtime_selectors_conflict_before_lookup(tmp_path: Path) -> None:
-    from sparselab.cli.main import _prepare_runtime_command, build_parser
+    from klab.cli.main import _prepare_runtime_command, build_parser
 
     request = tmp_path / "probe.yaml"
     request.write_text("runtime_profile: missing.yaml")
@@ -150,7 +150,7 @@ def test_runtime_selectors_conflict_before_lookup(tmp_path: Path) -> None:
 def test_validated_policy_and_native_envelope_reach_public_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    import sparselab.probes.cli as probes
+    import klab.probes.cli as probes
 
     lab = tmp_path / "custom-lab"
     target = _record(lab, _run(lab, backend="cuda"))
@@ -205,7 +205,7 @@ def test_validated_policy_and_native_envelope_reach_public_probe(
 def test_envelope_failure_stops_before_model_or_probe_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import sparselab.probes.cli as probes
+    import klab.probes.cli as probes
 
     run = _run(tmp_path / "lab")
     request = tmp_path / "probe.yaml"
@@ -226,8 +226,8 @@ def test_profile_file_uses_native_loader_and_authorization_before_scoring(
 ) -> None:
     import sys
 
-    import sparselab.cli.main as cli
-    import sparselab.probes.cli as probes
+    import klab.cli.main as cli
+    import klab.probes.cli as probes
 
     run = _run(tmp_path / "lab", backend="cuda")
     original = (run / "resolved_config.yaml").read_bytes()
@@ -320,9 +320,9 @@ def test_sealed_request_retains_paths_and_values_when_sources_change(
 ) -> None:
     import sys
 
-    import sparselab.cli.main as cli
-    from sparselab.lab_records import seal
-    from sparselab.probes import cli as probes
+    import klab.cli.main as cli
+    from klab.lab_records import seal
+    from klab.probes import cli as probes
 
     target = _record(tmp_path / "lab", _run(tmp_path / "lab"))
     profile_path = tmp_path / "profile.yaml"
@@ -350,7 +350,7 @@ def test_sealed_request_retains_paths_and_values_when_sources_change(
         probes,
         "run_battery",
         lambda *_a, **_k: {
-            "format": "sparselab-probe-v1",
+            "format": "klab-probe-v1",
             "stop": {"kind": "resource_exceeded"},
             "probes": [],
             "verdict": {"action": "rerun"},

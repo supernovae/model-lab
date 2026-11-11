@@ -2,7 +2,7 @@
 
 import pytest
 
-from sparselab.verification_proofs import ProofStore
+from klab.verification_proofs import ProofStore
 
 
 def test_key_availability_is_read_only_until_creation_is_requested(
@@ -59,7 +59,7 @@ def test_key_availability_refuses_a_symlinked_config_root(tmp_path, monkeypatch)
 def test_inspection_cache_preserves_key_publication_refusal(
     tmp_path, monkeypatch, mode
 ):
-    from sparselab.corpus.admission_inspection_cache import InspectionCache
+    from klab.corpus.admission_inspection_cache import InspectionCache
 
     work = tmp_path / "work"
     work.mkdir(mode=0o700)
@@ -92,8 +92,8 @@ def test_key_availability_refuses_malformed_existing_key_without_replacing_it(
 def test_key_publication_diagnostic_preserves_cold_verification(
     tmp_path, monkeypatch, mode
 ):
-    from sparselab.data.verification import verify_file
-    from sparselab.training.manifest import sha256_file
+    from klab.data.verification import verify_file
+    from klab.training.manifest import sha256_file
 
     work = tmp_path / "work"
     work.mkdir(mode=0o700)

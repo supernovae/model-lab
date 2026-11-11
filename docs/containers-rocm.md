@@ -81,12 +81,12 @@ configured Linux Docker host, a minimal CLI check is:
 
 ```sh
 # Replace this placeholder with the published ROCm application digest.
-IMAGE=ghcr.io/supernovae/tiny-sparse-lab@sha256:REPLACE_WITH_ROCM_DIGEST
+IMAGE=ghcr.io/supernovae/model-lab@sha256:REPLACE_WITH_ROCM_DIGEST
 docker run --rm --network=none --cap-drop=ALL \
   --security-opt=no-new-privileges --device=/dev/kfd --device=/dev/dri \
   --group-add "$(stat -c %g /dev/kfd)" \
   --group-add "$(stat -c %g /dev/dri/renderD128)" \
-  -v sparselab-rocm-state:/state "$IMAGE" sparselab --help
+  -v klab-rocm-state:/state "$IMAGE" klab --help
 ```
 
 Use the render node belonging to the intended GPU if it differs from

@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from sparselab.config.models import DatasetConfig
-from sparselab.data.datasets import iter_documents
-from sparselab.data.withheld_facts import (
+from klab.config.models import DatasetConfig
+from klab.data.datasets import iter_documents
+from klab.data.withheld_facts import (
     audit_manifest,
     evaluation_cases,
     split_facts,

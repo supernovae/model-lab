@@ -1,7 +1,7 @@
 # Location and runtime selection
 
 For ordinary lab work, select one persistent root with global `--work-dir`
-**before the command**, or set `SPARSELAB_WORK_DIR`. Use `--runtime ID` when
+**before the command**, or set `KLAB_WORK_DIR`. Use `--runtime ID` when
 executing in a registered interpreter. Neither setting moves explicit outputs,
 changes a saved backend, or grants permission to spend on compute.
 
@@ -23,6 +23,12 @@ work root or the invoking directory. RunConfig's explicit tokenizer/cache/output
 locations keep their existing loader semantics. Reauthor declarations when a
 new destination is intended; selecting a work root is not relocation.
 
+Before the project became Kybern Model Lab, the CLI was `sparselab`, its
+variables were `SPARSELAB_*`, its default roots were `~/.local/share/sparselab`
+and `~/.config/sparselab`, and its records used `sparselab-*` formats. Current
+`klab` does not read or migrate those roots or records. Start a fresh work
+root, and read older evidence from a pre-rename checkout.
+
 An explicit record or checkpoint path is the safest way to read evidence from
 another root. If a short ID matches multiple selected locations, native lookup
 fails as `ambiguous_result`; it never chooses the newest or first match. Sealed
@@ -31,7 +37,7 @@ records select their recorded checkpoint even after `latest` advances.
 ## Retention decision (2026-10-11)
 
 Audit base: `4deab09052fb799a3affd5d39b6c7c312f5bc8a3` (PR #85).
-Current main has no `TODO.md`; the [historical CLI reduction plan](https://github.com/supernovae/tiny-sparse-lab/blob/5df1193198223bee50661e2db65a7f01cc8372c0/TODO.md)
+Current main has no `TODO.md`; the [historical CLI reduction plan](https://github.com/supernovae/model-lab/blob/5df1193198223bee50661e2db65a7f01cc8372c0/TODO.md)
 and the current [roadmap](../ROADMAP.md) supply the intent. This decision covers
 location/runtime controls only. It does not remove research launchers or add
 the future parser surface budget gate.
@@ -40,11 +46,11 @@ Retain the audited controls. Their repeated spellings are not evidence of
 interchangeable behavior:
 
 - `--work-dir` chooses implicit persistent destinations and process scratch.
-  Resolution is flag, environment, absolute nonempty `XDG_DATA_HOME/sparselab`,
-  then `~/.local/share/sparselab`. `build_parser` resolves defaults without
+  Resolution is flag, environment, absolute nonempty `XDG_DATA_HOME/klab`,
+  then `~/.local/share/klab`. `build_parser` resolves defaults without
   creating directories; execution authorizes the runtime before initializing
   the workspace. For `monitor` and `monitor-baseline`, select the outer CLI root
-  with global `--work-dir` before the verb or per-command `SPARSELAB_WORK_DIR`.
+  with global `--work-dir` before the verb or per-command `KLAB_WORK_DIR`.
   `monitor --workspace` and the baseline positional root select the measured
   directory, not the CLI work root initialized before the handler. Keep an explicit
   worker lease namespace in the command environment when required.
@@ -114,7 +120,7 @@ declarations), `workers/cli.py` and `workers/controller.py` (controller store),
 
 ## Torch-free environment route
 
-`sparselab.cli.entry` dispatches `runtime env`, optionally preceded by global
+`klab.cli.entry` dispatches `runtime env`, optionally preceded by global
 `--work-dir PATH`, before importing the application CLI. Keep all eight paths:
 
 | Path | Distinct operation |
@@ -132,15 +138,15 @@ These operations are not aliases for training/runtime acceptance. The manager
 does not import Torch; observation and doctor may run bounded children in the
 selected interpreter. Provisioning intentionally installs packages, only on its
 explicit path. The registry follows `XDG_CONFIG_HOME` (or home config), and the
-installation root follows `SPARSELAB_RUNTIME_DIR` or XDG data/home defaults,
-not `SPARSELAB_WORK_DIR`. The installation root must not equal the scientific
+installation root follows `KLAB_RUNTIME_DIR` or XDG data/home defaults,
+not `KLAB_WORK_DIR`. The installation root must not equal the scientific
 work root and must be outside Git. Nesting it under the work root is currently
 allowed; the equality check is not a prohibition on nesting.
 
 Global `--work-dir PATH` before `runtime env` selects the scientific work root
 for native containment checks without creating it. It does not relocate the
 registry or runtime installation root; use their host-local environment settings.
-`sparselab runtime --help` points to the separate environment-management help.
+`klab runtime --help` points to the separate environment-management help.
 On a provisioned vendor interpreter use `uv run --locked --no-sync` or the
 executable directly; adding
 `--extra cpu` can synchronize a CPU framework over the intended installation.

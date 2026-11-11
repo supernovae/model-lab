@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from sparselab.canonical import canonical_digest
-from sparselab.evaluation import code_work
+from klab.canonical import canonical_digest
+from klab.evaluation import code_work
 
 
 @pytest.fixture
@@ -56,7 +56,7 @@ class FixtureSandbox:
         if isinstance(outcome, Exception):
             raise outcome
         return SimpleNamespace(
-            returncode=outcome, stdout="SPARSELAB_TESTS_COMPLETED_fixture\n", stderr=""
+            returncode=outcome, stdout="KLAB_TESTS_COMPLETED_fixture\n", stderr=""
         )
 
 
@@ -82,9 +82,9 @@ def test_sandbox_classification_and_provenance(responses, status, monkeypatch):
     for index, (command, options) in enumerate(sandbox.commands):
         expected = {"timeout": 2, "timeout_retry": False}
         if index == 1:
-            expected["input"] = "SPARSELAB_TESTS_COMPLETED_fixture\n"
+            expected["input"] = "KLAB_TESTS_COMPLETED_fixture\n"
         assert options == expected
-        assert "SPARSELAB_TESTS_COMPLETED_fixture" not in " ".join(command)
+        assert "KLAB_TESTS_COMPLETED_fixture" not in " ".join(command)
 
 
 def test_tampered_tests_refused(declaration):
@@ -286,7 +286,7 @@ def native_ready(tmp_path, declaration, monkeypatch):
 def test_interrupted_atomic_replace_preserves_generated_answer(
     native_ready, tmp_path, monkeypatch
 ):
-    from sparselab import lab_records
+    from klab import lab_records
 
     path, output = native_ready
 

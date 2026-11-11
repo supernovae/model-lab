@@ -12,9 +12,9 @@ separately using the supported [continuation rules](training.md).
 
 ```python
 from pathlib import Path
-from sparselab.config.loading import load_config
-from sparselab.data.packing import PreparedPrefix, prepare_data
-from sparselab.data.tokenizer import load_tokenizer
+from klab.config.loading import load_config
+from klab.data.packing import PreparedPrefix, prepare_data
+from klab.data.tokenizer import load_tokenizer
 
 config = load_config(Path("bounded-baseline.yaml"))
 data = prepare_data(

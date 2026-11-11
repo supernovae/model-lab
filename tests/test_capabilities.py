@@ -9,8 +9,8 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 
-from sparselab.data.chat_recall import cases
-from sparselab.evaluation.capabilities import (
+from klab.data.chat_recall import cases
+from klab.evaluation.capabilities import (
     CapabilityCaseLineage,
     capability_card,
     capability_card_payload,
@@ -254,7 +254,7 @@ def test_exact_full_answer_scoring_rejects_first_word_junk(
 ) -> None:
     card = capability_card("chat-alias-recall-v1")
     monkeypatch.setattr(
-        "sparselab.evaluation.capabilities.generate",
+        "klab.evaluation.capabilities.generate",
         lambda _model, _tokenizer, prompt, *_args, **_kwargs: (
             prompt + " lumen definitely"
         ),
@@ -272,7 +272,7 @@ def test_prompt_overflow_invalidates_evaluation_without_generation(
 ) -> None:
     card = capability_card("chat-alias-recall-v1")
     monkeypatch.setattr(
-        "sparselab.evaluation.capabilities.generate",
+        "klab.evaluation.capabilities.generate",
         lambda *_args, **_kwargs: pytest.fail("generation must not run"),
     )
 
@@ -290,7 +290,7 @@ def test_legacy_card_retains_its_explicit_first_word_diagnostic(
 ) -> None:
     card = capability_card("engram-recall-v1")
     monkeypatch.setattr(
-        "sparselab.evaluation.capabilities.generate",
+        "klab.evaluation.capabilities.generate",
         lambda _model, _tokenizer, prompt, *_args, **_kwargs: (
             prompt + " lumen trailing text"
         ),

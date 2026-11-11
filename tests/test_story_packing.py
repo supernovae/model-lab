@@ -5,7 +5,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from sparselab.data.story_packing import MatchedStoryDataset
+from klab.data.story_packing import MatchedStoryDataset
 
 
 def story_ids():

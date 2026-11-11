@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import torch
 
-from sparselab.config.models import AttentionConfig, ModelConfig
-from sparselab.model.inspection import inspect_model
-from sparselab.model.moe import TopKMoE
-from sparselab.model.transformer import DenseLM
+from klab.config.models import AttentionConfig, ModelConfig
+from klab.model.inspection import inspect_model
+from klab.model.moe import TopKMoE
+from klab.model.transformer import DenseLM
 
 
 def test_top_k_dispatch_preserves_token_order_and_normalizes_weights() -> None:

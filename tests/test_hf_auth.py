@@ -18,18 +18,18 @@ import yaml
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
 from requests import Response
 
-from sparselab import hf_auth
-from sparselab.cli.main import build_parser, main
-from sparselab.config.models import DatasetConfig
-from sparselab.corpus.acquisition import (
+from klab import hf_auth
+from klab.cli.main import build_parser, main
+from klab.config.models import DatasetConfig
+from klab.corpus.acquisition import (
     _acquire_http,
     _PrivateHubRedirect,
     acquire,
     verify_snapshot,
 )
-from sparselab.corpus.project import SourceDeclaration, load_project
-from sparselab.data import datasets, local_stories
-from sparselab.research import pythia
+from klab.corpus.project import SourceDeclaration, load_project
+from klab.data import datasets, local_stories
+from klab.research import pythia
 
 
 def test_hub_token_authorizes_without_changing_frozen_source_identity(
@@ -114,7 +114,7 @@ def test_hub_token_authorizes_without_changing_frozen_source_identity(
         sys,
         "argv",
         [
-            "sparselab",
+            "klab",
             "--work-dir",
             str(tmp_path / "cli"),
             "--hf-token-file",
@@ -283,7 +283,7 @@ def test_hub_snapshot_denial_redacts_token(
         raise Denied(status, token)
 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", reject)
-    from sparselab.corpus.acquisition import _acquire_hf
+    from klab.corpus.acquisition import _acquire_hf
 
     with pytest.raises(RuntimeError, match="Hugging Face access denied") as error:
         _acquire_hf(source, tmp_path, tmp_path / "cache", False)

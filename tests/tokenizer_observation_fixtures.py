@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 import yaml
 
-from sparselab.canonical import canonical_digest, canonical_json
-from sparselab.config.loading import load_tokenizer_config
-from sparselab.corpus.export import _export_binding, _export_request
-from sparselab.training.manifest import sha256_file
+from klab.canonical import canonical_digest, canonical_json
+from klab.config.loading import load_tokenizer_config
+from klab.corpus.export import _export_binding, _export_request
+from klab.training.manifest import sha256_file
 
 
 def observed_tokenizer(root):
@@ -130,7 +130,7 @@ def observed_tokenizer(root):
     receipts = root / "receipts"
     session_root = receipts / "session"
     job_root = session_root / "slot"
-    argv = ["sparselab", "tokenizer", "train", str(config_path)]
+    argv = ["klab", "tokenizer", "train", str(config_path)]
     source = {"path": str(root / "source"), "commit": "c" * 40}
     job_spec = {
         "argv": argv,

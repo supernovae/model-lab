@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from sparselab.training.metrics import SCHEMA_VERSION, ExperimentStore, _envelope_digest
+from klab.training.metrics import SCHEMA_VERSION, ExperimentStore, _envelope_digest
 
 
 def _run(store: ExperimentStore, run_id: str = "run") -> None:
@@ -166,7 +166,7 @@ def test_boolean_protocol_numbers_are_rejected_before_projection(tmp_path, field
 
 
 def test_export_byte_budget_includes_canonical_array_framing(tmp_path):
-    from sparselab.training.metrics import _canonical_json
+    from klab.training.metrics import _canonical_json
 
     store = ExperimentStore(tmp_path)
     _run(store)
@@ -282,8 +282,8 @@ def test_manifest_reference_preserves_complete_payload_and_bounded_transport(
 ):
     from types import SimpleNamespace
 
-    from sparselab.training.metrics import MAX_ENVELOPE_BYTES, _canonical_json
-    from sparselab.workers.artifacts import _restore_crash_projection
+    from klab.training.metrics import MAX_ENVELOPE_BYTES, _canonical_json
+    from klab.workers.artifacts import _restore_crash_projection
 
     source = ExperimentStore(tmp_path / "source")
     _run(source)
@@ -323,7 +323,7 @@ def test_manifest_reference_preserves_complete_payload_and_bounded_transport(
 
 
 def test_manifest_reference_rejects_malformed_and_mismatched_evidence(tmp_path):
-    from sparselab.training.metrics import _canonical_json
+    from klab.training.metrics import _canonical_json
 
     source = ExperimentStore(tmp_path / "source")
     _run(source)
@@ -364,7 +364,7 @@ def test_manifest_reference_rejects_malformed_and_mismatched_evidence(tmp_path):
 
 
 def test_historical_inline_manifest_remains_readable(tmp_path):
-    from sparselab.training.metrics import _canonical_json
+    from klab.training.metrics import _canonical_json
 
     source = ExperimentStore(tmp_path / "source")
     _run(source)
@@ -385,7 +385,7 @@ def test_historical_inline_manifest_remains_readable(tmp_path):
 
 
 def test_manifest_reference_conflict_and_inline_digest_mismatch(tmp_path):
-    from sparselab.training.metrics import _canonical_json
+    from klab.training.metrics import _canonical_json
 
     source = ExperimentStore(tmp_path / "source")
     _run(source)
@@ -463,7 +463,7 @@ def test_session_commits_survive_process_exit_without_cleanup(tmp_path) -> None:
 import os
 import sys
 from pathlib import Path
-from sparselab.training.metrics import ExperimentStore
+from klab.training.metrics import ExperimentStore
 store = ExperimentStore(Path(sys.argv[1]))
 store.create_run("run", {}, {})
 with store.session():
@@ -486,8 +486,8 @@ with store.session():
 
 
 def test_large_configuration_replication_resolves_only_from_matching_manifest(tmp_path):
-    from sparselab.canonical import canonical_digest
-    from sparselab.training.metrics import MAX_ENVELOPE_BYTES
+    from klab.canonical import canonical_digest
+    from klab.training.metrics import MAX_ENVELOPE_BYTES
 
     config = {
         "name": "mapped",

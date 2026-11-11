@@ -5,8 +5,8 @@ A portable Engram package stores only the tokenizer-independent byte-addressed l
 Export from a byte-memory checkpoint:
 
 ```sh
-uv run sparselab engram export RUN_ID --runs-dir runs --output artifacts/memory.engram
-uv run sparselab engram inspect artifacts/memory.engram
+uv run klab engram export RUN_ID --runs-dir runs --output artifacts/memory.engram
+uv run klab engram inspect artifacts/memory.engram
 ```
 
 `PortableEngramAdapter` freezes the exported table and trains only an output projection and context gate for a target hidden width. Byte-equivalent addressing alone does not prove transfer; use held-out facts and controlled baseline comparisons.
@@ -30,12 +30,12 @@ Input records use a strict schema. A record must contain either a complete `subj
 Compile, inspect, and verify:
 
 ```sh
-sparselab engram pack compile records.jsonl \
+klab engram pack compile records.jsonl \
   --output artifacts/geography.enpack \
   --name geography --namespace synthetic \
   --created-at 2026-09-23T00:00:00Z
-sparselab engram pack inspect artifacts/geography.enpack
-sparselab engram pack verify artifacts/geography.enpack
+klab engram pack inspect artifacts/geography.enpack
+klab engram pack verify artifacts/geography.enpack
 ```
 
 Use `--license`, `--source-name`, and `--source-revision` only for explicit defaults. A revision default requires a source name and applies only to records inheriting or naming that source. Source paths never become provenance; missing licenses are never guessed. Compilation refuses an existing output and publishes a verified pack with an atomic no-replace rename.
@@ -49,7 +49,7 @@ Use `--license`, `--source-name`, and `--source-revision` only for explicit defa
 Supply all three semantic inputs together:
 
 ```sh
-sparselab engram pack compile records.jsonl \
+klab engram pack compile records.jsonl \
   --output artifacts/semantic.enpack \
   --name semantic --namespace synthetic \
   --semantic-keys keys.safetensors \
@@ -57,6 +57,6 @@ sparselab engram pack compile records.jsonl \
   --semantic-metadata semantic.json
 ```
 
-The two safetensors files contain exactly one contiguous finite FP32 matrix each: `keys` with shape `[M, d_key]`, and `values` with shape `[M, d_value]`. `semantic.json` declares format `sparselab-semantic-assets`, version `1`, ordered `record_ids` for those rows, pinned key/value encoder names, revisions and SHA-256 identities, and `key_normalization` (`none` or `l2`). Record IDs must be unique and present in the pack; vectors may cover a subset. An `l2` declaration is verified, never applied by the compiler. The manifest records the independent key and value widths plus a shared representation-space identity; it contains no model width, tokenizer IDs, or model checkpoint identity.
+The two safetensors files contain exactly one contiguous finite FP32 matrix each: `keys` with shape `[M, d_key]`, and `values` with shape `[M, d_value]`. `semantic.json` declares format `klab-semantic-assets`, version `1`, ordered `record_ids` for those rows, pinned key/value encoder names, revisions and SHA-256 identities, and `key_normalization` (`none` or `l2`). Record IDs must be unique and present in the pack; vectors may cover a subset. An `l2` declaration is verified, never applied by the compiler. The manifest records the independent key and value widths plus a shared representation-space identity; it contains no model width, tokenizer IDs, or model checkpoint identity.
 
 The portable **byte-addressed lexical-table** path implements export, verified loading, attachment, and target-adapter training. It does not provide semantic retrieval by itself. A separate verified semantic EngramPack retriever and direct `DenseLM` adapter API are implemented; see [Verified semantic memory](research/semantic-memory.md). Encoder identities remain producer declarations, not independent certification that two encoders share meaningful coordinates. The two-case portable-adapter result remains negative and is not evidence of general transfer.

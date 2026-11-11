@@ -1,14 +1,14 @@
 """Test-suite bootstrap for child interpreters launched by tests.
 
 ``tests/conftest.py`` puts this directory first on ``PYTHONPATH`` and sets
-``SPARSELAB_TEST_HOST_RAM=total:available`` for every test, so a fresh
-``python -c``/``-m sparselab`` child plans against the same fixed host as the
+``KLAB_TEST_HOST_RAM=total:available`` for every test, so a fresh
+``python -c``/``-m klab`` child plans against the same fixed host as the
 parent process. Python imports ``sitecustomize`` at startup only from
 ``sys.path``; this directory is never there outside pytest, so shipped code
 always measures real RAM (``host_capacity.measure_memory`` has no override).
 
 The pin is applied lazily, when a child first imports
-``sparselab.host_capacity``, so children that never touch SparseLab pay no
+``klab.host_capacity``, so children that never touch Model Lab pay no
 startup cost.
 """
 
@@ -19,8 +19,8 @@ import importlib.machinery
 import os
 import sys
 
-_MODULE = "sparselab.host_capacity"
-_PINNED = os.environ.get("SPARSELAB_TEST_HOST_RAM")
+_MODULE = "klab.host_capacity"
+_PINNED = os.environ.get("KLAB_TEST_HOST_RAM")
 
 
 def _pin(module: object) -> None:

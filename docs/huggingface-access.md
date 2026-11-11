@@ -2,7 +2,7 @@
 
 Commands below use the [activated, provisioned environment](../README.md#first-run).
 
-SparseLab uses Hugging Face Hub for Corpus Forge `huggingface_dataset` acquisition, explicit `https://huggingface.co/...` HTTP documents, remote TinyStories/FineWeb-Edu/Cosmopedia streams, the one-time local TinyStories snapshot, and the pinned Pythia reference-model download. Configure credentials **before** launching `sparselab ...` so these requests use your account rather than an anonymous Hub session.
+Model Lab uses Hugging Face Hub for Corpus Forge `huggingface_dataset` acquisition, explicit `https://huggingface.co/...` HTTP documents, remote TinyStories/FineWeb-Edu/Cosmopedia streams, the one-time local TinyStories snapshot, and the pinned Pythia reference-model download. Configure credentials **before** launching `klab ...` so these requests use your account rather than an anonymous Hub session.
 
 ## Set up a token
 
@@ -20,7 +20,7 @@ time, so setting one inside an already running Python session is too late. For
 one explicit CLI invocation, supply a token **file path**, not the token itself:
 
 ```sh
-sparselab --hf-token-file "$HOME/.config/sparselab/hf-token" \
+klab --hf-token-file "$HOME/.config/klab/hf-token" \
   corpus acquire corpora/my-corpus/corpus.yaml
 ```
 
@@ -39,12 +39,12 @@ option is intentionally absent: process listings and shell history expose it.
 Local and SSH workers, containers and scheduled jobs need their own
 credentials/environment; a login on the controller does not authenticate a
 remote worker. If you relocate the Hub credential store with `HF_HOME`, set that
-variable for both login and SparseLab. `--work-dir`/`SPARSELAB_WORK_DIR` control
-SparseLab's scratch space, **not** the Hub login store or `HF_TOKEN`.
+variable for both login and Model Lab. `--work-dir`/`KLAB_WORK_DIR` control
+Model Lab's scratch space, **not** the Hub login store or `HF_TOKEN`.
 
 ## Behavior and boundaries
 
-For an authenticated network request, SparseLab forwards the token selected
+For an authenticated network request, Model Lab forwards the token selected
 from the explicit file, `HF_TOKEN`, or locally saved Hub login to the
 `datasets`/`huggingface_hub` client. For a Corpus Forge HTTP document, it sends
 a bearer token **only** to the exact HTTPS `huggingface.co` host and removes it

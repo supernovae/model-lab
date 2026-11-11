@@ -9,21 +9,21 @@ import pytest
 import torch
 from test_training import config
 
-from sparselab.canonical import canonical_digest, canonical_json
-from sparselab.config.loading import load_config
-from sparselab.config.models import AttentionConfig, DatasetConfig, ModelConfig
-from sparselab.data.allocation import build_allocation_manifest
-from sparselab.data.allocation_tasks import _collect_provenance
-from sparselab.data.packing import (
+from klab.canonical import canonical_digest, canonical_json
+from klab.config.loading import load_config
+from klab.config.models import AttentionConfig, DatasetConfig, ModelConfig
+from klab.data.allocation import build_allocation_manifest
+from klab.data.allocation_tasks import _collect_provenance
+from klab.data.packing import (
     canonical_tokenizer_sha256,
     load_prepared_data,
     prepare_data,
 )
-from sparselab.data.tokenizer import load_tokenizer
-from sparselab.engines.base import Microbatch
-from sparselab.engines.pytorch import PyTorchEngine
-from sparselab.model.transformer import DenseLM
-from sparselab.training.manifest import sha256_file, source_identity
+from klab.data.tokenizer import load_tokenizer
+from klab.engines.base import Microbatch
+from klab.engines.pytorch import PyTorchEngine
+from klab.model.transformer import DenseLM
+from klab.training.manifest import sha256_file, source_identity
 
 
 def _allocation_config(tmp_path: Path, *, weight: float, memory: bool = True):
@@ -280,7 +280,7 @@ def _prepared_cache(root: Path) -> None:
         np.save(root / name, values, allow_pickle=False)
     identity: dict[str, object] = {}
     allocation: dict[str, object] = {
-        "format": "sparselab-prepared-allocation-v1",
+        "format": "klab-prepared-allocation-v1",
         "manifest_sha256": "a" * 64,
         "owner_codes": {"neural": 0, "lexical": 1, "semantic": 2, "hybrid": 3},
         "semantic": {"verified": True},

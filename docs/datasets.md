@@ -27,8 +27,8 @@ remove within-split repeats and exclude training overlap. Selection and policy
 are part of scientific identity, not invisible cleaning defaults.
 
 ```sh
-sparselab data lock source.yaml --output source.lock.json --json
-sparselab data snapshot source.lock.json --output snapshot --json
+klab data lock source.yaml --output source.lock.json --json
+klab data snapshot source.lock.json --output snapshot --json
 ```
 
 Use new output paths. A snapshot retains its source lock, selected records,
@@ -105,7 +105,7 @@ path. Budgeted HF/Git keep their readings in the transport ledger.
 An immutable Forge release can serve several experiments. Export it once for a
 particular view, base configuration and vocabulary, then retain the export's
 exact `dataset` and tokenizer declarations in each consumer configuration. Run
-settings such as seed and optimizer budget may differ. `sparselab corpus
+settings such as seed and optimizer budget may differ. `klab corpus
 verify-export RUN.yaml` cold-verifies that configuration's release/export
 closure and reports its content binding without fitting, preparing or copying
 data. The declared `dataset.cache_dir` remains the export's prepared directory;
@@ -137,10 +137,10 @@ Whole-document packing fails on insufficient token bounds rather than silently
 truncating selected text. Preparation uses disk-backed resumable chunks.
 
 ```sh
-sparselab tokenizer train tokenizer.yaml
-PREPARED=$(sparselab data prepare run.yaml)
-sparselab data coverage --prepared-root "$PREPARED" --config run.yaml --json
-sparselab data budget --prepared-root "$PREPARED" --config run.yaml \
+klab tokenizer train tokenizer.yaml
+PREPARED=$(klab data prepare run.yaml)
+klab data coverage --prepared-root "$PREPARED" --config run.yaml --json
+klab data budget --prepared-root "$PREPARED" --config run.yaml \
   --passes 1 --no-require-full --output one-pass.yaml --json
 ```
 
@@ -173,12 +173,12 @@ tokenizer:
 ```
 
 The bounds above are illustrative: retain the original fit declaration's actual
-values. Obtain the two digests from `sparselab tokenizer verify ORIGINAL_RUN.yaml
+values. Obtain the two digests from `klab tokenizer verify ORIGINAL_RUN.yaml
 --json` before changing the consuming dataset. Relative paths are anchored to the
 new run YAML, including the nested origin paths. Keep the original tokenizer and
 manifest bytes unchanged; do not relabel their source or refit the tokenizer.
 
-Run `sparselab tokenizer verify RUN.yaml --json`, then `sparselab data prepare
+Run `klab tokenizer verify RUN.yaml --json`, then `klab data prepare
 RUN.yaml`. Verification authenticates the pinned tokenizer bytes and manifest
 against the original snapshot; preparation independently verifies the consuming
 snapshot, including on cache reuse. The origin snapshot must remain available.
@@ -275,7 +275,7 @@ min_free_bytes: 1073741824
 ```
 
 ```sh
-sparselab data migrate old-run.yaml \
+klab data migrate old-run.yaml \
   --output migrated --resources migration-resources.yaml --accept-policy-change --json
 ```
 

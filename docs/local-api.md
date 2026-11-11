@@ -2,7 +2,7 @@
 
 Commands below use the [activated, provisioned environment](../README.md#first-run).
 
-`sparselab serve` loads one pinned SparseLab checkpoint and exposes a small,
+`klab serve` loads one pinned Model Lab checkpoint and exposes a small,
 nonstreaming OpenAI-compatible API. It uses the same checkpoint, tokenizer,
 prepared-asset and runtime validation as CLI inference. Start with
 [locating and verifying a run](tinytext-model-guide.md), or the
@@ -22,14 +22,14 @@ cache from `data prepare`, or a `stage --prepared-inputs` bundle by itself.
 With `RUNS`, `RUN_ID` and `CHECKPOINT` set to a real verified run:
 
 ```sh
-sparselab serve "$RUN_ID" \
+klab serve "$RUN_ID" \
   --runs-dir "$RUNS" --checkpoint "$CHECKPOINT" --backend cpu \
   --host 127.0.0.1 --port 8000 --model-id local-model \
   --max-new-tokens 256 --max-request-bytes 65536 \
   --request-timeout 60 --max-clients 8
 ```
 
-For a provisioned accelerator use `sparselab` with the authorized
+For a provisioned accelerator use `klab` with the authorized
 `--runtime ID` or `--runtime-profile PATH` as documented in
 [runtime setup](runtime.md#machine-local-runtime-environments). The server
 resolves lookup pointers once; changing `latest.json` does not hot-swap a running
@@ -75,7 +75,7 @@ curl --fail-with-body http://127.0.0.1:8000/v1/chat/completions \
 ```
 
 Read `choices[0].text` for completion or `choices[0].message.content` for chat.
-Responses include actual token usage and a `sparselab` extension with the exact
+Responses include actual token usage and a `klab` extension with the exact
 serialized prompt, checkpoint identity and policy. Preserve it when reporting a
 surprising output; avoid logging private prompts into shared research artifacts.
 A raw prompt is unchanged. Chat uses `System:`, `User:` and `Assistant:` lines
@@ -95,7 +95,7 @@ turns and reports the dropped count.
 | `model` | Must name the loaded alias from `/v1/models` |
 | `max_tokens` | Positive bounded output budget; defaults to min(64, server cap); must fit context |
 | `temperature` | Range 0–2; zero (default) is greedy; positive values sample |
-| `top_k` | SparseLab integer extension, 0 through vocabulary size; zero (default) disables filtering |
+| `top_k` | Model Lab integer extension, 0 through vocabulary size; zero (default) disables filtering |
 | `seed` | Integer 0 through 2^64−1 (default 0); request-local RNG within the selected runtime |
 | `stop` | Null, literal string or up to four strings (1–256 characters each); omitted from visible text |
 | `top_p` | Only neutral `1` accepted; nucleus sampling is not implemented |
@@ -129,7 +129,7 @@ server. Consult the official
 [connection guide](https://docs.openwebui.com/getting-started/quick-start/connect-a-provider/starting-with-openai-compatible/)
 for your installed release's controls. Use its server-side provider connection,
 not direct cross-origin browser requests: an Origin naming the WebUI's own port
-will be rejected. Its outgoing Host must retain the SparseLab address and port.
+will be rejected. Its outgoing Host must retain the Model Lab address and port.
 This optional integration is not an
 end-to-end tested Open WebUI deployment.
 

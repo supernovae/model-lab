@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from sparselab.model.attention.dense import DenseAttention
+from klab.model.attention.dense import DenseAttention
 
 
 def test_sliding_window_mask_excludes_distant_past_and_future() -> None:

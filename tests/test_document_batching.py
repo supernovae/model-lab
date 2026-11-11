@@ -8,13 +8,13 @@ import torch
 from test_engram_integration import model_config
 from test_training import config as training_config
 
-from sparselab.address_hash import engram_table_sizes
-from sparselab.config.models import AttentionConfig, ModelConfig, RunConfig
-from sparselab.data.document_batching import collate_document_update
-from sparselab.data.story_packing import MatchedStoryDataset
-from sparselab.engines.pytorch import PyTorchEngine
-from sparselab.model.transformer import DenseLM
-from sparselab.training.continuation import runtime_optimization_transition
+from klab.address_hash import engram_table_sizes
+from klab.config.models import AttentionConfig, ModelConfig, RunConfig
+from klab.data.document_batching import collate_document_update
+from klab.data.story_packing import MatchedStoryDataset
+from klab.engines.pytorch import PyTorchEngine
+from klab.model.transformer import DenseLM
+from klab.training.continuation import runtime_optimization_transition
 
 
 def rows_for(lengths, masked=True):

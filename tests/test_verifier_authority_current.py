@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from sparselab import verifier_authority as authority
+from klab import verifier_authority as authority
 
 
 @pytest.mark.parametrize("kind", sorted(authority._CLOSURES))

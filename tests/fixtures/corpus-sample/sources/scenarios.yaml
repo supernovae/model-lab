@@ -1,7 +1,7 @@
 schema_version: 1
 id: sample_scenarios
 kind: deterministic_generator
-canonical_uri: sparselab://generators/pathlib_path_suffix_v1
+canonical_uri: klab://generators/pathlib_path_suffix_v1
 revision: '1'
 license: MIT
 redistribution: redistributable

@@ -1,0 +1,530 @@
+"""Load one frozen checkpoint through its native engine and run-owned artifacts."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+from tokenizers import Tokenizer
+
+from klab.canonical import canonical_digest, canonical_json
+from klab.config.models import RunConfig
+from klab.data.allocation import load_allocation_manifest, load_semantic_retriever
+from klab.data.packing import (
+    TokenBlockDataset,
+    canonical_tokenizer_sha256,
+    load_prepared_data,
+    supervision_requires_mask,
+)
+from klab.data.tokenizer import load_tokenizer
+from klab.data.verification import _receipt_from_proofs
+from klab.engines.base import Microbatch
+from klab.engines.mlx import MLXEngine, preserve_rng_state
+from klab.evaluation.evidence import _validated_artifacts
+from klab.model.inspection import inspection_report
+from klab.model.transformer import DenseLM
+from klab.runtime import discover_runtimes, select_device, torch_device_for
+from klab.runtime_profile import RuntimeAuthorization, require_authorization
+from klab.training.checkpoints import CheckpointManager
+from klab.training.manifest import read_manifest
+from klab.verification_proofs import ProofStore, VerificationMode
+
+
+@dataclass(frozen=True)
+class InferenceRun:
+    run: Path
+    config: RunConfig
+    model: Any
+    tokenizer: Tokenizer
+    device: torch.device | str
+    identity: dict[str, Any]
+    engine: MLXEngine | None = None
+
+    def validation_dataset(self) -> TokenBlockDataset:
+        root = self.run / "data"
+        addresses = root / "validation_byte_addresses.npy"
+        supervision = root / "validation_supervision.npy"
+        owners = root / "validation_owner_ids.npy"
+        queries = root / "validation_semantic_queries.npy"
+        mask = root / "validation_semantic_mask.npy"
+        needs_mask = supervision_requires_mask(
+            json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        )
+        if supervision.is_file() != needs_mask:
+            raise ValueError(
+                "validation supervision inventory differs from packing descriptor"
+            )
+        return TokenBlockDataset(
+            np.load(root / "validation.npy", mmap_mode="r", allow_pickle=False),
+            self.config.training.seq_len,
+            np.load(addresses, mmap_mode="r", allow_pickle=False)
+            if self.config.model.memory in {"byte", "portable"}
+            else None,
+            np.load(supervision, mmap_mode="r", allow_pickle=False)
+            if needs_mask
+            else None,
+            np.load(owners, mmap_mode="r", allow_pickle=False)
+            if self.config.dataset.allocation_manifest_path is not None
+            else None,
+            np.load(queries, mmap_mode="r", allow_pickle=False)
+            if queries.is_file()
+            else None,
+            np.load(mask, mmap_mode="r", allow_pickle=False)
+            if mask.is_file()
+            else None,
+        )
+
+    def evaluate(
+        self, observer: Callable[[Any, Any], None] | None = None
+    ) -> dict[str, float | int | str | None]:
+        """Evaluate through the run's native engine without changing its RNG or mode.
+
+        ``observer(logits, targets)`` sees each scored PyTorch batch.
+        """
+        dataset = self.validation_dataset()
+        if self.engine is None:
+            from klab.evaluation.language_model import evaluate
+
+            assert isinstance(self.device, torch.device)
+            return evaluate(
+                self.model,
+                dataset,
+                batch_size=self.config.evaluation.batch_size
+                or self.config.training.micro_batch_size,
+                max_batches=self.config.evaluation.max_batches,
+                device=self.device,
+                observer=observer,
+            )
+        if observer is not None:
+            raise ValueError("evaluation observers need the PyTorch engine")
+        batch_size = (
+            self.config.evaluation.batch_size or self.config.training.micro_batch_size
+        )
+        limit = min(len(dataset), batch_size * self.config.evaluation.max_batches)
+
+        def batches() -> Any:
+            for start in range(0, limit, batch_size):
+                records = [
+                    dataset.numpy_block(index)
+                    for index in range(start, min(start + batch_size, limit))
+                ]
+                inputs, targets, addresses = zip(*records, strict=True)
+                if any(address is not None for address in addresses):
+                    raise ValueError(
+                        "MLX evaluation does not support byte-address memory"
+                    )
+                yield Microbatch(np.stack(inputs), np.stack(targets))
+
+        return self.engine.evaluate(batches()).to_report()
+
+
+def _verified_checkpoint(
+    run: Path,
+    checkpoint: str | None,
+    *,
+    proof_store: ProofStore | None = None,
+    verification_mode: VerificationMode = "cold",
+) -> tuple[RunConfig, dict[str, Any], Path, dict[str, Any], CheckpointManager]:
+    config = RunConfig.model_validate_json((run / "resolved_config.yaml").read_text())
+    manifest = read_manifest(run / "manifest.json")
+    manifest_digest = canonical_digest(manifest)
+    if RunConfig.model_validate(manifest["effective_config"]) != config:
+        raise ValueError("resolved config differs from the verified run manifest")
+    selected = Path(checkpoint or "latest.json")
+    if not selected.is_absolute() and not selected.exists():
+        selected = (
+            run / selected
+            if selected.parts[0] == "checkpoints"
+            else run / "checkpoints" / selected
+        )
+    selected = selected.resolve()
+    expected_digest = None
+    if selected.name in {"latest.json", "best.json"}:
+        pointer = json.loads(selected.read_text())
+        relative = pointer.get("relative_path")
+        if (
+            not isinstance(relative, str)
+            or Path(relative).is_absolute()
+            or ".." in Path(relative).parts
+        ):
+            raise ValueError("inference requires a validated v2 checkpoint pointer")
+        expected_digest = pointer["manifest_sha256"]
+        selected = (selected.parent / relative).resolve()
+    if selected.parent != run / "checkpoints" or not selected.is_dir():
+        raise ValueError(
+            "selected checkpoint must be a generation belonging to this run"
+        )
+    metadata = json.loads((selected / "manifest.json").read_text())
+    if expected_digest is not None and metadata["sha256"] != expected_digest:
+        raise ValueError("checkpoint pointer digest does not match selected generation")
+    manager = CheckpointManager(run, manifest_sha256=manifest_digest)
+    report = manager.verify(
+        selected,
+        expected_manifest=manifest_digest,
+        require_training_state=False,
+        proof_store=proof_store,
+        verification_mode=verification_mode,
+    )
+    if not report.valid:
+        raise ValueError(f"invalid checkpoint: {report.errors}")
+    if (
+        metadata["engine"] != config.runtime.engine
+        or metadata["backend"] != config.runtime.backend
+    ):
+        raise ValueError(
+            "checkpoint runtime differs from the verified run configuration"
+        )
+    return config, manifest, selected, metadata, manager
+
+
+def _ephemeral_config(config: RunConfig, backend: str | None) -> RunConfig:
+    requested = backend or config.runtime.backend
+    if config.runtime.engine == "mlx" and backend not in {None, "auto", "metal"}:
+        raise ValueError(
+            "MLX inference only supports the stored metal backend; "
+            "backend overrides cannot select a PyTorch device"
+        )
+    return config.model_copy(
+        update={
+            "runtime": config.runtime.model_copy(
+                update={"backend": requested, "precision": "fp32", "device_index": 0}
+            )
+        }
+    )
+
+
+def evaluation_config(
+    run_id: str,
+    runs_dir: Path,
+    checkpoint: str | None = None,
+    backend: str | None = None,
+    *,
+    proof_store: ProofStore | None = None,
+    verification_mode: VerificationMode = "cold",
+) -> RunConfig:
+    """Verify the training checkpoint, then select an ephemeral inference runtime."""
+    run = (runs_dir / run_id).resolve()
+    config, _, _, _, _ = _verified_checkpoint(
+        run, checkpoint, proof_store=proof_store, verification_mode=verification_mode
+    )
+    return _ephemeral_config(config, backend)
+
+
+def load_run(
+    run_id: str,
+    runs_dir: Path,
+    checkpoint: str | None = None,
+    backend: str | None = None,
+    *,
+    authorization: RuntimeAuthorization | None = None,
+    proof_store: ProofStore | None = None,
+    verification_mode: VerificationMode = "cold",
+    expected_checkpoint_sha256: str | None = None,
+) -> InferenceRun:
+    run = (runs_dir / run_id).resolve()
+    config, manifest, selected, metadata, manager = _verified_checkpoint(
+        run, checkpoint, proof_store=proof_store, verification_mode=verification_mode
+    )
+    if (
+        expected_checkpoint_sha256 is not None
+        and metadata["sha256"] != expected_checkpoint_sha256
+    ):
+        raise ValueError("checkpoint digest differs from the sealed lab record")
+    runtime_config = _ephemeral_config(config, backend)
+    requested = runtime_config.runtime.backend
+    require_authorization(runtime_config, authorization)
+    artifacts, array_proofs = _validated_artifacts(
+        run, manifest, proof_store=proof_store, verification_mode=verification_mode
+    )
+    required = {
+        "tokenizer.json",
+        "data/manifest.json",
+        "data/train.npy",
+        "data/validation.npy",
+    }
+    data_manifest = json.loads((run / "data" / "manifest.json").read_text())
+    if not isinstance(data_manifest, dict):
+        raise TypeError("prepared-data manifest must be an object")
+    if supervision_requires_mask(data_manifest):
+        required.update(
+            {"data/train_supervision.npy", "data/validation_supervision.npy"}
+        )
+    if config.model.memory in {"byte", "portable"}:
+        required.update(
+            {"data/train_byte_addresses.npy", "data/validation_byte_addresses.npy"}
+        )
+    allocation_metadata = data_manifest.get("allocation")
+    if config.dataset.allocation_manifest_path is not None:
+        if not isinstance(allocation_metadata, dict):
+            raise ValueError("allocation run lacks prepared allocation metadata")
+        required.update({"data/train_owner_ids.npy", "data/validation_owner_ids.npy"})
+        if allocation_metadata.get("semantic") is not None:
+            required.update(
+                {
+                    "data/train_semantic_queries.npy",
+                    "data/validation_semantic_queries.npy",
+                    "data/train_semantic_mask.npy",
+                    "data/validation_semantic_mask.npy",
+                }
+            )
+    if not required <= artifacts.keys():
+        raise ValueError(
+            f"run lacks verified artifacts: {sorted(required - artifacts.keys())}"
+        )
+    receipt = _receipt_from_proofs(run / "data", data_manifest, array_proofs)
+    prepared = load_prepared_data(
+        run / "data",
+        byte_enabled=config.model.memory in {"byte", "portable"},
+        verification="structural",
+        receipt=receipt,
+    )
+
+    # The checkpoint and training runtime were verified before authorization.
+    if config.dataset.allocation_manifest_path is not None:
+        allocation_name = config.dataset.allocation_manifest_path.name
+        if f"allocation/{allocation_name}" not in artifacts:
+            raise ValueError("run lacks a verified allocation manifest artifact")
+    if config.model.memory_token_mapping is not None:
+        from klab.memory_tokenizer import validate_memory_token_map
+
+        validate_memory_token_map(
+            config.model.memory_token_mapping.model_dump(mode="json"),
+            tokenizer_path=run / "tokenizer.json",
+        )
+    tokenizer = load_tokenizer(run / "tokenizer.json")
+    if tokenizer.get_vocab_size() != config.model.vocab_size:
+        raise ValueError("run tokenizer vocabulary differs from model configuration")
+
+    learned_portability = None
+    portability_manifest = run / "portability_manifest.json"
+    if portability_manifest.is_file():
+        portability_payload = json.loads(portability_manifest.read_text())
+        if portability_payload.get("version") == 2:
+            from klab.research.portability import load_portability_manifest
+
+            config = config.model_copy(
+                update={
+                    "training": config.training.model_copy(
+                        update={"portability_manifest_path": portability_manifest}
+                    )
+                }
+            )
+            learned_portability = load_portability_manifest(config)
+    if learned_portability is not None and config.runtime.engine != "pytorch":
+        raise ValueError("learned portability inference requires the PyTorch runtime")
+    allocation_manifest = None
+    allocation_retriever = None
+    if config.dataset.allocation_manifest_path is not None:
+        allocation_name = config.dataset.allocation_manifest_path.name
+        allocation_manifest = load_allocation_manifest(
+            run / "allocation" / allocation_name,
+            source_identity_sha256=manifest["source_identity"]["sha256"],
+            tokenizer_sha256=canonical_tokenizer_sha256(tokenizer),
+        )
+        if not isinstance(
+            allocation_metadata, dict
+        ) or allocation_manifest.sha256 != allocation_metadata.get("manifest_sha256"):
+            raise ValueError("prepared data and run allocation manifests differ")
+        allocation_retriever = load_semantic_retriever(allocation_manifest)
+        if (allocation_retriever is None) != (config.model.semantic_memory_dim is None):
+            raise ValueError(
+                "model.semantic_memory_dim must match the verified allocation pack"
+            )
+        if (
+            allocation_retriever is not None
+            and allocation_retriever.memory_dim != config.model.semantic_memory_dim
+        ):
+            raise ValueError(
+                "model.semantic_memory_dim differs from semantic pack value width"
+            )
+    weights = manager.load(
+        selected,
+        "promote",
+        proof_store=proof_store,
+        verification_mode=verification_mode,
+    ).model
+    identity = {
+        "run_id": run_id,
+        "checkpoint_sha256": metadata["sha256"],
+        "checkpoint_relative_path": str(selected.relative_to(run)),
+        "step": metadata["step"],
+        "tokens_seen": metadata["tokens_seen"],
+        "config": config.model_dump(mode="json"),
+        "tokenizer_sha256": artifacts["tokenizer.json"],
+        "data_sha256": {
+            key: artifacts[f"data/{key}.npy"] for key in ("train", "validation")
+        },
+        "source_identity_sha256": manifest["source_identity"]["sha256"],
+        "training_runtime": {
+            key: manifest["runtime"][key]
+            for key in (
+                "engine",
+                "backend",
+                "device_index",
+                "device_name",
+                "framework_version",
+                "os",
+            )
+        },
+    }
+    if allocation_manifest is not None:
+        owner_names = {0: "neural", 1: "lexical", 2: "semantic", 3: "hybrid"}
+        allocation_identity: dict[str, Any] = {
+            "manifest_sha256": allocation_manifest.sha256,
+            "resource_regime": allocation_manifest.payload.get("resource_regime"),
+            "ownership_profile": allocation_manifest.payload.get("ownership_profile"),
+            "corpus": allocation_manifest.payload["corpus"],
+            "neural_loss_weight": config.training.neural_loss_weight,
+            "splits": {},
+        }
+        for split in ("train", "validation"):
+            token_ids = prepared.train if split == "train" else prepared.validation
+            sidecars = allocation_manifest.split(split, token_count=len(token_ids))
+            supervision = (
+                prepared.train_supervision
+                if split == "train"
+                else prepared.validation_supervision
+            )
+            raw_counts = np.bincount(sidecars.owner, minlength=4)
+            target_counts = (
+                raw_counts
+                if supervision is None
+                else np.bincount(sidecars.owner[supervision], minlength=4)
+            )
+            split_identity: dict[str, Any] = {
+                "raw_tokens": len(token_ids),
+                "valid_supervised_targets": (
+                    len(token_ids) if supervision is None else int(supervision.sum())
+                ),
+                "owner_raw_tokens": {
+                    owner_names[owner]: int(raw_counts[owner]) for owner in range(4)
+                },
+                "owner_supervised_targets": {
+                    owner_names[owner]: int(target_counts[owner]) for owner in range(4)
+                },
+                "semantic_query_positions": (
+                    0
+                    if sidecars.semantic_mask is None
+                    else int(sidecars.semantic_mask.sum())
+                ),
+            }
+            split_identity["weighted_neural_supervision_mass"] = (
+                config.training.neural_loss_weight
+                * (
+                    split_identity["owner_supervised_targets"]["neural"]
+                    + split_identity["owner_supervised_targets"]["hybrid"]
+                )
+            )
+            allocation_identity["splits"][split] = split_identity
+        semantic_identity = allocation_manifest.semantic
+        if semantic_identity is not None:
+            allocation_identity["semantic_pack"] = {
+                "pack_id": semantic_identity["pack_id"],
+                "manifest_sha256": semantic_identity["pack_sha256"],
+                "key_encoder": semantic_identity["key_encoder"],
+            }
+        identity["allocation"] = allocation_identity
+    if config.runtime.engine == "mlx":
+        # Native construction changes MLX/Python/NumPy state.  Weight loading
+        # does not need caller RNG, and no Torch model is constructed here.
+        with torch.random.fork_rng(devices=[]), preserve_rng_state():
+            engine = MLXEngine()
+            engine.validate(runtime_config, authorization=authorization)
+            engine.initialize(runtime_config, initial_weights=weights)
+            model = engine.model
+            assert model is not None
+            model.eval()
+            runtime = engine.runtime
+        del weights
+        assert model is not None and runtime is not None
+        identity.update(
+            {
+                "runtime": {
+                    **runtime.as_dict(),
+                    "engine": "mlx",
+                    "backend": "metal",
+                    "device_index": 0,
+                    "precision": "fp32",
+                },
+                "parameter_inventory": inspection_report(config),
+            }
+        )
+        return InferenceRun(run, config, model, tokenizer, "metal", identity, engine)
+
+    if config.runtime.engine != "pytorch":
+        raise ValueError(f"unsupported inference engine: {config.runtime.engine}")
+    selected_device = select_device(requested)
+    actual_backend = (
+        "rocm"
+        if selected_device.type == "cuda" and torch.version.hip
+        else selected_device.type
+    )
+    device = torch_device_for(actual_backend, runtime_config.runtime.device_index)
+    model_config = config.model
+    if model_config.memory_package_path is not None and learned_portability is None:
+        if "portable_package" not in artifacts:
+            raise ValueError("run lacks a verified portable memory package")
+        model_config = model_config.model_copy(
+            update={"memory_package_path": run / "portable_package"}
+        )
+    with torch.random.fork_rng(devices=[]):
+        model = DenseLM(model_config, config.attention)
+        if allocation_retriever is not None:
+            model.add_semantic_memory("allocation", allocation_retriever, site="final")
+        model.load_state_dict(weights)
+    del weights
+    if learned_portability is not None:
+        from klab.research.portability import (
+            initialize_memory_artifact,
+            verify_portability_assets_unchanged,
+        )
+
+        initialize_memory_artifact(model, config, learned_portability)
+        verify_portability_assets_unchanged(learned_portability)
+    model.to(device).eval()
+    runtime = next(
+        info
+        for info in discover_runtimes()
+        if info.engine == "pytorch" and info.backend == actual_backend
+    )
+    device_name = runtime.device_name
+    if device.type == "cuda":
+        device_name = torch.cuda.get_device_name(device)
+    elif device.type == "xpu":
+        device_name = torch.xpu.get_device_name(device)
+    identity.update(
+        {
+            "runtime": {
+                "engine": "pytorch",
+                "backend": actual_backend,
+                "device_index": runtime_config.runtime.device_index,
+                "device_name": device_name,
+                "framework_version": runtime.framework_version,
+                "os": runtime.os,
+                "precision": "fp32",
+            },
+            "parameter_inventory": inspection_report(config),
+        }
+    )
+    return InferenceRun(run, config, model, tokenizer, device, identity)
+
+
+def write_inference_result(run: Path, kind: str, result: dict[str, Any]) -> Path:
+    """Content-addressed results preserve earlier checkpoints and observations."""
+    content = canonical_json(result) + b"\n"
+    digest = hashlib.sha256(content).hexdigest()
+    path = run / "evaluations" / f"{kind}-{digest}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if path.read_bytes() != content:
+            raise ValueError(f"result artifact conflict: {path}")
+    else:
+        with path.open("xb") as handle:
+            handle.write(content)
+    return path

@@ -11,10 +11,10 @@ The earlier one-token evaluation began at the colon-only assistant prefix, where
 Build an immutable campaign before training:
 
 ```sh
-uv run --locked sparselab research portability build \
+uv run --locked klab research portability build \
   --output artifacts/engram-portability-smoke \
   --scale smoke --seed 20260925 --updates 4
-uv run --locked sparselab research portability plan \
+uv run --locked klab research portability plan \
   --campaign-root artifacts/engram-portability-smoke
 ```
 
@@ -46,7 +46,7 @@ The first non-native arm for a width materializes three own-preparation runs (on
 Run a single arm first:
 
 ```sh
-uv run --locked sparselab research portability run \
+uv run --locked klab research portability run \
   --campaign-root artifacts/engram-portability-smoke \
   --recipient width32 --representation token \
   --condition adapter-tuned --seed 17
@@ -71,11 +71,11 @@ The predeclared development threshold is exact-answer accuracy ≥0.95. An arm t
 `continue` executes remaining arms in protocol order. Omit `--max-arms` to run the full three-seed matrix; use it for a bounded invocation only:
 
 ```sh
-uv run --locked sparselab research portability continue \
+uv run --locked klab research portability continue \
   --campaign-root artifacts/engram-portability-smoke --max-arms 1
-uv run --locked sparselab research portability continue \
+uv run --locked klab research portability continue \
   --campaign-root artifacts/engram-portability-smoke
-uv run --locked sparselab research portability report \
+uv run --locked klab research portability report \
   --campaign-root artifacts/engram-portability-smoke
 ```
 

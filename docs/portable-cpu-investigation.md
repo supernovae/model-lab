@@ -29,7 +29,7 @@ work was missed before dispatch: smoke 2, warmup 5, main 1 model-training update
 The driver was interrupted. Worker receipt was COMPLETE, controller ingestion
 PENDING; suite evaluation, collection and completed reporting were not reached.
 No subsequent model proof had run at that revision. Exact run IDs, timings, resource readings,
-retained paths and cleanup state are in the [PR126 evidence addendum](https://github.com/supernovae/tiny-sparse-lab/pull/126#issuecomment-6157874827).
+retained paths and cleanup state are in the [PR126 evidence addendum](https://github.com/supernovae/model-lab/pull/126#issuecomment-6157874827).
 These are development observations, not acceptance thresholds or scientific claims.
 
 At that revision, the open decision was a separately bounded pilot-inclusive CPU

@@ -11,17 +11,17 @@ import pytest
 import torch
 from safetensors.numpy import load_file, save_file
 
-from sparselab.canonical import canonical_digest, canonical_json
-from sparselab.cli.main import main
-from sparselab.engram import packs
-from sparselab.engram.packs import (
+from klab.canonical import canonical_digest, canonical_json
+from klab.cli.main import main
+from klab.engram import packs
+from klab.engram.packs import (
     PublishedPackDurabilityError,
     compile_pack,
     inspect_pack,
     load_pack,
     verify_pack,
 )
-from sparselab.model.portable_engram import (
+from klab.model.portable_engram import (
     PortableEngramAdapter,
     export_portable_engram,
     load_portable_engram,
@@ -111,7 +111,7 @@ def _semantic_assets(root, *, ids=None, keys=None, values=None, dtype=np.float32
     metadata_path.write_text(
         json.dumps(
             {
-                "format": "sparselab-semantic-assets",
+                "format": "klab-semantic-assets",
                 "format_version": 1,
                 "record_ids": ids,
                 "key_encoder": {
@@ -411,7 +411,7 @@ def test_failed_compile_does_not_publish_or_modify_source(tmp_path) -> None:
 
 
 def _run_cli(monkeypatch, capsys, argv: list[str]) -> dict[str, object]:
-    monkeypatch.setattr(sys, "argv", ["sparselab", *argv])
+    monkeypatch.setattr(sys, "argv", ["klab", *argv])
     main()
     return json.loads(capsys.readouterr().out)
 
@@ -456,7 +456,7 @@ def test_pack_cli_dispatch_json_and_exit_statuses(
         sys,
         "argv",
         [
-            "sparselab",
+            "klab",
             "engram",
             "pack",
             "verify",
@@ -482,7 +482,7 @@ def test_cli_schema_errors_are_concise(tmp_path, monkeypatch, capsys) -> None:
         sys,
         "argv",
         [
-            "sparselab",
+            "klab",
             "engram",
             "pack",
             "compile",
@@ -631,8 +631,6 @@ def test_legacy_engram_inspect_leaf_remains_unchanged(
         package_path,
         ngram_size=2,
     )
-    monkeypatch.setattr(
-        sys, "argv", ["sparselab", "engram", "inspect", str(package_path)]
-    )
+    monkeypatch.setattr(sys, "argv", ["klab", "engram", "inspect", str(package_path)])
     main()
     assert json.loads(capsys.readouterr().out) == expected.as_dict()

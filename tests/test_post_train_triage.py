@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from sparselab.evaluation.post_train_triage import _advice, loss_trajectory, read_triage
+from klab.evaluation.post_train_triage import _advice, loss_trajectory, read_triage
 
 
 def _points(losses: tuple[float, ...]) -> list[dict[str, object]]:
@@ -97,7 +97,7 @@ def test_viewer_rejects_unsafe_run_and_conflicting_artifacts(tmp_path: Path) -> 
     directory = tmp_path / "run" / "post-train-triage"
     directory.mkdir(parents=True)
     (directory / "forged.json").write_text(
-        json.dumps({"format": "sparselab_post_train_triage_v1"})
+        json.dumps({"format": "klab_post_train_triage_v1"})
     )
     with pytest.raises(ValueError):
         read_triage("run", tmp_path)
@@ -109,7 +109,7 @@ def test_viewer_rejects_unsafe_run_and_conflicting_artifacts(tmp_path: Path) -> 
 
 def _triage_shape_fixture(tmp_path: Path) -> dict:
     """A sealed advisory fixture with unknown diagnostics; no model work."""
-    from sparselab.evaluation import post_train_triage as triage
+    from klab.evaluation import post_train_triage as triage
 
     return {
         "format": triage.FORMAT,
@@ -152,8 +152,8 @@ def _triage_shape_fixture(tmp_path: Path) -> dict:
 
 
 def _write_triage_shape(tmp_path: Path, payload: object) -> Path:
-    from sparselab.canonical import canonical_digest, canonical_json
-    from sparselab.training.manifest import sha256_file
+    from klab.canonical import canonical_digest, canonical_json
+    from klab.training.manifest import sha256_file
 
     if isinstance(payload, dict):
         payload["identity"] = {
@@ -188,7 +188,7 @@ def _write_triage_shape(tmp_path: Path, payload: object) -> Path:
     ],
 )
 def test_malformed_sealed_triage_is_value_error_and_cli_unknown(tmp_path, field, value):
-    from sparselab.cli.main import _triage_report
+    from klab.cli.main import _triage_report
 
     payload = _triage_shape_fixture(tmp_path)
     if field:
@@ -209,7 +209,7 @@ def test_malformed_sealed_triage_is_value_error_and_cli_unknown(tmp_path, field,
 
 
 def test_valid_shape_fixture_and_nonobject_progress(tmp_path, monkeypatch):
-    from sparselab.evaluation import post_train_triage as triage
+    from klab.evaluation import post_train_triage as triage
 
     payload = _triage_shape_fixture(tmp_path)
     path = _write_triage_shape(tmp_path, payload)
@@ -234,7 +234,7 @@ def test_valid_shape_fixture_and_nonobject_progress(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("value", [[], "scalar", 42, None, True])
 def test_nonobject_manifest_is_local_value_error(tmp_path, value):
-    from sparselab.training.manifest import read_manifest
+    from klab.training.manifest import read_manifest
 
     path = _write_triage_shape(tmp_path, _triage_shape_fixture(tmp_path))
     manifest = path.parent.parent / "manifest.json"
@@ -262,8 +262,8 @@ def test_nonobject_manifest_is_local_value_error(tmp_path, value):
     ],
 )
 def test_manifest_nested_shape_errors_are_local_value_error(tmp_path, field, value):
-    from sparselab.canonical import canonical_digest
-    from sparselab.training.manifest import (
+    from klab.canonical import canonical_digest
+    from klab.training.manifest import (
         ARCHITECTURE_VERSION,
         IDENTITY_VERSION,
         architecture_sha256,
@@ -305,7 +305,7 @@ def test_manifest_nested_shape_errors_are_local_value_error(tmp_path, field, val
 
 
 def _triage_pass_fixture(tmp_path):
-    from sparselab.canonical import canonical_digest, canonical_json
+    from klab.canonical import canonical_digest, canonical_json
 
     manifest = {"manifest_version": 1, "run_id": "run"}
     manifest["sha256"] = canonical_digest(manifest)
@@ -334,7 +334,7 @@ def _triage_pass_fixture(tmp_path):
     }
     path.unlink()
     raw = canonical_json(payload) + b"\n"
-    from sparselab.training.manifest import sha256_file
+    from klab.training.manifest import sha256_file
 
     path.write_bytes(raw)
     sealed = path.with_name(sha256_file(path) + ".json")
@@ -376,7 +376,7 @@ def _triage_pass_fixture(tmp_path):
     ],
 )
 def test_pass_binding_rejects_malformed_checkpoint_and_progress(tmp_path, broken):
-    from sparselab.canonical import canonical_digest, canonical_json
+    from klab.canonical import canonical_digest, canonical_json
 
     path, checkpoint, progress = _triage_pass_fixture(tmp_path)
     assert read_triage("run", tmp_path)["core"]["integrity"]["status"] == "PASS"
@@ -410,7 +410,7 @@ def test_pass_binding_rejects_malformed_checkpoint_and_progress(tmp_path, broken
         identity["sha256"] = canonical_digest(report)
         report["identity"] = identity
         path.write_bytes(canonical_json(report) + b"\n")
-        from sparselab.training.manifest import sha256_file
+        from klab.training.manifest import sha256_file
 
         sealed = path.with_name(sha256_file(path) + ".json")
         path.rename(sealed)

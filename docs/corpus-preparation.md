@@ -32,7 +32,7 @@ active read duplicates its handle and uses positional I/O, so concurrent reads
 and cache eviction cannot change another reader's position or close its file.
 A single tokenizer subprocess owns its Rayon pool; the measured CPU/RAM plan
 splits capacity between source readers and encoding instead of nesting pools.
-`SPARSELAB_MIXTURE_WORKERS=N` caps that operation's combined worker plan; omitted,
+`KLAB_MIXTURE_WORKERS=N` caps that operation's combined worker plan; omitted,
 it uses available physical cores, affinity and measured memory. Ordinary text
 preparation retains its existing default. These byte budgets bound queued
 payloads, not total RSS: decoded objects, the current record, tokenizer native
@@ -44,7 +44,7 @@ assembly frontier for the same output. Immutable segments live beside it in
 Commit cadence is independent of the 256-document/8 MiB tokenizer batches.
 By default a commit becomes due after 4,096 candidates or emitted rows, 64 MiB
 of pending segment data, or 30 seconds, checked at the next batch boundary;
-a completed stratum always commits. `SPARSELAB_MIXTURE_COMMIT_CANDIDATES=N`
+a completed stratum always commits. `KLAB_MIXTURE_COMMIT_CANDIDATES=N`
 selects a positive candidate/row interval (use `1` for eager commits). Byte and
 time guards still apply. Pending index deltas stream to disk, not a growing RAM
 buffer. This amortizes proof/fsync overhead at the cost of replaying uncommitted
@@ -82,7 +82,7 @@ installation, downloads or training). For example:
 
 ```sh
 /path/to/pinned-lab/.venv/bin/python /path/to/benchmark_mixture.py \
-  --root /srv/sparselab/synthetic-mixture-UNIQUE --workers 1 \
+  --root /srv/klab/synthetic-mixture-UNIQUE --workers 1 \
   --documents 512 --text-bytes 512
 ```
 
@@ -172,7 +172,7 @@ render-declaration`, `attempt init`, `attempt bind-artifact`, corpus verifiers a
 After a successful completed-local build, use its printed build path:
 
 ```sh
-sparselab --work-dir WORK corpus freeze BUILD --reuse-completed-preparation
+klab --work-dir WORK corpus freeze BUILD --reuse-completed-preparation
 ```
 
 This explicit selection writes `manifest.json` and `release-publication.json`
@@ -257,8 +257,8 @@ execution policy for the adopting run.
 
 The historical signed native-completion fallback also needs the original
 producer checkout at the declaration's source path. It checks the recorded bytes
-of `src/sparselab/corpus/split_inventory_adoption.py` and
-`src/sparselab/corpus/completed_preparation.py`, alongside the authenticated
+of `src/klab/corpus/split_inventory_adoption.py` and
+`src/klab/corpus/completed_preparation.py`, alongside the authenticated
 completion evidence and the remaining producer authority. Preserve that checkout
 and evidence while relying on the handoff: changing or removing those files can
 refuse later verification. This historical fallback does not record a new
@@ -623,7 +623,7 @@ included in the pilot's observed I/O and wall-time costs.
 
 `corpus preview DECLARATION --input-root INPUTS --output NEW_DIRECTORY`
 reads explicitly pinned snapshot manifests and acquired JSONL in place. The JSON
-`sparselab-corpus-preview-v1` declaration specifies a seed, source/snapshot IDs,
+`klab-corpus-preview-v1` declaration specifies a seed, source/snapshot IDs,
 relative manifest/data paths with exact SHA256 and byte lengths, aggregate read
 and record limits, sample/excerpt/output bounds and wall seconds.
 
@@ -644,7 +644,7 @@ placeholders deliberately fail validation:
 
 ```json
 {
-  "format": "sparselab-corpus-preview-v1",
+  "format": "klab-corpus-preview-v1",
   "seed": "preview-1",
   "sources": [{
     "source_id": "example",
@@ -1014,7 +1014,7 @@ For an owner-authorized local workflow without a storage allowance, select the
 policy once on the existing ledger while no transfer is active:
 
 ```sh
-sparselab --work-dir WORK corpus budget-observe-storage PROJECT --owner OWNER --approval-reference APPROVAL_REFERENCE --min-free-bytes FREE_FLOOR
+klab --work-dir WORK corpus budget-observe-storage PROJECT --owner OWNER --approval-reference APPROVAL_REFERENCE --min-free-bytes FREE_FLOOR
 ```
 
 This records the original disk target and the actual free-space floor as
@@ -1040,7 +1040,7 @@ local corpus workflow whose elapsed time is observational, select that policy on
 on the existing ledger, while no shard transfer is active:
 
 ```sh
-sparselab --work-dir WORK corpus budget-observe-time PROJECT --owner OWNER --approval-reference APPROVAL_REFERENCE
+klab --work-dir WORK corpus budget-observe-time PROJECT --owner OWNER --approval-reference APPROVAL_REFERENCE
 ```
 
 This command is intentionally excluded from automatic attempt dispatch. Run it
@@ -1065,9 +1065,9 @@ smaller project, change sampling or mixture, reset the ledger, or retry a failur
 For a project with one declared shard per source, this is one shard per step.
 
 ```sh
-sparselab --work-dir WORK corpus acquire PROJECT --source-id SOURCE_ID \
+klab --work-dir WORK corpus acquire PROJECT --source-id SOURCE_ID \
   --max-new-bytes REMAINING_NATIVE_BYTES --min-free-bytes FREE_FLOOR_BYTES --plan
-sparselab --work-dir WORK corpus acquire PROJECT --source-id SOURCE_ID \
+klab --work-dir WORK corpus acquire PROJECT --source-id SOURCE_ID \
   --max-new-bytes REMAINING_NATIVE_BYTES --min-free-bytes FREE_FLOOR_BYTES
 ```
 
@@ -1154,7 +1154,7 @@ For an already authorized local corpus assignment, select the policy on the
 existing ledger instead of replacing it or resetting counters:
 
 ```sh
-sparselab --work-dir WORK corpus budget-observe-network PROJECT \
+klab --work-dir WORK corpus budget-observe-network PROJECT \
   --owner OWNER --approval-reference REFERENCE
 ```
 
@@ -1296,8 +1296,8 @@ admission, inspection and inventory, use the streaming freeze's completed eviden
 and opt into its matching native build path:
 
 ```sh
-sparselab --work-dir WORK corpus build PROJECT --reuse-completed-preparation
-sparselab --work-dir WORK corpus freeze BUILD_DIRECTORY
+klab --work-dir WORK corpus build PROJECT --reuse-completed-preparation
+klab --work-dir WORK corpus freeze BUILD_DIRECTORY
 ```
 
 The build requires the frozen split receipt's explicit completed-inventory
@@ -1400,12 +1400,12 @@ specific old/new code first: matching partial producer identities alone cannot
 establish equivalence of arbitrary transitive changes.
 
 ```sh
-sparselab --work-dir WORK corpus adopt-retained-renders PROJECT \
+klab --work-dir WORK corpus adopt-retained-renders PROJECT \
   --source-stages WORK/corpora/ID/source-build-stages \
   --from-source OLD_COMMIT --to-source REVIEWED_COMMIT \
   --rationale 'Reviewed cache bookkeeping change; retain exact prior execution' \
   --output WORK/retained-renders.json
-sparselab --work-dir WORK corpus build PROJECT --offline \
+klab --work-dir WORK corpus build PROJECT --offline \
   --reuse-completed-preparation \
   --retained-render-adoption WORK/retained-renders.json \
   --retained-render-adoption-sha256 PRINTED_SHA256
@@ -1461,11 +1461,11 @@ reused, but an interrupted token encoding spool is not yet resumable.
 
 ### Relocate a retained release
 
-For a copied retained release, run `sparselab corpus attest-release-migration`
+For a copied retained release, run `klab corpus attest-release-migration`
 on the original host with the release path, `--verifier-checkout` and the exact
 `--verifier-revision` of a clean checkout that can verify that release. Copy the
 resulting source observation to the corresponding private work root on the new
-host, then run `sparselab corpus adopt-release-migration` with the relocated
+host, then run `klab corpus adopt-release-migration` with the relocated
 release path and `--source-observation`. Both hosts must use the same existing
 private verification key; neither command creates a key or changes historical
 receipts. Preserve the original verifier checkout and execution evidence.
@@ -1491,9 +1491,9 @@ adoption code. Keep the original host and evidence for that recovery.
 
 The release migration above does not cover the separate stage files needed for
 retained-mixture indexing. With the original host and its evidence still intact,
-run `sparselab corpus attest-mixture-stages RELEASE` there. Copy the resulting
+run `klab corpus attest-mixture-stages RELEASE` there. Copy the resulting
 `RELEASE_ID.stages.source.json` to the corresponding target work root, then run
-`sparselab corpus adopt-mixture-stages RELEASE --source-observation FILE` on the
+`klab corpus adopt-mixture-stages RELEASE --source-observation FILE` on the
 target. Both commands use the existing private verification key. The target also
 requires the previously completed release migration and its source observation.
 

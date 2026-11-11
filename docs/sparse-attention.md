@@ -59,7 +59,7 @@ and recomputed sparse blocks. Full MLX checkpoint/inference lifecycle
 acceptance is tracked separately from this attention component.
 
 ```sh
-uv run --locked --extra cpu sparselab train --runs-dir sparselab-work/runs configs/smoke_sparse_cpu.yaml --run-id sparse-smoke
+uv run --locked --extra cpu klab train --runs-dir klab-work/runs configs/smoke_sparse_cpu.yaml --run-id sparse-smoke
 ```
 
 The [`sparse-attention` lesson](research/lesson-paths.md) scaffolds the block-16/select-2 PyTorch configuration and exposes selector diagnostics without a campaign. The [memory/selection study](research/engram-sparse-budget.md) keeps endpoint comparisons and observed deltas separate from Python timing; batch/head selection unions can exceed a per-head budget.

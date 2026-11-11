@@ -9,17 +9,17 @@ import pytest
 
 mx = pytest.importorskip("mlx.core")
 
-from sparselab.config.models import RunConfig, TokenizerTrainConfig
-from sparselab.data.tokenizer import train_tokenizer
-from sparselab.engines.base import EngineState, Microbatch
-from sparselab.engines.mlx import MLXEngine
-from sparselab.runtime_profile import (
+from klab.config.models import RunConfig, TokenizerTrainConfig
+from klab.data.tokenizer import train_tokenizer
+from klab.engines.base import EngineState, Microbatch
+from klab.engines.mlx import MLXEngine
+from klab.runtime_profile import (
     RuntimeAuthorization,
     RuntimeProfile,
     authorize_profile,
 )
-from sparselab.training.checkpoints import CheckpointManager
-from sparselab.training.trainer import train
+from klab.training.checkpoints import CheckpointManager
+from klab.training.trainer import train
 
 pytestmark = pytest.mark.mlx
 

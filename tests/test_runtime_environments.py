@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sparselab.runtime_environments import (
+from klab.runtime_environments import (
     RuntimeEntry,
     profile_for_id,
     read_registry,
@@ -109,18 +109,18 @@ def test_registry_bad_id(tmp_path, identifier):
 def test_roots_are_external_independent_and_passive(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "science"))
-    monkeypatch.delenv("SPARSELAB_RUNTIME_DIR", raising=False)
-    assert resolve_runtime_dir() == tmp_path / "data/sparselab/runtimes"
-    assert resolve_registry_path() == tmp_path / "config/sparselab/runtimes.yaml"
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "science"))
+    monkeypatch.delenv("KLAB_RUNTIME_DIR", raising=False)
+    assert resolve_runtime_dir() == tmp_path / "data/klab/runtimes"
+    assert resolve_registry_path() == tmp_path / "config/klab/runtimes.yaml"
     assert not (tmp_path / "data").exists()
-    monkeypatch.setenv("SPARSELAB_RUNTIME_DIR", "relative")
+    monkeypatch.setenv("KLAB_RUNTIME_DIR", "relative")
     with pytest.raises(ValueError, match="absolute"):
         resolve_runtime_dir()
-    monkeypatch.setenv("SPARSELAB_RUNTIME_DIR", str(tmp_path / "science"))
+    monkeypatch.setenv("KLAB_RUNTIME_DIR", str(tmp_path / "science"))
     with pytest.raises(ValueError, match="differ"):
         resolve_runtime_dir()
-    monkeypatch.setenv("SPARSELAB_RUNTIME_DIR", str(Path.cwd() / "runtimes"))
+    monkeypatch.setenv("KLAB_RUNTIME_DIR", str(Path.cwd() / "runtimes"))
     with pytest.raises(ValueError, match="checkout"):
         resolve_runtime_dir()
 
@@ -136,7 +136,7 @@ def test_registries_are_host_local_not_environment_search(tmp_path, monkeypatch)
     assert not b.exists()
     assert os.access(Path(sys.executable), os.X_OK)
     assert (
-        yaml.safe_load((a / "sparselab/runtimes.yaml").read_text())[
+        yaml.safe_load((a / "klab/runtimes.yaml").read_text())[
             "runtime_registry_version"
         ]
         == 1
@@ -144,8 +144,8 @@ def test_registries_are_host_local_not_environment_search(tmp_path, monkeypatch)
 
 
 def test_discovery_caps_deduplicates_and_preserves_venv_prefixes(tmp_path):
-    from sparselab.runtime_env_inventory import canonical_python, discover_candidates
-    from sparselab.runtime_environments import RuntimeRegistry
+    from klab.runtime_env_inventory import canonical_python, discover_candidates
+    from klab.runtime_environments import RuntimeRegistry
 
     root = tmp_path / "runtimes"
     for index in range(35):
@@ -178,9 +178,9 @@ def test_discovery_caps_deduplicates_and_preserves_venv_prefixes(tmp_path):
 
 
 def test_inventory_missing_candidate_and_real_cpu():
-    from sparselab.runtime_env_inventory import inspect_python
+    from klab.runtime_env_inventory import inspect_python
 
-    missing = inspect_python(Path("/nonexistent/sparselab-runtime-python"))
+    missing = inspect_python(Path("/nonexistent/klab-runtime-python"))
     assert missing["status"] == "NOT_PROVISIONED"
     observed = inspect_python(Path(sys.executable).absolute())
     assert observed["status"] == "READY"
@@ -188,12 +188,12 @@ def test_inventory_missing_candidate_and_real_cpu():
     assert observed["torch"]["hip"] is None
     # A CPU-capable environment can also expose host accelerators such as MPS.
     assert "cpu" in observed["backends"]
-    assert observed["sparse_lab_import"]["success"]
+    assert observed["klab_import"]["success"]
 
 
 def test_inventory_source_drift_and_declared_backend(monkeypatch):
-    from sparselab import runtime_env_inventory as module
-    from sparselab.runtime_identity_probe import source_identity
+    from klab import runtime_env_inventory as module
+    from klab.runtime_identity_probe import source_identity
 
     environment = {
         "python": str(module.canonical_python(Path(sys.executable))),
@@ -217,8 +217,8 @@ def test_inventory_source_drift_and_declared_backend(monkeypatch):
 
 
 def test_venv_aliases_deduplicate_without_merging_independent_prefixes(tmp_path):
-    from sparselab.runtime_env_inventory import canonical_python, discover_candidates
-    from sparselab.runtime_environments import RuntimeRegistry
+    from klab.runtime_env_inventory import canonical_python, discover_candidates
+    from klab.runtime_environments import RuntimeRegistry
 
     root = tmp_path / "runtimes"
     for name in ("one", "two"):
@@ -256,8 +256,8 @@ def test_rocm_provision_hash_failure_retains_evidence_without_device_probe(
     import json
     from types import SimpleNamespace
 
-    from sparselab import runtime_env_provision as provisioner
-    from sparselab.training.manifest import sha256_file
+    from klab import runtime_env_provision as provisioner
+    from klab.training.manifest import sha256_file
 
     root = tmp_path / "runtimes"
     monkeypatch.setattr(provisioner.platform, "system", lambda: "Linux")

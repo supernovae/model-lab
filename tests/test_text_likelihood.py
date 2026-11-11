@@ -10,7 +10,7 @@ from tokenizers.models import BPE
 from tokenizers.pre_tokenizers import ByteLevel
 from tokenizers.trainers import BpeTrainer
 
-from sparselab.evaluation.text_likelihood import score_story
+from klab.evaluation.text_likelihood import score_story
 
 
 def _tokenizer() -> Tokenizer:

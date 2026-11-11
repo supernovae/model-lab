@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sparselab.documents import read_document
-from sparselab.experiments.plan import read_document as plan_read_document
+from klab.documents import read_document
+from klab.experiments.plan import read_document as plan_read_document
 
 
 @pytest.mark.parametrize("suffix", ["yaml", "json", "JSON"])
@@ -66,7 +66,7 @@ def test_rejected_data_has_source(tmp_path, suffix, text, match):
 def test_mapping_diagnostics_are_concise_for_direct_and_file_readers(
     tmp_path, exact_decimals, key, error_type, diagnostic
 ):
-    from sparselab.documents import _ExactUniqueLoader, _UniqueLoader
+    from klab.documents import _ExactUniqueLoader, _UniqueLoader
 
     path = tmp_path / "bad.yaml"
     text = f"nested:\n  key: 1\n  {key}: 2\n"
@@ -113,11 +113,11 @@ from pathlib import Path
 class Fence(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if fullname.split('.')[0] in {'torch', 'mlx', 'datasets', 'tokenizers', 'pydantic'} or (
-            fullname.startswith('sparselab.') and fullname != 'sparselab.documents'
+            fullname.startswith('klab.') and fullname != 'klab.documents'
         ):
             raise AssertionError('unexpected dependency: ' + fullname)
 sys.meta_path.insert(0, Fence())
-from sparselab.documents import read_document
+from klab.documents import read_document
 assert read_document(Path(sys.argv[1])) == {'plugin': {'path': 'relative'}}
 """
     subprocess.run([sys.executable, "-c", code, str(path)], check=True, cwd=tmp_path)
@@ -134,7 +134,7 @@ def test_missing_and_invalid_utf8_have_source(tmp_path):
 
 
 def test_plan_schema_is_separate_and_does_not_open_artifacts(tmp_path):
-    from sparselab.experiments.plan import load_plan
+    from klab.experiments.plan import load_plan
 
     path = tmp_path / "plan.yaml"
     path.write_text("plan_version: 1\nid: parsed\nbase_run: absent.yaml\n")
@@ -152,22 +152,22 @@ def test_model_components_do_not_import_workflow_consumers():
     """Fence the computational package, not adapters with known coupling debt."""
     import ast
 
-    import sparselab
+    import klab
 
-    root = Path(sparselab.__file__).parent / "model"
+    root = Path(klab.__file__).parent / "model"
     forbidden = (
-        "sparselab.experiments",
-        "sparselab.campaign",
-        "sparselab.lab_mode",
-        "sparselab.research",
-        "sparselab.cli",
+        "klab.experiments",
+        "klab.campaign",
+        "klab.lab_mode",
+        "klab.research",
+        "klab.cli",
     )
     for path in root.rglob("*.py"):
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, ast.ImportFrom):
                 imports = [node.module or ""]
-                if node.module == "sparselab":
-                    imports += ["sparselab." + name.name for name in node.names]
+                if node.module == "klab":
+                    imports += ["klab." + name.name for name in node.names]
             elif isinstance(node, ast.Import):
                 imports = [name.name for name in node.names]
             else:
@@ -181,7 +181,7 @@ def test_model_components_do_not_import_workflow_consumers():
 
 @pytest.mark.parametrize("levels", [1, 8, 25])
 def test_alias_doubling_visits_shared_leaves_once(tmp_path, monkeypatch, levels):
-    from sparselab import documents
+    from klab import documents
 
     path = tmp_path / "doubling.yaml"
     path.write_text(

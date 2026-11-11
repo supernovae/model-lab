@@ -6,13 +6,13 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from sparselab import resource_envelope as resources
-from sparselab.resource_envelope import (
+from klab import resource_envelope as resources
+from klab.resource_envelope import (
     ResourceEnvelope,
     check_envelope,
     load_resource_envelope,
 )
-from sparselab.workspace_preflight import StorageCheck
+from klab.workspace_preflight import StorageCheck
 
 
 @pytest.mark.parametrize(
@@ -293,8 +293,8 @@ def test_checks_disk_on_existing_ancestor_without_creating_output(
 
 
 def test_scientific_config_identity_excludes_operational_policy() -> None:
-    from sparselab.config.loading import load_config
-    from sparselab.config.models import RunConfig
+    from klab.config.loading import load_config
+    from klab.config.models import RunConfig
 
     config = load_config(
         Path(__file__).resolve().parents[1] / "configs" / "runtime_smoke_cpu.yaml"

@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from tokenizers import AddedToken, Tokenizer, decoders, models
 
-from sparselab.canonical import canonical_digest
-from sparselab.memory_tokenizer import (
+from klab.canonical import canonical_digest
+from klab.memory_tokenizer import (
     build_memory_token_map,
     load_memory_token_map,
     save_memory_token_map,

@@ -2,7 +2,7 @@
 
 Commands below use the [activated, provisioned environment](../README.md#first-run).
 
-SparseLab's token Engram is a causal N-gram lookup table with a latent value width independent of the backbone hidden width. Each position hashes only its current and earlier token IDs, retrieves a latent table vector, projects it to model width, and mixes it with the hidden state through a sigmoid gate:
+Model Lab's token Engram is a causal N-gram lookup table with a latent value width independent of the backbone hidden width. Each position hashes only its current and earlier token IDs, retrieves a latent table vector, projects it to model width, and mixes it with the hidden state through a sigmoid gate:
 
 $$h'_t = h_t + \sigma(g(h_t))\,A\,M[a(x_{\leq t})].$$
 
@@ -11,8 +11,8 @@ Set `model.memory: ngram` with `memory_table_size`, `memory_ngram_size`, and `me
 Each forward pass records lookup count, unique buckets, collisions, bucket reuse rate, table utilization, largest-bucket fraction, mean gate activation, retrieved-vector norm, and hidden-state norm. High reuse can arise from a small table or repeated corpus structure; it is not by itself a learned-memory success signal. Inspect language loss and withheld-fact evaluation separately.
 
 ```sh
-sparselab train --runs-dir sparselab-work/runs configs/smoke_memory_cpu.yaml --run-id token-engram-smoke
-sparselab train --runs-dir sparselab-work/runs configs/smoke_byte_memory_cpu.yaml --run-id byte-engram-smoke
+klab train --runs-dir klab-work/runs configs/smoke_memory_cpu.yaml --run-id token-engram-smoke
+klab train --runs-dir klab-work/runs configs/smoke_byte_memory_cpu.yaml --run-id byte-engram-smoke
 ```
 
 Multi-order/multi-head streams preserve causal addressing and allocate one table per stream. Per-run metrics persist aggregate lookup count, unique buckets, collisions, reuse rate, table utilization, and gate mean, plus the same six metrics under `engram/stream_N/*` for each stream. The Architecture dashboard renders those persisted series. Portable packages and frozen adapter training are available through `memory: portable`; the withheld-fact control matrix currently yields no transfer success, so it remains a negative experiment result.

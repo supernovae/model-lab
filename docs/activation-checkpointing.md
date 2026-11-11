@@ -51,5 +51,5 @@ The planner proposes recomputation explicitly; it never silently changes the
 requested config. The recorded focused generation/import/recomputation sweep passed
 35 tests, and the [actual MPS offload comparison](offload.md#actual-mps-comparison)
 verified composition with recomputation and final-parameter parity. The
-[host continuation record](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/host_cli_2026_09_22.json)
+[host continuation record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/host_cli_2026_09_22.json)
 also exercises recomputation in both engines.

@@ -7,10 +7,10 @@ import pytest
 from pydantic import ValidationError
 from test_training import config
 
-from sparselab.canonical import canonical_digest, canonical_json
-from sparselab.evaluation import panel
-from sparselab.evaluation.suite import run_suite
-from sparselab.training.trainer import train
+from klab.canonical import canonical_digest, canonical_json
+from klab.evaluation import panel
+from klab.evaluation.suite import run_suite
+from klab.training.trainer import train
 
 
 @pytest.fixture(scope="module")

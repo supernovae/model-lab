@@ -141,7 +141,7 @@ acceptance. New integrations need their own source and runtime checks.
 - **Proposed lab test:** isolate latent attention against dense and grouped-query
   controls using the lab's reference paths. Compare quality, cache growth and
   decode timing; implementing the paper's compressed-cache design is distinct
-  from the current [expanded-key cache](../../src/sparselab/model/attention/latent.py).
+  from the current [expanded-key cache](../../src/klab/model/attention/latent.py).
 - **Limit:** the 236B-total/21B-active model trains on 8.1T tokens and combines
   several changes. Its headline savings are not predictions for the simplified
   lab MLA implementation or tiny-model quality.
@@ -179,7 +179,7 @@ acceptance. New integrations need their own source and runtime checks.
   documents its `VLLM_PLE_CPU_OFFLOAD` host-memory path as NVIDIA-only;
   general UVA/CUDA-alike capability does not establish this path's ROCm support.
   [llama.cpp lazy reads](https://github.com/ggml-org/llama.cpp/blob/c06f84160a30c66d7b5a2829ae9b3ea15275cbc3/tools/cli/README.md)
-  are a separate mmap-based disk path. Neither establishes Tiny Sparse Lab ROCm
+  are a separate mmap-based disk path. Neither establishes Kybern Model Lab ROCm
   support or performance.
 
 ### Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention
@@ -330,12 +330,12 @@ Published results do not establish local quality, speed or memory fit.
 
 ### Fit and comparison boundaries
 
-The current [PyTorch optimizer factory](../../src/sparselab/training/optimizer.py)
+The current [PyTorch optimizer factory](../../src/klab/training/optimizer.py)
 provides AdamW and Adafactor with `foreach=False`; other choices below need new
 integration. AdamW separates matrix and vector decay groups and deduplicates tied
 parameters. Adafactor uses one decay group and its own parameter-scaling
 semantics. The
-[configuration](../../src/sparselab/config/models.py) rejects optimizer-state offload;
+[configuration](../../src/klab/config/models.py) rejects optimizer-state offload;
 runs use one process/device, and the existing [activation offload](../../docs/offload.md)
 does not move optimizer state.
 
@@ -355,7 +355,7 @@ steady-state update time, end-to-end time and checkpoint cost. Sparse model
 routing does not imply sparse-layout gradients or eliminate resident states.
 
 [Full resume](../../docs/checkpointing.md#full-resume) binds optimizer configuration.
-The [native verifier](../../src/sparselab/training/checkpoints.py) currently validates
+The [native verifier](../../src/klab/training/checkpoints.py) currently validates
 AdamW/Adafactor moment inventories, shapes and FP32 dtypes. A new optimizer needs
 configuration, accounting and safe state-codec/verification work, including
 quantization scales, projection matrices or reproducible seeds, refresh phase,

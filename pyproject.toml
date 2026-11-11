@@ -1,7 +1,7 @@
 [project]
-name = "tiny-sparse-lab"
+name = "kybern-model-lab"
 version = "0.1.0"
-description = "An educational dense-transformer laboratory"
+description = "Kybern Model Lab: a workbench for training, comparing and inspecting models"
 readme = "README.md"
 authors = [
     { name = "Byron Miller", email = "bymiller@redhat.com" }
@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.scripts]
-sparselab = "sparselab.cli.entry:main"
+klab = "klab.cli.entry:main"
 
 [project.optional-dependencies]
 cpu = [
@@ -34,7 +34,7 @@ mlx = [
 reference = [
     "transformers>=4.45,<5",
 ]
-# Optional standard-task backend for `sparselab probe --config full`.
+# Optional standard-task backend for `klab probe --config full`.
 lmeval = [
     "lm-eval>=0.4.9,<0.5",
 ]
@@ -44,7 +44,7 @@ requires = ["uv_build>=0.12.17,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-module-name = "sparselab"
+module-name = "klab"
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

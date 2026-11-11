@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from sparselab.dashboard.queries import snapshot
-from sparselab.training.metrics import ExperimentStore
+from klab.dashboard.queries import snapshot
+from klab.training.metrics import ExperimentStore
 
 
 def _legacy_store(tmp_path) -> sqlite3.Connection:
@@ -80,7 +80,7 @@ def test_dashboard_reads_latest_runtime_snapshot_without_migration(tmp_path) -> 
 def test_training_triage_panel_rejects_forged_and_symlinked_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.dashboard import app
+    from klab.dashboard import app
 
     messages: list[str] = []
     monkeypatch.setattr(
@@ -109,8 +109,8 @@ def test_training_triage_panel_rejects_forged_and_symlinked_artifacts(
 def test_imported_manifest_is_explicitly_pending_until_collection(tmp_path, assigned):
     import json
 
-    from sparselab.canonical import canonical_digest
-    from sparselab.workers.artifacts import _restore_crash_projection
+    from klab.canonical import canonical_digest
+    from klab.workers.artifacts import _restore_crash_projection
 
     source = ExperimentStore(tmp_path / "worker")
     source.create_run("child", {"name": "child"}, {}, parent_run_id="parent")

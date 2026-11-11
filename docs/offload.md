@@ -82,7 +82,7 @@ savings are zero**, despite the smaller sampled device allocation.
 An artificial budget that fit the model but not additional host staging was
 rejected before run creation. Saved-version, parameter/buffer-alias, and device
 allocation-lifetime regressions also passed. [Recorded configurations, runtime
-identities, headroom decisions, and measurements](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/offload_2026_09_22.json)
+identities, headroom decisions, and measurements](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/offload_2026_09_22.json)
 preserve the acceptance evidence. Discrete-device capacity claims remain gated
 on actual CUDA/ROCm/XPU hardware.
 

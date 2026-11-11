@@ -8,7 +8,7 @@ separate follow-up. There is no publication-report command yet.
 
 ## Integration contract
 
-The module is `sparselab.experiments.publication_report`:
+The module is `klab.experiments.publication_report`:
 
 - `build_publication_report(lock_path, *, workspace=None, index_path=None)` returns
   the allowlisted report dictionary. The lock is always reopened with native
@@ -34,7 +34,7 @@ from its hash. It creates no training, evaluation, acquisition or controller wor
 
 ## Interpretation and privacy
 
-The machine format is `sparselab-publication-report`. Both formats retain the
+The machine format is `klab-publication-report`. Both formats retain the
 original plan, scientific, source and evidence-index hashes, per-cell configuration
 and input hashes, planned seeds/budgets, lineage, selected runs, attempt statuses,
 checkpoint digests/counters and verification scopes, and integrity-bound validation

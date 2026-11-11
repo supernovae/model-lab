@@ -27,7 +27,7 @@ limit so a hung test cannot occupy a runner for six hours. Hardware and network
 tests retain their separate opt-in gates. PR checkout uses GitHub's synthetic
 merge commit to test integration with the base branch; detached HEAD is expected.
 
-Base installation is Torch-free: the lightweight `sparselab runtime env` CLI
+Base installation is Torch-free: the lightweight `klab runtime env` CLI
 works without Torch, but the full CLI currently imports a backend framework.
 For a provisioned vendor interpreter use it directly or set
 `UV_PROJECT_ENVIRONMENT` to its environment prefix and run with
@@ -35,12 +35,12 @@ For a provisioned vendor interpreter use it directly or set
 downloaded corpora, prepared arrays, run directories, or checkpoints. Reports
 should include the resolved configuration and relevant run evidence.
 
-For a local CPU example, run `sparselab runtime env discover --json`, then
-`sparselab runtime env register cpu-py314 --python "$PWD/.venv/bin/python" --backend cpu --json`
-and `sparselab runtime env doctor cpu-py314 --json`. Select it with
-`sparselab stage configs/runtime_smoke_cpu.yaml --through inspect --runtime cpu-py314 --output /absolute/disposable/stage`.
+For a local CPU example, run `klab runtime env discover --json`, then
+`klab runtime env register cpu-py314 --python "$PWD/.venv/bin/python" --backend cpu --json`
+and `klab runtime env doctor cpu-py314 --json`. Select it with
+`klab stage configs/runtime_smoke_cpu.yaml --through inspect --runtime cpu-py314 --output /absolute/disposable/stage`.
 The XDG runtime root and host-local registry are separate from
-`SPARSELAB_WORK_DIR` and scientific locks; never copy runtime IDs as capability
+`KLAB_WORK_DIR` and scientific locks; never copy runtime IDs as capability
 claims to another host. See [machine-local runtime environments](docs/runtime.md#machine-local-runtime-environments).
 
 Work on an ordinary branch in the existing checkout, not an automatically created
@@ -50,7 +50,7 @@ worktree:
 git switch main
 git pull --ff-only
 git switch -c feat/<task>
-export SPARSELAB_WORK_DIR=/data/sparselab
+export KLAB_WORK_DIR=/data/klab
 ```
 
 Choose an external persistent filesystem with enough space for actual campaigns.
@@ -58,7 +58,7 @@ For ordinary local experiments, follow [lab mode](docs/lab-mode.md); the sealed
 record captures source state and effective inputs. For **release work**, commit
 corpus/source-rights pins, ExperimentPlan/base run, evaluation suite and runtime
 requirement **before** acquisition, tokenizer fitting, preparation or training.
-Inspect `sparselab research snapshot <plan-or-campaign> --json` before
+Inspect `klab research snapshot <plan-or-campaign> --json` before
 expensive execution. Retain a compact verified evidence reference in Git instead
 of copying datasets/checkpoints into the repository. `scratch/` and optional
 `cache/` under the persistent root are disposable; neither is proof. A reviewed
@@ -101,7 +101,7 @@ The [research contribution workflow](docs/research/contributing.md) explains val
 ## Planning and contributions
 
 [ROADMAP.md](ROADMAP.md) summarizes feature direction. Use
-[GitHub issues](https://github.com/supernovae/tiny-sparse-lab/issues) for feature
+[GitHub issues](https://github.com/supernovae/model-lab/issues) for feature
 requests, bug reports and proposed code work. Search existing issues first;
 include the use case, expected behavior and relevant reproduction details.
 Link related issues in pull requests, where implementation, review and CI checks
@@ -109,7 +109,7 @@ are tracked. Keep the roadmap directional rather than duplicating issue status.
 
 ## Documentation
 
-Write for someone running their own experiment. Use native `sparselab` commands
+Write for someone running their own experiment. Use native `klab` commands
 and YAML/JSON declarations, through the locked environment; keep Python snippets
 out of user workflows. If a required operation is API-only, describe the missing
 CLI/DSL input, output and failure criteria in a GitHub issue instead of inventing a command or teaching a private script. Label placeholders and prerequisites, and
@@ -135,7 +135,7 @@ Describe research by its question and changed variables, then state where it
 ran: “FFN-width comparison, run with PyTorch on an AMD GPU,” for example.
 CPU, CUDA, ROCm, XPU and MPS describe PyTorch execution capabilities; MLX is a
 separate engine using Metal on Apple Silicon. Reserve “runtime validation” and
-“acceptance” for checks of SparseLab software behavior in an environment. Do not
+“acceptance” for checks of Model Lab software behavior in an environment. Do not
 present the processor as the subject of a model experiment unless the protocol
 explicitly compares execution backends.
 

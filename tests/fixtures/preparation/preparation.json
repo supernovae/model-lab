@@ -1,5 +1,5 @@
 {
-  "format": "sparselab-preparation-v1",
+  "format": "klab-preparation-v1",
   "defaults": {
     "ACQUISITION_PROJECT": "./project-acquire.yaml",
     "POLICY_DOCUMENT": "./APPLICATION_POLICY_PROSPECTIVE.md",

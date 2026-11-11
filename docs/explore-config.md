@@ -8,9 +8,9 @@ profile selects its backend through native runtime authorization; its engine
 and device index must match the saved run. There is no device fallback.
 
 ```sh
-sparselab explore TRY_ID
-sparselab explore TRY_ID --config explore.yaml --json
-sparselab explore TRY_ID --runtime MY_RUNTIME --resource-envelope bounds.yaml
+klab explore TRY_ID
+klab explore TRY_ID --config explore.yaml --json
+klab explore TRY_ID --runtime MY_RUNTIME --resource-envelope bounds.yaml
 ```
 
 Save a reusable descriptive request as `explore.yaml`:

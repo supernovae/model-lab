@@ -1,6 +1,6 @@
 import pytest
 
-from sparselab.training.throughput import summarize_training_progress
+from klab.training.throughput import summarize_training_progress
 
 
 def test_summarizes_exact_rates_and_eta() -> None:

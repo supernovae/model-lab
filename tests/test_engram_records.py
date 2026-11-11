@@ -7,7 +7,7 @@ import pyarrow as pa
 import pytest
 from pyarrow import parquet
 
-from sparselab.engram.records import iter_knowledge_records
+from klab.engram.records import iter_knowledge_records
 
 
 def _equivalent_rows() -> tuple[list[dict[str, object]], pa.Schema]:

@@ -4,10 +4,10 @@ relay_version: 1
 namespace: hosted-tinystories
 controller:
   kind: rclone
-  root: labs3:sparselab-relay
+  root: labs3:klab-relay
   config: /absolute/controller/rclone.conf
 worker:
   kind: rclone
-  root: labs3:sparselab-relay
+  root: labs3:klab-relay
   config: /absolute/worker/rclone.conf
 transfer_timeout_seconds: 1800

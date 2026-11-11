@@ -51,7 +51,7 @@ configs, and reports operations, typed edges, config byte digests and local path
 It neither opens payloads nor claims their availability. Future outputs have no
 fabricated content identity. Runtime capability is unknown, committed provenance
 is unverified, and execution is unavailable. The separate recipe digest uses the
-`sparselab-portable-preparation-v1` domain and sorted inventory; local bindings
+`klab-portable-preparation-v1` domain and sorted inventory; local bindings
 have their own byte digest. No historical hash algorithm or seed acceptance changes.
 
 ## Iteration and operation boundaries
@@ -113,9 +113,9 @@ defence in depth for future callers/reordering, not a new admission mechanism.
 The owner-reviewed execution subset adds:
 
 ```sh
-sparselab experiment recipe preparation apply RECIPE --bindings LOCAL \
+klab experiment recipe preparation apply RECIPE --bindings LOCAL \
   --admission ADMISSION.json --work-dir /absolute/work/root --json
-sparselab experiment recipe preparation resume RECIPE --bindings LOCAL \
+klab experiment recipe preparation resume RECIPE --bindings LOCAL \
   --admission ADMISSION.json --work-dir /absolute/work/root --json
 ```
 
@@ -285,15 +285,15 @@ exclusions and event history. It checks each consumer's revision, license,
 dataset configuration and split locations. The embedded source lock retains
 source attribution and licensing provenance; successful verification does not
 grant rights or establish redistributability. This profile requires
-`sparselab-dataset-snapshot-v1`; legacy imported snapshots remain readable through
+`klab-dataset-snapshot-v1`; legacy imported snapshots remain readable through
 their existing native readers but are not newly admitted here.
 
 Use the existing public commands with this admission:
 
 ```sh
-sparselab experiment recipe preparation inspect recipe.json --bindings local.json --json
-sparselab experiment recipe preparation apply recipe.json --bindings local.json --admission admission.json --work-dir /absolute/work --json
-sparselab experiment recipe preparation resume recipe.json --bindings local.json --admission admission.json --work-dir /absolute/work --json
+klab experiment recipe preparation inspect recipe.json --bindings local.json --json
+klab experiment recipe preparation apply recipe.json --bindings local.json --admission admission.json --work-dir /absolute/work --json
+klab experiment recipe preparation resume recipe.json --bindings local.json --admission admission.json --work-dir /absolute/work --json
 ```
 
 Inspection/help never read snapshot payloads or launch preparation. Apply/resume
@@ -304,7 +304,7 @@ The artifact memo/proof key includes sibling payloads, not just manifest bytes.
 Native snapshot/config/tokenizer/prepared hashes and legacy seed coercion are
 unchanged. No model execution capability is added.
 
-The historical [`test_portable_snapshot_preparation.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_portable_snapshot_preparation.py) exercised the real native
+The historical [`test_portable_snapshot_preparation.py`](https://github.com/supernovae/model-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_portable_snapshot_preparation.py) exercised the real native
 snapshot/tokenizer/packing/verifier and public CLI. Snapshot fixture construction
 substitutes only Hub metadata/transport with local rows; it is not real-data
 acquisition evidence. See [portable experiment ownership](portable-experiment-migration.md)
@@ -312,8 +312,8 @@ for where recipes and Lab code belong.
 
 Current [`test_verifier_authority_current.py`](../tests/test_verifier_authority_current.py)
 checks registered authority closures and exclusion audits. The historical
-[`test_snapshot_warm_reuse.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_snapshot_warm_reuse.py), [`test_snapshot_authority.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_snapshot_authority.py) and
-[`test_verification_reuse.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_verification_reuse.py) documented additional snapshot and prepared-inventory
+[`test_snapshot_warm_reuse.py`](https://github.com/supernovae/model-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_snapshot_warm_reuse.py), [`test_snapshot_authority.py`](https://github.com/supernovae/model-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_snapshot_authority.py) and
+[`test_verification_reuse.py`](https://github.com/supernovae/model-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_verification_reuse.py) documented additional snapshot and prepared-inventory
 reuse coverage before test consolidation; these retired files are evidence of
 that earlier coverage, not tests run by current CI. The new artifact
 branch uses cold native verification and does not add a persistent authority
@@ -433,10 +433,10 @@ their own verification and are not established by these tests.
 
 ### Acquisition boundary tests
 
-[Historical transport guard tests](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_acquisition_guards.py) covered HTTP and
+[Historical transport guard tests](https://github.com/supernovae/model-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_acquisition_guards.py) covered HTTP and
 credential boundaries, explicit network permission, cache/storage integrity,
 decoder limits and cumulative verification accounting.
-[Historical authority tests](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_acquisition_authority.py) covered admission paths/stages
+[Historical authority tests](https://github.com/supernovae/model-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_acquisition_authority.py) covered admission paths/stages
 and exclusive invocation ownership. Those HTTP fixtures used an in-memory opener
 and fake token, with no external network or credential-store access. These files
 were retired during test consolidation. Current
@@ -480,11 +480,11 @@ split freezing and inventory completion reuse.
 
 | Boundary | Historical regression | Original coverage |
 | --- | --- | --- |
-| Current models/schema | [`test_preparation_contract.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_preparation_contract.py) | One round-trip/schema per document; obsolete input refuses before context/compilation; paired strict snapshot ceilings |
-| Typed graph/local binding | [`test_preparation_recipe.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_preparation_recipe.py) | Exact paths/ports, metadata-only inspection, no interpretation of opaque plugin paths |
-| Synthetic execution | [`test_preparation_execution.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_preparation_execution.py) | Native CPU prep, bounds, provenance, replay, no-clobber and source-change refusal |
-| Snapshot consumption | [`test_portable_snapshot_preparation.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_portable_snapshot_preparation.py) | Required caps, cold integrity, exact split/source bindings and replay |
-| Acquisition | [`test_portable_acquisition.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_portable_acquisition.py), [`test_acquisition_authority.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_acquisition_authority.py), [`test_acquisition_guards.py`](https://github.com/supernovae/tiny-sparse-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_acquisition_guards.py) | Explicit network authority, lock identity, reservations, cancellation and recovery |
+| Current models/schema | [`test_preparation_contract.py`](https://github.com/supernovae/model-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_preparation_contract.py) | One round-trip/schema per document; obsolete input refuses before context/compilation; paired strict snapshot ceilings |
+| Typed graph/local binding | [`test_preparation_recipe.py`](https://github.com/supernovae/model-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_preparation_recipe.py) | Exact paths/ports, metadata-only inspection, no interpretation of opaque plugin paths |
+| Synthetic execution | [`test_preparation_execution.py`](https://github.com/supernovae/model-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_preparation_execution.py) | Native CPU prep, bounds, provenance, replay, no-clobber and source-change refusal |
+| Snapshot consumption | [`test_portable_snapshot_preparation.py`](https://github.com/supernovae/model-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_portable_snapshot_preparation.py) | Required caps, cold integrity, exact split/source bindings and replay |
+| Acquisition | [`test_portable_acquisition.py`](https://github.com/supernovae/model-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_portable_acquisition.py), [`test_acquisition_authority.py`](https://github.com/supernovae/model-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_acquisition_authority.py), [`test_acquisition_guards.py`](https://github.com/supernovae/model-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_acquisition_guards.py) | Explicit network authority, lock identity, reservations, cancellation and recovery |
 
 This consolidation changes operational admission/binding identity, not computation,
 Campaign ordering or historical content identity. It proves fixture-scale contract

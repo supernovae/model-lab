@@ -8,19 +8,19 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sparselab.canonical import canonical_digest, canonical_json
-from sparselab.corpus.admission_inspection_cache import capture
-from sparselab.corpus.completed_release import freeze_retained, verify_retained_release
-from sparselab.corpus.project import ProjectConfig
-from sparselab.corpus.split_runs import SplitStages
-from sparselab.training.manifest import sha256_file
+from klab.canonical import canonical_digest, canonical_json
+from klab.corpus.admission_inspection_cache import capture
+from klab.corpus.completed_release import freeze_retained, verify_retained_release
+from klab.corpus.project import ProjectConfig
+from klab.corpus.split_runs import SplitStages
+from klab.training.manifest import sha256_file
 
 
 def test_retained_build_recovers_from_closed_execution(tmp_path, monkeypatch):
     root = tmp_path / "work"
     root.mkdir(mode=0o700)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    key_dir = tmp_path / "config" / "sparselab"
+    key_dir = tmp_path / "config" / "klab"
     key_dir.mkdir(parents=True, mode=0o700)
     (tmp_path / "config").chmod(0o700)
     key = key_dir / "verification-key-v1"
@@ -63,7 +63,7 @@ def test_retained_build_recovers_from_closed_execution(tmp_path, monkeypatch):
         "jsonl_records.py",
     )
     producer = {
-        name: sha256_file(source_checkout / "src/sparselab/corpus" / name)
+        name: sha256_file(source_checkout / "src/klab/corpus" / name)
         for name in producer_names
     }
     request = {
@@ -121,7 +121,7 @@ def test_retained_build_recovers_from_closed_execution(tmp_path, monkeypatch):
         "/opt/venv/bin/python",
         "-B",
         "-m",
-        "sparselab",
+        "klab",
         "--work-dir",
         str(root),
         "corpus",
@@ -268,8 +268,8 @@ def test_retained_build_recovers_from_closed_execution(tmp_path, monkeypatch):
 
     # A migration is a new observation: preserve the original execution and
     # exercise actual files, a clean verifier checkout, and changed inodes.
-    from sparselab.corpus.release import verify_release
-    from sparselab.corpus.release_migration import adopt_target, attest_source
+    from klab.corpus.release import verify_release
+    from klab.corpus.release_migration import adopt_target, attest_source
 
     (root / "sources").chmod(0o700)
     (root / "transforms").chmod(0o700)
@@ -310,7 +310,7 @@ def test_retained_build_recovers_from_closed_execution(tmp_path, monkeypatch):
     shutil.copytree(root, moved)
     moved_build = moved / build.relative_to(root)
     moved_attestation = moved / attestation.relative_to(root)
-    from sparselab.verification_proofs import ProofStore
+    from klab.verification_proofs import ProofStore
 
     original_attestation = moved_attestation.read_bytes()
     incomplete = json.loads(original_attestation)
@@ -342,7 +342,7 @@ def test_retained_build_recovers_from_closed_execution(tmp_path, monkeypatch):
     assert verify_release(moved_build)["release_id"] == publication["release_id"]
     # A later compatible Lab update must not force rereading the source host.
     # The real files and signed receipt remain unchanged by this authority change.
-    import sparselab.corpus.release_migration as migration
+    import klab.corpus.release_migration as migration
 
     with monkeypatch.context() as later_version:
         later_version.setattr(migration, "_authority", lambda: "later-code-version")
@@ -366,7 +366,7 @@ def test_retained_build_recovers_from_closed_execution(tmp_path, monkeypatch):
 
 
 def test_migration_uses_bound_snapshot_digest(tmp_path):
-    from sparselab.corpus.release_migration import _snapshot_digests
+    from klab.corpus.release_migration import _snapshot_digests
 
     root = tmp_path / "work"
     release = root / "corpora" / "tiny" / "builds" / "build"

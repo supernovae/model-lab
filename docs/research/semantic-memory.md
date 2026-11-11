@@ -1,13 +1,13 @@
 # Verified semantic memory and exact retrieval
 
-The `semantic-retrieval` lesson teaches a bounded, verified retrieval interface. It is not a language-understanding lesson: a caller supplies **externally encoded canonical vectors**, already in the declared key space. SparseLab does not turn a prompt into those vectors, parse natural language, or infer that a vector match is semantically correct.
+The `semantic-retrieval` lesson teaches a bounded, verified retrieval interface. It is not a language-understanding lesson: a caller supplies **externally encoded canonical vectors**, already in the declared key space. Model Lab does not turn a prompt into those vectors, parse natural language, or infer that a vector match is semantically correct.
 
 Scaffold and verify the tutorial pack through the lab:
 
 ```sh
-sparselab learn scaffold semantic-retrieval --output experiments/semantic-retrieval
-sparselab engram pack inspect experiments/semantic-retrieval/semantic-pack
-sparselab engram pack verify experiments/semantic-retrieval/semantic-pack
+klab learn scaffold semantic-retrieval --output experiments/semantic-retrieval
+klab engram pack inspect experiments/semantic-retrieval/semantic-pack
+klab engram pack verify experiments/semantic-retrieval/semantic-pack
 ```
 
 The scaffold materializes the tutorial pack, semantic assets, query fixtures,
@@ -15,7 +15,7 @@ an API demonstration, a ready-to-run `probe.yaml`, and a hash-bound `lesson.json
 Run the ordinary supplied-vector diagnostic with:
 
 ```sh
-sparselab semantic probe experiments/semantic-retrieval/probe.yaml --json
+klab semantic probe experiments/semantic-retrieval/probe.yaml --json
 ```
 
 The probe authenticates the pack before one CPU inference-only forward. Its lesson
@@ -37,11 +37,11 @@ An [EngramPack](../portable-engram.md#engram-packs) can carry a semantic compone
 `SemanticRetriever.from_pack` first verifies the pack and its expected identity, then enforces entry, asset-byte, exact-comparison, and worst-case result-byte bounds before using arrays. `top_k` is capped at 16. The pack binds `K` (key width) and `V` (value width); neither is the model hidden width `D`. A verified pack ID establishes byte identity and integrity, not source ownership, licensing sufficiency, factual truth, encoder quality, retrieval quality, answer quality, or performance.
 
 ```sh
-sparselab engram pack inspect experiments/semantic-retrieval/semantic-pack
-sparselab engram pack verify experiments/semantic-retrieval/semantic-pack
+klab engram pack inspect experiments/semantic-retrieval/semantic-pack
+klab engram pack verify experiments/semantic-retrieval/semantic-pack
 ```
 
-`inspect` reads the manifest and reports that payloads are not yet verified. `verify` checks identity and payloads before loading. See `src/sparselab/engram/packs.py:EngramPack`, `verify_pack`, and `src/sparselab/engram/semantic.py:SemanticRetriever.from_pack`.
+`inspect` reads the manifest and reports that payloads are not yet verified. `verify` checks identity and payloads before loading. See `src/klab/engram/packs.py:EngramPack`, `verify_pack`, and `src/klab/engram/semantic.py:SemanticRetriever.from_pack`.
 
 ## Query, retrieval, and trace shapes
 
@@ -65,13 +65,13 @@ A semantic query is a `SemanticQueryBatch`: an encoder identity, precomputed vec
 - **`temporal_miss`**: a matching record reaches the threshold but is excluded by the inclusive `as_of` validity filter; and
 - **`conflict`**: multiple valid records share the best score. Their top-k hits and bounded tie trace remain deterministic.
 
-`last_traces` on the adapter retains at most the most recent 64 query traces. Inspect retrieval status, ordered hit IDs/scores, and tie metadata per query. These are mechanism observations, not a score or answer-quality claim. Sources: `src/sparselab/engram/semantic.py:SemanticQueryBatch`, `SemanticRetriever.retrieve`, and `SemanticRetrievalOutcome`.
+`last_traces` on the adapter retains at most the most recent 64 query traces. Inspect retrieval status, ordered hit IDs/scores, and tie metadata per query. These are mechanism observations, not a score or answer-quality claim. Sources: `src/klab/engram/semantic.py:SemanticQueryBatch`, `SemanticRetriever.retrieve`, and `SemanticRetrievalOutcome`.
 
 ## Native supplied-vector probe
 
-`sparselab semantic probe DECLARATION.yaml [--json]` is a read-only CPU
+`klab semantic probe DECLARATION.yaml [--json]` is a read-only CPU
 mechanism diagnostic. The declaration has format
-`"sparselab-semantic-probe-v1"` and names an initialized model or an
+`"klab-semantic-probe-v1"` and names an initialized model or an
 authenticated native checkpoint, rectangular token IDs, explicitly supplied
 vectors, and one or more verified pack attachments. It never encodes text,
 creates a run, trains a model, or chooses a retrieval threshold on the
@@ -97,13 +97,13 @@ Each attachment has a unique name and an explicitly owned site:
 
 These are semantic adapter sites, not aliases for lexical-memory placement. Multiple adapters can share a site or independently own hybrid multipack sites. A multipack request uses a SHA-256-keyed query mapping when key spaces differ. Missing/mismatched queries fail closed. Full-prefix and cached forwards agree when the aligned query trajectories are equivalent.
 
-This is a direct PyTorch `DenseLM` API. The standard `sparselab train` and generation CLI paths do not construct semantic query vectors or load a text encoder. Position-shaped query batches follow context truncation and repeat their final vector, mask, and `as_of` value across generated continuation tokens. Trainable adapters can be optimized through ordinary `DenseLM` forward calls, but the standard trainer does not currently construct semantic batches. Observe attachment name/site/block index, per-attachment traces, gate, and lookup diagnostics. Sources: `src/sparselab/model/transformer.py:DenseLM.add_semantic_memory` and `src/sparselab/engram/semantic.py:SemanticMemoryAdapter`.
+This is a direct PyTorch `DenseLM` API. The standard `klab train` and generation CLI paths do not construct semantic query vectors or load a text encoder. Position-shaped query batches follow context truncation and repeat their final vector, mask, and `as_of` value across generated continuation tokens. Trainable adapters can be optimized through ordinary `DenseLM` forward calls, but the standard trainer does not currently construct semantic batches. Observe attachment name/site/block index, per-attachment traces, gate, and lookup diagnostics. Sources: `src/klab/model/transformer.py:DenseLM.add_semantic_memory` and `src/klab/engram/semantic.py:SemanticMemoryAdapter`.
 
 ## Toy worlds are partitioned retrieval evidence
 
 Toy worlds use deterministic structured-key and value encoders with declared identities. Their vectors are canonical synthetic keys, not text embeddings. Producer facts are separate from query/answer artifacts. Each training and held-out world has an isolated pack containing only that world's producers. Worlds share a canonical start key but change intermediate and terminal assignment values; a held-out query is also evaluated against the other held-out world's pack to check that retrieval follows the attached assignment. Wording templates are partitioned, so held-out wording checks a split boundary only—it is **not evidence of natural-language understanding**.
 
-A multi-hop case stores one-edge records and derives each next key from the prior retrieved value; there is no direct start-to-final shortcut. Evaluation includes conflict, time-bounded, and unknown queries. Compare correct, disabled, random, conflicting, and incomplete verified packs; no parameter gradient is computed by exact retrieval. The standalone demo freezes its attached DenseLM and adapter before inference. Keep per-hop records, statuses, scores, pack identity, candidate/tie information, and adapter diagnostics. These observations establish only bounded synthetic retrieval behavior, not open-world facts, language understanding, learned transfer, or production quality. See `src/sparselab/data/toy_worlds.py`.
+A multi-hop case stores one-edge records and derives each next key from the prior retrieved value; there is no direct start-to-final shortcut. Evaluation includes conflict, time-bounded, and unknown queries. Compare correct, disabled, random, conflicting, and incomplete verified packs; no parameter gradient is computed by exact retrieval. The standalone demo freezes its attached DenseLM and adapter before inference. Keep per-hop records, statuses, scores, pack identity, candidate/tie information, and adapter diagnostics. These observations establish only bounded synthetic retrieval behavior, not open-world facts, language understanding, learned transfer, or production quality. See `src/klab/data/toy_worlds.py`.
 
 ### Knowledge-swap ratio
 

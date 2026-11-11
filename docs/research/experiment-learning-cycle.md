@@ -1,6 +1,6 @@
 # Experiment learning cycle
 
-SparseLab is meant to help turn model work into progressively better-understood systems, not a stream of disconnected PASS/FAIL runs. A model can learn, remain limited, expose a regression, or answer a question negatively without becoming useless evidence.
+Model Lab is meant to help turn model work into progressively better-understood systems, not a stream of disconnected PASS/FAIL runs. A model can learn, remain limited, expose a regression, or answer a question negatively without becoming useless evidence.
 
 This guide is the default loop for moving from a known-good reference to a controlled follow-up.
 
@@ -52,9 +52,9 @@ The current worked example is [`dense-lm-v1`](dense-lm-v1.md), a promoted TinySt
 Use:
 
 ```sh
-uv run --locked sparselab report --kind research --json
-uv run --locked sparselab research baseline describe dense-lm-v1
-uv run --locked sparselab research validate --baseline dense-lm-v1
+uv run --locked klab report --kind research --json
+uv run --locked klab research baseline describe dense-lm-v1
+uv run --locked klab research validate --baseline dense-lm-v1
 ```
 
 A historical or unrelated registry diagnostic can remain visible without changing the candidate-specific evidence state.
@@ -119,7 +119,7 @@ Do not turn a post-hoc observation into a retroactive gate. The first `dense-lm-
 Mutable state belongs under one experiment root:
 
 ```text
-sparselab-work/
+klab-work/
   experiments/
     <experiment-id>/
       receipt.json

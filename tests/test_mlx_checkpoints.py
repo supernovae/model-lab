@@ -10,13 +10,13 @@ import numpy as np
 import pytest
 import torch
 
-from sparselab.canonical import canonical_digest, canonical_json
-from sparselab.config.loading import load_config
-from sparselab.config.models import RunConfig
-from sparselab.model.inspection import named_tensor_inventory
-from sparselab.model.transformer import DenseLM
-from sparselab.training.checkpoints import CheckpointManager, TrainingSnapshot
-from sparselab.training.mlx_checkpoints import validate_optimizer_state
+from klab.canonical import canonical_digest, canonical_json
+from klab.config.loading import load_config
+from klab.config.models import RunConfig
+from klab.model.inspection import named_tensor_inventory
+from klab.model.transformer import DenseLM
+from klab.training.checkpoints import CheckpointManager, TrainingSnapshot
+from klab.training.mlx_checkpoints import validate_optimizer_state
 
 
 def _zero_optimizer(groups: list[list[str]], learning_rate: float) -> dict[str, object]:
@@ -122,7 +122,7 @@ def test_common_manager_promotes_mlx_canonical_weights_without_native_codec(
 def test_common_manager_rejects_unknown_native_codec_and_strict_pointer(
     tmp_path: Path,
 ) -> None:
-    from sparselab.workers.models import (
+    from klab.workers.models import (
         current_required_versions,
         validate_required_versions,
     )

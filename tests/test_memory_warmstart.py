@@ -6,15 +6,15 @@ import pytest
 import torch
 from lab_fixtures import write_smoke_inputs
 
-from sparselab.config.loading import load_config
-from sparselab.config.models import RunConfig
-from sparselab.memory_tokenizer import build_memory_token_map
-from sparselab.model.inspection import named_tensor_inventory
-from sparselab.model.transformer import DenseLM
-from sparselab.training.checkpoints import CheckpointManager
-from sparselab.training.manifest import read_manifest, sha256_file
-from sparselab.training.memory_warmstart import migrate_dense_to_ngram
-from sparselab.training.trainer import train
+from klab.config.loading import load_config
+from klab.config.models import RunConfig
+from klab.memory_tokenizer import build_memory_token_map
+from klab.model.inspection import named_tensor_inventory
+from klab.model.transformer import DenseLM
+from klab.training.checkpoints import CheckpointManager
+from klab.training.manifest import read_manifest, sha256_file
+from klab.training.memory_warmstart import migrate_dense_to_ngram
+from klab.training.trainer import train
 
 
 def _configs(

@@ -3,9 +3,9 @@
 import torch
 from torch.nn import functional
 
-from sparselab.config.models import AttentionConfig, ModelConfig, RuntimeConfig
-from sparselab.engines.pytorch import output_projection_cross_entropy
-from sparselab.model.transformer import DenseLM
+from klab.config.models import AttentionConfig, ModelConfig, RuntimeConfig
+from klab.engines.pytorch import output_projection_cross_entropy
+from klab.model.transformer import DenseLM
 
 
 def test_compiled_output_loss_matches_eager_with_tied_weights() -> None:

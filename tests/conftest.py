@@ -27,7 +27,7 @@ if isinstance(_torch, ModuleType):
 
 
 # `-n auto` (pyproject addopts): one worker per usable CPU, capped so each gets
-# ~2 GiB of currently available RAM (a worker plus a `sparselab try` child
+# ~2 GiB of currently available RAM (a worker plus a `klab try` child
 # peaks near 1 GiB). Threads stay at 1 per worker above, so a 48-core box runs
 # ~48 workers and a 4-vCPU CI runner or small laptop runs 4 or fewer.
 _WORKER_RAM_BYTES = 2 * 1024**3
@@ -44,18 +44,18 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
     return max(1, min(cpus, available // _WORKER_RAM_BYTES))
 
 
-# Host-RAM planning (``sparselab.host_capacity``) refuses work when measured
+# Host-RAM planning (``klab.host_capacity``) refuses work when measured
 # available RAM minus a reserve cannot fit one worker. Under xdist, and on a
 # box shared with other jobs, that measurement depends on whatever else is
 # running, so unrelated tests failed with "inadequate measured RAM after
-# reserve". Every SparseLab RAM reader (reserves from ``total`` as well as
+# reserve". Every Model Lab RAM reader (reserves from ``total`` as well as
 # checks on ``available``) goes through ``host_capacity.measure_memory``, so
 # pinning it gives tests one fixed, ample host whatever the physical machine.
 # A test that monkeypatches ``psutil.virtual_memory`` itself
 # (tests/test_host_capacity.py and friends) still gets its own value, so
 # low-memory and reserve logic stays covered.
 _GIB = 1024**3
-_TEST_HOST_RAM_ENV = "SPARSELAB_TEST_HOST_RAM"
+_TEST_HOST_RAM_ENV = "KLAB_TEST_HOST_RAM"
 _CHILD_BOOTSTRAP = Path(__file__).with_name("child_bootstrap")
 
 
@@ -63,11 +63,11 @@ _CHILD_BOOTSTRAP = Path(__file__).with_name("child_bootstrap")
 def _deterministic_host_ram(monkeypatch: pytest.MonkeyPatch) -> None:
     import psutil
 
-    from sparselab import host_capacity
+    from klab import host_capacity
 
     host_capacity_measure = host_capacity.measure_memory
     original = psutil.virtual_memory
-    # Children launched by tests (``python -c``/``-m sparselab``) get the same
+    # Children launched by tests (``python -c``/``-m klab``) get the same
     # fixed host from a tests-only sitecustomize (tests/child_bootstrap); the
     # shipped measure_memory has no override, so this never reaches production.
     monkeypatch.setenv(_TEST_HOST_RAM_ENV, f"{64 * _GIB}:{48 * _GIB}")

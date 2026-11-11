@@ -18,7 +18,7 @@ import pytest
 import torch
 from test_training import config as training_config
 
-from sparselab.address_hash import (
+from klab.address_hash import (
     BYTE_SCHEME_V1,
     BYTE_SCHEME_V2,
     ENGRAM_SCHEME_V1,
@@ -35,21 +35,21 @@ from sparselab.address_hash import (
     token_scheme,
     validate_engram_table_sizes,
 )
-from sparselab.cli.main import main
-from sparselab.config.models import RunConfig
-from sparselab.data.byte_hash import hash_bytes, table_address
-from sparselab.data.lexical_mining import _address_for_key
-from sparselab.model import portable_engram
-from sparselab.model.memory import TokenNgramMemory
-from sparselab.model.portable_engram import (
+from klab.cli.main import main
+from klab.config.models import RunConfig
+from klab.data.byte_hash import hash_bytes, table_address
+from klab.data.lexical_mining import _address_for_key
+from klab.model import portable_engram
+from klab.model.memory import TokenNgramMemory
+from klab.model.portable_engram import (
     PortableEngramManifest,
     export_portable_engram,
     load_portable_engram,
 )
-from sparselab.research.portability_campaign import _token_address
-from sparselab.training import manifest as manifest_module
-from sparselab.training.manifest import architecture_sha256, trained_memory_addressing
-from sparselab.training.trainer import train
+from klab.research.portability_campaign import _token_address
+from klab.training import manifest as manifest_module
+from klab.training.manifest import architecture_sha256, trained_memory_addressing
+from klab.training.trainer import train
 
 
 def read_manifest_unverified(path: Path) -> dict[str, object]:
@@ -287,7 +287,7 @@ def _byte_run_config(root: Path, table_size: int) -> RunConfig:
 def _export(
     monkeypatch: pytest.MonkeyPatch, runs: Path, run_id: str, output: Path
 ) -> None:
-    argv = ["sparselab", "engram", "export", run_id, "--output", str(output)]
+    argv = ["klab", "engram", "export", run_id, "--output", str(output)]
     monkeypatch.setattr(sys, "argv", [*argv, "--runs-dir", str(runs)])
     main()
 

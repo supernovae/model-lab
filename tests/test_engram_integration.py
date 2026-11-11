@@ -4,11 +4,11 @@ import pytest
 import torch
 from tokenizers import Tokenizer, models
 
-from sparselab.address_hash import engram_ngram_address, engram_table_sizes
-from sparselab.config.models import AttentionConfig, ModelConfig
-from sparselab.memory_tokenizer import build_memory_token_map
-from sparselab.model.transformer import DenseLM
-from sparselab.training.manifest import architecture_sha256
+from klab.address_hash import engram_ngram_address, engram_table_sizes
+from klab.config.models import AttentionConfig, ModelConfig
+from klab.memory_tokenizer import build_memory_token_map
+from klab.model.transformer import DenseLM
+from klab.training.manifest import architecture_sha256
 
 
 def model_config(tmp_path: Path, mode: str, **changes) -> ModelConfig:
@@ -151,9 +151,9 @@ def test_multiport_histories_and_gradients_are_independent(tmp_path, transform):
 def test_memory_map_rejects_different_supplied_tokenizer_object(tmp_path):
     from tokenizers import normalizers
 
-    from sparselab.config.loading import load_config
-    from sparselab.data.packing import prepare_data
-    from sparselab.data.tokenizer import load_tokenizer
+    from klab.config.loading import load_config
+    from klab.data.packing import prepare_data
+    from klab.data.tokenizer import load_tokenizer
 
     model = model_config(tmp_path, "deepseek_v1")
     base = load_config(Path("configs/runtime_smoke_cpu.yaml"))

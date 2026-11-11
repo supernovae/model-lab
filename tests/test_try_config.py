@@ -9,8 +9,8 @@ import pytest
 import yaml
 from test_lab_results import _cli
 
-from sparselab.resource_envelope import ResourceEnvelope, resolve_lab_try_limits
-from sparselab.try_config import TryConfig, load_try_config, prepare_try_config
+from klab.resource_envelope import ResourceEnvelope, resolve_lab_try_limits
+from klab.try_config import TryConfig, load_try_config, prepare_try_config
 
 
 @pytest.mark.parametrize(
@@ -58,8 +58,8 @@ def test_empty_files_default(tmp_path, document):
     ],
 )
 def test_invalid_policy_precedes_runtime(tmp_path, monkeypatch, document):
-    from sparselab import runtime_environments
-    from sparselab.cli.main import _prepare_runtime_command, build_parser
+    from klab import runtime_environments
+    from klab.cli.main import _prepare_runtime_command, build_parser
 
     path = tmp_path / "try.yaml"
     path.write_text(document)
@@ -86,7 +86,7 @@ def test_invalid_policy_precedes_runtime(tmp_path, monkeypatch, document):
 
 
 def test_paths_snapshot_and_runtime_conflict(tmp_path, monkeypatch):
-    from sparselab.cli.main import build_parser
+    from klab.cli.main import build_parser
 
     monkeypatch.setenv("HOME", str(tmp_path))
     path = tmp_path / "requests/try.yaml"
@@ -124,7 +124,7 @@ def test_paths_snapshot_and_runtime_conflict(tmp_path, monkeypatch):
 
 
 def test_five_options_and_removed_flags(tmp_path):
-    from sparselab.cli.main import build_parser
+    from klab.cli.main import build_parser
 
     parser = build_parser(tmp_path)
     commands = next(
@@ -219,8 +219,8 @@ def test_native_defaults_legacy_serialization_and_tighter_limits():
 def test_public_try_uses_native_profile_and_seals_loaded_request(
     tmp_path, monkeypatch, capsys
 ):
-    import sparselab.cli.main as cli
-    import sparselab.lab_mode as lab
+    import klab.cli.main as cli
+    import klab.lab_mode as lab
 
     baseline = Path(__file__).resolve().parents[1] / "configs/smoke_cpu.yaml"
     profile = {
@@ -270,7 +270,7 @@ def test_public_try_uses_native_profile_and_seals_loaded_request(
     assert seen[0]["seed"] == 7 and seen[0]["fresh_baseline"] is True
     assert seen[0]["probe_tier"] is None
     assert seen[0]["lab_dir"] == tmp_path / "custom-lab"
-    from sparselab.runtime_profile import RuntimeProfile
+    from klab.runtime_profile import RuntimeProfile
 
     assert payload["runtime_profile"] == RuntimeProfile.model_validate(
         profile
@@ -286,7 +286,7 @@ def test_public_try_uses_native_profile_and_seals_loaded_request(
 def test_failed_setup_retains_request_and_report_roundtrip(
     tmp_path, monkeypatch, capsys
 ):
-    from sparselab.lab_mode import read_record, run_try
+    from klab.lab_mode import read_record, run_try
 
     request = {"seed": 7, "probe_tier": "none", "resource_envelope": None}
     with pytest.raises((ValueError, OSError)):
@@ -315,7 +315,7 @@ def test_named_file_escape_and_typo(tmp_path, monkeypatch):
 
 
 def test_interrupted_setup_retains_request(tmp_path, monkeypatch):
-    import sparselab.lab_mode as lab
+    import klab.lab_mode as lab
 
     def stop(_path):
         raise KeyboardInterrupt
@@ -338,7 +338,7 @@ def test_interrupted_setup_retains_request(tmp_path, monkeypatch):
     [("try", 5), ("probe", 5), ("explore", 5), ("compare", 5), ("report", 5)],
 )
 def test_everyday_executable_option_budget(tmp_path, command, count):
-    from sparselab.cli.main import build_parser
+    from klab.cli.main import build_parser
 
     parser = build_parser(tmp_path)
     commands = next(
@@ -353,7 +353,7 @@ def test_everyday_executable_option_budget(tmp_path, command, count):
 
 
 def test_invalid_envelope_precedes_native_runtime(tmp_path, monkeypatch):
-    import sparselab.cli.main as cli
+    import klab.cli.main as cli
 
     (tmp_path / "try.yaml").write_text(
         "runtime_profile: missing.yaml\nresource_envelope: bounds.yaml"
@@ -383,7 +383,7 @@ def test_invalid_envelope_precedes_native_runtime(tmp_path, monkeypatch):
 def test_cli_rejects_try_limits_before_runtime_or_outputs(
     tmp_path, monkeypatch, command, limits
 ):
-    import sparselab.cli.main as cli
+    import klab.cli.main as cli
 
     bounds = tmp_path / "bounds.yaml"
     bounds.write_text(
@@ -419,10 +419,10 @@ def test_cli_rejects_try_limits_before_runtime_or_outputs(
 
 @pytest.mark.parametrize("command", ["probe", "explore", "train", "stage"])
 def test_direct_native_consumers_reject_try_limits(tmp_path, monkeypatch, command):
-    from sparselab import explorer, staging
-    from sparselab.config.loading import load_config
-    from sparselab.probes.cli import run_probe
-    from sparselab.training import trainer
+    from klab import explorer, staging
+    from klab.config.loading import load_config
+    from klab.probes.cli import run_probe
+    from klab.training import trainer
 
     envelope = ResourceEnvelope(
         resource_envelope_version=1, lab_try={"max_wall_seconds_per_arm": 60}
@@ -457,7 +457,7 @@ def test_direct_native_consumers_reject_try_limits(tmp_path, monkeypatch, comman
 
 
 def test_shared_resource_boundary_rejects_unconsumed_try_limits(tmp_path, monkeypatch):
-    from sparselab import resource_envelope as resource
+    from klab import resource_envelope as resource
 
     envelope = ResourceEnvelope(resource_envelope_version=1, lab_try={})
     monkeypatch.setattr(
@@ -494,7 +494,7 @@ def test_accelerator_error_names_valid_runtime_selectors(
 
 
 def test_continuation_path_and_flags_reach_cli(tmp_path):
-    from sparselab.cli.main import build_parser
+    from klab.cli.main import build_parser
 
     path = tmp_path / "request.yaml"
     path.write_text(

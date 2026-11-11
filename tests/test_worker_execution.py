@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from sparselab.workers.leases import acquire_lease, lease_key, process_matches
+from klab.workers.leases import acquire_lease, lease_key, process_matches
 
 
 def test_accelerator_aliases_contend_across_worker_roots(tmp_path: Path) -> None:
@@ -100,7 +100,7 @@ def test_cpu_workers_use_distinct_logical_slots(tmp_path: Path) -> None:
 
 
 def test_duplicate_executor_claim_is_nonblocking(tmp_path: Path) -> None:
-    from sparselab.workers.execution import _claim_file
+    from klab.workers.execution import _claim_file
 
     first = _claim_file(tmp_path)
     assert first is not None
@@ -113,13 +113,13 @@ def test_duplicate_executor_claim_is_nonblocking(tmp_path: Path) -> None:
 def test_dead_running_receipt_becomes_unknown_without_relaunch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("SPARSELAB_WORKER_LEASE_DIR", str(tmp_path / "leases"))
-    from sparselab.workers.execution import (
+    monkeypatch.setenv("KLAB_WORKER_LEASE_DIR", str(tmp_path / "leases"))
+    from klab.workers.execution import (
         _receipt_payload,
         _write_receipt,
         status_worker,
     )
-    from sparselab.workers.models import WorkerDefinition
+    from klab.workers.models import WorkerDefinition
 
     worker = WorkerDefinition(
         worker_id=f"worker-{tmp_path.name}",
@@ -156,12 +156,12 @@ def test_dead_running_receipt_becomes_unknown_without_relaunch(
 
 
 def test_cancel_marks_attempt_without_signalling_pid(tmp_path: Path) -> None:
-    from sparselab.workers.execution import (
+    from klab.workers.execution import (
         _receipt_payload,
         _write_receipt,
         cancel_attempt,
     )
-    from sparselab.workers.models import WorkerDefinition
+    from klab.workers.models import WorkerDefinition
 
     worker = WorkerDefinition(
         worker_id="worker",
@@ -190,7 +190,7 @@ def test_cancel_marks_attempt_without_signalling_pid(tmp_path: Path) -> None:
     assert receipt["cancellation_acknowledged"]
     assert receipt["state"] == "INTERRUPTED"
     assert (tmp_path / "attempts" / "attempt" / "cancel.json").is_file()
-    from sparselab.workers.execution import execute_attempt
+    from klab.workers.execution import execute_attempt
 
     assert cancel_attempt(worker, "future") is None
     future = _receipt_payload(
@@ -211,12 +211,12 @@ def test_cancel_marks_attempt_without_signalling_pid(tmp_path: Path) -> None:
 
 
 def test_late_cancel_cannot_regress_complete_receipt(tmp_path: Path) -> None:
-    from sparselab.workers.execution import (
+    from klab.workers.execution import (
         _receipt_payload,
         _write_receipt,
         cancel_attempt,
     )
-    from sparselab.workers.models import WorkerDefinition
+    from klab.workers.models import WorkerDefinition
 
     worker = WorkerDefinition(
         worker_id="worker",
@@ -248,12 +248,12 @@ def test_late_cancel_cannot_regress_complete_receipt(tmp_path: Path) -> None:
 def test_stale_heartbeat_mutation_cannot_replace_terminal_receipt(
     tmp_path: Path,
 ) -> None:
-    from sparselab.workers.execution import (
+    from klab.workers.execution import (
         _mutate_receipt,
         _receipt_payload,
         _write_receipt,
     )
-    from sparselab.workers.models import WorkerDefinition
+    from klab.workers.models import WorkerDefinition
 
     worker = WorkerDefinition(
         worker_id="worker",
@@ -348,13 +348,13 @@ def test_complete_worker_inventory_preserves_verified_triage_through_ingestion(
 
     from test_training import config as training_config
 
-    from sparselab.evaluation.post_train_triage import read_triage
-    from sparselab.training.metrics import ExperimentStore
-    from sparselab.training.trainer import train
-    from sparselab.workers import artifacts
-    from sparselab.workers.controller import Controller
-    from sparselab.workers.execution import _final_artifacts, _receipt_payload
-    from sparselab.workers.models import AttemptReceipt, WorkerDefinition
+    from klab.evaluation.post_train_triage import read_triage
+    from klab.training.metrics import ExperimentStore
+    from klab.training.trainer import train
+    from klab.workers import artifacts
+    from klab.workers.controller import Controller
+    from klab.workers.execution import _final_artifacts, _receipt_payload
+    from klab.workers.models import AttemptReceipt, WorkerDefinition
 
     original = training_config(tmp_path / "worker")
     configured = original.model_copy(
@@ -445,16 +445,16 @@ def test_complete_worker_inventory_preserves_verified_triage_through_ingestion(
 def test_receipt_includes_manifest_declared_hidden_cache_owner(tmp_path: Path) -> None:
     import json
 
-    from sparselab.canonical import canonical_digest
-    from sparselab.workers.execution import _final_artifacts
+    from klab.canonical import canonical_digest
+    from klab.workers.execution import _final_artifacts
 
     run = tmp_path / "runs" / "run"
     (run / "data").mkdir(parents=True)
-    (run / "data" / ".sparselab-cache-owner.json").write_text("{}")
+    (run / "data" / ".klab-cache-owner.json").write_text("{}")
     (run / ".transient").write_text("not declared")
     manifest = {
         "manifest_version": 1,
-        "artifacts": [{"relative_path": "data/.sparselab-cache-owner.json"}],
+        "artifacts": [{"relative_path": "data/.klab-cache-owner.json"}],
     }
     (run / "manifest.json").write_text(
         json.dumps(
@@ -468,7 +468,7 @@ def test_receipt_includes_manifest_declared_hidden_cache_owner(tmp_path: Path) -
         {"root": str(tmp_path)}, {"run_id": "run", "attempt_id": "attempt"}
     )
     names = {item["relative_path"] for item in files}
-    assert "run/data/.sparselab-cache-owner.json" in names
+    assert "run/data/.klab-cache-owner.json" in names
     assert "run/.transient" not in names
 
 
@@ -479,10 +479,10 @@ def test_same_attempt_cold_request_is_sticky_and_outside_scientific_spec(
 
     from test_training import config
 
-    from sparselab.canonical import canonical_json
-    from sparselab.workers import execution
-    from sparselab.workers.controller import Controller
-    from sparselab.workers.models import WorkerDefinition
+    from klab.canonical import canonical_json
+    from klab.workers import execution
+    from klab.workers.controller import Controller
+    from klab.workers.models import WorkerDefinition
 
     controller = Controller(tmp_path / "controller")
     submission = controller.submit(config(tmp_path / "inputs"))
@@ -535,11 +535,11 @@ def test_trainer_startup_interrupt_requires_regular_worker_marker(
 ):
     from types import SimpleNamespace
 
-    from sparselab import staging
-    from sparselab.config.loading import load_config
-    from sparselab.training import trainer
-    from sparselab.workers import bundles, execution
-    from sparselab.workers.models import (
+    from klab import staging
+    from klab.config.loading import load_config
+    from klab.training import trainer
+    from klab.workers import bundles, execution
+    from klab.workers.models import (
         ExperimentSpec,
         WorkerDefinition,
         current_required_versions,
@@ -578,7 +578,7 @@ def test_trainer_startup_interrupt_requires_regular_worker_marker(
     )
     execution._write_receipt(worker, receipt)
     lease_root = tmp_path / "leases"
-    monkeypatch.setenv("SPARSELAB_WORKER_LEASE_DIR", str(lease_root))
+    monkeypatch.setenv("KLAB_WORKER_LEASE_DIR", str(lease_root))
     monkeypatch.setattr(
         execution,
         "_spec_from_path",

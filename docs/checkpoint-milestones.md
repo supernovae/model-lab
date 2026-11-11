@@ -102,8 +102,8 @@ There is no automatic historical cleanup or stale-state bypass.
 Use the existing public readback commands on a reported generation:
 
 ```sh
-sparselab checkpoint inspect /absolute/run/checkpoints/step_00000004_gen_000005 --json
-sparselab checkpoint verify /absolute/run/checkpoints/step_00000004_gen_000005 --json
+klab checkpoint inspect /absolute/run/checkpoints/step_00000004_gen_000005 --json
+klab checkpoint verify /absolute/run/checkpoints/step_00000004_gen_000005 --json
 ```
 
 ## Optional archive boundary

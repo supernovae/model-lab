@@ -4,8 +4,8 @@ These native commands perform no tokenizer fitting, source acquisition, model
 initialization, scoring, or generation.
 
 ```sh
-sparselab tokenizer verify RUN_CONFIG.yaml --json
-sparselab evaluation freeze-items --release RELEASE_DIR \
+klab tokenizer verify RUN_CONFIG.yaml --json
+klab evaluation freeze-items --release RELEASE_DIR \
   --family-inventory families.jsonl --draft reviewed-items.json \
   --output NEW_ITEMS_DIR --json
 ```

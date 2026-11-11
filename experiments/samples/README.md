@@ -14,9 +14,9 @@ For an advanced research recipe, supply your own complete
 ID and resource path below are placeholders; no personal recipe is packaged.
 
 ```sh
-sparselab research scaffold neutral-study --resource-root /path/to/resources \
+klab research scaffold neutral-study --resource-root /path/to/resources \
   --scale smoke --data offline --backend cpu --output experiments/new-study
-sparselab study plan experiments/new-study/study.yaml
+klab study plan experiments/new-study/study.yaml
 ```
 
 Every seed must be explicit in the recipe. The generated README describes later
@@ -58,17 +58,17 @@ If an exact subset becomes infeasible, preparation fails instead of rounding.
 From the repository root, in the locked environment:
 
 ```sh
-uv run --locked --extra cpu sparselab experiment validate experiments/samples/corpus-shape-fraction.yaml --json
-uv run --locked --extra cpu sparselab experiment prepare experiments/samples/corpus-shape-fraction.yaml --json
-uv run --locked --extra cpu sparselab experiment diff experiments/samples/corpus-shape-fraction.yaml --json
-uv run --locked --extra cpu sparselab experiment lock experiments/samples/corpus-shape-fraction.yaml --json
+uv run --locked --extra cpu klab experiment validate experiments/samples/corpus-shape-fraction.yaml --json
+uv run --locked --extra cpu klab experiment prepare experiments/samples/corpus-shape-fraction.yaml --json
+uv run --locked --extra cpu klab experiment diff experiments/samples/corpus-shape-fraction.yaml --json
+uv run --locked --extra cpu klab experiment lock experiments/samples/corpus-shape-fraction.yaml --json
 ```
 
 Preparation materializes sources, releases, exports, tokenizers and packed
 datasets but starts no training. Inspect the lock output and the effective
 config before submitting any cell. `experiment run LOCK --cell
-main:corpus=full --json` enqueues a worker run; run `sparselab controller run
---store sparselab-work/experiments/corpus-shape-fraction-sample-v5/controller`
+main:corpus=full --json` enqueues a worker run; run `klab controller run
+--store klab-work/experiments/corpus-shape-fraction-sample-v5/controller`
 in a second process to dispatch, verify and ingest it. `experiment collect LOCK
 --json` writes a content-addressed evidence index; `experiment reconstruct
 LOCK --index INDEX --json` checks that index and emits five retrospective views.
@@ -78,6 +78,6 @@ quality claim, review decision or baseline promotion follows from it.
 
 The expected cost class is a small CPU smoke (four 20-update cells only if all
 are explicitly submitted). Only task-owned directories under
-`sparselab-work/experiments/corpus-shape-fraction-sample-v5/` may be removed
+`klab-work/experiments/corpus-shape-fraction-sample-v5/` may be removed
 after confirming no worker is active; the checked-in declaration and pinned
 tokenizer are durable inputs.

@@ -1,6 +1,6 @@
 # Model construction readiness
 
-SparseLab has a reusable local check for its current PyTorch model mechanisms.
+Model Lab has a reusable local check for its current PyTorch model mechanisms.
 It exercises the public CLI with isolated, tiny synthetic data: inspect,
 filesystem preflight, preparation, disposable stage smoke, training, checkpoint
 verification, evaluation, generation, and full-state child resume. The check
@@ -14,8 +14,8 @@ Run from the repository root with the locked CPU-development environment. The ou
 new task-owned directory; the command will not reuse or overwrite one.
 
 ```sh
-uv run --locked --extra cpu sparselab readiness smoke \
-  --output sparselab-work/experiments/lab-readiness-YYYYMMDD
+uv run --locked --extra cpu klab readiness smoke \
+  --output klab-work/experiments/lab-readiness-YYYYMMDD
 ```
 
 Use repeated `--family NAME` to limit a runner session to an affected path.
@@ -79,16 +79,16 @@ For an already provisioned environment, the command prefix below is
 Linux dependency set.
 
 ```sh
-WORK=sparselab-work/experiments/dense-scale
+WORK=klab-work/experiments/dense-scale
 mkdir -p "$WORK"
-export SPARSELAB_WORK_DIR="$WORK"
-uv run --locked --no-sync sparselab inspect configs/scale_dense_160m_cuda.yaml --json
-uv run --locked --no-sync sparselab workspace preflight configs/scale_dense_160m_cuda.yaml
-uv run --locked --no-sync sparselab tokenizer train configs/tokenizer_fineweb_scale_8k.yaml
-uv run --locked --no-sync sparselab data prepare configs/scale_dense_160m_cuda.yaml
-uv run --locked --no-sync sparselab stage configs/scale_dense_160m_cuda.yaml \
+export KLAB_WORK_DIR="$WORK"
+uv run --locked --no-sync klab inspect configs/scale_dense_160m_cuda.yaml --json
+uv run --locked --no-sync klab workspace preflight configs/scale_dense_160m_cuda.yaml
+uv run --locked --no-sync klab tokenizer train configs/tokenizer_fineweb_scale_8k.yaml
+uv run --locked --no-sync klab data prepare configs/scale_dense_160m_cuda.yaml
+uv run --locked --no-sync klab stage configs/scale_dense_160m_cuda.yaml \
   --through warmup --output "$WORK/staging/160m"
-uv run --locked --no-sync sparselab batch calibrate configs/scale_dense_160m_cuda.yaml \
+uv run --locked --no-sync klab batch calibrate configs/scale_dense_160m_cuda.yaml \
   --output "$WORK/calibration/160m"
 ```
 
@@ -104,15 +104,15 @@ Before spending a long GPU allocation, execute a short parent/child training
 pilot with the same selected config in both commands:
 
 ```sh
-uv run --locked --no-sync sparselab train configs/scale_dense_160m_cuda.yaml \
+uv run --locked --no-sync klab train configs/scale_dense_160m_cuda.yaml \
   --run-id dense-160m-pilot-parent --runs-dir "$WORK/runs" --stop-after-step 10
-uv run --locked --no-sync sparselab checkpoint verify \
+uv run --locked --no-sync klab checkpoint verify \
   "$WORK/runs/dense-160m-pilot-parent/checkpoints/latest.json" --json
-uv run --locked --no-sync sparselab train configs/scale_dense_160m_cuda.yaml \
+uv run --locked --no-sync klab train configs/scale_dense_160m_cuda.yaml \
   --run-id dense-160m-pilot-child --runs-dir "$WORK/runs" \
   --resume "$WORK/runs/dense-160m-pilot-parent/checkpoints/latest.json" \
   --stop-after-step 20
-uv run --locked --no-sync sparselab checkpoint verify \
+uv run --locked --no-sync klab checkpoint verify \
   "$WORK/runs/dense-160m-pilot-child/checkpoints/latest.json" --json
 ```
 

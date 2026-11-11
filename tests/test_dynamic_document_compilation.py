@@ -6,12 +6,12 @@ import pytest
 import torch
 from test_document_batching import configured, rows_for
 
-from sparselab.config.models import RunConfig
-from sparselab.data.document_batching import collate_document_update
-from sparselab.engines.pytorch import output_projection_cross_entropy
-from sparselab.model.rope import RoPE
-from sparselab.model.transformer import DenseLM
-from sparselab.training.continuation import runtime_optimization_transition
+from klab.config.models import RunConfig
+from klab.data.document_batching import collate_document_update
+from klab.engines.pytorch import output_projection_cross_entropy
+from klab.model.rope import RoPE
+from klab.model.transformer import DenseLM
+from klab.training.continuation import runtime_optimization_transition
 
 
 def test_dynamic_blocks_and_head_share_graphs_across_padded_shapes(tmp_path):

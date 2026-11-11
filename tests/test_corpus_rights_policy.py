@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from sparselab.corpus.rights import RightsPolicy, resolve_file_rights
+from klab.corpus.rights import RightsPolicy, resolve_file_rights
 
 
 def policy(**changes: object) -> RightsPolicy:

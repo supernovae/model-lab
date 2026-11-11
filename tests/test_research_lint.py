@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from sparselab.research.lint import lint_research
+from klab.research.lint import lint_research
 
 
 def _write(root: Path, name: str, content: str | dict) -> Path:
@@ -273,7 +273,7 @@ def test_cli_failure_exit_code(repository: Path) -> None:
     _write(repository, "experiments/research/demo/protocol.md", "changed")
     import argparse
 
-    from sparselab.research.lint import _handle
+    from klab.research.lint import _handle
 
     with pytest.raises(SystemExit, match="1"):
         _handle(argparse.Namespace(repository=str(repository), json=True))

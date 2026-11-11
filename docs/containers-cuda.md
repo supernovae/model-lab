@@ -43,12 +43,12 @@ outputs under `/state`. This example uses an existing Podman NVIDIA CDI device
 named `nvidia.com/gpu=0`; choose the already configured device on your worker.
 
 ```sh
-IMAGE=ghcr.io/supernovae/tiny-sparse-lab@sha256:REPLACE_WITH_PUBLISHED_CUDA_DIGEST
+IMAGE=ghcr.io/supernovae/model-lab@sha256:REPLACE_WITH_PUBLISHED_CUDA_DIGEST
 podman run --rm --device nvidia.com/gpu=0 \
   --read-only --cap-drop ALL --security-opt no-new-privileges \
   --memory 8g --cpus 2 --pids-limit 256 \
   --tmpfs /tmp:rw,nosuid,nodev,size=64m \
-  -v lab-cuda-JOB_ID:/state "$IMAGE" sparselab --help
+  -v lab-cuda-JOB_ID:/state "$IMAGE" klab --help
 ```
 
 This command is an installed CLI check, not a GPU execution test. Choose limits

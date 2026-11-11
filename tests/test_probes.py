@@ -17,11 +17,11 @@ import pytest
 import yaml
 from lab_fixtures import write_smoke_inputs
 
-from sparselab.lab_context import LabContext
-from sparselab.lab_records import eval_group, seal
-from sparselab.probes import lm_eval_adapter, metrics, runner, scoring
-from sparselab.probes.render import meter, render, sparkline
-from sparselab.probes.suite import (
+from klab.lab_context import LabContext
+from klab.lab_records import eval_group, seal
+from klab.probes import lm_eval_adapter, metrics, runner, scoring
+from klab.probes.render import meter, render, sparkline
+from klab.probes.suite import (
     BY_ID,
     PROBES,
     SUITE_VERSION,
@@ -32,7 +32,7 @@ from sparselab.probes.suite import (
     prompts,
     suite_identity,
 )
-from sparselab.probes.verdict import (
+from klab.probes.verdict import (
     ACTIONS,
     MISSING_STATUSES,
     decide,
@@ -52,6 +52,9 @@ PINNED_SUITE = {
     # v4: held-back final split, text-level needle (fixed character lengths),
     # within-run eval-noise wording on held-out loss.
     4: "b24f01ec34293994ad0df3a3e45f1e602c54cef21a769f17c24ddcf084c58289",
+    # v5: battery and scoring protocol identities renamed with the project
+    # (sparselab-* -> klab-*); probe declarations and items unchanged.
+    5: "b7f7b01dc04b9531f5680b398afbf4ffb0e7333e267fe79540e73eda84c20ec9",
 }
 
 RESULT_KEYS = {
@@ -271,7 +274,7 @@ def test_uniform_scores_give_chance_accuracy(
 
 def test_suite_identity_is_pinned_and_versioned() -> None:
     identity = suite_identity()
-    assert identity["name"] == "sparselab-probe-battery"
+    assert identity["name"] == "klab-probe-battery"
     assert identity["version"] == SUITE_VERSION
     assert identity["sha256"] == PINNED_SUITE[SUITE_VERSION], (
         "probe declarations or items changed: bump SUITE_VERSION and the pin"
@@ -748,7 +751,7 @@ def test_out_of_memory_stops_further_probe_work(scripted: _Script, error: Any) -
 def test_resource_envelope_violation_stops_probing(
     scripted: _Script, tmp_path: Path
 ) -> None:
-    from sparselab.resource_envelope import ResourceEnvelope
+    from klab.resource_envelope import ResourceEnvelope
 
     envelope = ResourceEnvelope(
         resource_envelope_version=1, max_rss_bytes=1
@@ -763,7 +766,7 @@ def test_resource_envelope_violation_stops_probing(
 def test_validation_is_computed_only_on_a_cache_miss(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from sparselab import lab_mode
+    from klab import lab_mode
 
     forwards: list[int] = []
 
@@ -785,7 +788,7 @@ def test_validation_is_computed_only_on_a_cache_miss(
 
 
 def test_sealed_records_detect_tampering(tmp_path: Path) -> None:
-    from sparselab.lab_records import read_lab_record, write_sealed
+    from klab.lab_records import read_lab_record, write_sealed
 
     path = tmp_path / "probe.json"
     write_sealed(path, {"format": runner.RESULT_FORMAT, "a": 1})
@@ -840,7 +843,7 @@ def _fake_result(**verdict: Any) -> dict[str, Any]:
 def test_render_is_plain_without_color_and_shows_verdict_and_hints() -> None:
     text = render(_fake_result(), color=False)
     assert "\x1b[" not in text
-    assert text.startswith(f"PROBE BATTERY  sparselab-probe-battery v{SUITE_VERSION}")
+    assert text.startswith(f"PROBE BATTERY  klab-probe-battery v{SUITE_VERSION}")
     assert "✔ PASS" in text and "✖ FAIL" in text and "⊘ SKIPPED" in text
     assert "ppl 49.4" in text
     assert "↳ " + BY_ID["calibration"].suggests in text
@@ -1032,7 +1035,7 @@ def test_lm_eval_summary_prefers_acc_then_acc_norm() -> None:
 
 @pytest.fixture(scope="module")
 def tried(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, dict[str, Any]]:
-    from sparselab.lab_mode import run_try
+    from klab.lab_mode import run_try
 
     root = tmp_path_factory.mktemp("probe-lab")
     baseline = write_smoke_inputs(root, max_steps=8)
@@ -1040,7 +1043,7 @@ def tried(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, dict[str, Any
     delta.write_text(
         yaml.safe_dump({"question": "wider?", "set": {"model.ffn_dim": 128}})
     )
-    from sparselab.evaluation.inference import InferenceRun
+    from klab.evaluation.inference import InferenceRun
 
     forwards: list[str] = []
     native = InferenceRun.evaluate
@@ -1063,11 +1066,11 @@ def _cli(
     root: Path,
     *args: str,
 ) -> str:
-    from sparselab.cli.main import main
+    from klab.cli.main import main
 
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(root / "work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(root / "work"))
     monkeypatch.setenv("NO_COLOR", "1")
-    monkeypatch.setattr(sys, "argv", ["sparselab", *args])
+    monkeypatch.setattr(sys, "argv", ["klab", *args])
     capsys.readouterr()
     main()
     return capsys.readouterr().out
@@ -1173,7 +1176,7 @@ def test_standalone_probe_scores_validation_once_per_arm(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from sparselab.evaluation.inference import InferenceRun
+    from klab.evaluation.inference import InferenceRun
 
     root, record = tried
     forwards: list[int] = []
@@ -1251,7 +1254,7 @@ def _assert_partial(probe: dict[str, Any], kind: str) -> None:
 def test_try_stopped_during_probing_keeps_partial_battery_and_comparison(
     how: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.lab_mode import read_record, run_try
+    from klab.lab_mode import read_record, run_try
 
     baseline = write_smoke_inputs(tmp_path, max_steps=8)
     delta = tmp_path / "wider.yaml"
@@ -1288,7 +1291,7 @@ def test_standalone_probe_signal_publishes_the_partial_battery(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from sparselab.lab_records import read_lab_record
+    from klab.lab_records import read_lab_record
 
     root, record = tried
     before = set((root / "work/lab/probes").glob("*/"))
@@ -1323,7 +1326,7 @@ def test_nonfinite_native_loss_is_a_numerical_hard_failure(
     """A NaN loss from the real evaluator stops the battery: abandon, not rerun."""
     import torch
 
-    from sparselab.probes.cli import load_target
+    from klab.probes.cli import load_target
 
     root, record = tried
     lab = root / "work/lab"
@@ -1378,12 +1381,12 @@ def test_dashboard_history_reads_verified_records(
 ) -> None:
     import shutil
 
-    from sparselab.dashboard.probe_data import (
+    from klab.dashboard.probe_data import (
         history_rows,
         live_batteries,
         load_history,
     )
-    from sparselab.probes.points import (
+    from klab.probes.points import (
         metric_points,
         pareto_frontier,
         points_from_record,
@@ -1428,7 +1431,7 @@ def test_dashboard_history_reads_verified_records(
 
 
 def test_pareto_points_are_unique_per_group_and_checkpoint() -> None:
-    from sparselab.probes.points import metric_points, probe_points
+    from klab.probes.points import metric_points, probe_points
 
     validation = {"validation_sha256": "v", "tokenizer_sha256": "t"}
     short = eval_group(validation, {"seq_len": 32, "batch_size": 4})
@@ -1469,7 +1472,7 @@ def test_explore_cli_reads_a_lab_run_through_the_verified_loader(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """CI-safe explorer smoke: a real (tiny) lab run, explored and cached."""
-    from sparselab.explorer import EXPLORER_FORMAT, cached_explorations, explore
+    from klab.explorer import EXPLORER_FORMAT, cached_explorations, explore
 
     root, record = tried
     run_id = record["arms"]["candidate"]["run_id"]
@@ -1500,8 +1503,8 @@ def test_explore_cli_uses_the_shared_runtime_preparation_and_envelope(
 ) -> None:
     """explore goes through _prepare_runtime_command like probe/try: the
     device is authorized there and the envelope reaches every stage check."""
-    import sparselab.cli.main as cli_main
-    import sparselab.resource_envelope as envelopes
+    import klab.cli.main as cli_main
+    import klab.resource_envelope as envelopes
 
     root, record = tried
     run_id = record["arms"]["candidate"]["run_id"]
@@ -1550,7 +1553,7 @@ def test_explore_compares_pinned_generations(
     tried: tuple[Path, dict[str, Any]],
 ) -> None:
     """Explore two immutable generations of one real lab run and compare activations."""
-    from sparselab.explorer import (
+    from klab.explorer import (
         ACTIVATION_SITES,
         EXPLORER_FORMAT,
         compare_explorations,

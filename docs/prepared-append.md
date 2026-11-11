@@ -6,7 +6,7 @@ training defaults, model math, optimizer state or ordinary preparation behavior.
 It is separate from `PreparedPrefix`, which derives a smaller benchmark selection.
 
 ```python
-from sparselab.data.packing import PreparedAppend, prepare_data
+from klab.data.packing import PreparedAppend, prepare_data
 
 prepared = prepare_data(
     next_config,

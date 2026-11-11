@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sparselab import operational_monitor as monitor
+from klab import operational_monitor as monitor
 
 
 class FakeProcess:

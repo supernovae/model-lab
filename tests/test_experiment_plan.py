@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from sparselab.config.loading import load_config
-from sparselab.engines.base import EngineCapabilityError
-from sparselab.experiments.compiler import compare_configs
-from sparselab.experiments.lock import _runtime, resolve_plan
-from sparselab.experiments.plan import load_plan, schema
+from klab.config.loading import load_config
+from klab.engines.base import EngineCapabilityError
+from klab.experiments.compiler import compare_configs
+from klab.experiments.lock import _runtime, resolve_plan
+from klab.experiments.plan import load_plan, schema
 
 
 @pytest.mark.parametrize(

@@ -4,10 +4,10 @@ relay_version: 1
 namespace: hosted-tinystories
 controller:
   kind: rclone
-  root: labdrive:SparseLab
+  root: labdrive:Model Lab
   config: /absolute/controller/rclone.conf
 worker:
   kind: rclone
-  root: labdrive:SparseLab
+  root: labdrive:Model Lab
   config: /absolute/worker/rclone.conf
 transfer_timeout_seconds: 1800

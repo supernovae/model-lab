@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from sparselab.canonical import canonical_json
-from sparselab.workers.models import (
+from klab.canonical import canonical_json
+from klab.workers.models import (
     AttemptReceipt,
     BundleManifest,
     ExperimentSpec,
@@ -19,7 +19,7 @@ from sparselab.workers.models import (
     validate_operation_result,
     validate_required_versions,
 )
-from sparselab.workers.transport import (
+from klab.workers.transport import (
     MAX_HEADER_BYTES,
     ProtocolError,
     _endpoint_argv,
@@ -268,7 +268,7 @@ def test_ssh_argv_is_fixed_and_option_injection_is_rejected() -> None:
         transport="ssh",
         host="gpu.example",
         python=Path("/opt/venv/bin/python"),
-        root=Path("/var/lib/sparselab"),
+        root=Path("/var/lib/klab"),
         engine="pytorch",
         backend="cuda",
         device_index=0,
@@ -278,7 +278,7 @@ def test_ssh_argv_is_fixed_and_option_injection_is_rejected() -> None:
     assert argv[5] == "gpu.example"
     assert (
         argv[6]
-        == "/opt/venv/bin/python -m sparselab.workers.agent serve-stdio --root /var/lib/sparselab --worker-id worker-1 --name worker-1 --engine pytorch --backend cuda --device-index 0"
+        == "/opt/venv/bin/python -m klab.workers.agent serve-stdio --root /var/lib/klab --worker-id worker-1 --name worker-1 --engine pytorch --backend cuda --device-index 0"
     )
     with pytest.raises(ValueError):
         WorkerDefinition(
@@ -330,7 +330,7 @@ def test_wire_scalars_do_not_coerce_type(field: str, value: object) -> None:
 
 @pytest.mark.parametrize("invalid", [0, 1, "true", None, []])
 def test_operational_cold_mode_rejects_nonboolean_protocol_values(invalid) -> None:
-    from sparselab.workers.models import validate_operation
+    from klab.workers.models import validate_operation
 
     for op, payload in (
         ("install_bundle", {"manifest_digest": "0" * 64, "mode": "install"}),

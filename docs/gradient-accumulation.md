@@ -10,13 +10,13 @@ training:
   gradient_accumulation: 4
 ```
 
-The nominal effective example batch is `micro_batch_size × gradient_accumulation`. SparseLab builds an update window from deterministic epoch order, up to that many examples, stopping at an epoch boundary or token-budget boundary. A short final window is real: its actual valid next-token targets, not the nominal product, determine its loss denominator and token counters.
+The nominal effective example batch is `micro_batch_size × gradient_accumulation`. Model Lab builds an update window from deterministic epoch order, up to that many examples, stopping at an epoch boundary or token-budget boundary. A short final window is real: its actual valid next-token targets, not the nominal product, determine its loss denominator and token counters.
 
 For each microbatch, the trainer computes summed next-token cross-entropy, ignores labels marked `-100`, and weights the auxiliary routing loss by that microbatch's share of valid targets. It divides the accumulated loss by the update window's total valid targets. This makes ordinary dense no-dropout accumulation comparable to a corresponding large batch while preserving correct masking at a partial final block.
 
 ## One successful update
 
-For each window, SparseLab:
+For each window, Model Lab:
 
 1. clears gradients once;
 2. runs backward for every nonempty microbatch;

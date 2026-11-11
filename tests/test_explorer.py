@@ -11,9 +11,9 @@ import pytest
 import torch
 import yaml
 
-from sparselab import explorer
-from sparselab.lab_context import LabCancelled, LabContext
-from sparselab.probes import scoring
+from klab import explorer
+from klab.lab_context import LabCancelled, LabContext
+from klab.probes import scoring
 
 ROOT = Path(__file__).resolve().parents[1]
 WORDS = [
@@ -36,7 +36,7 @@ WORDS = [
 
 
 def _config(**model: Any) -> Any:
-    from sparselab.config.models import RunConfig
+    from klab.config.models import RunConfig
 
     base = (
         "configs/smoke_cpu.yaml"
@@ -62,7 +62,7 @@ def _tokenizer() -> Any:
 
 
 def _loaded(**model: Any) -> Any:
-    from sparselab.model.transformer import DenseLM
+    from klab.model.transformer import DenseLM
 
     config = _config(**model)
     torch.manual_seed(0)
@@ -130,11 +130,11 @@ def test_size_guard_refuses_big_models_before_loading(tmp_path: Path) -> None:
         )
     )
     message = explorer.size_check(arch)
-    assert message and "limit" in message and "sparselab probe" in message
+    assert message and "limit" in message and "klab probe" in message
 
 
 def test_attention_probabilities_are_the_forward_passes_own_weights() -> None:
-    from sparselab.model.attention.dense import DenseAttention
+    from klab.model.attention.dense import DenseAttention
 
     for kv_heads in (2, 1):
         torch.manual_seed(1)
@@ -215,7 +215,7 @@ def test_explorer_stops_at_a_cancel_sentinel(tmp_path: Path) -> None:
 
 
 def test_cache_is_sealed_and_rejects_edits(tmp_path: Path) -> None:
-    from sparselab.lab_records import seal, write_json_atomic
+    from klab.lab_records import seal, write_json_atomic
 
     path = explorer.cache_path(tmp_path, "c" * 64, TEXT)
     assert path != explorer.cache_path(tmp_path, "c" * 64, TEXT + "!")
@@ -245,7 +245,7 @@ def test_memory_view_flags_an_ngram_table_that_reads_one_token(
 ) -> None:
     """The detector flags a table whose addresses are one earlier token's id
     (what the legacy 257 multiplier produced at 257 rows)."""
-    from sparselab.model.memory import TokenNgramMemory
+    from klab.model.memory import TokenNgramMemory
 
     config = {
         "memory": "ngram",
@@ -324,8 +324,8 @@ def test_loader_oom_is_a_clean_outcome_with_cleanup_and_no_cache(
 def test_pre_load_stage_check_runs_before_the_loader(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.lab_context import LabResourceExceeded
-    from sparselab.resource_envelope import ResourceEnvelope
+    from klab.lab_context import LabResourceExceeded
+    from klab.resource_envelope import ResourceEnvelope
 
     lab = _fake_run(tmp_path)
     calls: list[str] = []
@@ -433,7 +433,7 @@ def test_activation_diagnostics_match_raw_residual_stream_and_leave_no_hooks() -
 
 
 def test_compare_explorations_deltas_overlap_and_refusals() -> None:
-    from sparselab.lab_records import jsonable, seal
+    from klab.lab_records import jsonable, seal
 
     left_loaded = _loaded(**MOE_NGRAM)
     right_loaded = _loaded(**MOE_NGRAM)
@@ -504,8 +504,8 @@ def test_compare_explorations_deltas_overlap_and_refusals() -> None:
     with pytest.raises(explorer.ExplorerUnavailable, match="different runtimes"):
         explorer.compare_explorations(left, diff_runtime)
 
-    v1_record = seal({**right, "format": "sparselab-explorer-v1"})
-    with pytest.raises(explorer.ExplorerUnavailable, match="sparselab-explorer-v1"):
+    v1_record = seal({**right, "format": "klab-explorer-v1"})
+    with pytest.raises(explorer.ExplorerUnavailable, match="klab-explorer-v1"):
         explorer.compare_explorations(left, v1_record)
 
     no_act = seal({k: v for k, v in right.items() if k != "activation"})
@@ -526,7 +526,7 @@ def test_compare_explorations_deltas_overlap_and_refusals() -> None:
 def test_prime_stream_sizes_are_visible_and_not_given_legacy_collapse_diagnosis() -> (
     None
 ):
-    from sparselab.dashboard import explorer_view
+    from klab.dashboard import explorer_view
 
     loaded = _loaded(
         **{
@@ -547,7 +547,7 @@ def test_prime_stream_sizes_are_visible_and_not_given_legacy_collapse_diagnosis(
 
 
 def test_multiport_explorer_captures_every_table_and_gate() -> None:
-    from sparselab.dashboard import explorer_view
+    from klab.dashboard import explorer_view
 
     loaded = _loaded(
         **{

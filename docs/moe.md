@@ -1,6 +1,6 @@
 # Mixture of Experts
 
-SparseLab's local MoE replaces a dense SwiGLU block with independently parameterized SwiGLU experts. For a normalized hidden vector $x \in \mathbb{R}^D$, the router computes logits $r = Wx$ and probabilities $p = \operatorname{softmax}(r)$. It selects the $K$ largest entries and renormalizes their probabilities:
+Model Lab's local MoE replaces a dense SwiGLU block with independently parameterized SwiGLU experts. For a normalized hidden vector $x \in \mathbb{R}^D$, the router computes logits $r = Wx$ and probabilities $p = \operatorname{softmax}(r)$. It selects the $K$ largest entries and renormalizes their probabilities:
 
 $$y = \sum_{e \in \operatorname{TopK}(p)} \frac{p_e}{\sum_{j \in \operatorname{TopK}(p)} p_j} E_e(x).$$
 
@@ -11,7 +11,7 @@ The trainer records the auxiliary loss plus per-layer router entropy, maximum ex
 Run the CPU smoke:
 
 ```sh
-uv run --locked --extra cpu sparselab train --runs-dir sparselab-work/runs configs/smoke_moe_cpu.yaml --run-id moe-smoke
+uv run --locked --extra cpu klab train --runs-dir klab-work/runs configs/smoke_moe_cpu.yaml --run-id moe-smoke
 ```
 
 Compare it with `configs/smoke_cpu.yaml` only at matching tokenizer, data, and token budget. Total parameters include all routed experts; active-per-token accounting includes only the selected experts and an optional shared expert.

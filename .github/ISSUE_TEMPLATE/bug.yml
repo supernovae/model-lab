@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible SparseLab failure.
+description: Report a reproducible Model Lab failure.
 title: "bug: "
 labels: [bug]
 body:

@@ -2,7 +2,7 @@
 
 Commands below use the [activated, provisioned environment](../README.md#first-run).
 
-SparseLab can execute a prepared run on a user-provisioned CUDA host, including
+Model Lab can execute a prepared run on a user-provisioned CUDA host, including
 an explicitly supplied Google Colab session or a full-SSH machine. Placement is
 operational: it does not change the declaration's scientific identity or make a
 hosted backend the default. The feature does **not** create, upgrade, stop, or
@@ -25,7 +25,7 @@ outside the checkout unless stated otherwise.
   FP16 scaler evidence, and successful forward **and backward** evidence for
   the memory-efficient SDPA candidate. If unrestricted SDPA selects math, retain
   that result and do not claim fused acceptance.
-- TPUs are detected and reported as `TPU_UNSUPPORTED`; SparseLab has no
+- TPUs are detected and reported as `TPU_UNSUPPORTED`; Model Lab has no
   executable TPU backend. PyTorch/XLA is a separate backlog item, not a CPU
   fallback.
 - Relay publication is synchronous at finalized checkpoint boundaries. It
@@ -67,19 +67,19 @@ distribution, memory, and failures.
 Prepare inputs locally on CPU; these commands must not initialize CUDA:
 
 ```sh
-export SPARSELAB_WORK_DIR="$HOME/.local/share/sparselab"
-WORK="$SPARSELAB_WORK_DIR/experiments/hosted-environments-acceptance"
+export KLAB_WORK_DIR="$HOME/.local/share/klab"
+WORK="$KLAB_WORK_DIR/experiments/hosted-environments-acceptance"
 mkdir -p "$WORK/inputs"
 cp experiments/samples/hosted-tinystories/source.yaml "$WORK/inputs/"
 cp experiments/samples/hosted-tinystories/tokenizer.yaml "$WORK/inputs/"
 cp experiments/samples/hosted-tinystories/run-t4.yaml "$WORK/inputs/"
-sparselab workspace preflight "$WORK/inputs/tokenizer.yaml" --tokenizer
-sparselab inspect "$WORK/inputs/run-t4.yaml" --json
-sparselab workspace preflight "$WORK/inputs/run-t4.yaml"
-sparselab data lock "$WORK/inputs/source.yaml" --output "$WORK/inputs/source.lock.json"
-sparselab data snapshot "$WORK/inputs/source.lock.json" --output "$WORK/snapshot"
-sparselab tokenizer train "$WORK/inputs/tokenizer.yaml"
-sparselab data prepare "$WORK/inputs/run-t4.yaml"
+klab workspace preflight "$WORK/inputs/tokenizer.yaml" --tokenizer
+klab inspect "$WORK/inputs/run-t4.yaml" --json
+klab workspace preflight "$WORK/inputs/run-t4.yaml"
+klab data lock "$WORK/inputs/source.yaml" --output "$WORK/inputs/source.lock.json"
+klab data snapshot "$WORK/inputs/source.lock.json" --output "$WORK/snapshot"
+klab tokenizer train "$WORK/inputs/tokenizer.yaml"
+klab data prepare "$WORK/inputs/run-t4.yaml"
 ```
 
 Retain the prepared-data provenance and native output. Reuse already verified
@@ -185,14 +185,14 @@ See Google's [local ADC setup](https://docs.cloud.google.com/docs/authentication
 
 The CLI spelling for a standalone Python job is
 `colab --auth=adc run --gpu T4 script.py`, not `--run T4`.
-`run` normally releases the VM when the script finishes; SparseLab acceptance
+`run` normally releases the VM when the script finishes; Model Lab acceptance
 uses a named session and `exec` so checkpoint extraction precedes teardown.
 
 If account/CLI information cannot establish a zero-charge allocation, do not
 spend credits or probe repeatedly. In the browser, use **Runtime → Change
 runtime type → T4 GPU**, verify it is a free supplied session, and provide that
 session name. Do not use high-memory, paid upgrades, a paid fallback, or stop an
-unrelated session. `colab --auth=adc new -s sparselab-t4-acceptance --gpu T4`
+unrelated session. `colab --auth=adc new -s klab-t4-acceptance --gpu T4`
 is only an allocation command after free availability is established; a T4
 request or the reported compute-unit rate alone does not prove billing status.
 
@@ -202,8 +202,8 @@ cell itself submits no provider work:
 
 ```sh
 ENROLLMENT="$WORK/colab-enrollment.py" # an absolute, fresh local path
-sparselab hosted notebook-cell \
-  --root /content/sparselab --output "$ENROLLMENT" --json
+klab hosted notebook-cell \
+  --root /content/klab --output "$ENROLLMENT" --json
 ```
 
 Open the supplied dedicated notebook and run the generated fixed cell once.
@@ -211,7 +211,7 @@ It must finish before `hosted inspect` or `hosted setup`: an observer state of
 `BUSY`, missing state, changed boot/nonce, stale observation, or an unverifiable
 live PID/start time is refused rather than queued behind unknown work. Custom
 task roots must be passed consistently with `--root`; omitted Colab inspection
-observes `/content` but enrollment remains `/content/sparselab`.
+observes `/content` but enrollment remains `/content/klab`.
 
 From the fixed, committed feature revision, create a source bundle and discover
 actual host properties before setup:
@@ -219,12 +219,12 @@ actual host properties before setup:
 ```sh
 git bundle create "$WORK/source.bundle" HEAD
 SHA="$(git rev-parse HEAD)"
-sparselab hosted inspect \
-  --colab-session "$SESSION" --colab-auth adc --root /content/sparselab --json
-sparselab hosted setup \
+klab hosted inspect \
+  --colab-session "$SESSION" --colab-auth adc --root /content/klab --json
+klab hosted setup \
   --colab-session "$SESSION" --colab-auth adc --source-bundle "$WORK/source.bundle" \
-  --source-commit "$SHA" --root /content/sparselab \
-  --runtime-root /content/sparselab-runtimes --recipe cuda-cu126-v1 --json
+  --source-commit "$SHA" --root /content/klab \
+  --runtime-root /content/klab-runtimes --recipe cuda-cu126-v1 --json
 ```
 
 `inspect` reports requested/session accelerator metadata separately from the
@@ -247,15 +247,15 @@ With `REMOTE_PYTHON` and `REMOTE_WORKER_ROOT` copied from setup's structured
 result, register and stage the worker:
 
 ```sh
-sparselab worker register colab-t4-acceptance \
+klab worker register colab-t4-acceptance \
   --colab-session "$SESSION" --colab-auth adc --backend cuda --engine pytorch \
   --python "$REMOTE_PYTHON" --root "$REMOTE_WORKER_ROOT" \
   --relay-profile "$WORK/relay.yaml" --store "$WORK/runs"
-sparselab worker relay check "$WORK/relay.yaml" \
+klab worker relay check "$WORK/relay.yaml" \
   --worker colab-t4-acceptance --store "$WORK/runs" --json
-sparselab runtime attention "$WORK/inputs/run-t4.yaml" \
+klab runtime attention "$WORK/inputs/run-t4.yaml" \
   --worker colab-t4-acceptance --store "$WORK/runs" --json
-sparselab experiment submit "$WORK/inputs/run-t4.yaml" --wait \
+klab experiment submit "$WORK/inputs/run-t4.yaml" --wait \
   --worker colab-t4-acceptance --store "$WORK/runs"
 ```
 
@@ -277,17 +277,17 @@ When the terminal receipt or a verified durable checkpoint is available,
 collect without rerunning the executor:
 
 ```sh
-sparselab experiment collect "$RUN_ID" \
+klab experiment collect "$RUN_ID" \
   --relay-profile "$WORK/relay.yaml" --store "$WORK/runs" --json
-sparselab checkpoint verify "$GENERATION" --json
-sparselab report --kind run "$RUN_ID" --runs-dir "$WORK/runs" --json
+klab checkpoint verify "$GENERATION" --json
+klab report --kind run "$RUN_ID" --runs-dir "$WORK/runs" --json
 ```
 
 Recovery from a confirmed lost worker is explicit and only selects a fully
 verified committed checkpoint:
 
 ```sh
-sparselab experiment collect "$RUN_ID" \
+klab experiment collect "$RUN_ID" \
   --relay-profile "$WORK/relay.yaml" --store "$WORK/runs" \
   --recover --confirm-worker-lost --json
 ```
@@ -315,7 +315,7 @@ result or an unchecked API call into GPU acceptance.
 ## User-provisioned full SSH: Runpod and Vast
 
 Runpod, Vast, and comparable hosts reuse the CUDA recipe, relay, native worker
-protocol, and collection flow. SparseLab does not allocate them. For Runpod,
+protocol, and collection flow. Model Lab does not allocate them. For Runpod,
 obtain an existing pod's full-TCP SSH endpoint from its console/official CLI;
 its restricted proxy SSH is insufficient. For Vast, obtain the assigned host
 and port from its console/official CLI and inspect its storage and bandwidth
@@ -324,13 +324,13 @@ host-key verification. Do not disable host-key checking or auto-accept a
 recycled host.
 
 ```sh
-sparselab hosted inspect \
+klab hosted inspect \
   --ssh "$SSH_HOST" --root /absolute/task/root --json
-sparselab hosted setup \
+klab hosted setup \
   --ssh "$SSH_HOST" --source-bundle "$WORK/source.bundle" \
   --source-commit "$SHA" --root /absolute/task/root \
   --runtime-root /absolute/task/runtimes --recipe cuda-cu126-v1 --json
-sparselab worker register ssh-cuda-host \
+klab worker register ssh-cuda-host \
   --ssh "$SSH_HOST" --backend cuda --engine pytorch \
   --python "$REMOTE_PYTHON" --root "$REMOTE_WORKER_ROOT" \
   --relay-profile "$WORK/relay.yaml" --store "$WORK/runs"

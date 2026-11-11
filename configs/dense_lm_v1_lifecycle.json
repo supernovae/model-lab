@@ -1,8 +1,8 @@
 {
-  "format": "sparselab_dense_lm_v1_lifecycle_contract",
+  "format": "klab_dense_lm_v1_lifecycle_contract",
   "status": "three_seeds_passed_frozen_gates_canonical_promotion_recorded",
   "candidate": "dense-lm-v1",
-  "authority_note": "Archival provenance only; canonical baseline status, acceptance, and promotion are defined by the sparselab-research-lifecycle registry and linked evidence.",
+  "authority_note": "Archival provenance only; canonical baseline status, acceptance, and promotion are defined by the klab-research-lifecycle registry and linked evidence.",
   "inputs": {
     "source_identity_sha256": "927dca9db1746ce2909013763980c7403b0b165ac59ef559a1f78b0eac4d6650",
     "configs": {

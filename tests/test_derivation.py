@@ -8,10 +8,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sparselab.cli.main import main
-from sparselab.config.loading import load_config
-from sparselab.derivation import derive_config, parse_assignments
-from sparselab.training.manifest import sha256_file
+from klab.cli.main import main
+from klab.config.loading import load_config
+from klab.derivation import derive_config, parse_assignments
+from klab.training.manifest import sha256_file
 
 
 @pytest.fixture
@@ -41,7 +41,7 @@ def _sidecar(output: Path) -> Path:
 
 
 def _run_config_derive(monkeypatch, capsys, argv: list[str]) -> dict[str, object]:
-    monkeypatch.setattr(sys, "argv", ["sparselab", "config", "derive", *argv])
+    monkeypatch.setattr(sys, "argv", ["klab", "config", "derive", *argv])
     main()
     return json.loads(capsys.readouterr().out)
 
@@ -75,7 +75,7 @@ def test_config_derivation_relocates_paths_and_records_exact_bytes(
         loaded.training.portability_manifest_path
         == (source_config.parent / "manifests/portable.json").resolve()
     )
-    assert receipt["format"] == "sparselab-derivation-v1"
+    assert receipt["format"] == "klab-derivation-v1"
     assert receipt["kind"] == "run_config"
     assert receipt["origin"]["path"] == str(source_config.resolve())
     assert receipt["origin"]["file_sha256"] == sha256_file(source_config)
@@ -218,7 +218,7 @@ def test_config_derivation_publication_is_exclusive(
 def test_config_derivation_removes_only_its_receipt_after_payload_failure(
     source_config: Path, tmp_path: Path, monkeypatch
 ) -> None:
-    from sparselab import derivation
+    from klab import derivation
 
     output = tmp_path / "derived.yaml"
     original = derivation._exclusive_bytes
@@ -241,7 +241,7 @@ def test_config_derivation_removes_only_its_receipt_after_payload_failure(
 def test_config_derivation_rehashes_source_before_publication(
     source_config: Path, tmp_path: Path, monkeypatch
 ) -> None:
-    from sparselab import derivation
+    from klab import derivation
 
     output = tmp_path / "derived.yaml"
     original = derivation.sha256_file
@@ -293,7 +293,7 @@ def test_config_derive_cli_emits_receipt_and_expected_errors(
         sys,
         "argv",
         [
-            "sparselab",
+            "klab",
             "config",
             "derive",
             str(source_config),
@@ -381,7 +381,7 @@ def test_config_requires_yaml_and_existing_parent(source_config, tmp_path, desti
 def test_competing_publication_never_overwrites_competitor(
     source_config, tmp_path, monkeypatch
 ):
-    from sparselab import derivation
+    from klab import derivation
 
     output = tmp_path / "derived.yaml"
     original = derivation._exclusive_bytes
@@ -415,7 +415,7 @@ def test_config_cli_text_reports_published_handoff(
         sys,
         "argv",
         [
-            "sparselab",
+            "klab",
             "config",
             "derive",
             str(source_config),

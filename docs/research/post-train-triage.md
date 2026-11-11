@@ -1,6 +1,6 @@
 # Post-train triage (v1)
 
-`train` runs a bounded, advisory triage **after** a normally completed run. `sparselab report --kind run RUN_ID --runs-dir PATH [--json]` reads the immutable report; it never reruns inference. Reports live at `runs/RUN_ID/post-train-triage/<sha256>.json`. A missing, malformed or ambiguous report is `UNKNOWN`, not evidence of a failed training run. Neither training status nor immutable checkpoint, run manifest, research registry, Finding, NextTest, or promotion decision is changed by triage.
+`train` runs a bounded, advisory triage **after** a normally completed run. `klab report --kind run RUN_ID --runs-dir PATH [--json]` reads the immutable report; it never reruns inference. Reports live at `runs/RUN_ID/post-train-triage/<sha256>.json`. A missing, malformed or ambiguous report is `UNKNOWN`, not evidence of a failed training run. Neither training status nor immutable checkpoint, run manifest, research registry, Finding, NextTest, or promotion decision is changed by triage.
 
 ## Evidence and applicability
 
@@ -24,8 +24,8 @@ Candidates sort by cost (`negligible`, `low`, `medium`, `high`), then trigger co
 
 ## Optional Surface Review overlay
 
-`sparselab report RUN_ID --kind run --runs-dir RUNS_DIR --config report.yaml`
-and `sparselab dashboard --runs-dir RUNS_DIR --surface-dir DIR` can show a
+`klab report RUN_ID --kind run --runs-dir RUNS_DIR --config report.yaml`
+and `klab dashboard --runs-dir RUNS_DIR --surface-dir DIR` can show a
 **verified read-only overlay** for sealed [Surface Review v1](surface-review-v1.md)
 bundles. The report declaration is:
 
@@ -41,9 +41,9 @@ selector, while the dashboard command below uses `$SURFACE_DIR`. The report
 declaration does not expand environment variables.
 
 ```sh
-uv run --locked sparselab report "$RUN_ID" --kind run \
+uv run --locked klab report "$RUN_ID" --kind run \
   --runs-dir "$RUNS_DIR" --config report.yaml --json
-uv run --locked sparselab dashboard --runs-dir "$RUNS_DIR" \
+uv run --locked klab dashboard --runs-dir "$RUNS_DIR" \
   --surface-dir "$SURFACE_DIR"
 ```
 

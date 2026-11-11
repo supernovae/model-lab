@@ -4,7 +4,7 @@ Commands below use the [activated, provisioned environment](../README.md#first-r
 
 Start with [From flashcards to a useful local assistant](from-toy-to-useful.md) for the beginner explanation, the runnable 3.3M `instruction_starter.yaml` recipe, and the distinction between a familiar chat prompt and trained conversational ability.
 
-The optional `instruction_reference` source is a deterministic, offline synthetic curriculum for exercising the local chat transcript path. Each document uses the same plain-text form consumed by `sparselab chat`:
+The optional `instruction_reference` source is a deterministic, offline synthetic curriculum for exercising the local chat transcript path. Each document uses the same plain-text form consumed by `klab chat`:
 
 ```text
 System: You are a concise local assistant.
@@ -19,13 +19,13 @@ The curriculum contains bounded arithmetic, word reversal, attribute lookup, con
 ## Reference run
 
 ```sh
-sparselab tokenizer train configs/tokenizer_instruction_8k.yaml
-sparselab data prepare configs/instruction_100m.yaml
-sparselab inspect configs/instruction_100m.yaml --json
-sparselab train --runs-dir sparselab-work/runs configs/instruction_100m.yaml --run-id instruction-100m-pilot --stop-after-step 2
-sparselab checkpoint verify sparselab-work/runs/instruction-100m-pilot/checkpoints/latest.json --json
-sparselab train --runs-dir sparselab-work/runs configs/instruction_100m.yaml --run-id instruction-100m
-sparselab chat instruction-100m --system "You are a concise local assistant." --max-new-tokens 32 --runs-dir sparselab-work/runs
+klab tokenizer train configs/tokenizer_instruction_8k.yaml
+klab data prepare configs/instruction_100m.yaml
+klab inspect configs/instruction_100m.yaml --json
+klab train --runs-dir klab-work/runs configs/instruction_100m.yaml --run-id instruction-100m-pilot --stop-after-step 2
+klab checkpoint verify klab-work/runs/instruction-100m-pilot/checkpoints/latest.json --json
+klab train --runs-dir klab-work/runs configs/instruction_100m.yaml --run-id instruction-100m
+klab chat instruction-100m --system "You are a concise local assistant." --max-new-tokens 32 --runs-dir klab-work/runs
 ```
 
 `instruction_100m.yaml` is the initial larger reference: 104,843,648 dense parameters, a 20-million-target-token curriculum budget, effective batch size 16, and block activation checkpointing. It is intentionally a 100M—not 200M—configuration: establish that the corpus, transcript, checkpoint, and held-out behavior are useful before paying the substantially higher memory and training cost of a 200M experiment.
@@ -98,5 +98,5 @@ commands on a disposable v2 fixture. Each committed exactly 13 supervised
 training targets in one update. Evaluation scored 33 targets from a 398-token
 validation stream while excluding 19 wholly masked blocks; both produced
 `checkpointed_held_out` evidence bound to the supervision-mask digest.
-[The acceptance record](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/assistant_only_2026_09_22.json)
+[The acceptance record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/assistant_only_2026_09_22.json)
 is an objective/packing/runtime check, not a domain-quality result.

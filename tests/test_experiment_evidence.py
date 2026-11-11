@@ -3,16 +3,16 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
-from sparselab.config import load_config
-from sparselab.experiments.evidence import _build_index, collect_evidence, read_evidence
-from sparselab.experiments.lock import (
+from klab.config import load_config
+from klab.experiments.evidence import _build_index, collect_evidence, read_evidence
+from klab.experiments.lock import (
     ResolvedCell,
     ResolvedExperimentPlan,
     ResolvedPhase,
     _identities,
 )
-from sparselab.training.manifest import config_sha256, source_identity
-from sparselab.workers.models import ExperimentSpec, current_required_versions
+from klab.training.manifest import config_sha256, source_identity
+from klab.workers.models import ExperimentSpec, current_required_versions
 
 BASE = Path(__file__).resolve().parents[1] / "configs/runtime_smoke_cpu.yaml"
 

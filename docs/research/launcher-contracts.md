@@ -6,7 +6,7 @@ use `research scaffold`, then native `study plan`/`submit`/`collect`/`report`.
 Scaffolding writes declarations; execution is a separate explicit action.
 
 This audit covers the one-off launcher and teaching overlap requested by the
-[historical simplification plan](https://github.com/supernovae/tiny-sparse-lab/blob/5df1193198223bee50661e2db65a7f01cc8372c0/TODO.md),
+[historical simplification plan](https://github.com/supernovae/model-lab/blob/5df1193198223bee50661e2db65a7f01cc8372c0/TODO.md),
 against base `6762454de0337a0ea3b909e0487cdaebe02fb182`. The
 [current roadmap](../../ROADMAP.md) owns direction. The requested set has 18
 executable leaves before this change and 17 after it (including all four `learn`

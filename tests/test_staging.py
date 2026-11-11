@@ -9,20 +9,20 @@ import torch
 from test_training import config as training_config
 from test_training import equal
 
-import sparselab.staging as staging_module
-from sparselab.config.models import RunConfig
-from sparselab.data.packing import prepare_data
-from sparselab.data.tokenizer import load_tokenizer
-from sparselab.experiments.artifacts import verify_artifact
-from sparselab.experiments.plan import Artifact
-from sparselab.model.portable_engram import export_portable_engram
-from sparselab.resource_envelope import ResourceEnvelope
-from sparselab.staging import _read_sealed, stage
-from sparselab.training import manifest as manifest_module
-from sparselab.training.checkpoints import CheckpointManager
-from sparselab.training.manifest import read_manifest
-from sparselab.training.stages import ExperimentStage, StageHistory
-from sparselab.training.trainer import train
+import klab.staging as staging_module
+from klab.config.models import RunConfig
+from klab.data.packing import prepare_data
+from klab.data.tokenizer import load_tokenizer
+from klab.experiments.artifacts import verify_artifact
+from klab.experiments.plan import Artifact
+from klab.model.portable_engram import export_portable_engram
+from klab.resource_envelope import ResourceEnvelope
+from klab.staging import _read_sealed, stage
+from klab.training import manifest as manifest_module
+from klab.training.checkpoints import CheckpointManager
+from klab.training.manifest import read_manifest
+from klab.training.stages import ExperimentStage, StageHistory
+from klab.training.trainer import train
 
 FIXTURES = Path(__file__).with_name("fixtures")
 
@@ -79,7 +79,7 @@ def test_pilot_retention_is_isolated_from_full_run(
     if matched:
         import numpy as np
 
-        from sparselab.data.story_packing import MatchedStoryDataset
+        from klab.data.story_packing import MatchedStoryDataset
 
         dataset = MatchedStoryDataset(
             np.array([1, 2, 0, 3, 0], dtype=np.int32),
@@ -283,7 +283,7 @@ def test_prepared_artifact_memo_is_per_operation_and_fingerprint_bound(
     artifact = Artifact(
         kind="prepared_data",
         version=1,
-        producer="sparselab",
+        producer="klab",
         identifier=manifest["settings_sha256"],
         sha256=manifest["manifest_sha256"],
         path=str(prepared.root),
@@ -493,7 +493,7 @@ def test_fresh_stage_private_links_preserve_canonical_inputs_and_fallback_identi
 ) -> None:
     import os
 
-    from sparselab.training.manifest import sha256_file
+    from klab.training.manifest import sha256_file
 
     config = _config(tmp_path)
     original = prepare_data(config, load_tokenizer(config.tokenizer.path))
@@ -564,10 +564,10 @@ def test_owned_directory_publication_never_replaces_a_late_destination(
 def test_matched_story_pilots_complete_under_native_supervision(
     tmp_path: Path, layout: str, verification_mode: str, monkeypatch
 ) -> None:
-    from sparselab.config.models import MatchedStoryConfig
-    from sparselab.data.story_packing import MatchedStoryDataset
-    from sparselab.training.pilot_deadline import PilotDeadlineState, PurposeDeadlines
-    from sparselab.verification_proofs import verification_options
+    from klab.config.models import MatchedStoryConfig
+    from klab.data.story_packing import MatchedStoryDataset
+    from klab.training.pilot_deadline import PilotDeadlineState, PurposeDeadlines
+    from klab.verification_proofs import verification_options
 
     base = _config(tmp_path)
     tokenizer = load_tokenizer(base.tokenizer.path)

@@ -59,7 +59,7 @@ That is evidence of learning, partial wording generalization, and a clear failur
 
 A model trained on stories learns to continue stories. A model trained on well-formed question/answer conversations can learn to answer questions. A model trained on 24 associations can learn those associations. The terminal can display all three in a chat interface; the interface does not give them the same capabilities.
 
-SparseLab currently serializes chat as ordinary text:
+Model Lab currently serializes chat as ordinary text:
 
 ```text
 System: You are a concise local assistant.
@@ -109,7 +109,7 @@ You are a concise local assistant.
 After training the `instruction-100m` run below:
 
 ```sh
-sparselab chat instruction-100m --runs-dir sparselab-work/runs \
+klab chat instruction-100m --runs-dir klab-work/runs \
   --system "You are a concise local assistant." \
   --max-new-tokens 32
 ```
@@ -135,7 +135,7 @@ Run these commands from the repository root. Choose new run names for reruns; sa
 First create the existing instruction tokenizer:
 
 ```sh
-sparselab tokenizer train configs/tokenizer_instruction_8k.yaml
+klab tokenizer train configs/tokenizer_instruction_8k.yaml
 ```
 
 Use the included **[`configs/instruction_starter.yaml`](../configs/instruction_starter.yaml)**; there is no configuration to assemble first. It keeps the approximately 3.3M backbone but switches to the instruction dataset and its tokenizer.
@@ -154,20 +154,20 @@ The modest budget is for studying learning, not a quality guarantee. Copy the co
 Then exercise the real path before a full run:
 
 ```sh
-sparselab inspect configs/instruction_starter.yaml --json
-sparselab data prepare configs/instruction_starter.yaml
-sparselab train --runs-dir sparselab-work/runs configs/instruction_starter.yaml --run-id instruction-starter-pilot --stop-after-step 2
-sparselab checkpoint verify sparselab-work/runs/instruction-starter-pilot/checkpoints/latest.json --json
-sparselab eval instruction-starter-pilot --runs-dir sparselab-work/runs
+klab inspect configs/instruction_starter.yaml --json
+klab data prepare configs/instruction_starter.yaml
+klab train --runs-dir klab-work/runs configs/instruction_starter.yaml --run-id instruction-starter-pilot --stop-after-step 2
+klab checkpoint verify klab-work/runs/instruction-starter-pilot/checkpoints/latest.json --json
+klab eval instruction-starter-pilot --runs-dir klab-work/runs
 ```
 
 The two-step run should be interrupted at a safe boundary with a verifiable checkpoint. It verifies execution, **not learning quality**. It uses the configured training schedule; it is not a hidden warmup for the next run. Start the learning run fresh:
 
 ```sh
-sparselab train --runs-dir sparselab-work/runs configs/instruction_starter.yaml --run-id instruction-starter
-sparselab eval instruction-starter --runs-dir sparselab-work/runs
-sparselab chat instruction-starter --runs-dir sparselab-work/runs --system "You are a concise local assistant." --max-new-tokens 32
-sparselab report --kind run instruction-starter --runs-dir sparselab-work/runs --json
+klab train --runs-dir klab-work/runs configs/instruction_starter.yaml --run-id instruction-starter
+klab eval instruction-starter --runs-dir klab-work/runs
+klab chat instruction-starter --runs-dir klab-work/runs --system "You are a concise local assistant." --max-new-tokens 32
+klab report --kind run instruction-starter --runs-dir klab-work/runs --json
 ```
 
 Keep a short development questionnaire: greetings, arithmetic, a definition, rewordings, an unrelated question, and a request to correct an earlier answer. Record mistakes as well as good answers. Use a separate frozen set for a final claim; the synthetic validation split alone is not semantic generalization evidence.
@@ -193,7 +193,7 @@ This model learned recognizable sentence templates and one curriculum definition
 The run and `evaluations/guide-chat.json` transcript are retained locally, not committed as model downloads. On the machine containing that run, try it without retraining:
 
 ```sh
-sparselab chat guide-instruction-starter --system "You are a concise local assistant." --max-new-tokens 32
+klab chat guide-instruction-starter --system "You are a concise local assistant." --max-new-tokens 32
 ```
 
 This is a verified learning/example run, not a recommended application model. No full 100M instruction run or domain-support quality evaluation was performed for this guide.
@@ -201,13 +201,13 @@ This is a verified learning/example run, not a recommended application model. No
 ### Then try the larger reference deliberately
 
 ```sh
-sparselab inspect configs/instruction_100m.yaml --json
-sparselab data prepare configs/instruction_100m.yaml
-sparselab train --runs-dir sparselab-work/runs configs/instruction_100m.yaml --run-id instruction-100m-pilot --stop-after-step 2
-sparselab checkpoint verify sparselab-work/runs/instruction-100m-pilot/checkpoints/latest.json --json
-sparselab train --runs-dir sparselab-work/runs configs/instruction_100m.yaml --run-id instruction-100m
-sparselab eval instruction-100m --runs-dir sparselab-work/runs
-sparselab chat instruction-100m --system "You are a concise local assistant." --max-new-tokens 32 --runs-dir sparselab-work/runs
+klab inspect configs/instruction_100m.yaml --json
+klab data prepare configs/instruction_100m.yaml
+klab train --runs-dir klab-work/runs configs/instruction_100m.yaml --run-id instruction-100m-pilot --stop-after-step 2
+klab checkpoint verify klab-work/runs/instruction-100m-pilot/checkpoints/latest.json --json
+klab train --runs-dir klab-work/runs configs/instruction_100m.yaml --run-id instruction-100m
+klab eval instruction-100m --runs-dir klab-work/runs
+klab chat instruction-100m --system "You are a concise local assistant." --max-new-tokens 32 --runs-dir klab-work/runs
 ```
 
 Do not launch the full run solely because an estimate says `LIKELY_TO_FIT`. Inspect the actual configured backend and resource cost; use a short real run first. The `inspect` command uses tensor shapes without allocating the model, and `backend: auto` uses the same selector as training. Missing physical-capacity readings cannot certify fit. `stage --through warmup` runs an isolated, disposable pilot and records its measured report; it is still not a substitute for the configured full run or a large-model fit guarantee.
@@ -262,17 +262,17 @@ dataset:
 
 Create those files from your corpus and replace the license with your actual rights. Keep the starter's model dimensions and tokenizer for this continuation. The existing tokenizer can encode new text through its byte vocabulary, though its efficiency on a new domain may be poor. If starting a new model from scratch, you may train a domain tokenizer on training data only; changing the tokenizer is **not** a compatible weight continuation.
 
-SparseLab rejects exact cross-split duplicates, but it cannot certify semantic independence. The v2 examples above explicitly use **assistant-only** loss: system/user text supplies context rather than supervised targets. V2 also supports `all_tokens`; historical unversioned records retain whole-transcript loss. Training/evaluation counters count valid supervised prediction targets. Long conversations are packed into fixed blocks, so the facts needed to predict an answer must still fit the training window. See [objective and inert tool-transcript semantics](instruction-training.md#local-conversation-corpora).
+Model Lab rejects exact cross-split duplicates, but it cannot certify semantic independence. The v2 examples above explicitly use **assistant-only** loss: system/user text supplies context rather than supervised targets. V2 also supports `all_tokens`; historical unversioned records retain whole-transcript loss. Training/evaluation counters count valid supervised prediction targets. Long conversations are packed into fixed blocks, so the facts needed to predict an answer must still fit the training window. See [objective and inert tool-transcript semantics](instruction-training.md#local-conversation-corpora).
 
 ### Adapt a compatible checkpoint, or start fresh
 
 After the starter learning run exists:
 
 ```sh
-sparselab data prepare configs/support_triage.yaml
-sparselab train --runs-dir sparselab-work/runs configs/support_triage.yaml --run-id support-adapted \
-  --promote sparselab-work/runs/instruction-starter/checkpoints/best.json
-sparselab chat support-adapted --runs-dir sparselab-work/runs \
+klab data prepare configs/support_triage.yaml
+klab train --runs-dir klab-work/runs configs/support_triage.yaml --run-id support-adapted \
+  --promote klab-work/runs/instruction-starter/checkpoints/best.json
+klab chat support-adapted --runs-dir klab-work/runs \
   --system "Classify the support request. Reply with exactly one label: access, billing, or delivery." \
   --max-new-tokens 8
 ```
@@ -283,7 +283,7 @@ Promotion does not grow a 3M model into a 100M model, attach new Engram paramete
 
 ### Score the job, not the model's confidence
 
-Export a card template with `sparselab capability describe chat-alias-recall-v1`. Save the JSON as `data/support-test-v1.json`, remove `digest`, and replace the name, hypothesis, limitations and cases. For each test request use the same system text and this prompt structure:
+Export a card template with `klab capability describe chat-alias-recall-v1`. Save the JSON as `data/support-test-v1.json`, remove `digest`, and replace the name, hypothesis, limitations and cases. For each test request use the same system text and this prompt structure:
 
 ```text
 System: Classify the support request. Reply with exactly one label: access, billing, or delivery.
@@ -298,14 +298,14 @@ The case has a unique `identifier`, this `prompt`, `expected: "billing"`, and `k
 Once independently held-out cases have been frozen:
 
 ```sh
-sparselab capability describe data/support-test-v1.json
-sparselab capability evaluate support-adapted data/support-test-v1.json --runs-dir sparselab-work/runs
-sparselab report --kind run support-adapted --json --runs-dir sparselab-work/runs
+klab capability describe data/support-test-v1.json
+klab capability evaluate support-adapted data/support-test-v1.json --runs-dir klab-work/runs
+klab report --kind run support-adapted --json --runs-dir klab-work/runs
 ```
 
 Review the saved per-case replies: wrong label, extra prose, or a truncated answer should not quietly become a pass. Exact-answer cards suit labels and fixed extraction. They do **not** grade open-ended explanations fairly; those need a declared human rubric or a separately implemented evaluator. `best.json` selects lowest validation loss, not the best test score.
 
-A handbook assistant is a useful next test: supply facts in context, train answers and missing-information responses, then test on new documents. Claim **reading supplied context**, not memorizing unseen facts. SparseLab has bounded semantic pack retrieval in a direct PyTorch `DenseLM` API, but the standard chat/generation path does not encode text queries or retrieve automatically. Manual short context is supported; a complete text-to-query and retrieval application path remains open.
+A handbook assistant is a useful next test: supply facts in context, train answers and missing-information responses, then test on new documents. Claim **reading supplied context**, not memorizing unseen facts. Model Lab has bounded semantic pack retrieval in a direct PyTorch `DenseLM` API, but the standard chat/generation path does not encode text queries or retrieve automatically. Manual short context is supported; a complete text-to-query and retrieval application path remains open.
 
 ## 7. Decide what to change after a failure
 

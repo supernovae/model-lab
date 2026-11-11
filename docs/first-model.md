@@ -15,10 +15,10 @@ using only existing configs, loaders and commands:
 | | |
 |---|---|
 | Model | dense decoder, 8 layers, width 384, 6 heads, FFN 1024, context 512, tied embeddings |
-| Parameters | **17,308,032** (embedding 3.1M, attention 4.7M, FFN 9.4M), from `sparselab inspect` |
+| Parameters | **17,308,032** (embedding 3.1M, attention 4.7M, FFN 9.4M), from `klab inspect` |
 | Tokenizer | 8k BPE from [`configs/tokenizer_fineweb_scale_8k.yaml`](../configs/tokenizer_fineweb_scale_8k.yaml) |
 | Data | FineWeb-Edu `sample-10BT` at a pinned revision, streamed and capped at 60M train tokens; the validation documents come after the training documents |
-| Paths | `sparselab-work/experiments/dense-scale/` (tokenizer, prepared data) and `.../first-model/runs` (gitignored) |
+| Paths | `klab-work/experiments/dense-scale/` (tokenizer, prepared data) and `.../first-model/runs` (gitignored) |
 
 49M tokens is about 3 tokens per parameter, far below compute-optimal
 (about 20). The aim tonight is a real model that exercises the whole workflow,
@@ -31,7 +31,7 @@ not a converged one.
 | Tokenizer (20k documents) | about 1 min | 3k documents took 9 s here |
 | Data preparation (60M tokens) | 5–15 min, mostly download | 2M tokens prepared in 8 s here |
 | Training, GPU config (49M tokens) | **about 15–45 min** per arm, depending on the GPU | about 5 PFLOP (6·N·D); bf16 eager PyTorch on a current consumer card (CUDA or ROCm). Not measured yet: the first run records `targets_per_second` in `progress.json` |
-| Training, CPU config (4.9M tokens) | about 2 h per arm on an 8-vCPU box; less on a 12–16-core desktop | **measured** 716 tokens/s on an 8-vCPU box (fp32, deterministic, micro-batch 8). Estimated peak RAM about 5.4 GB (`sparselab inspect`) |
+| Training, CPU config (4.9M tokens) | about 2 h per arm on an 8-vCPU box; less on a 12–16-core desktop | **measured** 716 tokens/s on an 8-vCPU box (fp32, deterministic, micro-batch 8). Estimated peak RAM about 5.4 GB (`klab inspect`) |
 | Probe, standard tier (`--backend cpu`) | under 1 min | 15–29 s on the smoke run |
 | Probe, full tier (`--backend cpu`) | 1–5 min | 61 s on the smoke run with lm-eval datasets cached; lm-eval 4 tasks at `limit=50` |
 | Explore | seconds | 4 s on the smoke run |
@@ -43,11 +43,11 @@ trainings and later ones cost one.
 ## 0. Setup
 
 ```sh
-export SPARSELAB_WORK_DIR="$PWD/sparselab-work/experiments/first-model"
-mkdir -p "$SPARSELAB_WORK_DIR"
+export KLAB_WORK_DIR="$PWD/klab-work/experiments/first-model"
+mkdir -p "$KLAB_WORK_DIR"
 uv sync --locked --extra cpu --extra lmeval      # CPU env: probes, compare, dashboard
-sparselab tokenizer train configs/tokenizer_fineweb_scale_8k.yaml
-sparselab data prepare configs/first_model_20m_cuda.yaml
+klab tokenizer train configs/tokenizer_fineweb_scale_8k.yaml
+klab data prepare configs/first_model_20m_cuda.yaml
 ```
 
 Both first-model configs share one tokenizer, one data cache and one lab eval
@@ -62,24 +62,24 @@ flag alone does not authorize one. Provision one once, then pass the same
 `GPU` flags to every training command below. Choose exactly one device block.
 
 ```sh
-export SPARSELAB_RUNTIME_DIR="$HOME/.local/share/sparselab/runtimes"
+export KLAB_RUNTIME_DIR="$HOME/.local/share/klab/runtimes"
 ```
 
 **NVIDIA CUDA** (Linux x86_64, existing Python 3.14):
 
 ```sh
-sparselab runtime env provision cuda-gpu \
+klab runtime env provision cuda-gpu \
   --recipe cuda-cu126-v1 --python "$(command -v python3.14)" --json
-sparselab runtime env doctor cuda-gpu --precision bf16 --json
+klab runtime env doctor cuda-gpu --precision bf16 --json
 GPU=(--runtime cuda-gpu)
 ```
 
 **AMD ROCm** (RX 7900 XTX / gfx1100, Linux or WSL2 with AMD's driver stack):
 
 ```sh
-sparselab runtime env provision rocm-7900xtx \
+klab runtime env provision rocm-7900xtx \
   --recipe rocm-gfx1100-v1 --json
-sparselab runtime env doctor rocm-7900xtx --precision bf16 --json
+klab runtime env doctor rocm-7900xtx --precision bf16 --json
 GPU=(--backend rocm --runtime rocm-7900xtx)
 ```
 
@@ -87,7 +87,7 @@ ROCm is a supported backend. The built-in `rocm-gfx1100-v1` recipe is pinned
 for the RX 7900 XTX, and the repo's [ROCm acceptance
 record](runtime.md#versioned-vendor-provisioning) shows bf16 training on one.
 The config says `backend: cuda`, and a CUDA request never silently selects a
-HIP build, so ROCm needs the explicit `--backend rocm` on both arms. SparseLab
+HIP build, so ROCm needs the explicit `--backend rocm` on both arms. Model Lab
 does not install GPU drivers: check AMD's WSL/ROCm prerequisites first.
 On a GPU without bf16, set `runtime.precision: fp16`.
 
@@ -102,9 +102,9 @@ question: Does a wider FFN lower held-out loss at 49M tokens?
 set:
   model.ffn_dim: 1536
 YAML
-sparselab try wider-ffn.yaml \
+klab try wider-ffn.yaml \
   --vs configs/first_model_20m_cuda.yaml "${GPU[@]}" --config standard
-sparselab report TRY_ID
+klab report TRY_ID
 ```
 
 The first try trains the baseline (the config as-is) and the candidate, then
@@ -125,14 +125,14 @@ changes only the candidate, so first derive a short-budget **baseline** to make
 this fit tonight:
 
 ```sh
-sparselab config derive configs/first_model_20m_cuda.yaml \
+klab config derive configs/first_model_20m_cuda.yaml \
   --set training.max_steps=1000 --set training.max_tokens=8192000 \
-  --output "$SPARSELAB_WORK_DIR/first_model_short.yaml"
+  --output "$KLAB_WORK_DIR/first_model_short.yaml"
 for seed in 1 2 3; do
-  printf 'seed: %s\nprobe_tier: none\n' "$seed" > "$SPARSELAB_WORK_DIR/paired-try.yaml"
-  sparselab try wider-ffn.yaml \
-    --vs "$SPARSELAB_WORK_DIR/first_model_short.yaml" "${GPU[@]}" \
-    --config "$SPARSELAB_WORK_DIR/paired-try.yaml"
+  printf 'seed: %s\nprobe_tier: none\n' "$seed" > "$KLAB_WORK_DIR/paired-try.yaml"
+  klab try wider-ffn.yaml \
+    --vs "$KLAB_WORK_DIR/first_model_short.yaml" "${GPU[@]}" \
+    --config "$KLAB_WORK_DIR/paired-try.yaml"
 done
 ```
 
@@ -148,13 +148,13 @@ other change) measures the noise floor directly.
 ## 3. Probe at standard and full tiers
 
 ```sh
-sparselab probe CANDIDATE_RUN --vs BASELINE_RUN --backend cpu --config standard
-sparselab probe CANDIDATE_RUN --vs BASELINE_RUN --backend cpu --config full   # needs --extra lmeval
+klab probe CANDIDATE_RUN --vs BASELINE_RUN --backend cpu --config standard
+klab probe CANDIDATE_RUN --vs BASELINE_RUN --backend cpu --config full   # needs --extra lmeval
 ```
 
-`sparselab report TRY_ID` prints both arms' run ids. A run trained with plain
-`sparselab train` can be probed by its explicit run directory, for example
-`sparselab probe sparselab-work/experiments/first-model/runs/RUN --backend cpu`.
+`klab report TRY_ID` prints both arms' run ids. A run trained with plain
+`klab train` can be probed by its explicit run directory, for example
+`klab probe klab-work/experiments/first-model/runs/RUN --backend cpu`.
 
 Keep `--backend cpu`. `probe` has no default backend: without the flag it
 reuses the run's saved training backend (`cuda` or `rocm` for a GPU try), and
@@ -170,7 +170,7 @@ skipped as inapplicable, because this model is not trained on
 ## 4. Place it on the reference curve
 
 ```sh
-sparselab compare TRY_ID --references
+klab compare TRY_ID --references
 ```
 
 Run the full-tier probe first: compare reads records only and, where lm-eval
@@ -191,20 +191,20 @@ text: The water cycle describes how water moves
 ```
 
 ```sh
-sparselab explore CANDIDATE_RUN --config explore.yaml
+klab explore CANDIDATE_RUN --config explore.yaml
 ```
 
 `explore` already defaults to CPU, so it needs no flag after a GPU
 try. 17.3M parameters is under the explorer's 60M cap, so you get per-token loss,
 top-k guesses, attention maps for all 8 layers × 6 heads, and weight stats.
-A run trained with `sparselab train` (not `try`) also needs
-a `runs_dir: sparselab-work/experiments/first-model/runs` field in the
+A run trained with `klab train` (not `try`) also needs
+a `runs_dir: klab-work/experiments/first-model/runs` field in the
 explorer declaration (relative to that file), or pass the run directory directly.
 
 ## 6. Read the dashboard
 
 ```sh
-sparselab dashboard
+klab dashboard
 ```
 
 - **Home**: the newest verdict and next-step commands.
@@ -227,14 +227,14 @@ trained before it are refused at load. Retrain them under current code before
 comparing against them:
 
 ```sh
-sparselab tokenizer train configs/tokenizer_smoke.yaml
-sparselab tokenizer train configs/tokenizer_withheld_bytes.yaml
-sparselab tokenizer train configs/tokenizer_withheld_bpe.yaml
+klab tokenizer train configs/tokenizer_smoke.yaml
+klab tokenizer train configs/tokenizer_withheld_bytes.yaml
+klab tokenizer train configs/tokenizer_withheld_bpe.yaml
 
 for cfg in capability_recall_ngram_cpu smoke_memory_cpu smoke_byte_memory_cpu \
            smoke_combined_cpu withheld_bytes_cpu withheld_bpe_cpu; do
-  sparselab train "configs/$cfg.yaml" --run-id "$cfg-postfix"
-  sparselab probe "runs/$cfg-postfix" --backend cpu --config standard
+  klab train "configs/$cfg.yaml" --run-id "$cfg-postfix"
+  klab probe "runs/$cfg-postfix" --backend cpu --config standard
 done
 ```
 

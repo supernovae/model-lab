@@ -4,8 +4,8 @@ from pathlib import Path
 
 import torch
 
-from sparselab.config.loading import load_config
-from sparselab.model.transformer import DenseLM
+from klab.config.loading import load_config
+from klab.model.transformer import DenseLM
 
 
 def test_combined_mla_moe_byte_memory_forward() -> None:

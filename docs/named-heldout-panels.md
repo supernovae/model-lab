@@ -6,9 +6,9 @@ orchestration; Lab verifies inputs and computes the loss. No training configurat
 data cursor, checkpoint or source dataset is changed.
 
 ```sh
-sparselab eval RUN_ID --runs-dir /work/runs --checkpoint step_00013042_gen_000001 \
+klab eval RUN_ID --runs-dir /work/runs --checkpoint step_00013042_gen_000001 \
   --panel /work/recipe/english.json --output /work/results/english-step13042.json
-sparselab eval RUN_ID --runs-dir /work/runs --checkpoint step_00013042_gen_000001 \
+klab eval RUN_ID --runs-dir /work/runs --checkpoint step_00013042_gen_000001 \
   --panel /work/recipe/technical.json --output /work/results/technical-step13042.json
 ```
 

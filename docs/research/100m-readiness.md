@@ -1,9 +1,9 @@
 # Offline 100M-target readiness assessment
 
 **2026-10-10 host update:** The earlier assessment below describes a different
-workspace that lacked `/srv/sparselab`. The present host has retained artifacts;
+workspace that lacked `/srv/klab`. The present host has retained artifacts;
 their fresh, bounded cold-verification results and proposed retained-only
-admission/yield allocation are recorded in [the updated proposal](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/CARD05_BASE_100M_READINESS_PROPOSAL.md).
+admission/yield allocation are recorded in [the updated proposal](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/CARD05_BASE_100M_READINESS_PROPOSAL.md).
 That verification does not admit or measure a new v3 release. The older text is
 kept as a historical forecast, not a current host inventory.
 
@@ -16,21 +16,21 @@ result. Historical declarations and spent ledgers remain unchanged.
 
 **Not ready to launch.** The accepted historical supply is insufficient in every
 stratum at the previous mix/exposure limit. No admitted replacement release or
-100M prepared bundle is recorded. This workspace lacks `/srv/sparselab`, including
+100M prepared bundle is recorded. This workspace lacks `/srv/klab`, including
 the cited B7 preparation and B8 training roots (read-only path inspection).
 Consequently, the numbers below are checked-in historical measurements, **not
 fresh authentication of retained corpus, checkpoints, receipts or hardware**.
-[Current KML status](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/STATUS.md)
+[Current KML status](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/STATUS.md)
 records B8 as the latest completed scientific run, B16 as the latest initialized
 preparation attempt and B17 as a pre-ledger stop. The older foundation audit's
 all-not-started language is not current execution status.
 
 ## Supply and scientific assumptions
 
-The [current mixture template](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/card05-base-50m/current/mixture.template.yaml)
+The [current mixture template](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/card05-base-50m/current/mixture.template.yaml)
 still declares **50M** targets, 81/18/1 general/explanatory/incident quotas and
 at most two exposures per eligible position. The
-[prospective plan](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/CARD05_BASE_50M_PROPOSAL.md)
+[prospective plan](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/CARD05_BASE_50M_PROPOSAL.md)
 retains the 341,885,952-parameter dense model, unchanged 32,768-entry tokenizer,
 context 1,024 and fresh seed 17. These are the basis of this conditional 100M
 calculation, not a newly approved fixed mix or permission to change templates.
@@ -42,7 +42,7 @@ calculation, not a newly approved fixed mix or permission to change templates.
 | Incident | 343,703 | 1,000,000 | 500,000 | 156,297 |
 | Total | 24,302,497 | 100,000,000 | 50,000,000 | 25,697,503 |
 
-Source: [B7 preparation report](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/results/2026-10-08-card05-base-preparation-v4-readiness.md).
+Source: [B7 preparation report](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/results/2026-10-08-card05-base-preparation-v4-readiness.md).
 These are distinct retained train content positions, excluding EOS, measured
 with tokenizer SHA-256
 `308b33a6edbed613f3caf5232b124a7c6105a7a3dc273c999725be51c3ffeaa9`.
@@ -54,7 +54,7 @@ Extra repetitions or relabeling domains would change the scientific protocol.
 
 The old 50M proposal's one extra Wikimedia bucket forecast (~1.55M unique
 positions) cannot establish 100M supply, and adds no general or incident supply.
-[B16](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/results/2026-10-10-card05-50m-preparation-attempt1-receipt-collision.md)
+[B16](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/results/2026-10-10-card05-50m-preparation-attempt1-receipt-collision.md)
 reports authenticating four retained snapshots, but never reached admission or
 measured replacement-release supply. Do not infer that those retained snapshots
 have B7's counts or that they need reacquisition. First inventory and authenticate
@@ -68,10 +68,10 @@ separate preparation/acquisition authority if necessary.
 At microbatch 1, gradient accumulation 1 and context 1,024, exactly 100M targets
 require **97,656 full updates plus one 256-target update: 97,657 updates**, with
 768 final padding positions masked. The
-[current run template](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/card05-base-50m/current/prepared-run.template.yaml)
+[current run template](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/card05-base-50m/current/prepared-run.template.yaml)
 has `max_steps: 48829`, `max_tokens: 50000000` and `decay_steps: 48829`.
 Increasing only the token cap is incorrect: the explicit decay horizon in the
-[native scheduler](../../src/sparselab/training/optimizer.py) overrides max steps
+[native scheduler](../../src/klab/training/optimizer.py) overrides max steps
 and clamps at its floor. A future reviewed fresh run should bind the new target,
 update and decay horizon together. Keeping 500-step warmup and peak/floor
 `3e-4`/`3e-5` is a hypothesis to review; do not scale warmup automatically or
@@ -106,7 +106,7 @@ remains blocked.
 
 ## Resource forecast and missing allocation
 
-[B8's measured report](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/results/2026-10-08-card05-base-training-v4.md)
+[B8's measured report](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/results/2026-10-08-card05-base-training-v4.md)
 records 25M targets in a 6,348-second training monitor (~3,938 targets/second
 including its operational overhead), about 7,960 seconds end to end, 11 retained
 checkpoints, 10,953,015,296 bytes sampled device VRAM and 4,019,204,096 bytes

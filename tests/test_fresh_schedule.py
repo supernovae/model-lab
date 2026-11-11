@@ -7,12 +7,12 @@ import pytest
 import yaml
 from lab_fixtures import write_smoke_inputs
 
-from sparselab.config import RunConfig, load_config
-from sparselab.config.models import EvaluationConfig, FixedValidationPanel
-from sparselab.data.story_packing import MatchedStoryDataset
-from sparselab.data.tokenizer import load_tokenizer
-from sparselab.staging import materialize_prepared_inputs, verify_prepared_inputs
-from sparselab.training.schedule import (
+from klab.config import RunConfig, load_config
+from klab.config.models import EvaluationConfig, FixedValidationPanel
+from klab.data.story_packing import MatchedStoryDataset
+from klab.data.tokenizer import load_tokenizer
+from klab.staging import materialize_prepared_inputs, verify_prepared_inputs
+from klab.training.schedule import (
     derive_schedule,
     register_parser,
     schedule_settings,
@@ -211,7 +211,7 @@ def test_fresh_schedule_refuses_repeated_exposure_and_checkpoint_transitions(tmp
 
 
 def test_schedule_does_not_shorten_warmup_to_fit(tmp_path):
-    from sparselab.derivation import derive_config
+    from klab.derivation import derive_config
 
     source = write_smoke_inputs(tmp_path, max_steps=20, train_tokenizer_now=False)
     raw = load_config(source).model_dump(mode="json")

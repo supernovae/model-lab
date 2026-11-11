@@ -9,21 +9,21 @@ import numpy as np
 import pytest
 import torch
 
-from sparselab.canonical import canonical_digest
-from sparselab.config.loading import load_config
-from sparselab.config.migrate import migrate_v1
-from sparselab.config.models import RunConfig, TokenizerTrainConfig
-from sparselab.data.tokenizer import train_tokenizer
-from sparselab.engines.base import EngineCapabilityError, EngineOutOfMemory, EngineState
-from sparselab.engines.mlx_policy import validate as validate_mlx
-from sparselab.engines.pytorch import PyTorchEngine
-from sparselab.evaluation.evidence import experiment_evidence
-from sparselab.evaluation.post_train_triage import read_triage
-from sparselab.evaluation.reference_exercise import PROMPTS
-from sparselab.training.checkpoints import CheckpointManager
-from sparselab.training.manifest import read_manifest
-from sparselab.training.metrics import ExperimentStore
-from sparselab.training.trainer import train
+from klab.canonical import canonical_digest
+from klab.config.loading import load_config
+from klab.config.migrate import migrate_v1
+from klab.config.models import RunConfig, TokenizerTrainConfig
+from klab.data.tokenizer import train_tokenizer
+from klab.engines.base import EngineCapabilityError, EngineOutOfMemory, EngineState
+from klab.engines.mlx_policy import validate as validate_mlx
+from klab.engines.pytorch import PyTorchEngine
+from klab.evaluation.evidence import experiment_evidence
+from klab.evaluation.post_train_triage import read_triage
+from klab.evaluation.reference_exercise import PROMPTS
+from klab.training.checkpoints import CheckpointManager
+from klab.training.manifest import read_manifest
+from klab.training.metrics import ExperimentStore
+from klab.training.trainer import train
 
 
 def equal(left: object, right: object) -> None:
@@ -222,7 +222,7 @@ def test_training_pairs_validation_with_verified_checkpoints(tmp_path: Path) -> 
     assert isinstance(observations, list)
     report = read_triage(run_id, measured.logging.root_dir)
     assert report is not None
-    assert report["format"] == "sparselab_post_train_triage_v1"
+    assert report["format"] == "klab_post_train_triage_v1"
     assert report["core"]["evidence"]["expected_validation_targets"] == (
         measured.training.micro_batch_size * measured.training.seq_len
     )
@@ -266,7 +266,7 @@ def test_training_pairs_validation_with_verified_checkpoints(tmp_path: Path) -> 
 def test_post_train_triage_failure_preserves_completed_training(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from sparselab.training import trainer
+    from klab.training import trainer
 
     def unavailable(*args: object, **kwargs: object) -> None:
         raise RuntimeError("diagnostic unavailable")
@@ -414,7 +414,7 @@ def test_mps_interrupted_checkpoint_resumes_locally(tmp_path: Path) -> None:
     )
     import sys
 
-    from sparselab.runtime_profile import RuntimeProfile, authorize_profile
+    from klab.runtime_profile import RuntimeProfile, authorize_profile
 
     authorization = authorize_profile(
         RuntimeProfile(
@@ -869,9 +869,7 @@ def test_source_drift_requires_explicit_best_effort_resume(
     parent = original.logging.root_dir / "part"
     previous_source = read_manifest(parent / "manifest.json")["source_identity"]
     changed_source = {**previous_source, "sha256": "0" * 64}
-    monkeypatch.setattr(
-        "sparselab.training.trainer.source_identity", lambda: changed_source
-    )
+    monkeypatch.setattr("klab.training.trainer.source_identity", lambda: changed_source)
     with pytest.raises(ValueError, match="allow-runtime-drift"):
         train(original, run_id="rejected", resume=parent / "checkpoints/latest.json")
     assert not (original.logging.root_dir / "rejected").exists()
@@ -987,7 +985,7 @@ def test_budget_extension_preserves_full_state_and_parent(
         )
     assert {int(state["step"]) for state in finished.optimizer["state"].values()} == {8}
     if explicit_parent_decay:
-        from sparselab.training.continuation import _extension_settings
+        from klab.training.continuation import _extension_settings
 
         # Equal tampered files must not authorize a new tokenizer identity.
         (parent_run / "tokenizer.json").write_bytes(b"tampered tokenizer")
@@ -1064,7 +1062,7 @@ def test_budget_extension_rejects_other_changes_before_child(tmp_path: Path) -> 
 def test_preexisting_cancel_marker_stops_before_runtime(
     tmp_path, monkeypatch, entrypoint
 ):
-    from sparselab.training import trainer
+    from klab.training import trainer
 
     original = config(tmp_path)
     cancel = tmp_path / "cancel"
@@ -1085,7 +1083,7 @@ def test_preexisting_cancel_marker_stops_before_runtime(
 def test_late_cancellation_checkpoints_the_last_committed_update(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.training import trainer
+    from klab.training import trainer
 
     original = config(tmp_path)
     cancel = tmp_path / "late-cancel"
@@ -1116,7 +1114,7 @@ def test_late_cancellation_checkpoints_the_last_committed_update(
 def test_completed_training_calibrates_and_reuses_runtime_forecast(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    from sparselab.training import trainer
+    from klab.training import trainer
 
     validate_runtime = trainer.PyTorchEngine.validate
 
@@ -1204,10 +1202,10 @@ def test_completed_training_calibrates_and_reuses_runtime_forecast(
 
 @pytest.mark.parametrize("layout", ["story", "contiguous"])
 def test_matched_story_resume_and_config_identity(tmp_path: Path, layout: str) -> None:
-    from sparselab.config.models import MatchedStoryConfig
-    from sparselab.data.packing import prepare_data
-    from sparselab.data.story_packing import MatchedStoryDataset
-    from sparselab.data.tokenizer import load_tokenizer
+    from klab.config.models import MatchedStoryConfig
+    from klab.data.packing import prepare_data
+    from klab.data.story_packing import MatchedStoryDataset
+    from klab.data.tokenizer import load_tokenizer
 
     base = config(tmp_path)
     tokenizer = load_tokenizer(base.tokenizer.path)

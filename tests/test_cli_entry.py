@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sparselab.cli import entry
+from klab.cli import entry
 
 TOKEN = "/nonexistent-lab69/token"
 PREFIXES = [
@@ -36,7 +36,7 @@ import sys
 class RefuseExecution(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if fullname.split('.')[0] in {'torch', 'mlx'} or fullname in {
-            'sparselab.cli.main', 'sparselab.hf_auth',
+            'klab.cli.main', 'klab.hf_auth',
         }:
             raise AssertionError('unexpected import: ' + fullname)
 sys.meta_path.insert(0, RefuseExecution())
@@ -49,7 +49,7 @@ sys.addaudithook(guard)
 sys.argv = sys.argv[1:]
 runpy.run_path(sys.argv[0], run_name='__main__')
 """
-    console = Path(sysconfig.get_path("scripts")) / "sparselab"
+    console = Path(sysconfig.get_path("scripts")) / "klab"
     result = subprocess.run(
         [
             sys.executable,
@@ -62,14 +62,14 @@ runpy.run_path(sys.argv[0], run_name='__main__')
             "--help",
         ],
         cwd=tmp_path,
-        env={**os.environ, "SPARSELAB_WORK_DIR": str(tmp_path / "work")},
+        env={**os.environ, "KLAB_WORK_DIR": str(tmp_path / "work")},
         capture_output=True,
         text=True,
         timeout=15,
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "usage: sparselab runtime env" in result.stdout
+    assert "usage: klab runtime env" in result.stdout
     assert not (tmp_path / "selected").exists()
     assert not (tmp_path / "work").exists()
 
@@ -79,13 +79,13 @@ def test_environment_handoff_preserves_remainder_and_work_root(
     monkeypatch, tmp_path, prefix
 ):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "original"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "original"))
     child = ["list", "--", "child", "--hf-token-file", "--work-dir"]
     seen = []
     monkeypatch.setitem(
-        sys.modules, "sparselab.runtime_env_cli", SimpleNamespace(main=seen.append)
+        sys.modules, "klab.runtime_env_cli", SimpleNamespace(main=seen.append)
     )
-    monkeypatch.setattr(sys, "argv", ["sparselab", *prefix, "runtime", "env", *child])
+    monkeypatch.setattr(sys, "argv", ["klab", *prefix, "runtime", "env", *child])
     entry.main()
     assert seen == [child]
     selected = (
@@ -93,7 +93,7 @@ def test_environment_handoff_preserves_remainder_and_work_root(
         if any(arg.startswith("--work-dir") for arg in prefix)
         else "original"
     )
-    assert os.environ["SPARSELAB_WORK_DIR"] == str(tmp_path / selected)
+    assert os.environ["KLAB_WORK_DIR"] == str(tmp_path / selected)
 
 
 @pytest.mark.parametrize(
@@ -113,10 +113,10 @@ def test_ordinary_dispatch_receives_unchanged_argv(monkeypatch, argv):
     seen = []
     monkeypatch.setitem(
         sys.modules,
-        "sparselab.cli.main",
+        "klab.cli.main",
         SimpleNamespace(main=lambda: seen.append(sys.argv[1:])),
     )
-    monkeypatch.setattr(sys, "argv", ["sparselab", *argv])
+    monkeypatch.setattr(sys, "argv", ["klab", *argv])
     entry.main()
     assert seen == [argv]
 
@@ -126,7 +126,7 @@ def test_ordinary_dispatch_receives_unchanged_argv(monkeypatch, argv):
     [["--hf-token-file"], ["--hf-token-file", "--work-dir=root"], ["--work-dir"]],
 )
 def test_missing_prefix_values_fail_cleanly(monkeypatch, capsys, argv):
-    monkeypatch.setattr(sys, "argv", ["sparselab", *argv])
+    monkeypatch.setattr(sys, "argv", ["klab", *argv])
     with pytest.raises(SystemExit) as error:
         entry.main()
     assert error.value.code == 2
@@ -135,7 +135,7 @@ def test_missing_prefix_values_fail_cleanly(monkeypatch, capsys, argv):
 
 @pytest.mark.parametrize("option", ["--unknown", "--hf-token-file", "--work-dir"])
 def test_runtime_local_options_are_not_consumed(monkeypatch, capsys, option):
-    monkeypatch.setattr(sys, "argv", ["sparselab", "runtime", "env", "list", option])
+    monkeypatch.setattr(sys, "argv", ["klab", "runtime", "env", "list", option])
     with pytest.raises(SystemExit) as error:
         entry.main()
     assert error.value.code == 2

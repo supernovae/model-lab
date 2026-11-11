@@ -1,7 +1,7 @@
 # Controlled benchmarks
 
 Workshop owns the experiment's YAML declaration. Invoke the existing public
-`sparselab probe CHECKPOINT --config /absolute/workshop/probe.yaml --json` under
+`klab probe CHECKPOINT --config /absolute/workshop/probe.yaml --json` under
 its separately approved resource envelope. This remains the full probe entrypoint,
 including other full-tier probes; it is not a benchmark-only runner. Public tasks
 do not consume the private final split unless `final: true` is selected separately.

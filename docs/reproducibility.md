@@ -1,13 +1,13 @@
 # Reproducibility and artifact identity
 
-Reproducibility in SparseLab is an artifact contract, not a promise that every accelerator produces bitwise-identical floating-point results. A local run records requested/effective config, runtime identity, source identity, model architecture identity, tokenizer/data/package identities, and verified checkpoint lineage so later readers can determine what was actually run.
+Reproducibility in Model Lab is an artifact contract, not a promise that every accelerator produces bitwise-identical floating-point results. A local run records requested/effective config, runtime identity, source identity, model architecture identity, tokenizer/data/package identities, and verified checkpoint lineage so later readers can determine what was actually run.
 
 ## Start from explicit inputs
 
 Use schema-v2 configs. Old run configs are not silently reinterpreted by `train`; migrate them to a new path and inspect the printed field changes:
 
 ```sh
-uv run --locked --extra cpu sparselab config migrate old-run.yaml --output migrated-run.yaml
+uv run --locked --extra cpu klab config migrate old-run.yaml --output migrated-run.yaml
 ```
 
 Migration converts the historical device/batch/checkpoint cadence fields to explicit runtime, micro-batch/accumulation, and checkpoint sections. It refuses to overwrite its output. Tokenizer-training configs remain their own v1 schema.

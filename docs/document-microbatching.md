@@ -77,9 +77,9 @@ size. Documents can overshoot a group target. After publishing and cold-verifyin
 prepared inputs for a valid packing config, use:
 
 ```sh
-sparselab config schedule packing.yaml --prepared-inputs prepared-packing --output final.yaml
-sparselab data prepared-inputs publish final.yaml --output prepared-final
-sparselab data prepared-inputs verify final.yaml prepared-final
+klab config schedule packing.yaml --prepared-inputs prepared-packing --output final.yaml
+klab data prepared-inputs publish final.yaml --output prepared-final
+klab data prepared-inputs verify final.yaml prepared-final
 ```
 
 This command cold-verifies the original bundle and derives `training.max_steps`

@@ -5,13 +5,13 @@ import copy
 import pytest
 import torch
 
-from sparselab.config.models import AttentionConfig, ModelConfig
-from sparselab.model.memory import ByteAddressMemory, TokenNgramMemory
-from sparselab.model.portable_engram import (
+from klab.config.models import AttentionConfig, ModelConfig
+from klab.model.memory import ByteAddressMemory, TokenNgramMemory
+from klab.model.portable_engram import (
     PortableEngramAdapter,
     export_portable_engram,
 )
-from sparselab.model.transformer import DenseLM
+from klab.model.transformer import DenseLM
 
 
 def test_ngram_address_does_not_read_future_ids() -> None:
@@ -68,7 +68,7 @@ def test_multi_stream_collision_diagnostics_aggregate_all_lookups() -> None:
 
 
 def test_vectorized_stream_diagnostics_match_per_stream_reference() -> None:
-    from sparselab.model.memory import _diagnostics
+    from klab.model.memory import _diagnostics
 
     torch.manual_seed(7)
     memory = TokenNgramMemory(
@@ -296,7 +296,7 @@ def test_embedding_injection_carries_prefix_memory_into_later_logits() -> None:
 
 @pytest.mark.parametrize("kernel", [0, 4])
 def test_context_key_gate_reads_memory_and_backpropagates(kernel: int) -> None:
-    from sparselab.model.memory import ContextKeyGate
+    from klab.model.memory import ContextKeyGate
 
     gate = ContextKeyGate(4, 1e-6)
     hidden = torch.tensor([[[1.0, 0.0, 0.0, 0.0]]])

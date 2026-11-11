@@ -1,6 +1,6 @@
 # Decoder architecture
 
-SparseLab is a causal decoder laboratory. Its dense baseline uses RMSNorm, RoPE causal attention, SwiGLU, residual connections, and a tied or untied language-model head. PyTorch configurations can independently select local Top-K MoE, token/byte/portable Engram memory, sliding-window/block-sparse attention, or latent attention. These are correctness/inspection reference paths. The separate MLX engine supports FP32 dense feed-forward models with dense or native block-sparse attention, not the full PyTorch architecture set.
+Model Lab is a causal decoder laboratory. Its dense baseline uses RMSNorm, RoPE causal attention, SwiGLU, residual connections, and a tied or untied language-model head. PyTorch configurations can independently select local Top-K MoE, token/byte/portable Engram memory, sliding-window/block-sparse attention, or latent attention. These are correctness/inspection reference paths. The separate MLX engine supports FP32 dense feed-forward models with dense or native block-sparse attention, not the full PyTorch architecture set.
 
 ```mermaid
 flowchart LR
@@ -23,7 +23,7 @@ PyTorch dense and sliding-window attention optionally set
 `model.num_kv_heads` to a positive divisor of `num_heads`. Queries and the
 output projection remain full hidden width, while key and value projections and
 the request-local KV cache use `num_kv_heads × head_dim`. Query-head groups
-share each KV head through a broadcast group axis; SparseLab does not
+share each KV head through a broadcast group axis; Model Lab does not
 materialize repeated K/V tensors. Scores remain query-head-wide, so this is a
 storage/projection-width change rather than a claim of a sparse score kernel or
 a measured speedup. Omitting the field preserves ordinary multi-head attention

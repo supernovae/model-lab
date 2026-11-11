@@ -119,16 +119,16 @@ Delete an entry in the PR that fixes its issue.
 
 ### Host RAM in tests
 
-Host-work planning (`sparselab.host_capacity`) refuses work when measured
+Host-work planning (`klab.host_capacity`) refuses work when measured
 available RAM minus a reserve cannot fit one worker. Under xdist, or on a box
 shared with other jobs, that made unrelated tests fail with "inadequate
-measured RAM after reserve". Every SparseLab reader of host RAM, including
+measured RAM after reserve". Every Model Lab reader of host RAM, including
 reserves computed from total RAM, goes through
 `host_capacity.measure_memory()`. An autouse fixture in `tests/conftest.py`
 pins it to a fixed host (64 GiB total, 48 GiB available), whatever the
 physical machine. For child interpreters launched by tests (`python -c`,
-`python -m sparselab`), the fixture also sets
-`SPARSELAB_TEST_HOST_RAM=total:available` and puts
+`python -m klab`), the fixture also sets
+`KLAB_TEST_HOST_RAM=total:available` and puts
 [`tests/child_bootstrap/`](../tests/child_bootstrap/sitecustomize.py) first on
 `PYTHONPATH`. That directory's `sitecustomize.py` applies the same pin at
 interpreter startup. The shipped `measure_memory()` has no override, so the
@@ -195,7 +195,7 @@ and existing 30-minute safety limits, but are manual-only while their long
 native integrations are paused as automatic build gates. The automatic `safe`, `lab-loop` and `fast` jobs have 8-, 12- and 12-minute limits; the nightly full suite has 25 minutes. The manual hosted
 CPU jobs use up to four workers with work-stealing, as local runs do by default.
 
-The [historical CI run 36380519748](https://github.com/supernovae/tiny-sparse-lab/actions/runs/36380519748)
+The [historical CI run 36380519748](https://github.com/supernovae/model-lab/actions/runs/36380519748)
 measured 331 seconds for Linux's serial CPU step and 407 seconds for macOS's
 serial CPU step. Those measurements are not a bound for today's larger suite.
 Locked uv downloads are cached through `setup-uv`. Accelerator and network
@@ -203,9 +203,9 @@ checks remain separate explicit opt-ins.
 
 ## October 2026 feedback baseline
 
-[PR #284 CI](https://github.com/supernovae/tiny-sparse-lab/actions/runs/41164722398)
+[PR #284 CI](https://github.com/supernovae/model-lab/actions/runs/41164722398)
 spent 547 seconds in the lab-loop GitHub test step (543.29 seconds reported
-by pytest; 9m20s job) and 199 seconds in the fast GitHub test step (3m37s job). [PR #286 CI](https://github.com/supernovae/tiny-sparse-lab/actions/runs/41227511624)
+by pytest; 9m20s job) and 199 seconds in the fast GitHub test step (3m37s job). [PR #286 CI](https://github.com/supernovae/model-lab/actions/runs/41227511624)
 completed in 8m04s: lab-loop pytest time was 466.50 seconds (286 passed, one
 skipped; 467-second GitHub test step), the fast GitHub test step took 199 seconds,
 and safe took 32 seconds overall. Queue time was about two
@@ -215,15 +215,15 @@ motivates distributing individual tests instead of indivisible files; it alone
 does not establish a speedup. Compare successful runs with identical selection
 and inspect slow-test durations before changing fixture or correctness coverage.
 
-[PR #286 ready-for-review run](https://github.com/supernovae/tiny-sparse-lab/actions/runs/41231147074)
+[PR #286 ready-for-review run](https://github.com/supernovae/model-lab/actions/runs/41231147074)
 repeated CI on the identical head/base after draft CI had passed. Omitting the
 two draft lifecycle events avoids that redundant run without removing code-change
 validation. These measured checks took minutes, not hours; review/orchestration
 waiting must be tracked separately. The parallel CPU image check took 3m25s
-([run](https://github.com/supernovae/tiny-sparse-lab/actions/runs/41227511540));
+([run](https://github.com/supernovae/model-lab/actions/runs/41227511540));
 its build and smoke coverage are unchanged.
 
-The first [work-stealing run](https://github.com/supernovae/tiny-sparse-lab/actions/runs/41231881859)
+The first [work-stealing run](https://github.com/supernovae/model-lab/actions/runs/41231881859)
 on `1b6dc16` (based on PR #284's merged tree, before PR #286 integration)
 passed the same 286 lab-loop tests with one skip in 290.65 seconds, versus
 543.29 seconds reported by pytest in PR #284: about 46% less in this single

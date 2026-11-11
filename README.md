@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="docs/assets/sparselab-banner.svg" alt="Tiny Sparse Lab — Small models. Real experiments." width="100%">
+  <img src="docs/assets/klab-banner.svg" alt="Kybern Model Lab — Any model. Real experiments." width="100%">
 </p>
 
 <p align="center">
-  <a href="https://github.com/supernovae/tiny-sparse-lab/actions/workflows/ci.yml"><img src="https://github.com/supernovae/tiny-sparse-lab/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/supernovae/model-lab/actions/workflows/ci.yml"><img src="https://github.com/supernovae/model-lab/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/Python-3.14-3776AB?logo=python&amp;logoColor=white" alt="Python 3.14"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-7ceac4" alt="MIT license"></a>
   <a href="docs/experiment-programs.md"><img src="https://img.shields.io/badge/Experiments-YAML%20DSL-a7a2ff" alt="YAML experiment DSL"></a>
@@ -12,19 +12,26 @@
 <p align="center">
   <a href="docs/tinystories-microlab.md">Start with TinyStories</a> ·
   <a href="docs/lab-mode.md">Try an idea</a> ·
-  <a href="docs/using-sparselab.md">Find a guide</a>
+  <a href="docs/using-klab.md">Find a guide</a>
 </p>
 
-Tiny Sparse Lab is a workbench for small language-model experiments. Change a
-setting, train a candidate against a baseline, and inspect what actually moved—loss,
-probes, generations, and checkpoint internals—all kept together in one local record.
+Kybern Model Lab (Model Lab for short, `klab` on the command line) is a workbench
+for model experiments. Change a setting, train a candidate against a baseline, and
+inspect what actually moved—loss, probes, generations, and checkpoint internals—all
+kept together in one local record.
+
+The lab started with tiny sparse language models and has grown well past them: dense,
+mixture-of-experts, memory-augmented and sparse- or latent-attention decoders; runs from
+CPU smoke tests to single-GPU scale configs; and pinned public reference models to place
+results on a known curve. The same loop applies whatever architecture, scale or
+hardware the next idea needs.
 
 ## Workshop & shared experiments
 
 To keep individual experiments decoupled from the core lab engine, recipes and active
 studies live in **[Kybern Workshop](https://github.com/supernovae/kybern-workshop)**.
 Right now it hosts the experiments Kybern is running as a lab—all of which you can
-clone and run directly with SparseLab—and is growing into a public hub for storing
+clone and run directly with Model Lab—and is growing into a public hub for storing
 and sharing community experiments:
 
 - **[Basic synthetic CPU](https://github.com/supernovae/kybern-workshop/tree/main/examples/synthetic-cpu)** — Lightweight CPU workflow for quick end-to-end smoke runs and metadata checks.
@@ -44,23 +51,23 @@ are under `tests/fixtures/`. Prior Lab-only research remains in pinned Git histo
 Install **Python 3.14** and [uv](https://docs.astral.sh/uv/), then:
 
 ```sh
-git clone https://github.com/supernovae/tiny-sparse-lab.git
-cd tiny-sparse-lab
+git clone https://github.com/supernovae/model-lab.git
+cd model-lab
 uv sync --locked --extra cpu --dev
 . .venv/bin/activate
-export SPARSELAB_WORK_DIR="$HOME/.local/share/sparselab"
+export KLAB_WORK_DIR="$HOME/.local/share/klab"
 ```
 
 Run the setup above in Linux, WSL2, or macOS. Activate `.venv` in each new
-terminal; after that commands start with `sparselab` directly. Activation only
+terminal; after that commands start with `klab` directly. Activation only
 adds the installed environment to your shell's `PATH`. Without activation, use
-`.venv/bin/sparselab`, or `uv run --locked --no-sync sparselab` after setup.
+`.venv/bin/klab`, or `uv run --locked --no-sync klab` after setup.
 Direct invocation and `--no-sync` do not check or repair dependency drift.
 Repeat the locked sync when changing dependencies or Python, and keep active
 experiments on their pinned checkout and environment.
 
 For an already provisioned Windows environment, PowerShell activation is
-`.\.venv\Scripts\Activate.ps1` (or invoke `.\.venv\Scripts\sparselab.exe`
+`.\.venv\Scripts\Activate.ps1` (or invoke `.\.venv\Scripts\klab.exe`
 directly). Native Windows execution is not qualified by the Linux/WSL tests;
 use the Linux commands inside WSL for that supported path.
 
@@ -86,8 +93,8 @@ question: Does a wider FFN help at the same token budget?
 set:
   model.ffn_dim: 384
 YAML
-sparselab try wider-ffn.yaml --vs BASELINE.yaml
-sparselab report TRY_ID
+klab try wider-ffn.yaml --vs BASELINE.yaml
+klab report TRY_ID
 ```
 
 Replace `BASELINE.yaml` with your baseline config and `TRY_ID` with the printed record ID.
@@ -112,14 +119,14 @@ for ID resolution details, the [probe guide](docs/probe-battery.md) for probe ti
 and verdicts, and [result reports](docs/result-reports.md) for run-level (`--kind run`)
 and research (`--kind research`) report views.
 
-Prefer a visual view? Run `sparselab dashboard` to open the [lab dashboard](docs/dashboard.md)
+Prefer a visual view? Run `klab dashboard` to open the [lab dashboard](docs/dashboard.md)
 and browse your experiments, models, probe behaviors, checkpoint internals, and live run telemetry:
 
 ![Lab home: latest verdict and next steps](docs/assets/dashboard-home.png)
 
 ## Bring your machine
 
-SparseLab runs on PyTorch across CPU and major GPU backends, plus an optional MLX
+Model Lab runs on PyTorch across CPU and major GPU backends, plus an optional MLX
 engine for Apple Silicon.
 
 | Compute | Engine / backend | Notes |
@@ -138,7 +145,7 @@ to train and evaluate 17.3M-parameter models on FineWeb-Edu.
 
 ## Advanced workflows
 
-When you move beyond single-change `try` comparisons, SparseLab includes tools for larger studies:
+When you move beyond single-change `try` comparisons, Model Lab includes tools for larger studies:
 
 - **Inspect saved models:** [checkpoint exploration](docs/tinytext-model-guide.md),
   [local API](docs/local-api.md), and the retained [MODEL-0](docs/model-0.md) evidence.
@@ -170,7 +177,7 @@ experimental findings see the [experiment ledger](docs/research/experiment-ledge
 | **Declarative datasets** | Pin Hugging Face Hub sources, snapshot, resume, and track token budgets | [Dataset interfaces](docs/datasets.md) |
 | **Instruction tuning** | Full-transcript or assistant-only loss over local multi-turn conversations | [Instruction training](docs/instruction-training.md) |
 | **Evaluation & review** | Held-out loss, capability cards, checkpoint-bound probe suites, and blind review | [Evidence guide](docs/evidence.md) |
-| **Model diagnostics** | Semantic vector probes, continuation overlap, prep benchmarks, and checkpoint explorer | [CLI diagnostics](docs/using-sparselab.md#native-diagnostic-interfaces) |
+| **Model diagnostics** | Semantic vector probes, continuation overlap, prep benchmarks, and checkpoint explorer | [CLI diagnostics](docs/using-klab.md#native-diagnostic-interfaces) |
 | **Remote & queued runs** | Local worker queues, SSH staging, and relay-backed hosted notebooks (e.g. Colab) | [Hosted environments](docs/hosted-environments.md) |
 | **Web dashboard** | Visual browser for experiments, verdicts, Pareto frontiers, model behaviors, and weights | [Dashboard tour](docs/dashboard.md) · [Research views](docs/research/dashboard.md) |
 | **Interactive playground** | Raw completion, chat transcripts, side-by-side Streamlit comparisons, and local HTTP API | [Model guide](docs/tinytext-model-guide.md) · [Local API](docs/local-api.md) |

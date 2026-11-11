@@ -4,7 +4,7 @@ New training checkpoints seal version 1 `exposure` metadata in their existing
 manifest. Read it through the normal, read-only public report:
 
 ```sh
-sparselab report RUN_ID --kind run --json
+klab report RUN_ID --kind run --json
 ```
 
 The JSON field `evidence.checkpoints[].exposure` contains the prepared-data supply,

@@ -11,7 +11,7 @@ forward, optimizer update, generation or cloud/device job was performed.
 ## Implemented surface
 
 The [current public mapping and coverage](../corpus-preparation.md) documents
-replacements and pruning. The [current packet](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/card05-base-50m/current/README.md)
+replacements and pruning. The [current packet](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/card05-base-50m/current/README.md)
 owns one 32-phase argument/path/template declaration. `attempt phase-command`
 expands it; `attempt run-phase` delegates one zero-counter phase to the existing
 attempt dispatcher and monitors. It is not a scheduler or review engine.
@@ -29,10 +29,10 @@ or frozen manifest's `build_identity`; no old artifacts were rewritten.
 
 ## Historical preservation and deletions
 
-[Lessons learned](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/LESSONS_LEARNED.md) summarizes
+[Lessons learned](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/LESSONS_LEARNED.md) summarizes
 dense token-budget/scale/decoding, DevMind and TinyStories findings and limitations.
-[The archive index](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/README.md) is explicitly
-inactive. [The path map](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/path-map.json) records
+[The archive index](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/README.md) is explicitly
+inactive. [The path map](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/path-map.json) records
 original paths, new locations, exact hashes/sizes and the recoverable source
 revision for removed helpers.
 
@@ -59,12 +59,12 @@ Commands used the existing locked environment, without dependency sync:
 
 ```sh
 export UV_CACHE_DIR=/workspace/.uv-cache
-export UV_PROJECT_ENVIRONMENT=/workspace/tiny-sparse-lab/.venv
+export UV_PROJECT_ENVIRONMENT=/workspace/model-lab/.venv
 export PYTHONPATH=/workspace/tiny-sparse-refactor/src
 # All pytest commands below use: uv run --locked --no-sync pytest -q
 ```
 
-Some independent checks used `/tmp/uv-cache` or `/tmp/sparselab-uv-cache`; the same existing environment and
+Some independent checks used `/tmp/uv-cache` or `/tmp/klab-uv-cache`; the same existing environment and
 source checkout were used. Test bodies and their transitive effects were
 inspected before selecting these bounded checks. No broad pytest was run.
 

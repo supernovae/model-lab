@@ -18,7 +18,7 @@ acceptance gates before final outcomes are inspected.
 
 ## Execution workspace
 
-Name the configured `SPARSELAB_WORK_DIR`, expected storage envelope, backend, and
+Name the configured `KLAB_WORK_DIR`, expected storage envelope, backend, and
 hardware. Do not use an anonymous `/tmp` path for a long run.
 
 ## Status and evidence

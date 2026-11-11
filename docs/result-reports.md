@@ -4,9 +4,9 @@
 explicit `--kind` selects a different native reader without guessing from an ID.
 
 ```sh
-sparselab report TRY_OR_PROBE_ID --json
-sparselab report RUN_ID --kind run --runs-dir /path/to/runs --json
-sparselab report --kind research --config research-report.yaml --json
+klab report TRY_OR_PROBE_ID --json
+klab report RUN_ID --kind run --runs-dir /path/to/runs --json
+klab report --kind research --config research-report.yaml --json
 ```
 
 Advanced read selectors live in strict YAML, keeping the public report command
@@ -39,7 +39,7 @@ Run IDs remain distinct from sealed record IDs; see [result lookup](result-looku
 
 A run report uses `experiment_evidence` for integrity-bound checkpoint and
 held-out observations, and `read_triage` for saved advisory diagnostics. Its
-`sparselab-run-report-v1` JSON envelope keeps `evidence` and `triage` separate;
+`klab-run-report-v1` JSON envelope keeps `evidence` and `triage` separate;
 A declaration's `surface_dir` adds the existing independent `surface_review` overlay. Negative
 observations, rejected checkpoint/report digests and missing reports remain in
 the native evidence payload. Missing or invalid triage stays `UNKNOWN` with its
@@ -55,7 +55,7 @@ inputs, the envelope reports `missing_evidence` or `invalid_evidence` and exits
 native `rejected_reports` list. Triage advice is not a release decision.
 
 A research report uses `research_status` and `next_experiments`. Its
-`sparselab-research-report-v1` envelope includes both `status` and `next`, with
+`klab-research-report-v1` envelope includes both `status` and `next`, with
 native evidence availability and diagnostics intact. Declaration `study` or
 `protocol_sha256` scopes prior-design diagnostics as before. Next tests are
 reviewed declarations, not instructions authorizing execution. `research validate`

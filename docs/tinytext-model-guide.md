@@ -27,19 +27,19 @@ expected at this training budget.
 
 ```sh
 uv sync --locked --extra cpu --dev
-export SPARSELAB_WORK_DIR="${SPARSELAB_WORK_DIR:-$HOME/.local/share/sparselab}"
-SMOKE="$SPARSELAB_WORK_DIR/text-interface-smoke-1"
-sparselab readiness smoke --family dense --output "$SMOKE"
+export KLAB_WORK_DIR="${KLAB_WORK_DIR:-$HOME/.local/share/klab}"
+SMOKE="$KLAB_WORK_DIR/text-interface-smoke-1"
+klab readiness smoke --family dense --output "$SMOKE"
 RUNS="$SMOKE/runs"
 RUN_ID=readiness-dense
 CHECKPOINT=step_00000002_gen_000002
 GENERATION="$RUNS/$RUN_ID/checkpoints/$CHECKPOINT"
-sparselab checkpoint inspect "$GENERATION" --json
-sparselab checkpoint verify "$GENERATION" --json
-sparselab generate "$RUN_ID" \
+klab checkpoint inspect "$GENERATION" --json
+klab checkpoint verify "$GENERATION" --json
+klab generate "$RUN_ID" \
   --runs-dir "$RUNS" --checkpoint "$CHECKPOINT" --backend cpu \
   --prompt 'hello' --max-new-tokens 4 --strict-context --show-prompt --json
-sparselab chat "$RUN_ID" \
+klab chat "$RUN_ID" \
   --runs-dir "$RUNS" --checkpoint "$CHECKPOINT" --backend cpu \
   --message 'Hi' --max-new-tokens 4 --show-prompt --json
 ```
@@ -50,7 +50,7 @@ sufficient context. You can now use these variables in the [local API guide](loc
 or compare its initial and step-2 generations:
 
 ```sh
-sparselab surface chat \
+klab surface chat \
   --cell initial="$RUNS/$RUN_ID/checkpoints/step_00000000_gen_000001" \
   --cell step2="$GENERATION" --backend cpu --seed 42 --port 8502
 ```
@@ -68,13 +68,13 @@ Never sync the CPU extra into a vendor environment. Inference may be slow on CPU
 but does not train, resume training, promote a model or modify checkpoint files.
 
 ```sh
-export SPARSELAB_WORK_DIR="${SPARSELAB_WORK_DIR:-$HOME/.local/share/sparselab}"
+export KLAB_WORK_DIR="${KLAB_WORK_DIR:-$HOME/.local/share/klab}"
 # List candidate retained manifests; this discovers paths, not verified models.
-find "$SPARSELAB_WORK_DIR" -type f -path '*/checkpoints/*/manifest.json' -print
+find "$KLAB_WORK_DIR" -type f -path '*/checkpoints/*/manifest.json' -print
 ```
 
 Campaign ingestion can put a run under a Campaign's `controller/` directory,
-not directly under `$SPARSELAB_WORK_DIR/runs`. Use the run's actual parent for
+not directly under `$KLAB_WORK_DIR/runs`. Use the run's actual parent for
 `--runs-dir`. Read the experiment's checked-in Family, checkpoint reference and
 result record when available; historical absolute paths are location hints,
 not proof the files exist on this machine. See [MODEL-0's recorded location](model-0.md).
@@ -87,8 +87,8 @@ RUNS=/absolute/path/to/runs
 RUN_ID=your-run-id
 CHECKPOINT=step_00000020_gen_000001
 GENERATION="$RUNS/$RUN_ID/checkpoints/$CHECKPOINT"
-sparselab checkpoint inspect "$GENERATION" --json
-sparselab checkpoint verify "$GENERATION" --json
+klab checkpoint inspect "$GENERATION" --json
+klab checkpoint verify "$GENERATION" --json
 ```
 
 `inspect` reports inventory and lineage; `verify` checks integrity and exits
@@ -119,8 +119,8 @@ run in place. To import an existing legacy snapshot, use its authenticated
 manifest and a fresh output directory:
 
 ```sh
-sparselab data migrate /path/to/legacy/snapshot/manifest.json \
-  --kind snapshot --output "$SPARSELAB_WORK_DIR/imported-snapshot-1" --json
+klab data migrate /path/to/legacy/snapshot/manifest.json \
+  --kind snapshot --output "$KLAB_WORK_DIR/imported-snapshot-1" --json
 ```
 
 This preserves the original evidence and writes a generic snapshot plus a new
@@ -151,7 +151,7 @@ training data; asking a code base model to act as an assistant tests a different
 behavior. This example sends the literal prompt without role labels:
 
 ```sh
-sparselab generate "$RUN_ID" \
+klab generate "$RUN_ID" \
   --runs-dir "$RUNS" --checkpoint "$CHECKPOINT" --backend cpu \
   --prompt 'def add(a, b):' --max-new-tokens 32 \
   --temperature 0 --top-k 0 --seed 42 --strict-context --show-prompt --json
@@ -170,17 +170,17 @@ budget instead of silently using the legacy sliding-context behavior.
 ## Inspect the chat serialization
 
 ```sh
-sparselab chat "$RUN_ID" \
+klab chat "$RUN_ID" \
   --runs-dir "$RUNS" --checkpoint "$CHECKPOINT" --backend cpu \
   --message 'Write a function that adds two numbers.' \
   --system 'Answer briefly.' --max-new-tokens 32 \
   --temperature 0 --top-k 0 --seed 42 --show-prompt --json
 
 # Omit --message for a terminal conversation; choose a fresh transcript path.
-sparselab chat "$RUN_ID" \
+klab chat "$RUN_ID" \
   --runs-dir "$RUNS" --checkpoint "$CHECKPOINT" --backend cpu \
   --max-new-tokens 32 --show-prompt \
-  --transcript "$SPARSELAB_WORK_DIR/chat-debug-session-1.json"
+  --transcript "$KLAB_WORK_DIR/chat-debug-session-1.json"
 ```
 
 Chat uses this inspectable plain-text format, not an inferred tokenizer template:
@@ -214,7 +214,7 @@ There is no parameter-count threshold that turns a base model into an assistant.
 ```sh
 # Replace SECOND_GENERATION with another real immutable generation path.
 SECOND_GENERATION=/absolute/path/to/another-run/checkpoints/step_00000040_gen_000002
-sparselab surface chat \
+klab surface chat \
   --cell early="$GENERATION" --cell later="$SECOND_GENERATION" \
   --backend cpu --seed 42 --port 8502
 ```

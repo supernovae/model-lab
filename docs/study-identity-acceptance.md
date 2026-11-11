@@ -3,14 +3,14 @@
 Use the existing read-only `study report` route with optional fixed expectations:
 
 ```sh
-sparselab study report /absolute/study.yaml /absolute/receipt.json \
+klab study report /absolute/study.yaml /absolute/receipt.json \
   --evidence /absolute/collected-report.json --output /absolute/new-report-root \
   --identity-expectations /absolute/expected.json \
   --candidate-commit FULL_LAB_CHECKOUT_COMMIT
 ```
 
 The JSON/YAML expectation record has exactly `format` (value
-`sparselab-study-identity-expectations-v1`), `matrix_sha256`, `study_sha256`,
+`klab-study-identity-expectations-v1`), `matrix_sha256`, `study_sha256`,
 `config_identity_mode` (`current` or `legacy_default_fields`), and ordered
 `config_sha256` (one SHA256 per run, at most 1000). These are fixed authored
 expectations, not values to regenerate from the candidate under test.

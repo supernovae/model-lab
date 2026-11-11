@@ -12,14 +12,14 @@ from contextlib import contextmanager
 import pytest
 from test_inference import trained_run  # noqa: F401
 
-from sparselab.cli.main import build_parser, main
-from sparselab.evaluation import serving
-from sparselab.evaluation.generation_request import (
+from klab.cli.main import build_parser, main
+from klab.evaluation import serving
+from klab.evaluation.generation_request import (
     GenerationCancelled,
     GenerationResult,
 )
-from sparselab.evaluation.inference import load_run
-from sparselab.evaluation.serving import (
+from klab.evaluation.inference import load_run
+from klab.evaluation.serving import (
     APIError,
     LocalHTTPServer,
     LocalInference,
@@ -79,8 +79,8 @@ def test_models_and_real_raw_chat_roundtrip(loaded):
         assert status == 200
         entry = models["data"][0]
         assert entry["id"] == "test-model"
-        assert entry["sparselab"]["identity"] == loaded.identity
-        assert entry["sparselab"]["streaming"] is False
+        assert entry["klab"]["identity"] == loaded.identity
+        assert entry["klab"]["streaming"] is False
         status, first = request(
             server, "/v1/completions", payload(temperature=0.8, seed=17, top_k=8)
         )
@@ -89,7 +89,7 @@ def test_models_and_real_raw_chat_roundtrip(loaded):
             server, "/v1/completions", payload(temperature=0.8, seed=17, top_k=8)
         )
         assert first["choices"] == second["choices"]
-        assert first["sparselab"]["prompt"] == "hello"
+        assert first["klab"]["prompt"] == "hello"
         assert first["usage"]["total_tokens"] == sum(
             first["usage"][key] for key in ("prompt_tokens", "completion_tokens")
         )
@@ -110,7 +110,7 @@ def test_models_and_real_raw_chat_roundtrip(loaded):
         assert status == 200
         assert chat["object"] == "chat.completion"
         assert chat["choices"][0]["message"]["role"] == "assistant"
-        assert chat["sparselab"]["prompt"] == "User: Hi\n\nAssistant:"
+        assert chat["klab"]["prompt"] == "User: Hi\n\nAssistant:"
 
 
 @pytest.mark.parametrize(
@@ -396,7 +396,7 @@ def test_loopback_and_limits(loaded):
 
 
 def test_cli_wires_loader_runtime_and_pinned_identity(loaded, monkeypatch, capsys):
-    from sparselab.cli.serve import serve
+    from klab.cli.serve import serve
 
     calls = []
 
@@ -404,7 +404,7 @@ def test_cli_wires_loader_runtime_and_pinned_identity(loaded, monkeypatch, capsy
         calls.append((args, kwargs))
         return loaded
 
-    monkeypatch.setattr("sparselab.evaluation.inference.load_run", loader)
+    monkeypatch.setattr("klab.evaluation.inference.load_run", loader)
     monkeypatch.setattr(LocalHTTPServer, "serve_forever", lambda *args, **kwargs: None)
     args = build_parser().parse_args(
         [
@@ -435,7 +435,7 @@ def test_serve_rejects_corrupt_checkpoint_before_binding(loaded, tmp_path, monke
     monkeypatch.setattr(
         sys,
         "argv",
-        ["sparselab", "serve", "bad", "--runs-dir", str(tmp_path), "--backend", "cpu"],
+        ["klab", "serve", "bad", "--runs-dir", str(tmp_path), "--backend", "cpu"],
     )
 
     def forbidden(*args, **kwargs):
@@ -447,7 +447,7 @@ def test_serve_rejects_corrupt_checkpoint_before_binding(loaded, tmp_path, monke
 
 
 def test_serve_runtime_gate_precedes_loader(loaded, monkeypatch, tmp_path):
-    from sparselab.cli.main import _prepare_runtime_command
+    from klab.cli.main import _prepare_runtime_command
 
     config = loaded.config.model_copy(
         update={"runtime": loaded.config.runtime.model_copy(update={"backend": "cuda"})}
@@ -717,7 +717,7 @@ def test_real_cli_process_serves_pinned_model_and_closes_on_sigint(loaded, tmp_p
     import time
     from urllib.parse import urlsplit
 
-    environment = {**os.environ, "SPARSELAB_WORK_DIR": str(tmp_path / "work")}
+    environment = {**os.environ, "KLAB_WORK_DIR": str(tmp_path / "work")}
     stdout_path = tmp_path / "serve.stdout.log"
     stderr_path = tmp_path / "serve.stderr.log"
     # Files avoid an unread stderr pipe blocking startup, and preserve diagnostics
@@ -735,7 +735,7 @@ def test_real_cli_process_serves_pinned_model_and_closes_on_sigint(loaded, tmp_p
                         "import faulthandler, runpy, sys; "
                         "print('CLI child entered', file=sys.stderr, flush=True); "
                         "faulthandler.dump_traceback_later(10, repeat=True); "
-                        "runpy.run_module('sparselab', run_name='__main__', alter_sys=True)"
+                        "runpy.run_module('klab', run_name='__main__', alter_sys=True)"
                     ),
                     "serve",
                     loaded.run.name,

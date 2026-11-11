@@ -58,12 +58,12 @@ jobs:
         run: |
           uv run --locked --no-sync ruff check .
           uv run --locked --no-sync ruff format --check .
-          uv run --locked --no-sync python -m sparselab.research.lint --json
+          uv run --locked --no-sync python -m klab.research.lint --json
       - name: Core config and verifier authority sanity
         env:
           UV_OFFLINE: "1"
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
-          SPARSELAB_WORK_DIR: ${{ runner.temp }}/pr-safe-work
+          KLAB_WORK_DIR: ${{ runner.temp }}/pr-safe-work
         run: |
           uv run --locked --no-sync pytest -q -n 0 -p no:cacheprovider \
             --basetemp "$RUNNER_TEMP/pr-safe-pytest" \
@@ -95,8 +95,8 @@ jobs:
       - name: Model build, training, lab loop, probes, explorer, and generation
         env:
           UV_OFFLINE: "1"
-          SPARSELAB_WORK_DIR: ${{ runner.temp }}/lab-loop-work
-          SPARSELAB_LAB_LOOP_BUDGET_SECONDS: "300"
+          KLAB_WORK_DIR: ${{ runner.temp }}/lab-loop-work
+          KLAB_LAB_LOOP_BUDGET_SECONDS: "300"
         run: |
           uv run --locked --no-sync pytest -q -p no:cacheprovider \
             --basetemp "$RUNNER_TEMP/lab-loop-pytest" \
@@ -143,7 +143,7 @@ jobs:
       - name: Fast CPU suite (not slow)
         env:
           UV_OFFLINE: "1"
-          SPARSELAB_WORK_DIR: ${{ runner.temp }}/fast-work
+          KLAB_WORK_DIR: ${{ runner.temp }}/fast-work
         run: >-
           uv run --locked --no-sync pytest -q -p no:cacheprovider
           --basetemp "$RUNNER_TEMP/fast-pytest"
@@ -177,7 +177,7 @@ jobs:
       - name: Supervised staging regressions
         env:
           UV_OFFLINE: "1"
-          SPARSELAB_WORK_DIR: ${{ runner.temp }}/matched-story-staging-work
+          KLAB_WORK_DIR: ${{ runner.temp }}/matched-story-staging-work
         run: |
           uv run --locked --no-sync pytest -q -p no:cacheprovider \
             -n auto --maxprocesses=4 --dist worksteal --durations=10 \
@@ -252,5 +252,5 @@ jobs:
           uv run --locked --extra cpu pytest -q -n auto --maxprocesses=4
           --dist worksteal --durations=25
           -m "not mps and not mlx and not cuda and not rocm and not xpu and not network"
-      - run: uv run --locked --extra cpu sparselab --help
-      - run: uv run --locked --extra cpu sparselab inspect configs/micro_dense.yaml --json
+      - run: uv run --locked --extra cpu klab --help
+      - run: uv run --locked --extra cpu klab inspect configs/micro_dense.yaml --json

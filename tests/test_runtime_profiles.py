@@ -8,9 +8,9 @@ import pytest
 import yaml
 from test_training import config as training_config
 
-from sparselab import runtime
-from sparselab.cli.main import main
-from sparselab.runtime_profile import (
+from klab import runtime
+from klab.cli.main import main
+from klab.runtime_profile import (
     RuntimeProfile,
     authorize_profile,
     load_runtime_profile,
@@ -79,7 +79,7 @@ def test_real_cpu_probe_and_authorization(tmp_path):
 
 
 def test_mlx_namespace_package_probe_uses_loaded_core_identity(tmp_path, monkeypatch):
-    from sparselab.runtime_identity_probe import probe
+    from klab.runtime_identity_probe import probe
 
     namespace = ModuleType("mlx")
     namespace.__file__ = None
@@ -115,8 +115,8 @@ def test_accelerator_cli_rejects_before_workdir(tmp_path, monkeypatch, command):
     path = tmp_path / "accelerator.yaml"
     path.write_text(yaml.safe_dump(value))
     work = tmp_path / "must-not-exist"
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(work))
-    args = ["sparselab", *command.split(), str(path)]
+    monkeypatch.setenv("KLAB_WORK_DIR", str(work))
+    args = ["klab", *command.split(), str(path)]
     if command == "experiment submit":
         args += ["--wait"]
     if command == "stage":
@@ -147,8 +147,8 @@ def test_unregistered_acceleration_is_not_authorized(tmp_path, backend):
 
 
 def fake_runtime(monkeypatch, config, backend):
-    import sparselab.runtime_identity_probe as identity
-    import sparselab.runtime_profile as profiles
+    import klab.runtime_identity_probe as identity
+    import klab.runtime_profile as profiles
 
     engine = "mlx" if backend == "metal" else "pytorch"
     evidence = {
@@ -183,7 +183,7 @@ def fake_runtime(monkeypatch, config, backend):
 def test_matched_vendor_probe_authorizes_without_hardware(
     tmp_path, monkeypatch, backend
 ):
-    from sparselab.runtime_profile import require_authorization
+    from klab.runtime_profile import require_authorization
 
     _, config = fake_runtime(monkeypatch, training_config(tmp_path), backend)
     profile = RuntimeProfile.model_validate(
@@ -254,13 +254,13 @@ def test_requested_bf16_without_profile_requirement_still_tests_optimizer(
 def test_runtime_receipt_is_immutable_cell_scoped_and_revalidated(
     tmp_path, monkeypatch
 ):
-    import sparselab.runtime_profile as profiles
-    from sparselab.experiments.binding import (
+    import klab.runtime_profile as profiles
+    from klab.experiments.binding import (
         bind_runtime,
         inspect_runtime_binding,
         open_runtime_binding,
     )
-    from sparselab.training.manifest import config_sha256, source_identity
+    from klab.training.manifest import config_sha256, source_identity
 
     evidence, config = fake_runtime(monkeypatch, training_config(tmp_path), "rocm")
     calls = []
@@ -321,8 +321,8 @@ def test_runtime_receipt_is_immutable_cell_scoped_and_revalidated(
     import json
     import os
 
-    import sparselab.cli.main as cli
-    import sparselab.experiments.lock as locking
+    import klab.cli.main as cli
+    import klab.experiments.lock as locking
 
     tampered = json.loads(original)
     tampered["descriptor"]["python"] = "/tmp/attacker-python"
@@ -346,8 +346,8 @@ def test_runtime_receipt_is_immutable_cell_scoped_and_revalidated(
 
 
 def test_profile_binding_rejects_failed_actual_precision_probe(tmp_path, monkeypatch):
-    from sparselab.experiments.binding import bind_runtime
-    from sparselab.training.manifest import config_sha256, source_identity
+    from klab.experiments.binding import bind_runtime
+    from klab.training.manifest import config_sha256, source_identity
 
     _, config = fake_runtime(monkeypatch, training_config(tmp_path), "rocm")
     cell = SimpleNamespace(
@@ -377,11 +377,11 @@ def test_registered_ssh_worker_validates_probe_source_and_remote_transport(
 ):
     from dataclasses import replace
 
-    from sparselab.runtime_identity_probe import probe
-    from sparselab.training.manifest import source_identity
-    from sparselab.workers import transport
-    from sparselab.workers.controller import Controller
-    from sparselab.workers.models import WorkerCapabilities, WorkerDefinition
+    from klab.runtime_identity_probe import probe
+    from klab.training.manifest import source_identity
+    from klab.workers import transport
+    from klab.workers.controller import Controller
+    from klab.workers.models import WorkerCapabilities, WorkerDefinition
 
     config = training_config(tmp_path)
     definition = WorkerDefinition(
@@ -411,7 +411,7 @@ def test_registered_ssh_worker_validates_probe_source_and_remote_transport(
         tested_features=(),
         validated_at="fixture-validation",
     )
-    from sparselab.workers.execution import _caps
+    from klab.workers.execution import _caps
 
     capability = WorkerCapabilities.model_validate(
         _caps(definition, validation_status="unverified", runtime=tested)
@@ -468,7 +468,7 @@ def test_registered_ssh_worker_validates_probe_source_and_remote_transport(
     ],
 )
 def test_authorization_rejects_runtime_drift(tmp_path, monkeypatch, field, replacement):
-    from sparselab.runtime_profile import require_authorization
+    from klab.runtime_profile import require_authorization
 
     evidence, config = fake_runtime(monkeypatch, training_config(tmp_path), "rocm")
     profile = RuntimeProfile.model_validate(profile_value(backend="rocm"))
@@ -489,7 +489,7 @@ def test_authorization_rejects_runtime_drift(tmp_path, monkeypatch, field, repla
 def test_sealed_authorization_cannot_select_another_runtime(
     tmp_path, monkeypatch, target
 ):
-    from sparselab.runtime_profile import require_authorization
+    from klab.runtime_profile import require_authorization
 
     evidence, config = fake_runtime(monkeypatch, training_config(tmp_path), "rocm")
     evidence["device_count"] = 2

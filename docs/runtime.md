@@ -2,12 +2,12 @@
 
 Commands below use the [activated, provisioned environment](../README.md#first-run).
 
-Each SparseLab experiment runs in one process on one host/device. An optional controller schedules multiple whole independent experiments on local or SSH workers; it never shares their optimizer state or gradients. A run records its selected engine, backend, precision, device index, available memory readings, framework/runtime versions, and probe result in its manifest. That record describes the machine that ran it; it is not evidence that another machine has the same capability.
+Each Model Lab experiment runs in one process on one host/device. An optional controller schedules multiple whole independent experiments on local or SSH workers; it never shares their optimizer state or gradients. A run records its selected engine, backend, precision, device index, available memory readings, framework/runtime versions, and probe result in its manifest. That record describes the machine that ran it; it is not evidence that another machine has the same capability.
 
 An **engine** is the framework executing the model: PyTorch or MLX. A **backend**
 is its CPU/GPU execution route: PyTorch CPU, NVIDIA CUDA, AMD ROCm, Intel XPU or
 Apple MPS; MLX uses Metal on Apple Silicon. A device is the selected processor.
-Runtime checks ask whether SparseLab can execute a workload in that environment.
+Runtime checks ask whether Model Lab can execute a workload in that environment.
 Research experiments ask about their declared model, data or training variables;
 recording the device does not make it the subject of the experiment. A study
 explicitly comparing execution backends must declare that as its own question.
@@ -37,7 +37,7 @@ Metal on supported Macs. Discovery reports local availability, and a disposable
 workload checks the requested operations and precision before execution.
 A host label alone neither selects a device nor enables a fallback.
 
-WSL2 uses the Linux process, locking, and filesystem paths in SparseLab. Keep
+WSL2 uses the Linux process, locking, and filesystem paths in Model Lab. Keep
 Linux training data, caches, and checkpoints in the Linux filesystem where
 practical, and measure the actual chosen storage; Microsoft's
 [filesystem guidance](https://learn.microsoft.com/en-us/windows/wsl/filesystems)
@@ -53,14 +53,14 @@ driver and explicitly excludes installing a Linux GPU driver inside WSL;
 PyTorch's [Intel GPU guide](https://docs.pytorch.org/docs/stable/notes/get_start_xpu.html)
 lists supported XPU host/device combinations; AMD's
 [installation guide](https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest/frameworks/pytorch/install.html)
-covers its framework packages. SparseLab does not install or infer drivers from
+covers its framework packages. Model Lab does not install or infer drivers from
 the presence of WSL. Native Windows execution is not established by WSL2 tests.
 
 The base installation has no Torch dependency. The lightweight
-`sparselab runtime env` command family is available without Torch; the rest of the CLI
+`klab runtime env` command family is available without Torch; the rest of the CLI
 currently imports a backend framework and needs an appropriate provisioned
 environment. For CPU development, use `uv sync --locked --extra cpu --dev`
-then activate `.venv` (`. .venv/bin/activate`) and invoke `sparselab` directly.
+then activate `.venv` (`. .venv/bin/activate`) and invoke `klab` directly.
 The extra installs dependencies; it does not select the execution backend.
 Do not sync the CPU extra
 into an accelerator environment.
@@ -77,7 +77,7 @@ runtime:
   precision: fp32       # auto | fp32 | bf16 | fp16
 ```
 
-For the PyTorch engine, `auto` prefers an available local MPS device, then CUDA or ROCm, then XPU, then CPU. An explicit unavailable backend is an error—SparseLab does not retry it on CPU. ROCm uses PyTorch's `cuda` device API internally but is recorded as `rocm`; a CUDA request does not silently select a HIP build. CPU and MPS have index 0 only; CUDA/ROCm/XPU validate the requested index against the local runtime.
+For the PyTorch engine, `auto` prefers an available local MPS device, then CUDA or ROCm, then XPU, then CPU. An explicit unavailable backend is an error—Model Lab does not retry it on CPU. ROCm uses PyTorch's `cuda` device API internally but is recorded as `rocm`; a CUDA request does not silently select a HIP build. CPU and MPS have index 0 only; CUDA/ROCm/XPU validate the requested index against the local runtime.
 
 `precision: auto` resolves to FP32. BF16 and FP16 are not merely labels: validation starts a disposable subprocess that performs a tiny forward, backward, and optimizer update at the requested precision. CPU rejects FP16. FP16 is accepted only on backends with the current GradScaler path; BF16 is passed through PyTorch autocast when the requested probe succeeds. Parameters, gradients, reductions, and the conservative estimator remain accounted as FP32 even when autocast is used.
 
@@ -144,40 +144,40 @@ fails, explicitly select the retained runtime and start a new comparison identit
 never relabel historical results or mutate an active run. An existing 2.15 host
 installation is not proven by these repository pins.
 
-PRs [#303](https://github.com/supernovae/tiny-sparse-lab/pull/303) (compiled output
-loss) and [#305](https://github.com/supernovae/tiny-sparse-lab/pull/305) (shared
+PRs [#303](https://github.com/supernovae/model-lab/pull/303) (compiled output
+loss) and [#305](https://github.com/supernovae/model-lab/pull/305) (shared
 tokenizer provenance) remain separate changes. Their behavior is not implied by
 this baseline; test the combined revision before using either for comparisons.
 
 ## Machine-local runtime environments
 
-`sparselab runtime env` is a lightweight, Torch-free management entry point.
+`klab runtime env` is a lightweight, Torch-free management entry point.
 It distinguishes four things: passive **hardware observations**, installed
 **Python environments**, strict **profiles**, and fresh **execution authorization**.
 An RX 7900 XTX observed by `rocminfo` does not make a CPU Torch interpreter ROCm-ready.
 
 ```sh
-sparselab runtime env discover --json
-sparselab runtime env register cpu-py314 \
+klab runtime env discover --json
+klab runtime env register cpu-py314 \
   --python "$PWD/.venv/bin/python" --backend cpu --json
-sparselab runtime env list --json
-sparselab runtime env show cpu-py314 --json
-sparselab runtime env doctor cpu-py314 --json
-sparselab runtime env profile cpu-py314
-sparselab stage configs/runtime_smoke_cpu.yaml \
+klab runtime env list --json
+klab runtime env show cpu-py314 --json
+klab runtime env doctor cpu-py314 --json
+klab runtime env profile cpu-py314
+klab stage configs/runtime_smoke_cpu.yaml \
   --through inspect --runtime cpu-py314 --output /absolute/disposable/stage
 ```
 
-The runtime root is `SPARSELAB_RUNTIME_DIR` when explicitly absolute; otherwise
-an absolute, nonblank `XDG_DATA_HOME` gives `$XDG_DATA_HOME/sparselab/runtimes`,
-falling back to `~/.local/share/sparselab/runtimes`. Relative explicit roots,
-checkout-contained roots and a root equal to `SPARSELAB_WORK_DIR` are rejected.
+The runtime root is `KLAB_RUNTIME_DIR` when explicitly absolute; otherwise
+an absolute, nonblank `XDG_DATA_HOME` gives `$XDG_DATA_HOME/klab/runtimes`,
+falling back to `~/.local/share/klab/runtimes`. Relative explicit roots,
+checkout-contained roots and a root equal to `KLAB_WORK_DIR` are rejected.
 Root resolution is passive. Provisioning additionally requires writable local
 storage and capacity. Existing registered interpreters may live outside that
 root, including the checkout CPU `.venv`.
 
-The operational registry lives at `$XDG_CONFIG_HOME/sparselab/runtimes.yaml`
-when XDG is absolute/nonblank, else `~/.config/sparselab/runtimes.yaml`:
+The operational registry lives at `$XDG_CONFIG_HOME/klab/runtimes.yaml`
+when XDG is absolute/nonblank, else `~/.config/klab/runtimes.yaml`:
 
 ```yaml
 runtime_registry_version: 1
@@ -235,16 +235,16 @@ and GPU combination against AMD's
 [compatibility matrix](https://rocm.docs.amd.com/en/latest/compatibility/compatibility-matrix.html),
 [WSL installation prerequisites](https://rocm.docs.amd.com/en/latest/install/rocm.html?fam=radeon&gpu=amd-radeon-rx-7900-xtx&gfx=gfx1100&os=wsl),
 and [PyTorch installer](https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest/frameworks/pytorch/install.html).
-SparseLab does not install drivers or certify vendor support.
+Model Lab does not install drivers or certify vendor support.
 
 ```sh
 # Only on a supported host with the existing driver stack:
-export SPARSELAB_RUNTIME_DIR="$HOME/.local/share/sparselab/runtimes"
-sparselab runtime env provision rocm-7900xtx \
+export KLAB_RUNTIME_DIR="$HOME/.local/share/klab/runtimes"
+klab runtime env provision rocm-7900xtx \
   --recipe rocm-gfx1100-v1 --json
-sparselab runtime env doctor rocm-7900xtx --json
+klab runtime env doctor rocm-7900xtx --json
 # The accelerator command re-execs into the registered interpreter:
-sparselab stage /absolute/rocm-run.yaml \
+klab stage /absolute/rocm-run.yaml \
   --through warmup --runtime rocm-7900xtx --output /absolute/disposable/rocm-stage
 ```
 
@@ -254,7 +254,7 @@ runtime storage, at least 20 GiB free and 100,000 free inodes including cache
 headroom. It exclusively reserves `<runtime-root>/<ID>`, disables interpreter
 downloads, and keeps its cache/scratch/logs on that filesystem. It exports only
 locked common dependencies, rejects Torch/CPU-index contamination, installs
-the explicit vendor pins, then installs editable SparseLab with `--no-deps`.
+the explicit vendor pins, then installs editable Model Lab with `--no-deps`.
 Torch version/path/HIP must be unchanged by that last source-only install.
 Linux overlay mounts are accepted only at a resolved, writable runtime ancestor
 whose actual statvfs is not read-only and has the required byte/inode headroom.
@@ -370,7 +370,7 @@ only for ROCm. BF16 requirements need a disposable optimizer update, not just
 a passive support declaration. Device-name matching uses regular-expression
 search against the selected device.
 
-`sparselab runtime probe PROFILE --json` queries the selected interpreter and
+`klab runtime probe PROFILE --json` queries the selected interpreter and
 records its real executable, Python version and prefixes, Torch path/version,
 HIP/CUDA/XPU versions, selected device and available names, source identity,
 and host fields. Missing optional APIs remain null.
@@ -384,7 +384,7 @@ Direct `train`, `stage`, `eval`, `generate`, and `chat` accept mutually exclusiv
 `--runtime ID` or `--runtime-profile PROFILE`; single-config `experiment submit`
 also accepts these when auto-registering a local worker (exclusive with
 `--worker`, unavailable with `--matrix`). Without `--wait`, process the existing
-queued submission with `sparselab controller run --store ROOT` using the same
+queued submission with `klab controller run --store ROOT` using the same
 store; see [workers](workers.md). Experiment
 bind/run, Campaign apply/resume, evaluation suite run and research snapshot
 support logical IDs wherever they support profile files. A different interpreter
@@ -406,10 +406,10 @@ an explicit accelerator lock does not claim that it is executable locally.
 Bind each selected cell separately:
 
 ```sh
-sparselab experiment bind LOCK --runtime-profile PROFILE --cell main:single --json
-sparselab experiment run LOCK --runtime-profile PROFILE --cell main:single --json
+klab experiment bind LOCK --runtime-profile PROFILE --cell main:single --json
+klab experiment run LOCK --runtime-profile PROFILE --cell main:single --json
 # Logical ID, resolved on this host before the same fresh authorization:
-sparselab experiment bind LOCK --runtime cpu-py314 --cell main:single --json
+klab experiment bind LOCK --runtime cpu-py314 --cell main:single --json
 # Alternatively: --worker NAME, or run --binding RECEIPT (mutually exclusive).
 ```
 
@@ -445,7 +445,7 @@ Validate each provisioned host/device using the
 Use the actual candidate config, registered interpreter and explicit backend.
 `runtime env doctor`, `inspect` and a full-shape `stage --through warmup` provide
 separate environment, configuration and optimizer-execution observations.
-A check executed on CPU does not exercise SparseLab’s GPU execution path;
+A check executed on CPU does not exercise Model Lab’s GPU execution path;
 that path needs a workload run in the selected GPU environment.
 
 For a declared Campaign, use its runtime stage and input-bound approval gate,
@@ -461,7 +461,7 @@ interfaces. A separate CPU evaluation retains the original training identity.
 Keep missing, failed and interrupted observations visible. No automatic model
 promotion follows from completing this execution contract.
 
-The [registered-runtime acceptance record](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/runtime-contract-rocm-20261001T134938Z.json)
+The [registered-runtime acceptance record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/runtime-contract-rocm-20261001T134938Z.json)
 preserves a software integration check run on the recorded GPU. Its device,
 source and checkpoint identities describe the execution environment and outputs;
 new users declare their own runtime.
@@ -479,9 +479,9 @@ MPS and MLX use unified memory. Their device recommendation/driver allocation an
 `inspect` builds a shape-only parameter inventory and a conservative memory estimate; it does not construct the model or load tokenizer/data/package assets. The estimate uses disjoint categories—resident weights, registered runtime buffers, gradients, optimizer state, retained activations, attention working tensors, workspace, and headroom. It is a planning model, not a measured peak. Missing capacity information produces `UNKNOWN`; an artificial `budget_bytes` can demonstrate an exceedance but cannot prove physical fit.
 
 ```sh
-sparselab inspect configs/runtime_smoke_cpu.yaml --json
-sparselab stage configs/runtime_smoke_cpu.yaml --through smoke --output sparselab-work/stages/runtime-smoke
-sparselab stage configs/runtime_smoke_cpu.yaml --through warmup --output sparselab-work/stages/runtime-warmup
+klab inspect configs/runtime_smoke_cpu.yaml --json
+klab stage configs/runtime_smoke_cpu.yaml --through smoke --output klab-work/stages/runtime-smoke
+klab stage configs/runtime_smoke_cpu.yaml --through warmup --output klab-work/stages/runtime-warmup
 ```
 
 A stage bundle is an immutable, verified copy of the effective inputs. `inspect` records only preflight inspection; `validate` additionally validates backend and artifacts; `smoke` and `warmup` run short, disposable subprocess pilots. Pilots do not advance the eventual training run's optimizer, schedule, cursor, counters, or RNG. A stage output must be new, or an identical complete bundle is re-verified and reused. If estimation or a pilot exceeds its safe ceiling, staging writes a proposal and stops; it does not rewrite the requested config.
@@ -574,17 +574,17 @@ OOM, non-fit, throughput or scientific failure.
 ## Runtime forecasting and progress
 
 Runtime forecasts are operational aids, not scientific results or performance
-guarantees. SparseLab keeps four records distinct: a planning estimate from
+guarantees. Model Lab keeps four records distinct: a planning estimate from
 compatible historical optimizer throughput, an optional warmup-calibrated
 estimate from a disposable pilot, a live target-based ETA, and a final
 observation of actual phase costs. Missing evidence is `null`/unavailable, not
 zero.
 
 ```sh
-sparselab inspect CONFIG --estimate-runtime --json
-sparselab stage CONFIG --through warmup --output sparselab-work/stages/forecast
-sparselab train --runs-dir sparselab-work/runs CONFIG --stage-bundle sparselab-work/stages/forecast
-sparselab runtime status RUN_ID --runs-dir sparselab-work/runs --json
+klab inspect CONFIG --estimate-runtime --json
+klab stage CONFIG --through warmup --output klab-work/stages/forecast
+klab train --runs-dir klab-work/runs CONFIG --stage-bundle klab-work/stages/forecast
+klab runtime status RUN_ID --runs-dir klab-work/runs --json
 ```
 
 `inspect --estimate-runtime` is read-only. Planning uses up to the 25 most
@@ -868,7 +868,7 @@ recommendation.
 
 ### Offline performance evidence
 
-The retained [preparation benchmark](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/benchmarks/runtime-prep-v1.json)
+The retained [preparation benchmark](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/benchmarks/runtime-prep-v1.json)
 measured generated 1/8/32 MiB prose/code JSONL, one local BPE tokenizer,
 scalar and batched encoding, and bounded Rayon thread counts. Wall time includes
 imports, child startup and instrumentation; sampled process-tree RSS includes
@@ -878,10 +878,10 @@ assertion or model-quality result.
 Use the native bounded replacement for new operational measurements:
 
 ```sh
-sparselab data benchmark-preparation declaration.yaml --json
+klab data benchmark-preparation declaration.yaml --json
 ```
 
-The strict `sparselab-preparation-benchmark-v1` declaration names an **absent**
+The strict `klab-preparation-benchmark-v1` declaration names an **absent**
 workspace and bounds generated sizes (32 MiB each, 64 MiB total), coordinate
 count (32), document batches, CPU threads and worker timeout. Admission checks
 the existing parent filesystem before it claims the workspace, preserving a
@@ -903,13 +903,13 @@ statistical portability or causal Rust-only speedup claim. Source re-iteration
 on resume, scalar tokenizer training, JSON IPC, and the contiguous final copy
 remain measured-performance questions.
 
-The [runtime-prep-v1 acceptance record](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/runtime-prep-v1.json)
+The [runtime-prep-v1 acceptance record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/runtime-prep-v1.json)
 binds the actual CPU profile probe, preparation/hash measurements, bounded
 recovery checks, CLI smoke, and final focused/broader suite results. It is
 operational implementation evidence, not a research finding or a hardware
 portability claim.
 
-The [Campaign integration rebase record](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/runtime-prep-v1-rebase.json)
+The [Campaign integration rebase record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/runtime-prep-v1-rebase.json)
 adds actual worker-dispatch/ingestion CLI proof and the combined CPU suites
 after integrating Campaign orchestration. Original benchmark measurements retain their
 original source identities; they were not rerun or relabeled as rebase measurements.
@@ -978,7 +978,7 @@ environment. The CPU, ROCm and XPU runtime smoke configs use the same 20-step,
 experiment's config. Backend names in configs and run IDs are useful coordinates;
 host/backend combinations do not define separate storage layouts.
 
-Set `SPARSELAB_WORK_DIR` to an external persistent root. Register and doctor the
+Set `KLAB_WORK_DIR` to an external persistent root. Register and doctor the
 interpreter first using [runtime environments](#machine-local-runtime-environments).
 The example uses the registered CPU runtime `cpu-py314`; for an accelerator,
 select its config and registered runtime together. These smoke configs retain
@@ -986,18 +986,18 @@ explicit tokenizer/cache paths in the checkout; the work root does not relocate
 those paths. Use a separately authored config for external input destinations.
 
 ```sh
-WORK="$SPARSELAB_WORK_DIR/experiments/runtime-acceptance"
+WORK="$KLAB_WORK_DIR/experiments/runtime-acceptance"
 CONFIG=configs/runtime_smoke_cpu.yaml
 RUNTIME=cpu-py314
 RUN_ID="runtime-acceptance-$(date -u +%Y%m%dT%H%M%SZ)"
 STAGE_DIR="$WORK/staging/$RUN_ID"
 # Direct invocation preserves the already provisioned framework.
-sparselab tokenizer train configs/tokenizer_smoke.yaml
-sparselab inspect "$CONFIG" --json
-sparselab stage "$CONFIG" --runtime "$RUNTIME" --through warmup --output "$STAGE_DIR"
-sparselab train --runs-dir "$WORK/runs" "$CONFIG" --runtime "$RUNTIME" \
+klab tokenizer train configs/tokenizer_smoke.yaml
+klab inspect "$CONFIG" --json
+klab stage "$CONFIG" --runtime "$RUNTIME" --through warmup --output "$STAGE_DIR"
+klab train --runs-dir "$WORK/runs" "$CONFIG" --runtime "$RUNTIME" \
   --stage-bundle "$STAGE_DIR" --run-id "$RUN_ID"
-sparselab eval "$RUN_ID" --runs-dir "$WORK/runs" --runtime "$RUNTIME"
+klab eval "$RUN_ID" --runs-dir "$WORK/runs" --runtime "$RUNTIME"
 ```
 
 The stage, training manifest, and evaluation must record the requested backend;
@@ -1005,11 +1005,11 @@ training must commit 20 steps / 640 targets for these runtime smoke configs, and
 evaluation must use the committed checkpoint. Inspect the measured host/device
 identity and probe result. An explicit unavailable backend is a failed
 software check. Run it in the environment intended for your workload; its
-results concern SparseLab execution there, not the scientific question.
+results concern Model Lab execution there, not the scientific question.
 
 ## Recorded local acceptance
 
-The [Host CLI acceptance record](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/host_cli_2026_09_22.json) contains
+The [Host CLI acceptance record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/host_cli_2026_09_22.json) contains
 fresh-process CPU FP32 20/640 versus 10+resume, CPU BF16 and Adafactor 4/128
 versus 2+resume, and native MLX FP32 2/64 versus 1+resume. Model, optimizer,
 schedule, scaler, cursor, and RNG match bitwise within each pair; parent
@@ -1019,7 +1019,7 @@ one fresh update. These are bounded implementation checks, not cross-engine
 training equivalence or model-quality results. Their execution environment is
 part of the record, not the subject of a scientific finding.
 
-The [integrated single-host gate](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/single_host_gate_2026_09_22.json) also retains actual MPS continuation/promotion, corruption and signal recovery, installed-wheel/offline checks, and populated dashboard evidence. The [independent-worker gate](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/independent_workers_2026_09_23.json) adds three overlapping CPU workers, controller disconnect/replay, acknowledged cancellation, explicit recovery after executor loss, offline promotion, actual CLI matrix execution, genuine source-mismatch rejection, and a real MLX/Metal worker.
+The [integrated single-host gate](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/single_host_gate_2026_09_22.json) also retains actual MPS continuation/promotion, corruption and signal recovery, installed-wheel/offline checks, and populated dashboard evidence. The [independent-worker gate](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/independent_workers_2026_09_23.json) adds three overlapping CPU workers, controller disconnect/replay, acknowledged cancellation, explicit recovery after executor loss, offline promotion, actual CLI matrix execution, genuine source-mismatch rejection, and a real MLX/Metal worker.
 
 Native CUDA sparse kernels remain an [implementation direction](../ROADMAP.md#longer-term-directions). Retained
 software integration records do not yet include execution on Intel XPU or a
@@ -1027,7 +1027,7 @@ simultaneous multi-host Apple/AMD/Intel worker setup. Native HIP sparse-attentio
 measurements were collected on an AMD RX 7900 XTX under WSL2; that names the
 environment used for the measurements, not the purpose of the model studies.
 
-The [registered-runtime ROCm gate](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/runtime-contract-rocm-20261001T134938Z.json)
+The [registered-runtime ROCm gate](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/runtime-contract-rocm-20261001T134938Z.json)
 records isolated `rocm-gfx1100-v1` provisioning and a fresh RX 7900 XTX BF16
 Campaign: one ingested attempt, two optimizer steps, 64 supervised targets,
 and a verified full-state checkpoint. Explicit ROCm and CPU FP32 evaluation

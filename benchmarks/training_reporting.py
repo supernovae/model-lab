@@ -14,7 +14,7 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 
-from sparselab.training.metrics import ExperimentStore
+from klab.training.metrics import ExperimentStore
 
 
 def main() -> None:

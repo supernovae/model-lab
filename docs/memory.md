@@ -1,6 +1,6 @@
 # Training memory accounting
 
-Training memory is not one number. SparseLab separates a conservative **estimate** from per-update **observations**, and keeps categories disjoint so a total is not inflated by counting the same tensor twice.
+Training memory is not one number. Model Lab separates a conservative **estimate** from per-update **observations**, and keeps categories disjoint so a total is not inflated by counting the same tensor twice.
 
 ## What occupies memory
 
@@ -101,7 +101,7 @@ The acceptance record reports 86,444 optimizer-tensor bytes for AdamW and 3,436 
 on the same 10,800-parameter tied tiny decoder, including 11 step scalars.
 Both exactly match the estimator. This is persistent-state accounting, not a
 total-process memory reduction or quality comparison.
-[The record](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/memory_optimizer_2026_09_22.json) includes
+[The record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/memory_optimizer_2026_09_22.json) includes
 factor shapes, aliases, CPU RSS, native MLX fields, and calibration limits.
 
 ## Reduce memory without changing the science silently
@@ -111,8 +111,8 @@ A smaller `training.micro_batch_size` reduces activation dimensions. Increasing 
 `inspect` can write a separate proposal rather than editing its input:
 
 ```sh
-uv run --locked --extra cpu sparselab inspect configs/runtime_smoke_cpu.yaml \
-  --write-proposal sparselab-work/runtime-proposal.yaml
+uv run --locked --extra cpu klab inspect configs/runtime_smoke_cpu.yaml \
+  --write-proposal klab-work/runtime-proposal.yaml
 ```
 
 The adjacent decision report describes each ordered candidate and before/after estimated peak. A proposed config is only effective if a user deliberately supplies it to a later command. The planner does not claim savings from unsupported activation offload, optimizer-state offload, selective checkpointing, or unvalidated precision.
@@ -126,7 +126,7 @@ not a usable proposal. Report or config conflicts fail rather than replacing
 user-owned artifacts. Storage failures during publication roll back files
 created by that invocation.
 
-The [CLI acceptance record](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/resource_policy_2026_09_22.json)
+The [CLI acceptance record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/resource_policy_2026_09_22.json)
 covers low-memory and capacity-constrained balanced proposals, unchanged source
 files, preserved effective batch, loadable hash-bound YAML, and overwrite refusal.
 These are planner/publication checks, not measured training-capacity claims.

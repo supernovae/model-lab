@@ -6,12 +6,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sparselab.config.loading import load_config
-from sparselab.config.models import RunConfig
-from sparselab.derivation import derive_config, receipt_path
-from sparselab.lab_mode import run_try
-from sparselab.training.manifest import config_sha256
-from sparselab.try_config import TryConfig
+from klab.config.loading import load_config
+from klab.config.models import RunConfig
+from klab.derivation import derive_config, receipt_path
+from klab.lab_mode import run_try
+from klab.training.manifest import config_sha256
+from klab.try_config import TryConfig
 
 FIXTURE = Path(__file__).parent / "fixtures/contracts/run_config_v2.json"
 
@@ -71,7 +71,7 @@ def test_valid_seed_identity_matches_pre_fix(seed, expected):
 def test_try_rejects_invalid_seed_before_artifacts(
     tmp_path, monkeypatch, seed, location
 ):
-    from sparselab import resource_envelope
+    from klab import resource_envelope
 
     baseline = _write(
         tmp_path / "base.yaml", _raw(seed if location == "baseline" else 7)
@@ -102,7 +102,7 @@ def test_try_rejects_invalid_seed_before_artifacts(
 def test_try_boundary_override_supersedes_delta_before_setup(
     tmp_path, monkeypatch, seed
 ):
-    from sparselab import resource_envelope
+    from klab import resource_envelope
 
     baseline = _write(tmp_path / "base.yaml", _raw())
     candidate = _write(
@@ -129,7 +129,7 @@ def test_try_boundary_override_supersedes_delta_before_setup(
 
 @pytest.mark.parametrize("seed", [-1, 2**32])
 def test_try_rejects_merged_baseline_seed_before_artifacts(tmp_path, monkeypatch, seed):
-    from sparselab import resource_envelope
+    from klab import resource_envelope
 
     raw = _raw()
     del raw["seed"]
@@ -148,7 +148,7 @@ def test_try_rejects_merged_baseline_seed_before_artifacts(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("seed", [0, 2**32 - 1])
 def test_try_merged_baseline_uses_effective_valid_seed(tmp_path, monkeypatch, seed):
-    from sparselab import resource_envelope
+    from klab import resource_envelope
 
     raw = _raw(seed)
     baseline = tmp_path / "base.yaml"
@@ -195,7 +195,7 @@ def test_legacy_seed_coercion_is_preserved_across_callers(
 
 @pytest.mark.parametrize("seed", [True, "7", 7.0])
 def test_strict_try_override_rejected_before_setup(tmp_path, monkeypatch, seed):
-    from sparselab import resource_envelope
+    from klab import resource_envelope
 
     monkeypatch.setattr(
         resource_envelope,

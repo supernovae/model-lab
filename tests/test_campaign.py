@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sparselab.campaign.plan import CampaignPlan, load_campaign
+from klab.campaign.plan import CampaignPlan, load_campaign
 
 
 def declaration() -> dict:
@@ -130,7 +130,7 @@ def test_symlink_path_rejected(tmp_path: Path) -> None:
 def test_operational_artifact_accepts_external_absolute_location(
     tmp_path: Path,
 ) -> None:
-    from sparselab.campaign.engine import CampaignEngine
+    from klab.campaign.engine import CampaignEngine
 
     artifact = {
         "kind": "tokenizer",
@@ -264,16 +264,16 @@ def make_full_campaign(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Real synthetic model inputs, independent of the descriptive corpus release."""
     import shutil
 
-    from sparselab.config.models import DatasetConfig, RunConfig, TokenizerTrainConfig
-    from sparselab.data.packing import prepare_data
-    from sparselab.data.tokenizer import load_tokenizer, train_tokenizer
-    from sparselab.training.manifest import sha256_file
-    from sparselab.workdir import ensure_work_dir
+    from klab.config.models import DatasetConfig, RunConfig, TokenizerTrainConfig
+    from klab.data.packing import prepare_data
+    from klab.data.tokenizer import load_tokenizer, train_tokenizer
+    from klab.training.manifest import sha256_file
+    from klab.workdir import ensure_work_dir
 
     root = Path(__file__).resolve().parents[1]
     recipe = tmp_path / "recipe"
     shutil.copytree(root / "examples/tiny-campaign", recipe)
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
     ensure_work_dir(tmp_path / "work")
     monkeypatch.setenv("OMP_NUM_THREADS", "1")
     monkeypatch.setenv("MKL_NUM_THREADS", "1")
@@ -462,10 +462,10 @@ def make_full_campaign(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def frozen_corpus(tmp_path: Path) -> Path:
     import shutil
 
-    from sparselab.corpus.acquisition import acquire
-    from sparselab.corpus.pipeline import build
-    from sparselab.corpus.project import load_project
-    from sparselab.corpus.release import freeze
+    from klab.corpus.acquisition import acquire
+    from klab.corpus.pipeline import build
+    from klab.corpus.project import load_project
+    from klab.corpus.release import freeze
 
     root = Path(__file__).resolve().parents[1]
     shutil.copytree(root / "examples/tiny-campaign", tmp_path / "recipe")
@@ -475,7 +475,7 @@ def frozen_corpus(tmp_path: Path) -> Path:
 
 
 def test_verified_readiness_denominator_and_deficits(tmp_path: Path) -> None:
-    from sparselab.campaign.policy import CorpusReadinessPolicy, measure_readiness
+    from klab.campaign.policy import CorpusReadinessPolicy, measure_readiness
 
     release = frozen_corpus(tmp_path)
     documents = [
@@ -527,7 +527,7 @@ def test_verified_readiness_denominator_and_deficits(tmp_path: Path) -> None:
 
 
 def test_source_pass_exact_ceil_and_zero_availability(tmp_path: Path) -> None:
-    from sparselab.campaign.policy import CorpusReadinessPolicy, measure_readiness
+    from klab.campaign.policy import CorpusReadinessPolicy, measure_readiness
 
     release = frozen_corpus(tmp_path)
     facts = measure_readiness(release, CorpusReadinessPolicy(min_heldout_families=1))[
@@ -572,11 +572,11 @@ def test_source_pass_exact_ceil_and_zero_availability(tmp_path: Path) -> None:
 def test_readiness_actual_tokens(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.campaign.policy import CorpusReadinessPolicy, measure_readiness
-    from sparselab.config.models import DatasetConfig, TokenizerTrainConfig
-    from sparselab.data.tokenizer import load_tokenizer, train_tokenizer
+    from klab.campaign.policy import CorpusReadinessPolicy, measure_readiness
+    from klab.config.models import DatasetConfig, TokenizerTrainConfig
+    from klab.data.tokenizer import load_tokenizer, train_tokenizer
 
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
     release = frozen_corpus(tmp_path)
     path = train_tokenizer(
         TokenizerTrainConfig(
@@ -632,7 +632,7 @@ def invoke_cli(
         [
             sys.executable,
             "-m",
-            "sparselab",
+            "klab",
             "--work-dir",
             str(work),
             "campaign",
@@ -653,7 +653,7 @@ def invoke_cli(
     )
     assert result.returncode == expected_code, result.stdout + result.stderr
     envelope = json.loads(result.stdout)
-    assert envelope["format"] == "sparselab-campaign-command-v1"
+    assert envelope["format"] == "klab-campaign-command-v1"
     assert envelope["command"] == command
     return envelope
 
@@ -661,7 +661,7 @@ def invoke_cli(
 def test_receipt_tampering_never_reruns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.campaign.engine import CampaignEngine
+    from klab.campaign.engine import CampaignEngine
 
     path = make_full_campaign(tmp_path, monkeypatch)
     engine = CampaignEngine(path, tmp_path / "work")
@@ -675,7 +675,7 @@ def test_receipt_tampering_never_reruns(
 def test_approval_replay_rejection_and_namespace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.campaign.engine import CampaignEngine
+    from klab.campaign.engine import CampaignEngine
 
     path = make_full_campaign(tmp_path, monkeypatch)
     engine = CampaignEngine(path, tmp_path / "work")
@@ -699,7 +699,7 @@ def test_approval_replay_rejection_and_namespace(
 def test_changed_reference_digest_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from sparselab.campaign.engine import CampaignEngine
+    from klab.campaign.engine import CampaignEngine
 
     path = make_full_campaign(tmp_path, monkeypatch)
     value = yaml.safe_load(path.read_text())
@@ -716,7 +716,7 @@ def test_changed_reference_digest_fails_closed(
 
 @pytest.mark.parametrize("command", ["plan", "status", "next", "explain"])
 def test_engine_readonly_never_creates_workspace(tmp_path: Path, command: str) -> None:
-    from sparselab.campaign.engine import CampaignEngine
+    from klab.campaign.engine import CampaignEngine
 
     source = Path(__file__).resolve().parents[1] / "examples/tiny-campaign.yaml"
     work = tmp_path / "nonexistent"
@@ -734,7 +734,7 @@ def test_receipt_reconciles_crash_before_index(
 ) -> None:
     import shutil
 
-    from sparselab.campaign.engine import CampaignEngine
+    from klab.campaign.engine import CampaignEngine
 
     root = Path(__file__).resolve().parents[1]
     shutil.copytree(root / "examples/tiny-campaign", tmp_path / "recipe")
@@ -742,7 +742,7 @@ def test_receipt_reconciles_crash_before_index(
     value["stages"][0]["project"] = "recipe/corpus.yaml"
     path = tmp_path / "campaign.yaml"
     path.write_text(yaml.safe_dump(value))
-    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
     engine = CampaignEngine(path, tmp_path / "work")
     original_save = engine.store.save
 
@@ -769,7 +769,7 @@ def test_stale_running_records_interruption(
 ) -> None:
     import shutil
 
-    from sparselab.campaign.engine import CampaignEngine
+    from klab.campaign.engine import CampaignEngine
 
     root = Path(__file__).resolve().parents[1]
     shutil.copytree(root / "examples/tiny-campaign", tmp_path / "recipe")
@@ -797,7 +797,7 @@ def test_stale_running_records_interruption(
 
 
 def test_state_receipt_conflict_is_rejected(tmp_path: Path) -> None:
-    from sparselab.campaign.engine import CampaignEngine
+    from klab.campaign.engine import CampaignEngine
 
     source = Path(__file__).resolve().parents[1] / "examples/tiny-campaign.yaml"
     engine = CampaignEngine(source, tmp_path / "work")
@@ -811,7 +811,7 @@ def test_state_receipt_conflict_is_rejected(tmp_path: Path) -> None:
 def test_uncommitted_campaign_preflight_blocks_before_store_creation(
     tmp_path: Path,
 ) -> None:
-    from sparselab.campaign.engine import CampaignEngine
+    from klab.campaign.engine import CampaignEngine
 
     source = tmp_path / "campaign.yaml"
     source.write_text(yaml.safe_dump(declaration()))
@@ -834,7 +834,7 @@ def test_uncommitted_campaign_preflight_blocks_before_store_creation(
     ],
 )
 def test_runtime_acceptance_rejects_unsafe_or_ambiguous_source(changes):
-    from sparselab.campaign.plan import RuntimeAcceptance
+    from klab.campaign.plan import RuntimeAcceptance
 
     with pytest.raises(ValueError):
         RuntimeAcceptance(
@@ -848,7 +848,7 @@ def test_runtime_acceptance_rejects_unsafe_or_ambiguous_source(changes):
 
 
 def test_cpu_evaluation_cannot_inherit_accelerator_authorization():
-    from sparselab.campaign.plan import Evaluation
+    from klab.campaign.plan import Evaluation
 
     with pytest.raises(ValueError, match="CPU"):
         Evaluation(

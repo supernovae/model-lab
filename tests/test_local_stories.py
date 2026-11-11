@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from sparselab.config.models import DatasetConfig, TokenizerTrainConfig
-from sparselab.data import datasets, tokenizer
-from sparselab.data.bakeoff import choose_candidate
-from sparselab.data.local_stories import LICENSE, REVISION, snapshot, verify_snapshot
+from klab.config.models import DatasetConfig, TokenizerTrainConfig
+from klab.data import datasets, tokenizer
+from klab.data.bakeoff import choose_candidate
+from klab.data.local_stories import LICENSE, REVISION, snapshot, verify_snapshot
 
 
 def _config(
@@ -86,7 +86,7 @@ def test_snapshot_rejects_full_digest_collision(
 ) -> None:
     from types import SimpleNamespace
 
-    from sparselab.data import local_stories
+    from klab.data import local_stories
 
     class CollidingHash:
         def __init__(self, _data: bytes = b"") -> None:
@@ -169,7 +169,7 @@ def test_selection_threshold_and_ties() -> None:
 
 
 def test_source_pins_keep_legacy_values_and_exports():
-    from sparselab import local_stories_pins
+    from klab import local_stories_pins
 
     assert (
         REVISION

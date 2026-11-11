@@ -1,4 +1,4 @@
-# SparseLab agent invariants
+# Kybern Model Lab agent invariants
 
 ## 0. Default to lab mode
 
@@ -7,8 +7,8 @@ the user asked for, on hardware they already control, inside its resource
 envelope. Use the fast path in the [activated environment](README.md#first-run) and do not write ceremony:
 
 ```sh
-sparselab try DELTA.yaml --vs BASELINE.yaml
-sparselab report TRY_ID
+klab try DELTA.yaml --vs BASELINE.yaml
+klab report TRY_ID
 ```
 
 `try` derives the candidate through native `config derive`, trains both arms
@@ -39,7 +39,7 @@ tests under separate `status` and `next` keys. See [result reports](docs/result-
 These views never train, create a run store or grant release/compute authority.
 
 Every try also runs the fast [probe battery](docs/probe-battery.md) tier; use
-`sparselab probe RUN --vs BASE --backend cpu --config standard --json`
+`klab probe RUN --vs BASE --backend cpu --config standard --json`
 (or `--config full`) for more. Act on
 `probe.verdict.action`: `abandon` (a hard probe failed, including a NaN/inf
 loss reported as a numerical failure: drop or fix the idea),
@@ -57,12 +57,12 @@ the held-out probes again and again turns them into development data, so any
 claim that an idea is better needs a separate, untouched final evaluation
 (fresh split, longer run, more seeds). Iteration verdicts use only the held-out
 item split. The **held-back final split** is that untouched evaluation for
-probe items: never select on it. Only `sparselab probe CANDIDATE --vs BASE
+probe items: never select on it. Only `klab probe CANDIDATE --vs BASE
 --config final` reads it (`try` and ordinary probes cannot; a test
 enforces this), once, for the final verdict on a candidate you have already
 chosen; never use it to compare or rank candidates, and never re-run it after
 changing the idea. Final results never enter ordinary `compare`, enrichment,
-Pareto or dashboard history; `sparselab compare --final A B` reports them
+Pareto or dashboard history; `klab compare --final A B` reports them
 side by side only. A single-seed "beyond noise" loss gain is within-run eval
 noise only: confirm it with paired seeds before claiming a win. A try whose
 comparison is `NOT_COMPARABLE` is never promoted, whatever its probes say. Do not edit probe
@@ -71,26 +71,26 @@ the dev split: `guard.overfit_suspected` means you are fitting the probes; chang
 the idea instead. Any suite change needs a `SUITE_VERSION` bump, and results are
 comparable only within one suite digest.
 
-To place a result on a known curve, run `sparselab compare RESULT
+To place a result on a known curve, run `klab compare RESULT
 --references` (records only, no compute). It compares a metric only within one
 comparison group (held-out loss: same `eval_group`; lm-eval: same
 `benchmark_group`; fact recall: same `item_group`) and otherwise reports
 `not_comparable` with the reason or `missing_evidence` with the command that
 produces it; never compare such pairs by hand. Reference models (`ref:NAME`)
 are scored on the text-level probes only (both fact recalls and lm-eval;
-`sparselab probe ref:NAME --config full`, optional `reference` + `lmeval`
+`klab probe ref:NAME --config full`, optional `reference` + `lmeval`
 extras) and are never a `--vs` baseline. Declaration `lm_eval_tasks`/`lm_eval_limit`
 make a new benchmark group, so such results never compare with the default
 slice.
 
-To look inside a small checkpoint (≤ 60M parameters), run `sparselab explore
+To look inside a small checkpoint (≤ 60M parameters), run `klab explore
 RUN [--config explore.yaml] [--json]` (CPU by default; `--runtime-profile`/`--runtime`,
 `--resource-envelope` use the same native loaders and runtime preparation as
 `probe`, whose direct profile/envelope paths are selected through its validated
 declaration). It
 reports the architecture, per-token loss and top-k, attention maps, weight
 statistics, expert routing and memory lookups, cached under `LAB/explorer`. It is descriptive, not a verdict.
-`sparselab dashboard` shows the same data for people (Home, Experiments,
+`klab dashboard` shows the same data for people (Home, Experiments,
 Models, Behaviors, Explorer; see `docs/dashboard.md`).
 
 Write proposal, binding and stop documents **only** for:
@@ -112,7 +112,7 @@ Read `README.md`, relevant nearby guidance, `ROADMAP.md` for feature direction, 
 preserve other work and use an isolated checkout when experiments have pinned
 another checkout. Distinguish code, fixtures, experiments and evidence.
 Kernel Memory Lab was retired from the active showcase on 2026-10-18. Its
-[bootstrap](https://github.com/supernovae/tiny-sparse-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/BOOTSTRAP.md) and retained status
+[bootstrap](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/kernel-memory-lab/BOOTSTRAP.md) and retained status
 are historical context, not a current release assignment. Fresh rerun ideas belong
 to the coordinated backlog with new identities, current frameworks and separately
 authorized scope. Historical allocations grant no runtime or spending authority;
@@ -164,8 +164,8 @@ conclusions.
 ## 4. Bound resources and retain owned outputs
 
 Use a persistent work root outside Git: global `--work-dir` overrides
-`SPARSELAB_WORK_DIR`; otherwise use absolute nonempty `XDG_DATA_HOME/sparselab`
-or `~/.local/share/sparselab`. Lab tries live under `WORK_DIR/lab`. Respect
+`KLAB_WORK_DIR`; otherwise use absolute nonempty `XDG_DATA_HOME/klab`
+or `~/.local/share/klab`. Lab tries live under `WORK_DIR/lab`. Respect
 explicit legacy locations. Only disposable fixture scratch belongs in `/tmp`.
 Use the [location/runtime selection guide](docs/location-runtime-controls.md)
 before changing selectors. Work defaults, historical lab/run readers and
@@ -224,7 +224,7 @@ checklist.
 
 - **Reuse the shared primitives; never copy them.** Hash JSON with
   `canonical_digest`, encode with `canonical_json` and hash files with
-  `sha256_file` (all in `sparselab.training.manifest`). Check filesystem trust
+  `sha256_file` (all in `klab.training.manifest`). Check filesystem trust
   with `verification_proofs.writable_by_others`/`_trusted`. Do not add a
   private `_digest`/`_sha`/`_write_json` wrapper or inline
   `hashlib.sha256(canonical_json(...))`. Never import another module's
@@ -241,7 +241,7 @@ checklist.
 - **Size tests for an ordinary laptop.** Use the smallest budget that proves the
   behavior. A cancel or signal test only needs training still running, not an
   hour of steps or tens of GB of storage preflight. Never depend on CI's umask,
-  user, disk or `HOME`, and always isolate `SPARSELAB_WORK_DIR`.
+  user, disk or `HOME`, and always isolate `KLAB_WORK_DIR`.
 - **Pruning is a change too.** After deleting tests, imports or helpers, run
   `ruff check .` (F821 catches names a removal broke), the touched test files
   and the `lab-loop` tests before handoff. A red `main` blocks every other PR.

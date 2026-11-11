@@ -2,17 +2,17 @@
 
 Commands below use the [activated, provisioned environment](../README.md#first-run).
 
-SparseLab is intended to make a small experiment inspectable, not to convert a successful demo into a broad capability claim. The lightweight evidence path connects three local facts: an immutable run configuration and artifacts, a verified checkpoint, and a held-out validation observation recorded against that checkpoint.
+Model Lab is intended to make a small experiment inspectable, not to convert a successful demo into a broad capability claim. The lightweight evidence path connects three local facts: an immutable run configuration and artifacts, a verified checkpoint, and a held-out validation observation recorded against that checkpoint.
 
 ## Surface workflow
 
 ```sh
-sparselab train --runs-dir sparselab-work/runs configs/smoke_cpu.yaml --run-id evidence-smoke --stop-after-step 4
-sparselab checkpoint verify sparselab-work/runs/evidence-smoke/checkpoints/latest.json --json
-sparselab report --kind run evidence-smoke --json --runs-dir sparselab-work/runs
+klab train --runs-dir klab-work/runs configs/smoke_cpu.yaml --run-id evidence-smoke --stop-after-step 4
+klab checkpoint verify klab-work/runs/evidence-smoke/checkpoints/latest.json --json
+klab report --kind run evidence-smoke --json --runs-dir klab-work/runs
 ```
 
-Both engines evaluate at step 0, every `evaluation.every_steps`, and the terminal boundary. Each evaluation forces a checkpoint and writes an immutable report under `sparselab-work/runs/<id>/evaluations/`. `sparselab report --kind run` verifies the run manifest, run-owned artifacts, every checkpoint generation, and each report's digest, checkpoint binding, counters, finite loss, validation protocol, tokenizer, and evaluation-input identities.
+Both engines evaluate at step 0, every `evaluation.every_steps`, and the terminal boundary. Each evaluation forces a checkpoint and writes an immutable report under `klab-work/runs/<id>/evaluations/`. `klab report --kind run` verifies the run manifest, run-owned artifacts, every checkpoint generation, and each report's digest, checkpoint binding, counters, finite loss, validation protocol, tokenizer, and evaluation-input identities.
 
 Assistant-only evidence counts the retained supervised targets, not every raw
 prompt token. Wholly masked blocks are excluded before the configured batch
@@ -38,7 +38,7 @@ Task evidence is separate: [capability cards](capabilities.md) retain responses 
 
 ## Hardware and numerical-format experiments
 
-A future RISC, ASIC, or MXFP4 accelerator experiment should use SparseLab as a **reference harness**, not as proof from an isolated kernel demo. Freeze a small input/token batch, model weights, expected outputs, and tolerance policy; run the same operation through the PyTorch reference and the candidate path; then retain both artifact identities, output error statistics, and measured throughput/energy conditions. For training-capable hardware, also compare one optimizer update or an explicitly bounded state transition.
+A future RISC, ASIC, or MXFP4 accelerator experiment should use Model Lab as a **reference harness**, not as proof from an isolated kernel demo. Freeze a small input/token batch, model weights, expected outputs, and tolerance policy; run the same operation through the PyTorch reference and the candidate path; then retain both artifact identities, output error statistics, and measured throughput/energy conditions. For training-capable hardware, also compare one optimizer update or an explicitly bounded state transition.
 
 MXFP4 will need its own explicit quantization, rounding, accumulation, overflow, and dequantization contract before such a claim is meaningful. A successful dense FP32 run is useful baseline evidence, but it is not MXFP4 validation. Keep the candidate implementation behind an explicit configuration/backend selection; never silently substitute a reference result for hardware output.
 

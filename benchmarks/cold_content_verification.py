@@ -23,7 +23,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from sparselab.host_capacity import hardware_observation, sha_work_plan
+from klab.host_capacity import hardware_observation, sha_work_plan
 
 MIB = 1024 * 1024
 FIXTURE_BYTES = 64 * MIB

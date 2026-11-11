@@ -8,14 +8,14 @@ import torch
 from test_training import config, equal
 from torch.nn import functional
 
-from sparselab.config.models import AttentionConfig, ModelConfig
-from sparselab.engines.base import (
+from klab.config.models import AttentionConfig, ModelConfig
+from klab.engines.base import (
     EngineNonFiniteError,
     EngineOutOfMemory,
     Microbatch,
 )
-from sparselab.engines.pytorch import PyTorchEngine
-from sparselab.model.transformer import DenseLM
+from klab.engines.pytorch import PyTorchEngine
+from klab.model.transformer import DenseLM
 
 
 def _moe_model() -> DenseLM:

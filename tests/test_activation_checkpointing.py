@@ -6,10 +6,10 @@ import pytest
 import torch
 from torch.nn import functional
 
-from sparselab.config.models import AttentionConfig, ModelConfig
-from sparselab.model.attention.sparse import BlockSparseAttention
-from sparselab.model.moe import TopKMoE
-from sparselab.model.transformer import DenseLM
+from klab.config.models import AttentionConfig, ModelConfig
+from klab.model.attention.sparse import BlockSparseAttention
+from klab.model.moe import TopKMoE
+from klab.model.transformer import DenseLM
 
 
 def _model(

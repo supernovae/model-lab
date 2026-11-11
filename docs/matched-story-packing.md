@@ -32,9 +32,9 @@ This only indexes tokens; it does not train or fetch data:
 ```python
 import json
 import numpy as np
-from sparselab.data.story_packing import MatchedStoryDataset
-from sparselab.data.tokenizer import load_tokenizer
-from sparselab.training.manifest import sha256_file
+from klab.data.story_packing import MatchedStoryDataset
+from klab.data.tokenizer import load_tokenizer
+from klab.training.manifest import sha256_file
 
 tokens_path = prepared_root / "train.npy"  # Path to verified prepared inputs
 ids = np.load(tokens_path, mmap_mode="r")
