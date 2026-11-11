@@ -192,7 +192,7 @@ Always pass `-n 0` for MLX/MPS or run another accelerator test/training process 
 
 The full CPU jobs on Linux and macOS retain their tests, hardware exclusions,
 and existing 30-minute safety limits, but are manual-only while their long
-native integrations are paused as automatic build gates. The automatic `safe`, `lab-loop` and `fast` jobs have 8-, 12- and 12-minute limits; the nightly full suite has 25 minutes. The manual hosted
+native integrations are paused as automatic build gates. The automatic `safe`, `lab-loop` and `fast` jobs have 8-, 18- and 18-minute limits; the nightly full suite has 25 minutes. The manual hosted
 CPU jobs use up to four workers with work-stealing, as local runs do by default.
 
 The [historical CI run 36380519748](https://github.com/supernovae/model-lab/actions/runs/36380519748)
