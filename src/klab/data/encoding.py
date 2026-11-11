@@ -36,8 +36,13 @@ def validate_tokenizer_batch_limits(
     return documents, source_bytes
 
 
-def tokenizer_work_plan(max_workers: int | None):
-    """One shared capacity budget for native tokenization across output shards."""
+def tokenizer_work_plan(max_workers: int | None, *, default_cap: int | None = 4):
+    """One shared capacity budget for native tokenization across output shards.
+
+    An explicit ``max_workers`` is honored up to measured CPU and RAM capacity.
+    Without one, a single child keeps ``default_cap`` threads; ``None`` means the
+    measured host capacity.
+    """
     try:
         total = host_capacity.measure_memory().total
     except OSError, psutil.Error, AttributeError:
@@ -46,7 +51,7 @@ def tokenizer_work_plan(max_workers: int | None):
         "tokenizer_rayon",
         worker_memory_bytes=512 * 1024**2,
         reserve_bytes=max(1024**3, total // 10),
-        operator_cap=4 if max_workers is None else max_workers,
+        operator_cap=default_cap if max_workers is None else max_workers,
     )
 
 
