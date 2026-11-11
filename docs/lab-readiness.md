@@ -120,7 +120,9 @@ Record the actual backend, peak, update times, checkpoint write time, and
 dataset identity. A near-1B run requires its
 own GPU warmup and capacity gate; inspection cannot certify it. A GPU sparse
 campaign also requires native CUDA sparse correctness and component benchmarks
-before treating that path as ready for scaled execution. Multi-device training
+before treating that path as ready for scaled execution. Single-host
+[multi-device replicas](gradient-accumulation.md#several-devices-on-one-host)
+need their own measured throughput on the target devices; multi-host training
 and spot-specific cadence remain separate future work; see the
 [feature roadmap](../ROADMAP.md#longer-term-directions) for direction and tracking ownership.
 

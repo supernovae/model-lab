@@ -170,6 +170,15 @@ def test_runtime_config_secondary_device_indices_validation(tmp_path: Path) -> N
     )
     assert cpu_cfg.secondary_device_indices == (0,)
 
+    with pytest.raises(ValidationError, match="cannot be combined with fp16"):
+        RuntimeConfig(
+            engine="pytorch",
+            backend="cuda",
+            device_index=0,
+            secondary_device_indices=(1,),
+            precision="fp16",
+        )
+
     with pytest.raises(ValidationError, match="must not contain duplicates"):
         RuntimeConfig(
             engine="pytorch",
@@ -378,6 +387,8 @@ def test_pytorch_engine_multi_device_microbatch_parallel_equivalence(
             assert res_single.committed_targets == valid_targets
             assert res_multi.committed_targets == valid_targets
             assert res_single.metrics is not None and res_multi.metrics is not None
+            assert res_multi.metrics["batch/devices_used"] == 2.0
+            assert "batch/devices_used" not in res_single.metrics
 
             for metric_key in (
                 "train/loss",

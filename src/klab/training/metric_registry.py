@@ -200,6 +200,15 @@ METRICS = {
             "trainer",
         ),
         MetricSpec(
+            "batch/devices_used",
+            "devices",
+            "Devices that executed microbatches of the committed update; reported "
+            "only when secondary devices are configured. One means the update ran "
+            "on the primary alone.",
+            "accumulation",
+            "trainer",
+        ),
+        MetricSpec(
             "batch/effective_batch_size",
             "examples",
             "Examples consumed by the committed update window.",
