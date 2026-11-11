@@ -1,0 +1,79 @@
+schema_version: 2
+name: smoke-moe-sparse-latent-cpu
+seed: 42
+model:
+  vocab_size: 512
+  hidden_dim: 32
+  num_layers: 2
+  num_heads: 2
+  ffn_dim: 96
+  max_seq_len: 64
+  ffn: moe
+  num_experts: 3
+  experts_per_token: 2
+  shared_expert: true
+  router_aux_loss_coefficient: 0.01
+tokenizer:
+  path: ../artifacts/tokenizer_smoke/tokenizer.json
+dataset:
+  source: synthetic
+  cache_dir: ../artifacts/data
+  train_max_documents: 1000
+  validation_max_documents: 100
+  train_max_tokens: 32768
+  validation_max_tokens: 8192
+  synthetic_seed: 42
+attention:
+  kind: local_selected
+  block_size: 8
+  window_size: 8
+  selected_blocks: 1
+  latent_dim: 16
+training:
+  seq_len: 32
+  max_steps: 40
+  max_tokens: 5120
+  deterministic: true
+  micro_batch_size: 4
+  gradient_accumulation: 1
+optimizer:
+  warmup_steps: 4
+  weight_decay: 0.1
+  betas:
+  - 0.9
+  - 0.95
+  eps: 1e-8
+  name: adamw
+  peak: 0.003
+  floor: 0.0003
+  state_offload: false
+evaluation:
+  every_steps: 10
+  max_batches: 4
+logging:
+  root_dir: ../runs
+  every_steps: 1
+runtime:
+  engine: pytorch
+  backend: cpu
+  device_index: 0
+  precision: fp32
+  memory:
+    policy: balanced
+    max_device_memory_fraction: 0.9
+    budget_bytes: null
+    activation_checkpointing:
+      enabled: false
+      strategy: transformer_block
+    activation_offload:
+      enabled: false
+    allowed_sequence_lengths: []
+    allowed_optimizers: []
+checkpoint:
+  every_steps: 20
+  every_tokens: null
+  every_minutes: null
+  keep_periodic: true
+staging:
+  smoke_steps: 2
+  warmup_steps: 5

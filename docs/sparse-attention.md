@@ -1,4 +1,56 @@
-# Block Sparse Attention
+# Sparse attention
+
+Lab has two sparse attention kinds. Use `local_selected` for long context and
+for training at scale; `block_sparse` is the per-position reference selector
+with native ROCm and Metal kernels.
+
+## Local plus selected blocks
+
+```yaml
+model:
+  max_seq_len: 32768
+  ffn: moe            # or dense: attention and feed-forward kinds are independent
+attention:
+  kind: local_selected
+  block_size: 64      # tokens per block
+  window_size: 256    # always-visible previous tokens; a multiple of block_size
+  selected_blocks: 8  # further-back blocks chosen per head
+  latent_dim: 128     # optional: MLA latent keys and values
+```
+
+Each query attends to its own block (causally), the `window_size / block_size`
+blocks before it, and `selected_blocks` earlier blocks. Selection is per batch
+element and head, shared by the queries of one block: the block's first query is
+scored against the mean key of every block before the local window, and the top
+blocks are gathered. Because that first query sees no later token, the layer is
+causal at every position. Selection is a top-k choice and carries no gradient of
+its own; the query and key projections it uses are trained through attention.
+
+Cost per layer is `T * (window_size + (selected_blocks + 1) * block_size)` score
+cells plus one gathered copy of the visible keys and values, and
+`(T / block_size)^2` block scores computed in bounded chunks. No `[T, T]` tensor
+and no per-position loop exist. When the local window and selected blocks cover
+every earlier block, the output equals dense attention (or MLA with
+`latent_dim`) with the same weights, which is how the implementation is tested.
+
+Limits today:
+
+- Generation recomputes the active prefix; there is no incremental KV cache yet.
+- Grouped-query heads and the MLX engine are not supported.
+- The selector is a fixed mean-key rule, not a learned indexer, and no quality
+  comparison with dense attention has been run. Treat `selected_blocks` and
+  `window_size` as settings to measure, not as tuned defaults.
+- With training retained for backward, each layer holds its gathered keys and
+  values; enable activation checkpointing for deep models at long context.
+
+`configs/smoke_local_selected_cpu.yaml` and
+`configs/smoke_moe_sparse_latent_cpu.yaml` are CPU smokes.
+`configs/long_context_32k_moe_sparse_latent.yaml` trains a small MoE model with
+latent keys and values at 32,768 tokens of context on CPU. On a 24-core
+workstation its eight single-threaded updates took about 22 s each with an
+11.1 GiB peak, against an 11.9 GiB estimate from `klab inspect`.
+
+## Block-sparse reference
 
 `attention.kind: block_sparse` is a causal selector. It groups only already-available keys into fixed-size blocks, scores compressed mean-key representations against each query, and selects the highest-scoring blocks. The PyTorch reference gathers original K/V tokens; native HIP attends to selected tokens directly. Neither path forms a dense `[B, H, T, T]` score matrix.
 

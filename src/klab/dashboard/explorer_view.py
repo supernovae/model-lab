@@ -19,6 +19,8 @@ ATTENTION_KIND = {
     "dense": "dense attention",
     "mla": "latent (MLA) attention",
     "block_sparse": "block-sparse attention",
+    "sliding_window": "sliding-window attention",
+    "local_selected": "local + selected-block attention",
 }
 
 ACTIVATION_SITE_LABEL = {

@@ -38,6 +38,8 @@ class DenseAttention(nn.Module):
             )
         if implementation == "sdpa" and self.num_kv_heads != self.num_heads:
             raise ValueError("SDPA requires equal Q/KV head counts")
+        if window_size is not None and window_size <= 0:
+            raise ValueError("window_size must be positive")
         self.implementation = implementation
         self.max_seq_len = max_seq_len
         self.head_dim = hidden_dim // num_heads
@@ -48,13 +50,6 @@ class DenseAttention(nn.Module):
         self.v_proj = nn.Linear(hidden_dim, kv_dim, bias=False)
         self.out_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.rope = RoPE(self.head_dim, rope_base)
-        causal_mask = torch.empty(0, dtype=torch.bool)
-        if implementation != "sdpa":
-            causal_mask = torch.ones(max_seq_len, max_seq_len, dtype=torch.bool).triu(1)
-            if window_size is not None:
-                positions = torch.arange(max_seq_len)
-                causal_mask |= positions[:, None] - positions[None, :] >= window_size
-        self.register_buffer("causal_mask", causal_mask, persistent=False)
 
     def _heads(self, projection: nn.Linear, x: Tensor, heads: int) -> Tensor:
         batch, length, _ = x.shape
@@ -84,7 +79,9 @@ class DenseAttention(nn.Module):
             self.rope(self._heads(self.k_proj, x, self.num_kv_heads)),
             self._heads(self.v_proj, x, self.num_kv_heads),
         )
-        if self.implementation == "sdpa":
+        if self.window_size is not None and length > self.window_size:
+            output = self._windowed(query, key, value)
+        elif self.implementation == "sdpa":
             output = functional.scaled_dot_product_attention(
                 query, key, value, dropout_p=0.0, is_causal=True
             )
@@ -95,17 +92,69 @@ class DenseAttention(nn.Module):
             output.transpose(1, 2).contiguous().view(batch, length, hidden)
         )
 
-    def _probabilities(self, query: Tensor, key: Tensor, length: int) -> Tensor:
-        """Masked softmax attention weights (fp32), as the reference path uses."""
-        scores = self._attention(query, key)
-        mask = (
-            self.causal_mask[:length, :length]
-            if self.causal_mask.numel()
-            else torch.ones(length, length, dtype=torch.bool, device=query.device).triu(
-                1
+    def blocked_mask(self, length: int, device: torch.device | None = None) -> Tensor:
+        """``[query, key]`` mask, true where attention is not allowed.
+
+        Built on demand: no ``[max_seq_len, max_seq_len]`` buffer is kept, so the
+        configured context does not cost memory until a sequence that long runs.
+        """
+        positions = torch.arange(length, device=device)
+        distance = positions[:, None] - positions[None, :]
+        blocked = distance < 0
+        if self.window_size is not None:
+            blocked |= distance >= self.window_size
+        return blocked
+
+    def _masked_attention(
+        self, query: Tensor, key: Tensor, value: Tensor, allowed: Tensor
+    ) -> Tensor:
+        """Attend ``query`` to ``key``/``value`` where ``allowed[query, key]``."""
+        if self.implementation == "sdpa":
+            return functional.scaled_dot_product_attention(
+                query,
+                key,
+                value,
+                attn_mask=allowed[None, None],
+                dropout_p=0.0,
+                is_causal=False,
             )
-        )
-        scores.masked_fill_(mask, float("-inf"))
+        scores = self._attention(query, key)
+        scores.masked_fill_(~allowed, float("-inf"))
+        probabilities = torch.softmax(scores.float(), dim=-1).to(value.dtype)
+        return self._attend_values(probabilities, value)
+
+    def _windowed(self, query: Tensor, key: Tensor, value: Tensor) -> Tensor:
+        """Sliding-window attention in window-sized query chunks.
+
+        Each chunk scores only the keys its queries can see, at most
+        ``2 * window_size - 1`` of them, so work and memory grow with
+        ``length * window_size`` instead of ``length ** 2``. The weights are the
+        ones a full masked score matrix would give.
+        """
+        window = self.window_size
+        assert window is not None
+        length = query.shape[2]
+        outputs = []
+        for start in range(0, length, window):
+            stop = min(start + window, length)
+            low = max(0, start - window + 1)
+            query_positions = torch.arange(start, stop, device=query.device)
+            key_positions = torch.arange(low, stop, device=query.device)
+            distance = query_positions[:, None] - key_positions[None, :]
+            outputs.append(
+                self._masked_attention(
+                    query[:, :, start:stop],
+                    key[:, :, low:stop],
+                    value[:, :, low:stop],
+                    (distance >= 0) & (distance < window),
+                )
+            )
+        return torch.cat(outputs, dim=2)
+
+    def _probabilities(self, query: Tensor, key: Tensor, length: int) -> Tensor:
+        """Masked softmax attention weights (fp32) over the full prefix."""
+        scores = self._attention(query, key)
+        scores.masked_fill_(self.blocked_mask(length, query.device), float("-inf"))
         return torch.softmax(scores.float(), dim=-1)
 
     @torch.no_grad()
@@ -144,7 +193,6 @@ class DenseAttention(nn.Module):
         """Evaluate appended tokens using bounded request-local projected K/V."""
         batch, length, hidden = x.shape
         offset = cache.position
-        prior_length = cache.length
         if offset + length > self.max_seq_len:
             raise ValueError("sequence length exceeds configured attention context")
         query = self.rope(
@@ -155,31 +203,26 @@ class DenseAttention(nn.Module):
         )
         value = self._heads(self.v_proj, x, self.num_kv_heads)
         cache.append(key, value, position=offset + length)
-        keys = cache.key[:, :, : cache.length]
-        values = cache.value[:, :, : cache.length]
+        # A window never reaches further back than its size, so only that tail
+        # of the stored keys is read: decode cost follows the window, not the
+        # whole cached prefix.
+        visible = (
+            cache.length
+            if self.window_size is None
+            else min(cache.length, self.window_size - 1 + length)
+        )
+        keys = cache.key[:, :, cache.length - visible : cache.length]
+        values = cache.value[:, :, cache.length - visible : cache.length]
         query_positions = torch.arange(offset, offset + length, device=x.device)
         key_positions = torch.arange(
-            offset - prior_length, offset + length, device=x.device
+            offset + length - visible, offset + length, device=x.device
         )
         allowed = key_positions[None, :] <= query_positions[:, None]
         if self.window_size is not None:
             allowed &= (
                 key_positions[None, :] > query_positions[:, None] - self.window_size
             )
-        if self.implementation == "sdpa":
-            output = functional.scaled_dot_product_attention(
-                query,
-                keys,
-                values,
-                attn_mask=allowed[None, None],
-                dropout_p=0.0,
-                is_causal=False,
-            )
-        else:
-            scores = self._attention(query, keys)
-            scores.masked_fill_(~allowed[None, None], float("-inf"))
-            probabilities = torch.softmax(scores.float(), dim=-1).to(values.dtype)
-            output = self._attend_values(probabilities, values)
+        output = self._masked_attention(query, keys, values, allowed)
         return (
             self.out_proj(
                 output.transpose(1, 2).contiguous().view(batch, length, hidden)

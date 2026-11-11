@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import math
+from typing import Literal
 
 import torch
 from torch import Tensor, nn
+from torch.nn import functional
 
 from klab.model.cache import AttentionKVCache
 from klab.model.rope import RoPE
@@ -19,8 +21,11 @@ class LatentAttention(nn.Module):
         latent_dim: int,
         max_seq_len: int,
         rope_base: float,
+        *,
+        implementation: Literal["reference", "sdpa"] = "reference",
     ) -> None:
         super().__init__()
+        self.implementation = implementation
         if latent_dim % num_heads:
             raise ValueError("latent_dim must be divisible by num_heads")
         self.num_heads = num_heads
@@ -31,11 +36,7 @@ class LatentAttention(nn.Module):
         self.k_up = nn.Linear(latent_dim, hidden_dim, bias=False)
         self.out_proj = nn.Linear(latent_dim, hidden_dim, bias=False)
         self.rope = RoPE(self.head_dim, rope_base)
-        self.register_buffer(
-            "causal_mask",
-            torch.ones(max_seq_len, max_seq_len, dtype=torch.bool).triu(1),
-            persistent=False,
-        )
+        self.max_seq_len = max_seq_len
 
     def _project(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         batch, length, _ = x.shape
@@ -47,13 +48,24 @@ class LatentAttention(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         batch, length, _ = x.shape
-        if length > self.causal_mask.shape[0]:
+        if length > self.max_seq_len:
             raise ValueError("sequence length exceeds configured attention context")
         query, key, value = self._project(x)
         query, key = self.rope(query), self.rope(key)
-        scores = query @ key.transpose(-2, -1) / math.sqrt(self.head_dim)
-        scores.masked_fill_(self.causal_mask[:length, :length], float("-inf"))
-        output = torch.softmax(scores.float(), dim=-1).to(value.dtype) @ value
+        if self.implementation == "sdpa":
+            # No [T, T] weights are materialized; the latent values may be
+            # narrower than the keys.
+            output = functional.scaled_dot_product_attention(
+                query, key, value, dropout_p=0.0, is_causal=True
+            )
+        else:
+            scores = query @ key.transpose(-2, -1) / math.sqrt(self.head_dim)
+            # Built per call: no [max_seq_len, max_seq_len] buffer is kept.
+            scores.masked_fill_(
+                torch.ones(length, length, dtype=torch.bool, device=x.device).triu(1),
+                float("-inf"),
+            )
+            output = torch.softmax(scores.float(), dim=-1).to(value.dtype) @ value
         return self.out_proj(output.transpose(1, 2).reshape(batch, length, -1))
 
     def create_cache(
@@ -94,12 +106,15 @@ class LatentAttention(nn.Module):
             offset - prior_length, offset + length, device=x.device
         )
         query_positions = torch.arange(offset, offset + length, device=x.device)
-        scores = query @ keys.transpose(-2, -1) / math.sqrt(self.head_dim)
-        scores.masked_fill_(
-            ~(key_positions[None, :] <= query_positions[:, None])[None, None],
-            float("-inf"),
-        )
-        output = torch.softmax(scores.float(), dim=-1).to(values.dtype) @ values
+        allowed = key_positions[None, :] <= query_positions[:, None]
+        if self.implementation == "sdpa":
+            output = functional.scaled_dot_product_attention(
+                query, keys, values, attn_mask=allowed[None, None], dropout_p=0.0
+            )
+        else:
+            scores = query @ keys.transpose(-2, -1) / math.sqrt(self.head_dim)
+            scores.masked_fill_(~allowed[None, None], float("-inf"))
+            output = torch.softmax(scores.float(), dim=-1).to(values.dtype) @ values
         return (
             self.out_proj(output.transpose(1, 2).reshape(batch, length, -1)),
             cache,

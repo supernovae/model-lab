@@ -26,6 +26,7 @@ With no filter, the versioned matrix is:
 | Dense | `smoke_cpu.yaml` | CPU/PyTorch FP32 |
 | MoE | `smoke_moe_cpu.yaml` | CPU/PyTorch FP32 |
 | Block sparse | `smoke_sparse_cpu.yaml` | CPU/PyTorch FP32 reference |
+| Local + selected blocks | `smoke_local_selected_cpu.yaml` | CPU/PyTorch FP32 |
 | Sliding window | `smoke_sliding_cpu.yaml` | CPU/PyTorch FP32 |
 | MLA | `smoke_mla_cpu.yaml` | CPU/PyTorch FP32 reference |
 | Token Engram | `smoke_memory_cpu.yaml` | CPU/PyTorch FP32 |

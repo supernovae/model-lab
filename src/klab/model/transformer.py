@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from typing import Literal
 
@@ -18,6 +18,7 @@ from klab.engram.semantic import (
 )
 from klab.model.attention.dense import DenseAttention
 from klab.model.attention.latent import LatentAttention
+from klab.model.attention.local_selected import LocalSelectedAttention
 from klab.model.attention.sparse import BlockSparseAttention
 from klab.model.cache import (
     AttentionKVCache,
@@ -41,46 +42,93 @@ from klab.model.portable_engram import PortableEngramAdapter, load_portable_engr
 SemanticQueryInput = SemanticQueryBatch | Mapping[str, SemanticQueryBatch] | None
 
 
+AttentionBuilder = Callable[[ModelConfig, AttentionConfig], nn.Module]
+
+
+def _dense_attention(model: ModelConfig, attention: AttentionConfig) -> nn.Module:
+    return DenseAttention(
+        model.hidden_dim,
+        model.num_heads,
+        model.max_seq_len,
+        attention.rope_base,
+        attention.window_size,
+        model.num_kv_heads,
+        implementation=attention.implementation,
+    )
+
+
+def _latent_attention(model: ModelConfig, attention: AttentionConfig) -> nn.Module:
+    return LatentAttention(
+        model.hidden_dim,
+        model.num_heads,
+        attention.latent_dim,
+        model.max_seq_len,
+        attention.rope_base,
+        implementation=attention.implementation,
+    )
+
+
+def _block_sparse_attention(
+    model: ModelConfig, attention: AttentionConfig
+) -> nn.Module:
+    return BlockSparseAttention(
+        model.hidden_dim,
+        model.num_heads,
+        model.max_seq_len,
+        attention.rope_base,
+        attention.block_size,
+        attention.selected_blocks,
+    )
+
+
+def _local_selected_attention(
+    model: ModelConfig, attention: AttentionConfig
+) -> nn.Module:
+    return LocalSelectedAttention(
+        model.hidden_dim,
+        model.num_heads,
+        model.max_seq_len,
+        attention.rope_base,
+        attention.block_size,
+        attention.window_size,
+        attention.selected_blocks,
+        attention.latent_dim,
+    )
+
+
+# One builder per attention kind. A decoder block pairs whichever attention this
+# returns with either feed-forward kind (dense SwiGLU or routed MoE), so a new
+# attention needs a module and an entry here, not changes to the block.
+ATTENTION_BUILDERS: dict[str, AttentionBuilder] = {
+    "dense": _dense_attention,
+    "sliding_window": _dense_attention,
+    "mla": _latent_attention,
+    "block_sparse": _block_sparse_attention,
+    "local_selected": _local_selected_attention,
+}
+
+
+def build_attention(model: ModelConfig, attention: AttentionConfig) -> nn.Module:
+    try:
+        builder = ATTENTION_BUILDERS[attention.kind]
+    except KeyError:
+        raise ValueError(f"unknown attention kind: {attention.kind}") from None
+    return builder(model, attention)
+
+
 class DecoderBlock(nn.Module):
     def __init__(self, model: ModelConfig, attention: AttentionConfig) -> None:
         super().__init__()
         if (
             model.num_kv_heads is not None
             and model.num_kv_heads != model.num_heads
-            and attention.kind in {"mla", "block_sparse"}
+            and attention.kind in {"mla", "block_sparse", "local_selected"}
         ):
             raise ValueError(
                 "grouped-query attention is supported only for dense or sliding_window attention"
             )
         self.norm1 = RMSNorm(model.hidden_dim, model.rms_norm_eps)
-        self.attention: nn.Module = (
-            LatentAttention(
-                model.hidden_dim,
-                model.num_heads,
-                attention.latent_dim,
-                model.max_seq_len,
-                attention.rope_base,
-            )
-            if attention.kind == "mla"
-            else BlockSparseAttention(
-                model.hidden_dim,
-                model.num_heads,
-                model.max_seq_len,
-                attention.rope_base,
-                attention.block_size,
-                attention.selected_blocks,
-            )
-            if attention.kind == "block_sparse"
-            else DenseAttention(
-                model.hidden_dim,
-                model.num_heads,
-                model.max_seq_len,
-                attention.rope_base,
-                attention.window_size,
-                model.num_kv_heads,
-                implementation=attention.implementation,
-            )
-        )
+        self.attention: nn.Module = build_attention(model, attention)
         self.norm2 = RMSNorm(model.hidden_dim, model.rms_norm_eps)
         self.ffn: nn.Module = (
             SwiGLU(model.hidden_dim, model.ffn_dim)
@@ -613,6 +661,14 @@ class DenseLM(nn.Module):
                 False,
                 "block_sparse selection is prefix-dependent; generation recomputes "
                 "the active prefix for exact reference semantics",
+            )
+        if any(
+            isinstance(block.attention, LocalSelectedAttention) for block in self.blocks
+        ):
+            return IncrementalCacheCapability(
+                False,
+                "local_selected attention has no incremental cache yet; generation "
+                "recomputes the active prefix",
             )
         mode = (
             "mla"

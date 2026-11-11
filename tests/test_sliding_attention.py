@@ -17,4 +17,5 @@ def test_sliding_window_mask_excludes_distant_past_and_future() -> None:
             [True, True, True, False, False, False],
         ]
     )
-    assert torch.equal(attention.causal_mask, expected)
+    assert torch.equal(attention.blocked_mask(6), expected)
+    assert "causal_mask" not in dict(attention.named_buffers())

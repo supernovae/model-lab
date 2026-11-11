@@ -876,6 +876,11 @@ def _cache_layout(config: Any) -> dict[str, object]:
             "status": "unsupported",
             "reason": "block-sparse reference attention does not expose incremental KV caching",
         }
+    if kind == "local_selected":
+        return {
+            "status": "unsupported",
+            "reason": "local_selected attention does not expose incremental KV caching yet",
+        }
     heads = config.model.num_heads
     head_dim = config.model.hidden_dim // heads
     value_dim = config.attention.latent_dim // heads if kind == "mla" else head_dim
