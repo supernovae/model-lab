@@ -56,7 +56,7 @@ Unavailable readings are omitted with explanatory events, not written as zero. E
 | `runtime_forecast.planning` | Optimizer-only estimate from the most recent exact-compatible historical observations; missing matches produce unavailable fields, not a theoretical time. |
 | `runtime_forecast.warmup_calibrated` | Separate estimate from measured disposable pilot updates; it is used only when the pilot and run signatures match. |
 | `runtime_forecast.live.optimizer_only_eta` | Raw low/high seconds and status for remaining optimizer work, based on completed supervised targets and robust recent/long windows. It excludes future non-optimizer phases. |
-| `runtime_final_observation.phases.*` | Actual seconds, availability, and observation count for preparation, planning, optimizer updates, validation, checkpointing, and reporting. Attempts are separate; evaluation and generation are `not_observed` unless measured by their own operation. |
+| `runtime_final_observation.phases.*` | Actual seconds, availability, and observation count for preparation, planning, batch assembly (host-side selection and stacking of each update's blocks, while the device waits), optimizer updates, validation, checkpointing, and reporting. Attempts are separate; evaluation and generation are `not_observed` unless measured by their own operation. |
 | `runtime_final_observation.end_to_end_seconds` | Observed whole-run wall time. `unclassified_overhead` is the residual after measured phase components, not an independently timed phase. |
 | `runtime_progress_snapshots` | One replaceable latest operational snapshot per run, outside the controller replication outbox. `runtime status` reads it and the separate final-observation event without modifying the database. |
 

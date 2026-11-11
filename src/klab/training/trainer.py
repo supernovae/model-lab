@@ -1952,6 +1952,7 @@ def _train_impl(
             observed_components = (
                 "preparation",
                 "planning",
+                "batch_assembly",
                 "optimizer_update",
                 "validation",
                 "checkpoint",
@@ -2242,6 +2243,7 @@ def _train_impl(
                     )
                     finish_run("interrupted", reason)
                     return run_id
+                assembly_started = time.perf_counter()
                 remaining = config.training.max_tokens - tokens
                 if isinstance(dataset, MatchedStoryDataset):
                     epoch, group = cursor.epoch, cursor.next_block
@@ -2377,6 +2379,7 @@ def _train_impl(
                         max_padded_slots=config.training.matched_stories.max_padded_slots,
                         max_attention_cells=config.training.matched_stories.max_attention_cells,
                     )
+                add_phase_time("batch_assembly", assembly_started)
                 retry_seconds = 0.0
                 emit_pilot_progress(
                     "start",
