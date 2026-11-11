@@ -389,6 +389,19 @@ def test_pytorch_engine_multi_device_microbatch_parallel_equivalence(
             assert res_single.metrics is not None and res_multi.metrics is not None
             assert res_multi.metrics["batch/devices_used"] == 2.0
             assert "batch/devices_used" not in res_single.metrics
+            # Per-device timings appear only when replicas ran, and are sane.
+            for name in (
+                "performance/primary_compute_seconds",
+                "performance/replica_compute_seconds",
+                "performance/device_wait_seconds",
+                "performance/gradient_merge_seconds",
+            ):
+                assert res_multi.metrics[name] >= 0.0
+                assert name not in res_single.metrics
+            assert (
+                res_multi.metrics["performance/primary_compute_seconds"]
+                <= res_multi.metrics["performance/step_seconds"]
+            )
 
             for metric_key in (
                 "train/loss",
@@ -684,3 +697,76 @@ def test_discover_runtimes_enumerates_multi_xpu_indices_and_physical_uuids(
         "passive memory readings for this device index are unavailable"
         not in inspected1.limitations
     )
+
+
+def test_gradient_reduction_applies_replica_pushes_in_replica_order() -> None:
+    import threading
+
+    from klab.engines.multi_device import GradientReduction, SecondaryReplica
+
+    def replica(scale: float) -> SecondaryReplica:
+        model = torch.nn.Linear(3, 2)
+        for parameter in model.parameters():
+            parameter.grad = torch.full_like(parameter, scale)
+        return SecondaryReplica(device=torch.device("cpu"), model=model)
+
+    primary = torch.nn.Linear(3, 2)
+    primary.weight.grad = torch.ones_like(primary.weight)
+    parameters = list(primary.parameters())
+    reduction = GradientReduction(parameters, torch.device("cpu"), pushes=2)
+    first, second = replica(2.0), replica(4.0)
+
+    # The later replica finishes first but must wait for its turn.
+    late = threading.Thread(target=reduction.push, args=(1, second))
+    late.start()
+    late.join(timeout=0.2)
+    assert late.is_alive()
+    assert all(collected is None for collected in reduction.collected)
+    reduction.push(0, first)
+    late.join(timeout=10)
+    assert not late.is_alive()
+
+    reduction.merge()
+    # Weight had its own gradient; bias had none and takes the collected sum.
+    assert torch.equal(primary.weight.grad, torch.full_like(primary.weight, 7.0))
+    assert torch.equal(primary.bias.grad, torch.full_like(primary.bias, 6.0))
+    assert first.model.weight.grad is None and second.model.weight.grad is None
+
+
+def test_failed_replica_slice_surfaces_without_blocking_other_replicas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from klab.engines import multi_device
+
+    replicas = [
+        multi_device.SecondaryReplica(
+            device=torch.device("cpu"), model=torch.nn.Linear(2, 2)
+        )
+        for _ in range(2)
+    ]
+    primary = torch.nn.Linear(2, 2)
+
+    def failing(replica, config, pairs, valid_targets, loss, **options):
+        if replica is replicas[0]:
+            raise RuntimeError("replica slice failed")
+        options["reduction"].push(options["turn"], replica)
+        return {"compute_seconds": 0.0, "finished_at": 0.0}
+
+    monkeypatch.setattr(multi_device, "execute_replica_microbatches", failing)
+    with (
+        ThreadPoolExecutor(max_workers=2) as executor,
+        pytest.raises(RuntimeError, match="replica slice failed"),
+    ):
+        multi_device.dispatch_replicas_and_primary(
+            replicas=replicas,
+            config=None,
+            active_pairs=[("a", 1), ("b", 1), ("c", 1)],
+            valid_targets=3,
+            output_head_loss_fn=None,
+            primary_fn=lambda pairs: None,
+            primary_params=list(primary.parameters()),
+            primary_device=torch.device("cpu"),
+            executor=executor,
+        )

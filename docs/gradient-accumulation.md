@@ -46,6 +46,28 @@ training:
   gradient_accumulation: 16   # at least two microbatches per update are needed
 ```
 
+Every device runs its share of the update on its own host thread, with compiled
+or eager kernels alike. A replica's thread copies the updated weights before its
+share and moves its gradients to the primary after it, so that exchange overlaps
+with the primary's compute; gradients are added in replica order, so the sum is
+the same on every run.
+
+Each update that used replicas reports where its time went:
+
+| Metric | Meaning |
+|---|---|
+| `performance/primary_compute_seconds` | The primary's forward and backward time for its share |
+| `performance/replica_compute_seconds` | The slowest replica's time, including its weight copy |
+| `performance/device_wait_seconds` | Time finished devices waited for the slowest, summed over devices |
+| `performance/gradient_merge_seconds` | Adding the collected gradients on the primary |
+
+A persistent `device_wait_seconds` means the devices are not equally fast or the
+microbatches are not equally costly. Clipping, the optimizer step and reporting
+are fixed costs per update, so give each device a share that is long compared
+with them: with more devices, raise `gradient_accumulation` rather than letting
+updates shrink. See the [two-B70 measurements](../benchmarks/multi_device_b70.md)
+and use `benchmarks/device_busy.py` to see device idle time directly.
+
 An update with a single microbatch (for example `gradient_accumulation: 1` or a
 short final window) runs on the primary alone. `batch/devices_used` records how
 many devices executed each committed update, so idle secondaries are visible in

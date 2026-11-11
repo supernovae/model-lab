@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 import torch
-from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from torch.nn import functional
 
 from klab.config.models import RunConfig
@@ -26,6 +27,9 @@ class SecondaryReplica:
     model: DenseLM
     compiled_output_head_loss: Any = None
     trainable_params: tuple[torch.nn.Parameter, ...] = field(default=())
+    # True until the replica copies the primary's parameters at the start of a
+    # slice; set again after every applied optimizer step or state restore.
+    stale: bool = True
 
     def __post_init__(self) -> None:
         if not self.trainable_params:
@@ -34,56 +38,76 @@ class SecondaryReplica:
             )
 
 
-def sync_replicas_weights(
-    primary_params: list[torch.nn.Parameter] | tuple[torch.nn.Parameter, ...],
-    replicas: list[SecondaryReplica],
-) -> None:
-    """Broadcast trainable parameters to all replicas using one flat copy per replica."""
-    if not primary_params or not replicas:
-        return
-    with torch.no_grad():
-        flat_primary = _flatten_dense_tensors([p.detach() for p in primary_params])
-        for replica in replicas:
-            flat_replica = flat_primary.to(replica.device, non_blocking=True)
-            for rep_param, unflattened in zip(
-                replica.trainable_params,
-                _unflatten_dense_tensors(flat_replica, replica.trainable_params),
-                strict=True,
-            ):
-                rep_param.copy_(unflattened, non_blocking=True)
-
-
-def reduce_replica_gradients(
+def pull_replica_weights(
     primary_params: list[torch.nn.Parameter] | tuple[torch.nn.Parameter, ...],
     replica: SecondaryReplica,
-    primary_device: torch.device,
 ) -> None:
-    """Reduce a replica's gradients onto the primary device in a single flat transfer."""
-    if (
-        not primary_params
-        or not replica.trainable_params
-        or all(p.grad is None for p in replica.trainable_params)
-    ):
-        return
-    rep_grads = [
-        p.grad.detach()
-        if p.grad is not None
-        else torch.zeros_like(p, memory_format=torch.preserve_format)
-        for p in replica.trainable_params
-    ]
+    """Copy the primary's trainable parameters onto one replica, tensor by tensor.
+
+    Called from the replica's own thread at the start of its slice, so the copy
+    overlaps with the primary's compute instead of delaying it.
+    """
     with torch.no_grad():
-        flat_rep_grads = _flatten_dense_tensors(rep_grads)
-        flat_on_primary = flat_rep_grads.to(primary_device, non_blocking=True)
-        for primary_param, grad_slice in zip(
-            primary_params,
-            _unflatten_dense_tensors(flat_on_primary, primary_params),
-            strict=True,
+        for replica_param, primary_param in zip(
+            replica.trainable_params, primary_params, strict=True
         ):
-            if primary_param.grad is None:
-                primary_param.grad = grad_slice.clone()
-            else:
-                primary_param.grad.add_(grad_slice)
-    replica.model.zero_grad(set_to_none=True)
+            replica_param.copy_(primary_param, non_blocking=True)
+    replica.stale = False
+
+
+class GradientReduction:
+    """Collect replica gradients on the primary device while it is still computing.
+
+    Each replica thread pushes its gradients when its slice ends. Pushes are
+    applied in replica order so the sum is the same on every run, and the first
+    push hands over its transferred tensors, so the primary holds at most one
+    extra copy of the gradients. ``merge`` adds the collected sum to the
+    primary's own gradients once its slice has finished.
+    """
+
+    def __init__(
+        self,
+        primary_params: list[torch.nn.Parameter] | tuple[torch.nn.Parameter, ...],
+        primary_device: torch.device,
+        pushes: int,
+    ) -> None:
+        self.primary_params = primary_params
+        self.primary_device = primary_device
+        self.collected: list[torch.Tensor | None] = [None] * len(primary_params)
+        self.turns = [threading.Event() for _ in range(pushes)]
+
+    def push(self, turn: int, replica: SecondaryReplica) -> None:
+        try:
+            if turn:
+                self.turns[turn - 1].wait()
+            with torch.no_grad():
+                for index, parameter in enumerate(replica.trainable_params):
+                    if parameter.grad is None:
+                        continue
+                    moved = parameter.grad.detach().to(
+                        self.primary_device, non_blocking=True
+                    )
+                    held = self.collected[index]
+                    if held is None:
+                        self.collected[index] = moved
+                    else:
+                        held.add_(moved)
+            replica.model.zero_grad(set_to_none=True)
+        finally:
+            self.turns[turn].set()
+
+    def merge(self) -> None:
+        with torch.no_grad():
+            for parameter, collected in zip(
+                self.primary_params, self.collected, strict=True
+            ):
+                if collected is None:
+                    continue
+                if parameter.grad is None:
+                    parameter.grad = collected
+                else:
+                    parameter.grad.add_(collected)
+        self.collected = [None] * len(self.primary_params)
 
 
 def microbatch_position_mask(
@@ -139,12 +163,17 @@ def execute_replica_microbatches(
     valid_targets: int,
     output_head_loss_fn: Any,
     *,
-    sync_device: bool = True,
+    primary_params: list[torch.nn.Parameter] | tuple[torch.nn.Parameter, ...],
+    reduction: GradientReduction,
+    turn: int,
 ) -> dict[str, Any]:
-    """Execute forward and backward on a replica's microbatch slice."""
+    """Run one replica's slice: pull weights, forward/backward, push gradients."""
+    started = time.perf_counter()
     device = replica.device
     model = replica.model
     model.zero_grad(set_to_none=True)
+    if replica.stale:
+        pull_replica_weights(primary_params, replica)
     language_sum = torch.zeros((), device=device)
     aux_sum = torch.zeros((), device=device)
     diagnostic_sums: dict[str, torch.Tensor] = {}
@@ -214,9 +243,12 @@ def execute_replica_microbatches(
             position_count,
         )
 
-    if sync_device:
-        synchronize(device)
+    synchronize(device)
+    computed = time.perf_counter()
+    reduction.push(turn, replica)
     return {
+        "compute_seconds": computed - started,
+        "finished_at": computed,
         "language_sum": language_sum,
         "aux_sum": aux_sum,
         "losses_finite": losses_finite,
@@ -227,6 +259,32 @@ def execute_replica_microbatches(
     }
 
 
+def _replica_slice(
+    replica: SecondaryReplica,
+    config: RunConfig,
+    pairs: list[tuple[Microbatch, int]],
+    valid_targets: int,
+    output_head_loss_fn: Any,
+    primary_params: list[torch.nn.Parameter] | tuple[torch.nn.Parameter, ...],
+    reduction: GradientReduction,
+    turn: int,
+) -> dict[str, Any]:
+    try:
+        return execute_replica_microbatches(
+            replica,
+            config,
+            pairs,
+            valid_targets,
+            output_head_loss_fn,
+            primary_params=primary_params,
+            reduction=reduction,
+            turn=turn,
+        )
+    finally:
+        # A failed slice must not leave later replicas waiting for its turn.
+        reduction.turns[turn].set()
+
+
 def dispatch_replicas_and_primary(
     *,
     replicas: list[SecondaryReplica],
@@ -235,9 +293,23 @@ def dispatch_replicas_and_primary(
     valid_targets: int,
     output_head_loss_fn: Any,
     primary_fn: Any,
-    executor: ThreadPoolExecutor | None = None,
-) -> tuple[Any, list[dict[str, Any]]]:
-    """Launch replica slices before the primary slice, overlapping on eager runtimes."""
+    primary_params: list[torch.nn.Parameter] | tuple[torch.nn.Parameter, ...],
+    primary_device: torch.device,
+    executor: ThreadPoolExecutor,
+) -> tuple[Any, list[dict[str, Any]], dict[str, float]]:
+    """Run each replica's slice on its own thread while the caller runs the primary's.
+
+    Compiled and eager kernels are dispatched the same way. A backward pass can
+    block its host thread (embedding backward on XPU reads a count back per
+    microbatch), so slices issued in turn from one thread run one device at a
+    time; a thread per device keeps every device busy. Compilation itself is
+    serialized by TorchDynamo's own lock.
+
+    Each replica thread also copies the updated weights before its slice and
+    moves its gradients to the primary after it, so that exchange overlaps with
+    the primary's compute. The returned timings say how long each side computed
+    and how long finished replicas waited for the primary.
+    """
     world_size = 1 + len(replicas)
     primary_pairs = active_pairs[0::world_size]
     replica_tasks: list[tuple[SecondaryReplica, list[tuple[Microbatch, int]]]] = []
@@ -245,44 +317,44 @@ def dispatch_replicas_and_primary(
         rep_pairs = active_pairs[rep_idx + 1 :: world_size]
         if rep_pairs:
             replica_tasks.append((replica, rep_pairs))
-
-    compiled = (
-        config.runtime.compile_transformer_blocks
-        or config.runtime.compile_output_head_loss
-    )
-    if executor is not None and replica_tasks and not compiled:
-        futures = [
-            executor.submit(
-                execute_replica_microbatches,
-                replica,
-                config,
-                rep_pairs,
-                valid_targets,
-                output_head_loss_fn,
-                sync_device=False,
-            )
-            for replica, rep_pairs in replica_tasks
-        ]
-        primary_out = primary_fn(primary_pairs)
-        replica_outs = [fut.result() for fut in futures]
-        for replica, _ in replica_tasks:
-            synchronize(replica.device)
-        return primary_out, replica_outs
-
-    # When torch.compile is active, dispatch replica kernels before primary kernels
-    # and synchronize once after all devices have been queued.
-    replica_outs = [
-        execute_replica_microbatches(
+    reduction = GradientReduction(primary_params, primary_device, len(replica_tasks))
+    started = time.perf_counter()
+    futures = [
+        executor.submit(
+            _replica_slice,
             replica,
             config,
             rep_pairs,
             valid_targets,
             output_head_loss_fn,
-            sync_device=False,
+            primary_params,
+            reduction,
+            turn,
         )
-        for replica, rep_pairs in replica_tasks
+        for turn, (replica, rep_pairs) in enumerate(replica_tasks)
     ]
-    primary_out = primary_fn(primary_pairs)
-    for replica, _ in replica_tasks:
-        synchronize(replica.device)
-    return primary_out, replica_outs
+    try:
+        primary_out = primary_fn(primary_pairs)
+        synchronize(primary_device)
+    finally:
+        primary_finished = time.perf_counter()
+        replica_outs = [future.result() for future in futures]
+    reduction.merge()
+    synchronize(primary_device)
+    finished = time.perf_counter()
+    all_computed = max(
+        [primary_finished, *(out["finished_at"] for out in replica_outs)]
+    )
+    timings = {
+        "performance/primary_compute_seconds": primary_finished - started,
+        "performance/replica_compute_seconds": max(
+            (out["compute_seconds"] for out in replica_outs), default=0.0
+        ),
+        # Time finished devices spent waiting for the slowest one, summed.
+        "performance/device_wait_seconds": sum(
+            all_computed - out["finished_at"] for out in replica_outs
+        )
+        + (all_computed - primary_finished),
+        "performance/gradient_merge_seconds": finished - all_computed,
+    }
+    return primary_out, replica_outs, timings

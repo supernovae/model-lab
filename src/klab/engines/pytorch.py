@@ -46,8 +46,6 @@ from klab.engines.multi_device import (
     diagnostic_is_count,
     dispatch_replicas_and_primary,
     microbatch_position_mask,
-    reduce_replica_gradients,
-    sync_replicas_weights,
 )
 from klab.engram.semantic import SemanticQueryBatch
 from klab.memory import MemoryMonitor
@@ -448,7 +446,6 @@ class PyTorchEngine:
         self._learned_address_collision_targets = 0
         self._secondary_replicas: list[SecondaryReplica] = []
         self._replica_executor: ThreadPoolExecutor | None = None
-        self._replicas_need_sync: bool = True
 
     def validate(
         self, config: RunConfig, *, authorization: RuntimeAuthorization | None = None
@@ -629,7 +626,8 @@ class PyTorchEngine:
             self._replica_executor.shutdown(wait=False)
             self._replica_executor = None
         self._secondary_replicas = []
-        self._replicas_need_sync = True
+        for replica in self._secondary_replicas:
+            replica.stale = True
         if config.runtime.secondary_device_indices and (
             portability_run is not None
             or config.dataset.allocation_manifest_path is not None
@@ -1232,6 +1230,7 @@ class PyTorchEngine:
             if chunk_valid or batch.position_mask is not None
         ]
         devices_used = 1
+        replica_timings: dict[str, float] = {}
         if (
             self._secondary_replicas
             and len(microbatches) >= 2
@@ -1245,9 +1244,6 @@ class PyTorchEngine:
             trainable_inputs = [
                 parameter for parameter in model.parameters() if parameter.requires_grad
             ]
-            if self._replicas_need_sync:
-                sync_replicas_weights(trainable_inputs, self._secondary_replicas)
-                self._replicas_need_sync = False
 
             def _run_primary_slice(
                 primary_pairs: list[tuple[Microbatch, int]],
@@ -1345,6 +1341,7 @@ class PyTorchEngine:
                     diagnostic_weights,
                 ),
                 replica_outs,
+                replica_timings,
             ) = dispatch_replicas_and_primary(
                 replicas=self._secondary_replicas,
                 config=config,
@@ -1352,6 +1349,8 @@ class PyTorchEngine:
                 valid_targets=valid_targets,
                 output_head_loss_fn=output_projection_cross_entropy,
                 primary_fn=_run_primary_slice,
+                primary_params=trainable_inputs,
+                primary_device=device,
                 executor=self._replica_executor,
             )
             active_replicas = [
@@ -1377,7 +1376,6 @@ class PyTorchEngine:
                         diagnostic_weights[name] = (
                             diagnostic_weights.get(name, 0) + weight
                         )
-                reduce_replica_gradients(trainable_inputs, replica, device)
             if pilot_progress is not None:
                 pilot_progress.emit(
                     "progress",
@@ -1759,7 +1757,8 @@ class PyTorchEngine:
             overflow = self.scaler.get_scale() < old_scale
         monitor.sample("optimizer")
         if not overflow:
-            self._replicas_need_sync = True
+            for replica in self._secondary_replicas:
+                replica.stale = True
         synchronize(device)
         memory_metrics = monitor.end_update()
         elapsed = time.perf_counter() - started
@@ -1815,6 +1814,7 @@ class PyTorchEngine:
                 if self._secondary_replicas
                 else {}
             ),
+            **replica_timings,
             "batch/effective_batch_size": float(
                 sum(batch.inputs.shape[0] for batch in microbatches)
             ),
@@ -2044,7 +2044,8 @@ class PyTorchEngine:
                 raise ValueError("fp16 resume requires saved GradScaler state")
             self.scaler.load_state_dict(state.scaler)
         _restore_rng(state.rng, device)
-        self._replicas_need_sync = True
+        for replica in self._secondary_replicas:
+            replica.stale = True
 
     def memory_snapshot(self) -> dict[str, float]:
         _, _, _, _, monitor = self._ready()

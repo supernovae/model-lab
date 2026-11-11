@@ -209,6 +209,39 @@ METRICS = {
             "trainer",
         ),
         MetricSpec(
+            "performance/primary_compute_seconds",
+            "seconds",
+            "Primary device forward and backward time for its share of the update; "
+            "reported only for updates that used secondary devices.",
+            "throughput",
+            "trainer",
+        ),
+        MetricSpec(
+            "performance/replica_compute_seconds",
+            "seconds",
+            "Slowest secondary device's time to copy weights and run its share of "
+            "the update.",
+            "throughput",
+            "trainer",
+        ),
+        MetricSpec(
+            "performance/device_wait_seconds",
+            "seconds",
+            "Time devices that finished their share spent waiting for the slowest "
+            "device, summed over devices. Persistent values mean unequal devices "
+            "or an unbalanced split.",
+            "throughput",
+            "trainer",
+        ),
+        MetricSpec(
+            "performance/gradient_merge_seconds",
+            "seconds",
+            "Time to add the gradients collected from secondary devices to the "
+            "primary's after every device finished.",
+            "throughput",
+            "trainer",
+        ),
+        MetricSpec(
             "batch/effective_batch_size",
             "examples",
             "Examples consumed by the committed update window.",

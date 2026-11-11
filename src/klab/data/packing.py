@@ -5,13 +5,14 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import json
+import mmap
 import os
 import shutil
 import sys
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from functools import lru_cache, partial
@@ -2900,6 +2901,34 @@ class TokenBlockDataset:
             "trailing_target_positions": max(0, len(self.ids) - end),
             "usable_supervised_targets_per_pass": targets,
         }
+
+    def advise(self, indices: Sequence[int]) -> None:
+        """Ask the kernel to start reading these blocks; never changes results.
+
+        Training reads each update's blocks at random offsets of a memory-mapped
+        file. Cold pages cost a disk read on the critical path while every
+        device waits, so the trainer announces the next update's blocks and the
+        kernel reads them while the current update computes. Arrays that are not
+        memory-mapped, and platforms without ``madvise``, are left alone.
+        """
+        for array in (self.ids, self.supervision, self.byte_addresses):
+            mapped = getattr(array, "_mmap", None)
+            if mapped is None or not hasattr(mapped, "madvise"):
+                continue
+            base = getattr(array, "offset", 0)
+            width = array.dtype.itemsize
+            for index in indices:
+                start = base + int(self.block_indices[index]) * self.seq_len * width
+                aligned = start - start % mmap.ALLOCATIONGRANULARITY
+                length = min(
+                    start + (self.seq_len + 1) * width - aligned,
+                    mapped.size() - aligned,
+                )
+                if length > 0:
+                    try:
+                        mapped.madvise(mmap.MADV_WILLNEED, aligned, length)
+                    except OSError, ValueError:
+                        return
 
     def numpy_block(
         self, index: int

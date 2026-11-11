@@ -76,3 +76,15 @@ def test_evaluation_scores_only_supervision_masked_targets() -> None:
         UniformModel(), dataset, batch_size=2, max_batches=1, device=torch.device("cpu")
     )
     assert result["valid_targets"] == 2
+
+
+def test_block_read_ahead_hint_never_changes_blocks(tmp_path) -> None:
+    path = tmp_path / "ids.npy"
+    np.save(path, np.arange(40_000, dtype=np.int32))
+    mapped = TokenBlockDataset(np.load(path, mmap_mode="r"), 1024)
+    before = [mapped.numpy_block(index)[0].copy() for index in range(len(mapped))]
+    mapped.advise(list(range(len(mapped))))
+    after = [mapped.numpy_block(index)[0] for index in range(len(mapped))]
+    assert all(np.array_equal(a, b) for a, b in zip(before, after, strict=True))
+    # Arrays held in memory have nothing to read ahead.
+    TokenBlockDataset(np.arange(100, dtype=np.int32), 8).advise([0, 1])
