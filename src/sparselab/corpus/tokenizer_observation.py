@@ -227,6 +227,36 @@ def verify_observed_tokenizer(
     export = json.loads(export_raw)
     if export_raw != canonical_json(export) + b"\n":
         raise ValueError("tokenizer observation export is not canonical")
+    # Validate untrusted split fields before the binding projection indexes them.
+    # Keep exception translation local to metadata access/arithmetic, not loaders
+    # or provenance checks whose internal failures must remain visible.
+    try:
+        split_values = {
+            split: (
+                export["splits"][split]["path"],
+                export["splits"][split]["sha256"],
+                export["splits"][split]["records"],
+                export["splits"][split]["rendered_bytes"]
+                + export["splits"][split]["records"]
+                + 1,
+            )
+            for split in ("train", "validation")
+        }
+    except (KeyError, TypeError) as error:
+        raise ValueError("tokenizer observation split differs") from error
+    for split in ("train", "validation"):
+        view = f"lm/{split}.jsonl"
+        dataset_path = getattr(config.dataset, f"{split}_path")
+        if (
+            dataset_path is None
+            or dataset_path.resolve() != (release / view).resolve()
+            or split_values[split][0] != view
+            or split_values[split][1] != release_manifest["files"][view]["sha256"]
+            or split_values[split][2]
+            != getattr(config.dataset, f"{split}_max_documents")
+            or split_values[split][3] != getattr(config.dataset, f"{split}_max_tokens")
+        ):
+            raise ValueError("tokenizer observation split differs")
     request = _export_request(
         release_manifest["release_id"],
         "lm",
@@ -293,23 +323,6 @@ def verify_observed_tokenizer(
         or token_manifest.get("sampling_audit", {}).get("disjoint_from_fit") is not True
     ):
         raise ValueError("tokenizer observation provenance differs")
-    for split in ("train", "validation"):
-        view = f"lm/{split}.jsonl"
-        dataset_path = getattr(config.dataset, f"{split}_path")
-        if (
-            dataset_path is None
-            or dataset_path.resolve() != (release / view).resolve()
-            or export["splits"][split]["path"] != view
-            or export["splits"][split]["sha256"]
-            != release_manifest["files"][view]["sha256"]
-            or export["splits"][split]["records"]
-            != getattr(config.dataset, f"{split}_max_documents")
-            or export["splits"][split]["rendered_bytes"]
-            + export["splits"][split]["records"]
-            + 1
-            != getattr(config.dataset, f"{split}_max_tokens")
-        ):
-            raise ValueError("tokenizer observation split differs")
     result = {
         "method": "post_run_observation",
         "observed_at_utc": values["observed_at_utc"],

@@ -154,6 +154,25 @@
           "title": "Floor",
           "type": "number"
         },
+        "memory_table_lr_multiplier": {
+          "default": 1.0,
+          "exclusiveMinimum": 0,
+          "title": "Memory Table Lr Multiplier",
+          "type": "number"
+        },
+        "memory_table_weight_decay": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memory Table Weight Decay"
+        },
         "name": {
           "const": "adamw",
           "default": "adamw",
@@ -1260,6 +1279,24 @@
       "additionalProperties": false,
       "description": "Shared document grouping; layout is the sole arm-specific setting.",
       "properties": {
+        "document_batching": {
+          "default": "separate",
+          "enum": [
+            "separate",
+            "padded"
+          ],
+          "title": "Document Batching",
+          "type": "string"
+        },
+        "frozen_update_ends": {
+          "default": [],
+          "items": {
+            "exclusiveMinimum": 0,
+            "type": "integer"
+          },
+          "title": "Frozen Update Ends",
+          "type": "array"
+        },
         "layout": {
           "enum": [
             "contiguous",
@@ -1268,11 +1305,59 @@
           "title": "Layout",
           "type": "string"
         },
+        "max_attention_cells": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Attention Cells"
+        },
+        "max_padded_slots": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Padded Slots"
+        },
+        "padding_multiple": {
+          "default": 128,
+          "exclusiveMinimum": 0,
+          "title": "Padding Multiple",
+          "type": "integer"
+        },
+        "target_group_transition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TargetGroupTransition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "targets_per_update": {
           "default": 4096,
           "exclusiveMinimum": 0,
           "title": "Targets Per Update",
           "type": "integer"
+        },
+        "unpadded_documents": {
+          "default": false,
+          "title": "Unpadded Documents",
+          "type": "boolean"
         }
       },
       "required": [
@@ -1361,6 +1446,56 @@
       "title": "MemoryConfig",
       "type": "object"
     },
+    "MemoryTokenMapping": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "enum": [
+            "identity",
+            "deepseek_v1",
+            "deepseek_safe_v1"
+          ],
+          "title": "Algorithm",
+          "type": "string"
+        },
+        "mapping_sha256": {
+          "title": "Mapping Sha256",
+          "type": "string"
+        },
+        "memory_vocab_size": {
+          "exclusiveMinimum": 0,
+          "title": "Memory Vocab Size",
+          "type": "integer"
+        },
+        "token_ids": {
+          "items": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": "Token Ids",
+          "type": "array"
+        },
+        "tokenizer_sha256": {
+          "title": "Tokenizer Sha256",
+          "type": "string"
+        },
+        "vocab_size": {
+          "exclusiveMinimum": 0,
+          "title": "Vocab Size",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "algorithm",
+        "token_ids",
+        "vocab_size",
+        "memory_vocab_size",
+        "tokenizer_sha256",
+        "mapping_sha256"
+      ],
+      "title": "MemoryTokenMapping",
+      "type": "object"
+    },
     "ModelConfig": {
       "additionalProperties": false,
       "properties": {
@@ -1401,10 +1536,57 @@
           "title": "Memory",
           "type": "string"
         },
+        "memory_addressing": {
+          "default": "legacy",
+          "enum": [
+            "legacy",
+            "prime_xor_v1"
+          ],
+          "title": "Memory Addressing",
+          "type": "string"
+        },
+        "memory_block_index": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memory Block Index"
+        },
+        "memory_block_indices": {
+          "default": [],
+          "items": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": "Memory Block Indices",
+          "type": "array"
+        },
+        "memory_conv_kernel_size": {
+          "default": 0,
+          "maximum": 16,
+          "minimum": 0,
+          "title": "Memory Conv Kernel Size",
+          "type": "integer"
+        },
         "memory_dim": {
           "default": 0,
           "title": "Memory Dim",
           "type": "integer"
+        },
+        "memory_gate_transform": {
+          "default": "identity",
+          "enum": [
+            "identity",
+            "signed_sqrt"
+          ],
+          "title": "Memory Gate Transform",
+          "type": "string"
         },
         "memory_hash_heads": {
           "default": 1,
@@ -1412,11 +1594,24 @@
           "title": "Memory Hash Heads",
           "type": "integer"
         },
+        "memory_hash_seed": {
+          "default": 0,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Memory Hash Seed",
+          "type": "integer"
+        },
+        "memory_independent_init": {
+          "default": false,
+          "title": "Memory Independent Init",
+          "type": "boolean"
+        },
         "memory_injection": {
           "default": "final",
           "enum": [
             "final",
-            "embedding"
+            "embedding",
+            "after_block"
           ],
           "title": "Memory Injection",
           "type": "string"
@@ -1447,10 +1642,45 @@
           "default": null,
           "title": "Memory Package Path"
         },
+        "memory_padding_token_id": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Memory Padding Token Id",
+          "type": "integer"
+        },
         "memory_table_size": {
           "default": 0,
           "title": "Memory Table Size",
           "type": "integer"
+        },
+        "memory_table_sizes": {
+          "default": [],
+          "items": {
+            "exclusiveMinimum": 0,
+            "type": "integer"
+          },
+          "title": "Memory Table Sizes",
+          "type": "array"
+        },
+        "memory_token_mapping": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryTokenMapping"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "memory_variant": {
+          "default": "hidden_gate",
+          "enum": [
+            "hidden_gate",
+            "context_key"
+          ],
+          "title": "Memory Variant",
+          "type": "string"
         },
         "num_experts": {
           "default": 1,
@@ -1790,6 +2020,11 @@
           "title": "Backend",
           "type": "string"
         },
+        "compile_dynamic_shapes": {
+          "default": false,
+          "title": "Compile Dynamic Shapes",
+          "type": "boolean"
+        },
         "compile_output_head_loss": {
           "default": false,
           "title": "Compile Output Head Loss",
@@ -1842,6 +2077,14 @@
           ],
           "title": "Precision",
           "type": "string"
+        },
+        "secondary_device_indices": {
+          "default": [],
+          "items": {
+            "type": "integer"
+          },
+          "title": "Secondary Device Indices",
+          "type": "array"
         }
       },
       "title": "RuntimeConfig",
@@ -1864,6 +2107,34 @@
         }
       },
       "title": "StagingConfig",
+      "type": "object"
+    },
+    "TargetGroupTransition": {
+      "additionalProperties": false,
+      "description": "One explicit first-pass regrouping at a completed checkpoint boundary.",
+      "properties": {
+        "after_tokens": {
+          "exclusiveMinimum": 0,
+          "title": "After Tokens",
+          "type": "integer"
+        },
+        "parent_checkpoint_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Parent Checkpoint Sha256",
+          "type": "string"
+        },
+        "previous_targets_per_update": {
+          "exclusiveMinimum": 0,
+          "title": "Previous Targets Per Update",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "after_tokens",
+        "previous_targets_per_update",
+        "parent_checkpoint_sha256"
+      ],
+      "title": "TargetGroupTransition",
       "type": "object"
     },
     "TokenizerConfig": {
@@ -1897,12 +2168,46 @@
       "description": "Explicit immutable origin of a tokenizer reused across frozen snapshots.",
       "properties": {
         "dataset": {
-          "$ref": "#/$defs/DatasetConfig"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DatasetConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "manifest_sha256": {
           "pattern": "^[0-9a-f]{64}$",
           "title": "Manifest Sha256",
           "type": "string"
+        },
+        "mixture_declaration_path": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mixture Declaration Path"
+        },
+        "mixture_declaration_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mixture Declaration Sha256"
         },
         "sha256": {
           "pattern": "^[0-9a-f]{64}$",
@@ -1911,7 +2216,6 @@
         }
       },
       "required": [
-        "dataset",
         "sha256",
         "manifest_sha256"
       ],
@@ -1987,6 +2291,12 @@
         "seq_len": {
           "exclusiveMinimum": 0,
           "title": "Seq Len",
+          "type": "integer"
+        },
+        "stable_steps": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Stable Steps",
           "type": "integer"
         },
         "trainable_parameters": {

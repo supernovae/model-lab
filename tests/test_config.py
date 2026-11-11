@@ -418,3 +418,88 @@ def test_origin_binding_requires_pins_and_frozen_sources(origin_bound_config, ch
         raw["dataset"]["source"] = "synthetic"
     with pytest.raises(ValueError):
         RunConfig.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"memory_injection": "after_block"},
+        {"memory_injection": "after_block", "memory_block_index": 2},
+        {"memory_injection": "after_block", "memory_block_index": True},
+        {"memory_block_index": 0},
+        {"memory_conv_kernel_size": 4},
+    ],
+)
+def test_context_memory_rejects_invalid_placement_and_refinement(change):
+    base = {
+        "vocab_size": 260,
+        "hidden_dim": 8,
+        "num_layers": 2,
+        "num_heads": 2,
+        "ffn_dim": 16,
+        "max_seq_len": 16,
+        "memory": "ngram",
+        "memory_table_size": 31,
+        "memory_ngram_size": 3,
+        "memory_dim": 4,
+    }
+    with pytest.raises(ValueError):
+        ModelConfig(**(base | change))
+
+
+def test_context_memory_roundtrip_preserves_distinct_architecture():
+    base = ModelConfig(
+        vocab_size=260,
+        hidden_dim=8,
+        num_layers=2,
+        num_heads=2,
+        ffn_dim=16,
+        max_seq_len=16,
+        memory="ngram",
+        memory_table_size=31,
+        memory_ngram_size=3,
+        memory_dim=4,
+    )
+    assert "memory_variant" not in base.model_dump()
+    assert "memory_block_index" not in base.model_dump()
+    assert "memory_conv_kernel_size" not in base.model_dump()
+    contextual = ModelConfig.model_validate(
+        base.model_dump()
+        | {
+            "memory_variant": "context_key",
+            "memory_injection": "after_block",
+            "memory_block_index": 0,
+            "memory_conv_kernel_size": 4,
+        }
+    )
+    assert ModelConfig.model_validate_json(contextual.model_dump_json()) == contextual
+    assert contextual.model_dump() != base.model_dump()
+
+
+def test_mixture_tokenizer_origin_requires_one_pinned_declaration(
+    tmp_path, origin_bound_config
+):
+    from sparselab.training.manifest import config_sha256
+
+    raw = origin_bound_config
+    raw["tokenizer"]["origin"] = {
+        "mixture_declaration_path": "origin/mixture.json",
+        "mixture_declaration_sha256": "a" * 64,
+        "sha256": "b" * 64,
+        "manifest_sha256": "c" * 64,
+    }
+    path = tmp_path / "run.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    config = load_config(path)
+    assert (
+        config.tokenizer.origin.mixture_declaration_path
+        == tmp_path / "origin/mixture.json"
+    )
+    before = config_sha256(raw)
+    raw["tokenizer"]["origin"]["mixture_declaration_path"] = "/moved/mixture.json"
+    assert config_sha256(raw) == before
+    raw["tokenizer"]["origin"]["mixture_declaration_sha256"] = "d" * 64
+    assert config_sha256(raw) != before
+    del raw["tokenizer"]["origin"]["mixture_declaration_sha256"]
+    with pytest.raises(ValueError, match="requires its digest"):
+        RunConfig.model_validate(raw)

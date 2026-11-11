@@ -1161,6 +1161,33 @@ def verify_mixture(declaration: Path, output: Path, *, audit: bool = False) -> d
     return receipt
 
 
+def verify_mixture_tokenizer_origin(
+    declaration: Path, tokenizer_path: Path, vocab_size: int
+) -> dict:
+    """Verify only the fit-tokenizer closure, not a consumer's mixture schedule.
+
+    An explicit tokenizer origin reuses the declaration's native fit/observation
+    verification. It does not claim that the mixture itself was materialized or
+    that a post-run observation is a historical output-digest attestation.
+    """
+    spec = MixtureDeclaration.model_validate(yaml.safe_load(declaration.read_bytes()))
+    release = spec.release_path.resolve()
+    manifest = verify_release(release)
+    fit = load_tokenizer_config(spec.tokenizer_config)
+    if (
+        tokenizer_path.resolve() != (fit.output_dir / "tokenizer.json").resolve()
+        or vocab_size != fit.vocab_size
+    ):
+        raise ValueError("tokenizer origin path or vocabulary mismatch")
+    _, digest = _tokenizer(spec, release, manifest["release_id"])
+    result = json.loads(
+        tokenizer_path.with_name("tokenizer_manifest.json").read_bytes()
+    )
+    if result["sha256"] != digest:
+        raise ValueError("tokenizer origin digest mismatch")
+    return result
+
+
 def verify_mixture_dataset(
     dataset: DatasetConfig, tokenizer_path: Path, vocab_size: int
 ) -> dict:

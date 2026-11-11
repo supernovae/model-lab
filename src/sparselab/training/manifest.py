@@ -42,6 +42,13 @@ _MACHINE_LOCAL_PATH_KEYS = frozenset(
 
 def _without_machine_local_paths(value: object) -> object:
     if isinstance(value, Mapping):
+        # An explicit tokenizer origin binds declaration bytes, not their location.
+        if "mixture_declaration_sha256" in value:
+            value = {
+                key: item
+                for key, item in value.items()
+                if key != "mixture_declaration_path"
+            }
         return {
             str(key): _without_machine_local_paths(item)
             for key, item in value.items()
@@ -132,7 +139,11 @@ def config_sha256(config: Mapping[str, Any]) -> str:
             },
         }
     tokenizer = config.get("tokenizer")
-    if isinstance(tokenizer, Mapping) and tokenizer.get("origin") is not None:
+    if (
+        isinstance(tokenizer, Mapping)
+        and isinstance(tokenizer.get("origin"), Mapping)
+        and isinstance(tokenizer["origin"].get("dataset"), Mapping)
+    ):
         origin = tokenizer["origin"]
         config = {
             **config,

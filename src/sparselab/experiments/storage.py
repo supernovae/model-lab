@@ -18,7 +18,9 @@ if TYPE_CHECKING:
     from sparselab.data.verification import VerifiedPreparedData
 
 
-def checkpoint_generation_bounds(config: RunConfig) -> dict[str, Any]:
+def checkpoint_generation_bounds(
+    config: RunConfig, *, completed_steps: int = 0, completed_tokens: int = 0
+) -> dict[str, Any]:
     """Bound checkpoints from trainer watermarks and manager prune semantics."""
     # Plan retention does not alter CheckpointManager's per-run pruning policy.
     training = config.training
@@ -68,6 +70,46 @@ def checkpoint_generation_bounds(config: RunConfig) -> dict[str, Any]:
         + validation_steps
         + minute_steps,
     )
+    if completed_steps:
+        # A new resumed run stores only its future generations. Existing parent
+        # bytes already reduce free space and must not be projected a second time.
+        steps = training.max_steps - completed_steps
+        remaining_tokens = training.max_tokens - completed_tokens
+        if steps < 1 or remaining_tokens < 1:
+            raise ValueError("continuation storage requires remaining training budget")
+        explicit = tuple(
+            s for s in checkpoints.steps if completed_steps < s < training.max_steps
+        )
+        scheduled_steps = (
+            ((steps - 1) // checkpoints.every_steps + 1)
+            if checkpoints.every_steps
+            else 0
+        )
+        # Matched-document updates are not seq_len * micro_batch_size targets.
+        # Use the remaining target cap and allow an immediately due inherited watermark.
+        scheduled_tokens = (
+            (
+                (remaining_tokens + checkpoints.every_tokens - 1)
+                // checkpoints.every_tokens
+                + 1
+            )
+            if checkpoints.every_tokens
+            else 0
+        )
+        validation_steps = (
+            (training.max_steps - 1) // config.evaluation.every_steps
+            - completed_steps // config.evaluation.every_steps
+        )
+        minute_steps = steps - 1 if checkpoints.every_minutes is not None else 0
+        upper = 2 + min(
+            steps - 1,
+            len(explicit)
+            + milestone_events
+            + scheduled_steps
+            + scheduled_tokens
+            + validation_steps
+            + minute_steps,
+        )
     keep_periodic = checkpoints.keep_periodic
     retained_upper = upper if keep_periodic else min(upper, 3)
     # Manager prunes *after* committing and projecting a new generation. Reserve

@@ -21,12 +21,19 @@ from test_training import config as training_config
 from sparselab.address_hash import (
     BYTE_SCHEME_V1,
     BYTE_SCHEME_V2,
+    ENGRAM_SCHEME_V1,
     TOKEN_SCHEME_V1,
     TOKEN_SCHEME_V2,
     byte_scheme,
+    engram_address_finish,
+    engram_address_step,
+    engram_multipliers,
+    engram_ngram_address,
+    engram_table_sizes,
     token_addressing_marker,
     token_ngram_address,
     token_scheme,
+    validate_engram_table_sizes,
 )
 from sparselab.cli.main import main
 from sparselab.config.models import RunConfig
@@ -320,3 +327,142 @@ def test_token_addressing_identity_names_changed_heads_only() -> None:
     assert token_addressing_marker(257, 2) == {
         "hashing": [TOKEN_SCHEME_V2, TOKEN_SCHEME_V1]
     }
+
+
+# Fixed signed-int64 vectors pin both coefficient expansion and overflow semantics.
+# The scalar oracle below is separate from the tensor primitive and NumPy demo.
+_PRIME_XOR_MULTIPLIERS = (22818641653045131, 27993534731251561, 17422327423556949)
+_PRIME_XOR_TABLES = (31, 37, 41, 43)
+_PRIME_XOR_VECTORS = (
+    ((0, 0, 0), (0, 0, 0, 0)),
+    ((1, 0, 0), (2, 16, 6, 40)),
+    ((259, 258, 257), (21, 33, 19, 37)),
+    ((2**63 - 1, 1, 0), (2, 15, 21, 18)),
+    ((-(2**63), -1, 2), (11, 28, 1, 29)),
+)
+
+
+def test_prime_xor_coefficients_are_frozen_bounded_and_rng_independent() -> None:
+    assert ENGRAM_SCHEME_V1 == "token-ngram-prime-xor-splitmix64-v1"
+    random.seed(123)
+    before = random.getstate()
+    torch_state = torch.random.get_rng_state().clone()
+    assert engram_multipliers(0, 3, 260) == _PRIME_XOR_MULTIPLIERS
+    assert engram_multipliers(17, 3, 260, layer_id=1) == (
+        23414436029034979,
+        32322975159504861,
+        9307579752262803,
+    )
+    assert engram_multipliers(0, 2, 260) == _PRIME_XOR_MULTIPLIERS[:2]
+    assert random.getstate() == before
+    assert torch.equal(torch.random.get_rng_state(), torch_state)
+    for vocab_size in (1, 2, 260, 32768, 2**31 - 1):
+        for value in engram_multipliers(2**64 - 1, 8, vocab_size, layer_id=15):
+            assert value % 2 == 1
+            assert 1 <= value * vocab_size <= 2**63 - 1
+
+
+@pytest.mark.parametrize("key,rows", _PRIME_XOR_VECTORS)
+def test_prime_xor_frozen_vectors_match_scalar_tensor_and_numpy_demo(
+    key: tuple[int, ...], rows: tuple[int, ...]
+) -> None:
+    import numpy as np
+
+    # This is the demo's multiply/XOR/remainder operation with our explicitly
+    # frozen constants, not a claim of matching NumPy's seed expansion.
+    with np.errstate(over="ignore"):
+        demo_mix = np.int64(key[0]) * np.int64(_PRIME_XOR_MULTIPLIERS[0])
+        for token, multiplier in zip(key[1:], _PRIME_XOR_MULTIPLIERS[1:], strict=True):
+            demo_mix = np.bitwise_xor(demo_mix, np.int64(token) * np.int64(multiplier))
+    tensor_mix = torch.zeros((), dtype=torch.long)
+    for token, multiplier in zip(key, _PRIME_XOR_MULTIPLIERS, strict=True):
+        tensor_mix = engram_address_step(tensor_mix, torch.tensor(token), multiplier)
+    for prime, row in zip(_PRIME_XOR_TABLES, rows, strict=True):
+        assert engram_ngram_address(key, prime, _PRIME_XOR_MULTIPLIERS) == row
+        assert int(engram_address_finish(tensor_mix, prime)) == row
+        assert int(demo_mix % prime) == row
+
+
+def test_prime_xor_suffix_padding_eos_and_whole_window_conformance() -> None:
+    ids = torch.tensor([[4, 17, 2, 17, 4], [17, 4, 2, 4, 17]], dtype=torch.long)
+    padding = 2  # Explicit canonical pad token, deliberately nonzero.
+    coefficients = engram_multipliers(41, 3, 260)
+    for order in (2, 3):
+        tensor_mix = torch.zeros_like(ids)
+        for offset in range(order):
+            shifted = torch.full_like(ids, padding)
+            shifted[:, offset:] = ids[:, : ids.shape[1] - offset]
+            tensor_mix = engram_address_step(tensor_mix, shifted, coefficients[offset])
+        for prime in engram_table_sizes(1021, 2):
+            addresses = engram_address_finish(tensor_mix, prime)
+            for batch in range(ids.shape[0]):
+                for position in range(ids.shape[1]):
+                    key = tuple(
+                        int(ids[batch, position - offset])
+                        if position >= offset
+                        else padding
+                        for offset in range(order)
+                    )
+                    assert addresses[batch, position] == engram_ngram_address(
+                        key, prime, coefficients
+                    )
+            # Every suffix component can affect the lookup. Repeated keys keep
+            # their exact row, including the EOS token (2) in the middle.
+            key = (4, 17, 2)[:order]
+            row = engram_ngram_address(key, prime, coefficients)
+            for slot in range(order):
+                changed = [*key]
+                changes = 0
+                for token in range(32):
+                    changed[slot] = token
+                    changes += engram_ngram_address(changed, prime, coefficients) != row
+                assert changes >= 28
+
+
+def test_prime_xor_distinct_prime_table_expansion_and_validation() -> None:
+    assert engram_table_sizes(31, 4) == _PRIME_XOR_TABLES
+    assert engram_table_sizes(32, 4) == (37, 41, 43, 47)
+    assert engram_table_sizes(2, 4) == (2, 3, 5, 7)
+    assert engram_table_sizes(59, 4) == (59, 61, 67, 71)
+    assert validate_engram_table_sizes(_PRIME_XOR_TABLES, 4) == _PRIME_XOR_TABLES
+    assert validate_engram_table_sizes((2**31 - 1,), 1) == (2**31 - 1,)
+    with pytest.raises(ValueError, match="exceeds"):
+        engram_table_sizes(2**31 - 1, 2)
+    for invalid in ((31, 31), (31, 35), (True, 31), (1, 31), (2**31 + 1, 31)):
+        with pytest.raises(ValueError, match="primes"):
+            validate_engram_table_sizes(invalid, 2)
+    with pytest.raises(ValueError, match="stream count"):
+        validate_engram_table_sizes((31,), 2)
+    # Carmichael / strong pseudoprime examples must not pass as table primes.
+    for composite in (341, 561, 1105, 1729, 2047, 1373653, 25326001):
+        with pytest.raises(ValueError, match="primes"):
+            validate_engram_table_sizes((composite,), 1)
+
+
+@pytest.mark.parametrize(
+    "args,kwargs",
+    [
+        ((-1, 3, 260), {}),
+        ((2**64, 3, 260), {}),
+        ((True, 3, 260), {}),
+        ((0, 0, 260), {}),
+        ((0, 3, 0), {}),
+        ((0, 3, 260), {"layer_id": -1}),
+    ],
+)
+def test_prime_xor_invalid_coefficient_domains_are_rejected(args, kwargs) -> None:
+    with pytest.raises(ValueError):
+        engram_multipliers(*args, **kwargs)
+
+
+def test_prime_xor_invalid_keys_and_coefficients_are_rejected() -> None:
+    for key, coefficients in (
+        ((), (1,)),
+        ((1, 2), (1,)),
+        ((True,), (1,)),
+        ((2**63,), (1,)),
+        ((1,), (2,)),
+        ((1,), (0,)),
+    ):
+        with pytest.raises(ValueError):
+            engram_ngram_address(key, 31, coefficients)

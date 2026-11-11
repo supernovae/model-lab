@@ -168,9 +168,9 @@ def home_page(lab_dir: Path, runs_dirs: Sequence[Path], pages: PageLinks) -> Non
         help="Probe results (from tries and `sparselab probe`)",
     )
     cols[2].metric(
-        "Checkpoints",
+        "Scored checkpoints",
         len(checkpoints - {None}),
-        help="Distinct verified checkpoints, references included",
+        help="Checkpoints with sealed lab scores, including public references. Not the count of available training snapshots.",
     )
     cols[3].metric(
         "Reference models",
@@ -1004,6 +1004,9 @@ def explorer_page(lab_dir: Path, runs_dirs: Sequence[Path]) -> None:
         f"≤ {ex.MAX_TOKENS} tokens) · computed through the verified checkpoint "
         "loader (runtime shown per exploration) and cached under LAB/explorer",
     )
+    st.markdown(
+        "For text completion from the available larger snapshot, open [Generate](generate). Explorer is for small-model internal diagnostics."
+    )
     snap = _snapshot(lab_dir)
     cached = snap.explorations
     choices = _explorable_runs(snap, runs_dirs)
@@ -1068,7 +1071,7 @@ def explorer_page(lab_dir: Path, runs_dirs: Sequence[Path]) -> None:
         )
         text = cols[2].text_input(
             "Sample text",
-            value=ex.DEFAULT_TEXT,
+            value="",
             key="explorer_compare_text",
             max_chars=600,
         )
@@ -1135,7 +1138,7 @@ def explorer_page(lab_dir: Path, runs_dirs: Sequence[Path]) -> None:
         key="explorer_run",
     )
     text = cols[1].text_input(
-        "Sample text", value=ex.DEFAULT_TEXT, key="explorer_text", max_chars=600
+        "Sample text", value="", key="explorer_text", max_chars=600
     )
     saved_single = st.session_state.get("explorer_last")
     if isinstance(saved_single, Mapping) and "exploration" in saved_single:
@@ -1356,6 +1359,12 @@ def _memory(exploration: Mapping[str, Any], tokens: list[dict[str, Any]]) -> Non
                 "size. The hash may be degenerate for this table size (e.g. a "
                 "multiplier that is a multiple of the row count)."
             )
+    st.plotly_chart(xv.memory_address_figure(memory, tokens), use_container_width=True)
+    st.caption(
+        "Each dot is a recorded lookup. Repeated rows may reflect repeated n-grams or hash "
+        "collisions. Row IDs are addresses, not concepts or neurons. The gate below shows "
+        "mixing strength; these records do not identify neuron connections or causal influence."
+    )
     reuse = xv.memory_reuse(memory)
     cols = st.columns(max(1, len(reuse)))
     for col, (table, share) in zip(cols, reuse.items(), strict=False):

@@ -288,7 +288,11 @@ def verify_run_tokenizer(
     from sparselab.training.manifest import sha256_file
 
     origin = config.tokenizer.origin
-    dataset = origin.dataset if origin is not None else config.dataset
+    dataset = (
+        origin.dataset
+        if origin is not None and origin.dataset is not None
+        else config.dataset
+    )
     path = config.tokenizer.path
     if origin is not None and (
         sha256_file(path) != origin.sha256
@@ -296,6 +300,17 @@ def verify_run_tokenizer(
         != origin.manifest_sha256
     ):
         raise ValueError("explicit tokenizer origin digest mismatch")
+    if origin is not None and origin.mixture_declaration_path is not None:
+        from sparselab.corpus.mixture import verify_mixture_tokenizer_origin
+
+        if (
+            sha256_file(origin.mixture_declaration_path)
+            != origin.mixture_declaration_sha256
+        ):
+            raise ValueError("tokenizer origin mixture declaration digest mismatch")
+        return verify_mixture_tokenizer_origin(
+            origin.mixture_declaration_path, path, config.model.vocab_size
+        )
     return verify_tokenizer_artifact(
         path,
         source=dataset.source,

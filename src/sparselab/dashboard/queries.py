@@ -104,18 +104,27 @@ def _run_rows(connection: sqlite3.Connection) -> tuple[RunRecord, ...]:
 
 
 def _rows(
-    connection: sqlite3.Connection, table: str, columns: tuple[str, ...], order: str
+    connection: sqlite3.Connection,
+    table: str,
+    columns: tuple[str, ...],
+    order: str,
+    run_ids: tuple[str, ...] | None = None,
 ) -> tuple[dict[str, object], ...]:
     if table not in _tables(connection):
         return ()
     selected = ",".join(columns)
+    where = ""
+    parameters = ()
+    if run_ids is not None:
+        where = " WHERE run_id IN (" + ",".join("?" for _ in run_ids) + ")"
+        parameters = run_ids
     values = connection.execute(
-        f"SELECT {selected} FROM {table} ORDER BY {order}"
+        f"SELECT {selected} FROM {table}{where} ORDER BY {order}", parameters
     ).fetchall()
     return tuple(dict(zip(columns, row, strict=True)) for row in values)
 
 
-def snapshot(root: Path) -> DashboardSnapshot:
+def snapshot(root: Path, run_ids: tuple[str, ...] | None = None) -> DashboardSnapshot:
     """Read the known projection tables without upgrading a legacy database."""
     with _connect(root) as connection:
         records = _run_rows(connection)
@@ -124,12 +133,14 @@ def snapshot(root: Path) -> DashboardSnapshot:
             "metrics",
             ("run_id", "step", "tokens_seen", "wall_time", "name", "value"),
             "step, name",
+            run_ids,
         )
         event_rows = _rows(
             connection,
             "events",
             ("run_id", "step", "tokens_seen", "wall_time", "kind", "payload_json"),
             "id",
+            run_ids,
         )
         stage_rows = _rows(
             connection,
@@ -146,6 +157,7 @@ def snapshot(root: Path) -> DashboardSnapshot:
                 "payload_json",
             ),
             "run_id, sequence",
+            run_ids,
         )
         checkpoint_rows = _rows(
             connection,
@@ -166,19 +178,23 @@ def snapshot(root: Path) -> DashboardSnapshot:
                 "backend",
             ),
             "run_id, step, created_at",
+            run_ids,
         )
         runtime_progress_rows = _rows(
             connection,
             "runtime_progress_snapshots",
             ("run_id", "step", "tokens_seen", "wall_time", "payload_json"),
             "run_id",
+            run_ids,
         )
         manifest_rows = _rows(
-            connection, "manifests", ("run_id", "digest", "json"), "run_id"
+            connection, "manifests", ("run_id", "digest", "json"), "run_id", run_ids
         )
         assignments = {
             str(row["run_id"]): row["worker_id"]
-            for row in _rows(connection, "attempts", ("run_id", "worker_id"), "run_id")
+            for row in _rows(
+                connection, "attempts", ("run_id", "worker_id"), "run_id", run_ids
+            )
         }
     manifests = {
         str(row["run_id"]): {"digest": row["digest"], **_object(row["json"])}

@@ -30,7 +30,15 @@ from sparselab.runtime_profile import authorize_worker, require_authorization
 from sparselab.training.manifest import source_identity
 from sparselab.verification_proofs import verification_options
 
-from .leases import acquire_lease, boot_identity, process_matches, process_start
+from .leases import (
+    DeviceLease,
+    MultiDeviceLease,
+    acquire_lease,
+    acquire_multi_device_leases,
+    boot_identity,
+    process_matches,
+    process_start,
+)
 
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _TERMINAL = {"COMPLETE", "FAILED", "INTERRUPTED", "UNKNOWN"}
@@ -295,6 +303,58 @@ def _runtime_for_definition(definition: Any) -> Any:
     raise ValueError("configured runtime is absent from passive discovery")
 
 
+def _acquire_config_lease(
+    definition: Any,
+    passive: Any,
+    config: RunConfig | None = None,
+    *,
+    state_dir: Path | None = None,
+) -> DeviceLease | MultiDeviceLease | None:
+    worker_id = _definition_value(definition, "worker_id")
+    if (
+        config is None
+        or not config.runtime.secondary_device_indices
+        or passive.backend == "cpu"
+    ):
+        return acquire_lease(
+            worker_id=worker_id,
+            backend=passive.backend,
+            physical_device_id=passive.physical_device_id,
+            state_dir=state_dir,
+        )
+    if not passive.physical_device_id or not str(passive.physical_device_id).strip():
+        raise ValueError(
+            "secondary_device_indices requires a reported physical_device_id on the primary device"
+        )
+    engine = _definition_value(definition, "engine")
+    infos_by_index = {
+        info.device_index: info
+        for info in discover_runtimes()
+        if info.engine == engine and info.backend == passive.backend
+    }
+    physical_ids = [str(passive.physical_device_id).strip()]
+    for sec_idx in config.runtime.secondary_device_indices:
+        sec_info = infos_by_index.get(sec_idx)
+        if sec_info is None:
+            raise ValueError(
+                f"secondary_device_indices index {sec_idx} is absent from passive discovery"
+            )
+        if (
+            not sec_info.physical_device_id
+            or not str(sec_info.physical_device_id).strip()
+        ):
+            raise ValueError(
+                f"secondary_device_indices index {sec_idx} lacks a reported physical_device_id"
+            )
+        physical_ids.append(str(sec_info.physical_device_id).strip())
+    return acquire_multi_device_leases(
+        worker_id=worker_id,
+        backend=passive.backend,
+        physical_device_ids=physical_ids,
+        state_dir=state_dir,
+    )
+
+
 def initialize_worker(definition: Any) -> None:
     """Persist a private immutable registration; conflicting endpoints fail closed."""
     root = Path(_definition_value(definition, "root"))
@@ -404,11 +464,19 @@ def validate_worker(
     effective = _effective_config(definition, config)
     authorization = authorize_worker(definition, effective)
     passive = _runtime_for_definition(definition)
-    lease = acquire_lease(
-        worker_id=_definition_value(definition, "worker_id"),
-        backend=passive.backend,
-        physical_device_id=passive.physical_device_id,
-    )
+    try:
+        lease = _acquire_config_lease(definition, passive, effective)
+    except ValueError as error:
+        failed = _caps(definition, validation_status="failed", runtime=passive)
+        _atomic_json(
+            Path(_definition_value(definition, "root")) / "capabilities.json", failed
+        )
+        return {
+            "ok": False,
+            "code": "VALIDATION_FAILED",
+            "message": str(error),
+            "runtime": passive.as_dict(),
+        }
     if lease is None:
         return {
             "ok": False,
@@ -819,11 +887,16 @@ def execute_attempt(definition: Any, attempt_id: str) -> dict[str, Any]:
                 error=_failure(error),
             )
         passive = _runtime_for_definition(definition)
-        lease = acquire_lease(
-            worker_id=_definition_value(definition, "worker_id"),
-            backend=passive.backend,
-            physical_device_id=passive.physical_device_id,
-        )
+        try:
+            lease = _acquire_config_lease(definition, passive, effective)
+        except ValueError as error:
+            return _terminal_receipt(
+                definition,
+                attempt_id,
+                state="FAILED",
+                phase="rejected_before_initialization",
+                error=_failure(error),
+            )
         if lease is None:
             # PREPARED may be reconciled/spawned later; it has not begun execution.
             return receipt

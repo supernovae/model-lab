@@ -98,6 +98,26 @@ class PreparedData:
     receipt: VerifiedPreparedData
 
 
+@dataclass(frozen=True)
+class PreparedPrefix:
+    """Explicitly pinned immutable parent for a whole-document token prefix.
+
+    The parent must have the same preparation source fingerprint. A pin binds
+    bytes; it does not establish equivalence between different producers.
+    """
+
+    root: Path
+    manifest_sha256: str
+
+
+@dataclass(frozen=True)
+class PreparedAppend:
+    """Same-producer parent for an authenticated fresh local_text tail."""
+
+    root: Path
+    manifest_sha256: str
+
+
 def prepared_dataset_identity(dataset: DatasetConfig) -> dict[str, object]:
     """Dataset selection identity; verified content binds operational locations."""
     return {
@@ -160,7 +180,7 @@ def _sha256(path: Path) -> str:
     return manifest_module.sha256_file(path)
 
 
-def _tokenizer_sha256(tokenizer: Tokenizer) -> str:
+def canonical_tokenizer_sha256(tokenizer: Tokenizer) -> str:
     """Hash the complete tokenizer, not merely its vocabulary."""
     return hashlib.sha256(tokenizer.to_str().encode("utf-8")).hexdigest()
 
@@ -838,6 +858,20 @@ class _ArraySpool:
 
     extend = append
 
+    def append_array(self, values: np.ndarray) -> None:
+        """Copy verified contiguous IDs without per-token Python conversion."""
+        if (
+            values.ndim != 1
+            or values.dtype != self.dtype
+            or not values.flags.c_contiguous
+        ):
+            raise ValueError(
+                "spool array must have matching contiguous one-dimensional dtype"
+            )
+        self.flush()
+        self.raw.write(memoryview(values).cast("B"))
+        self.count += len(values)
+
     def flush(self) -> None:
         if self.buffer:
             started = time.monotonic()
@@ -1320,6 +1354,489 @@ def _publish_prepared_directory(staged: Path, destination: Path) -> None:
         )
 
 
+def _prepare_verified_prefix(
+    config: RunConfig,
+    tokenizer: Tokenizer,
+    request: PreparedPrefix,
+    *,
+    identity: dict,
+    root: Path,
+    telemetry: PreparationTelemetry,
+    resource_envelope: ResourceEnvelope | None,
+) -> PreparedData:
+    """Derive exact IDs from a cold-verified parent, without calling an encoder."""
+    if (
+        config.dataset.source != "local_text"
+        or config.dataset.corpus_release_path is not None
+        or config.dataset.allocation_manifest_path is not None
+        or config.model.memory in {"byte", "portable"}
+    ):
+        raise ValueError("prepared prefix requires plain all-token local_text")
+    parent_manifest = json.loads((request.root / "manifest.json").read_text())
+    if parent_manifest.get("manifest_sha256") != request.manifest_sha256:
+        raise ValueError("prepared prefix parent manifest pin mismatch")
+    parent = load_prepared_data(request.root, byte_enabled=False)
+    manifest = parent.manifest
+    if manifest["manifest_sha256"] != request.manifest_sha256:
+        raise ValueError(
+            "prepared prefix parent manifest pin changed during verification"
+        )
+    if (
+        manifest["packing_version"] != PACKING_VERSION
+        or manifest.get("supervision") != {"kind": "all_tokens"}
+        or manifest.get("allocation") is not None
+    ):
+        raise ValueError(
+            "prepared prefix requires current all-token arrays without sidecars"
+        )
+    parent_identity = manifest["cache_identity"]
+    expected = {**identity, "dataset": dict(identity["dataset"])}
+    # Only selection size may differ. A pin alone cannot authorize relabeling
+    # another producer's IDs under the current ordinary preparation cache key.
+    for key in ("train_max_documents", "train_max_tokens"):
+        expected["dataset"][key] = parent_identity["dataset"][key]
+    if expected != parent_identity:
+        raise ValueError("prepared prefix source/tokenizer/selection identity mismatch")
+    count = config.dataset.train_max_documents
+    tokens = config.dataset.train_max_tokens
+    parent_count = parent_identity["dataset"]["train_max_documents"]
+    if not (0 < count < parent_count and 0 < tokens < len(parent.train)):
+        raise ValueError("prepared prefix must reduce both document and token counts")
+    for split, values in (("train", parent.train), ("validation", parent.validation)):
+        stats = manifest[split]
+        documents = parent_identity["dataset"][f"{split}_max_documents"]
+        if (
+            stats.get("acquired_documents") != documents
+            or stats.get("retained_documents") != documents
+            or stats.get("skipped_documents") != 0
+            or stats.get("truncated_documents") != 0
+            or stats.get("tokens") != len(values)
+        ):
+            raise ValueError(
+                "prepared prefix requires complete unskipped parent documents"
+            )
+    eos = tokenizer.token_to_id("<eos>")
+    if eos is None or parent.train[tokens - 1] != eos:
+        raise ValueError(
+            "prepared prefix token cap is not a whole-document EOS boundary"
+        )
+    # Bound temporary memory even for billion-token parents. Counting the whole
+    # parent also rejects embedded EOS tokens, which cannot identify documents.
+    parent_eos = prefix_eos = 0
+    for start in range(0, len(parent.train), 1_048_576):
+        end = min(start + 1_048_576, len(parent.train))
+        parent_eos += int(np.count_nonzero(parent.train[start:end] == eos))
+        if start < tokens:
+            prefix_eos += int(
+                np.count_nonzero(parent.train[start : min(end, tokens)] == eos)
+            )
+        if resource_envelope is not None:
+            check_envelope(
+                resource_envelope,
+                workspace=root.parent,
+                rss_bytes=current_process_rss_bytes(),
+            )
+    if parent_eos != parent_count or prefix_eos != count:
+        raise ValueError("prepared prefix document count/EOS boundary mismatch")
+    matched = config.training.matched_stories
+    if matched is not None and matched.unpadded_documents:
+        from sparselab.data.story_packing import MatchedStoryDataset
+
+        for values in (parent.train[:tokens], parent.validation):
+            MatchedStoryDataset(
+                values,
+                config.training.seq_len,
+                eos,
+                layout="story",
+                targets_per_update=1,
+                unpadded_documents=True,
+            )
+    elif (
+        tokens < config.training.seq_len + 1
+        or len(parent.validation) < config.training.seq_len + 1
+    ):
+        raise ValueError("prepared split lacks a full next-token block")
+    if (root / "manifest.json").is_file():
+        return load_prepared_data(root, byte_enabled=False, expected_identity=identity)
+    if root.exists() or root.is_symlink():
+        raise RuntimeError(f"unverified prepared-data destination exists: {root}")
+    from sparselab.workspace_preflight import check_storage, require_storage
+
+    require_storage(
+        [
+            check_storage(
+                root, projected_bytes=(tokens + len(parent.validation)) * 4 + 65536
+            )
+        ]
+    )
+    root.parent.mkdir(parents=True, exist_ok=True)
+    # Separate staging leaves any failed streaming chunks intact and auditable.
+    staged = Path(tempfile.mkdtemp(prefix=root.name + ".prefix-", dir=root.parent))
+    proofs = {}
+    result = dict(manifest)
+    for split, values in (
+        ("train", parent.train[:tokens]),
+        ("validation", parent.validation),
+    ):
+        if resource_envelope is not None:
+            check_envelope(
+                resource_envelope,
+                workspace=staged,
+                rss_bytes=current_process_rss_bytes(),
+            )
+        proof = _atomic_array(staged / f"{split}.npy", values)
+        telemetry.logical_output_bytes += proof.size_bytes
+        telemetry.output_tokens += len(values)
+        proofs[f"{split}.npy"] = proof
+        result[split] = {
+            **manifest[split],
+            "shape": [len(values)],
+            "tokens": len(values),
+            "sha256": proof.sha256,
+            "size_bytes": proof.size_bytes,
+            "artifact_bytes": proof.size_bytes,
+            "output_tokens": len(values),
+        }
+        if split == "train":
+            result[split].update(acquired_documents=count, retained_documents=count)
+    # Revalidate the sealed parent's file fingerprints after reading/copying.
+    load_prepared_data(
+        request.root,
+        byte_enabled=False,
+        verification="structural",
+        receipt=parent.receipt,
+    )
+    result.update(
+        cache_identity=identity,
+        settings_sha256=hashlib.sha256(canonical_json(identity)).hexdigest(),
+        source_identity_sha256=source_identity()["sha256"],
+        prefix_derivation={
+            "kind": "verified-whole-document-prefix-v1",
+            "parent_manifest_sha256": request.manifest_sha256,
+            "parent_cache_identity": parent_identity,
+            "parent_train_sha256": manifest["train"]["sha256"],
+            "train_documents": count,
+            "train_tokens": tokens,
+        },
+    )
+    result.pop("manifest_sha256", None)
+    result["manifest_sha256"] = hashlib.sha256(canonical_json(result)).hexdigest()
+    with (staged / "manifest.json").open("xb") as handle:
+        handle.write(canonical_json(result) + b"\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    fd = os.open(staged, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    if resource_envelope is not None:
+        check_envelope(
+            resource_envelope, workspace=staged, rss_bytes=current_process_rss_bytes()
+        )
+    _publish_prepared_directory(staged, root)
+    fd = os.open(root.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    sealed = _receipt_from_proofs(root, result, _relocate_proofs(root, proofs))
+    prepared = load_prepared_data(
+        root,
+        byte_enabled=False,
+        expected_identity=identity,
+        verification="structural",
+        receipt=sealed,
+    )
+    _write_preparation_receipt(root, result["manifest_sha256"], telemetry, reused=False)
+    return prepared
+
+
+def _prepare_verified_append(
+    config: RunConfig,
+    tokenizer: Tokenizer,
+    request: PreparedAppend,
+    *,
+    identity: dict,
+    root: Path,
+    telemetry: PreparationTelemetry,
+    resource_envelope: ResourceEnvelope | None,
+    tokenizer_batch_documents: int,
+    tokenizer_batch_source_bytes: int,
+) -> PreparedData:
+    """Authenticate old raw bytes/IDs, then encode only the fresh JSONL tail."""
+    if (
+        config.dataset.source != "local_text"
+        or config.dataset.corpus_release_path is not None
+        or config.dataset.allocation_manifest_path is not None
+        or config.model.memory in {"byte", "portable"}
+    ):
+        raise ValueError("prepared append requires plain all-token local_text")
+    parent = load_prepared_data(request.root, byte_enabled=False)
+    manifest = parent.manifest
+    if manifest["manifest_sha256"] != request.manifest_sha256:
+        raise ValueError("prepared append parent manifest pin mismatch")
+    if (
+        manifest["packing_version"] != PACKING_VERSION
+        or manifest.get("supervision") != {"kind": "all_tokens"}
+        or manifest.get("allocation") is not None
+    ):
+        raise ValueError(
+            "prepared append requires current all-token arrays without sidecars"
+        )
+    parent_identity = manifest["cache_identity"]
+    expected = {
+        **identity,
+        "dataset": dict(identity["dataset"]),
+        "local_chat_source": dict(identity["local_chat_source"]),
+    }
+    for key in ("revision", "train_max_documents", "train_max_tokens"):
+        expected["dataset"][key] = parent_identity["dataset"][key]
+    expected["local_chat_source"]["train_sha256"] = parent_identity[
+        "local_chat_source"
+    ]["train_sha256"]
+    if expected != parent_identity:
+        raise ValueError(
+            "prepared append source/tokenizer/producer/validation identity mismatch"
+        )
+    old_count = parent_identity["dataset"]["train_max_documents"]
+    count = config.dataset.train_max_documents
+    tokens = config.dataset.train_max_tokens
+    if not (0 < old_count < count and len(parent.train) < tokens):
+        raise ValueError("prepared append must increase both document and token counts")
+    for split, values in (("train", parent.train), ("validation", parent.validation)):
+        stats = manifest[split]
+        documents = parent_identity["dataset"][f"{split}_max_documents"]
+        if (
+            stats.get("acquired_documents") != documents
+            or stats.get("retained_documents") != documents
+            or stats.get("skipped_documents") != 0
+            or stats.get("truncated_documents") != 0
+            or stats.get("tokens") != len(values)
+        ):
+            raise ValueError(
+                "prepared append requires complete unskipped parent documents"
+            )
+    eos = tokenizer.token_to_id("<eos>")
+    if eos is None or parent.train[-1] != eos:
+        raise ValueError("prepared append parent must end at EOS")
+    matched = config.training.matched_stories
+    if matched is not None and len(parent.train) not in matched.frozen_update_ends:
+        raise ValueError("prepared append requires the frozen parent update boundary")
+
+    def envelope():
+        if resource_envelope is not None:
+            check_envelope(
+                resource_envelope,
+                workspace=root.parent,
+                rss_bytes=current_process_rss_bytes(),
+            )
+
+    parent_eos = 0
+    for start in range(0, len(parent.train), 1_048_576):
+        parent_eos += int(
+            np.count_nonzero(parent.train[start : start + 1_048_576] == eos)
+        )
+        envelope()
+    if parent_eos != old_count:
+        raise ValueError("prepared append parent document/EOS count mismatch")
+    cached = (root / "manifest.json").is_file()
+    if not cached and (root.exists() or root.is_symlink()):
+        raise RuntimeError(f"unverified prepared-data destination exists: {root}")
+    from sparselab.workspace_preflight import check_storage, require_storage
+
+    path = config.dataset.train_path
+    assert path is not None
+    # Final plus spool, tail array plus spool, validation and raw tail staging.
+    projected = (
+        (2 * tokens + 2 * (tokens - len(parent.train)) + len(parent.validation)) * 4
+        + path.stat().st_size
+        + 65536
+    )
+    staged = tail_dir = tail_file = None
+    if not cached:
+        require_storage([check_storage(root, projected_bytes=projected)])
+        root.parent.mkdir(parents=True, exist_ok=True)
+        staged = Path(tempfile.mkdtemp(prefix=root.name + ".append-", dir=root.parent))
+        tail_dir = staged / "tail"
+        tail_dir.mkdir()
+        tail_file = tail_dir / "source.jsonl"
+    prefix_digest = hashlib.sha256()
+    tail_digest = hashlib.sha256()
+    whole_digest = hashlib.sha256()
+    raw_limit = 6 * tokenizer_batch_source_bytes + 1024
+    raw_prefix_bytes = 0
+    # One record per line, as required by the native local_text reader. Hash the
+    # exact first N lines against the parent's whole raw-source digest; parents
+    # that selected only part of a larger raw file are deliberately ineligible.
+    with (
+        path.open("rb") as source,
+        tail_file.open("xb") if tail_file else nullcontext(None) as output,
+    ):
+        for number in range(count):
+            line = source.readline(raw_limit + 1)
+            if not line or len(line) > raw_limit or not line.endswith(b"\n"):
+                raise ValueError(
+                    "prepared append requires bounded complete JSONL records"
+                )
+            whole_digest.update(line)
+            if number < old_count:
+                prefix_digest.update(line)
+                raw_prefix_bytes += len(line)
+            else:
+                tail_digest.update(line)
+                if output is not None:
+                    output.write(line)
+            if number % 1024 == 0:
+                envelope()
+        if source.read(1):
+            raise ValueError(
+                "prepared append requires the exact complete selected raw source"
+            )
+        if output is not None:
+            output.flush()
+            os.fsync(output.fileno())
+    if (
+        prefix_digest.hexdigest()
+        != parent_identity["local_chat_source"]["train_sha256"]
+    ):
+        raise ValueError("prepared append historical raw prefix digest mismatch")
+    if whole_digest.hexdigest() != identity["local_chat_source"]["train_sha256"]:
+        raise ValueError("prepared append source changed during verification")
+    if cached:
+        return load_prepared_data(root, byte_enabled=False, expected_identity=identity)
+    assert staged is not None and tail_dir is not None and tail_file is not None
+    tail_config = config.dataset.model_copy(
+        update={
+            "train_path": tail_file,
+            "train_max_documents": count - old_count,
+            "train_max_tokens": tokens - len(parent.train),
+        }
+    )
+    # The authenticated parent already checked its history against the identical
+    # validation source. Apply that same native check to every new tail document.
+    _assert_local_chat_disjoint(
+        tail_config, local_text_source_bytes=tokenizer_batch_source_bytes
+    )
+    tail_proofs: dict[str, VerifiedFile] = {}
+    _collect_streaming(
+        tail_config,
+        tokenizer,
+        "train",
+        tail_dir,
+        selected_documents=count - old_count,
+        resource_envelope=resource_envelope,
+        telemetry=telemetry,
+        tokenizer_batch_documents=tokenizer_batch_documents,
+        tokenizer_batch_source_bytes=tokenizer_batch_source_bytes,
+        proofs=tail_proofs,
+    )
+    tail = np.load(tail_dir / "train.npy", mmap_mode="r", allow_pickle=False)
+    tail_eos = 0
+    for start in range(0, len(tail), 1_048_576):
+        tail_eos += int(np.count_nonzero(tail[start : start + 1_048_576] == eos))
+        envelope()
+    if len(parent.train) + len(tail) != tokens or tail_eos != count - old_count:
+        raise ValueError("prepared append tail token/document count mismatch")
+    spool = _ArraySpool(staged / "train.npy", np.dtype(np.int32), telemetry)
+    for values in (parent.train, tail):
+        for start in range(0, len(values), 1_048_576):
+            spool.append_array(values[start : start + 1_048_576])
+            envelope()
+    proofs = {
+        "train.npy": spool.finish(),
+        "validation.npy": _atomic_array(staged / "validation.npy", parent.validation),
+    }
+    train = np.load(staged / "train.npy", mmap_mode="r", allow_pickle=False)
+    if matched is not None and matched.unpadded_documents:
+        from sparselab.data.story_packing import MatchedStoryDataset
+
+        for values in (train, parent.validation):
+            MatchedStoryDataset(
+                values,
+                config.training.seq_len,
+                eos,
+                layout="story",
+                targets_per_update=1,
+                unpadded_documents=True,
+            )
+    elif min(len(train), len(parent.validation)) < config.training.seq_len + 1:
+        raise ValueError("prepared split lacks a full next-token block")
+    # Verify sources and parent file fingerprints again before publication.
+    if _local_chat_identity(config.dataset) != identity["local_chat_source"]:
+        raise ValueError("prepared append source changed before publication")
+    load_prepared_data(
+        request.root,
+        byte_enabled=False,
+        verification="structural",
+        receipt=parent.receipt,
+    )
+    result = dict(manifest)
+    result.pop("prefix_derivation", None)
+    result.update(
+        revision=config.dataset.revision,
+        cache_identity=identity,
+        settings_sha256=hashlib.sha256(canonical_json(identity)).hexdigest(),
+        source_identity_sha256=source_identity()["sha256"],
+        train={
+            **manifest["train"],
+            "shape": [tokens],
+            "tokens": tokens,
+            "acquired_documents": count,
+            "retained_documents": count,
+            "output_tokens": tokens,
+            "artifact_bytes": proofs["train.npy"].size_bytes,
+            "sha256": proofs["train.npy"].sha256,
+            "size_bytes": proofs["train.npy"].size_bytes,
+        },
+        append_derivation={
+            "kind": "verified-whole-document-append-v1",
+            "parent_manifest_sha256": request.manifest_sha256,
+            "parent_cache_identity": parent_identity,
+            "parent_train_sha256": manifest["train"]["sha256"],
+            "parent_train_tokens": len(parent.train),
+            "parent_train_documents": old_count,
+            "parent_raw_prefix_bytes": raw_prefix_bytes,
+            "parent_raw_prefix_sha256": prefix_digest.hexdigest(),
+            "tail_raw_sha256": tail_digest.hexdigest(),
+            "tail_array_sha256": tail_proofs["train.npy"].sha256,
+            "tail_documents": count - old_count,
+            "tail_tokens": len(tail),
+        },
+    )
+    result.pop("manifest_sha256", None)
+    result["manifest_sha256"] = hashlib.sha256(canonical_json(result)).hexdigest()
+    with (staged / "manifest.json").open("xb") as handle:
+        handle.write(canonical_json(result) + b"\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    # Tail files are owned scratch, not extra published artifact dependencies.
+    del tail
+    shutil.rmtree(tail_dir)
+    fd = os.open(staged, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    envelope()
+    _publish_prepared_directory(staged, root)
+    fd = os.open(root.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    sealed = _receipt_from_proofs(root, result, _relocate_proofs(root, proofs))
+    prepared = load_prepared_data(
+        root,
+        byte_enabled=False,
+        expected_identity=identity,
+        verification="structural",
+        receipt=sealed,
+    )
+    _write_preparation_receipt(root, result["manifest_sha256"], telemetry, reused=False)
+    return prepared
+
+
 def _prepare_data(
     config: RunConfig,
     tokenizer: Tokenizer,
@@ -1330,6 +1847,8 @@ def _prepare_data(
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
     observer: BottleneckObserver | None = None,
+    prefix_from: PreparedPrefix | None = None,
+    append_from: PreparedAppend | None = None,
 ) -> PreparedData:
     """Prepare immutable IDs and causal sidecars with an optional allocation."""
     tokenizer_batch_documents, tokenizer_batch_source_bytes = (
@@ -1420,7 +1939,7 @@ def _prepare_data(
         allocation = load_allocation_manifest(
             config.dataset.allocation_manifest_path,
             source_identity_sha256=source_digest,
-            tokenizer_sha256=_tokenizer_sha256(tokenizer),
+            tokenizer_sha256=canonical_tokenizer_sha256(tokenizer),
         )
         corpus = allocation.payload["corpus"]
         assert isinstance(corpus, dict)
@@ -1470,11 +1989,15 @@ def _prepare_data(
         },
         "packing_version": PACKING_VERSION,
         "source_identity_sha256": source_digest,
-        "tokenizer_sha256": _tokenizer_sha256(tokenizer),
+        "tokenizer_sha256": canonical_tokenizer_sha256(tokenizer),
     }
     from sparselab.experiments.source_compatibility import active_source_compatibility
 
     compatibility = active_source_compatibility()
+    if compatibility is not None and (
+        prefix_from is not None or append_from is not None
+    ):
+        raise ValueError("prepared prefix cannot use source compatibility override")
     if compatibility is not None:
         baseline = compatibility["baseline_source_identity"]
         historical_source = (
@@ -1545,6 +2068,28 @@ def _prepare_data(
         config.dataset.cache_dir
         / hashlib.sha256(canonical_json(cache_identity)).hexdigest()[:16]
     )
+    if append_from is not None:
+        return _prepare_verified_append(
+            config,
+            tokenizer,
+            append_from,
+            identity=cache_identity,
+            root=root,
+            telemetry=telemetry,
+            resource_envelope=resource_envelope,
+            tokenizer_batch_documents=tokenizer_batch_documents,
+            tokenizer_batch_source_bytes=tokenizer_batch_source_bytes,
+        )
+    if prefix_from is not None:
+        return _prepare_verified_prefix(
+            config,
+            tokenizer,
+            prefix_from,
+            identity=cache_identity,
+            root=root,
+            telemetry=telemetry,
+            resource_envelope=resource_envelope,
+        )
     manifest_path = root / "manifest.json"
     _train_path, _validation_path = root / "train.npy", root / "validation.npy"
     _train_supervision_path, _validation_supervision_path = (
@@ -1823,7 +2368,26 @@ def _prepare_data(
         validation, validation_supervision, validation_byte, validation_stats = (
             _collect(config.dataset, tokenizer, "validation", **settings)
         )
-    if (
+    unpadded = (
+        config.training.matched_stories is not None
+        and config.training.matched_stories.unpadded_documents
+    )
+    if unpadded:
+        from sparselab.data.story_packing import MatchedStoryDataset
+
+        eos = tokenizer.token_to_id("<eos>")
+        if eos is None:
+            raise ValueError("whole-document preparation requires EOS")
+        for values in (train, validation):
+            MatchedStoryDataset(
+                values,
+                config.training.seq_len,
+                eos,
+                layout="story",
+                targets_per_update=1,
+                unpadded_documents=True,
+            )
+    elif (
         len(train) < config.training.seq_len + 1
         or len(validation) < config.training.seq_len + 1
     ):
@@ -1958,7 +2522,7 @@ def _prepare_data(
         **({"token_mixture": token_mixture} if token_mixture is not None else {}),
         **attributions[config.dataset.source],
         **({"corpus_export": corpus_export} if corpus_export is not None else {}),
-        "tokenizer_sha256": _tokenizer_sha256(tokenizer),
+        "tokenizer_sha256": canonical_tokenizer_sha256(tokenizer),
         "settings_sha256": hashlib.sha256(canonical_json(cache_identity)).hexdigest(),
         "source_identity_sha256": source_identity()["sha256"],
         "train": {
@@ -2136,8 +2700,38 @@ def prepare_data(
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
     observer: BottleneckObserver | None = None,
+    prefix_from: PreparedPrefix | None = None,
+    append_from: PreparedAppend | None = None,
 ) -> PreparedData:
-    """Prepare data and mark only new caches owned by the selected workspace."""
+    """Prepare data and mark only new caches owned by the selected workspace.
+
+    ``prefix_from`` explicitly derives a smaller, whole-document local_text
+    selection from a pinned parent cache. Sources and parent bytes are verified;
+    validation is unchanged and no document is re-encoded. Other dataset kinds,
+    masks, sidecars and source-compatibility overrides are deliberately rejected.
+
+    ``append_from`` authenticates a same-producer complete raw JSONL prefix,
+    copies historical IDs unchanged and encodes only the fresh complete tail.
+    Matched-story callers must freeze the parent update boundary; full-state
+    continuation additionally verifies the historical group settings/cursor.
+    """
+    if prefix_from is not None and append_from is not None:
+        raise ValueError("prepared prefix and append are mutually exclusive")
+    if config.model.memory_token_mapping is not None:
+        from sparselab.memory_tokenizer import validate_memory_token_map
+
+        validate_memory_token_map(
+            config.model.memory_token_mapping.model_dump(mode="json"),
+            tokenizer_path=config.tokenizer.path,
+        )
+        from sparselab.data.tokenizer import load_tokenizer
+
+        if canonical_tokenizer_sha256(tokenizer) != canonical_tokenizer_sha256(
+            load_tokenizer(config.tokenizer.path)
+        ):
+            raise ValueError(
+                "memory mapping tokenizer object differs from configured tokenizer"
+            )
     tokenizer_batch_documents, tokenizer_batch_source_bytes = (
         validate_tokenizer_batch_limits(
             tokenizer_batch_documents, tokenizer_batch_source_bytes
@@ -2176,6 +2770,8 @@ def prepare_data(
                 proof_store=proof_store,
                 verification_mode=verification_mode,
                 observer=observer,
+                prefix_from=prefix_from,
+                append_from=append_from,
             )
     with (
         campaign_lock(base),
@@ -2192,6 +2788,8 @@ def prepare_data(
             proof_store=proof_store,
             verification_mode=verification_mode,
             observer=observer,
+            prefix_from=prefix_from,
+            append_from=append_from,
         )
         if prepared.root.name not in existing:
             mark_prepared_cache(workspace, prepared.root)

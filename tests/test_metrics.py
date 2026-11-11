@@ -483,3 +483,43 @@ with store.session():
     with sqlite3.connect(reopened.path) as con:
         assert con.execute("PRAGMA integrity_check").fetchone() == ("ok",)
         assert con.execute("SELECT value FROM metrics").fetchall() == [(1.0,)]
+
+
+def test_large_configuration_replication_resolves_only_from_matching_manifest(tmp_path):
+    from sparselab.canonical import canonical_digest
+    from sparselab.training.metrics import MAX_ENVELOPE_BYTES
+
+    config = {
+        "name": "mapped",
+        "model": {"memory_token_mapping": {"token_ids": list(range(32768))}},
+    }
+    manifest = {"run_id": "mapped", "effective_config": config}
+    digest = canonical_digest(manifest)
+    source = ExperimentStore(tmp_path / "source")
+    source.create_run(
+        "mapped", config, {"manifest_sha256": digest}, config_manifest=manifest
+    )
+    source.register_manifest("mapped", digest, manifest)
+    records = source.export_records()["records"]
+    assert all(len(json.dumps(r).encode()) < MAX_ENVELOPE_BYTES for r in records)
+    assert records[0]["payload"]["config"]["field"] == "effective_config"
+    with source._connect() as con:
+        assert (
+            json.loads(con.execute("SELECT config_json FROM runs").fetchone()[0])
+            == config
+        )
+    target = ExperimentStore(tmp_path / "target")
+    target.import_records(records)
+    with pytest.raises(ValueError, match="digest differs"):
+        target.materialize_manifest("mapped", digest, manifest | {"tampered": True})
+    target.materialize_manifest("mapped", digest, manifest)
+    with target._connect() as con:
+        assert (
+            json.loads(con.execute("SELECT config_json FROM runs").fetchone()[0])
+            == config
+        )
+    assert target.export_records()["records"] == []
+    with pytest.raises(ValueError, match="complete manifest"):
+        ExperimentStore(tmp_path / "unbound").create_run(
+            "mapped", config, {"manifest_sha256": digest}
+        )

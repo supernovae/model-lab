@@ -67,6 +67,70 @@ def test_multi_stream_collision_diagnostics_aggregate_all_lookups() -> None:
     assert float(diagnostics.bucket_reuse_rate) > 0
 
 
+def test_vectorized_stream_diagnostics_match_per_stream_reference() -> None:
+    from sparselab.model.memory import _diagnostics
+
+    torch.manual_seed(7)
+    memory = TokenNgramMemory(
+        hidden_dim=8,
+        table_size=31,
+        ngram_size=3,
+        value_dim=5,
+        ngram_orders=(2, 3, 4),
+        hash_heads=2,
+    )
+    hidden = torch.randn(3, 12, 8)
+    input_ids = torch.randint(0, 64, (3, 12))
+    output = memory(hidden, input_ids)
+    actual = memory.last_diagnostics
+    assert actual is not None
+
+    addresses = [
+        memory.addresses(input_ids, order, head)
+        for order in memory.ngram_orders
+        for head in range(memory.hash_heads)
+    ]
+    for left, right in zip(addresses, memory._all_addresses(input_ids), strict=True):
+        assert torch.equal(left, right)
+    tables = (memory.table, *memory.extra_tables)
+    stream_values = [
+        memory.output(table(address))
+        for table, address in zip(tables, addresses, strict=True)
+    ]
+    values = torch.stack(stream_values).mean(dim=0)
+    gate = torch.sigmoid(memory.gate(hidden))
+    expected_streams = tuple(
+        _diagnostics(address, gate, value, hidden, memory.table_size)
+        for address, value in zip(addresses, stream_values, strict=True)
+    )
+    expected = _diagnostics(
+        torch.cat([address.flatten() for address in addresses]),
+        gate,
+        values,
+        hidden,
+        memory.table_size,
+    )
+    torch.testing.assert_close(output, hidden + gate * values, rtol=0, atol=0)
+    for field in (
+        "lookup_count",
+        "unique_addresses",
+        "collision_count",
+        "bucket_reuse_rate",
+        "table_utilization",
+        "maximum_address_fraction",
+        "gate_mean",
+        "value_norm",
+        "hidden_norm",
+    ):
+        torch.testing.assert_close(getattr(actual, field), getattr(expected, field))
+        for actual_stream, expected_stream in zip(
+            actual.streams, expected_streams, strict=True
+        ):
+            torch.testing.assert_close(
+                getattr(actual_stream, field), getattr(expected_stream, field)
+            )
+
+
 def test_disabled_memory_is_absent_and_enabled_memory_runs_backward() -> None:
     plain = ModelConfig(
         vocab_size=512,
@@ -228,3 +292,70 @@ def test_embedding_injection_carries_prefix_memory_into_later_logits() -> None:
     )
     torch.testing.assert_close(final_before, final_after, rtol=0, atol=0)
     assert not torch.allclose(early_before, early_after, rtol=0, atol=1e-10)
+
+
+@pytest.mark.parametrize("kernel", [0, 4])
+def test_context_key_gate_reads_memory_and_backpropagates(kernel: int) -> None:
+    from sparselab.model.memory import ContextKeyGate
+
+    gate = ContextKeyGate(4, 1e-6)
+    hidden = torch.tensor([[[1.0, 0.0, 0.0, 0.0]]])
+    assert torch.sigmoid(gate(hidden, hidden)).item() > 0.85
+    assert torch.sigmoid(gate(hidden, -hidden)).item() < 0.15
+    torch.manual_seed(7)
+    memory = TokenNgramMemory(
+        8, 31, 3, 4, (2, 3), 2, variant="context_key", conv_kernel_size=kernel
+    )
+    ids = torch.tensor([[3, 7, 11, 13, 17, 19]])
+    states = torch.randn(1, 6, 8, requires_grad=True)
+    output = memory(states, ids)
+    future_ids = ids.clone()
+    future_ids[:, 4:] += 1
+    future_states = states.detach().clone()
+    future_states[:, 4:] += 5
+    torch.testing.assert_close(output[:, :4], memory(future_states, future_ids)[:, :4])
+    output.square().sum().backward()
+    for name, parameter in memory.named_parameters():
+        assert parameter.grad is not None, name
+        assert torch.isfinite(parameter.grad).all(), name
+        assert parameter.grad.abs().sum() > 0, name
+    assert not memory.table.weight.grad.is_sparse
+    assert states.grad is not None and states.grad.abs().sum() > 0
+
+
+def test_context_gate_changes_with_retrieved_content_at_fixed_hidden() -> None:
+    memory = TokenNgramMemory(4, 31, 2, 4, variant="context_key")
+    hidden = torch.tensor([[[1.0, 0.0, 0.0, 0.0]]])
+    ids = torch.tensor([[7]])
+    with torch.no_grad():
+        memory.key.weight.copy_(torch.eye(4))
+        memory.table.weight[:] = hidden[0, 0]
+        memory(hidden, ids)
+        aligned = memory.last_diagnostics.gate_mean.item()
+        memory.table.weight.neg_()
+        memory(hidden, ids)
+        opposed = memory.last_diagnostics.gate_mean.item()
+    assert aligned > 0.85 and opposed < 0.15
+
+
+def test_convolved_memory_rejects_masked_allocation() -> None:
+    config = ModelConfig(
+        vocab_size=260,
+        hidden_dim=8,
+        num_layers=2,
+        num_heads=2,
+        ffn_dim=16,
+        max_seq_len=8,
+        memory="ngram",
+        memory_table_size=31,
+        memory_ngram_size=3,
+        memory_dim=4,
+        memory_variant="context_key",
+        memory_conv_kernel_size=4,
+    )
+    model = DenseLM(config, AttentionConfig())
+    with pytest.raises(ValueError, match="memory_mask"):
+        model(
+            torch.ones(1, 4, dtype=torch.long),
+            memory_mask=torch.ones(1, 4, dtype=torch.bool),
+        )

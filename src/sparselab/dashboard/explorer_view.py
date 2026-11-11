@@ -121,12 +121,20 @@ def _memory_block(memory: Mapping[str, Any]) -> str:
         if memory.get("ngram_orders")
         else ""
     )
+    sizes = memory.get("rows_per_stream")
+    table_shape = (
+        f"{memory['tables']} table(s), rows [{', '.join(f'{rows:,}' for rows in sizes)}] × "
+        if sizes
+        else f"{memory['tables']} table(s) × {memory['rows']:,} rows × "
+    )
+    sites = memory.get("block_indices")
+    placement = f" · blocks {', '.join(map(str, sites))} (zero-based)" if sites else ""
     return (
         "<div class='lab-block' style='background:rgba(130,80,223,.10)'>"
         f"<div class='t'>Memory · {html.escape(str(memory['kind']))} "
         f"({html.escape(str(memory['injection']))} injection)</div>"
-        f"<div class='s'>{memory['tables']} table(s) × {memory['rows']:,} rows × "
-        f"{memory['dim']} dims{orders} · {compact(memory['parameters'])} params</div>"
+        f"<div class='s'>{table_shape}"
+        f"{memory['dim']} dims{orders}{placement} · {compact(memory['parameters'])} params</div>"
         "</div>"
     )
 
@@ -381,6 +389,8 @@ def memory_rows(
         row: dict[str, Any] = {"position": position, "token": token["text"]}
         if memory.get("gate"):
             row["gate"] = memory["gate"][position]
+        for port, gates in memory.get("gates_by_port", {}).items():
+            row[f"gate {port}"] = gates[position]
         for stream in memory["streams"]:
             if position >= len(stream["addresses"]):
                 continue
@@ -407,15 +417,16 @@ def memory_reuse(memory: Mapping[str, Any]) -> dict[str, float]:
 def gate_figure(memory: Mapping[str, Any], tokens: list[Mapping[str, Any]]) -> Any:
     if not memory.get("gate"):
         return None
-    labels = _labels(tokens)[: len(memory["gate"])]
-    figure = go.Figure(
-        go.Bar(
-            x=labels,
-            y=memory["gate"],
-            marker_color=SERIES["reference"],
-            hovertemplate="%{x}<br>gate %{y:.3f}<extra></extra>",
+    figure = go.Figure()
+    for name, gates in memory.get("gates_by_port", {"memory": memory["gate"]}).items():
+        figure.add_trace(
+            go.Bar(
+                name=name,
+                x=_labels(tokens)[: len(gates)],
+                y=gates,
+                hovertemplate="%{x}<br>gate %{y:.3f}<extra>%{fullData.name}</extra>",
+            )
         )
-    )
     figure.update_xaxes(tickfont={"size": 9}, tickangle=-60)
     return figure_layout(
         figure,
@@ -648,4 +659,31 @@ def paired_activation_line_figure(
         title=f"Layer {key} · {ACTIVATION_SITE_LABEL.get(site, site)} RMS per token",
         xaxis_title="token position",
         yaxis_title="RMS",
+    )
+
+
+def memory_address_figure(
+    memory: Mapping[str, Any], tokens: list[Mapping[str, Any]]
+) -> go.Figure:
+    """Observed token-to-address edges; table identity keeps equal row IDs distinct."""
+    figure = go.Figure()
+    for stream in memory["streams"]:
+        addresses = stream["addresses"][: len(tokens)]
+        figure.add_trace(
+            go.Scatter(
+                x=list(range(len(addresses))),
+                y=[f"{stream['table']} · row {address}" for address in addresses],
+                text=[str(token["text"]) for token in tokens[: len(addresses)]],
+                mode="markers",
+                name=str(stream["table"]),
+                hovertemplate="Position %{x} · %{text}<br>%{y}<extra></extra>",
+            )
+        )
+    figure.update_yaxes(type="category")
+    return figure_layout(
+        figure,
+        height=420,
+        title="Observed token → memory row lookups",
+        xaxis_title="Token position",
+        yaxis_title="Table and hashed row",
     )

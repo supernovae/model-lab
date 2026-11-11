@@ -231,6 +231,9 @@ def _excluded_edges(kind: str) -> frozenset[tuple[str, str]]:
 # Pinned below to the AST of each excluded import and all existing uses of its
 # imported names. A new use in a verifier, or any change to an existing user,
 # makes authority unavailable until the exclusion is explicitly re-audited.
+# Context-transfer audit 2026-11-04: only _prepare_data changes.
+# It validates short unpadded splits through MatchedStoryDataset; all byte-loader
+# verifiers and their uses of excluded imports are unchanged. No exclusions added.
 # Combined PR290/305 audit 2026-11-03: versus integrated PR290 only
 # _prepare_data changes, to verify the explicit tokenizer origin.
 # load_prepared_data and _verified_receipt ASTs are unchanged; semantic
@@ -270,11 +273,25 @@ def _excluded_edges(kind: str) -> frozenset[tuple[str, str]]:
 # and record_event changes only method names. Reversing the public API renames
 # and removing their docstrings restores the complete module AST exactly;
 # artifact imports/uses, cold evidence, trust checks and exclusions are unchanged.
+# data.packing re-audited 2026-11-04 against f61763f: reversing the
+# _tokenizer_sha256 -> canonical_tokenizer_sha256 promotion and removing the
+# producer-only map/tokenizer-object check in prepare_data restores the complete
+# baseline module AST. Only _prepare_data and prepare_data owners changed;
+# load_prepared_data and receipt validators are unchanged. The new tokenizer
+# load is confined to prepare_data; no excluded edge gained a verifier use.
+# Re-pin the existing complete-owner signatures without excluding new edges.
+# Integration re-audit 2026-11-11: preserved main prefix block checks and proofs;
+# only producer owners change. load_prepared_data and receipt validation ASTs
+# remain identical to main; no exclusion edges are added or removed.
+# Verified append producer re-audit: existing exclusion edge set is unchanged.
+# New append production calls native collectors/preflight only; load_prepared_data,
+# receipt verification and all verifier closure membership remain unchanged.
+# Whole-owner pins below include append dispatch and producer-only helpers.
 _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.preparation_workers",
-    ): "8501efeec2d7fa1bfc7ba62d183caf46967be782e863f3ae3b981290d47d53e3",
+    ): "e5b731976865f31d558447bc238794e331cbf82e6aa5583733846da8ef3e05e0",
     (
         "experiments.artifacts",
         "data.sources",
@@ -282,7 +299,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "corpus.mixture",
-    ): "ee538665bb3739ae23b3c333f01e7b96dcace6f51e1f5db7c901d04a3fa2d1d7",
+    ): "2af16abca502bb82c157fef2aee80df5a70685cbdb0102fc583bd0164504ed59",
     (
         "workers",
         "workers.transport",
@@ -290,11 +307,11 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.tokenizer",
-    ): "e9e1da52bfe3bc28830632fc6db512c1588d1848aa69e1fea4a30c4b261f0cb9",
+    ): "30be6bd1f5d0251b22ff4b7f4b4d7657890e872aca8cea5fe442dfadb8256170",
     (
         "data.packing",
         "data.sources",
-    ): "485c50c4cd417e1f93ea271787d32b147af2f02e89acfaac85d24adfa59ec6a0",
+    ): "dc3769e15a7341f951e05bfb1e7af663873d3c42749a24e43acf2aead95730a2",
     (
         "data",
         "data.tokenizer",
@@ -314,11 +331,11 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "corpus.export",
-    ): "809514e5a5f94bb0d4b56169653e5afdae58f059442fadae99fc383089e93155",
+    ): "671168408a9906e94efdc41a8ba54e0833407d28eb438a7d5a592a17cc67df61",
     (
         "data.packing",
         "data.allocation",
-    ): "d0d21e33780beb62e8bbc56f05ff5f6397b7f5be94f11182f89868ee30f2b98f",
+    ): "c0ab7e30055854ded1bc725e6aedb74dd372053d15a82de25e16088027090818",
     (
         "data.packing",
         "data.byte_hash",
@@ -334,43 +351,43 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.encoding",
-    ): "1126f7c3cc13f8f123d49bc62ddb5a71222fcf053891f84b3af17b62f7989b71",
+    ): "86584acb9103d8920d08c1d04cf30fb57455dadd35ea2ce97fe15b8a126a7264",
     (
         "data.packing",
         "data.local_stories",
-    ): "6f5c869315ab93300585df4aa00841e2ffd7cd62f969252391364c3d811b86c3",
+    ): "f02c6ed06a3bbed3711634f334ce4763e5af7008807e91775d2b3c61938365ae",
     (
         "data.packing",
         "data.preparation_chunks",
-    ): "8e8d44ac404067135aef1375f98b572d9058e3b3bd649cd3253efd5b6214777d",
+    ): "57b23fa77a23ed7e531fa8005d62af6a8ad90740d19088c93b2969d836f7287a",
     (
         "data.packing",
         "data.preparation_telemetry",
-    ): "388d56a800e86214f7883f36a55200cb60e0a00e849d9c871878af5a214b4650",
+    ): "ceb9301d55bda05c2827571b2f6e7fafc0988b7fdfe38249096fe46d2f9998ae",
     (
         "data.packing",
         "experiments.source_compatibility",
-    ): "0f4c16abf8709e64866b1a7d6207e9db9d6b6ced79fb81b603df87cf7ae5535a",
+    ): "da30e3a2d720629d9f4f2a740405e1d2b24535f27f4eae3f63db725e4b257d2f",
     (
         "data.packing",
         "progress",
-    ): "ea34073e9e0c0cbed67df985f81aac8e3c3c788163b6ba6aaa5f2f98f20d3e7e",
+    ): "17675c284d532681502a7217e5c669a89824acc8c09b11c52d1cf637fccdc271",
     (
         "data.packing",
         "resource_envelope",
-    ): "3ee10340cccbcc26206bc55d3f7d5c1b3476ff2388e63daaf0b5fbfe2dfc8e00",
+    ): "10a75cf00ee4d6c10dd688ef2cfe9f45b145cca803321511c26e4b36408d29ff",
     (
         "data.packing",
         "workdir",
-    ): "663292fe730983bd3dc49e88ba3684d1b8631ee4714f2256096c19353722407d",
+    ): "6e7d990f9d82a6c7c2b157b0c1bc533b4cd9964cb33624c7625cd6a94c86cf84",
     (
         "data.packing",
         "workspace_cleanup",
-    ): "387d791e1615a692cd05e34b447f1a99c64885b9af73ef4d9d70ed2a9602189c",
+    ): "2e111f35237382d0fca9cc2d1e8de7fe7613f69d5911160e0ac42299f6ee5381",
     (
         "data.packing",
         "workspace_preflight",
-    ): "3b02af5cb7c3068a58a927139b2acc3645c378a3c988ea46e828fa0a6b8aa1e7",
+    ): "cd86a55fd9bfad8038ff04daf2ac87dfbf431722113ba049194452b0a2db78f0",
     (
         "corpus.tokenizer_bakeoff",
         "corpus.cli",
@@ -427,7 +444,8 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
 
 
 @lru_cache(maxsize=128)
-def _exclusion_signature(source: bytes, imported: str) -> str:
+def exclusion_signature(source: bytes, imported: str) -> str:
+    """Compute the static review signature; this does not authorize an exclusion."""
     tree = ast.parse(source)
     declared: set[str] = set()
     imports: list[str] = []
@@ -673,7 +691,7 @@ def verifier_authority(kind: str, version: int) -> dict[str, object]:
         for imported in imports:
             edge = name, imported
             if edge in excluded:
-                if _exclusion_signature(source, imported) != _EXCLUSION_SIGNATURES.get(
+                if exclusion_signature(source, imported) != _EXCLUSION_SIGNATURES.get(
                     edge
                 ):
                     raise ValueError(f"verifier exclusion needs review: {edge}")

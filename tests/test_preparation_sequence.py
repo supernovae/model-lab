@@ -1850,3 +1850,81 @@ def test_native_inventory_handoff_reuses_completed_proof_and_rejects_changed_loc
         _native_completion_without_lock_binding(
             InventoryCache(root), consumer, inventory, report, lock, source
         )
+
+
+@pytest.mark.parametrize("outcome", ["success", "digest_mismatch", "producer_error"])
+def test_cold_inventory_completion_has_operation_owned_lifetime(
+    tmp_path, monkeypatch, outcome
+):
+    from sparselab.corpus.split_inventory_cache import (
+        InventoryCache,
+        verified_inventory,
+    )
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "settings"))
+    root = tmp_path / "work"
+    root.mkdir(mode=0o700)
+    recipe, _ = _sources(root, "fixture-cold-inventory")
+    project = load_project(recipe / "acquire.yaml")
+    original = recipe / "original.jsonl"
+    original_report = write_split_inventory(project, root, original)
+    # A distinct owned path has identical reviewed bytes but no completion key.
+    reviewed = recipe / "reviewed.jsonl"
+    reviewed.write_bytes(original.read_bytes())
+    persistent = InventoryCache(root)
+    assert persistent.completed(project, reviewed) is None
+    original_completion = persistent.completed(project, original)
+    assert original_completion is not None
+    original_entries = {p: p.read_bytes() for p in persistent.directory.glob("*.json")}
+    generated = []
+
+    def regenerate(project, root, output, *, completion_cache):
+        report = write_split_inventory(
+            project, root, output, completion_cache=completion_cache
+        )
+        completed = completion_cache.completed(project, output)
+        assert completed is not None
+        assert completed[2]["mode"] == "native_production"
+        assert completed[0]["sha256"] == original_report["sha256"]
+        assert completion_cache.directory.is_relative_to(output.parent)
+        assert completion_cache.proofs.directory.is_relative_to(output.parent)
+        assert list(completion_cache.proofs.directory.glob("*.json"))
+        generated.append(output)
+        if outcome == "producer_error":
+            raise OSError("fixture producer failure after completion")
+        if outcome == "digest_mismatch":
+            return {**report, "sha256": "0" * 64}
+        return report
+
+    arguments = (project, root, reviewed, original_report["sha256"], regenerate)
+    if outcome == "success":
+        report, reused = verified_inventory(*arguments)
+        assert reused is False
+        assert report["path"] == str(reviewed)
+        assert report["sha256"] == original_report["sha256"]
+        completion = persistent.completed(project, reviewed)
+        assert completion is not None
+        assert completion[2]["mode"] == "native_production"
+        report_again, reused_again = verified_inventory(*arguments)
+        assert reused_again is True
+        assert report_again == report
+    else:
+        error, message = (
+            (OSError, "fixture producer failure after completion")
+            if outcome == "producer_error"
+            else (ValueError, "split inventory differs from verified snapshots")
+        )
+        with pytest.raises(error, match=message):
+            verified_inventory(*arguments)
+        assert persistent.completed(project, reviewed) is None
+    assert len(generated) == 1
+    assert not generated[0].parent.exists()
+    assert not list(root.glob(".inventory-check-*"))
+    # Existing durable completions survive byte-for-byte; neither completion nor
+    # signed proof in the persistent stores may mention the dead scratch path.
+    assert all(path.read_bytes() == raw for path, raw in original_entries.items())
+    for directory in (persistent.directory, persistent.proofs.directory):
+        assert all(
+            str(generated[0]).encode() not in path.read_bytes()
+            for path in directory.glob("*.json")
+        )
