@@ -166,3 +166,19 @@ block enumeration, regardless of `--max-blocks`. Use a bounded prepared subset f
 larger corpora. Full closure verification still reads the declared artifact files.
 
 Token-memory mechanisms, tokenizer-bound maps, multiple ports and explicit dense-checkpoint migration are documented in [Context-gated n-gram memory](ngram-memory.md).
+
+
+### Optional Python code-work scoring
+
+The optional Inspect/Docker code-work adapter keeps generated Python inside its
+sandbox and refuses missing dependencies or images without installing or pulling
+them. Its completion marker is supplied through stdin, not argv or environment,
+so echoing a process command line cannot forge successful test completion.
+
+This is **non-adversarial functional scoring**, not an adversarially qualified
+judge. Generated code and tests share a Python interpreter: a solution can inspect
+or alter harness state, and tests are visible inside the container. Container
+isolation protects the host but does not establish score integrity. Results carry
+this assumption and limitation; do not use these scores as trusted evidence for
+adversarial or harness-aware generated code. A separately qualified trusted-test
+execution protocol is needed for that use case.

@@ -79,10 +79,12 @@ def test_sandbox_classification_and_provenance(responses, status, monkeypatch):
     assert result["solution_sha256"] == canonical_digest("answer")
     assert result["tests_sha256"] == canonical_digest("tests")
     assert sandbox.files == {"/tmp/solution.py": "answer", "/tmp/tests.py": "tests"}
-    assert all(
-        options == {"timeout": 2, "timeout_retry": False}
-        for _, options in sandbox.commands
-    )
+    for index, (command, options) in enumerate(sandbox.commands):
+        expected = {"timeout": 2, "timeout_retry": False}
+        if index == 1:
+            expected["input"] = "SPARSELAB_TESTS_COMPLETED_fixture\n"
+        assert options == expected
+        assert "SPARSELAB_TESTS_COMPLETED_fixture" not in " ".join(command)
 
 
 def test_tampered_tests_refused(declaration):
@@ -332,3 +334,41 @@ def test_evaluator_source_is_separate_from_training_source(
     assert result["evaluation_source_sha256"] == "d" * 64
     assert result["identity"]["source_identity_sha256"] == "e" * 64
     assert result["evidence_complete"]
+
+
+def test_argv_echo_cannot_forge_completion_marker(monkeypatch):
+    monkeypatch.setattr(code_work.secrets, "token_hex", lambda _: "fixture")
+
+    class ArgvEchoSandbox(FixtureSandbox):
+        async def exec(self, command, **kwargs):
+            # Model the reported attack: read argv and exit zero without tests.
+            return SimpleNamespace(returncode=0, stdout="\n".join(command), stderr="")
+
+    result = asyncio.run(
+        code_work.execute_python_case(ArgvEchoSandbox([]), "source", "tests", 2)
+    )
+    assert result["status"] == "test_failed"
+
+
+def test_trusted_wrapper_reads_marker_before_tests(monkeypatch, capsys):
+    import io
+    import runpy
+    import sys
+
+    monkeypatch.setattr(code_work.secrets, "token_hex", lambda _: "fixture")
+    sandbox = FixtureSandbox([0, 0])
+    asyncio.run(code_work.execute_python_case(sandbox, "source", "tests", 2))
+    command, options = sandbox.commands[1]
+    seen = []
+    monkeypatch.setattr(sys, "stdin", io.StringIO(options["input"]))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+
+    def fake_tests(path, run_name):
+        assert sys.stdin.read() == ""
+        seen.append((path, run_name))
+
+    monkeypatch.setattr(runpy, "run_path", fake_tests)
+    # Execute only the trusted wrapper, with test/solution execution stubbed out.
+    exec(compile(command[-1], "<trusted-code-work-wrapper>", "exec"), {})  # noqa: S102
+    assert seen == [("/tmp/tests.py", "__main__")]
+    assert capsys.readouterr().out == options["input"]

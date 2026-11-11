@@ -3,6 +3,8 @@
 This is a raw-Python, one-sample-per-task adapter, not an agent benchmark. Tests
 are withheld from the model prompt, but are visible to code in its container.
 No generated code is executed on the host; missing dependencies fail closed.
+Scores assume non-adversarial solutions: tests and solution share one Python
+process inside the sandbox, so harness tampering is not a qualified threat model.
 """
 
 from __future__ import annotations
@@ -156,11 +158,16 @@ async def execute_python_case(
                     "-I",
                     "-c",
                     (
-                        "import sys, runpy; sys.path.insert(0, '/tmp'); "
-                        "runpy.run_path('/tmp/tests.py', run_name='__main__'); "
-                        f"print({marker!r})"
+                        "import sys, runpy\n"
+                        "def main():\n"
+                        " marker = sys.stdin.readline().strip()\n"
+                        " sys.path.insert(0, '/tmp')\n"
+                        " runpy.run_path('/tmp/tests.py', run_name='__main__')\n"
+                        " print(marker)\n"
+                        "main()"
                     ),
                 ],
+                input=marker + "\n",
                 timeout=timeout,
                 timeout_retry=False,
             )
@@ -309,6 +316,11 @@ def run_code_work(
         "pass_at_1": None,
         "declared_tasks": len(spec.tasks),
         "evidence_complete": False,
+        "scoring_assumption": "non_adversarial_python",
+        "scoring_limitation": (
+            "Tests and solution share a Python process; harness tampering can "
+            "invalidate scores. Process isolation is not scoring integrity."
+        ),
     }
     publication_id = result["publication_id"]
     # The first immutable publication is also the exclusive invocation claim.

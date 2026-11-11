@@ -59,8 +59,8 @@ sidecars, allocation/release datasets, supervision masks and source-compatibilit
 overrides are rejected. The same preparation fingerprint is mandatory. A manifest
 pin proves bytes, not cross-producer encoding equivalence.
 
-Adding this producer API changes the conservative packing fingerprint. Existing
-c59 caches are **not** automatically compatible. First adoption needs one full
+Adding this producer API changes the conservative packing fingerprint. Caches from older
+producers are **not** automatically compatible. First adoption needs one full
 native preparation under the new producer; subsequent same-producer appends can
 reuse that cache. Avoiding this one-time preparation would require a separately
 reviewed explicit compatibility mechanism. No alias or override is provided here.
@@ -75,19 +75,17 @@ the mixture, manage services or authorize production adoption.
 
 ## Focused CPU validation
 
-The isolated implementation passed 60 focused checks: 21 append cases, existing
-prefix cases, every registered verifier-authority kind, and two native document
-continuation/retention cases. New fixtures establish exact fresh-preparation IDs,
-tail-only encoder calls, cold/signed reuse, stale/corrupt/mutated historical
-inputs, cached wrong-parent refusal, frozen boundaries, publication failure and
-exact cold full-state continuation. Run from the checkout:
+Fixtures establish exact fresh-preparation IDs, tail-only encoder calls,
+cold/signed reuse, stale/corrupt/mutated historical inputs, cached wrong-parent
+refusal, frozen boundaries, publication failure and exact cold full-state
+continuation. Use the existing locked development environment from the checkout:
 
-```bash
-PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-PYTHONPATH="$PWD/src:$PWD/tests" /home/byron/src/tiny-sparse-lab/.venv/bin/python -B \
--m pytest -q -p no:cacheprovider -o addopts='' \
-tests/test_prepared_append.py tests/test_prepared_prefix.py \
-tests/test_verifier_authority_current.py \
-tests/test_document_budget_extension.py::test_native_append_preserves_optimizer_cursor_and_exact_resume \
-tests/test_document_budget_extension.py::test_append_extension_with_new_retention_boundary_preserves_full_state
+```sh
+uv run --locked --no-sync pytest -n 2 -q \
+  tests/test_prepared_append.py tests/test_prepared_prefix.py \
+  tests/test_verifier_authority_current.py \
+  tests/test_document_budget_extension.py
 ```
+
+These tiny CPU fixtures verify implementation behavior, not real-corpus quality,
+accelerator performance or permission to continue a production run.

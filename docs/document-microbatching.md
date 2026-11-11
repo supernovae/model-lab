@@ -31,9 +31,8 @@ remains separate-document batch one.
 
 Sequence dimensions round up to `padding_multiple`, capped at `training.seq_len`.
 There are no dummy rows: final microbatches may be partial. This bounds shapes but
-does not guarantee compiler cache behavior or memory fit. See
-[the executable replay](../tools/document_microbatch/README.md) for measured-shape
-accounting and pending GPU checks. Default `document_batching: separate` retains
+does not guarantee compiler cache behavior or memory fit. Use native batch
+telemetry to measure the chosen workload and runtime. Default `document_batching: separate` retains
 legacy mb1 execution and diagnostic semantics; omitted new defaults preserve
 historical config identities.
 
@@ -68,7 +67,7 @@ FP32 logits use rtol 3e-5/atol 3e-6; gradients 2e-4/3e-6; direct AdamW parameter
 3e-5/2e-6. The native engine allows atol 5e-6 (observed 3.59e-6 near a zero gradient
 through Adam's epsilon division). Summed CE uses rtol 2e-6. Same-path checkpoint
 resume remains bitwise tested; different batching is numerically, not bitwise,
-equivalent. CPU success does not certify BF16 B70 numerics or performance.
+equivalent. CPU success does not certify accelerator BF16 numerics or performance.
 
 
 ## Author a fresh schedule from prepared groups

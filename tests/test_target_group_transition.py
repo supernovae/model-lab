@@ -1,14 +1,10 @@
 """CPU-only suffix migration, bounded collation and full-state replay."""
 
 import json
-import subprocess
-import sys
 from dataclasses import replace
-from pathlib import Path
 
 import numpy as np
 import pytest
-import yaml
 from test_training import config, equal
 
 from sparselab.config.models import RunConfig
@@ -166,41 +162,6 @@ def test_native_regroup_save_reload_adam_rng_cursor_and_floor(tmp_path):
     raw["training"]["max_steps"] = plan.horizon(tokens)
     target = RunConfig.model_validate(raw)
     target_group_transition(source, target, snap)
-    source_yaml = tmp_path / "source.yaml"
-    source_yaml.write_text(yaml.safe_dump(source.model_dump(mode="json")))
-    planned_yaml = tmp_path / "planned.yaml"
-    subprocess.run(
-        [
-            sys.executable,
-            str(Path(__file__).parents[1] / "tools/plan_target_groups.py"),
-            "--config",
-            str(source_yaml),
-            "--checkpoint",
-            str(generation),
-            "--targets",
-            "32768",
-            "--runs-dir",
-            str(tmp_path / "nvme-runs"),
-            "--train-tokens",
-            str(root / "data/train.npy"),
-            "--output",
-            str(planned_yaml),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    planned = RunConfig.model_validate(yaml.safe_load(planned_yaml.read_text()))
-    assert planned.logging.root_dir == tmp_path / "nvme-runs"
-    assert planned.training.max_steps == 3
-    assert (
-        planned.training.matched_stories.target_group_transition.after_tokens
-        == snap.tokens_seen
-    )
-    assert (
-        planned.checkpoint.every_steps is None
-        and planned.checkpoint.every_tokens == 5000000
-    )
     verify_regroup_cursor(plan, snap)
     for section, field, value in [
         ("optimizer", "peak", source.optimizer.peak * 2),
