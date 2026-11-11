@@ -445,7 +445,9 @@ Failed loading leaves no fallback model. The UI distinguishes the selected snaps
 sampler status at observation time and output identity. Cold verification can take
 minutes; generation is token-bounded, not forcibly cancelled at a wall-clock limit.
 
-Historical mappings are consulted before generation reads. Mapped archived
+Historical mappings are consulted before generation reads when
+`KLAB_CHECKPOINT_ARCHIVE_MAP` names a relocation map (set it for both the dashboard
+and the sampler service); without it no relocations are assumed. Mapped archived
 checkpoints report their archive location as unavailable: the native loader requires
 a generation inside its original run and does not support the relocated archive
 layout. No copy, symlink workaround or stale-source fallback is used. Other stores

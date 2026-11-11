@@ -1,4 +1,4 @@
-"""CPU replica fixtures cover padded DevMind updates without accelerator work."""
+"""CPU replica fixtures cover padded document updates without accelerator work."""
 
 import numpy as np
 import pytest
