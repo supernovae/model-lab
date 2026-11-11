@@ -96,22 +96,22 @@ def test_tiny_profile_effective_evaluation_limit(
 @pytest.mark.parametrize(
     ("section", "changes", "message"),
     [
-        ("model", {"ffn": "moe", "num_experts": 2}, "dense PyTorch"),
+        ("model", {"ffn": "moe", "num_experts": 2}, "dense-FFN PyTorch"),
         (
             "model",
             {
-                "memory": "ngram",
+                "memory": "byte",
                 "memory_table_size": 16,
                 "memory_ngram_size": 2,
                 "memory_dim": 8,
             },
-            "dense PyTorch",
+            "dense-FFN PyTorch",
         ),
-        ("runtime", {"engine": "mlx", "backend": "metal"}, "dense PyTorch"),
+        ("runtime", {"engine": "mlx", "backend": "metal"}, "dense-FFN PyTorch"),
         (
             "dataset",
             {"source": "local_chat", "allocation_manifest_path": "allocation.json"},
-            "dense PyTorch",
+            "dense-FFN PyTorch",
         ),
         ("training", {"seq_len": 8}, "sequence length must match"),
     ],
@@ -131,3 +131,20 @@ def test_fixed_panels_refuse_incompatible_run_config(
     del values["evaluation"]["panels"]
     baseline.write_text(yaml.safe_dump(values))
     load_config(baseline)
+
+
+def test_fixed_panels_accept_token_memory(tmp_path):
+    baseline = _evaluation_config(tmp_path, (3, 3), 2, 64)
+    values = yaml.safe_load(baseline.read_text())
+    values["model"].update(
+        memory="ngram",
+        memory_table_size=31,
+        memory_ngram_size=3,
+        memory_dim=8,
+        memory_variant="context_key",
+    )
+    baseline.write_text(yaml.safe_dump(values))
+    actual = load_config(baseline)
+    assert actual.model.memory == "ngram"
+    assert actual.evaluation.batch_limit == 4
+    assert not (tmp_path / "outputs").exists()

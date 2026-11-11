@@ -28,7 +28,7 @@ from sparselab.data.allocation import (
 from sparselab.data.packing import (
     _collect,
     _source_documents,
-    _tokenizer_sha256,
+    canonical_tokenizer_sha256,
 )
 from sparselab.data.tokenizer import load_tokenizer
 from sparselab.data.toy_worlds import StructuredKey, frozen_encoders
@@ -478,7 +478,7 @@ def _build_bundle(
     if not isinstance(source_digest, str):
         raise TypeError("source identity has no SHA-256 digest")
     source_sha = source_digest
-    tokenizer_sha = _tokenizer_sha256(tokenizer)
+    tokenizer_sha = canonical_tokenizer_sha256(tokenizer)
     train_sha = sha256_file(train_path)
     validation_sha = sha256_file(validation_path)
     profiles: dict[str, dict[str, Any]] = {}

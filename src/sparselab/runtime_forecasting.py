@@ -11,6 +11,8 @@ from pathlib import Path
 from statistics import median
 from typing import TYPE_CHECKING
 
+from sparselab.canonical import canonical_digest
+
 if TYPE_CHECKING:
     from sparselab.config.models import RunConfig
     from sparselab.runtime import RuntimeInfo
@@ -57,6 +59,9 @@ def runtime_signature(config: RunConfig, runtime: RuntimeInfo) -> dict[str, obje
     if not isinstance(model, dict):
         raise TypeError("model configuration must serialize to an object")
     model.pop("memory_package_path", None)
+    mapping = model.get("memory_token_mapping")
+    if isinstance(mapping, Mapping):
+        model["memory_token_mapping"] = {"sha256": canonical_digest(mapping)}
     attention = _json_model(config.attention)
     optimizer = _json_model(config.optimizer)
     if not isinstance(attention, dict) or not isinstance(optimizer, dict):

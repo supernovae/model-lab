@@ -14,7 +14,7 @@ from sparselab.config.loading import load_config
 from sparselab.config.migrate import migrate_v1
 from sparselab.config.models import RunConfig, TokenizerTrainConfig
 from sparselab.data.tokenizer import train_tokenizer
-from sparselab.engines.base import EngineCapabilityError, EngineState
+from sparselab.engines.base import EngineCapabilityError, EngineOutOfMemory, EngineState
 from sparselab.engines.mlx_policy import validate as validate_mlx
 from sparselab.engines.pytorch import PyTorchEngine
 from sparselab.evaluation.evidence import experiment_evidence
@@ -579,8 +579,16 @@ def test_explicit_runtime_transition_preserves_full_resume_state(
     checkpoint = parent / "checkpoints/latest.json"
     before = CheckpointManager(parent).load(checkpoint)
     assert before.step == 2
+    assert "estimate_policy" not in original.runtime.memory.model_dump(mode="json")
     target = original.model_copy(
         update={
+            "runtime": original.runtime.model_copy(
+                update={
+                    "memory": original.runtime.memory.model_copy(
+                        update={"estimate_policy": "observe"}
+                    )
+                }
+            ),
             "attention": original.attention.model_copy(
                 update={"implementation": "sdpa"}
             ),
@@ -672,6 +680,16 @@ def test_explicit_runtime_transition_preserves_full_resume_state(
         "training.micro_batch_size",
         "training.gradient_accumulation",
         "evaluation.batch_size",
+        "runtime.memory.estimate_policy",
+    }
+    assert next(
+        item
+        for item in decision["changes"]
+        if item["field"] == "runtime.memory.estimate_policy"
+    ) == {
+        "field": "runtime.memory.estimate_policy",
+        "previous": "enforce",
+        "requested": "observe",
     }
     resumed = CheckpointManager(child).load(child / "checkpoints/latest.json")
     assert resumed.step == 3
@@ -696,6 +714,14 @@ def test_explicit_runtime_transition_preserves_full_resume_state(
         CheckpointManager(parent).load(checkpoint).checkpoint_sha256
         == before.checkpoint_sha256
     )
+    with pytest.raises(ValueError, match="only enforce-to-observe"):
+        train(
+            target.model_copy(update={"runtime": original.runtime}),
+            run_id="runtime-policy-reverse-refused",
+            resume=child / "checkpoints/latest.json",
+            allow_runtime_optimization=True,
+            stop_after_step=4,
+        )
     train(
         target,
         run_id="runtime-grandchild",
@@ -705,6 +731,48 @@ def test_explicit_runtime_transition_preserves_full_resume_state(
     grandchild = original.logging.root_dir / "runtime-grandchild"
     loaded = CheckpointManager(grandchild).load(grandchild / "checkpoints/latest.json")
     assert loaded.step == 4 and loaded.tokens_seen == before.tokens_seen + 64
+
+
+@pytest.mark.parametrize(
+    ("policy", "allocation_failure"),
+    [("enforce", False), ("observe", False), ("observe", True)],
+)
+def test_estimate_observation_keeps_warning_and_allocation_failures(
+    tmp_path, monkeypatch, caplog, policy, allocation_failure
+):
+    raw = config(tmp_path).model_dump(mode="json")
+    raw["runtime"]["memory"].update(estimate_policy=policy, budget_bytes=1)
+    target = RunConfig.model_validate(raw)
+    root = target.logging.root_dir / "estimate-policy"
+    if policy == "enforce":
+        with pytest.raises(MemoryError, match="estimated training memory"):
+            train(target, run_id="estimate-policy", stop_after_step=1)
+        assert not root.exists()
+        return
+    if allocation_failure:
+
+        def failed_update(*_args, **_kwargs):
+            raise EngineOutOfMemory("injected allocation failure")
+
+        monkeypatch.setattr(PyTorchEngine, "train_update", failed_update)
+        with pytest.raises(EngineOutOfMemory, match="injected allocation failure"):
+            train(target, run_id="estimate-policy", stop_after_step=1)
+        snapshot = CheckpointManager(root).load(root / "checkpoints/latest.json")
+        assert snapshot.step == snapshot.tokens_seen == 0
+        progress = json.loads((root / "progress.json").read_text())
+        assert progress["status"] == "failed" and progress["step"] == 0
+    else:
+        train(target, run_id="estimate-policy", stop_after_step=1)
+        snapshot = CheckpointManager(root).load(root / "checkpoints/latest.json")
+        assert snapshot.step == 1 and snapshot.tokens_seen == 32
+        observation = ExperimentStore.get_all_calibrations(target.logging.root_dir)[0]
+        estimate = observation["observation"]["estimate"]
+        assert estimate["result"] == "LIKELY_TO_EXCEED"
+        assert estimate["peak_bytes"] > estimate["capacity_ceiling_bytes"] == 1
+    assert (
+        "estimate_policy=observe continues with the unchanged configuration"
+        in caplog.text
+    )
 
 
 @pytest.mark.slow

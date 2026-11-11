@@ -135,7 +135,12 @@ def _load_run_data(
 
 
 def _check_training_storage(
-    config: RunConfig, data: PreparedData, *, tokenizer_path: Path | None = None
+    config: RunConfig,
+    data: PreparedData,
+    *,
+    tokenizer_path: Path | None = None,
+    completed_steps: int = 0,
+    completed_tokens: int = 0,
 ) -> None:
     from sparselab.workspace_preflight import require_storage, training_storage_checks
 
@@ -153,7 +158,12 @@ def _check_training_storage(
         }
     )
     require_storage(
-        training_storage_checks(storage_config, verified_prepared=data.receipt)
+        training_storage_checks(
+            storage_config,
+            verified_prepared=data.receipt,
+            completed_steps=completed_steps,
+            completed_tokens=completed_tokens,
+        )
     )
 
 
@@ -577,6 +587,10 @@ def train(
     resume: Path | None = None,
     extend_budget: Path | None = None,
     promote: Path | None = None,
+    add_ngram_memory: bool = False,
+    extend_context: bool = False,
+    append_data: bool = False,
+    append_from_checkpoint: bool = False,
     recover: Path | None = None,
     run_id: str | None = None,
     stop_after_step: int | None = None,
@@ -600,6 +614,14 @@ def train(
     spot_policy: SpotSafetyPolicy | None = None,
 ) -> str:
     """Run one independent experiment, optionally bound to a stage bundle."""
+    if add_ngram_memory and promote is None:
+        raise ValueError("--add-ngram-memory requires --promote")
+    if extend_context and not add_ngram_memory:
+        raise ValueError("--extend-context requires --add-ngram-memory and --promote")
+    if append_from_checkpoint and not append_data:
+        raise ValueError("--append-from-checkpoint requires --append-data")
+    if append_data and extend_budget is None:
+        raise ValueError("--append-data requires --extend-budget")
     require_model_runtime_allowed()
     require_authorization(config, authorization)
     validate_tokenizer_batch_limits(
@@ -625,6 +647,10 @@ def train(
         resume=resume,
         extend_budget=extend_budget,
         promote=promote,
+        add_ngram_memory=add_ngram_memory,
+        extend_context=extend_context,
+        append_data=append_data,
+        append_from_checkpoint=append_from_checkpoint,
         recover=recover,
         run_id=run_id,
         stop_after_step=stop_after_step,
@@ -683,6 +709,10 @@ def _train_impl(
     *,
     resume: Path | None = None,
     promote: Path | None = None,
+    add_ngram_memory: bool = False,
+    extend_context: bool = False,
+    append_data: bool = False,
+    append_from_checkpoint: bool = False,
     extend_budget: Path | None = None,
     recover: Path | None = None,
     run_id: str | None = None,
@@ -943,6 +973,10 @@ def _train_impl(
             resume=resume,
             extend_budget=extend_budget,
             promote=promote,
+            add_ngram_memory=add_ngram_memory,
+            extend_context=extend_context,
+            append_data=append_data,
+            append_from_checkpoint=append_from_checkpoint,
             recover=recover,
             allow_runtime_drift=allow_runtime_drift,
             allow_runtime_optimization=allow_runtime_optimization,
@@ -950,7 +984,9 @@ def _train_impl(
         snapshot = continuation_state.snapshot
         source_run = continuation_state.source_run
         continuation = continuation_state.kind
-        artifact_source = source_run if continuation == "RESUMED" else None
+        artifact_source = (
+            source_run if continuation == "RESUMED" and not append_data else None
+        )
         if staged is not None and continuation != "RESUMED":
             artifact_source = Path(staged["assets_root"])
             config = config.model_copy(
@@ -971,7 +1007,7 @@ def _train_impl(
         preparation_started = time.perf_counter()
         seed_everything(config.seed, deterministic_cpu=config.training.deterministic)
         with pilot_phase("data_open"):
-            if continuation == "RESUMED":
+            if continuation == "RESUMED" and not append_data:
                 assert source_run is not None
                 data = _load_run_data(
                     source_run,
@@ -1008,6 +1044,15 @@ def _train_impl(
                     proof_store=proof_store,
                     verification_mode=verification_mode,
                 )
+        if config.model.memory_token_mapping is not None:
+            from sparselab.memory_tokenizer import validate_memory_token_map
+
+            validate_memory_token_map(
+                config.model.memory_token_mapping.model_dump(mode="json"),
+                tokenizer_path=artifact_source / "tokenizer.json"
+                if artifact_source
+                else config.tokenizer.path,
+            )
         load_fixed_panels(
             config,
             inputs_root=artifact_source,
@@ -1020,6 +1065,10 @@ def _train_impl(
             _check_training_storage(
                 config,
                 data,
+                completed_steps=snapshot.step if continuation == "RESUMED" else 0,
+                completed_tokens=snapshot.tokens_seen
+                if continuation == "RESUMED"
+                else 0,
                 # Native continuation/stage verification selected this owned
                 # input source. A resumed run need not retain caller-local files.
                 tokenizer_path=(
@@ -1040,7 +1089,10 @@ def _train_impl(
         )
         matched = config.training.matched_stories
         if matched is not None:
-            if config.model.memory != "none" or any(
+            if (
+                config.model.memory != "none"
+                and not (config.model.memory == "ngram" and matched.unpadded_documents)
+            ) or any(
                 value is not None
                 for value in (
                     data.train_supervision,
@@ -1051,7 +1103,7 @@ def _train_impl(
                 )
             ):
                 raise ValueError(
-                    "matched stories support plain all-token data without memory only"
+                    "matched stories require plain all-token data; ngram memory requires unpadded whole documents"
                 )
             story_tokenizer = load_tokenizer(
                 artifact_source / "tokenizer.json"
@@ -1067,7 +1119,21 @@ def _train_impl(
                 eos,
                 layout=matched.layout,
                 targets_per_update=matched.targets_per_update,
+                target_group_transition=(
+                    matched.target_group_transition.model_dump()
+                    if matched.target_group_transition
+                    else None
+                ),
+                unpadded_documents=matched.unpadded_documents,
+                frozen_update_ends=matched.frozen_update_ends,
             )
+            if snapshot is not None and any(
+                decision["kind"] == "target_group_transition"
+                for decision in continuation_state.decisions
+            ):
+                from sparselab.training.continuation import verify_regroup_cursor
+
+                verify_regroup_cursor(dataset, snapshot)
             if config.training.max_steps != dataset.horizon(config.training.max_tokens):
                 raise ValueError(
                     "matched story max_steps must equal the exact shared budget horizon"
@@ -1081,6 +1147,28 @@ def _train_impl(
             data.validation_semantic_queries,
             data.validation_semantic_mask,
         )
+        if matched is not None and matched.unpadded_documents:
+            if any(
+                value is not None
+                for value in (
+                    data.validation_supervision,
+                    data.validation_byte_addresses,
+                    data.validation_owner_ids,
+                    data.validation_semantic_queries,
+                    data.validation_semantic_mask,
+                )
+            ):
+                raise ValueError(
+                    "unpadded document validation requires plain all-token data"
+                )
+            validation_dataset = MatchedStoryDataset(
+                data.validation,
+                config.training.seq_len,
+                eos,
+                layout="story",
+                targets_per_update=1,
+                unpadded_documents=True,
+            )
         if not len(dataset):
             raise ValueError("training data contains no supervised next-token targets")
         if not len(validation_dataset):
@@ -1363,6 +1451,7 @@ def _train_impl(
                 "runtime_forecast": runtime_forecast,
             },
             parent_run_id,
+            config_manifest=manifest.payload(),
         )
         store.register_manifest(run_id, manifest_digest, manifest.payload())
         for sequence, stage_record in enumerate(history.records):
@@ -2216,45 +2305,78 @@ def _train_impl(
                     raise RuntimeError(
                         "selected training window has no supervised targets"
                     )
-                microbatches = [
-                    Microbatch(
-                        np.stack(
-                            [
-                                record[0]
-                                for record in records[
-                                    offset : offset + config.training.micro_batch_size
+                padded_documents = (
+                    isinstance(dataset, MatchedStoryDataset)
+                    and config.training.matched_stories.document_batching == "padded"
+                )
+                microbatches = (
+                    []
+                    if padded_documents
+                    else [
+                        Microbatch(
+                            np.stack(
+                                [
+                                    record[0]
+                                    for record in records[
+                                        offset : offset
+                                        + config.training.micro_batch_size
+                                    ]
                                 ]
-                            ]
-                        ),
-                        np.stack(
-                            [
-                                record[1]
-                                for record in records[
-                                    offset : offset + config.training.micro_batch_size
+                            ),
+                            np.stack(
+                                [
+                                    record[1]
+                                    for record in records[
+                                        offset : offset
+                                        + config.training.micro_batch_size
+                                    ]
                                 ]
-                            ]
-                        ),
-                        _stack_optional(
-                            records[offset : offset + config.training.micro_batch_size],
-                            2,
-                        ),
-                        _stack_optional(
-                            records[offset : offset + config.training.micro_batch_size],
-                            3,
-                        ),
-                        _stack_optional(
-                            records[offset : offset + config.training.micro_batch_size],
-                            4,
-                        ),
-                        _stack_optional(
-                            records[offset : offset + config.training.micro_batch_size],
-                            5,
-                        ),
+                            ),
+                            _stack_optional(
+                                records[
+                                    offset : offset + config.training.micro_batch_size
+                                ],
+                                2,
+                            ),
+                            _stack_optional(
+                                records[
+                                    offset : offset + config.training.micro_batch_size
+                                ],
+                                3,
+                            ),
+                            _stack_optional(
+                                records[
+                                    offset : offset + config.training.micro_batch_size
+                                ],
+                                4,
+                            ),
+                            _stack_optional(
+                                records[
+                                    offset : offset + config.training.micro_batch_size
+                                ],
+                                5,
+                            ),
+                        )
+                        for offset in range(
+                            0, len(records), config.training.micro_batch_size
+                        )
+                    ]
+                )
+                if (
+                    isinstance(dataset, MatchedStoryDataset)
+                    and config.training.matched_stories.document_batching == "padded"
+                ):
+                    from sparselab.data.document_batching import collate_document_update
+
+                    microbatches = collate_document_update(
+                        records,
+                        width=config.training.micro_batch_size,
+                        eos=dataset.eos,
+                        max_length=config.training.seq_len,
+                        padding_multiple=config.training.matched_stories.padding_multiple,
+                        max_padded_slots=config.training.matched_stories.max_padded_slots,
+                        max_attention_cells=config.training.matched_stories.max_attention_cells,
                     )
-                    for offset in range(
-                        0, len(records), config.training.micro_batch_size
-                    )
-                ]
                 retry_seconds = 0.0
                 emit_pilot_progress(
                     "start",

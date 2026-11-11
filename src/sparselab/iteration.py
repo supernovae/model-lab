@@ -731,18 +731,19 @@ def check_iteration(
                 result["declared_delta"], result["delta"] = declared, delta
                 result["transition"] = phase.transition
                 from sparselab.training.continuation import (
-                    _budget_extension,
                     _resume_settings,
+                    validate_budget_extension,
                 )
                 from sparselab.training.manifest import architecture_sha256
 
                 try:
                     if phase.transition == "extend_budget":
-                        _budget_extension(
+                        validate_budget_extension(
                             old,
                             candidate,
                             snapshot,
                             parent_tokenizer=_parent_tokenizer(parent),
+                            parent_root=_parent_tokenizer(parent).parent,
                         )
                         compatible = True
                     elif phase.transition == "resume":
@@ -841,14 +842,17 @@ def check_iteration(
                 if phase.transition == "resume":
                     compatible = _resume_settings(old) == _resume_settings(cell.config)
                 elif phase.transition == "extend_budget":
-                    from sparselab.training.continuation import _budget_extension
+                    from sparselab.training.continuation import (
+                        validate_budget_extension,
+                    )
 
                     try:
-                        _budget_extension(
+                        validate_budget_extension(
                             old,
                             cell.config,
                             snapshot,
                             parent_tokenizer=_parent_tokenizer(parent),
+                            parent_root=_parent_tokenizer(parent).parent,
                         )
                         compatible = True
                     except (OSError, ValueError, KeyError) as error:

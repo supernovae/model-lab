@@ -402,3 +402,37 @@ def test_derived_prefix_publishes_reusable_authenticated_proofs(
             proof_store=store,
             verification_mode="verified_reuse",
         )
+
+
+@pytest.mark.parametrize("seq_len", [64, 2])
+def test_prefix_checks_unpadded_document_lengths(prefix_fixture, seq_len):
+    from sparselab.config.models import MatchedStoryConfig
+
+    _source, target, tokenizer, parent = prefix_fixture
+    first_end = (
+        int(np.flatnonzero(parent.train == tokenizer.token_to_id("<eos>"))[0]) + 1
+    )
+    target = target.model_copy(
+        update={
+            "training": target.training.model_copy(
+                update={
+                    "seq_len": seq_len,
+                    "matched_stories": MatchedStoryConfig(
+                        layout="story", targets_per_update=64, unpadded_documents=True
+                    ),
+                }
+            ),
+            "dataset": target.dataset.model_copy(
+                update={
+                    "train_max_documents": 1,
+                    "train_max_tokens": first_end,
+                }
+            ),
+        }
+    )
+    if seq_len < first_end:
+        with pytest.raises(ValueError, match="length|long|seq_len"):
+            prepare_data(target, tokenizer, prefix_from=request(parent))
+    else:
+        actual = prepare_data(target, tokenizer, prefix_from=request(parent))
+        np.testing.assert_array_equal(actual.train, parent.train[:first_end])

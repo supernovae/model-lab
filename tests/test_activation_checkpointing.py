@@ -18,6 +18,8 @@ def _model(
     memory: str = "none",
     attention: str = "dense",
     memory_injection: str = "final",
+    memory_variant: str = "hidden_gate",
+    memory_conv_kernel_size: int = 0,
 ) -> DenseLM:
     options = (
         {"memory_table_size": 32, "memory_ngram_size": 2, "memory_dim": 8}
@@ -37,6 +39,9 @@ def _model(
         shared_expert=ffn == "moe",
         router_aux_loss_coefficient=0.1 if ffn == "moe" else 0.0,
         memory_injection=memory_injection,
+        memory_block_index=0 if memory_injection == "after_block" else None,
+        memory_variant=memory_variant,
+        memory_conv_kernel_size=memory_conv_kernel_size,
         memory=memory,
         **options,
     )
@@ -190,3 +195,24 @@ def test_embedding_memory_diagnostics_are_not_recomputed() -> None:
     assert model.recomputed_block_call_ratio == 1.0
     assert after.keys() == before.keys()
     torch.testing.assert_close(after[indicator_name], before_indicator)
+
+
+@pytest.mark.parametrize("kernel", [0, 4])
+def test_context_memory_checkpointed_gradients_and_update(kernel: int) -> None:
+    torch.manual_seed(17)
+    plain = _model(
+        memory="ngram",
+        memory_injection="after_block",
+        memory_variant="context_key",
+        memory_conv_kernel_size=kernel,
+    )
+    checkpointed = copy.deepcopy(plain)
+    inputs = torch.randint(0, 260, (2, 6))
+    labels = torch.randint(0, 260, (2, 6))
+    left = _loss_and_update(plain, inputs, labels, checkpointed=False)
+    right = _loss_and_update(checkpointed, inputs, labels, checkpointed=True)
+    torch.testing.assert_close(left[0], right[0])
+    for name in left[2]:
+        torch.testing.assert_close(left[2][name], right[2][name])
+    for name, value in plain.state_dict().items():
+        torch.testing.assert_close(value, checkpointed.state_dict()[name])

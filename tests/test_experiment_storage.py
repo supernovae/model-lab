@@ -171,3 +171,31 @@ def test_insufficient_future_growth_is_not_excused_by_existing_cache(
     )
     with pytest.raises(OSError, match="storage preflight failed"):
         require_storage(checks)
+
+
+def test_resumed_storage_counts_only_future_target_cadence(tmp_path):
+    from sparselab.experiments.storage import checkpoint_generation_bounds
+
+    cfg = configured(tmp_path, updates=14087, every_tokens=5000000, keep_periodic=True)
+    cfg = cfg.model_copy(
+        update={
+            "training": cfg.training.model_copy(update={"max_tokens": 144235834}),
+            "evaluation": cfg.evaluation.model_copy(update={"every_steps": 100}),
+        }
+    )
+    future = checkpoint_generation_bounds(
+        cfg, completed_steps=13500, completed_tokens=66864692
+    )
+    assert future["steps"] == 587
+    assert (
+        future["scheduled_tokens"] == 17
+    )  # includes an immediately due inherited watermark
+    assert future["validation_steps"] == 5
+    assert future["peak_generations"] == 24
+    old = training_storage_checks(cfg)
+    remaining = training_storage_checks(
+        cfg, completed_steps=13500, completed_tokens=66864692
+    )
+    assert sum(r.projected_bytes for r in remaining) < sum(
+        r.projected_bytes for r in old
+    )

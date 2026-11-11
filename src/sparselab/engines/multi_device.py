@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
 import torch
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from torch.nn import functional
@@ -85,6 +86,52 @@ def reduce_replica_gradients(
     replica.model.zero_grad(set_to_none=True)
 
 
+def microbatch_position_mask(
+    batch: Microbatch, device: torch.device, chunk_valid: int
+) -> tuple[torch.Tensor | None, int]:
+    """Validate the common serial/replica right-padding contract."""
+    mask = batch.position_mask
+    if mask is None:
+        return None, chunk_valid
+    if mask.dtype != np.bool_ or mask.shape != batch.inputs.shape:
+        raise ValueError("position mask must be boolean and match inputs")
+    if (
+        np.any((batch.targets != -100) & ~mask)
+        or np.any(mask[:, 1:] & ~mask[:, :-1])
+        or np.any(~mask[:, 0])
+    ):
+        raise ValueError(
+            "position mask must be nonempty right-padded prefixes covering targets"
+        )
+    return torch.from_numpy(mask).to(device), int(mask.sum())
+
+
+def diagnostic_is_count(name: str, batches: list[Microbatch]) -> bool:
+    return (
+        any(batch.position_mask is not None for batch in batches)
+        and name.startswith("engram/")
+        and name.rsplit("/", 1)[-1]
+        in {"lookup_count", "unique_addresses", "collision_count"}
+    )
+
+
+def accumulate_microbatch_diagnostics(
+    sums: dict[str, torch.Tensor],
+    weights: dict[str, int],
+    diagnostics: dict[str, torch.Tensor],
+    batch: Microbatch,
+    chunk_valid: int,
+    position_count: int,
+) -> None:
+    """Keep count totals and position-weighted Engram diagnostics replica invariant."""
+    for name, value in diagnostics.items():
+        count_metric = diagnostic_is_count(name, [batch])
+        padded_engram = batch.position_mask is not None and name.startswith("engram/")
+        weight = 1 if count_metric else position_count if padded_engram else chunk_valid
+        sums[name] = sums.get(name, value.new_zeros(())) + value * weight
+        weights[name] = 1 if count_metric else weights.get(name, 0) + weight
+
+
 def execute_replica_microbatches(
     replica: SecondaryReplica,
     config: RunConfig,
@@ -101,13 +148,14 @@ def execute_replica_microbatches(
     language_sum = torch.zeros((), device=device)
     aux_sum = torch.zeros((), device=device)
     diagnostic_sums: dict[str, torch.Tensor] = {}
+    diagnostic_weights: dict[str, int] = {}
     losses_finite = torch.ones((), device=device, dtype=torch.bool)
     recomputed = 0.0
     executed_microbatches = 0
     trainable_inputs = list(replica.trainable_params)
 
     for batch, chunk_valid in pairs:
-        if not chunk_valid:
+        if not chunk_valid and batch.position_mask is None:
             continue
         if batch.semantic_queries is not None or batch.semantic_mask is not None:
             raise ValueError(
@@ -121,6 +169,9 @@ def execute_replica_microbatches(
             if batch.byte_addresses is None
             else torch.from_numpy(batch.byte_addresses).to(device)
         )
+        position_mask, position_count = microbatch_position_mask(
+            batch, device, chunk_valid
+        )
         valid_target_mask = y != -100
         with precision_context(config, device):
             logits, auxiliary = model.forward_with_aux(
@@ -132,6 +183,7 @@ def execute_replica_microbatches(
                 activation_checkpointing=config.runtime.memory.activation_checkpointing.enabled,
                 diagnostics=config.logging.architecture_diagnostics,
                 return_hidden=config.runtime.compile_output_head_loss,
+                position_mask=position_mask,
             )
         diagnostics = architecture_metrics(model)
         if config.runtime.compile_output_head_loss:
@@ -153,10 +205,14 @@ def execute_replica_microbatches(
         recomputed += model.recomputed_block_call_ratio
         language_sum = language_sum + ce_sum.detach()
         aux_sum = aux_sum + auxiliary.detach() * chunk_valid
-        for name, value in diagnostics.items():
-            diagnostic_sums[name] = (
-                diagnostic_sums.get(name, value.new_zeros(())) + value * chunk_valid
-            )
+        accumulate_microbatch_diagnostics(
+            diagnostic_sums,
+            diagnostic_weights,
+            diagnostics,
+            batch,
+            chunk_valid,
+            position_count,
+        )
 
     if sync_device:
         synchronize(device)
@@ -167,6 +223,7 @@ def execute_replica_microbatches(
         "recomputed": recomputed,
         "executed_microbatches": executed_microbatches,
         "diagnostic_sums": diagnostic_sums,
+        "diagnostic_weights": diagnostic_weights,
     }
 
 

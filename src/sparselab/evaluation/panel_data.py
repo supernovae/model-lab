@@ -12,7 +12,7 @@ from sparselab.canonical import canonical_digest
 from sparselab.config.models import FixedValidationPanel, RunConfig
 from sparselab.data.packing import (
     TokenBlockDataset,
-    _tokenizer_sha256,
+    canonical_tokenizer_sha256,
     load_prepared_data,
 )
 from sparselab.data.tokenizer import load_tokenizer
@@ -72,7 +72,7 @@ def load_fixed_panels(
         return {}
     tokenizer_path = tokenizer_path or config.tokenizer.path
     file_sha = sha256_file(tokenizer_path)
-    canonical_sha = _tokenizer_sha256(load_tokenizer(tokenizer_path))
+    canonical_sha = canonical_tokenizer_sha256(load_tokenizer(tokenizer_path))
     result = {}
     manifests = set()
     validation_arrays = set()

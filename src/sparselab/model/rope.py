@@ -31,6 +31,12 @@ class RoPE(nn.Module):
                 self.sin = angles.sin()[None, None, :, :]
         return self.cos[:, :, :length], self.sin[:, :, :length]
 
+    def reserve(self, length: int, device: torch.device) -> None:
+        """Precompute bounded constants before tracing dynamic training shapes."""
+        if length < 1:
+            raise ValueError("RoPE reservation requires a positive length")
+        self._cache(length, device)
+
     def forward(self, x: Tensor, *, position_offset: int = 0) -> Tensor:
         if position_offset < 0:
             raise ValueError("position_offset must be non-negative")

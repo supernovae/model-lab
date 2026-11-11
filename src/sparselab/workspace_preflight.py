@@ -136,6 +136,8 @@ def training_storage_checks(
     work_dir: Path | None = None,
     run_dir: Path | None = None,
     checkpoint_generations_upper: int | None = None,
+    completed_steps: int = 0,
+    completed_tokens: int = 0,
     verified_prepared: VerifiedPreparedData | None = None,
 ) -> list[StorageCheck]:
     """Reserve incremental growth on each device, not already allocated cache bytes.
@@ -146,9 +148,9 @@ def training_storage_checks(
     if checkpoint_generations_upper is None:
         from sparselab.experiments.storage import checkpoint_generation_bounds
 
-        checkpoint_generations_upper = checkpoint_generation_bounds(config)[
-            "peak_generations"
-        ]
+        checkpoint_generations_upper = checkpoint_generation_bounds(
+            config, completed_steps=completed_steps, completed_tokens=completed_tokens
+        )["peak_generations"]
     if checkpoint_generations_upper < 1:
         raise ValueError("checkpoint generation count must be positive")
     checkpoint = int(inspection_report(config)["estimated_checkpoint_bytes"])
@@ -162,7 +164,10 @@ def training_storage_checks(
         run_copy = projected_data_bytes(config)
         cache_growth = run_copy
     else:
-        from sparselab.data.packing import _tokenizer_sha256, prepared_dataset_identity
+        from sparselab.data.packing import (
+            canonical_tokenizer_sha256,
+            prepared_dataset_identity,
+        )
         from sparselab.data.tokenizer import load_tokenizer
         from sparselab.data.verification import (
             VerifiedPreparedData,
@@ -191,7 +196,7 @@ def training_storage_checks(
             or identity.get("dataset") != expected_dataset
             or identity.get("packing") != expected_packing
             or identity.get("tokenizer_sha256")
-            != _tokenizer_sha256(load_tokenizer(config.tokenizer.path))
+            != canonical_tokenizer_sha256(load_tokenizer(config.tokenizer.path))
         ):
             raise ValueError("prepared receipt does not match run configuration")
         run_copy, _ = verified_prepared_footprint(verified_prepared)

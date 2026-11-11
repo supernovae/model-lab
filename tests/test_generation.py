@@ -562,13 +562,20 @@ def test_incremental_cache_preserves_unicode_byte_memory_addresses(
     )
 
 
-@pytest.mark.parametrize("injection", ["final", "embedding"])
-def test_incremental_cache_preserves_ngram_memory_history(injection: str) -> None:
+@pytest.mark.parametrize("injection", ["final", "embedding", "after_block"])
+@pytest.mark.parametrize(
+    "variant,kernel",
+    [("hidden_gate", 0), ("context_key", 0), ("context_key", 1), ("context_key", 4)],
+)
+@pytest.mark.parametrize("block_index", [0, 1])
+def test_incremental_cache_preserves_ngram_memory_history(
+    injection: str, variant: str, kernel: int, block_index: int
+) -> None:
     model = DenseLM(
         ModelConfig(
             vocab_size=260,
             hidden_dim=16,
-            num_layers=1,
+            num_layers=2,
             num_heads=2,
             ffn_dim=32,
             max_seq_len=8,
@@ -579,6 +586,9 @@ def test_incremental_cache_preserves_ngram_memory_history(injection: str) -> Non
             memory_ngram_orders=(2, 3),
             memory_hash_heads=2,
             memory_injection=injection,
+            memory_block_index=block_index if injection == "after_block" else None,
+            memory_variant=variant,
+            memory_conv_kernel_size=kernel,
         ),
         AttentionConfig(),
     ).eval()
@@ -590,6 +600,27 @@ def test_incremental_cache_preserves_ngram_memory_history(injection: str) -> Non
     full_next = model(torch.cat((prefix, appended), dim=1))[:, -2:]
 
     torch.testing.assert_close(cached_next, full_next)
+    # Independent request and rollover must not inherit the preceding memory tail.
+    rolled = torch.cat((prefix, appended), dim=1)[:, 2:]
+    cached_roll, other = model.forward_cached(rolled, cache_capacity=8)
+    torch.testing.assert_close(cached_roll, model(rolled))
+    assert other is not cache
+    if kernel:
+        expected = prefix.shape[0] * (kernel - 1) * 3 * 16 * 4
+        assert (
+            cache.memory_history.numel() * cache.memory_history.element_size()
+            == expected
+        )
+        assert cache.memory_history.untyped_storage().nbytes() == expected
+        assert (
+            cache.allocated_bytes
+            == cache.input_ids.numel() * 8
+            + sum(layer.allocated_bytes for layer in cache.layers)
+            + expected
+        )
+        cache.memory_history = None
+        with pytest.raises(ValueError, match="missing memory convolution history"):
+            model.forward_cached(appended[:, :1], cache=cache)
 
 
 @pytest.mark.parametrize("injection", ["final", "embedding"])
@@ -688,3 +719,30 @@ def test_long_completion_respects_token_budget_and_strict_context():
             torch.device("cpu"),
             strict_context=True,
         )
+
+
+def test_context_memory_cache_bfloat16_keeps_fp32_residual_history() -> None:
+    from sparselab.config.loading import load_config
+
+    base = load_config(Path("configs/smoke_memory_cpu.yaml"))
+    configured = base.model.model_copy(
+        update={
+            "memory_variant": "context_key",
+            "memory_conv_kernel_size": 4,
+            "memory_injection": "after_block",
+            "memory_block_index": 0,
+        }
+    )
+    model = DenseLM(configured, base.attention).eval()
+    ids = torch.tensor([[3, 7, 11, 13, 17, 19]])
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        _, cache = model.forward_cached(ids[:, :4], cache_capacity=8)
+        actual, cache = model.forward_cached(ids[:, 4:], cache=cache)
+        expected = model(ids)[:, -2:]
+        torch.testing.assert_close(actual, expected)
+        assert cache.layers[0].key.dtype == torch.bfloat16
+        assert cache.memory_history.dtype == torch.float32
+        cache.memory_history = cache.memory_history.to(torch.bfloat16)
+        with pytest.raises(ValueError, match="memory convolution history is invalid"):
+            model.forward_cached(ids[:, :1], cache=cache)
+        assert cache.length == 6

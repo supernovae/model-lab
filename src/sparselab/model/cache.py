@@ -7,7 +7,7 @@ checkpoint, or reusable model state.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import torch
@@ -89,11 +89,24 @@ class GenerationCache:
     batch_size: int
     device: torch.device
     input_dtype: torch.dtype
+    memory_history: Tensor | None = None
+    memory_histories: dict[str, Tensor] = field(default_factory=dict)
 
     @property
     def allocated_bytes(self) -> int:
-        return self.input_ids.numel() * self.input_ids.element_size() + sum(
-            layer.allocated_bytes for layer in self.layers
+        memory_bytes = (
+            self.memory_history.numel() * self.memory_history.element_size()
+            if self.memory_history is not None
+            else 0
+        )
+        return (
+            self.input_ids.numel() * self.input_ids.element_size()
+            + sum(layer.allocated_bytes for layer in self.layers)
+            + memory_bytes
+            + sum(
+                value.numel() * value.element_size()
+                for value in self.memory_histories.values()
+            )
         )
 
     def append_input_ids(self, input_ids: Tensor) -> None:

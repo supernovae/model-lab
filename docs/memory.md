@@ -59,6 +59,13 @@ physical fit or implement a hard memory cap. This option addresses a potential
 policy mismatch; an estimate alone is not evidence that a particular model fails
 on a particular device.
 
+Full-state continuation can explicitly change `estimate_policy` from `enforce`
+to `observe` with `--allow-runtime-optimization`, including an appended-data
+budget extension. An omitted historical value means `enforce`; the child records
+the policy transition. This does not admit changes to memory budgets or fractions,
+model/data settings, optimizer or effective batch. It does not reduce the retained
+estimate, claim physical fit, or provide a hard GPU-memory cap.
+
 ## Observe an update
 
 During PyTorch training, memory monitoring samples at begin, after forward, after backward, after optimizer work, and end of each update. Relevant metric families include:

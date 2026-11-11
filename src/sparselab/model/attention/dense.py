@@ -39,6 +39,7 @@ class DenseAttention(nn.Module):
         if implementation == "sdpa" and self.num_kv_heads != self.num_heads:
             raise ValueError("SDPA requires equal Q/KV head counts")
         self.implementation = implementation
+        self.max_seq_len = max_seq_len
         self.head_dim = hidden_dim // num_heads
         self.window_size = window_size
         self.q_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
@@ -47,10 +48,12 @@ class DenseAttention(nn.Module):
         self.v_proj = nn.Linear(hidden_dim, kv_dim, bias=False)
         self.out_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.rope = RoPE(self.head_dim, rope_base)
-        causal_mask = torch.ones(max_seq_len, max_seq_len, dtype=torch.bool).triu(1)
-        if window_size is not None:
-            positions = torch.arange(max_seq_len)
-            causal_mask |= positions[:, None] - positions[None, :] >= window_size
+        causal_mask = torch.empty(0, dtype=torch.bool)
+        if implementation != "sdpa":
+            causal_mask = torch.ones(max_seq_len, max_seq_len, dtype=torch.bool).triu(1)
+            if window_size is not None:
+                positions = torch.arange(max_seq_len)
+                causal_mask |= positions[:, None] - positions[None, :] >= window_size
         self.register_buffer("causal_mask", causal_mask, persistent=False)
 
     def _heads(self, projection: nn.Linear, x: Tensor, heads: int) -> Tensor:
@@ -74,7 +77,7 @@ class DenseAttention(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         batch, length, hidden = x.shape
-        if length > self.causal_mask.shape[0]:
+        if length > self.max_seq_len:
             raise ValueError("sequence length exceeds configured attention context")
         query, key, value = (
             self.rope(self._heads(self.q_proj, x, self.num_heads)),
@@ -95,7 +98,14 @@ class DenseAttention(nn.Module):
     def _probabilities(self, query: Tensor, key: Tensor, length: int) -> Tensor:
         """Masked softmax attention weights (fp32), as the reference path uses."""
         scores = self._attention(query, key)
-        scores.masked_fill_(self.causal_mask[:length, :length], float("-inf"))
+        mask = (
+            self.causal_mask[:length, :length]
+            if self.causal_mask.numel()
+            else torch.ones(length, length, dtype=torch.bool, device=query.device).triu(
+                1
+            )
+        )
+        scores.masked_fill_(mask, float("-inf"))
         return torch.softmax(scores.float(), dim=-1)
 
     @torch.no_grad()
@@ -107,7 +117,7 @@ class DenseAttention(nn.Module):
         internally without exposing them). Used by the model explorer.
         """
         length = x.shape[1]
-        if length > self.causal_mask.shape[0]:
+        if length > self.max_seq_len:
             raise ValueError("sequence length exceeds configured attention context")
         query = self.rope(self._heads(self.q_proj, x, self.num_heads))
         key = self.rope(self._heads(self.k_proj, x, self.num_kv_heads))
@@ -135,7 +145,7 @@ class DenseAttention(nn.Module):
         batch, length, hidden = x.shape
         offset = cache.position
         prior_length = cache.length
-        if offset + length > self.causal_mask.shape[0]:
+        if offset + length > self.max_seq_len:
             raise ValueError("sequence length exceeds configured attention context")
         query = self.rope(
             self._heads(self.q_proj, x, self.num_heads), position_offset=offset

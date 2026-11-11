@@ -28,7 +28,7 @@ from sparselab.data.encoding import (
 from sparselab.data.packing import (
     PreparedData,
     _publish_prepared_directory,
-    _tokenizer_sha256,
+    canonical_tokenizer_sha256,
     load_prepared_data,
     prepare_data,
 )
@@ -323,6 +323,14 @@ def _pilot_story_dataset(
         eos,
         layout=matched.layout,
         targets_per_update=matched.targets_per_update,
+        target_group_transition=(
+            matched.target_group_transition.model_dump()
+            if matched.target_group_transition
+            else None
+        ),
+        frozen_update_ends=(
+            matched.frozen_update_ends if matched.target_group_transition else ()
+        ),
     )
 
 
@@ -658,7 +666,7 @@ def _verify_allocation_assets(
     allocation = load_allocation_manifest(
         assets / "allocation" / allocation_path.name,
         source_identity_sha256=source_sha256,
-        tokenizer_sha256=_tokenizer_sha256(tokenizer),
+        tokenizer_sha256=canonical_tokenizer_sha256(tokenizer),
     )
     if allocation.sha256 != metadata.get("manifest_sha256"):
         raise ValueError("prepared data and allocation manifests differ")
@@ -775,7 +783,7 @@ def materialize_prepared_inputs(
                 allocation = load_allocation_manifest(
                     allocation_source,
                     source_identity_sha256=str(source_digest),
-                    tokenizer_sha256=_tokenizer_sha256(tokenizer),
+                    tokenizer_sha256=canonical_tokenizer_sha256(tokenizer),
                 )
                 prepared_allocation = data.manifest.get("allocation")
                 if (

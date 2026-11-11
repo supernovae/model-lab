@@ -1,0 +1,36 @@
+Base source: f515057 (clean live source inspected, never modified)
+CPU runtime: /home/byron/src/tiny-sparse-lab/.venv/bin/python
+Environment: PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+
+Initial focused selection:
+python -B -m pytest -n 0 tests/test_target_group_transition.py tests/test_document_batching.py tests/test_story_packing.py tests/test_document_budget_extension.py -q --tb=short
+56 passed in 65.57s.
+
+After adding bounded-engine normalization coverage, refusal checks and planner CLI coverage:
+python -B -m pytest -n 0 tests/test_target_group_transition.py tests/test_document_batching.py -q --tb=short
+27 passed in 26.28s.
+This supersedes the earlier versions of these two files (two additional parametrized cases).
+Existing story packing and document-budget extension tests were not rerun because their code/coverage had not changed after the initial pass.
+
+Ruff check over all changed Python files: passed.
+Ruff format --check over all changed Python files: 12 files already formatted.
+git diff --check: passed.
+Existing batching engine tests assert XPU is not initialized.
+
+Unrun: full suite, production full-stream planner scan, real model checkpoint tensor load,
+GPU compilation/memory/throughput, live adoption, external publication.
+Observed sample: fixed at-most-8-MiB prepared-token read; see target-group-sample.json.
+No outstanding test failures. During test development a same-file validation fixture,
+a runtime-refusal assertion, and the planner's checkpoint-manifest reader were corrected
+and the affected tests rerun successfully.
+
+NVMe follow-up validation:
+- Planner --runs-dir and --train-tokens exercised in the native CPU checkpoint fixture.
+- tests/test_target_group_transition.py: 2 passed in 9.30s.
+- One sequential CPU planning scan of existing NVMe train.npy (576,943,464 bytes).
+- Concrete source step 13500 / 66,864,692 targets -> max_steps 14087, 587 remaining updates.
+- Source RunConfig digest equals selected checkpoint config_sha256.
+- Future runtime, optimizer and dataset models equal source; width/context remain 4/4096.
+- Working store is /mnt/sparselab; keep_periodic=true, no deleting retention policy.
+- Staged launcher Python compile() and bash -n passed; launcher not executed.
+- No checkpoint tensors loaded, archives/copies/deletions performed, or GPU initialized.

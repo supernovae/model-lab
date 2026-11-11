@@ -235,6 +235,13 @@ METRICS = {
             "offload",
         ),
         MetricSpec(
+            "engram/injection/after_block",
+            "indicator",
+            "Memory was injected after the configured zero-based decoder block.",
+            "memory",
+            "model",
+        ),
+        MetricSpec(
             "engram/injection/final",
             "indicator",
             "Memory was injected after the final RMSNorm and before the LM head.",

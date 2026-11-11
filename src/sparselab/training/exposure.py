@@ -47,6 +47,11 @@ def exposure_context(
                 "kind": "matched-eos-stories-v1",
                 "layout": dataset.layout,
                 "targets_per_update": dataset.targets_per_update,
+                **(
+                    {"target_group_transition": dataset.target_group_transition}
+                    if dataset.target_group_transition
+                    else {}
+                ),
                 "order": "source",
                 "initial_context": "virtual-eos",
                 "group_offsets_sha256": canonical_digest(
