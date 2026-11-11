@@ -36,13 +36,13 @@ def test_owned_native_stage_fallback_refuses_changed_or_present_bad_proof(
     event_path = next(stages.root.glob("completion-*.json"))
     event = json.loads(event_path.read_bytes())
     request_id = {"request": stages.identity, "completion": event["sha256"]}
-    cache_path = stages.cache._path("split-phase", request_id)
+    cache_path = stages.cache.entry_path("split-phase", request_id)
     raw = cache_path.read_bytes()
     cache_value = json.loads(raw)
-    binding = stages.cache._binding(
+    binding = stages.cache.entry_binding(
         cache_path, raw, request_id, capture(cache_value["dependencies"])
     )
-    proof_path = stages.cache.proofs._receipt(binding)
+    proof_path = stages.cache.proofs.receipt_path(binding)
     assert proof_path.is_file()
     proof_path.unlink()  # Tiny fixture only: simulate an optional receipt not minted.
     result, evidence = _phase(
@@ -164,13 +164,13 @@ def test_stage_migration_reuses_real_files_and_refuses_tampering(tmp_path, monke
     for event_path in stages.root.glob("completion-*.json"):
         event = json.loads(event_path.read_bytes())
         stage_request = {"request": stages.identity, "completion": event["sha256"]}
-        cache_path = stages.cache._path("split-phase", stage_request)
+        cache_path = stages.cache.entry_path("split-phase", stage_request)
         raw = cache_path.read_bytes()
         value = json.loads(raw)
-        binding = stages.cache._binding(
+        binding = stages.cache.entry_binding(
             cache_path, raw, stage_request, capture(value["dependencies"])
         )
-        proof = stages.cache.proofs._receipt(binding)
+        proof = stages.cache.proofs.receipt_path(binding)
         assert proof.is_file()
         proof.unlink()
 

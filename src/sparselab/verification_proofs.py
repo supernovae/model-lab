@@ -221,7 +221,7 @@ class ProofStore:
             "events": list(self._events),
         }
 
-    def _event(
+    def record_event(
         self,
         binding: dict[str, object],
         reason: str,
@@ -230,6 +230,7 @@ class ProofStore:
         bytes_hashed: int | None = None,
         bytes_avoided: int | None = None,
     ) -> None:
+        """Append operational diagnostics without granting verification authority."""
         authority_error = None
         if authority is None:
             try:
@@ -254,7 +255,7 @@ class ProofStore:
         self, binding: dict[str, object], *, bytes_hashed: int | None = None
     ) -> None:
         """Record an explicitly cold request without treating it as a lookup miss."""
-        self._event(binding, "explicit_cold", bytes_hashed=bytes_hashed)
+        self.record_event(binding, "explicit_cold", bytes_hashed=bytes_hashed)
 
     def hashed(self, binding: dict[str, object], size: int) -> None:
         """Account for actual file-verifier cold hashing after a failed lookup."""
@@ -357,7 +358,8 @@ class ProofStore:
             "binding": binding,
         }
 
-    def _receipt(self, binding: dict[str, object]) -> Path:
+    def receipt_path(self, binding: dict[str, object]) -> Path:
+        """Locate a receipt; its existence alone does not authenticate evidence."""
         locator = {
             key: binding.get(key)
             for key in (
@@ -444,7 +446,7 @@ class ProofStore:
         reason = "unknown"
         hit = False
         try:
-            receipt = self._receipt(binding)
+            receipt = self.receipt_path(binding)
             if not supports_verifier(binding.get("kind")):
                 reason = "unknown"
             elif not self.trusted(Path(str(binding["path"]))):
@@ -520,7 +522,7 @@ class ProofStore:
             reason = "unknown"
         self.hits += int(hit)
         self.misses += int(not hit)
-        self._event(
+        self.record_event(
             binding,
             reason,
             authority=authority,
@@ -535,7 +537,7 @@ class ProofStore:
         and exact operation. This never publishes or upgrades a proof.
         """
         try:
-            receipt = self._receipt(binding)
+            receipt = self.receipt_path(binding)
             if (
                 not supports_verifier(binding.get("kind"))
                 or not self._safe_binding(binding)
@@ -622,7 +624,7 @@ class ProofStore:
         try:
             key = self._key(create=True)
             if key is None:
-                self._event(binding, "key_publication_unavailable")
+                self.record_event(binding, "key_publication_unavailable")
                 return
             self.directory.parent.mkdir(mode=0o700, exist_ok=True)
             if not _trusted(self.root, self.directory.parent):
@@ -631,7 +633,7 @@ class ProofStore:
             if not _trusted(self.root, self.directory, private=True):
                 return
             # Authority was computed before any publication or key creation.
-            receipt = self._receipt(binding)
+            receipt = self.receipt_path(binding)
             temporary = self.directory / (".proof-" + secrets.token_hex(16))
             try:
                 with temporary.open("xb") as stream:

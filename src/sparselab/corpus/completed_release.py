@@ -69,7 +69,7 @@ def retained_payload(path):
     cache = stages.cache
     if cache.proofs is None:
         raise ValueError("retained native build proof store unavailable")
-    cache_path = cache._path("split-phase", request)
+    cache_path = cache.entry_path("split-phase", request)
     raw = _small(cache_path, root)
     value = json.loads(raw)
     if set(value) != {"dependencies", "payload"} or value["payload"] != payload:
@@ -84,8 +84,8 @@ def retained_payload(path):
     ):
         raise ValueError("unsafe retained native build dependencies")
     dependencies = capture(paths)
-    binding = cache._binding(cache_path, raw, request, dependencies)
-    receipt = cache.proofs._receipt(binding)
+    binding = cache.entry_binding(cache_path, raw, request, dependencies)
+    receipt = cache.proofs.receipt_path(binding)
     if receipt.exists() or receipt.is_symlink():
         historical = _small(receipt, root, private=True)
         saved = json.loads(historical)["proof"]["binding"]

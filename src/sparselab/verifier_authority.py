@@ -269,6 +269,10 @@ def _excluded_edges(kind: str) -> frozenset[tuple[str, str]]:
 # was added before the existing unavailable-key return. Removing that call
 # restores the complete record AST; imported artifact uses, cold-evidence
 # validation, trust checks and excluded edges are unchanged.
+# verification_proofs record re-audited 2026-11-03: promoting receipt_path
+# and record_event changes only method names. Reversing the public API renames
+# and removing their docstrings restores the complete module AST exactly;
+# artifact imports/uses, cold evidence, trust checks and exclusions are unchanged.
 # data.packing re-audited 2026-11-04 against f61763f: reversing the
 # _tokenizer_sha256 -> canonical_tokenizer_sha256 promotion and removing the
 # producer-only map/tokenizer-object check in prepare_data restores the complete
@@ -435,7 +439,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "verification_proofs",
         "experiments.artifacts",
-    ): "ef3237ce0f4e0bd2de58092bd5712316738fe25d49981b2993bda24f135d11ae",
+    ): "a08eafd5bf4d29c80811d6e279211eeb3ddf8ee1ee0f0675bdd98613e5480506",
 }
 
 

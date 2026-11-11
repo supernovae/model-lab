@@ -53,7 +53,7 @@ def _entry(cache, request, payload, dependencies, binding):
         or not payload.get("files")
     ):
         raise ValueError("retained render execution differs")
-    receipt = cache.proofs._receipt(binding)
+    receipt = cache.proofs.receipt_path(binding)
     raw = _small(receipt, cache.root, private=True)
     saved = json.loads(raw)["proof"]["binding"]
     if not cache.proofs.lookup(saved):
@@ -158,11 +158,11 @@ def write_adoption(
             raise ValueError("retained render proof store unavailable")
         cache.directory = completion.parent / "sealed"
         cache.authority = {**cache.authority, "streaming_producer": producer}
-        path = cache._path("split-phase", request)
+        path = cache.entry_path("split-phase", request)
         raw = _small(path, root)
         value = json.loads(raw)
         dependencies = capture(value["dependencies"])
-        binding = cache._binding(path, raw, request, dependencies)
+        binding = cache.entry_binding(path, raw, request, dependencies)
         entries.append(_entry(cache, request, value["payload"], dependencies, binding))
     declaration = {
         "kind": _KIND,
@@ -302,7 +302,7 @@ def adopt_render(cache, request, payload, dependencies, binding):
             stream.flush()
             os.fsync(stream.fileno())
         sync_directory(state["journal"].parent)
-        cache.proofs._event(binding, "explicit_retained_render_adoption")
+        cache.proofs.record_event(binding, "explicit_retained_render_adoption")
         return payload, dependencies
     except (OSError, ValueError, TypeError, KeyError) as error:
         raise RuntimeError(
