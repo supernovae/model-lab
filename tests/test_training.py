@@ -1264,3 +1264,27 @@ def test_matched_story_resume_and_config_identity(tmp_path: Path, layout: str) -
     equal(left.model, right.model)
     equal(left.optimizer, right.optimizer)
     equal(left.rng, right.rng)
+
+
+def test_require_prepared_refuses_to_tokenize_then_reuses_published_cache(
+    tmp_path: Path,
+) -> None:
+    from klab.data.packing import PreparedDataMissing, prepare_data
+    from klab.data.tokenizer import load_tokenizer
+
+    base = config(tmp_path)
+    short = base.model_copy(
+        update={
+            "training": base.training.model_copy(
+                update={"max_steps": 3, "max_tokens": 96}
+            )
+        }
+    )
+    with pytest.raises(PreparedDataMissing, match="klab data prepare"):
+        train(short, run_id="unprepared", require_prepared=True)
+    assert not short.dataset.cache_dir.exists() or not any(
+        short.dataset.cache_dir.rglob("*.npy")
+    )
+
+    prepare_data(short, load_tokenizer(short.tokenizer.path))
+    assert train(short, run_id="prepared", require_prepared=True) == "prepared"

@@ -292,11 +292,18 @@ def _excluded_edges(kind: str) -> frozenset[tuple[str, str]]:
 # producer owner _prepare_data. load_prepared_data, receipt validators and the
 # exclusion edge set are unchanged; no excluded edge gained a verifier use.
 # Re-pin the existing complete-owner signatures.
+# data.packing re-audited 2026-11-11 (require_prepared, merged over the worker
+# budget re-pin above): prepare_data and _prepare_data gain a require_prepared
+# flag that raises PreparedDataMissing on a cache miss, after the unchanged
+# verified cache-hit return and before any production. A cache hit takes the same
+# load_prepared_data path as before; receipt validators and the exclusion edge
+# set are unchanged, and no excluded edge gained a verifier use. Re-pin the
+# existing complete-owner signatures.
 _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.preparation_workers",
-    ): "3ba22c57267e4b03a754ae8b2d27cc409c619f8357359f39b64eba39f39c12a4",
+    ): "5b1b149c43050734d47214c329363b5bb3bf02fbf39aa1d373dad27c7f1d4c86",
     (
         "experiments.artifacts",
         "data.sources",
@@ -304,7 +311,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "corpus.mixture",
-    ): "efbc2c8df9856393623bbcd20e4a8463c4483ed5856db46075882141a993f968",
+    ): "e83b134e867deda519073957bdd5dfc7b0c0db6f77c415b1660eb470fda387e1",
     (
         "workers",
         "workers.transport",
@@ -312,11 +319,11 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.tokenizer",
-    ): "85a25da082875dd2d6b06c016d943c5f31bb8b34e7ba74b96b02dc6acc41088c",
+    ): "eecb84a15664eb83847b057ba67b26dbf6525062443177f2dc657d7da36e316b",
     (
         "data.packing",
         "data.sources",
-    ): "cdaca397132f56ecdf758945cb23f1a77df738f3785598d2b6d00da89214fea0",
+    ): "2d8d9cfbeddf0df450408585d6f7a25ae23b9e5808c6cc147f5f95acca12135f",
     (
         "data",
         "data.tokenizer",
@@ -336,11 +343,11 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "corpus.export",
-    ): "65b06a0512789c07b9e918426822d6aaf99c4b13cc6d4aa8276d7f5f70612a12",
+    ): "1eb36174ea3787a72f2ac8e7db3784eb11bd4b35d20c8db197ca36a229abb055",
     (
         "data.packing",
         "data.allocation",
-    ): "59438a75d0e39f3825406bbbcbfc7aae36f2d4c89e907afd0aea1d364d01efd4",
+    ): "04985cd0a1d11bafe90eeb28d6ce51b534468eb95800c32e70ed208ace93e750",
     (
         "data.packing",
         "data.byte_hash",
@@ -356,43 +363,43 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.encoding",
-    ): "c1581ab616281807342526b4b1f55fb9651f7e56cdbb6de33306552f91d5776e",
+    ): "cf4d057e01134320e4371cef0cdf9d4a6c6025f1ce794328e05e2bee3624ab02",
     (
         "data.packing",
         "data.local_stories",
-    ): "b2c35e630407c4e40ce365161b00b7511c1179f5dd942bf7f2ec1a4d07e04e14",
+    ): "22c57139cc004bb20b527270c7aff49737462515b33493b04b050b67d95f8844",
     (
         "data.packing",
         "data.preparation_chunks",
-    ): "c41db3c3dad3409ae38a87ed58a6304e5369e2ea7a06d47a04ed03e146e94801",
+    ): "edd07da0131c471f1815bfd99a04ae25b9807b5d1e35ec3056147e7670ed1be3",
     (
         "data.packing",
         "data.preparation_telemetry",
-    ): "aff8f7601dc0d0a23678eec4c1ae1e0dec0386ab70434f472f9dd0bb0781091b",
+    ): "c8bca40e69c10684bc6639eb24309a124f03df583912ea5607b62b35e4923029",
     (
         "data.packing",
         "experiments.source_compatibility",
-    ): "9bce305af93bb593dda221fe31c6dbcb25521c74705a0699809248ef16f7500a",
+    ): "7ae59da40ecfa8d6704ad6990908cf233fc78649d60de1d5ea0b63434a14d950",
     (
         "data.packing",
         "progress",
-    ): "87df2512d30668e2d2b069a1356b552c35a99b720b7ea011145b07f7d05eb242",
+    ): "9b4199a6f511426423ee17a13a438850c22c30ca2fcaa8cfd44750ec5410eee0",
     (
         "data.packing",
         "resource_envelope",
-    ): "77af6d275b6a15c15aa840cfb96c97f8ab8e47b9552e339f6c0aff6dc75bd304",
+    ): "e35f8e3fb04b7f9546c63d595decfe70081a91413bce1b6eba1af8ca1766983a",
     (
         "data.packing",
         "workdir",
-    ): "e773a125cb320f33b1c7a256d84d8a664dd2290bed621153cae27c28818506c1",
+    ): "4b6722380a2b4eaeefa5d634594f35fba00cc41fa2022f9051ce97f3efc69070",
     (
         "data.packing",
         "workspace_cleanup",
-    ): "d598fd0d7474996e17426b85808ca993d0c6c8c8539e073fd4b0368829b7e43b",
+    ): "f1d6b0eae6f5c8edd0623f1b664a062281243733a8f9f8fbe2da9a1b95018ec1",
     (
         "data.packing",
         "workspace_preflight",
-    ): "3c815920a85ddd7f3e4c57d2b35ed03a8a578d6831ae48f4b2a81337e0dd0d79",
+    ): "f3e908c0de58e2827cb10f1fe95469c77d1a4b1defa410dc68b6bd10d68db2e8",
     (
         "corpus.tokenizer_bakeoff",
         "corpus.cli",

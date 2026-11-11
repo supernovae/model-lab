@@ -610,6 +610,7 @@ def train(
     tokenizer_batch_source_bytes: int = TOKENIZER_BATCH_SOURCE_BYTES,
     proof_store: ProofStore | None = None,
     verification_mode: Literal["cold", "verified_reuse"] = "cold",
+    require_prepared: bool = False,
     checkpoint_committed: Callable[[Path, CheckpointRecord], None] | None = None,
     spot_policy: SpotSafetyPolicy | None = None,
 ) -> str:
@@ -671,6 +672,7 @@ def train(
         tokenizer_batch_source_bytes=tokenizer_batch_source_bytes,
         proof_store=proof_store,
         verification_mode=verification_mode,
+        require_prepared=require_prepared,
         checkpoint_committed=checkpoint_committed,
         spot_policy=spot_policy,
     )
@@ -734,6 +736,7 @@ def _train_impl(
     tokenizer_batch_source_bytes: int = TOKENIZER_BATCH_SOURCE_BYTES,
     proof_store: ProofStore | None = None,
     verification_mode: Literal["cold", "verified_reuse"] = "cold",
+    require_prepared: bool = False,
     checkpoint_committed: Callable[[Path, CheckpointRecord], None] | None = None,
     spot_policy: SpotSafetyPolicy | None = None,
 ) -> str:
@@ -1043,6 +1046,7 @@ def _train_impl(
                     tokenizer_batch_source_bytes=tokenizer_batch_source_bytes,
                     proof_store=proof_store,
                     verification_mode=verification_mode,
+                    require_prepared=require_prepared,
                 )
         if config.model.memory_token_mapping is not None:
             from klab.memory_tokenizer import validate_memory_token_map

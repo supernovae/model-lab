@@ -14,6 +14,22 @@ A run uses one local process on one host and one explicitly configured or automa
 
 CPU reproducibility uses `runtime.backend: cpu` and `training.deterministic: true`. MPS and other accelerators can exercise the same local lifecycle, but are not claimed to be bitwise-identical to CPU.
 
+## Prepare on CPU before holding an accelerator
+
+`klab train` tokenizes and packs a missing data cache itself, before the model is
+built. For a large corpus that can take a long time on CPU while a reserved or
+rented accelerator waits. Prepare first, then make the training command refuse
+to do that work:
+
+```sh
+klab data prepare RUN.yaml                 # CPU only; uses host cores, resumable
+klab train RUN.yaml --run-id RUN --require-prepared
+```
+
+With `--require-prepared`, a published cache for this config is verified and
+used; a missing cache fails immediately with the `data prepare` command to run,
+and nothing is tokenized. Use it in any launch script that starts on a GPU host.
+
 ## Smoke runs
 
 ```sh
