@@ -14,7 +14,7 @@ from collections import Counter
 from collections.abc import Iterator
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
-from functools import partial
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -2262,6 +2262,8 @@ def _prepare_data(
                 temporary_root,
                 envelope=resource_envelope,
                 parallel_supported=parallel_supported,
+                token_budget=config.dataset.train_max_tokens
+                + config.dataset.validation_max_tokens,
             ) as workers,
         ):
             telemetry.shard_workers = workers.count
@@ -2808,6 +2810,21 @@ def prepare_data(
         return prepared
 
 
+def _supervised_blocks(
+    supervision: np.ndarray, candidates: int, seq_len: int
+) -> np.ndarray:
+    """Indices of full blocks with at least one supervised target, in bounded chunks."""
+    chunk = max(1, (1 << 26) // seq_len)
+    kept = [np.empty(0, dtype=np.int64)]
+    for first in range(0, candidates, chunk):
+        last = min(candidates, first + chunk)
+        targets = np.asarray(supervision[first * seq_len + 1 : last * seq_len + 1])
+        kept.append(
+            first + np.flatnonzero(targets.reshape(last - first, seq_len).any(axis=1))
+        )
+    return np.concatenate(kept).astype(np.int64, copy=False)
+
+
 class TokenBlockDataset:
     def __init__(
         self,
@@ -2860,18 +2877,7 @@ class TokenBlockDataset:
         self.block_indices = (
             np.arange(candidates, dtype=np.int64)
             if supervision is None
-            else np.asarray(
-                [
-                    block
-                    for block in range(candidates)
-                    if bool(
-                        supervision[
-                            block * seq_len + 1 : (block + 1) * seq_len + 1
-                        ].any()
-                    )
-                ],
-                dtype=np.int64,
-            )
+            else _supervised_blocks(supervision, candidates, seq_len)
         )
 
     def __len__(self) -> int:
@@ -2974,7 +2980,14 @@ class BatchCursor:
     next_block: int = 0
 
 
+@lru_cache(maxsize=2)
 def epoch_order(num_blocks: int, seed: int, epoch: int) -> torch.Tensor:
+    """One epoch's block permutation, kept so each update does not redraw it.
+
+    The permutation is a pure function of its arguments and costs O(num_blocks),
+    which is seconds and hundreds of MB at tens of billions of tokens. Callers
+    only index the shared result.
+    """
     return torch.randperm(
         num_blocks, generator=torch.Generator().manual_seed(seed + epoch)
     )

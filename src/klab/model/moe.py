@@ -53,6 +53,8 @@ class TopKMoE(nn.Module):
     Tokens are flattened from ``[B, T, D]`` to ``[B*T, D]``.  Each selected
     expert receives only its selected rows; weighted ``index_add_`` restores
     the original token order without materializing an expert-by-token tensor.
+    Assignments are grouped with one sort, so a forward waits on the device
+    once per layer for the group sizes, not once per expert.
     """
 
     def __init__(
@@ -91,15 +93,23 @@ class TopKMoE(nn.Module):
         weights, selected = probabilities.topk(self.experts_per_token, dim=-1)
         weights = weights / weights.sum(dim=-1, keepdim=True)
         output = torch.zeros_like(tokens)
-        for expert_index, expert in enumerate(self.experts):
-            token_indices, choice_indices = (selected == expert_index).nonzero(
-                as_tuple=True
-            )
+        # One sort groups every (token, choice) assignment by expert, keeping
+        # token order inside each group. The group sizes are the only values
+        # read back from the device, once per layer instead of once per expert.
+        assignments = selected.reshape(-1)
+        position = torch.arange(assignments.numel(), device=assignments.device)
+        order = torch.argsort(assignments * assignments.numel() + position)
+        sizes = torch.bincount(assignments, minlength=self.num_experts).tolist()
+        token_groups = torch.div(
+            order, self.experts_per_token, rounding_mode="floor"
+        ).split(sizes)
+        weight_groups = weights.reshape(-1).index_select(0, order).split(sizes)
+        for expert, token_indices, expert_weights in zip(
+            self.experts, token_groups, weight_groups, strict=True
+        ):
             if token_indices.numel():
                 contribution = expert(tokens.index_select(0, token_indices))
-                contribution = contribution * weights[
-                    token_indices, choice_indices
-                ].unsqueeze(-1)
+                contribution = contribution * expert_weights.unsqueeze(-1)
                 output.index_add_(0, token_indices, contribution.to(output.dtype))
         if self.shared_expert is not None:
             output = output + self.shared_expert(tokens)

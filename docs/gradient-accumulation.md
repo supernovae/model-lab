@@ -27,9 +27,35 @@ FP16 overflow restores the window RNG/cursor state, reduces the scaler, and retr
 
 The metrics record `batch/micro_batch_size`, `batch/accumulation_steps`, actual `batch/effective_batch_size`, and `batch/effective_tokens_per_update`, alongside the successful update's loss, learning rate, and throughput. Read actual counts when comparing a short final window.
 
+## Several devices on one host
+
+`runtime.secondary_device_indices` lists additional devices of the same backend
+(`cuda`, `rocm`, `xpu`, or `cpu` for wiring checks). Each holds an in-process
+replica of the model. The microbatches of one update are dealt round-robin across
+the primary and the replicas, their gradients are reduced onto the primary, and
+the primary alone clips, steps the optimizer and saves state. The update, its
+effective batch and its checkpoint format are the same as on one device, so a run
+can resume with or without secondaries.
+
+```yaml
+runtime:
+  backend: xpu
+  device_index: 0
+  secondary_device_indices: [1]
+training:
+  gradient_accumulation: 16   # at least two microbatches per update are needed
+```
+
+An update with a single microbatch (for example `gradient_accumulation: 1` or a
+short final window) runs on the primary alone. `batch/devices_used` records how
+many devices executed each committed update, so idle secondaries are visible in
+the run's metrics. FP16, activation offload, semantic memory, allocation sidecars
+and portability runs are refused with secondaries. Validation runs on the primary.
+Throughput scaling depends on the backend and model and must be measured per run.
+
 ## What it does not mean
 
-Accumulation does not reduce resident parameters, gradients, or optimizer state. It usually reduces peak activation size because each forward/backward sees a smaller microbatch, but it can increase update wall time because more microbatches are executed serially. It does not provide distributed data parallelism, expert exchange, model sharding, remote workers, or a KV decode cache.
+Accumulation does not reduce resident parameters, gradients, or optimizer state. It usually reduces peak activation size because each forward/backward sees a smaller microbatch, but it can increase update wall time because more microbatches are executed serially on one device. It does not provide multi-host data parallelism, expert exchange, model sharding, remote workers, or a KV decode cache.
 
 MoE routing balance remains microbatch-local. The implementation masks invalid targets before routing summaries/auxiliary reductions, but it does not claim that accumulation recreates a whole-window global routing objective.
 

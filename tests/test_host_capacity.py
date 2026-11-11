@@ -287,7 +287,9 @@ def test_ram_env_cannot_bypass_low_memory_limits(
         check_envelope(envelope, workspace=tmp_path, rss_bytes=rss)
 
 
-def test_corpus_encoder_budget_keeps_preparation_pool_cap(capacity, tmp_path):
+def test_preparation_pool_follows_operator_budget_and_measured_capacity(
+    capacity, tmp_path
+):
     from tokenizers import Tokenizer, models
 
     from klab.data.encoding import tokenizer_work_plan
@@ -295,20 +297,31 @@ def test_corpus_encoder_budget_keeps_preparation_pool_cap(capacity, tmp_path):
 
     capacity.total = 64 * 1024**3
     capacity.available = 48 * 1024**3
-    # Six available CPUs: corpus assembly can use its explicit encoder budget.
+    # Six available CPUs bound every plan, whatever the operator requests.
     assert tokenizer_work_plan(6).workers == 6
+    assert tokenizer_work_plan(64).workers == 6
     assert tokenizer_work_plan(None).workers == 4
     tokenizer = Tokenizer(models.BPE())
-    for envelope in (
-        None,
-        ResourceEnvelope(resource_envelope_version=1),
+
+    def pool(envelope, **options):
+        workers = PreparationWorkers(
+            tokenizer, tmp_path, envelope=envelope, parallel_supported=True, **options
+        )
+        return workers.count, workers.threads
+
+    # A small or undeclared budget keeps one four-thread child.
+    assert pool(None) == (1, [4])
+    assert pool(ResourceEnvelope(resource_envelope_version=1)) == (1, [4])
+    # A large budget without an envelope spreads measured capacity over children.
+    assert pool(None, token_budget=10_000_000_000) == (2, [3, 3])
+    # An explicit operator budget is honored up to measured capacity.
+    assert pool(
         ResourceEnvelope(
             resource_envelope_version=1, max_workers=6, preparation_shard_workers=6
-        ),
-    ):
-        pool = PreparationWorkers(
-            tokenizer, tmp_path, envelope=envelope, parallel_supported=True
         )
-        assert pool.plan.workers == 4
-        assert sum(pool.threads) == 4
-        assert pool.count <= 4
+    ) == (6, [1] * 6)
+    assert pool(
+        ResourceEnvelope(
+            resource_envelope_version=1, max_workers=64, preparation_shard_workers=2
+        )
+    ) == (2, [3, 3])

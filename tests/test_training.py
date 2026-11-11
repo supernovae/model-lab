@@ -1198,6 +1198,8 @@ def test_completed_training_calibrates_and_reuses_runtime_forecast(
     assert isinstance(phases, dict)
     assert phases["generation"]["availability"] == "not_observed"
     assert phases["evaluation"]["availability"] == "not_observed"
+    assert phases["batch_assembly"]["availability"] == "observed"
+    assert phases["batch_assembly"]["observation_count"] == final["completed_steps"]
 
 
 @pytest.mark.parametrize("layout", ["story", "contiguous"])

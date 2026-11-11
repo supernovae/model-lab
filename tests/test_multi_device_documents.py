@@ -1,4 +1,4 @@
-"""CPU replica fixtures cover padded DevMind updates without accelerator work."""
+"""CPU replica fixtures cover padded document updates without accelerator work."""
 
 import numpy as np
 import pytest
@@ -43,6 +43,7 @@ def test_padded_replica_updates_preserve_gradients_and_diagnostics(tmp_path, mem
         ):
             torch.testing.assert_close(a.grad, b.grad, rtol=2e-4, atol=3e-6)
             torch.testing.assert_close(a, b, rtol=3e-5, atol=5e-6)
+        assert actual.metrics.pop("batch/devices_used") == 2.0
         for name, value in actual.metrics.items():
             if name.startswith(("engram/", "batch/")):
                 assert value == pytest.approx(
