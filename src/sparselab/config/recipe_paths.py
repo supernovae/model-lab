@@ -11,6 +11,7 @@ from sparselab.declaration_context import RecipeContext, canonical_reference, sa
 _INPUT_FIELDS = frozenset(
     {
         "tokenizer.path",
+        "tokenizer.origin.mixture_declaration_path",
         "tokenizer.origin.dataset.train_path",
         "tokenizer.origin.dataset.validation_path",
         "tokenizer.origin.dataset.source_manifest_path",

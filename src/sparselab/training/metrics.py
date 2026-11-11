@@ -11,7 +11,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
 
-from sparselab.canonical import reject_duplicate_keys
+from sparselab.canonical import canonical_digest, reject_duplicate_keys
 
 SCHEMA_VERSION = 4
 ENVELOPE_SCHEMA_VERSION = 1
@@ -479,6 +479,8 @@ class ExperimentStore:
         config: object,
         metadata: object,
         parent_run_id: str | None = None,
+        *,
+        config_manifest: Mapping[str, object] | None = None,
     ) -> None:
         config_json = _canonical_json(config)
         metadata_json = _canonical_json(metadata)
@@ -489,6 +491,24 @@ class ExperimentStore:
             "metadata": json.loads(metadata_json),
             "parent_run_id": parent_run_id,
         }
+        if len(config_json.encode("utf-8")) > MAX_ENVELOPE_BYTES // 2:
+            if (
+                config_manifest is None
+                or config_manifest.get("effective_config") != config
+            ):
+                raise ValueError(
+                    "large run configuration requires its complete manifest"
+                )
+            digest = canonical_digest(config_manifest)
+            if (
+                not isinstance(metadata, Mapping)
+                or metadata.get("manifest_sha256") != digest
+            ):
+                raise ValueError("configuration manifest differs from run metadata")
+            payload["config"] = {
+                "manifest_reference": manifest_reference(digest, config_manifest),
+                "field": "effective_config",
+            }
         self._write(
             run_id,
             "run_created",
@@ -634,10 +654,31 @@ class ExperimentStore:
                     "manifest projection is absent or has a different digest"
                 )
             projected = _strict_json_loads(row[1])
-            if projected == payload:
-                return
-            if projected != {"manifest_reference": reference}:
+            if projected != payload and projected != {"manifest_reference": reference}:
                 raise ValueError("manifest reference differs from verified payload")
+            run = con.execute(
+                "SELECT config_json FROM runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if run is not None:
+                config = _strict_json_loads(run[0])
+                if isinstance(config, Mapping) and "manifest_reference" in config:
+                    if config != {
+                        "manifest_reference": reference,
+                        "field": "effective_config",
+                    }:
+                        raise ValueError(
+                            "run configuration reference differs from verified manifest"
+                        )
+                    if not isinstance(payload, Mapping) or not isinstance(
+                        payload.get("effective_config"), Mapping
+                    ):
+                        raise ValueError(
+                            "configuration manifest lacks effective configuration"
+                        )
+                    con.execute(
+                        "UPDATE runs SET config_json=? WHERE run_id=?",
+                        (_canonical_json(payload["effective_config"]), run_id),
+                    )
             con.execute(
                 "UPDATE manifests SET json=? WHERE run_id=? AND digest=?",
                 (encoded, run_id, digest),
@@ -1039,6 +1080,14 @@ class ExperimentStore:
         )
         assert isinstance(payload, Mapping)
         if kind == "run_created":
+            config = payload["config"]
+            if isinstance(config, Mapping) and "manifest_reference" in config:
+                if (
+                    set(config) != {"manifest_reference", "field"}
+                    or config["field"] != "effective_config"
+                ):
+                    raise ValueError("invalid run configuration manifest reference")
+                _validate_manifest_reference(config["manifest_reference"])
             con.execute(
                 "INSERT OR IGNORE INTO runs VALUES(?,?,'running',?,datetime('now'),datetime('now'),?,?,NULL)",
                 (

@@ -162,10 +162,16 @@ def registered_runtime_buffers_bytes(config: RunConfig) -> int:
     mask = (
         context * context
         if config.attention.kind in {"dense", "sliding_window", "mla"}
+        and config.attention.implementation != "sdpa"
         else 0
     )
     rope = 4 * (head_dim // 2 + config.training.seq_len * head_dim)
-    return layers * (mask + rope)
+    mapping_bytes = (
+        8 * config.model.vocab_size * max(1, len(config.model.memory_block_sites))
+        if config.model.memory_token_mapping is not None
+        else 0
+    )
+    return layers * (mask + rope) + mapping_bytes
 
 
 def estimate_memory(

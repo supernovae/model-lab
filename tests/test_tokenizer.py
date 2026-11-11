@@ -181,3 +181,42 @@ def test_tokenizer_byte_budget_does_not_split_utf8_codepoint(
     assert set(requested) == {"ok", "éx"}
     assert manifest["selected_documents"] == 1
     assert manifest["selected_input_bytes_utf8"] == 2
+
+
+def test_mixture_origin_rejects_changed_declaration_before_verification(tmp_path):
+    from pathlib import Path
+
+    from sparselab.config.loading import load_config
+    from sparselab.config.models import RunConfig
+    from sparselab.data.tokenizer import verify_run_tokenizer
+    from sparselab.training.manifest import sha256_file
+
+    raw = load_config(
+        Path(__file__).resolve().parents[1] / "configs/smoke_cpu.yaml"
+    ).model_dump(mode="json")
+    token = tmp_path / "tokenizer.json"
+    token.write_text("fixture")
+    manifest = tmp_path / "tokenizer_manifest.json"
+    manifest.write_text("{}")
+    declaration = tmp_path / "mixture.json"
+    declaration.write_text("{}")
+    raw["dataset"].update(
+        source="local_text",
+        license="CC0-1.0",
+        revision="fixture",
+        train_path=str(tmp_path / "train.jsonl"),
+        validation_path=str(tmp_path / "validation.jsonl"),
+    )
+    raw["tokenizer"] = {
+        "path": str(token),
+        "origin": {
+            "mixture_declaration_path": str(declaration),
+            "mixture_declaration_sha256": sha256_file(declaration),
+            "sha256": sha256_file(token),
+            "manifest_sha256": sha256_file(manifest),
+        },
+    }
+    config = RunConfig.model_validate(raw)
+    declaration.write_text('{"changed":true}')
+    with pytest.raises(ValueError, match="declaration digest mismatch"):
+        verify_run_tokenizer(config)

@@ -14,6 +14,7 @@ try_config_version: 1
 seed: 7
 probe_tier: standard
 fresh_baseline: false
+repeat_baseline: false
 lab_dir: ./lab
 runtime_profile: ./cpu-profile.yaml
 resource_envelope: ./bounds.yaml
@@ -71,3 +72,110 @@ readable without rewriting them. Native checkpoint/digest binding and held-out
 scoring are unchanged. One paired seed is still insufficient for a scientific
 claim; this migration does not add across-seed aggregation or dashboard replay
 of custom settings.
+
+## Baseline/candidate/baseline bracket
+
+Set `repeat_baseline: true` to execute three independent native training/scoring
+arms in that order. Both baselines are fresh even when a reusable baseline exists.
+The final baseline uses the identical config, seed, prepared inputs and evaluation
+protocol as the first; it does not continue from the candidate. The sealed record
+retains all three arms and a separate `baseline_repeat_comparison`. Per-arm limits
+and safe cancellation apply to the third arm too. A failure or cancellation keeps
+completed arms and withholds an overall completed result.
+
+`train_seconds` is end-to-end native training wall time, including preparation,
+compilation, evaluation during training and checkpoint writes, and excluding the
+subsequent scoring pass. Do not call it steady-state device throughput or compare
+it with profiler timing. Arms share one Python process and its compiler/cache
+scope; A2 may be warm. There is no automatic cache reset or cold-start equivalence
+claim. Record runtime/cache policy separately for a performance experiment.
+This option adds drift/repeatability evidence; it does
+not infer a speed winner, choose a tolerance or replace separate trace runs.
+
+Without `continuation`, each arm starts from the declared initial model. For a
+same-checkpoint full-state bracket, use the native terminal budget extension:
+
+```yaml
+repeat_baseline: true
+probe_tier: none
+continuation:
+  checkpoint: /absolute/parent/checkpoints/step_00023691_gen_000001
+  append_data: true
+  allow_runtime_optimization: true
+  allow_runtime_drift: false
+```
+
+Replace the example generation with a verified actual terminal generation. The
+baseline config declares strictly larger whole-update caps and the native-verified
+append-only dataset. A 24-update test sets `max_steps` to parent step + 24 and
+`max_tokens` to the corresponding native group offset. The candidate delta changes
+only a native-allowed runtime setting, such as `training.matched_stories.padding_multiple`.
+Every arm invokes native `extend_budget` from that same parent, preserving its
+model, Adam, RNG, cursor and schedule. All baselines are fresh. The sealed record
+retains the declared continuation and parent manifest hash, and native run lineage
+records retain the verified parent checkpoint identity. Native parent-terminal,
+append-prefix, scientific-setting and full-state checks remain authoritative.
+
+`allow_runtime_drift` defaults false; if an experiment uses a changed implementation,
+explicitly record and authorize that change before setting it true. This is not a
+model-weights-only fork. Use the existing resource envelope for per-arm wall bounds;
+a checkpointed wall stop remains interrupted, not a successful throughput result.
+The caller must arrange exclusive device ownership and production fallback before
+invoking this workflow; try does not interrupt or resume another trainer.
+
+For an explicitly selected nonterminal checkpoint, `append_from_checkpoint: true`
+requires `append_data: true` and retains native consumed-prefix/cursor verification.
+The bounded target dataset must cover exactly its declared new single-pass budget;
+limiting training caps alone while retaining a larger prepared stream is refused.
+Prepare that bounded dataset once with native `prepare_data`, then reuse its cache
+for all arms. This feature does not supply a zero-tokenization cache-slicing API.
+
+
+### Preparing a bounded window from an existing encoded cache
+
+For an all-token `local_text` corpus, the Python preparation API can derive a
+whole-document prefix without encoding the corpus again. Set **both**
+`dataset.train_max_documents` and `dataset.train_max_tokens` to the exact desired
+boundary. A token cap alone does not limit the selected document count; native
+preparation correctly rejects the next document if it would cross that cap.
+Keep validation selection unchanged. Match the training budget and group endpoint
+separately using the native continuation rules above.
+
+```python
+from pathlib import Path
+from sparselab.config.loading import load_config
+from sparselab.data.packing import PreparedPrefix, prepare_data
+from sparselab.data.tokenizer import load_tokenizer
+
+config = load_config(Path("bounded-baseline.yaml"))
+data = prepare_data(
+    config,
+    load_tokenizer(config.tokenizer.path),
+    prefix_from=PreparedPrefix(
+        root=Path("/absolute/path/to/verified-parent-cache"),
+        manifest_sha256="<manifest digest from the prior verified preparation record>",
+    ),
+)
+print(data.root, data.manifest["manifest_sha256"])
+```
+
+The parent pin is an explicit choice of previously prepared data, including its
+recorded producer. The API cold-verifies the parent's arrays and manifest,
+verifies current raw-source hashes and tokenizer identity, rejects changed
+selection/packing settings, and checks the complete parent and prefix EOS counts.
+It accepts only complete, unskipped documents with no embedded EOS tokens, masks,
+allocation, byte sidecars or release-export bindings. The parent must have the
+**same preparation source fingerprint**; a pinned hash authenticates old bytes but
+does not establish equivalence between different encoders or preparation versions.
+After a preparation-code upgrade, first perform one native preparation under that
+version. Subsequent bounded windows can reuse it. Parent identity and manifest are
+retained in `prefix_derivation`; ordinary preparation recognizes the result under
+the same identity as a freshly encoded selection.
+
+The operation reads/hashes source files and parent arrays, scans EOS counts in
+bounded chunks, then copies the prefix and unchanged validation with native atomic
+writers and sealed verification receipts. It needs space for the complete output
+copy; it does not save I/O by retokenizing, linking mutable arrays or rewriting
+existing manifests. Failed streaming chunks and failed derivation staging are
+preserved. Pass the existing `resource_envelope` parameter to apply host/storage
+limits. Preparation timing is separate from the subsequent unprofiled A/B/A run.

@@ -41,7 +41,7 @@ def _resume_settings(config: RunConfig) -> str:
     return config_sha256(settings)
 
 
-def _runtime_optimization_transition(
+def runtime_optimization_transition(
     source: RunConfig, target: RunConfig, checkpoint_sha256: str
 ) -> dict[str, object]:
     """Admit only explicitly requested execution changes with a fixed effective batch."""
@@ -49,7 +49,22 @@ def _runtime_optimization_transition(
         raise ValueError("runtime optimization transition requires PyTorch")
     if source.attention.kind != "dense" or target.attention.kind != "dense":
         raise ValueError("runtime optimization transition requires dense attention")
-    if (
+    source_matched = source.training.matched_stories
+    target_matched = target.training.matched_stories
+    document_groups = (
+        source_matched is not None
+        and target_matched is not None
+        and source_matched.unpadded_documents
+        and target_matched.unpadded_documents
+        and source_matched.layout == target_matched.layout == "story"
+    )
+    # Grouping/data/budget/cursor remain covered by the complete settings
+    # comparison below and native checkpoint/data verification.
+    if document_groups and (
+        source.training.gradient_accumulation != target.training.gradient_accumulation
+    ):
+        raise ValueError("document batching must preserve declared accumulation")
+    if not document_groups and (
         source.training.micro_batch_size * source.training.gradient_accumulation
         != target.training.micro_batch_size * target.training.gradient_accumulation
     ):
@@ -71,10 +86,24 @@ def _runtime_optimization_transition(
         ("training", "micro_batch_size"),
         ("training", "gradient_accumulation"),
         ("evaluation", "batch_size"),
+        ("runtime", "memory", "estimate_policy"),
         ("runtime", "memory", "activation_checkpointing", "enabled"),
         ("runtime", "compile_transformer_blocks"),
+        ("runtime", "compile_dynamic_shapes"),
         ("runtime", "compile_output_head_loss"),
     )
+    defaults = {
+        ("attention", "implementation"): "reference",
+        ("evaluation", "batch_size"): None,
+        ("runtime", "memory", "estimate_policy"): "enforce",
+        ("training", "matched_stories", "document_batching"): "separate",
+        ("training", "matched_stories", "padding_multiple"): 128,
+    }
+    if document_groups:
+        paths += (
+            ("training", "matched_stories", "document_batching"),
+            ("training", "matched_stories", "padding_multiple"),
+        )
     changes: list[dict[str, object]] = []
     for path in paths:
         old: dict[str, Any] = original
@@ -83,15 +112,16 @@ def _runtime_optimization_transition(
             old, new = old[part], new[part]
         key = path[-1]
         # Default-valued fields are intentionally omitted from historical identities.
-        default: object = (
-            "reference"
-            if path == ("attention", "implementation")
-            else None
-            if path == ("evaluation", "batch_size")
-            else False
-        )
+        default = defaults.get(path, False)
         previous, requested = old.get(key, default), new.get(key, default)
         if previous != requested:
+            if path == ("runtime", "memory", "estimate_policy") and (
+                previous,
+                requested,
+            ) != ("enforce", "observe"):
+                raise ValueError(
+                    "runtime estimate policy transition permits only enforce-to-observe"
+                )
             changes.append(
                 {"field": ".".join(path), "previous": previous, "requested": requested}
             )
@@ -111,12 +141,122 @@ def _runtime_optimization_transition(
         "parent_checkpoint_sha256": checkpoint_sha256,
         "changes": changes,
         "reason": "explicit --allow-runtime-optimization; numerical trajectory may differ",
+        **(
+            {
+                "effective_batch_contract": "original-document-update-groups",
+                "document_diagnostics_version": 2
+                if target_matched.document_batching == "padded"
+                else 1,
+            }
+            if document_groups
+            else {}
+        ),
     }
 
 
-def _extension_settings(
-    source: RunConfig, target: RunConfig, *, parent_tokenizer: Path | None = None
-) -> str:
+def target_group_transition(
+    source: RunConfig, target: RunConfig, snapshot: TrainingSnapshot
+) -> dict[str, object]:
+    """Explicit scientific transition; retain Adam/RNG and the already reached LR floor."""
+    old, new = source.training.matched_stories, target.training.matched_stories
+    policy = new.target_group_transition if new else None
+    if (
+        old is None
+        or new is None
+        or policy is None
+        or old.target_group_transition is not None
+        or source.runtime.engine != "pytorch"
+        or source.optimizer.name != "adamw"
+        or source.optimizer.decay_steps is None
+        or snapshot.step < source.optimizer.decay_steps
+        or policy.after_tokens != snapshot.tokens_seen
+        or policy.previous_targets_per_update != old.targets_per_update
+        or policy.parent_checkpoint_sha256 != snapshot.checkpoint_sha256
+        or snapshot.cursor != (0, snapshot.step)
+        or new.targets_per_update <= old.targets_per_update
+        or target.training.max_steps <= snapshot.step
+        or target.training.max_steps >= source.training.max_steps
+        or new.document_batching != "padded"
+        or new.max_padded_slots is None
+        or new.max_attention_cells is None
+    ):
+        raise ValueError(
+            "regrouping requires a first-pass complete checkpoint at the existing LR floor and explicit bounded larger groups"
+        )
+    comparable = target.model_dump(mode="json")
+    comparable["training"]["max_steps"] = source.training.max_steps
+    settings = comparable["training"]["matched_stories"]
+    settings["targets_per_update"] = old.targets_per_update
+    settings.pop("target_group_transition", None)
+    for field in ("max_padded_slots", "max_attention_cells"):
+        settings.pop(field, None)
+        previous = getattr(old, field)
+        if previous is not None:
+            settings[field] = previous
+    if _resume_settings(source) != _resume_settings(
+        RunConfig.model_validate(comparable)
+    ):
+        raise ValueError(
+            "regrouping must preserve data, curriculum, optimizer, runtime and evaluation settings"
+        )
+    from sparselab.training.optimizer import schedule_payload
+
+    if snapshot.schedule != schedule_payload(source, snapshot.step):
+        raise ValueError(
+            "regrouping checkpoint schedule differs from its source configuration"
+        )
+    return {
+        "kind": "target_group_transition",
+        **policy.model_dump(),
+        "targets_per_update": new.targets_per_update,
+        "old_max_steps": source.training.max_steps,
+        "new_max_steps": target.training.max_steps,
+        "optimizer_state": "preserved; one Adam step per new effective group",
+        "schedule": "existing absolute-step floor; no warmup restart or LR scaling",
+        "cursor": "preserve historical group prefix; verify against prepared stream",
+        "resume_level": "changed_optimizer_trajectory",
+    }
+
+
+def verify_regroup_cursor(dataset, snapshot: TrainingSnapshot) -> None:
+    """Bind unchanged group-index cursor to exactly the next unconsumed document."""
+    import numpy as np
+
+    from sparselab.data.story_packing import MatchedStoryDataset
+
+    source = RunConfig.model_validate(snapshot.config)
+    old = source.training.matched_stories
+    previous = MatchedStoryDataset(
+        dataset.ids,
+        dataset.seq_len,
+        dataset.eos,
+        layout=old.layout,
+        targets_per_update=old.targets_per_update,
+        unpadded_documents=True,
+        frozen_update_ends=old.frozen_update_ends,
+    )
+    epoch, group = snapshot.cursor
+    if (
+        epoch != 0
+        or group != snapshot.step
+        or group >= len(previous)
+        or int(previous.group_offsets[group]) != snapshot.tokens_seen
+        or not np.array_equal(
+            previous.group_offsets[: group + 1], dataset.group_offsets[: group + 1]
+        )
+    ):
+        raise ValueError(
+            "regrouping changed the consumed prefix or next-document cursor"
+        )
+
+
+def _extension_config(
+    source: RunConfig,
+    target: RunConfig,
+    *,
+    parent_tokenizer: Path | None = None,
+    append_data: bool = False,
+) -> RunConfig:
     """Compare budget-independent settings; authenticate relocated tokenizer bytes."""
     comparable = target.model_dump(mode="json")
     comparable["training"]["max_steps"] = source.training.max_steps
@@ -125,6 +265,11 @@ def _extension_settings(
     # Checkpoint bookkeeping is excluded from scientific resume settings.
     comparable["checkpoint"] = source.checkpoint.model_dump(mode="json")
     comparable["optimizer"]["decay_steps"] = source.optimizer.decay_steps
+    if append_data:
+        comparable["dataset"] = source.dataset.model_dump(mode="json")
+        comparable["training"]["matched_stories"]["frozen_update_ends"] = list(
+            source.training.matched_stories.frozen_update_ends
+        )
     if parent_tokenizer is not None:
         manifest = read_manifest(parent_tokenizer.parent / "manifest.json")
         record = next(
@@ -148,44 +293,93 @@ def _extension_settings(
         if parent_sha256 != sha256_file(target.tokenizer.path):
             raise ValueError("budget extension requires matching tokenizer identity")
         comparable["tokenizer"]["path"] = str(source.tokenizer.path)
-    return _resume_settings(RunConfig.model_validate(comparable))
+    return RunConfig.model_validate(comparable)
 
 
-def _budget_extension(
+def _extension_settings(
+    source: RunConfig,
+    target: RunConfig,
+    *,
+    parent_tokenizer: Path | None = None,
+    append_data: bool = False,
+) -> str:
+    return _resume_settings(
+        _extension_config(
+            source, target, parent_tokenizer=parent_tokenizer, append_data=append_data
+        )
+    )
+
+
+def validate_budget_extension(
     source: RunConfig,
     target: RunConfig,
     snapshot: TrainingSnapshot,
     *,
     parent_tokenizer: Path | None = None,
+    parent_root: Path | None = None,
+    append_data: bool = False,
+    append_from_checkpoint: bool = False,
+    allow_runtime_optimization: bool = False,
 ) -> dict[str, object]:
     """Validate the sole scientific difference allowed for full-state extension."""
     old = source.training
     new = target.training
     targets_per_step = old.seq_len * old.micro_batch_size * old.gradient_accumulation
+    variable = old.matched_stories is not None
+    decay_horizon = getattr(source.optimizer, "decay_steps", None) or old.max_steps
+    if append_from_checkpoint and not append_data:
+        raise ValueError("append-from-checkpoint requires append-data")
+    prior_steps = snapshot.step if append_from_checkpoint else old.max_steps
+    prior_tokens = snapshot.tokens_seen if append_from_checkpoint else old.max_tokens
     if (
         source.optimizer.name != "adamw"
         or target.optimizer.name != "adamw"
-        or source.optimizer.decay_steps not in {None, old.max_steps}
-        or target.optimizer.decay_steps != old.max_steps
+        or target.optimizer.decay_steps != decay_horizon
         or snapshot.schedule.get("kind")
         != (
             "warmup_cosine_floor_v1"
             if source.optimizer.decay_steps is not None
             else "warmup_cosine_v1"
         )
-        or snapshot.step != old.max_steps
-        or snapshot.tokens_seen != old.max_tokens
-        or old.max_tokens != old.max_steps * targets_per_step
-        or new.max_tokens != new.max_steps * targets_per_step
-        or new.max_steps <= old.max_steps
-        or new.max_tokens <= old.max_tokens
+        or (not append_from_checkpoint and snapshot.step != old.max_steps)
+        or (not append_from_checkpoint and snapshot.tokens_seen != old.max_tokens)
+        or (append_from_checkpoint and not variable)
+        or (not variable and old.max_tokens != old.max_steps * targets_per_step)
+        or (not variable and new.max_tokens != new.max_steps * targets_per_step)
+        or new.max_steps <= prior_steps
+        or new.max_tokens <= prior_tokens
     ):
         raise ValueError(
             "budget extension requires a terminal, whole-update AdamW parent and strictly larger whole-update caps"
         )
-    if _extension_settings(
-        source, target, parent_tokenizer=parent_tokenizer
-    ) != _resume_settings(source):
+    supply = {}
+    if variable:
+        if parent_root is None:
+            raise ValueError("matched budget extension requires verified parent data")
+        from sparselab.training.data_extension import verify_matched_extension
+
+        supply = verify_matched_extension(
+            source,
+            target,
+            snapshot,
+            parent_root,
+            append_data=append_data,
+            append_from_checkpoint=append_from_checkpoint,
+        )
+    elif append_data:
+        raise ValueError("append-data requires matched whole-document training")
+    comparable = _extension_config(
+        source,
+        target,
+        parent_tokenizer=parent_tokenizer,
+        append_data=append_data,
+    )
+    optimization = None
+    if allow_runtime_optimization:
+        optimization = runtime_optimization_transition(
+            source, comparable, snapshot.checkpoint_sha256
+        )
+    elif _resume_settings(comparable) != _resume_settings(source):
         raise ValueError(
             "budget extension changes settings other than the budget and decay horizon"
         )
@@ -197,6 +391,8 @@ def _budget_extension(
         "new_max_steps": new.max_steps,
         "new_max_tokens": new.max_tokens,
         "decay_steps": target.optimizer.decay_steps,
+        **({"runtime_optimization": optimization} if optimization is not None else {}),
+        **supply,
     }
 
 
@@ -265,14 +461,41 @@ def load_continuation(
     recover: Path | None,
     allow_runtime_drift: bool,
     allow_runtime_optimization: bool = False,
+    add_ngram_memory: bool = False,
+    extend_context: bool = False,
+    append_data: bool = False,
+    append_from_checkpoint: bool = False,
 ) -> Continuation:
+    if append_from_checkpoint and not append_data:
+        raise ValueError("append-from-checkpoint requires explicit append-data")
+    if append_data and extend_budget is None:
+        raise ValueError("append-data requires explicit extend-budget")
+    if extend_context and not add_ngram_memory:
+        raise ValueError("extend-context requires explicit add-ngram-memory promotion")
+    if add_ngram_memory:
+        if promote is None or any(
+            path is not None for path in (resume, recover, extend_budget)
+        ):
+            raise ValueError(
+                "add-ngram-memory requires only --promote, not resume or recovery"
+            )
+        if (
+            promote.is_symlink()
+            or not promote.is_dir()
+            or promote.parent.name != "checkpoints"
+            or not promote.name.startswith("step_")
+            or "_gen_" not in promote.name
+            or promote.resolve() != promote.parent.resolve() / promote.name
+        ):
+            raise ValueError(
+                "add-ngram-memory requires an immutable checkpoint generation directory"
+            )
     if allow_runtime_optimization and (
-        (resume is None and recover is None)
+        (resume is None and recover is None and extend_budget is None)
         or promote is not None
-        or extend_budget is not None
     ):
         raise ValueError(
-            "runtime optimization requires an explicit full-state resume or recovery"
+            "runtime optimization requires an explicit full-state resume, recovery or budget extension"
         )
     selected = extend_budget or resume or promote
     if selected is None and recover is None:
@@ -332,7 +555,7 @@ def load_continuation(
             raise ValueError(f"checkpoint run binding failed: {binding.errors}")
         _verify_artifacts(root, manifest, resume=promote is None)
         source_config = RunConfig.model_validate(manifest["effective_config"])
-        if not allow_runtime_optimization and architecture_sha256(
+        if not (allow_runtime_optimization or add_ngram_memory) and architecture_sha256(
             source_config.model_dump(mode="json")
         ) != architecture_sha256(config.model_dump(mode="json")):
             raise ValueError(
@@ -343,6 +566,52 @@ def load_continuation(
                 config.tokenizer.path
             ):
                 raise ValueError("promotion requires matching tokenizer identity")
+            if add_ngram_memory:
+                from sparselab.training.memory_warmstart import migrate_dense_to_ngram
+                from sparselab.training.mlx_checkpoints import strict_json
+
+                source_binding = manager.verify(
+                    selected,
+                    expected_manifest=manifest_digest,
+                    require_training_state=False,
+                    expected_config=source_config,
+                )
+                if not source_binding.valid:
+                    raise ValueError(
+                        f"source checkpoint architecture binding failed: {source_binding.errors}"
+                    )
+                checkpoint_manifest = strict_json(selected / "manifest.json")
+                if (
+                    checkpoint_manifest.get("sha256") != snapshot.checkpoint_sha256
+                    or canonical_digest(
+                        {
+                            key: value
+                            for key, value in checkpoint_manifest.items()
+                            if key != "sha256"
+                        }
+                    )
+                    != snapshot.checkpoint_sha256
+                    or checkpoint_manifest.get("config_sha256")
+                    != config_sha256(source_config.model_dump(mode="json"))
+                ):
+                    raise ValueError(
+                        "source checkpoint scientific identity differs from its run manifest"
+                    )
+                snapshot.model, migration = migrate_dense_to_ngram(
+                    source_config,
+                    config,
+                    snapshot.model,
+                    source_tokenizer_sha256=sha256_file(root / "tokenizer.json"),
+                    target_tokenizer_sha256=sha256_file(config.tokenizer.path),
+                    source_checkpoint_sha256=snapshot.checkpoint_sha256,
+                    extend_context=extend_context,
+                )
+                migration.update(
+                    source_run_manifest_sha256=manifest_digest,
+                    source_step=checkpoint_manifest["step"],
+                    source_tokens_seen=checkpoint_manifest["tokens_seen"],
+                )
+                decisions.append(migration)
             if config.model.memory_package_path is not None and _package_identity(
                 root / "portable_package"
             ) != _package_identity(config.model.memory_package_path):
@@ -356,7 +625,9 @@ def load_continuation(
                 manifest["run_id"],
                 snapshot.checkpoint_sha256,
                 tuple(decisions),
-                manager.lineage_best_for_child(
+                None
+                if add_ngram_memory
+                else manager.lineage_best_for_child(
                     str(manifest["run_id"]), snapshot.checkpoint_sha256
                 ),
             )
@@ -369,21 +640,38 @@ def load_continuation(
             raise ValueError(
                 "checkpoint scientific identity differs from its source run manifest"
             )
-        if allow_runtime_optimization:
+        if extend_budget is not None:
+            extension = validate_budget_extension(
+                saved_config,
+                config,
+                snapshot,
+                parent_tokenizer=root / "tokenizer.json",
+                parent_root=root,
+                append_data=append_data,
+                append_from_checkpoint=append_from_checkpoint,
+                allow_runtime_optimization=allow_runtime_optimization,
+            )
+            optimization = extension.pop("runtime_optimization", None)
+            if optimization is not None:
+                decisions.append(optimization)
+        elif (
+            config.training.matched_stories is not None
+            and config.training.matched_stories.target_group_transition is not None
+            and saved_config.training.matched_stories is not None
+            and saved_config.training.matched_stories.target_group_transition is None
+        ):
+            decisions.append(target_group_transition(saved_config, config, snapshot))
+        elif allow_runtime_optimization:
             decisions.append(
-                _runtime_optimization_transition(
+                runtime_optimization_transition(
                     saved_config, config, snapshot.checkpoint_sha256
                 )
             )
-        elif extend_budget is None:
+        else:
             if _resume_settings(saved_config) != _resume_settings(config):
                 raise ValueError(
                     "resume configuration differs from checkpoint; use promotion for changed scientific settings"
                 )
-        else:
-            extension = _budget_extension(
-                saved_config, config, snapshot, parent_tokenizer=root / "tokenizer.json"
-            )
         if snapshot.engine != runtime.engine or snapshot.backend != runtime.backend:
             raise ValueError("full resume requires the same engine and backend")
         drift: list[dict[str, object]] = []

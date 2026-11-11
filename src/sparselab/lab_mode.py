@@ -196,13 +196,13 @@ def memory_packages(config: Any) -> dict[str, Any]:
 
 def current_inputs(config: Any) -> dict[str, Any]:
     """Hash tokenizer, dataset and memory-package inputs as they are on disk now."""
-    from sparselab.data.packing import _tokenizer_sha256
+    from sparselab.data.packing import canonical_tokenizer_sha256
     from sparselab.data.tokenizer import load_tokenizer
 
     tokenizer_path = Path(config.tokenizer.path)
     try:
         # Same digest prepared data records: the complete serialized tokenizer.
-        tokenizer_sha256 = _tokenizer_sha256(load_tokenizer(tokenizer_path))
+        tokenizer_sha256 = canonical_tokenizer_sha256(load_tokenizer(tokenizer_path))
     except Exception:  # noqa: BLE001 - an unreadable tokenizer is never reusable
         tokenizer_sha256 = "unreadable"
     inputs: dict[str, Any] = {
@@ -270,6 +270,7 @@ def _reusable_baseline(
         base = (record.get("arms") or {}).get("baseline") or {}
         if (
             record.get("status") == "completed"
+            and record.get("continuation") is None
             and base.get("reuse_key") == key
             and isinstance(base.get("run_id"), str)
         ):
@@ -390,6 +391,8 @@ def _train_and_score(
     tokenizer_batch_source_bytes: int,
     train_fn: Callable[..., str],
     measurements: dict[str, Any] | None = None,
+    continuation: Any = None,
+    continuation_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Train (or reuse) and score one arm under CONTEXT.
 
@@ -406,11 +409,27 @@ def _train_and_score(
     # already bound the same digests moments ago).
     packages = memory_packages(config)
     context.checkpoint()
+    if continuation_identity is not None and (
+        _sha256_file(continuation.checkpoint / "manifest.json")
+        != continuation_identity["checkpoint_manifest_sha256"]
+    ):
+        raise ValueError("parent checkpoint changed between try arms")
     started = time.monotonic()
     if not reuse:
         try:
             returned = train_fn(
                 config,
+                **(
+                    {
+                        "extend_budget": continuation.checkpoint,
+                        "append_data": continuation.append_data,
+                        "append_from_checkpoint": continuation.append_from_checkpoint,
+                        "allow_runtime_optimization": continuation.allow_runtime_optimization,
+                        "allow_runtime_drift": continuation.allow_runtime_drift,
+                    }
+                    if continuation is not None
+                    else {}
+                ),
                 run_id=run_id,
                 cancel_path=context.cancel_path,
                 max_wall_seconds=max_wall_seconds,
@@ -512,6 +531,12 @@ def _train_and_score(
             "checkpoint_sha256": identity.get("checkpoint_sha256"),
             "step": identity.get("step"),
             "tokens_seen": identity.get("tokens_seen"),
+            "training_targets_applied": identity.get("tokens_seen")
+            - (
+                continuation_identity["tokens_seen"]
+                if continuation_identity is not None
+                else 0
+            ),
             "parameters": (identity.get("parameter_inventory") or {}).get("total"),
             **pareto,
             "eval_protocol": protocol_identity,
@@ -681,6 +706,8 @@ def run_try(
     tokenizer_batch_documents: int | None = None,
     tokenizer_batch_source_bytes: int | None = None,
     fresh_baseline: bool = False,
+    repeat_baseline: bool = False,
+    continuation: Any = None,
     train_fn: Callable[..., str] | None = None,
     now: Callable[[], datetime] | None = None,
     probe_tier: str | None = "fast",
@@ -706,7 +733,10 @@ def run_try(
 
     # Only seed errors precede attempt creation. Other parsing/setup failures
     # still produce the established failed/interrupted record below.
-    TryConfig(seed=seed)
+    policy = TryConfig(
+        seed=seed, repeat_baseline=repeat_baseline, continuation=continuation
+    )
+    continuation = policy.continuation
     seed_adapter = TypeAdapter(RunSeed)
     for path, is_candidate in ((baseline_path, False), (candidate_path, True)):
         try:
@@ -876,7 +906,9 @@ def run_try(
             raise
         runs.mkdir(parents=True, exist_ok=True)
         reuse_id = (
-            None if fresh_baseline else _reusable_baseline(root, runs, base_key, inputs)
+            None
+            if fresh_baseline or repeat_baseline or continuation is not None
+            else _reusable_baseline(root, runs, base_key, inputs)
         )
         new_id = f"lab-base-{base_key[:16]}-{try_id}"
         changed_variables = sorted(delta)
@@ -931,6 +963,23 @@ def run_try(
                 "status": "running",
             }
         )
+        if continuation is not None:
+            record["continuation"] = {
+                **continuation.model_dump(mode="json"),
+                "checkpoint_manifest_sha256": _sha256_file(
+                    continuation.checkpoint / "manifest.json"
+                ),
+                "mode": "native_terminal_budget_extension",
+            }
+            parent_metadata = json.loads(
+                (continuation.checkpoint / "manifest.json").read_text()
+            )
+            record["continuation"].update(
+                {key: parent_metadata[key] for key in ("step", "tokens_seen", "sha256")}
+            )
+        record["execution_order"] = ["baseline", "candidate"] + (
+            ["baseline_repeat"] if repeat_baseline else []
+        )
         record["resources"].update(
             {
                 "resource_envelope": None
@@ -951,6 +1000,8 @@ def run_try(
             "tokenizer_batch_source_bytes": tokenizer_batch_source_bytes,
             "train_fn": train_fn,
             "context": context,
+            "continuation": continuation,
+            "continuation_identity": record.get("continuation"),
         }
         protocol = eval_protocol(base_config)
         record["arms"]["baseline"] = _train_and_score(
@@ -958,7 +1009,7 @@ def run_try(
             config=base_config,
             run_id=reuse_id or new_id,
             reuse=reuse_id is not None,
-            key=base_key,
+            key=base_key if continuation is None else None,
             protocol=protocol,
             **common,
         )
@@ -972,6 +1023,21 @@ def run_try(
             protocol=protocol,
             **common,
         )
+        if repeat_baseline:
+            record["arms"]["baseline_repeat"] = _train_and_score(
+                arm="baseline_repeat",
+                config=base_config,
+                run_id=f"lab-base-repeat-{try_id}",
+                reuse=False,
+                key=base_key if continuation is None else None,
+                protocol=protocol,
+                **common,
+            )
+            record["baseline_repeat_comparison"] = compare(
+                record["arms"]["baseline"],
+                record["arms"]["baseline_repeat"],
+                [],
+            )
         context.enter("candidate", "comparison")
         record["comparison"] = compare(
             record["arms"]["baseline"],

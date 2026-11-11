@@ -775,3 +775,103 @@ def test_cancel_during_setup_finalizes_the_started_record(
     )
     assert again["status"] == "completed"
     assert again["arms"]["baseline"]["reused"] is False
+
+
+def test_terminal_checkpoint_bracket_preserves_full_state_and_fresh_baselines(lab):
+    from test_training import equal
+
+    from sparselab.config.loading import load_config
+    from sparselab.training.checkpoints import CheckpointManager
+    from sparselab.training.manifest import sha256_file
+    from sparselab.try_config import TryContinuation
+
+    root, baseline = lab
+    config = load_config(baseline)
+    train(config, run_id="parent")
+    parent_run = config.logging.root_dir / "parent"
+    manager = CheckpointManager(parent_run)
+    generation = next((parent_run / "checkpoints").glob("step_00000004_gen_*"))
+    before = {p.name: sha256_file(p) for p in generation.iterdir()}
+    parent = manager.load(generation)
+    raw = config.model_dump(mode="json")
+    raw["training"].update(max_steps=6, max_tokens=768)
+    raw["optimizer"]["decay_steps"] = 4
+    baseline.write_text(yaml.safe_dump(raw))
+    delta = _delta(
+        root,
+        "runtime.yaml",
+        {
+            "training.deterministic": not config.training.deterministic,
+        },
+    )
+    calls = []
+
+    def observed_train(config, **kwargs):
+        assert kwargs["extend_budget"] == generation
+        calls.append(kwargs["run_id"])
+        return train(config, **kwargs)
+
+    record, path = run_try(
+        delta,
+        baseline,
+        work_dir=root / "work",
+        repeat_baseline=True,
+        continuation=TryContinuation(
+            checkpoint=generation, allow_runtime_optimization=True
+        ),
+        train_fn=observed_train,
+        probe_tier=None,
+    )
+    assert record["status"] == "completed", record.get("failure")
+    assert read_record(path) == record
+    assert record["execution_order"] == ["baseline", "candidate", "baseline_repeat"]
+    assert len(calls) == len(set(calls)) == 3
+    children = []
+    for arm in record["execution_order"]:
+        row = record["arms"][arm]
+        assert not row["reused"]
+        assert row["reuse_key"] is None
+        assert row["training_targets_applied"] == 256
+        run = Path(row["run_dir"])
+        child = CheckpointManager(run).load(run / "checkpoints/latest.json")
+        assert child.parent_checkpoint_sha256 == parent.checkpoint_sha256
+        assert child.step == 6 and child.tokens_seen == 768
+        assert child.rng and child.optimizer
+        assert {int(v["step"]) for v in child.optimizer["state"].values()} == {6}
+        assert CheckpointManager(run).verify(run / "checkpoints/latest.json").valid
+        children.append(child)
+    equal(children[0].model, children[2].model)
+    equal(children[0].optimizer, children[2].optimizer)
+    equal(children[0].rng, children[2].rng)
+    assert children[0].schedule == children[2].schedule
+    assert {p.name: sha256_file(p) for p in generation.iterdir()} == before
+    ordinary, _ = run_try(delta, baseline, work_dir=root / "work", probe_tier=None)
+    assert ordinary["status"] == "completed"
+    assert ordinary["arms"]["baseline"]["reused"] is False
+    assert ordinary["arms"]["baseline"]["training_targets_applied"] == 768
+
+
+def test_bracket_cancellation_keeps_completed_arms(lab):
+    root, baseline = lab
+    calls = []
+
+    def cancel_third(config, **kwargs):
+        calls.append(kwargs["run_id"])
+        if len(calls) == 3:
+            kwargs["cancel_path"].touch()
+        return train(config, **kwargs)
+
+    record, path = run_try(
+        _delta(root, "bracket.yaml", {"model.ffn_dim": 128}),
+        baseline,
+        work_dir=root / "work",
+        repeat_baseline=True,
+        train_fn=cancel_third,
+        probe_tier=None,
+    )
+    assert record["status"] == "interrupted"
+    assert record["interruption"]["arm"] == "baseline_repeat"
+    assert record["arms"]["baseline"]["status"] == "completed"
+    assert record["arms"]["candidate"]["status"] == "completed"
+    assert "comparison" not in record
+    assert read_record(path) == record

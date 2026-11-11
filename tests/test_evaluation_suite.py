@@ -74,7 +74,7 @@ def evaluated_run(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def fixed_panel_run(tmp_path_factory):
+def fixed_panel_run(tmp_path_factory, request):
     from sparselab.config.models import RunConfig
     from sparselab.data.packing import prepare_data
     from sparselab.data.tokenizer import load_tokenizer
@@ -92,7 +92,8 @@ def fixed_panel_run(tmp_path_factory):
         base = RunConfig.model_validate(values)
         tokenizer = load_tokenizer(base.tokenizer.path)
         panels = []
-        for seed, name in ((8, "first"), (9, "second")):
+        names = ("first", "second", "third", "fourth", "fifth")
+        for seed, name in enumerate(names[: getattr(request, "param", 2)], start=8):
             source = base.model_copy(
                 update={
                     "dataset": base.dataset.model_copy(
@@ -1004,3 +1005,54 @@ def test_group_write_is_trusted_only_for_a_user_private_group(
         directory.chmod(mode)
         assert verification_proofs._trusted(tmp_path, directory) is trusted
     verification_proofs._private_group.cache_clear()
+
+
+@pytest.mark.parametrize("fixed_panel_run", [2, 5], indirect=True)
+def test_context_memory_fixed_panels_preserve_coverage(
+    fixed_panel_run, tmp_path, monkeypatch
+):
+    from sparselab.config.models import RunConfig
+    from sparselab.evaluation.evidence import experiment_evidence
+
+    monkeypatch.setenv("SPARSELAB_WORK_DIR", str(tmp_path / "work"))
+    values = _panel_run_config(fixed_panel_run, tmp_path).model_dump(mode="json")
+    values["model"].update(
+        memory="ngram",
+        memory_variant="context_key",
+        memory_injection="after_block",
+        memory_block_index=0,
+        memory_table_size=31,
+        memory_ngram_size=3,
+        memory_dim=4,
+        memory_ngram_orders=[2, 3],
+        memory_hash_heads=2,
+        memory_conv_kernel_size=4,
+    )
+    measured = RunConfig.model_validate(values)
+    train(measured, run_id="context-memory-panels")
+    run = measured.logging.root_dir / "context-memory-panels"
+    evidence = experiment_evidence(run)
+    assert evidence["evidence_level"] == "checkpointed_held_out"
+    assert not evidence["rejected_reports"]
+    reports = list((run / "evaluations").glob("validation_step_*_gen_*.json"))
+    assert reports
+    for path in reports:
+        report = json.loads(path.read_text())
+        count = len(measured.evaluation.panels)
+        assert report["valid_targets"] == 48 * count
+        assert report["batches"] == 2 * count
+        assert set(report["panels"]) == {
+            panel.name for panel in measured.evaluation.panels
+        }
+    # A sidecar-addressed mode still cannot consume token-only fixed panels.
+    values["model"].update(
+        memory="byte",
+        memory_variant="hidden_gate",
+        memory_injection="final",
+        memory_block_index=None,
+        memory_hash_heads=1,
+        memory_ngram_orders=[],
+        memory_conv_kernel_size=0,
+    )
+    with pytest.raises(ValueError, match="fixed panels require"):
+        RunConfig.model_validate(values)

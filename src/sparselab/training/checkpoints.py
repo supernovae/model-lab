@@ -44,7 +44,11 @@ from sparselab.training.mlx_checkpoints import (
 from sparselab.training.mlx_checkpoints import (
     write_native_state as write_mlx_native_state,
 )
-from sparselab.training.optimizer import learning_rate_for_step, schedule_payload
+from sparselab.training.optimizer import (
+    is_ngram_table_parameter,
+    learning_rate_for_step,
+    schedule_payload,
+)
 from sparselab.verification_proofs import (
     ProofStore,
     VerificationMode,
@@ -353,6 +357,7 @@ def _check_common_native_state(
             config.optimizer.warmup_steps,
             config.optimizer.peak,
             config.optimizer.floor,
+            stable_steps=config.training.stable_steps,
             decay_steps=(
                 config.optimizer.decay_steps
                 if isinstance(config.optimizer, AdamWConfig)
@@ -571,8 +576,6 @@ def _check_native_state(
     ):
         raise ValueError("optimizer updated-parameter inventory mismatch")
     for group in groups:
-        if group["lr"] != learning_rate:
-            raise ValueError("optimizer learning rate differs from saved schedule")
         if config.optimizer.name == "adamw" and (
             tuple(group["betas"]) != config.optimizer.betas
             or group["eps"] != config.optimizer.eps
@@ -585,6 +588,22 @@ def _check_native_state(
                 if config.optimizer.name != "adamw" or len(shape) >= 2
                 else 0.0
             )
+            multiplier = 1.0
+            if (
+                isinstance(config.optimizer, AdamWConfig)
+                and config.model.memory == "ngram"
+                and is_ngram_table_parameter(names[parameter_id])
+            ):
+                multiplier = config.optimizer.memory_table_lr_multiplier
+                if config.optimizer.memory_table_weight_decay is not None:
+                    decay = config.optimizer.memory_table_weight_decay
+            if (
+                group.get("lr_multiplier", 1.0) != multiplier
+                or group["lr"] != learning_rate * multiplier
+            ):
+                raise ValueError(
+                    "optimizer learning rate differs from saved schedule and table policy"
+                )
             if group["weight_decay"] != decay:
                 raise ValueError("optimizer weight decay differs from configuration")
     for parameter_id, values in ordinary_state.items():
@@ -1261,55 +1280,90 @@ class CheckpointManager:
         self, parent_run_id: str, selected_checkpoint_digest: str
     ) -> LineageBest | None:
         """Derive ancestry only through the explicitly selected parent generation."""
-        records, _ = self._verified_records(
-            expected_manifest=self.manifest_sha256, require_training_state=False
-        )
+        # Rank small manifests before opening tensor shards. Metadata is only a
+        # hint: the selected parent and every contributing candidate must still
+        # pass the same payload verification as the exhaustive recovery path.
+        candidates: list[tuple[Path, CheckpointRecord, LineageBest | None]] = []
+        for directory in sorted(
+            self.root.glob("step_*_gen_*"),
+            key=self._generation_order,
+            reverse=True,
+        ):
+            if not directory.is_dir() or directory.is_symlink():
+                continue
+            try:
+                raw = strict_json(directory / "manifest.json")
+                record = self._record_from_manifest(directory, raw)
+            except OSError, TypeError, ValueError, KeyError, json.JSONDecodeError:
+                continue
+            try:
+                inherited = _lineage_best(raw.get("lineage_best"))
+            except TypeError, ValueError:
+                inherited = None
+            candidates.append((directory, record, inherited))
+
+        verified: dict[Path, bool] = {}
+
+        def valid(directory: Path) -> bool:
+            if directory not in verified:
+                verified[directory] = self.verify(
+                    directory,
+                    expected_manifest=self.manifest_sha256,
+                    require_training_state=False,
+                ).valid
+            return verified[directory]
+
         selected = next(
             (
                 record
-                for record in records
+                for directory, record, _ in candidates
                 if record.manifest_sha256 == selected_checkpoint_digest
+                and valid(directory)
             ),
             None,
         )
         if selected is None:
             raise ValueError("selected parent is not a verified generation of this run")
-        records = [
-            record
-            for record in records
-            if record.generation_id <= selected.generation_id
-            and record.step <= selected.step
+        candidates = [
+            entry
+            for entry in candidates
+            if entry[1].generation_id <= selected.generation_id
+            and entry[1].step <= selected.step
         ]
-        local_record = min(
-            (
-                record
-                for record in records
-                if record.validation_loss is not None
-                and math.isfinite(record.validation_loss)
-            ),
-            key=lambda record: (float(record.validation_loss), record.generation_id),
-            default=None,
-        )
-        local = (
-            LineageBest(
-                parent_run_id,
-                local_record.manifest_sha256,
-                local_record.step,
-                float(local_record.validation_loss),
-            )
-            if local_record is not None
-            else None
-        )
-        inherited: LineageBest | None = None
-        for record in records:
-            try:
-                raw = strict_json(self.root / record.relative_path / "manifest.json")
-                inherited = choose_lineage_best(
-                    inherited, _lineage_best(raw.get("lineage_best"))
+        local: LineageBest | None = None
+        local_candidates = [
+            (directory, record)
+            for directory, record, _ in candidates
+            if record.validation_loss is not None
+            and math.isfinite(record.validation_loss)
+        ]
+        for directory, record in sorted(
+            local_candidates,
+            key=lambda entry: (float(entry[1].validation_loss), entry[1].generation_id),
+        ):
+            if valid(directory):
+                local = LineageBest(
+                    parent_run_id,
+                    record.manifest_sha256,
+                    record.step,
+                    float(record.validation_loss),
                 )
-            except OSError, TypeError, ValueError, json.JSONDecodeError:
-                continue
-        return choose_lineage_best(inherited, local)
+                break
+        inherited_candidates = [
+            (directory, ancestor)
+            for directory, _, ancestor in candidates
+            if ancestor is not None
+        ]
+        # Stable sorting retains the original newest-generation precedence for
+        # equal inherited losses; inherited entries still win ties with local.
+        for directory, ancestor in sorted(
+            inherited_candidates, key=lambda entry: entry[1].loss
+        ):
+            if local is not None and ancestor.loss > local.loss:
+                break
+            if valid(directory):
+                return ancestor
+        return local
 
     def reconcile(self) -> RecoveryResult:
         """Repair lookup pointers from verified immutable generations under the lease."""

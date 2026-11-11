@@ -16,7 +16,7 @@ from pydantic import Field
 from sparselab.canonical import canonical_digest, canonical_json
 from sparselab.config.models import FixedValidationPanel
 from sparselab.data.packing import (
-    _tokenizer_sha256,
+    canonical_tokenizer_sha256,
 )
 from sparselab.evaluation.inference import load_run
 from sparselab.evaluation.language_model import evaluate
@@ -113,18 +113,18 @@ def run_panel(
             ).hexdigest()
             if (
                 loaded.engine is not None
-                or loaded.config.model.memory != "none"
+                or loaded.config.model.memory not in {"none", "ngram"}
                 or loaded.config.model.ffn != "dense"
                 or loaded.config.dataset.allocation_manifest_path is not None
                 or loaded.config.model.semantic_memory_dim is not None
                 or not isinstance(loaded.device, torch.device)
             ):
                 raise ValueError(
-                    "named panels require a dense PyTorch run without memory"
+                    "named panels require dense-FFN PyTorch with no memory or token ngram memory"
                 )
             if (
                 loaded.identity["tokenizer_sha256"] != panel.tokenizer_file_sha256
-                or _tokenizer_sha256(loaded.tokenizer)
+                or canonical_tokenizer_sha256(loaded.tokenizer)
                 != panel.tokenizer_canonical_sha256
             ):
                 raise ValueError("panel checkpoint tokenizer identity mismatch")

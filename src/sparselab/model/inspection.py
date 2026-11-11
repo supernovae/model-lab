@@ -59,6 +59,15 @@ def _add(
     tensors[name] = TensorSpec(shape, trainable=trainable)
 
 
+def _memory_table_name(name: str) -> bool:
+    if name.startswith("extra_memories."):
+        name = "memory." + name.split(".", 2)[2]
+    return (
+        name.startswith(("memory.table.", "memory.extra_tables."))
+        or name == "memory.embedding.weight"
+    )
+
+
 def named_tensor_inventory(
     model_config: ModelConfig,
     attention_config: AttentionConfig | None = None,
@@ -136,24 +145,50 @@ def named_tensor_inventory(
             if m.memory == "ngram"
             else 1
         )
-        frozen = m.memory == "portable"
-        _add(
-            tensors,
-            "memory.table.weight"
-            if m.memory != "portable"
-            else "memory.embedding.weight",
-            (m.memory_table_size, m.memory_dim),
-            trainable=not frozen,
-        )
-        if m.memory == "ngram":
-            for stream in range(1, streams):
-                _add(
-                    tensors,
-                    f"memory.extra_tables.{stream - 1}.weight",
-                    (m.memory_table_size, m.memory_dim),
-                )
-        _add(tensors, "memory.output.weight", (d, m.memory_dim))
-        _add(tensors, "memory.gate.weight", (1, d))
+        ports = max(1, len(m.memory_block_sites))
+        for port in range(ports):
+            prefix = (
+                "memory"
+                if port == 0
+                else f"extra_memories.{m.memory_block_sites[port]}"
+            )
+            sizes = (m.memory_table_sizes or (m.memory_table_size,) * streams * ports)[
+                port * streams : (port + 1) * streams
+            ]
+            frozen = m.memory == "portable"
+            _add(
+                tensors,
+                f"{prefix}.table.weight"
+                if m.memory != "portable"
+                else f"{prefix}.embedding.weight",
+                (sizes[0], m.memory_dim),
+                trainable=not frozen,
+            )
+            if m.memory == "ngram":
+                for stream in range(1, streams):
+                    _add(
+                        tensors,
+                        f"{prefix}.extra_tables.{stream - 1}.weight",
+                        (
+                            sizes[stream],
+                            m.memory_dim,
+                        ),
+                    )
+            if m.memory_variant == "context_key":
+                _add(tensors, f"{prefix}.output.weight", (d, streams * m.memory_dim))
+                _add(tensors, f"{prefix}.key.weight", (d, streams * m.memory_dim))
+                _add(tensors, f"{prefix}.gate.query_norm.weight", (d,))
+                _add(tensors, f"{prefix}.gate.key_norm.weight", (d,))
+                if m.memory_conv_kernel_size:
+                    _add(
+                        tensors,
+                        f"{prefix}.conv.weight",
+                        (d, 1, m.memory_conv_kernel_size),
+                    )
+                    _add(tensors, f"{prefix}.conv_norm.weight", (d,))
+            else:
+                _add(tensors, f"{prefix}.output.weight", (d, m.memory_dim))
+                _add(tensors, f"{prefix}.gate.weight", (1, d))
 
     if m.semantic_memory_dim is not None:
         _add(
@@ -246,19 +281,13 @@ def parameter_inventory(config: RunConfig) -> ParameterInventory:
     )
     table = _sum_specs(
         tensors,
-        lambda name, spec: (
-            name.startswith(("memory.table.", "memory.extra_tables."))
-            or name == "memory.embedding.weight"
-        ),
+        lambda name, spec: _memory_table_name(name),
     )
     adapter = _sum_specs(
         tensors,
         lambda name, spec: (
-            name.startswith(("memory.", "semantic_memories."))
-            and not (
-                name.startswith(("memory.table.", "memory.extra_tables."))
-                or name == "memory.embedding.weight"
-            )
+            name.startswith(("memory.", "extra_memories.", "semantic_memories."))
+            and not (_memory_table_name(name))
         ),
     )
     total = _sum_specs(tensors, stored)
@@ -276,7 +305,7 @@ def parameter_inventory(config: RunConfig) -> ParameterInventory:
             if m.memory == "ngram"
             else 1
         )
-        active -= table - streams * m.memory_dim
+        active -= table - streams * m.memory_dim * max(1, len(m.memory_block_sites))
     return ParameterInventory(
         total,
         trainable,
@@ -324,6 +353,13 @@ def inspection_report(config: RunConfig) -> dict[str, int | str]:
         "memory_injection": "none"
         if config.model.memory == "none"
         else config.model.memory_injection,
+        "memory_variant": config.model.memory_variant,
+        "memory_block_index": config.model.memory_block_index,
+        **(
+            {"memory_block_indices": list(config.model.memory_block_indices)}
+            if config.model.memory_block_indices
+            else {}
+        ),
         "expert_note": "not present in dense model"
         if config.model.ffn == "dense"
         else "routed and shared expert storage; expert is a non-additive subtotal",
@@ -380,7 +416,7 @@ def inspect_model(model: nn.Module) -> dict[str, int | str]:
     norm = sum(
         parameter.numel()
         for name, parameter in model.named_parameters()
-        if "norm" in name
+        if name == "norm.weight" or ".norm" in name
     )
     output_head = 0 if tied else model.output.weight.numel()
     active = total if tied else total - embedding + model.config.hidden_dim
@@ -388,18 +424,20 @@ def inspect_model(model: nn.Module) -> dict[str, int | str]:
         active -= routed_expert + shared_expert
         active += active_expert
     memory_parameters = memory_tables = active_memory_rows = frozen = 0
-    if model.memory is not None:
-        memory_parameters = _unique_numel(model.memory.parameters())
-        frozen = sum(
+    for memory in ([model.memory] if model.memory is not None else []) + list(
+        model.extra_memories.values()
+    ):
+        memory_parameters += _unique_numel(memory.parameters())
+        frozen += sum(
             parameter.numel()
-            for parameter in model.memory.parameters()
+            for parameter in memory.parameters()
             if not parameter.requires_grad
         )
-        for module in model.memory.modules():
+        for module in memory.modules():
             if isinstance(module, nn.Embedding):
                 memory_tables += module.weight.numel()
                 active_memory_rows += module.embedding_dim
-        active -= memory_tables - active_memory_rows
+    active -= memory_tables - active_memory_rows
     weight_bytes = sum(
         parameter.numel() * parameter.element_size() for parameter in model.parameters()
     )
@@ -426,6 +464,13 @@ def inspect_model(model: nn.Module) -> dict[str, int | str]:
         "memory_injection": "none"
         if model.memory is None
         else model.config.memory_injection,
+        "memory_variant": model.config.memory_variant,
+        "memory_block_index": model.config.memory_block_index,
+        **(
+            {"memory_block_indices": list(model.config.memory_block_indices)}
+            if model.config.memory_block_indices
+            else {}
+        ),
         "frozen": frozen,
         "expert_note": (
             "not present in dense model"

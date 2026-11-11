@@ -93,3 +93,91 @@ execution route; the remaining execution/provenance boundaries still apply.
 
 For a smaller whole-document window of an already encoded all-token local corpus,
 use [verified prepared prefixes](prepared-prefix.md) to avoid encoding it again.
+### Unpadded whole-document n-gram pilot
+
+For an all-token CPU/PyTorch pilot, set
+`training.matched_stories: {layout: story, targets_per_update: 4096,
+unpadded_documents: true}`, `training.micro_batch_size: 1` and
+`evaluation.batch_size: 1`. Both training and default validation use one complete
+EOS-terminated document per row, with a fresh virtual EOS input and fresh model
+history. No other document shares its attention or n-gram suffix. Rows end at
+the last valid target, so there are no padding slots. The native shared target
+groups and cursor still determine updates, budgets and exact resume.
+
+This mode accepts `memory: none` or `memory: ngram`. It refuses overlength
+documents and supervision/byte/semantic sidecars instead of silently splitting
+context or discarding masks. Select complete source records within the desired
+context and retain the original records for a separate longer-context identity.
+Use `MatchedStoryDataset.horizon(max_tokens)` for the exact `max_steps`;
+the token budget must end at a document boundary. An interior cutoff is rejected.
+Changing 4096 to 8192 does not require tokenizing those same documents again.
+This is not multi-document concatenation, assistant-only SFT, or a guarantee of
+GPU performance; microbatch one and variable shapes should be measured on the
+intended runtime before scaling.
+
+A reused tokenizer can bind `tokenizer.origin` to either an existing frozen
+snapshot dataset or a `mixture_declaration_path` plus its
+`mixture_declaration_sha256`. Both forms also require `sha256` and
+`manifest_sha256` for the tokenizer files. The mixture declaration form checks
+its native release and fit-tokenizer closure, including an explicitly recorded
+post-run observation when applicable. It does not replay the consumer mixture
+or assert that its schedule completed. A post-run observation remains bounded
+metadata/current-byte evidence, not a historical output-digest attestation.
+`sparselab tokenizer verify CONFIG --json` checks the actual vocabulary and
+special IDs, and `sparselab data prepare CONFIG` uses the same origin check.
+Existing service verification context is required for authenticated relocated
+releases; do not replace keys or rewrite historical receipts.
+
+### Continue variable document groups and append new data
+
+`train TARGET --extend-budget IMMUTABLE_GENERATION` now supports terminal matched
+story runs. Budget caps must equal complete native update boundaries; derive
+counts with `MatchedStoryDataset.targets_for_updates` / `horizon`, rather than
+multiplying steps by sequence length. AdamW moments, RNG, cursor and cumulative
+counters are restored. The target's `optimizer.decay_steps` must retain the
+parent's existing decay horizon (or the parent's terminal step on its first
+extension). Further extensions keep that same horizon and floor; they do not
+restart warmup.
+
+Adding `--append-data` admits a larger, already prepared `local_text` stream for
+an unpadded, single-pass parent. The target must preserve every trained token in
+its original order, every prior update boundary, and identical validation tokens.
+Set `training.matched_stories.frozen_update_ends` to the old stream length, plus
+any earlier frozen phase ends. Those document-aligned boundaries prevent the
+parent's short terminal update from being merged with newly appended records.
+The native validator rejects a missing boundary, changed prefix/heldout stream,
+changed grouping or other scientific settings, and records old/new token hashes.
+The new single-pass budget includes the consumed prefix; training starts after
+that prefix and processes only the new records.
+
+The explicit operation is full-state continuation, not weight promotion. After
+its first checkpoint, ordinary `--resume` uses the expanded owned data snapshot;
+do not repeat `--append-data` without another terminal budget extension. A code
+or runtime change still requires the existing explicit drift policy. Arbitrary
+corpus replacement, masked SFT and multi-pass append transitions are not admitted
+by this append-only path.
+
+To start a new data phase before the source's planned budget finishes, add
+`--append-from-checkpoint` alongside `--extend-budget` and `--append-data`.
+This explicit transition admits only a verified complete-update checkpoint from
+a single-pass whole-document parent. The new stream must preserve every consumed
+token, every consumed update boundary and the validation stream. Its caps must
+advance beyond the checkpoint; they may be smaller than the parent's unconsumed
+plan. Freeze the consumed token boundary in `frozen_update_ends`. The decision
+records consumed counters and the number/location of deferred source tokens.
+Original source data and checkpoints are retained. Optimizer, RNG, scheduler and
+learned memory remain full-state; this is not a weight-only promotion or an
+objective change. Without the new flag, append-data still requires a terminal
+parent. Coordinate device/source ownership before launching the child; preparation
+and read-only checkpoint validation do not stop or change a live parent.
+
+A separately measured runtime configuration can be composed with a budget/data
+extension using `--allow-runtime-optimization`. Both validators run: the extension
+must preserve the authenticated consumed prefix, update boundaries, heldouts and
+scheduler; the existing runtime policy permits only its supported dense-attention
+execution changes and preserves effective batch and ordinary validation batch.
+Changed optimizer/scientific settings remain refused. The child records separate
+budget-extension and runtime-optimization decisions. Full optimizer/RNG state is
+retained, while changed kernels may change the numerical trajectory. This flag is
+explicit consent to a supported transition, not evidence that it is faster or
+correct; choose settings only after the separate comparison results are reviewed.

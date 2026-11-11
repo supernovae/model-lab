@@ -231,6 +231,9 @@ def _excluded_edges(kind: str) -> frozenset[tuple[str, str]]:
 # Pinned below to the AST of each excluded import and all existing uses of its
 # imported names. A new use in a verifier, or any change to an existing user,
 # makes authority unavailable until the exclusion is explicitly re-audited.
+# Context-transfer audit 2026-11-04: only _prepare_data changes.
+# It validates short unpadded splits through MatchedStoryDataset; all byte-loader
+# verifiers and their uses of excluded imports are unchanged. No exclusions added.
 # Combined PR290/305 audit 2026-11-03: versus integrated PR290 only
 # _prepare_data changes, to verify the explicit tokenizer origin.
 # load_prepared_data and _verified_receipt ASTs are unchanged; semantic
@@ -266,21 +269,25 @@ def _excluded_edges(kind: str) -> frozenset[tuple[str, str]]:
 # was added before the existing unavailable-key return. Removing that call
 # restores the complete record AST; imported artifact uses, cold-evidence
 # validation, trust checks and excluded edges are unchanged.
-# data.packing prefix derivation re-audited 2026-11-06 against f61763f:
-# only existing producer owners _prepare_data/prepare_data change, adding the
-# producer-only _prepare_verified_prefix and PreparedPrefix declaration.
-# load_prepared_data/_verified_receipt ASTs are unchanged; they never invoke
-# prefix preparation. The new helper calls existing verifiers (not vice versa),
-# requires cold parent authentication and identical preparation identity, and
-# rejects source-compatibility overrides. Its new excluded-edge uses are only
-# telemetry typing, resource checks and workspace preflight during publication.
-# Re-pin the complete affected producer owners; no excluded edge or verifier
-# closure is added/removed, and packing itself remains digested in every kind.
+# data.packing re-audited 2026-11-04 against f61763f: reversing the
+# _tokenizer_sha256 -> canonical_tokenizer_sha256 promotion and removing the
+# producer-only map/tokenizer-object check in prepare_data restores the complete
+# baseline module AST. Only _prepare_data and prepare_data owners changed;
+# load_prepared_data and receipt validators are unchanged. The new tokenizer
+# load is confined to prepare_data; no excluded edge gained a verifier use.
+# Re-pin the existing complete-owner signatures without excluding new edges.
+# Integration re-audit 2026-11-11: preserved main prefix block checks and proofs;
+# only producer owners change. load_prepared_data and receipt validation ASTs
+# remain identical to main; no exclusion edges are added or removed.
+# Verified append producer re-audit: existing exclusion edge set is unchanged.
+# New append production calls native collectors/preflight only; load_prepared_data,
+# receipt verification and all verifier closure membership remain unchanged.
+# Whole-owner pins below include append dispatch and producer-only helpers.
 _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.preparation_workers",
-    ): "08e8a1006dc05aa9b944b32af91c95782e31f8d254cf9470147fb6cdbdc88a0a",
+    ): "e5b731976865f31d558447bc238794e331cbf82e6aa5583733846da8ef3e05e0",
     (
         "experiments.artifacts",
         "data.sources",
@@ -288,7 +295,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "corpus.mixture",
-    ): "8b1609435cd6c97c72f02c76fc7082c068a69ad7ca1b66666a8d768819733d2b",
+    ): "2af16abca502bb82c157fef2aee80df5a70685cbdb0102fc583bd0164504ed59",
     (
         "workers",
         "workers.transport",
@@ -296,11 +303,11 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.tokenizer",
-    ): "1be34f386d7724fdf8b40751f8ba4a60ca3b47ed69847f742ed3c54a505c3539",
+    ): "30be6bd1f5d0251b22ff4b7f4b4d7657890e872aca8cea5fe442dfadb8256170",
     (
         "data.packing",
         "data.sources",
-    ): "5ec19f50ff74ca6a2d23f5cafbefb9c0fcf5ca9ff0878c2d84a1a2e8fa38999a",
+    ): "dc3769e15a7341f951e05bfb1e7af663873d3c42749a24e43acf2aead95730a2",
     (
         "data",
         "data.tokenizer",
@@ -320,11 +327,11 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "corpus.export",
-    ): "978d6a4e494e157863a8d70398c9ac47a10fa392c109a64f9f829b9fc7994600",
+    ): "671168408a9906e94efdc41a8ba54e0833407d28eb438a7d5a592a17cc67df61",
     (
         "data.packing",
         "data.allocation",
-    ): "f7baf0d9e939b8d6b80588bee15b40270ca42a1878d0ca7978bf9ef17989335e",
+    ): "c0ab7e30055854ded1bc725e6aedb74dd372053d15a82de25e16088027090818",
     (
         "data.packing",
         "data.byte_hash",
@@ -340,43 +347,43 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.encoding",
-    ): "60da23c7dc63de473bc4afc6e4eab257cff248bc71652d31557f2cbdf260596a",
+    ): "86584acb9103d8920d08c1d04cf30fb57455dadd35ea2ce97fe15b8a126a7264",
     (
         "data.packing",
         "data.local_stories",
-    ): "d035b3fb6f0100ea2016d38776815f13a9c9465d6bf275e46399e110cbd849a4",
+    ): "f02c6ed06a3bbed3711634f334ce4763e5af7008807e91775d2b3c61938365ae",
     (
         "data.packing",
         "data.preparation_chunks",
-    ): "d152fe59eda209a2e303fb67e1efc190b82d4c5fbceea59d48b050b1b8ccfcbf",
+    ): "57b23fa77a23ed7e531fa8005d62af6a8ad90740d19088c93b2969d836f7287a",
     (
         "data.packing",
         "data.preparation_telemetry",
-    ): "10775254bf31039740193ccbc0f4f303a0917c39d64bfa32d68dad25e9e71f44",
+    ): "ceb9301d55bda05c2827571b2f6e7fafc0988b7fdfe38249096fe46d2f9998ae",
     (
         "data.packing",
         "experiments.source_compatibility",
-    ): "ea598a6577c73a090264b78c4b6ffef5590f2e910cc5b46ab5dcbc8d1f54816f",
+    ): "da30e3a2d720629d9f4f2a740405e1d2b24535f27f4eae3f63db725e4b257d2f",
     (
         "data.packing",
         "progress",
-    ): "1859fe6654622fbbf8310b35e375e55d006cfaa1c9aa2024d6ad6c9bf7e1838c",
+    ): "17675c284d532681502a7217e5c669a89824acc8c09b11c52d1cf637fccdc271",
     (
         "data.packing",
         "resource_envelope",
-    ): "dc0bbe0bfcd2578dbd829eb002aa58a3eccaae08922e1d15050db9f2b981548c",
+    ): "10a75cf00ee4d6c10dd688ef2cfe9f45b145cca803321511c26e4b36408d29ff",
     (
         "data.packing",
         "workdir",
-    ): "907c8eb18bd20de4cf4ea6379bf54f7b95a98488886266a56d2e12a19bc4ad23",
+    ): "6e7d990f9d82a6c7c2b157b0c1bc533b4cd9964cb33624c7625cd6a94c86cf84",
     (
         "data.packing",
         "workspace_cleanup",
-    ): "5a09ded445c71b585024fc56ddb95977eee969cb6f24bb93930616e0df53618f",
+    ): "2e111f35237382d0fca9cc2d1e8de7fe7613f69d5911160e0ac42299f6ee5381",
     (
         "data.packing",
         "workspace_preflight",
-    ): "5abc4e0ee4e882c9fd852bb02e51e44e30efb0dd35e7f8c42b3309f242808be2",
+    ): "cd86a55fd9bfad8038ff04daf2ac87dfbf431722113ba049194452b0a2db78f0",
     (
         "corpus.tokenizer_bakeoff",
         "corpus.cli",
@@ -433,7 +440,8 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
 
 
 @lru_cache(maxsize=128)
-def _exclusion_signature(source: bytes, imported: str) -> str:
+def exclusion_signature(source: bytes, imported: str) -> str:
+    """Compute the static review signature; this does not authorize an exclusion."""
     tree = ast.parse(source)
     declared: set[str] = set()
     imports: list[str] = []
@@ -679,7 +687,7 @@ def verifier_authority(kind: str, version: int) -> dict[str, object]:
         for imported in imports:
             edge = name, imported
             if edge in excluded:
-                if _exclusion_signature(source, imported) != _EXCLUSION_SIGNATURES.get(
+                if exclusion_signature(source, imported) != _EXCLUSION_SIGNATURES.get(
                     edge
                 ):
                     raise ValueError(f"verifier exclusion needs review: {edge}")

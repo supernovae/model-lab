@@ -18,7 +18,7 @@ from sparselab.config.models import RunConfig
 from sparselab.data.allocation import load_allocation_manifest, load_semantic_retriever
 from sparselab.data.packing import (
     TokenBlockDataset,
-    _tokenizer_sha256,
+    canonical_tokenizer_sha256,
     load_prepared_data,
     supervision_requires_mask,
 )
@@ -290,6 +290,13 @@ def load_run(
         allocation_name = config.dataset.allocation_manifest_path.name
         if f"allocation/{allocation_name}" not in artifacts:
             raise ValueError("run lacks a verified allocation manifest artifact")
+    if config.model.memory_token_mapping is not None:
+        from sparselab.memory_tokenizer import validate_memory_token_map
+
+        validate_memory_token_map(
+            config.model.memory_token_mapping.model_dump(mode="json"),
+            tokenizer_path=run / "tokenizer.json",
+        )
     tokenizer = load_tokenizer(run / "tokenizer.json")
     if tokenizer.get_vocab_size() != config.model.vocab_size:
         raise ValueError("run tokenizer vocabulary differs from model configuration")
@@ -318,7 +325,7 @@ def load_run(
         allocation_manifest = load_allocation_manifest(
             run / "allocation" / allocation_name,
             source_identity_sha256=manifest["source_identity"]["sha256"],
-            tokenizer_sha256=_tokenizer_sha256(tokenizer),
+            tokenizer_sha256=canonical_tokenizer_sha256(tokenizer),
         )
         if not isinstance(
             allocation_metadata, dict

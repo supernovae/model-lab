@@ -120,6 +120,30 @@ sparselab research corpus mine \
 
 The report binds the train-file and tokenizer hashes and contains token/document frequencies, empirical unigram entropy, exact per-order/head address occupancy, and storage estimates. Collisions count distinct zero-padded token n-gram keys that share an address (`collisions / distinct_ngram_count`); repeat lookups are reported separately. Exact key tracking is bounded to one million distinct keys and eight million key components. The estimator opens one explicit training JSONL and no validation/test path. It tokenizes each rendered train conversation independently, without packing, EOS insertion, or trainer truncation; address statistics are a source-document estimate, not the exact packed training run. Its table-byte estimate excludes the output projection and gate.
 
+For addresses as seen by the trainer, use the native prepared-data directory:
+
+```sh
+sparselab research corpus mine \
+  --prepared-train "$PREPARED_DATA" \
+  --sequence-length 256 --max-blocks 128 \
+  --table-size 65536 --memory-dim 64 --ngram-orders 2 3 --hash-heads 2 \
+  --output "$SPARSELAB_WORK_DIR/packed-train-lexical-analysis.json"
+```
+
+This mode cold-verifies the complete prepared closure (including held-out file
+integrity), then analyzes only the first eligible TRAIN input blocks. EOS inside
+blocks is preserved; hash context resets at each block, exactly as in a batched
+training forward. Loss-masked input positions still perform lookups, while blocks
+with no supervised targets are excluded by the native dataset. Use the actual
+training sequence length. The report binds the prepared manifest and tokenizer,
+records selected block indices and reports block frequencies instead of document
+frequencies. A bounded prefix is a sample, not the shuffled training schedule;
+even a complete pass does not account for repeated epochs. Byte-addressed and
+allocation-sidecar data are refused. No gate behavior or useful knowledge transfer
+is inferred from these address counts. The canonical tokenizer identity comes from
+the verified prepared manifest; token IDs are checked as nonnegative int32, but
+this analysis does not verify their upper bound against a model vocabulary.
+
 Create a blinded comparison directly from content-addressed capability results:
 
 ```sh
@@ -136,3 +160,25 @@ sparselab review validate \
 ```
 
 The bundle builder verifies both result digests and requires a shared card, evaluator, case set, prompts, and expected answers. It randomizes case order and A/B assignment, but keeps condition names, result identities, and case identifiers only in the separate reveal map. The rater bundle binds its seed, criteria digest, and reveal-map digest; give raters only that bundle. `--records` is also available for paired responses that do not come from capability results. Judgments bind to the bundle and criteria, cover every blind case exactly once, and contain no reveal fields. Validation only normalizes judgments; it does not score, rank, select, or tune models. Do not use held-out test scores or unblinded judgments in a hidden optimization loop.
+
+Packed mining also refuses more than one million candidate blocks before native
+block enumeration, regardless of `--max-blocks`. Use a bounded prepared subset for
+larger corpora. Full closure verification still reads the declared artifact files.
+
+Token-memory mechanisms, tokenizer-bound maps, multiple ports and explicit dense-checkpoint migration are documented in [Context-gated n-gram memory](ngram-memory.md).
+
+
+### Optional Python code-work scoring
+
+The optional Inspect/Docker code-work adapter keeps generated Python inside its
+sandbox and refuses missing dependencies or images without installing or pulling
+them. Its completion marker is supplied through stdin, not argv or environment,
+so echoing a process command line cannot forge successful test completion.
+
+This is **non-adversarial functional scoring**, not an adversarially qualified
+judge. Generated code and tests share a Python interpreter: a solution can inspect
+or alter harness state, and tests are visible inside the container. Container
+isolation protects the host but does not establish score integrity. Results carry
+this assumption and limitation; do not use these scores as trusted evidence for
+adversarial or harness-aware generated code. A separately qualified trusted-test
+execution protocol is needed for that use case.

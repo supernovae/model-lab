@@ -15,7 +15,7 @@ from sparselab.config.models import AttentionConfig, DatasetConfig, ModelConfig
 from sparselab.data.allocation import build_allocation_manifest
 from sparselab.data.allocation_tasks import _collect_provenance
 from sparselab.data.packing import (
-    _tokenizer_sha256,
+    canonical_tokenizer_sha256,
     load_prepared_data,
     prepare_data,
 )
@@ -32,7 +32,7 @@ def _allocation_config(tmp_path: Path, *, weight: float, memory: bool = True):
     manifest = build_allocation_manifest(
         tmp_path / "allocation.json",
         source_identity_sha256=source_identity()["sha256"],
-        tokenizer_sha256=_tokenizer_sha256(tokenizer),
+        tokenizer_sha256=canonical_tokenizer_sha256(tokenizer),
         train_jsonl_sha256="0" * 64,
         validation_jsonl_sha256="1" * 64,
         train_owner=np.array([1], dtype=np.uint8),
@@ -376,7 +376,7 @@ def test_allocation_corpus_digest_mismatch_fails_before_preparation(
     manifest = build_allocation_manifest(
         tmp_path / "bad-allocation.json",
         source_identity_sha256=source_identity()["sha256"],
-        tokenizer_sha256=_tokenizer_sha256(tokenizer),
+        tokenizer_sha256=canonical_tokenizer_sha256(tokenizer),
         train_jsonl_sha256="0" * 64,
         validation_jsonl_sha256="1" * 64,
         train_owner=np.zeros(1, dtype=np.uint8),

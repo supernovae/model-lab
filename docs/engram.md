@@ -19,9 +19,45 @@ Multi-order/multi-head streams preserve causal addressing and allocate one table
 
 ## Learn and compare placement
 
-The [`lexical-engram` lesson](research/lesson-paths.md) provides a standalone final-injection configuration and initialized shape/diagnostic probe. Lexical `memory_injection` supports final and embedding placement; these are the alternatives in the [placement study](research/engram-placement.md), not evidence for lexical middle placement. Separately, verified semantic retrieval and direct `DenseLM` adapters support embedding, after-block, and final sites, including multiple named/multipack attachments; see [Verified semantic memory](research/semantic-memory.md). Lookup diagnostics remain mechanism observations, not score or transfer proof.
+The [`lexical-engram` lesson](research/lesson-paths.md) provides a standalone final-injection configuration and initialized shape/diagnostic probe. Lexical `memory_injection` supports final and embedding placement; token memory also supports the explicit after-block site described below. The [placement study](research/engram-placement.md) remains historical evidence. Separately, verified semantic retrieval and direct `DenseLM` adapters support embedding, after-block, and final sites, including multiple named/multipack attachments; see [Verified semantic memory](research/semantic-memory.md). Lookup diagnostics remain mechanism observations, not score or transfer proof.
 
 
 ## Adding an Engram variant
 
 Treat a new Engram as an explicit architecture and artifact contract, not as a hidden replacement for an existing mode. Define its causal address inputs, table/adapter ownership, checkpoint compatibility, parameter accounting, and persisted diagnostics before adding it to `model.memory`. Preserve `none`, `ngram`, `byte`, and `portable` semantics unchanged so existing runs remain interpretable. A new addressing scheme must state what equality it preserves and what it does **not** establish; address collisions, lookup reuse, or a successful smoke run are not evidence of retrieval quality or knowledge transfer.
+
+## Context-key fusion ablation
+
+For token memory, `memory_variant: context_key` concatenates per-order/head
+lookups and projects separate keys and values. Its scalar gate is the sigmoid
+of the RMS-normalized hidden/key dot product divided by sqrt(hidden width),
+following equations (3)–(4) of [Engram v2](https://arxiv.org/html/2601.07372v2#S2).
+`memory_conv_kernel_size: 4` adds equation (5)'s RMS normalization, depthwise
+causal convolution (dilation = maximum n-gram order), SiLU and residual; zero
+omits refinement. Convolution parameters use PyTorch's Conv1d initialization;
+linear/embedding weights retain Lab's normal initialization. All are jointly
+trained with the configured optimizer. Convolved memory rejects allocation
+masks because masked values must not leak through its temporal history.
+
+Use `memory_injection: after_block` with a zero-based `memory_block_index` for
+one token-memory attachment after that decoder block and before the next block
+(or the final norm). Full and cached paths use the same site. Cached convolution
+history is bounded, request-owned, counted in cache bytes and reset on rollover.
+Explorer residual-post measurements include an attachment between blocks.
+
+The default `hidden_gate` keeps averaged projected streams and a hidden-only
+gate. Both variants retain Lab's existing token hashes and identity token mapping.
+This is a fusion/placement ablation, not an exact paper reproduction: it omits
+canonical token compression, the paper's XOR/prime-table construction and
+multi-branch backbone. It uses equation (4), not the demo's signed-square-root
+transform. Changing those choices requires explicit architecture/address identity.
+Standard embeddings allocate dense gradients and optimizer state; one active
+row per stream is not the total training-memory cost.
+
+Aggregate occupancy counts independent table namespaces. The historical metric
+`collision_count` is repeated bucket accesses, including identical keys; use
+[packed train mining](capabilities.md) to separate distinct-key collisions from
+repeat accesses. For `context_key`, stream `value_norm` describes raw lookup
+vectors and aggregate `value_norm` describes their projected concatenation;
+`hidden_gate` stream norms describe projected vectors. Compare gates and losses,
+not unlike stream norms.

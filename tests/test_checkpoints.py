@@ -29,6 +29,7 @@ from sparselab.training.optimizer import (
     learning_rate_for_step,
     make_optimizer,
     schedule_payload,
+    set_optimizer_learning_rate,
 )
 
 
@@ -166,30 +167,52 @@ def test_checkpoint_allows_symlinked_ancestor_but_not_member(tmp_path: Path) -> 
 
 
 def _snapshot(
-    step: int, loss: float | None = None, *, decay_steps: int | None = None
+    step: int,
+    loss: float | None = None,
+    *,
+    decay_steps: int | None = None,
+    memory_policy: bool = False,
+    stable_steps: int = 0,
 ) -> TrainingSnapshot:
     config = load_config(Path("configs/smoke_cpu.yaml"))
+    values = config.model_dump(mode="json")
     if decay_steps is not None:
-        values = config.model_dump(mode="json")
         values["optimizer"]["decay_steps"] = decay_steps
-        config = RunConfig.model_validate(values)
+    values["training"]["stable_steps"] = stable_steps
+    if memory_policy:
+        values["model"].update(
+            memory="ngram", memory_table_size=17, memory_dim=8, memory_ngram_size=2
+        )
+        values["optimizer"].update(
+            memory_table_lr_multiplier=5.0, memory_table_weight_decay=0.0
+        )
+    config = RunConfig.model_validate(values)
     model = DenseLM(config.model, config.attention)
     settings = config.optimizer
     optimizer = make_optimizer(
-        model, settings.peak, settings.weight_decay, settings.betas, settings.eps
+        model,
+        settings.peak,
+        settings.weight_decay,
+        settings.betas,
+        settings.eps,
+        memory_table_lr_multiplier=settings.memory_table_lr_multiplier,
+        memory_table_weight_decay=settings.memory_table_weight_decay,
     )
     inputs = torch.arange(8).reshape(1, 8)
     for update in range(1, step + 1):
         optimizer.zero_grad(set_to_none=True)
-        for group in optimizer.param_groups:
-            group["lr"] = learning_rate_for_step(
+        set_optimizer_learning_rate(
+            optimizer,
+            learning_rate_for_step(
                 update,
                 config.training.max_steps,
                 settings.warmup_steps,
                 settings.peak,
                 settings.floor,
                 decay_steps=decay_steps,
-            )
+                stable_steps=stable_steps,
+            ),
+        )
         model(inputs).square().mean().backward()
         optimizer.step()
     optimizer_state = optimizer.state_dict()
@@ -542,4 +565,101 @@ def test_retention_keeps_best_latest_and_recovery_predecessor(tmp_path: Path) ->
     assert (
         json.loads((checkpoints / "best.json").read_text())["manifest_sha256"]
         == best.manifest_sha256
+    )
+
+
+def test_checkpoint_binds_memory_table_optimizer_and_stable_schedule(tmp_path):
+    manager = CheckpointManager(tmp_path)
+    snapshot = _snapshot(1, memory_policy=True, stable_steps=3)
+    manager.save(snapshot)
+    assert manager.verify(tmp_path / "checkpoints/latest.json").valid
+    assert snapshot.schedule["kind"] == "warmup_stable_cosine_v1"
+    assert snapshot.schedule["stable_steps"] == 3
+    snapshot.optimizer["param_groups"][-1]["lr"] /= 5
+    with pytest.raises(ValueError, match="learning rate"):
+        CheckpointManager(tmp_path / "tampered").save(snapshot)
+
+
+@pytest.mark.parametrize("corrupt_best", [False, True])
+def test_lineage_verifies_only_candidates_that_can_contribute(
+    tmp_path, monkeypatch, corrupt_best
+) -> None:
+    manager = CheckpointManager(tmp_path)
+    records = [
+        manager.save(_snapshot(step), loss)
+        for step, loss in enumerate((0.6, 0.2, 0.5, 0.7), start=1)
+    ]
+    if corrupt_best:
+        shard = next(
+            (manager.root / records[1].relative_path).glob("weights-*.safetensors")
+        )
+        shard.write_bytes(shard.read_bytes() + b"corrupt")
+    original = manager.verify
+    opened = []
+
+    def verify(path, *args, **kwargs):
+        opened.append(path.name)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(manager, "verify", verify)
+    winner = records[2 if corrupt_best else 1]
+    assert manager.lineage_best_for_child("parent", records[-1].manifest_sha256) == (
+        LineageBest(
+            "parent", winner.manifest_sha256, winner.step, winner.validation_loss
+        )
+    )
+    assert opened == [
+        records[-1].relative_path,
+        records[1].relative_path,
+        *([records[2].relative_path] if corrupt_best else []),
+    ]
+    monkeypatch.setattr(manager, "verify", original)
+    assert bool(manager.recovery_report().rejected) == corrupt_best
+
+
+@pytest.mark.parametrize("corrupt_newer_ancestor", [False, True])
+def test_lineage_keeps_inherited_tie_order_and_verifies_contributor(
+    tmp_path, corrupt_newer_ancestor
+) -> None:
+    manager = CheckpointManager(tmp_path)
+    ancestors = [
+        LineageBest("older", "a" * 64, 1, 0.1),
+        LineageBest("newer", "b" * 64, 1, 0.1),
+    ]
+    records = []
+    for step, ancestor in enumerate(ancestors, start=1):
+        snapshot = _snapshot(step)
+        snapshot.lineage_best = ancestor
+        records.append(manager.save(snapshot, 0.5))
+    selected = manager.save(_snapshot(3), 0.1)
+    if corrupt_newer_ancestor:
+        shard = next(
+            (manager.root / records[-1].relative_path).glob("weights-*.safetensors")
+        )
+        shard.write_bytes(shard.read_bytes() + b"corrupt")
+    assert (
+        manager.lineage_best_for_child("parent", selected.manifest_sha256)
+        == (ancestors[0 if corrupt_newer_ancestor else 1])
+    )
+
+
+def test_lineage_rejects_corrupt_selected_parent(tmp_path) -> None:
+    manager = CheckpointManager(tmp_path)
+    manager.save(_snapshot(1), 0.1)
+    selected = manager.save(_snapshot(2), 0.2)
+    shard = next((manager.root / selected.relative_path).glob("weights-*.safetensors"))
+    shard.write_bytes(shard.read_bytes() + b"corrupt")
+    with pytest.raises(
+        ValueError, match="selected parent is not a verified generation"
+    ):
+        manager.lineage_best_for_child("parent", selected.manifest_sha256)
+
+
+def test_lineage_local_tie_keeps_earliest_generation(tmp_path) -> None:
+    manager = CheckpointManager(tmp_path)
+    first = manager.save(_snapshot(1), 0.1)
+    manager.save(_snapshot(2), 0.1)
+    selected = manager.save(_snapshot(3), 0.3)
+    assert manager.lineage_best_for_child("parent", selected.manifest_sha256) == (
+        LineageBest("parent", first.manifest_sha256, 1, 0.1)
     )

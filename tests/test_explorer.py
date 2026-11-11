@@ -521,3 +521,62 @@ def test_compare_explorations_deltas_overlap_and_refusals() -> None:
 
     with pytest.raises(explorer.ExplorerUnavailable, match="unverified cache"):
         explorer.compare_explorations(left, {**right, "cache_issue": "bad cache"})
+
+
+def test_prime_stream_sizes_are_visible_and_not_given_legacy_collapse_diagnosis() -> (
+    None
+):
+    from sparselab.dashboard import explorer_view
+
+    loaded = _loaded(
+        **{
+            **MOE_NGRAM,
+            "memory_table_size": 97,
+            "memory_addressing": "prime_xor_v1",
+            "memory_table_sizes": (97, 101),
+        }
+    )
+    architecture = explorer.architecture(loaded.config)
+    assert architecture["memory"]["rows_per_stream"] == [97, 101]
+    assert architecture["memory"]["rows_scope"] == "first_table"
+    assert "rows [97, 101]" in explorer_view.architecture_html(architecture)
+    ids = [3, 7, 11, 13, 17]
+    # This coincidental short pattern would trigger the legacy-only diagnostic.
+    view = explorer.memory_view(loaded, ids, {"memory": {"table": torch.tensor([ids])}})
+    assert view["streams"][0]["single_token_offset"] is None
+
+
+def test_multiport_explorer_captures_every_table_and_gate() -> None:
+    from sparselab.dashboard import explorer_view
+
+    loaded = _loaded(
+        **{
+            **MOE_NGRAM,
+            "num_layers": 3,
+            "memory_injection": "after_block",
+            "memory_block_indices": [0, 2],
+            "memory_variant": "context_key",
+            "memory_addressing": "prime_xor_v1",
+            "memory_table_sizes": [97, 101, 103, 107],
+            "memory_table_size": 97,
+        }
+    )
+    ids = [3, 7, 11]
+    forward = explorer._forward_with_hooks(loaded, ids)
+    view = explorer.memory_view(loaded, ids, forward)
+    assert len(view["streams"]) == 4
+    assert set(view["gates_by_port"]) == {"memory", "extra_memories.2"}
+    assert view["gate"] == pytest.approx(view["gates_by_port"]["memory"])
+    for gates in view["gates_by_port"].values():
+        assert len(gates) == len(ids)
+        assert all(0 <= gate <= 1 for gate in gates)
+    architecture = explorer.architecture(loaded.config)["memory"]
+    assert architecture["tables"] == 4
+    assert architecture["parameters"] == sum(
+        parameter.numel()
+        for port in [loaded.model.memory, *loaded.model.extra_memories.values()]
+        for parameter in port.parameters()
+    )
+    assert (
+        len(explorer_view.gate_figure(view, explorer.token_view(loaded, ids)).data) == 2
+    )

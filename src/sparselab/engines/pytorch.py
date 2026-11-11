@@ -28,7 +28,7 @@ from sparselab.data.allocation import (
     load_allocation_manifest,
     load_semantic_retriever,
 )
-from sparselab.data.packing import _tokenizer_sha256
+from sparselab.data.packing import canonical_tokenizer_sha256
 from sparselab.data.tokenizer import load_tokenizer
 from sparselab.engines.base import (
     CanonicalTensor,
@@ -42,7 +42,10 @@ from sparselab.engines.base import (
 )
 from sparselab.engines.multi_device import (
     SecondaryReplica,
+    accumulate_microbatch_diagnostics,
+    diagnostic_is_count,
     dispatch_replicas_and_primary,
+    microbatch_position_mask,
     reduce_replica_gradients,
     sync_replicas_weights,
 )
@@ -73,6 +76,7 @@ from sparselab.training.optimizer import (
     learning_rate_for_step,
     make_adafactor,
     make_optimizer,
+    set_optimizer_learning_rate,
 )
 from sparselab.training.pilot_progress import current_pilot_progress, pilot_phase
 
@@ -497,7 +501,7 @@ class PyTorchEngine:
             allocation = load_allocation_manifest(
                 config.dataset.allocation_manifest_path,
                 source_identity_sha256=cast(str, source_identity()["sha256"]),
-                tokenizer_sha256=_tokenizer_sha256(
+                tokenizer_sha256=canonical_tokenizer_sha256(
                     load_tokenizer(config.tokenizer.path)
                 ),
             )
@@ -555,6 +559,8 @@ class PyTorchEngine:
                     config.optimizer.weight_decay,
                     config.optimizer.betas,
                     config.optimizer.eps,
+                    memory_table_lr_multiplier=config.optimizer.memory_table_lr_multiplier,
+                    memory_table_weight_decay=config.optimizer.memory_table_weight_decay,
                 )
                 if config.optimizer.name == "adamw"
                 else make_adafactor(
@@ -580,12 +586,22 @@ class PyTorchEngine:
         self.model, self.optimizer = model, optimizer
         if config.runtime.compile_output_head_loss:
             self._compiled_output_head_loss = torch.compile(
-                output_projection_cross_entropy, dynamic=False
+                output_projection_cross_entropy,
+                dynamic=config.runtime.compile_dynamic_shapes,
+                fullgraph=config.runtime.compile_dynamic_shapes,
             )
         if config.runtime.compile_transformer_blocks:
+            if config.runtime.compile_dynamic_shapes:
+                from sparselab.model.rope import RoPE
+
+                for module in model.modules():
+                    if isinstance(module, RoPE):
+                        module.reserve(config.model.max_seq_len, device)
             for block in model.blocks:
                 block.forward_with_aux = torch.compile(
-                    block.forward_with_aux, dynamic=False
+                    block.forward_with_aux,
+                    dynamic=config.runtime.compile_dynamic_shapes,
+                    fullgraph=config.runtime.compile_dynamic_shapes,
                 )
         self.portability_run = portability_run
         self._portability_parameters = trainable_parameters
@@ -637,12 +653,20 @@ class PyTorchEngine:
                     compiled_loss = None
                     if config.runtime.compile_output_head_loss:
                         compiled_loss = torch.compile(
-                            output_projection_cross_entropy, dynamic=False
+                            output_projection_cross_entropy,
+                            dynamic=config.runtime.compile_dynamic_shapes,
+                            fullgraph=config.runtime.compile_dynamic_shapes,
                         )
                     if config.runtime.compile_transformer_blocks:
+                        if config.runtime.compile_dynamic_shapes:
+                            for module in replica_model.modules():
+                                if isinstance(module, RoPE):
+                                    module.reserve(config.model.max_seq_len, sec_device)
                         for block in replica_model.blocks:
                             block.forward_with_aux = torch.compile(
-                                block.forward_with_aux, dynamic=False
+                                block.forward_with_aux,
+                                dynamic=config.runtime.compile_dynamic_shapes,
+                                fullgraph=config.runtime.compile_dynamic_shapes,
                             )
                     self._secondary_replicas.append(
                         SecondaryReplica(
@@ -1117,7 +1141,19 @@ class PyTorchEngine:
     def train_update(
         self, microbatches: list[Microbatch], update_index: int, valid_targets: int
     ) -> UpdateResult:
-        with _translate_allocation_failures():
+        # Strict dynamic compilation must never turn cache exhaustion or a
+        # compiler failure into an apparently successful eager training run.
+        strict_compile = (
+            self.config is not None and self.config.runtime.compile_dynamic_shapes
+        )
+        with (
+            _translate_allocation_failures(),
+            torch._dynamo.config.patch(
+                suppress_errors=False, fail_on_recompile_limit_hit=True
+            )
+            if strict_compile
+            else nullcontext(),
+        ):
             return self._train_update(microbatches, update_index, valid_targets)
 
     def _train_update(
@@ -1143,6 +1179,7 @@ class PyTorchEngine:
             config.optimizer.warmup_steps,
             config.optimizer.peak,
             config.optimizer.floor,
+            stable_steps=config.training.stable_steps,
             decay_steps=(
                 config.optimizer.decay_steps
                 if isinstance(config.optimizer, AdamWConfig)
@@ -1158,6 +1195,7 @@ class PyTorchEngine:
         language_sum = torch.zeros((), device=device)
         aux_sum = torch.zeros((), device=device)
         diagnostic_sums: dict[str, torch.Tensor] = {}
+        diagnostic_weights: dict[str, int] = {}
         losses_finite = torch.ones((), device=device, dtype=torch.bool)
         recomputed = 0.0
         executed_microbatches = 0
@@ -1193,7 +1231,7 @@ class PyTorchEngine:
         active_pairs = [
             (batch, chunk_valid)
             for batch, chunk_valid in zip(microbatches, chunk_counts, strict=True)
-            if chunk_valid
+            if chunk_valid or batch.position_mask is not None
         ]
         if (
             self._secondary_replicas
@@ -1220,10 +1258,12 @@ class PyTorchEngine:
                 float,
                 int,
                 dict[str, torch.Tensor],
+                dict[str, int],
             ]:
                 p_lang = torch.zeros((), device=device)
                 p_aux = torch.zeros((), device=device)
                 p_diag: dict[str, torch.Tensor] = {}
+                p_weights: dict[str, int] = {}
                 p_finite = torch.ones((), device=device, dtype=torch.bool)
                 p_recomp = 0.0
                 p_exec = 0
@@ -1245,6 +1285,9 @@ class PyTorchEngine:
                         if batch.byte_addresses is None
                         else torch.from_numpy(batch.byte_addresses).to(device)
                     )
+                    position_mask, position_count = microbatch_position_mask(
+                        batch, device, chunk_valid
+                    )
                     valid_target_mask = y != -100
                     with precision_context(config, device):
                         logits, auxiliary = model.forward_with_aux(
@@ -1256,6 +1299,7 @@ class PyTorchEngine:
                             activation_checkpointing=config.runtime.memory.activation_checkpointing.enabled,
                             diagnostics=config.logging.architecture_diagnostics,
                             return_hidden=config.runtime.compile_output_head_loss,
+                            position_mask=position_mask,
                         )
                     diagnostics = architecture_metrics(model)
                     monitor.sample("forward")
@@ -1280,11 +1324,15 @@ class PyTorchEngine:
                     p_recomp += model.recomputed_block_call_ratio
                     p_lang = p_lang + ce_sum.detach()
                     p_aux = p_aux + auxiliary.detach() * chunk_valid
-                    for name, value in diagnostics.items():
-                        p_diag[name] = (
-                            p_diag.get(name, value.new_zeros(())) + value * chunk_valid
-                        )
-                return p_lang, p_aux, p_finite, p_recomp, p_exec, p_diag
+                    accumulate_microbatch_diagnostics(
+                        p_diag,
+                        p_weights,
+                        diagnostics,
+                        batch,
+                        chunk_valid,
+                        position_count,
+                    )
+                return p_lang, p_aux, p_finite, p_recomp, p_exec, p_diag, p_weights
 
             (
                 (
@@ -1294,6 +1342,7 @@ class PyTorchEngine:
                     recomputed,
                     executed_microbatches,
                     diagnostic_sums,
+                    diagnostic_weights,
                 ),
                 replica_outs,
             ) = dispatch_replicas_and_primary(
@@ -1321,6 +1370,13 @@ class PyTorchEngine:
                     diagnostic_sums[name] = (
                         diagnostic_sums.get(name, val_dev.new_zeros(())) + val_dev
                     )
+                    weight = rep_out["diagnostic_weights"][name]
+                    if diagnostic_is_count(name, microbatches):
+                        diagnostic_weights[name] = 1
+                    else:
+                        diagnostic_weights[name] = (
+                            diagnostic_weights.get(name, 0) + weight
+                        )
                 reduce_replica_gradients(trainable_inputs, replica, device)
             if pilot_progress is not None:
                 pilot_progress.emit(
@@ -1348,7 +1404,7 @@ class PyTorchEngine:
                         allocation_raw_counts[owner] += int(
                             np.count_nonzero(batch.owner_ids == owner)
                         )
-                if not chunk_valid:
+                if not chunk_valid and batch.position_mask is None:
                     continue
                 executed_microbatches += 1
                 x, y = (
@@ -1455,6 +1511,9 @@ class PyTorchEngine:
                         torch.from_numpy(batch.semantic_queries).to(device),
                         torch.from_numpy(batch.semantic_mask).to(device),
                     )
+                position_mask, position_count = microbatch_position_mask(
+                    batch, device, chunk_valid
+                )
                 valid_target_mask = y != -100
                 neural_aux_targets = 0
                 if allocation_enabled:
@@ -1478,6 +1537,7 @@ class PyTorchEngine:
                         activation_checkpointing=config.runtime.memory.activation_checkpointing.enabled,
                         diagnostics=config.logging.architecture_diagnostics,
                         return_hidden=config.runtime.compile_output_head_loss,
+                        position_mask=position_mask,
                     )
                 diagnostics = architecture_metrics(model)
                 monitor.sample("forward")
@@ -1575,11 +1635,14 @@ class PyTorchEngine:
                     )
                 else:
                     aux_sum = aux_sum + auxiliary.detach() * chunk_valid
-                for name, value in diagnostics.items():
-                    diagnostic_sums[name] = (
-                        diagnostic_sums.get(name, value.new_zeros(()))
-                        + value * chunk_valid
-                    )
+                accumulate_microbatch_diagnostics(
+                    diagnostic_sums,
+                    diagnostic_weights,
+                    diagnostics,
+                    batch,
+                    chunk_valid,
+                    position_count,
+                )
         if self.scaler is not None:
             self.scaler.unscale_(optimizer)
         named_parameters = dict(model.named_parameters())
@@ -1685,8 +1748,7 @@ class PyTorchEngine:
         if gradients_finite is not None and not bool(gradients_finite):
             optimizer.zero_grad(set_to_none=True)
             raise EngineNonFiniteError("nonfinite unscaled gradients")
-        for group in optimizer.param_groups:
-            group["lr"] = lr
+        set_optimizer_learning_rate(optimizer, lr)
         overflow = False
         if self.scaler is None:
             optimizer.step()
@@ -1752,9 +1814,25 @@ class PyTorchEngine:
                 sum(batch.inputs.shape[0] for batch in microbatches)
             ),
             "batch/effective_tokens_per_update": float(valid_targets),
+            "batch/compute_slots": float(
+                sum(batch.inputs.size for batch in microbatches)
+            ),
+            "batch/real_positions": float(
+                sum(
+                    batch.inputs.size
+                    if batch.position_mask is None
+                    else batch.position_mask.sum()
+                    for batch in microbatches
+                )
+            ),
+            "batch/document_diagnostics_version": float(
+                2
+                if any(batch.position_mask is not None for batch in microbatches)
+                else 1
+            ),
             "recompute/block_call_ratio": recomputed / executed_microbatches,
             **{
-                name: float(value) / valid_targets
+                name: float(value) / diagnostic_weights[name]
                 for name, value in diagnostic_sums.items()
             },
             **memory_metrics,

@@ -112,6 +112,13 @@ not prove successful resume, future trajectory equivalence, or model quality.
 
 ## Evaluation, best, and lineage
 
+Child lineage discovery ranks generation manifests before reading tensor payloads.
+It verifies the explicitly selected parent and any candidate that can contribute
+the best local or inherited loss, falling back when a candidate is corrupt.
+Unrelated retained generations do not require a payload scan during an ordinary
+continuation. Explicit recovery still verifies the full retained store; full-state
+resume verification and older-parent boundaries are unchanged.
+
 Validation runs at step 0, configured evaluation intervals, and final/interruption boundaries. A new best validation loss causes a checkpoint; a cadence-only checkpoint has `validation_loss: null` rather than inheriting stale attribution. `best.json` points only to a verified evaluated generation physically present in that run. A resumed child may carry an ancestor `lineage_best` record whose checkpoint is not local; it is lineage metadata, not a fabricated local best pointer.
 
 When selecting an older parent checkpoint, inherited best-state discovery stops
