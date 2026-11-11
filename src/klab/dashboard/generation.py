@@ -166,7 +166,7 @@ def generation_page(
 ) -> None:
     st.header("Generate")
     st.caption(
-        "Continue text with a saved DevMind checkpoint. CPU only · training stays independent."
+        "Continue text with a saved checkpoint. CPU only · training stays independent."
     )
     try:
         config = service_config()
@@ -375,7 +375,7 @@ def generation_page(
             st.download_button(
                 "Download completion",
                 result["prompt"] + result["completion"],
-                "devmind-completion.txt",
+                "completion.txt",
                 "text/plain",
             )
             with st.expander("Input, settings and verified identity"):

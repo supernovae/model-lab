@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import json
+import os
 import re
 import sqlite3
 from collections.abc import Callable
@@ -12,9 +13,22 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
-ARCHIVE_MAP = Path(
-    "/tank/klab/projects/devmind/archive/checkpoint-copy-20261105-v1/original-to-archive.json"
-)
+ARCHIVE_MAP_ENV = "KLAB_CHECKPOINT_ARCHIVE_MAP"
+
+
+def _archived(archive_map: Path | None) -> dict[str, str]:
+    """Relocation records from an explicit map, or the operator's environment selection."""
+    if archive_map is None:
+        location = os.environ.get(ARCHIVE_MAP_ENV)
+        if not location:
+            return {}
+        archive_map = Path(location)
+    if not archive_map.is_file():
+        return {}
+    return {
+        item["source"]: item["archive"]
+        for item in json.loads(archive_map.read_text())["checkpoints"]
+    }
 
 
 @dataclass(frozen=True)
@@ -74,15 +88,10 @@ def catalog(root: Path) -> list[SavedSnapshot]:
 
 
 def available_catalog(
-    root: Path, archive_map: Path = ARCHIVE_MAP
+    root: Path, archive_map: Path | None = None
 ) -> list[SavedSnapshot]:
     """Eligibility is an inventory check, never a replacement for native cold verification."""
-    archived = {}
-    if archive_map.is_file():
-        archived = {
-            item["source"]: item["archive"]
-            for item in json.loads(archive_map.read_text())["checkpoints"]
-        }
+    archived = _archived(archive_map)
     result = []
     for item in catalog(root):
         try:
@@ -96,19 +105,14 @@ def available_catalog(
 def resolve_candidate(
     root: Path,
     selected: SavedSnapshot,
-    archive_map: Path = ARCHIVE_MAP,
+    archive_map: Path | None = None,
     *,
     archived: dict[str, str] | None = None,
 ) -> Path:
     """Consult relocation mapping before any generation read; never fall back to an old copy."""
     original = root / selected.run / selected.checkpoint
     if archived is None:
-        archived = {}
-        if archive_map.is_file():
-            archived = {
-                item["source"]: item["archive"]
-                for item in json.loads(archive_map.read_text())["checkpoints"]
-            }
+        archived = _archived(archive_map)
     if str(original) in archived:
         raise ValueError(
             "Archived checkpoint at "

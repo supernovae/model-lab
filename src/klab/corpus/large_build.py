@@ -1274,7 +1274,7 @@ def _emit_build(
             "token_count_reason": "final_tokenizer_not_fitted",
             "proxy_warning": (
                 "Whitespace words and UTF-8 bytes/4 are tokenizer-independent "
-                "descriptors, not measured DevMind token counts."
+                "descriptors, not measured token counts."
             ),
         },
         "rights": {

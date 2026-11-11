@@ -16,15 +16,33 @@ from klab.data.preparation_telemetry import PreparationTelemetry
 from klab.progress import progress_phase
 from klab.resource_envelope import check_envelope, current_process_rss_bytes
 
+THREADS_PER_CHILD = 4
+TOKENS_PER_CHILD = 32_000_000
+MAX_SHARD_WORKERS = 32
+
 
 class PreparationWorkers:
-    def __init__(self, tokenizer, root, *, envelope, parallel_supported):
-        self.plan = tokenizer_work_plan(
-            None
-            if envelope is None or envelope.max_workers is None
-            else min(4, envelope.max_workers)
-        )
-        self.requested = 1 if envelope is None else envelope.preparation_shard_workers
+    def __init__(
+        self, tokenizer, root, *, envelope, parallel_supported, token_budget=0
+    ):
+        if envelope is None:
+            # No operator policy: use measured host capacity where the declared
+            # token budget can repay extra children. One tokenizer child stops
+            # scaling near eight threads, so the budget is spread over children.
+            capacity = tokenizer_work_plan(None, default_cap=None).workers
+            self.requested = (
+                min(
+                    MAX_SHARD_WORKERS,
+                    -(-capacity // THREADS_PER_CHILD),
+                    max(1, -(-token_budget // TOKENS_PER_CHILD)),
+                )
+                if parallel_supported
+                else 1
+            )
+            self.plan = tokenizer_work_plan(self.requested * THREADS_PER_CHILD)
+        else:
+            self.plan = tokenizer_work_plan(envelope.max_workers)
+            self.requested = envelope.preparation_shard_workers
         queue_cap = None if envelope is None else envelope.max_queue_depth
         self.count = min(self.requested, self.plan.workers, queue_cap or self.requested)
         self.fallback = (

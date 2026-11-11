@@ -1231,6 +1231,7 @@ class PyTorchEngine:
             for batch, chunk_valid in zip(microbatches, chunk_counts, strict=True)
             if chunk_valid or batch.position_mask is not None
         ]
+        devices_used = 1
         if (
             self._secondary_replicas
             and len(microbatches) >= 2
@@ -1240,6 +1241,7 @@ class PyTorchEngine:
             and self.scaler is None
             and self.offload is None
         ):
+            devices_used = min(len(active_pairs), 1 + len(self._secondary_replicas))
             trainable_inputs = [
                 parameter for parameter in model.parameters() if parameter.requires_grad
             ]
@@ -1808,6 +1810,11 @@ class PyTorchEngine:
             "performance/tokens_per_second": valid_targets / max(elapsed, 1e-9),
             "batch/micro_batch_size": float(config.training.micro_batch_size),
             "batch/accumulation_steps": float(len(microbatches)),
+            **(
+                {"batch/devices_used": float(devices_used)}
+                if self._secondary_replicas
+                else {}
+            ),
             "batch/effective_batch_size": float(
                 sum(batch.inputs.shape[0] for batch in microbatches)
             ),
