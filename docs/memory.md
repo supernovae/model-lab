@@ -7,11 +7,11 @@ Training memory is not one number. Model Lab separates a conservative **estimate
 The `inspect` estimator currently reports these byte categories:
 
 - **Resident weights** — all model parameters, including stored but inactive MoE experts and frozen portable-memory tables. Tied embeddings/output weights are counted once.
-- **Runtime buffers** — registered causal masks and RoPE caches. They are not parameter bytes merely because they are persistent runtime state.
+- **Runtime buffers** — RoPE caches and token-memory maps. Attention masks are built per call and are not registered. They are not parameter bytes merely because they are persistent runtime state.
 - **Gradients** — FP32 gradients for trainable parameters.
 - **Optimizer state** — AdamW moment state, or the modeled Adafactor factors. Optimizer state is separate from weights and gradients.
 - **Retained activations** — tensors held for backward, including logits/loss allowance and memory-adapter values.
-- **Attention working tensors** — projection and score/probability allowances. The reference estimate keeps a dense $T^2$ allowance for dense, sliding, MLA, and block-sparse attention; selection semantics are not a measured sparse-memory reduction.
+- **Attention working tensors** — projection and score/probability allowances, sized by how many keys each query scores: two windows for `sliding_window`; the local window plus selected blocks (and one gathered copy of those keys and values) for `local_selected`; none for `sdpa` dense or MLA attention on CUDA/XPU, which is an assumption to confirm with a measured warmup; and a full $T^2$ allowance otherwise (reference dense, MLA and block-sparse, and `sdpa` on CPU, MPS and ROCm). The estimate version is `reference-v2`.
 - **Temporary workspace** — a conservative allocator/kernel/logit allowance.
 - **Headroom** — 15% of the preceding subtotal, reserved for uncertainty rather than an allocation category available to the model.
 

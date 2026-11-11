@@ -150,28 +150,72 @@ def optimizer_state_bytes(
 
 
 def registered_runtime_buffers_bytes(config: RunConfig) -> int:
-    """Account for nonpersistent masks and RoPE caches actually registered by blocks."""
-    d, layers, context = (
-        config.model.hidden_dim,
-        config.model.num_layers,
-        config.model.max_seq_len,
-    )
+    """Account for nonpersistent RoPE caches actually registered by blocks."""
+    d, layers = config.model.hidden_dim, config.model.num_layers
     head_dim = d // config.model.num_heads
-    # Dense/sliding and MLA own an [C,C] bool causal mask. RoPE owns fp32
-    # inverse frequency plus fp32 cos/sin caches built through the requested T.
-    mask = (
-        context * context
-        if config.attention.kind in {"dense", "sliding_window", "mla"}
-        and config.attention.implementation != "sdpa"
-        else 0
-    )
+    # Attention keeps no [C,C] mask buffer: masks are built per call. RoPE owns
+    # fp32 inverse frequency plus fp32 cos/sin caches built through the requested T.
     rope = 4 * (head_dim // 2 + config.training.seq_len * head_dim)
     mapping_bytes = (
         8 * config.model.vocab_size * max(1, len(config.model.memory_block_sites))
         if config.model.memory_token_mapping is not None
         else 0
     )
-    return layers * (mask + rope) + mapping_bytes
+    return layers * rope + mapping_bytes
+
+
+def _attention_reach(config: RunConfig) -> tuple[int, int, str]:
+    """Keys scored per query, gathered K/V width per position, and the assumption.
+
+    Score and probability tensors are sized by how many keys each query
+    actually scores, so a bounded attention is not charged for a ``[T, T]``
+    matrix it never builds.
+    """
+    attention, model, t = config.attention, config.model, config.training.seq_len
+    if attention.kind == "local_selected":
+        assert attention.block_size and attention.window_size
+        assert attention.selected_blocks is not None
+        slots = attention.window_size // attention.block_size + 1
+        slots += attention.selected_blocks
+        reach = min(t, slots * attention.block_size)
+        value_width = attention.latent_dim or model.hidden_dim
+        return (
+            reach,
+            # Selected key and value blocks are copied once per query block.
+            (reach // attention.block_size) * (model.hidden_dim + value_width),
+            (
+                "local_selected attention scores its local window and selected "
+                "blocks only, plus one gathered copy of those keys and values"
+            ),
+        )
+    if attention.kind == "sliding_window":
+        assert attention.window_size is not None
+        return (
+            min(t, 2 * attention.window_size),
+            0,
+            "sliding-window attention scores at most two windows of keys per query",
+        )
+    if (
+        attention.implementation == "sdpa"
+        and attention.kind in {"dense", "mla"}
+        and config.runtime.backend in {"cuda", "xpu"}
+    ):
+        return (
+            0,
+            0,
+            (
+                "fused scaled-dot-product attention on CUDA/XPU is assumed not to "
+                "retain a [T, T] score matrix; verify with a measured warmup"
+            ),
+        )
+    return (
+        t,
+        0,
+        (
+            "a full [T, T] score/probability allowance is kept for dense, MLA and "
+            "block-sparse attention on this implementation and backend"
+        ),
+    )
 
 
 def estimate_memory(
@@ -212,7 +256,12 @@ def estimate_memory(
         if attention.kind == "mla"
         else d + 2 * (model.num_kv_heads or h) * (d // h)
     )
-    per_block_attention = 4 * b * t * projected_width + 2 * 4 * b * h * t * t
+    keys_per_query, gathered_width, attention_note = _attention_reach(config)
+    per_block_attention = (
+        4 * b * t * projected_width
+        + 2 * 4 * b * h * t * keys_per_query
+        + 4 * b * t * gathered_width
+    )
     streams = (
         (len(model.memory_ngram_orders) or 1) * model.memory_hash_heads
         if model.memory == "ngram"
@@ -265,9 +314,9 @@ def estimate_memory(
         assert ceiling is not None
         result = "LIKELY_TO_FIT" if peak <= ceiling else "LIKELY_TO_EXCEED"
     assumptions = [
-        "reference-v1: FP32 master parameters and gradients; autocast does not reduce resident model or optimizer state",
+        "reference-v2: FP32 master parameters and gradients; autocast does not reduce resident model or optimizer state",
         "categories are disjoint: registered buffers, retained activations, attention working tensors, workspace, and headroom",
-        "dense score/probability allowance remains conservative for sliding, MLA, and block-sparse reference attention",
+        attention_note,
     ]
     if config.runtime.memory.activation_offload.enabled:
         assumptions.append(
@@ -280,7 +329,7 @@ def estimate_memory(
             "artificial budget can only demonstrate an exceedance; it cannot certify a physical fit"
         )
     return MemoryEstimate(
-        "reference-v1",
+        "reference-v2",
         result,
         peak,
         ceiling,

@@ -671,7 +671,9 @@ OptimizerConfig = Annotated[AdamWConfig | AdafactorConfig, Field(discriminator="
 
 
 class AttentionConfig(StrictModel):
-    kind: Literal["dense", "sliding_window", "mla", "block_sparse"] = "dense"
+    kind: Literal[
+        "dense", "sliding_window", "mla", "block_sparse", "local_selected"
+    ] = "dense"
     implementation: Literal["reference", "sdpa"] = Field(
         default="reference", exclude_if=lambda value: value == "reference"
     )
@@ -711,8 +713,33 @@ class AttentionConfig(StrictModel):
             raise ValueError(
                 "block_sparse attention requires block_size and selected_blocks"
             )
-        if self.implementation == "sdpa" and self.kind != "dense":
-            raise ValueError("SDPA implementation requires attention.kind=dense")
+        if self.kind == "local_selected":
+            if (
+                self.block_size is None
+                or self.selected_blocks is None
+                or self.window_size is None
+            ):
+                raise ValueError(
+                    "local_selected attention requires block_size, window_size "
+                    "and selected_blocks"
+                )
+            if self.window_size % self.block_size:
+                raise ValueError(
+                    "local_selected window_size must be a multiple of block_size"
+                )
+            if self.implementation != "reference":
+                raise ValueError(
+                    "local_selected attention has one implementation; "
+                    "leave attention.implementation unset"
+                )
+        if self.implementation == "sdpa" and self.kind not in {
+            "dense",
+            "sliding_window",
+            "mla",
+        }:
+            raise ValueError(
+                "SDPA implementation requires dense, sliding_window or mla attention"
+            )
         return self
 
 
@@ -957,7 +984,7 @@ class RunConfig(StrictModel):
                     "portability runs require an explicit trainable_parameters list"
                 )
         if (
-            self.attention.kind == "mla"
+            self.attention.latent_dim is not None
             and self.attention.latent_dim % self.model.num_heads
         ):
             raise ValueError("attention.latent_dim must divide evenly across heads")
@@ -965,7 +992,7 @@ class RunConfig(StrictModel):
             self.model.num_kv_heads is not None
             and self.model.num_kv_heads != self.model.num_heads
             and (
-                self.attention.kind in {"mla", "block_sparse"}
+                self.attention.kind in {"mla", "block_sparse", "local_selected"}
                 or self.runtime.engine == "mlx"
             )
         ):

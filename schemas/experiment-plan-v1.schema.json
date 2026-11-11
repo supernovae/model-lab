@@ -370,7 +370,8 @@
             "dense",
             "sliding_window",
             "mla",
-            "block_sparse"
+            "block_sparse",
+            "local_selected"
           ],
           "title": "Kind",
           "type": "string"

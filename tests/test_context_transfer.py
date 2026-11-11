@@ -16,13 +16,13 @@ def test_sdpa_avoids_unused_dense_masks_and_keeps_reference_diagnostics():
     sdpa = DenseAttention(8, 2, 8192, 10000.0, implementation="sdpa")
     reference = DenseAttention(8, 2, 32, 10000.0)
     reference.load_state_dict(sdpa.state_dict())
-    assert sdpa.causal_mask.numel() == 0
+    assert "causal_mask" not in dict(sdpa.named_buffers())
     x = torch.randn(1, 17, 8)
     torch.testing.assert_close(sdpa(x), reference(x))
     torch.testing.assert_close(
         sdpa.attention_probabilities(x), reference.attention_probabilities(x)
     )
-    assert sdpa.causal_mask.numel() == 0
+    assert "causal_mask" not in dict(sdpa.named_buffers())
     with pytest.raises(ValueError, match="context"):
         sdpa(torch.empty(1, 8193, 8))
 
@@ -69,7 +69,7 @@ def test_long_document_rope_multiport_and_chunked_cache(tmp_path, context):
         )
         fresh, _ = model.forward_cached(ids[:, :32], cache_capacity=context)
         torch.testing.assert_close(fresh, full[:, :32], rtol=1e-4, atol=1e-5)
-    assert all(block.attention.causal_mask.numel() == 0 for block in model.blocks)
+    assert not any(name.endswith("causal_mask") for name, _ in model.named_buffers())
     assert model.blocks[0].attention.rope.cos.shape[2] == context
 
 

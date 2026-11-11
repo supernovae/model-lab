@@ -17,6 +17,7 @@ SMOKE_FAMILIES = {
     "dense": "smoke_cpu.yaml",
     "moe": "smoke_moe_cpu.yaml",
     "block_sparse": "smoke_sparse_cpu.yaml",
+    "local_selected": "smoke_local_selected_cpu.yaml",
     "sliding": "smoke_sliding_cpu.yaml",
     "mla": "smoke_mla_cpu.yaml",
     "token_engram": "smoke_memory_cpu.yaml",

@@ -91,8 +91,7 @@ def named_tensor_inventory(
         _add(tensors, f"{prefix}.norm1.weight", (d,))
         _add(tensors, f"{prefix}.norm2.weight", (d,))
         attention_prefix = f"{prefix}.attention"
-        if attention.kind == "mla":
-            assert attention.latent_dim is not None
+        if attention.latent_dim is not None:
             latent = attention.latent_dim
             _add(tensors, f"{attention_prefix}.q_proj.weight", (d, d))
             _add(tensors, f"{attention_prefix}.kv_down.weight", (latent, d))

@@ -42,9 +42,34 @@ This is **compute sparsity**, not sparse attention or external memory. The imple
 `attention.kind: sliding_window` restricts query position $t$ to keys from
 `max(0, t - window_size + 1)` through $t$. It preserves causal masking and
 does not change the projections, RoPE, values, output width, or residual
-path. The reference implementation applies this boundary as a mask over
-ordinary score tensors; it demonstrates attention sparsity but does not claim
-a sparse-kernel speedup or long-context scaling result.
+path. Sequences longer than the window are computed in window-sized query
+chunks that score only the keys they can see, so work and memory grow with
+`T * window_size` in both the `reference` and `sdpa` implementations, and the
+incremental cache reads only the last window of stored keys. Weights equal a
+full masked score matrix. No speedup over dense attention has been measured on
+an accelerator.
+
+## Local plus selected-block attention
+
+`attention.kind: local_selected` is the long-context sparse attention. The
+sequence is cut into blocks of `block_size` tokens, and every query attends to
+its own block causally, to the `window_size / block_size` blocks before it, and
+to `selected_blocks` earlier blocks chosen per head. A block's selection scores
+its first query against the mean key of each earlier block, so no position sees
+a later token. All queries of a block share one gather; there is no per-position
+loop and no `[T, T]` tensor. With `latent_dim`, keys and values use the MLA
+latent projections, combining sparse selection with latent K/V compression.
+See [sparse attention](sparse-attention.md#local-plus-selected-blocks).
+
+## Composing attention and feed-forward kinds
+
+A decoder block pairs one attention kind with one feed-forward kind, and the
+two are independent: `dense`, `sliding_window`, `mla`, `block_sparse` and
+`local_selected` each work with `model.ffn: dense` or `moe`.
+`klab.model.transformer.ATTENTION_BUILDERS` maps each kind to its builder, so an
+experimental attention is one module plus one entry, with no change to the block
+or the MoE path. Attention keeps no `[max_seq_len, max_seq_len]` buffer: a large
+configured context costs nothing until a sequence that long runs.
 
 ## Block-sparse attention
 
@@ -58,9 +83,10 @@ The PyTorch path uses an inspectable reference loop on CPU and non-ROCm devices.
 `attention.kind: mla` first compresses each hidden state to `latent_dim`, then
 expands latent keys for RoPE dot products while retaining head-partitioned
 latent values. Attention output is projected from latent width back to hidden
-width. `latent_dim` must divide evenly across heads. This is a causal reference
-implementation; it does not provide a fused latent KV cache or a decode-memory
-bandwidth claim.
+width. `latent_dim` must divide evenly across heads. With
+`attention.implementation: sdpa` it uses fused scaled-dot-product attention and
+builds no `[T, T]` weight tensor where the backend provides a fused kernel. It
+does not provide a fused latent KV cache or a decode-memory bandwidth claim.
 
 ## Inference cache versus training state
 

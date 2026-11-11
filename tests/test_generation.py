@@ -350,7 +350,7 @@ def test_grouped_query_attention_matches_explicit_kv_repeat_reference() -> None:
     repeated_key = key.repeat_interleave(2, dim=1)
     repeated_value = value.repeat_interleave(2, dim=1)
     scores = query @ repeated_key.transpose(-2, -1) / (attention.head_dim**0.5)
-    scores.masked_fill_(attention.causal_mask[:5, :5], float("-inf"))
+    scores.masked_fill_(attention.blocked_mask(5), float("-inf"))
     output = torch.softmax(scores.float(), dim=-1).to(value.dtype) @ repeated_value
     expected = attention.out_proj(output.transpose(1, 2).contiguous().view(2, 5, 16))
 

@@ -79,11 +79,18 @@ def test_sdpa_is_opt_in_and_default_serialization_is_unchanged() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
-        ({"kind": "sliding_window", "window_size": 2}, "requires attention.kind=dense"),
-        ({"kind": "mla", "latent_dim": 4}, "requires attention.kind=dense"),
         (
             {"kind": "block_sparse", "block_size": 2, "selected_blocks": 1},
-            "requires attention.kind=dense",
+            "requires dense, sliding_window or mla",
+        ),
+        (
+            {
+                "kind": "local_selected",
+                "block_size": 2,
+                "window_size": 4,
+                "selected_blocks": 1,
+            },
+            "leave attention.implementation unset",
         ),
     ],
 )
