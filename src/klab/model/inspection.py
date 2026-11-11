@@ -104,6 +104,15 @@ def named_tensor_inventory(
             _add(tensors, f"{attention_prefix}.v_proj.weight", (kv_dim, d))
             _add(tensors, f"{attention_prefix}.out_proj.weight", (d, d))
 
+        if attention.selector == "learned":
+            assert attention.block_size is not None
+            _add(
+                tensors,
+                f"{attention_prefix}.pool_logits",
+                (m.num_heads, attention.block_size),
+            )
+            _add(tensors, f"{attention_prefix}.coarse_gate", (m.num_heads,))
+
         ffn_prefix = f"{prefix}.ffn"
         if m.ffn == "dense":
             for projection, shape in (

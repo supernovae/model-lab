@@ -178,9 +178,13 @@ def _attention_reach(config: RunConfig) -> tuple[int, int, str]:
         slots = attention.window_size // attention.block_size + 1
         slots += attention.selected_blocks
         reach = min(t, slots * attention.block_size)
+        # The learned selector's coarse branch also scores one summary per block.
+        coarse = (
+            -(-t // attention.block_size) + 1 if attention.selector == "learned" else 0
+        )
         value_width = attention.latent_dim or model.hidden_dim
         return (
-            reach,
+            reach + coarse,
             # Selected key and value blocks are copied once per query block.
             (reach // attention.block_size) * (model.hidden_dim + value_width),
             (

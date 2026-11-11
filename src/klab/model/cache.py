@@ -20,7 +20,7 @@ class IncrementalCacheCapability:
 
     supported: bool
     reason: str | None = None
-    backend: Literal["dense", "sliding", "mla"] | None = None
+    backend: Literal["dense", "sliding", "mla", "local_selected"] | None = None
 
 
 @dataclass
@@ -31,6 +31,9 @@ class AttentionKVCache:
     value: Tensor
     length: int
     position: int
+    # Per-layer state an attention keeps beside K/V, such as block summaries
+    # and block selections for sparse attention.
+    extra: dict[str, Tensor] = field(default_factory=dict)
 
     @property
     def capacity(self) -> int:
@@ -38,9 +41,9 @@ class AttentionKVCache:
 
     @property
     def allocated_bytes(self) -> int:
-        return (
-            self.key.numel() * self.key.element_size()
-            + self.value.numel() * self.value.element_size()
+        return sum(
+            tensor.numel() * tensor.element_size()
+            for tensor in (self.key, self.value, *self.extra.values())
         )
 
     def append(self, key: Tensor, value: Tensor, *, position: int) -> None:
@@ -84,7 +87,7 @@ class GenerationCache:
     input_ids: Tensor
     length: int
     capacity: int
-    mode: Literal["dense", "sliding", "mla"]
+    mode: Literal["dense", "sliding", "mla", "local_selected"]
     owner: object
     batch_size: int
     device: torch.device

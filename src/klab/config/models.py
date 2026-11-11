@@ -682,6 +682,9 @@ class AttentionConfig(StrictModel):
     latent_dim: int | None = Field(default=None, gt=0)
     block_size: int | None = Field(default=None, gt=0)
     selected_blocks: int | None = Field(default=None, gt=0)
+    selector: Literal["mean_key", "learned"] = Field(
+        default="mean_key", exclude_if=lambda value: value == "mean_key"
+    )
 
     @model_validator(mode="after")
     def validate_kind(self) -> AttentionConfig:
@@ -732,6 +735,8 @@ class AttentionConfig(StrictModel):
                     "local_selected attention has one implementation; "
                     "leave attention.implementation unset"
                 )
+        if self.selector != "mean_key" and self.kind != "local_selected":
+            raise ValueError("attention.selector requires kind=local_selected")
         if self.implementation == "sdpa" and self.kind not in {
             "dense",
             "sliding_window",

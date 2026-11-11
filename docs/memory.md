@@ -11,7 +11,7 @@ The `inspect` estimator currently reports these byte categories:
 - **Gradients** — FP32 gradients for trainable parameters.
 - **Optimizer state** — AdamW moment state, or the modeled Adafactor factors. Optimizer state is separate from weights and gradients.
 - **Retained activations** — tensors held for backward, including logits/loss allowance and memory-adapter values.
-- **Attention working tensors** — projection and score/probability allowances, sized by how many keys each query scores: two windows for `sliding_window`; the local window plus selected blocks (and one gathered copy of those keys and values) for `local_selected`; none for `sdpa` dense or MLA attention on CUDA/XPU, which is an assumption to confirm with a measured warmup; and a full $T^2$ allowance otherwise (reference dense, MLA and block-sparse, and `sdpa` on CPU, MPS and ROCm). The estimate version is `reference-v2`.
+- **Attention working tensors** — projection and score/probability allowances, sized by how many keys each query scores: two windows for `sliding_window`; the local window plus selected blocks (and one gathered copy of those keys and values, plus one summary per block with the learned selector) for `local_selected`; none for `sdpa` dense or MLA attention on CUDA/XPU, which is an assumption to confirm with a measured warmup; and a full $T^2$ allowance otherwise (reference dense, MLA and block-sparse, and `sdpa` on CPU, MPS and ROCm). The estimate version is `reference-v2`.
 - **Temporary workspace** — a conservative allocator/kernel/logit allowance.
 - **Headroom** — 15% of the preceding subtotal, reserved for uncertainty rather than an allocation category available to the model.
 
