@@ -14,8 +14,9 @@ import time
 from collections import Counter
 from collections.abc import Iterator, Sequence
 from contextlib import nullcontext
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
-from functools import lru_cache, partial
+from functools import lru_cache, partial, wraps
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -46,6 +47,7 @@ from klab.data.preparation_workers import (
     PreparationWorkers,
     collect_parallel_stream,
 )
+from klab.data.token_store import TokenStore
 from klab.data.verification import (
     HashingWriter,
     VerifiedFile,
@@ -1258,6 +1260,183 @@ def _collect_streaming(
     return stats
 
 
+def _documents_encode_independently(tokenizer: Tokenizer) -> bool:
+    """Whether batched, parallel and one-at-a-time encoding give the same IDs."""
+    tokenizer_spec = json.loads(tokenizer.to_str())
+    bpe = tokenizer_spec.get("model", {})
+    return (
+        bpe.get("type") == "BPE"
+        and bpe.get("dropout") in (None, 0.0)
+        and not bpe.get("byte_fallback", False)
+        and bpe.get("continuing_subword_prefix") in (None, "")
+        and bpe.get("end_of_word_suffix") in (None, "")
+        and tokenizer_spec.get("pre_tokenizer", {}).get("type") == "ByteLevel"
+        and tokenizer_spec.get("normalizer") is None
+        and tokenizer_spec.get("pre_tokenizer", {}).get("add_prefix_space") is False
+        and tokenizer_spec.get("padding") is None
+    )
+
+
+# Staging directories of the token-store path, removed if preparation fails.
+_STORE_STAGING: ContextVar[list[Path] | None] = ContextVar(
+    "klab_token_store_staging", default=None
+)
+# The reusable token store is used for eligible sources; tests compare it with
+# the chunked path by turning it off.
+TOKEN_STORE_ENABLED = True
+
+
+def _discard_store_staging_on_failure(function):
+    """Leave no token-store staging directory behind when preparation fails."""
+
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        token = _STORE_STAGING.set([])
+        try:
+            return function(*args, **kwargs)
+        except BaseException:
+            for staging in _STORE_STAGING.get() or []:
+                shutil.rmtree(staging, ignore_errors=True)
+            raise
+        finally:
+            _STORE_STAGING.reset(token)
+
+    return guarded
+
+
+def token_store_root(cache_dir: Path) -> Path:
+    """Where a dataset cache directory keeps its reusable token shards.
+
+    The store sits beside the cache directory, so every run that shares a cache
+    directory shares its tokens, and a cache directory in a private or
+    temporary location keeps its tokens there too.
+    """
+    return cache_dir.with_name(cache_dir.name + "-tokens")
+
+
+def _token_stores(
+    config: RunConfig,
+    tokenizer: Tokenizer,
+    source_sha256: dict[str, str],
+    *,
+    tokenizer_batch_source_bytes: int,
+    resource_envelope: ResourceEnvelope | None,
+    telemetry: PreparationTelemetry,
+) -> dict[str, tuple[TokenStore, int, int]] | None:
+    """Build or extend the token store for both splits of a local_text source.
+
+    Returns each split's store with its selected document and token counts, or
+    ``None`` when the source is not eligible and the chunked path must run. The
+    checks and messages are those of the chunked path, so a selection it would
+    refuse is refused here in the same words.
+    """
+    eos = tokenizer.token_to_id("<eos>")
+    if eos is None:
+        raise ValueError("tokenizer has no <eos> special token")
+    from klab.data.encoding import tokenizer_work_plan
+    from klab.workspace_preflight import check_storage, require_storage
+
+    workers = tokenizer_work_plan(
+        None if resource_envelope is None else resource_envelope.max_workers,
+        default_cap=None,
+    ).workers
+    base = token_store_root(config.dataset.cache_dir)
+    selected = {}
+    for split in ("train", "validation"):
+        source = getattr(config.dataset, f"{split}_path")
+        documents = getattr(config.dataset, f"{split}_max_documents")
+        max_tokens = getattr(config.dataset, f"{split}_max_tokens")
+        store = TokenStore.open(
+            base,
+            source_sha256=source_sha256[f"{split}_sha256"],
+            tokenizer_sha256=canonical_tokenizer_sha256(tokenizer),
+            eos=eos,
+        )
+        if not store.complete and store.documents < documents:
+            # ByteLevel BPE never yields more tokens than bytes; real text is
+            # near four bytes per token, so two is a safe planning bound.
+            unread = source.stat().st_size - (
+                int(store.shards[-1]["source_end"]) if store.shards else 0
+            )
+            require_storage(
+                [
+                    check_storage(
+                        base,
+                        projected_bytes=min(
+                            4 * max(max_tokens - store.tokens, 0), 2 * unread
+                        ),
+                    )
+                ]
+            )
+        started = time.monotonic()
+        with progress_phase(
+            f"data_{split}_token_store",
+            completed_work=store.documents,
+            total_work=documents,
+            unit="documents",
+        ) as progress:
+            store.extend(
+                source,
+                tokenizer,
+                documents=documents,
+                max_tokens=max_tokens,
+                source_bytes=tokenizer_batch_source_bytes,
+                workers=workers,
+                split=split,
+                progress=lambda done, tokens, progress=progress, total=documents: (
+                    progress.update(
+                        completed_work=done,
+                        total_work=total,
+                        unit="documents",
+                        raw_counters={"output_tokens": tokens},
+                    )
+                ),
+            )
+        telemetry.add("tokenizer_encoding_seconds", time.monotonic() - started)
+        ends = store.ends()[:documents]
+        if len(ends) and int(ends[-1]) > max_tokens:
+            first = int(np.searchsorted(ends, max_tokens, side="right"))
+            raise ValueError(
+                f"{split} token cap would truncate selected story "
+                f"{first + 1}: {int(ends[first])} > {max_tokens}"
+            )
+        if len(ends) != documents:
+            raise ValueError(
+                f"{split} snapshot has only {len(ends)} "
+                f"selected distinct stories; required {documents}"
+            )
+        if store.max_document_bytes(documents) > tokenizer_batch_source_bytes:
+            # Stored under a looser document cap: let the chunked path name the
+            # offending document.
+            return None
+        selected[split] = (store, documents, int(ends[-1]))
+    return selected
+
+
+def _copy_from_token_store(
+    store: TokenStore, tokens: int, path: Path, telemetry: PreparationTelemetry
+) -> VerifiedFile:
+    """Write the first ``tokens`` stored IDs as a prepared ``.npy`` array."""
+    temporary = path.with_name(path.stem + ".tmp.npy")
+    started = time.monotonic()
+    with temporary.open("xb") as output:
+        writer = HashingWriter(output)
+        np.lib.format.write_array_header_1_0(
+            writer,
+            {
+                "descr": np.lib.format.dtype_to_descr(np.dtype(np.int32)),
+                "fortran_order": False,
+                "shape": (tokens,),
+            },
+        )
+        store.copy_tokens(tokens, writer.write)
+        output.flush()
+        os.fsync(output.fileno())
+    temporary.replace(path)
+    telemetry.add("spool_write_seconds", time.monotonic() - started)
+    return _written_file(path, writer.digest.hexdigest(), writer.size)
+
+
 def _atomic_array(path: Path, values: np.ndarray) -> VerifiedFile:
     temporary = path.with_name(path.stem + ".tmp.npy")
     if not values.flags.c_contiguous:
@@ -2209,7 +2388,34 @@ def _prepare_data(
     require_storage([check_storage(root, projected_bytes=projected_data_bytes(config))])
     temporary_root = root.with_name(root.name + ".tmp")
     chunks_owner = None
-    if streaming:
+    token_stores = None
+    if (
+        TOKEN_STORE_ENABLED
+        and config.dataset.source == "local_text"
+        and not byte_enabled
+        and allocation is None
+        and _documents_encode_independently(tokenizer)
+    ):
+        assert local_chat is not None
+        token_stores = _token_stores(
+            config,
+            tokenizer,
+            local_chat,
+            tokenizer_batch_source_bytes=tokenizer_batch_source_bytes,
+            resource_envelope=resource_envelope,
+            telemetry=telemetry,
+        )
+    if token_stores is not None:
+        # Tokens come from the reusable store, so staging holds only the final
+        # arrays; it is removed if anything fails before publication.
+        root.parent.mkdir(parents=True, exist_ok=True)
+        temporary_root = Path(
+            tempfile.mkdtemp(prefix=f".{root.name}-", dir=root.parent)
+        )
+        staged = _STORE_STAGING.get()
+        if staged is not None:
+            staged.append(temporary_root)
+    elif streaming:
         assert binding is not None
         chunks_owner = PreparationChunks(
             temporary_root,
@@ -2238,23 +2444,39 @@ def _prepare_data(
         if byte_enabled
         else {}
     )
-    if config.dataset.source in {"local_stories", "local_text", "snapshot"}:
+    if token_stores is not None:
+        results = {}
+        for split, (store, documents, tokens) in token_stores.items():
+            proofs[f"{split}.npy"] = _copy_from_token_store(
+                store, tokens, temporary_root / f"{split}.npy", telemetry
+            )
+            results[split] = {
+                "acquired_documents": documents,
+                "retained_documents": documents,
+                "skipped_documents": 0,
+                "truncated_documents": 0,
+                "output_tokens": tokens,
+                "artifact_bytes": proofs[f"{split}.npy"].size_bytes,
+                "artifact_files": 1,
+            }
+            telemetry.records += documents
+            telemetry.output_tokens += tokens
+            telemetry.logical_output_bytes += proofs[f"{split}.npy"].size_bytes
+            telemetry.shards[split] = {
+                "token_store": str(store.root),
+                "token_store_shards": len(store.shards),
+            }
+        train_stats = results["train"]
+        validation_stats = results["validation"]
+        train = np.load(temporary_root / "train.npy", mmap_mode="r", allow_pickle=False)
+        validation = np.load(
+            temporary_root / "validation.npy", mmap_mode="r", allow_pickle=False
+        )
+    elif config.dataset.source in {"local_stories", "local_text", "snapshot"}:
         if config.dataset.source == "local_stories":
             assert local_stories is not None
         assert chunks_owner is not None
-        tokenizer_spec = json.loads(tokenizer.to_str())
-        bpe = tokenizer_spec.get("model", {})
-        parallel_supported = (
-            bpe.get("type") == "BPE"
-            and bpe.get("dropout") in (None, 0.0)
-            and not bpe.get("byte_fallback", False)
-            and bpe.get("continuing_subword_prefix") in (None, "")
-            and bpe.get("end_of_word_suffix") in (None, "")
-            and tokenizer_spec.get("pre_tokenizer", {}).get("type") == "ByteLevel"
-            and tokenizer_spec.get("normalizer") is None
-            and tokenizer_spec.get("pre_tokenizer", {}).get("add_prefix_space") is False
-            and tokenizer_spec.get("padding") is None
-        )
+        parallel_supported = _documents_encode_independently(tokenizer)
         results = {}
         with (
             chunks_owner,
@@ -2699,6 +2921,7 @@ def _prepare_data(
     return prepared
 
 
+@_discard_store_staging_on_failure
 def prepare_data(
     config: RunConfig,
     tokenizer: Tokenizer,
