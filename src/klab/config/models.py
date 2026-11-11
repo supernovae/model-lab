@@ -531,6 +531,11 @@ class RuntimeConfig(StrictModel):
                 raise ValueError(
                     "secondary_device_indices cannot be combined with activation offload"
                 )
+            if self.precision == "fp16":
+                raise ValueError(
+                    "secondary_device_indices cannot be combined with fp16: scaled "
+                    "updates run on the primary device only; use bf16 or fp32"
+                )
         return self
 
 
