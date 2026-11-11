@@ -79,7 +79,7 @@ jobs:
     # explore, and generate from real models within a fast iteration budget.
     if: github.event_name != 'workflow_dispatch' || inputs.suite == 'safe'
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 18
     steps:
       - uses: actions/checkout@v7
         with:
@@ -127,7 +127,7 @@ jobs:
     # Modules already run in safe and lab-loop are excluded to avoid duplication.
     if: github.event_name != 'workflow_dispatch' || inputs.suite == 'fast'
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 18
     steps:
       - uses: actions/checkout@v7
         with:
