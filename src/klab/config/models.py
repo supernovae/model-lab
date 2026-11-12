@@ -798,7 +798,12 @@ class FixedValidationPanel(StrictModel):
 
 
 class EvaluationConfig(StrictModel):
-    every_steps: int = Field(default=25, gt=0)
+    every_steps: int | None = Field(default=25, gt=0)
+    # Validate after this many trained targets. Either cadence triggers a
+    # pass; set every_steps to null for a purely token-based cadence.
+    every_tokens: int | None = Field(
+        default=None, gt=0, exclude_if=lambda value: value is None
+    )
     max_batches: int = Field(default=16, gt=0)
     batch_size: int | None = Field(
         default=None, gt=0, exclude_if=lambda value: value is None
@@ -820,6 +825,8 @@ class EvaluationConfig(StrictModel):
     def unique_panels(self) -> EvaluationConfig:
         if len({p.name for p in self.panels}) != len(self.panels):
             raise ValueError("fixed validation requires distinct named panels")
+        if self.every_steps is None and self.every_tokens is None:
+            raise ValueError("at least one evaluation cadence is required")
         return self
 
 
@@ -877,6 +884,11 @@ class CheckpointConfig(StrictModel):
     steps: tuple[Annotated[int, Field(strict=True, ge=0)], ...] = Field(
         default=(), exclude_if=lambda value: not value
     )
+    # Save whenever validation improves, in addition to the cadence above.
+    save_on_new_best: bool = Field(default=True, exclude_if=lambda value: value)
+    # Write, hash and verify off the training thread after a host-memory
+    # snapshot, so devices keep training while the checkpoint is written.
+    background: bool = Field(default=True, exclude_if=lambda value: value)
 
     @model_validator(mode="after")
     def validate_cadence(self) -> CheckpointConfig:

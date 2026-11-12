@@ -68,6 +68,7 @@ read: a [pinned snapshot](datasets.md#source-declaration-and-lock), a
 [Hugging Face dataset](datasets.md#source-kinds), chat transcripts or a
 [token mixture](token-store.md#mixture-output).
 
-Larger starting shapes are in `configs/`: `dense_7m.yaml` to `dense_50m.yaml`,
+For a long accelerator run, start from `configs/accelerator_scale.yaml`
+([keep accelerators busy](training.md#keep-accelerators-busy)). Other starting shapes are in `configs/`: `dense_7m.yaml` to `dense_50m.yaml`,
 `first_model_20m_cpu.yaml` and `scale_dense_160m_cuda.yaml`. Copy one and
 replace its `dataset` and `tokenizer` sections with yours.

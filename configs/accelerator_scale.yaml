@@ -1,0 +1,68 @@
+# Starting point for long accelerator runs: settings chosen so devices spend
+# their time on optimizer updates. See docs/training.md#keep-accelerators-busy.
+# Replace the tokenizer and dataset paths with yours, set runtime.backend to
+# your device, and run `klab inspect` before training.
+schema_version: 2
+name: accelerator-scale
+seed: 42
+model:
+  vocab_size: 32768
+  hidden_dim: 1024
+  num_layers: 12
+  num_heads: 16
+  ffn_dim: 2816
+  max_seq_len: 1024
+tokenizer:
+  path: ../work/tokenizer/tokenizer.json
+dataset:
+  source: local_text
+  license: replace with the terms of your corpus
+  train_path: ../work/corpus/train.jsonl
+  validation_path: ../work/corpus/validation.jsonl
+  cache_dir: ../work/data
+  train_max_documents: 100000000
+  validation_max_documents: 20000
+  train_max_tokens: 10000000000
+  validation_max_tokens: 4000000
+training:
+  seq_len: 1024
+  max_steps: 1000000
+  max_tokens: 10000000000
+  micro_batch_size: 16
+  gradient_accumulation: 1
+  # Bitwise-repeatable kernels and a single host thread cost throughput.
+  deterministic: false
+optimizer:
+  name: adamw
+  peak: 0.0003
+  floor: 0.00003
+  warmup_steps: 2000
+  weight_decay: 0.1
+attention:
+  kind: dense
+  implementation: sdpa
+evaluation:
+  # About 200 validation passes over the run, each a fixed 32 batches.
+  every_steps: null
+  every_tokens: 50000000
+  max_batches: 32
+checkpoint:
+  # Written in the background after a host-memory snapshot.
+  every_steps: null
+  every_tokens: 250000000
+  every_minutes: 60
+  save_on_new_best: false
+  keep_periodic: false
+logging:
+  root_dir: ../work/runs
+  every_steps: 50
+runtime:
+  engine: pytorch
+  backend: cuda
+  precision: bf16
+  compile_transformer_blocks: true
+  memory:
+    # Block compilation needs activation checkpointing off; turn it back on
+    # (and compilation off) if the model does not fit.
+    activation_checkpointing:
+      enabled: false

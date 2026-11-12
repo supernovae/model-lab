@@ -6,7 +6,7 @@ import math
 import sqlite3
 import threading
 import uuid
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
@@ -533,27 +533,54 @@ class ExperimentStore:
         wall_time: float,
         values: Mapping[str, float],
     ) -> None:
-        if not values or any(not math.isfinite(value) for value in values.values()):
-            raise ValueError("nonfinite or empty metric set")
-        normalized = {str(key): float(value) for key, value in values.items()}
-        payload = {
-            "step": step,
-            "tokens_seen": tokens_seen,
-            "wall_time": wall_time,
-            "values": normalized,
-        }
-        self._write(
-            run_id,
-            "metrics",
-            payload,
-            lambda con: con.executemany(
-                "INSERT INTO metrics VALUES(?,?,?,?,?,?)",
-                [
-                    (run_id, step, tokens_seen, wall_time, name, value)
-                    for name, value in normalized.items()
-                ],
-            ),
-        )
+        self.log_metrics_batch(run_id, [(step, tokens_seen, wall_time, values)])
+
+    def log_metrics_batch(
+        self,
+        run_id: str,
+        rows: Sequence[tuple[int, int, float, Mapping[str, float]]],
+    ) -> None:
+        """Record several updates' metrics in one transaction and one sync.
+
+        Each update keeps its own outbox record, exactly as separate
+        ``log_metrics`` calls would write.
+        """
+        payloads = []
+        for step, tokens_seen, wall_time, values in rows:
+            if not values or any(not math.isfinite(value) for value in values.values()):
+                raise ValueError("nonfinite or empty metric set")
+            payloads.append(
+                {
+                    "step": step,
+                    "tokens_seen": tokens_seen,
+                    "wall_time": wall_time,
+                    "values": {str(key): float(value) for key, value in values.items()},
+                }
+            )
+        if not payloads:
+            return
+        with self._connect() as con:
+            try:
+                for payload in payloads:
+                    con.executemany(
+                        "INSERT INTO metrics VALUES(?,?,?,?,?,?)",
+                        [
+                            (
+                                run_id,
+                                payload["step"],
+                                payload["tokens_seen"],
+                                payload["wall_time"],
+                                name,
+                                value,
+                            )
+                            for name, value in payload["values"].items()
+                        ],
+                    )
+                    self._append_outbox(con, run_id, "metrics", payload)
+                con.commit()
+            except BaseException:
+                con.rollback()
+                raise
 
     def log_event(
         self,

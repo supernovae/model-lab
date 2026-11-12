@@ -522,6 +522,16 @@
           },
           "title": "Steps",
           "type": "array"
+        },
+        "save_on_new_best": {
+          "default": true,
+          "title": "Save On New Best",
+          "type": "boolean"
+        },
+        "background": {
+          "default": true,
+          "title": "Background",
+          "type": "boolean"
         }
       },
       "title": "CheckpointConfig",
@@ -1104,10 +1114,30 @@
       "additionalProperties": false,
       "properties": {
         "every_steps": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
           "default": 25,
-          "exclusiveMinimum": 0,
-          "title": "Every Steps",
-          "type": "integer"
+          "title": "Every Steps"
+        },
+        "every_tokens": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Every Tokens"
         },
         "max_batches": {
           "default": 16,

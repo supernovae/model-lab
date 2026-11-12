@@ -82,6 +82,54 @@ run state. The dashboard's Training and Runtime views are operational telemetry,
 not a scheduler or automatic tuning interface. See [runtime policy](runtime.md#runtime-forecasting-and-progress)
 for exact-history matching and interpretation limits.
 
+## Keep accelerators busy
+
+An accelerator is idle whenever the trainer waits on something other than an
+optimizer update. These settings bound that time; the
+[`accelerator_scale.yaml`](../configs/accelerator_scale.yaml) preset sets all of
+them and is the starting point for a long run.
+
+| Setting | Effect |
+| --- | --- |
+| `checkpoint.background` (default `true`) | A PyTorch checkpoint is copied to host memory, then written, hashed and verified off the training thread. Training waits only for the copy. |
+| `checkpoint.every_tokens`, `every_minutes` | Checkpoint by trained tokens or wall time instead of a step count. Set `every_steps: null` to use only these. |
+| `checkpoint.save_on_new_best: false` | An improving validation loss no longer writes a checkpoint by itself; `best` is then the best of the cadence checkpoints. |
+| `evaluation.every_tokens` | Validate by trained tokens. Set `every_steps: null` to use only this. |
+| `logging.every_steps` | Record update metrics every N updates (the first and last are always kept). |
+| `training.deterministic: false` | Lets the backend pick its fastest kernels and use all host threads. Runs are then not bitwise repeatable. |
+| `runtime.precision: bf16`, `attention.implementation: sdpa`, `runtime.compile_transformer_blocks: true` | Faster updates where the backend supports them. Test the workload first. |
+
+Background checkpoints need host memory for one copy of the weights and
+optimizer state. If less than 1.5 times that is available, that checkpoint is
+written inline instead. The final checkpoint of a run, milestone-retention
+runs and MLX runs are always written inline. One checkpoint is written at a
+time: if the next one is due before the previous has finished, training waits
+for it. A failed background write fails the run at the next update.
+
+Update metrics and `progress.json` are written at most once a second and are
+held while a checkpoint is being written, because small synced writes stall
+behind its disk writeback. The dashboard can therefore trail training by that
+long.
+
+Every run records where its wall time went in the `runtime_final_observation`
+event: `checkpoint` is time training waited, `checkpoint_background` is write
+time that overlapped training, and `validation` is inline validation.
+
+Measured on one Arc Pro B70 with a 155M-parameter dense model (bf16, 200
+updates of 4,096 tokens, about 1.9 GB per checkpoint):
+
+| Run | End to end | Waiting on checkpoints | Validation | Checkpoints |
+| --- | --- | --- | --- | --- |
+| Before, default cadences | 105.6 s | 46.2 s (43.8%) | 9.4 s | 6 |
+| After, same config | 68.8 s | 10.6 s (15.5%) | 9.4 s | 6 |
+| After, token cadences and no best saves | 60.2 s | 10.5 s (17.4%) | 5.3 s | 3 |
+| After, plus SDPA, compiled blocks, relaxed determinism | 51.9 s | 11.9 s (22.8%) | 10.6 s | 3 |
+
+About 8 s of the remaining wait in each row is the final checkpoint, which is
+written inline; on a long run that is a fixed cost. The last row's validation
+time includes compiling the blocks. This is one short run per row on one
+machine, not a benchmark of long runs.
+
 ## Checkpoint and resume workflow
 
 PyTorch checkpoints are immutable local generations under `klab-work/runs/<run-id>/checkpoints/`; `latest.json` points to the newest validated generation. Verify a checkpoint before continuing it:
@@ -110,7 +158,7 @@ records one executed ROCm continuation rather than a generic performance guarant
 
 Current run manifests retain `manifest_version: 1` with `identity_version: run-identity-v2`. Requested/effective configuration digests exclude machine-local paths; architecture identity covers model and attention semantics separately. Historical identity-less manifests keep their original digest interpretation. A child's `parent_run_id` and `checkpoint_sha256` bind the exact selected parent generation, not a moving pointer.
 
-Full PyTorch continuation uses checkpoint directory format 2 with native state codec version 2. Verification checks the resolved RunConfig and its digests, canonical tensors/aliases/trainability, named optimizer coverage and moment shapes, completed-update schedule and learning rate, counters/cursor, and safe host/selected-device RNG envelopes. Saving streams model weights by shard rather than cloning the whole model to CPU first. Older format-2 native envelopes remain weights-only: use `checkpoint verify --weights-only` for inference/promotion eligibility, not as proof that full optimizer continuation is supported.
+Full PyTorch continuation uses checkpoint directory format 2 with native state codec version 2. Verification checks the resolved RunConfig and its digests, canonical tensors/aliases/trainability, named optimizer coverage and moment shapes, completed-update schedule and learning rate, counters/cursor, and safe host/selected-device RNG envelopes. PyTorch saves copy the state to host memory and write it off the training thread; see [keep accelerators busy](#keep-accelerators-busy). Older format-2 native envelopes remain weights-only: use `checkpoint verify --weights-only` for inference/promotion eligibility, not as proof that full optimizer continuation is supported.
 
 A POSIX advisory writer lease covers either engine's training session; another writer or recovery operation fails rather than modifying the same run. Explicit `--recover klab-work/runs/<parent-id>` reconciles finalized verified generations, repairs `latest.json`/`best.json`, and starts a child from the selected generation. Temporary or corrupt generations are not adopted. Equal finite validation losses retain the earlier generation as best. `checkpoint.keep_periodic: false` preserves latest, best, and the immediate verified predecessor; it does not preserve a fully verifiable historical learning curve.
 

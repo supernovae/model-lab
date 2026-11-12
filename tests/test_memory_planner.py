@@ -553,3 +553,32 @@ def test_sdpa_buffer_estimate_matches_registered_runtime_allocations():
         model(torch.zeros((1, config.training.seq_len), dtype=torch.long))
     actual = sum(buffer.numel() * buffer.element_size() for buffer in model.buffers())
     assert registered_runtime_buffers_bytes(config) == actual
+
+
+def test_constrained_plan_keeps_compiled_blocks_without_activation_checkpointing() -> (
+    None
+):
+    config = load_config(Path("configs/smoke_cpu.yaml"))
+    runtime_config = config.runtime.model_copy(
+        update={
+            "compile_transformer_blocks": True,
+            "memory": config.runtime.memory.model_copy(update={"budget_bytes": 1}),
+        }
+    )
+    compiled = config.model_copy(update={"runtime": runtime_config})
+    estimate = estimate_memory(compiled, _runtime(), parameter_inventory(compiled))
+    # Block compilation excludes activation checkpointing, so the planner
+    # records that it was not applied instead of proposing an invalid config.
+    proposal = plan_memory(compiled, _runtime(), estimate)
+    assert proposal.config["runtime"]["compile_transformer_blocks"] is True
+    assert not proposal.config["runtime"]["memory"]["activation_checkpointing"][
+        "enabled"
+    ]
+    assert {
+        "requested": "activation_checkpointing",
+        "effective": False,
+    }.items() <= next(
+        decision
+        for decision in proposal.decisions
+        if decision.get("requested") == "activation_checkpointing"
+    ).items()
