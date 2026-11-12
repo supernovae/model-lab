@@ -76,8 +76,6 @@ if TYPE_CHECKING:
     from klab.data.preparation_chunks import SplitChunks
 
 PACKING_VERSION = "contiguous-eos-v6"
-PREVIOUS_PACKING_VERSION = "contiguous-eos-v5"
-HISTORICAL_PACKING_VERSION = "contiguous-eos-v4"
 _MAX_MIXTURE_ROW_BYTES = 1024**2  # one metadata row; token IDs are binary
 _MIXTURE_COPY_BYTES = 64 * 1024**2
 
@@ -206,10 +204,7 @@ def canonical_tokenizer_sha256(tokenizer: Tokenizer) -> str:
 
 def supervision_requires_mask(manifest: dict[str, object]) -> bool:
     required_arrays(manifest)
-    return (
-        manifest.get("packing_version") != HISTORICAL_PACKING_VERSION
-        and manifest["supervision"]["kind"] == "token-loss-mask-v1"
-    )
+    return manifest["supervision"]["kind"] == "token-loss-mask-v1"
 
 
 def _verified_receipt(

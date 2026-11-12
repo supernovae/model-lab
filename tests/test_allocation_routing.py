@@ -258,6 +258,7 @@ def _array_metadata(
         "shape": list(values.shape),
         "tokens": int(values.shape[0]),
         "sha256": sha256_file(path),
+        "size_bytes": path.stat().st_size,
     }
 
 
@@ -299,7 +300,7 @@ def _prepared_cache(root: Path) -> None:
             ),
         }
     manifest = {
-        "packing_version": "contiguous-eos-v5",
+        "packing_version": "contiguous-eos-v6",
         "cache_identity": identity,
         "settings_sha256": canonical_digest(identity),
         "train": _array_metadata(root / "train.npy"),

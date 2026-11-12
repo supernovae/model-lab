@@ -21,8 +21,6 @@ from klab.training.checkpoints import (
     LineageBest,
     TrainingSnapshot,
     existing_run_recovery_report,
-    load_legacy_checkpoint,
-    verify_legacy_checkpoint,
 )
 from klab.training.manifest import config_sha256
 from klab.training.optimizer import (
@@ -60,39 +58,6 @@ def state() -> dict[str, object]:
         "cursor": (0, 1),
         "config": {"schema_version": 1},
     }
-
-
-def write_legacy_fixture(path: Path) -> None:
-    torch.save(state(), path)
-    path.with_suffix(".json").write_text(
-        json.dumps(
-            {
-                "filename": path.name,
-                "format_version": 1,
-                "step": 1,
-                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            }
-        )
-    )
-
-
-def test_legacy_checkpoint_reader_validates_existing_artifact(tmp_path: Path) -> None:
-    path = tmp_path / "checkpoint.pt"
-    write_legacy_fixture(path)
-    report = verify_legacy_checkpoint(path)
-    assert report.valid
-    loaded = load_legacy_checkpoint(path)
-    assert loaded["step"] == 1
-    path.write_bytes(path.read_bytes() + b"corrupt")
-    assert not verify_legacy_checkpoint(path).valid
-    with pytest.raises(ValueError, match="invalid legacy checkpoint"):
-        load_legacy_checkpoint(path)
-
-
-def test_legacy_checkpoint_requires_manifest(tmp_path: Path) -> None:
-    path = tmp_path / "checkpoint.pt"
-    torch.save(state(), path)
-    assert not verify_legacy_checkpoint(path).valid
 
 
 def test_pointer_digest_must_bind_selected_generation(tmp_path: Path) -> None:
@@ -240,7 +205,7 @@ def _snapshot(
     )
 
 
-def test_explicit_decay_schedule_matches_legacy_through_horizon() -> None:
+def test_explicit_decay_schedule_matches_the_default_through_horizon() -> None:
     peak, floor, warmup, decay, maximum = 3e-4, 3e-5, 100, 4096, 16384
     for step in (4095, 4096, 4097, 8192):
         actual = learning_rate_for_step(

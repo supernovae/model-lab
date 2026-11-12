@@ -6,17 +6,15 @@ import pytest
 import yaml
 
 from klab.config.loading import load_config
-from klab.config.migrate import migrate_file
 from klab.config.models import ModelConfig, RunConfig
 from klab.derivation import derive_config
 
 
-def _v1() -> dict[str, object]:
+def _run() -> dict[str, object]:
     return {
-        "schema_version": 1,
-        "name": "migration-test",
+        "schema_version": 2,
+        "name": "path-test",
         "seed": 7,
-        "device": "cpu",
         "model": {
             "vocab_size": 512,
             "hidden_dim": 16,
@@ -34,108 +32,20 @@ def _v1() -> dict[str, object]:
             "train_max_tokens": 64,
             "validation_max_tokens": 64,
         },
-        "training": {"batch_size": 1, "seq_len": 8, "max_steps": 20, "max_tokens": 80},
-        "logging": {"root_dir": "runs", "checkpoint_every_steps": 10},
+        "training": {
+            "micro_batch_size": 1,
+            "seq_len": 8,
+            "max_steps": 20,
+            "max_tokens": 80,
+        },
+        "optimizer": {"name": "adamw", "peak": 0.003, "floor": 0.0003},
+        "logging": {"root_dir": "runs"},
+        "checkpoint": {"every_steps": 10},
     }
 
 
-def test_v1_loading_gives_migration_guidance(tmp_path: Path) -> None:
-    source = tmp_path / "legacy.yaml"
-    source.write_text(yaml.safe_dump(_v1()), encoding="utf-8")
-    with pytest.raises(ValueError, match="klab config migrate"):
-        load_config(source)
-
-
-def test_migration_rebases_relative_paths_for_moved_output(tmp_path: Path) -> None:
-    source = tmp_path / "input" / "legacy.yaml"
-    source.parent.mkdir()
-    source.write_text(yaml.safe_dump(_v1(), sort_keys=False), encoding="utf-8")
-    output = tmp_path / "published" / "nested" / "config.yaml"
-
-    migrate_file(source, output)
-    config = load_config(output)
-
-    assert config.tokenizer.path == source.parent / "assets/tokenizer.json"
-    assert config.dataset.cache_dir == source.parent / "cache"
-    assert config.logging.root_dir == source.parent / "runs"
-
-
 @pytest.mark.parametrize("absolute", [False, True])
-@pytest.mark.parametrize("kind", ["allocation", "snapshot", "corpus", "portability"])
-def test_migration_preserves_manifest_targets(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, absolute: bool, kind: str
-) -> None:
-    source = tmp_path / "source" / "nested" / "legacy.yaml"
-    source.parent.mkdir(parents=True)
-    raw = _v1()
-    dataset = raw["dataset"]
-    section = dataset
-    if kind == "portability":
-        section = raw["training"]
-        section["trainable_parameters"] = ["lm_head.weight"]
-        fields = ["portability_manifest_path"]
-    else:
-        dataset.update(
-            source="snapshot" if kind == "snapshot" else "local_chat",
-            train_path="train.jsonl",
-            validation_path="validation.jsonl",
-            license="CC0-1.0",
-            revision="a" * 64,
-        )
-        fields = {
-            "allocation": ["allocation_manifest_path"],
-            "snapshot": ["source_manifest_path"],
-            "corpus": ["corpus_release_path", "corpus_export_path"],
-        }[kind]
-    targets = {}
-    for field in fields:
-        target = source.parent / f"{field}.json"
-        target.write_text(f"{field} fixture\n", encoding="utf-8")
-        targets[field] = target
-        section[field] = str(target) if absolute else target.name
-    original = yaml.safe_dump(raw, sort_keys=False)
-    source.write_text(original, encoding="utf-8")
-    output = tmp_path / "destination" / "nested" / "migrated.yaml"
-    cwd = tmp_path / "unrelated"
-    cwd.mkdir()
-    monkeypatch.chdir(cwd)
-    migrate_file(source, output)
-    published = yaml.safe_load(output.read_text(encoding="utf-8"))
-    for reload_cwd in (cwd, source.parent):
-        monkeypatch.chdir(reload_cwd)
-        loaded = load_config(output)
-        loaded_section = loaded.training if kind == "portability" else loaded.dataset
-        for field, target in targets.items():
-            assert getattr(loaded_section, field) == target
-            assert getattr(loaded_section, field).read_bytes() == target.read_bytes()
-            value = published["training" if kind == "portability" else "dataset"][field]
-            assert isinstance(value, str)
-            assert (output.parent / value).resolve() == target
-    assert source.read_text(encoding="utf-8") == original
-    assert published["model"] == raw["model"]
-    assert published["seed"] == raw["seed"]
-    assert published["dataset"]["train_max_tokens"] == dataset["train_max_tokens"]
-
-
-def test_invalid_migration_does_not_publish_output(tmp_path: Path) -> None:
-    source = tmp_path / "invalid.yaml"
-    invalid = _v1()
-    invalid["training"] = {
-        "batch_size": 1,
-        "seq_len": 32,
-        "max_steps": 20,
-        "max_tokens": 80,
-    }
-    source.write_text(yaml.safe_dump(invalid), encoding="utf-8")
-    output = tmp_path / "output.yaml"
-
-    with pytest.raises(ValueError, match="migrated config is invalid"):
-        migrate_file(source, output)
-    assert not output.exists()
-
-
-@pytest.mark.parametrize("absolute", [False, True])
-@pytest.mark.parametrize("publication", ["load", "derive", "migrate"])
+@pytest.mark.parametrize("publication", ["load", "derive"])
 def test_mixture_paths_preserve_source_targets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -150,7 +60,7 @@ def test_mixture_paths_preserve_source_targets(
     mixture_output = source.parent / "assets" / "mixture"
     mixture_output.mkdir()
     (mixture_output / "receipt.json").write_text("{}\n", encoding="utf-8")
-    raw = _v1()
+    raw = _run()
     raw["dataset"].update(
         source="local_token_mixture",
         license="local synthetic fixture",
@@ -161,17 +71,11 @@ def test_mixture_paths_preserve_source_targets(
         else "assets/mixture.yaml",
         mixture_output_path=str(mixture_output) if absolute else "assets/mixture",
     )
-    if publication != "migrate":
-        from klab.config.migrate import migrate_v1
-
-        raw = migrate_v1(raw)
     source.write_text(yaml.safe_dump(raw), encoding="utf-8")
     output = tmp_path / "published" / "elsewhere" / "run.yaml"
     output.parent.mkdir(parents=True)
     if publication == "derive":
         derive_config(source, output, {"name": "derived-mixture"})
-    elif publication == "migrate":
-        migrate_file(source, output)
     else:
         output = source
 
@@ -190,7 +94,7 @@ def test_mixture_paths_preserve_source_targets(
         ).read_text() == "{}\n"
 
 
-def test_memory_injection_serialization_preserves_legacy_final_config() -> None:
+def test_memory_injection_default_is_omitted_from_serialized_configs() -> None:
     config = load_config(
         Path(__file__).resolve().parents[1] / "configs" / "runtime_smoke_cpu.yaml"
     )
@@ -278,7 +182,7 @@ def test_grouped_query_attention_rejects_mlx_run_configs() -> None:
         RunConfig.model_validate(values)
 
 
-def test_adamw_decay_horizon_preserves_legacy_serialization() -> None:
+def test_adamw_decay_horizon_is_omitted_until_set() -> None:
     base = load_config(Path("configs/smoke_cpu.yaml"))
     serialized = base.model_dump(mode="json")
     for dump in (base.model_dump(mode="python"), serialized):

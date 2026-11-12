@@ -11,7 +11,6 @@ from tokenizers.models import BPE
 from tokenizers.pre_tokenizers import ByteLevel
 from tokenizers.trainers import BpeTrainer
 
-from klab.config.migrate import migrate_v1
 from klab.config.models import AttentionConfig, ModelConfig, RunConfig
 from klab.data.byte_hash import table_address, token_bytes
 from klab.data.packing import prepare_data
@@ -242,47 +241,47 @@ def test_prepare_data_unicode_addresses_match_generation_helper(
     tokenizer = _tokenizer()
     document = " leading é"
     config = RunConfig.model_validate(
-        migrate_v1(
-            {
-                "schema_version": 1,
-                "name": "byte-parity",
-                "seed": 1,
-                "device": "cpu",
-                "model": {
-                    "vocab_size": tokenizer.get_vocab_size(),
-                    "hidden_dim": 16,
-                    "num_layers": 1,
-                    "num_heads": 2,
-                    "ffn_dim": 32,
-                    "max_seq_len": 16,
-                    "memory": "byte",
-                    "memory_table_size": 97,
-                    "memory_ngram_size": 3,
-                    "memory_dim": 8,
-                },
-                "tokenizer": {"path": tmp_path / "tokenizer.json"},
-                "dataset": {
-                    "source": "synthetic",
-                    "cache_dir": tmp_path / "cache",
-                    "train_max_documents": 1,
-                    "validation_max_documents": 1,
-                    "train_max_tokens": 64,
-                    "validation_max_tokens": 64,
-                },
-                "training": {
-                    "batch_size": 1,
-                    "seq_len": 8,
-                    "max_steps": 1,
-                    "max_tokens": 8,
-                },
-                "optimizer": {
-                    "learning_rate": 0.001,
-                    "min_learning_rate": 0.0001,
-                    "warmup_steps": 0,
-                },
-                "logging": {"root_dir": tmp_path / "runs", "checkpoint_every_steps": 1},
-            }
-        )
+        {
+            "schema_version": 2,
+            "name": "byte-parity",
+            "seed": 1,
+            "model": {
+                "vocab_size": tokenizer.get_vocab_size(),
+                "hidden_dim": 16,
+                "num_layers": 1,
+                "num_heads": 2,
+                "ffn_dim": 32,
+                "max_seq_len": 16,
+                "memory": "byte",
+                "memory_table_size": 97,
+                "memory_ngram_size": 3,
+                "memory_dim": 8,
+            },
+            "tokenizer": {"path": tmp_path / "tokenizer.json"},
+            "dataset": {
+                "source": "synthetic",
+                "cache_dir": tmp_path / "cache",
+                "train_max_documents": 1,
+                "validation_max_documents": 1,
+                "train_max_tokens": 64,
+                "validation_max_tokens": 64,
+            },
+            "training": {
+                "micro_batch_size": 1,
+                "seq_len": 8,
+                "max_steps": 1,
+                "max_tokens": 8,
+            },
+            "optimizer": {
+                "name": "adamw",
+                "peak": 0.001,
+                "floor": 0.0001,
+                "warmup_steps": 0,
+            },
+            "logging": {"root_dir": tmp_path / "runs"},
+            "runtime": {"backend": "cpu", "precision": "fp32"},
+            "checkpoint": {"every_steps": 1},
+        }
     )
     monkeypatch.setattr(
         "klab.data.packing.iter_documents",

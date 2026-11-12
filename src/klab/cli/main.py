@@ -16,7 +16,6 @@ from typing import Any
 
 from klab.batch_calibration import calibrate_batch
 from klab.config.loading import load_config, load_tokenizer_config
-from klab.config.migrate import migrate_file
 from klab.dashboard.stores import configured_stores, parse_run_store
 from klab.data.encoding import (
     TOKENIZER_BATCH_DOCUMENTS,
@@ -285,11 +284,6 @@ def _engram_pack_verify(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
-def _config_migrate(args: argparse.Namespace) -> None:
-    changes = migrate_file(Path(args.input), Path(args.output))
-    print("\n".join(changes))
-
-
 def _config_compose(args: argparse.Namespace) -> None:
     """Publish one run config assembled from several declaration files."""
     try:
@@ -401,39 +395,15 @@ def _architecture_derive(args: argparse.Namespace) -> None:
     print(f"output: {result['output']}")
 
 
-def _legacy_checkpoint_inventory(path: Path, expected_config=None) -> dict[str, object]:
-    from klab.training.weight_import import load_legacy_weights
-
-    legacy = load_legacy_weights(path, expected_config)
-    return {
-        **legacy.metadata,
-        "engine": "pytorch",
-        "requested_backend": legacy.config.runtime.backend,
-        "resume_level": "weights_only",
-        "source_config_sha256": legacy.source_config_sha256,
-        "tensor_inventory": {
-            name: {"shape": list(tensor.shape), "dtype": str(tensor.dtype)}
-            for name, tensor in legacy.tensors.items()
-        },
-        "full_resume_unavailable_reason": (
-            "Legacy v1 lacks resumable RNG and immutable provenance; "
-            "use weights import, then train --promote."
-        ),
-    }
-
-
 def _checkpoint_inspect(args: argparse.Namespace) -> None:
     path = Path(args.path)
-    if path.suffix == ".pt":
-        manifest = _legacy_checkpoint_inventory(path)
-    else:
-        directory = CheckpointManager(path.parent.parent)._resolve(path)
-        if not directory.is_dir() or directory.is_symlink():
-            raise ValueError("unsafe checkpoint directory")
-        manifest_path = _safe_member(directory, "manifest.json")
-        if manifest_path is None:
-            raise ValueError("unsafe checkpoint manifest path")
-        manifest = json.loads(manifest_path.read_text())
+    directory = CheckpointManager(path.parent.parent)._resolve(path)
+    if not directory.is_dir() or directory.is_symlink():
+        raise ValueError("unsafe checkpoint directory")
+    manifest_path = _safe_member(directory, "manifest.json")
+    if manifest_path is None:
+        raise ValueError("unsafe checkpoint manifest path")
+    manifest = json.loads(manifest_path.read_text())
     print(
         json.dumps(manifest, sort_keys=True)
         if args.json
@@ -454,38 +424,18 @@ def _checkpoint_verify(args: argparse.Namespace) -> None:
         }
         print(json.dumps(payload, sort_keys=True) if args.json else payload)
         raise SystemExit(1) from None
-    if path.suffix == ".pt":
-        try:
-            metadata = _legacy_checkpoint_inventory(path, expected_config)
-            payload = {
-                "valid": True,
-                "errors": [],
-                "files": [{"name": path.name, "sha256": metadata["sha256"]}],
-                "resume_level": "weights_only",
-                "full_resume_unavailable_reason": metadata[
-                    "full_resume_unavailable_reason"
-                ],
-            }
-        except (OSError, RuntimeError, TypeError, ValueError, KeyError) as error:
-            payload = {
-                "valid": False,
-                "errors": [{"field": "legacy_checkpoint", "reason": str(error)}],
-                "files": [],
-                "resume_level": "weights_only",
-            }
-    else:
-        root = path.parent.parent
-        report = CheckpointManager(root).verify(
-            path,
-            require_training_state=not args.weights_only,
-            expected_config=expected_config,
-        )
-        payload = {
-            "valid": report.valid,
-            "errors": list(report.errors),
-            "files": list(report.verified_files),
-            "resume_level": report.resume_level,
-        }
+    root = path.parent.parent
+    report = CheckpointManager(root).verify(
+        path,
+        require_training_state=not args.weights_only,
+        expected_config=expected_config,
+    )
+    payload = {
+        "valid": report.valid,
+        "errors": list(report.errors),
+        "files": list(report.verified_files),
+        "resume_level": report.resume_level,
+    }
     print(json.dumps(payload, sort_keys=True) if args.json else payload)
     if not payload["valid"]:
         raise SystemExit(1)
@@ -1786,7 +1736,7 @@ _FALLBACK_HELP = {
     "dashboard": "Local read-only training/research dashboard",
     "readiness": "CPU wiring smoke checks for the shipped mechanisms",
     "weights": "Import external weights with provenance, or export for Hugging Face",
-    "config": "Derive or migrate typed run configs",
+    "config": "Validate, compose and derive run configs",
     "checkpoint": "Inspect or verify checkpoints",
     "workspace": "Storage preflight and cleanup plans",
     "runtime": "Runtime probes and status",
@@ -2038,7 +1988,7 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     weight_import.add_argument(
         "--format",
         required=True,
-        choices=("klab_legacy_v1", "hf_llama_safetensors"),
+        choices=("hf_llama_safetensors",),
     )
     weight_import.add_argument("--source-tokenizer", required=True)
     weight_import.add_argument("--provenance", required=True)
@@ -2097,10 +2047,6 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     config_compose.add_argument("--json", action="store_true")
     config_compose.set_defaults(handler=_config_compose)
     register_schedule(config_commands)
-    config_migrate = config_commands.add_parser("migrate")
-    config_migrate.add_argument("input")
-    config_migrate.add_argument("--output", required=True)
-    config_migrate.set_defaults(handler=_config_migrate)
     checkpoint = commands.add_parser("checkpoint")
     checkpoint_commands = checkpoint.add_subparsers(
         dest="checkpoint_command", required=True

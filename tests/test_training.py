@@ -11,7 +11,6 @@ import torch
 
 from klab.canonical import canonical_digest
 from klab.config.loading import load_config
-from klab.config.migrate import migrate_v1
 from klab.config.models import RunConfig, TokenizerTrainConfig
 from klab.data.tokenizer import train_tokenizer
 from klab.engines.base import EngineCapabilityError, EngineOutOfMemory, EngineState
@@ -82,45 +81,45 @@ def config(root: Path) -> RunConfig:
                 (tok_dir / "tokenizer_manifest.json").read_bytes(),
             )
     return RunConfig.model_validate(
-        migrate_v1(
-            {
-                "schema_version": 1,
-                "name": "test",
-                "seed": 7,
-                "device": "cpu",
-                "model": {
-                    "vocab_size": 512,
-                    "hidden_dim": 16,
-                    "num_layers": 1,
-                    "num_heads": 2,
-                    "ffn_dim": 32,
-                    "max_seq_len": 32,
-                },
-                "tokenizer": {"path": tokenizer},
-                "dataset": {
-                    "source": "synthetic",
-                    "cache_dir": root / "cache",
-                    "train_max_documents": 200,
-                    "validation_max_documents": 40,
-                    "train_max_tokens": 8192,
-                    "validation_max_tokens": 2048,
-                    "synthetic_seed": 7,
-                },
-                "training": {
-                    "batch_size": 2,
-                    "seq_len": 16,
-                    "max_steps": 12,
-                    "max_tokens": 384,
-                    "deterministic": True,
-                },
-                "optimizer": {
-                    "learning_rate": 0.003,
-                    "min_learning_rate": 0.0003,
-                    "warmup_steps": 2,
-                },
-                "logging": {"root_dir": root / "runs", "checkpoint_every_steps": 6},
-            }
-        )
+        {
+            "schema_version": 2,
+            "name": "test",
+            "seed": 7,
+            "model": {
+                "vocab_size": 512,
+                "hidden_dim": 16,
+                "num_layers": 1,
+                "num_heads": 2,
+                "ffn_dim": 32,
+                "max_seq_len": 32,
+            },
+            "tokenizer": {"path": tokenizer},
+            "dataset": {
+                "source": "synthetic",
+                "cache_dir": root / "cache",
+                "train_max_documents": 200,
+                "validation_max_documents": 40,
+                "train_max_tokens": 8192,
+                "validation_max_tokens": 2048,
+                "synthetic_seed": 7,
+            },
+            "training": {
+                "micro_batch_size": 2,
+                "seq_len": 16,
+                "max_steps": 12,
+                "max_tokens": 384,
+                "deterministic": True,
+            },
+            "optimizer": {
+                "name": "adamw",
+                "peak": 0.003,
+                "floor": 0.0003,
+                "warmup_steps": 2,
+            },
+            "logging": {"root_dir": root / "runs"},
+            "runtime": {"backend": "cpu", "precision": "fp32"},
+            "checkpoint": {"every_steps": 6},
+        }
     )
 
 

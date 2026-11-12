@@ -217,5 +217,3 @@ def test_semantic_retrieval_lesson_builds_verified_pack_and_runnable_workspace(
         "lesson-fork-left",
         "lesson-fork-right",
     )
-
-

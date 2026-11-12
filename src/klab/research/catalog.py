@@ -386,5 +386,3 @@ def load_dataset_source(
 def resource_sha256(relative: str, *, root: Path | None = None) -> str:
     _, _, path = _read_packaged(relative, root=root)
     return sha256_file(path)
-
-
