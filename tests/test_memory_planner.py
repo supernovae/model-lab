@@ -582,3 +582,24 @@ def test_constrained_plan_keeps_compiled_blocks_without_activation_checkpointing
         for decision in proposal.decisions
         if decision.get("requested") == "activation_checkpointing"
     ).items()
+
+
+def test_dense_32k_preset_fits_an_accelerator_and_not_a_cpu() -> None:
+    config = load_config(Path("configs/long_context_32k_dense_sdpa.yaml"))
+    assert config.training.seq_len == config.model.max_seq_len == 32768
+    inventory = parameter_inventory(config)
+    device = 16 * 2**30
+    fused = estimate_memory(
+        config,
+        _runtime(backend="xpu", device_total=device, device_free=device),
+        inventory,
+    )
+    assert fused.result == "LIKELY_TO_FIT"
+    # One Arc Pro B70 measured a 4.33 GiB allocated peak for this shape; the
+    # plan must not promise less than was observed.
+    assert 4.33 * 2**30 <= fused.peak_bytes <= 8 * 2**30
+    # Without fused attention every layer is charged its [T, T] scores.
+    cpu = config.model_copy(
+        update={"runtime": config.runtime.model_copy(update={"backend": "cpu"})}
+    )
+    assert estimate_memory(cpu, _runtime(), inventory).peak_bytes > 100 * 2**30

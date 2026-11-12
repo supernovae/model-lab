@@ -62,12 +62,13 @@ took 5.7 ms with the cache against 1.32 s for one prefix recomputation.
 Limits today:
 
 - Grouped-query heads and the MLX engine are not supported.
-- No quality comparison with dense attention has been run, for either selector.
+- Quality on long-range dependencies is unmeasured (see the comparison below).
   Treat `selected_blocks` and `window_size` as settings to measure, not as tuned
   defaults.
 - With training retained for backward, each layer holds its gathered keys and
-  values; enable activation checkpointing for deep models at long context.
-- No accelerator measurement exists yet.
+  values: about twice dense fused attention's memory per token on XPU. Enable
+  activation checkpointing for deep models or very long context.
+- Measured on one accelerator type (Intel Arc Pro B70, XPU). CUDA is unmeasured.
 
 `configs/smoke_local_selected_cpu.yaml` and
 `configs/smoke_moe_sparse_latent_cpu.yaml` are CPU smokes.
@@ -75,6 +76,62 @@ Limits today:
 latent keys and values and the learned selector at 32,768 tokens of context on
 CPU. On a 24-core workstation its eight single-threaded updates took about 24 s
 each with a 12.3 GiB peak, against a 14.2 GiB estimate from `klab inspect`.
+`configs/long_context_32k_dense_sdpa.yaml` is the matched dense baseline for an
+accelerator: the same model with fused dense attention.
+
+### Measured against dense fused attention
+
+One Intel Arc Pro B70 (`--runtime b70-xpu`), bf16, the 12.0M-parameter 4-layer
+MoE model of the 32k example, synthetic stories, one run per row. Step time is
+the median after warmup; memory is the device's peak allocated bytes.
+
+| Context | Tokens per update | Attention | Step | Tokens/s | Peak memory |
+| --- | --- | --- | --- | --- | --- |
+| 8,192 | 32,768 | dense `sdpa` | 205 ms | 159,700 | 4.31 GiB |
+| 8,192 | 32,768 | `local_selected` | 307 ms | 106,900 | 9.11 GiB |
+| 8,192 | 32,768 | `local_selected`, latent, learned | 297 ms | 110,400 | 8.69 GiB |
+| 32,768 | 32,768 | dense `sdpa` | 525 ms | 62,400 | 4.33 GiB |
+| 32,768 | 32,768 | `local_selected` | 308 ms | 106,500 | 9.14 GiB |
+| 32,768 | 32,768 | `local_selected`, latent, learned | 314 ms | 104,400 | 9.28 GiB |
+| 131,072 | 131,072 | dense `sdpa` | 7.82 s | 16,800 | 16.79 GiB |
+| 131,072 | 131,072 | `local_selected`, latent, learned, activation checkpointing | 2.24 s | 58,600 | 11.85 GiB |
+
+What this shows:
+
+- **Time:** `local_selected` costs the same per token at 8k and 32k. Dense is
+  1.5 times faster at 8k, 1.7 times slower at 32k and 3.5 times slower at 131k.
+  The crossover is between 8k and 32k for this model.
+- **Memory:** dense fused attention on XPU keeps no `[T, T]` matrix; its peak
+  follows tokens per update, not context. `local_selected` used about twice
+  dense's memory per token. At 131k without activation checkpointing the memory
+  planner refused the `local_selected` run before training; with it the run
+  used less than dense.
+- **Estimate:** `klab inspect` planned 5.4 GiB for dense at 32k (4.33 measured)
+  and 12.9 and 14.2 GiB for the two `local_selected` rows (9.14 and 9.28
+  measured).
+
+### Quality against matched dense runs
+
+Four `klab try` comparisons on the same B70: 8,192-token context, the same
+model, seed and token budget, dense `sdpa` as the baseline. Both corpora place
+the information a prediction needs further back than the 256-token local window:
+*recall* states 48 key-value facts, then filler, then queries; *copy* repeats a
+random passage after filler.
+
+| Corpus | Tokens | Dense | `local_selected` | `local_selected`, learned |
+| --- | --- | --- | --- | --- |
+| recall | 39.3M | 1.411 | 1.314 | 1.314 |
+| copy | 26.2M | 1.221 | 1.155 | 1.195 |
+
+Values are held-out loss. Sparse attention was not worse than dense at a matched
+budget, with one seed per arm. That is all these runs support. Every arm,
+dense included, predicted the tokens that depend on distant content at chance
+(1.68 nats per token on recall queries and 1.84 on the copied passage, the
+entropy of their random digits), so the loss differences come from the filler
+text. The runs do not show that block selection retrieves distant content, and
+the difference between selectors is within what one seed can produce. A longer
+budget or a real long-document corpus, with paired seeds, is still needed before
+claiming `local_selected` matches dense on long-range tasks.
 
 ## Block-sparse reference
 
