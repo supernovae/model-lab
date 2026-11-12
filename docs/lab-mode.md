@@ -41,6 +41,10 @@ A probe that cannot run (an optional dependency missing, an error, a resource
 stop) makes the battery `incomplete`, with action `rerun` and the gaps listed in
 `probe.verdict.missing`. It never fails the try and never counts as a pass.
 
+Before probing, `try` screens each arm's training data for the held-out and
+final probe items ([leakage](probes.md#held-out-leakage)) and records the
+result under `leakage`. Contaminated data also makes the verdict `rerun`.
+
 ## What is kept the same
 
 Both arms are scored under one evaluation protocol: the baseline's context

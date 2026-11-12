@@ -36,7 +36,7 @@ Every `try` runs the fast [probe](docs/probes.md) tier. For more, run
 
 - `abandon`: a hard probe failed, including a NaN or infinite loss. Drop or fix the idea.
 - `tweak`: change one setting; `suggestion` names what the failing probe implicates.
-- `rerun`: evidence is missing (`verdict.missing` says which). Fix it and run again; never read it as a pass.
+- `rerun`: evidence is missing (`verdict.missing` says which; `leakage` means held-out probe items are in the training data). Fix it and run again; never read it as a pass.
 - `escalate`: probe again at `next_tier`.
 - `longer_run`: every tier passed and loss improved. Worth a larger budget, still in lab mode.
 - `compare`: add `--vs`.

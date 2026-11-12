@@ -13,8 +13,10 @@ fast-fail) and what a failure suggests. Prompt items come in two disjoint splits
 * ``final``: the held-back final evaluation set. Deterministic, disjoint items
   that no selection loop reads: :func:`require_split` refuses ``final`` unless
   the caller is inside :func:`final_verdict_access`, which only
-  ``klab probe --config final`` enters. Use it once, for the final verdict on a
-  chosen candidate, never to pick between candidates.
+  ``klab probe --config final`` enters (this module also opens it, only to
+  hash it and to count leaked items in :func:`leakage_screen`). Use it once,
+  for the final verdict on a chosen candidate, never to pick between
+  candidates.
 
 The suite digest covers declarations, thresholds and all three splits (a
 digest reveals nothing about the items), so two results are comparable exactly
@@ -27,7 +29,7 @@ import contextlib
 import contextvars
 import hashlib
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
@@ -442,6 +444,42 @@ def needle_split(split: str) -> dict[str, Any]:
     }
 
 
+def needle_items(split: str, char_lengths: Sequence[int]) -> list[dict]:
+    """Text-level needle items: every prefix is exactly N characters long.
+
+    Independent of any tokenizer, so a lab run and a reference model are asked
+    identical strings (one ``item_group``). The code word opens the context,
+    filler sentences (rotated per item) push it back, and the filler is cut to
+    the exact length before the closing question.
+    """
+    spec = needle_split(split)
+    filler = spec["filler"]
+    items = []
+    for length in char_lengths:
+        for offset, word in enumerate(spec["needles"]):
+            head = spec["statement"].format(w=word) + " "
+            tail = " " + spec["question"]
+            room = int(length) - len(head) - len(tail)
+            if room < 0:
+                raise ValueError(f"needle length {length} is too short")
+            stream = ""
+            k = offset
+            while len(stream) < room:
+                stream += filler[k % len(filler)] + " "
+                k += 1
+            prefix = head + stream[:room] + tail
+            assert len(prefix) == int(length)
+            items.append(
+                {
+                    "prefix": prefix,
+                    "answer": word,
+                    "candidates": spec["needles"],
+                    "chars": int(length),
+                }
+            )
+    return items
+
+
 def prompts(split: str) -> list[str]:
     return list(_pick(split, _DEV_PROMPTS, _HELDOUT_PROMPTS, _FINAL_PROMPTS))
 
@@ -486,6 +524,86 @@ def suite_identity() -> dict[str, Any]:
         "splits": splits,
         "verdict_split": verdict_split(),
     }
+
+
+# --- Held-out leakage screen -------------------------------------------------
+
+# Splits whose items a training corpus must not contain. ``dev`` is free to
+# read and tune against, so it is not screened.
+LEAKAGE_SPLITS = ("heldout", "final")
+# Token windows of one item; ``Window`` is a tuple of token ids.
+Window = tuple[int, ...]
+LeakageEncode = Callable[[str, str | None], list[Window]]
+LeakageSearch = Callable[[set[Window]], set[Window]]
+
+
+def _leakage_items(
+    split: str, parametric_seed: int | None
+) -> Iterator[tuple[str, str, str | None]]:
+    """(item id, text, answer) for every SPLIT item training must not contain.
+
+    Fact items are their question and answer: the in-context statement is
+    given to the model anyway. Closed-book items depend on the split: in
+    ``heldout`` the trained facts of a ``withheld_facts`` run are in its
+    training data by design, so only its never-trained control facts are
+    screened (none for other runs, where that probe is inapplicable); every
+    fact in the held-back ``final`` wording is screened. Prompts have no
+    answer: any of their windows counts.
+    """
+    for index, item in enumerate(fact_items(split)):
+        yield f"fact_recall/{index}", item["question"], item["answer"]
+    if split == "final":
+        closed_book: tuple[Any, ...] = _FACTS
+    elif parametric_seed is not None:
+        closed_book = split_facts(parametric_seed)[1]
+    else:
+        closed_book = ()
+    for fact in closed_book:
+        item = _parametric_item(fact, split)
+        yield f"parametric_recall/{fact.subject}", item["question"], item["answer"]
+    for item in needle_items(split, BY_ID["needle"].params["char_lengths"]):
+        yield f"needle/{item['answer']}@{item['chars']}", item["prefix"], item["answer"]
+    for index, prompt in enumerate(prompts(split)):
+        yield f"prompt/{index}", prompt, None
+
+
+def leakage_screen(
+    encode: LeakageEncode,
+    search: LeakageSearch,
+    *,
+    parametric_seed: int | None,
+) -> dict[str, Any]:
+    """Screen held-out and final items against training data; counts only.
+
+    ENCODE turns an item (text, answer) into the token windows that would leak
+    it; SEARCH returns the windows that occur in the training data. The final
+    split is opened here only to screen it, as :func:`suite_identity` opens it
+    only to hash it: the result holds per-split counts, held-out item ids, and
+    nothing that identifies or reveals a final item. Both splits share one
+    SEARCH, so the training data is read once.
+    """
+    items: dict[str, list[tuple[str, list[Window]]]] = {}
+    for split in LEAKAGE_SPLITS:
+        opened = (
+            final_verdict_access() if split == "final" else contextlib.nullcontext()
+        )
+        with opened:
+            items[split] = [
+                (item_id, encode(text, answer))
+                for item_id, text, answer in _leakage_items(split, parametric_seed)
+            ]
+    hits = search(
+        {window for rows in items.values() for _, windows in rows for window in windows}
+    )
+    found: dict[str, Any] = {}
+    for split, rows in items.items():
+        leaked = [item_id for item_id, windows in rows if hits.intersection(windows)]
+        found[split] = {
+            "checked": len(rows),
+            "contaminated": len(leaked),
+            **({"items": leaked} if split != "final" else {}),
+        }
+    return found
 
 
 def tiers_through(tier: str) -> tuple[str, ...]:

@@ -32,7 +32,8 @@ klab report RUN_ID --kind run [--runs-dir RUNS] [--json]
 ```
 
 A record report shows the whole sealed record, including failed and interrupted
-ones; `--lab-dir` selects another lab. Lab verifies a record's digest whenever
+ones; `--lab-dir` selects another lab. A try report includes its
+[held-out leakage](probes.md#held-out-leakage) screen (`leakage`). Lab verifies a record's digest whenever
 it is read, so an edited record is refused everywhere.
 
 A run report shows two things side by side under separate JSON keys:
