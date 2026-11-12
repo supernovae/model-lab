@@ -105,3 +105,63 @@ That binding-only check did not validate the README's pinned historical procedur
 or later admissions. The subsequent review identified that removing its required
 historical field made the guide inconsistent. PR35 restores the historical
 procedure; current metadata examples remain in `docs/native-workflow.md`.
+
+## Acceptance reconciliation — 2026-11-12
+
+Checked against Lab `1c7bcbd` and Workshop `53f47ba`, for
+[#158](https://github.com/supernovae/model-lab/issues/158). Every command ran
+from a directory outside both checkouts, on copies of the Workshop files.
+
+### What was executed
+
+- **Installed file set, no checkout.** `uv build --wheel` produced
+  `kybern_model_lab-0.1.0-py3-none-any.whl` with all 462 tracked package files
+  (presets, packaged resources and the `klab` entry point included). The wheel
+  was unpacked into an empty directory and used as the only source of `klab`,
+  with the existing interpreter and no installation. From a copy of Workshop's
+  `examples/synthetic-cpu`: `architecture list`, `tokenizer train`,
+  `try DELTA --vs run.json` and `report TRY_ID` all completed. The record's code
+  revision has no Git commit and a source identity digest, as expected without
+  a checkout.
+- **Installed package in CI.** The CPU container installs Lab with
+  `uv pip install .` (not editable) and the `build-smoke` job runs the CLI in
+  that image on every pull request.
+- **Current schema against every Workshop declaration.** All 29 run, tokenizer
+  and model declarations on Workshop `main` load with the current schema: 22
+  run configs, 5 tokenizer configs and 2 model sections.
+- **Workshop's documented metadata path.** `experiment recipe create` and
+  `experiment recipe preparation inspect` with the arguments in Workshop's
+  `docs/native-workflow.md` both exited 0; inspection reported
+  `executable: false` and created nothing.
+- **A recipe run end to end.** The copied synthetic recipe trained with
+  `tokenizer train` and `train`, and `generate` read the result.
+
+Not executed: the TinyStories recipes (they download from the Hub), any DevMind
+preparation or training, accelerators, and the prepared-input workflow's
+`apply`, `approve` and `report` steps.
+
+### Criteria
+
+| Criterion | State |
+| --- | --- |
+| Authoring lives in Lab; declarations live in the experiment repository | Met. `config validate`, `config derive`, `architecture derive`, `experiment recipe create/export` and `research scaffold` author; Workshop holds the declarations. |
+| One installed-Lab path for an arbitrary directory | Met. [Build](build.md#4-keep-the-model-in-its-own-repository) is the plain path; [portable recipes](portable-recipes.md) is the inventoried one. |
+| Relative declarations survive relocation and an unrelated working directory | Met in the runs above. |
+| No Workshop checkout, repository or project name in runtime logic | Met. Lab's Python source contains no `workshop` or `devmind` string outside one scaffold help text. |
+| Executable functions in Lab; the experiment repository holds only declarations | Lab side met. Workshop `main` still tracks 21 Python files: four helper scripts, seven example handoff scripts and tests, and ten test modules. This is tracked in [#157](https://github.com/supernovae/model-lab/issues/157). |
+| Artifact identities come from verified native outputs | Unchanged: creation and inspection invent no hashes and report missing inputs as missing. |
+| Native dry-run validation of authored recipes | Met for the profiles exercised: section validation, matrix inspection and preparation inspection. Unsupported profiles are refused by name. |
+| Derivative recipes declare an immutable base | Unchanged from the record above: the checkpoint connection is previewed; tokenizer, architecture and budget compatibility are verified when the run starts. `training.parent_checkpoint` now declares a parent in a plain run config. |
+| Residual limits documented | This section. |
+
+### Residuals, owned elsewhere
+
+- **Workshop Python.** Removing or replacing Workshop's helper scripts and
+  per-experiment tests is #157.
+- **Study-specific code still in Lab.** `src/klab/research/`, the packaged
+  `dense-lm-v1` catalog and TinyStories source resources, study-named
+  evaluation modules and about 22 study configs under `configs/` remain. Their
+  disposition is #157.
+- **Workshop's quick start.** Its README runs `uv run --locked --extra cpu klab`
+  from inside a Lab checkout with `../kybern-workshop` paths. That works, but an
+  activated environment and plain `klab` from the recipe directory is simpler.

@@ -77,3 +77,38 @@ To pick an architecture by name and size instead, scale a preset onto your
 config: `klab architecture derive moe --params 300M --base model.yaml --output
 moe-300m.yaml`. [Model components](components.md) lists the presets and covers
 per-layer schedules and kinds supplied by another package.
+
+## 4. Keep the model in its own repository
+
+Lab is the engine; a model's declarations do not have to live in it. A project
+is a directory of declarations (and, if you like, a corpus and notes) in any Git
+repository. [Kybern Workshop](https://github.com/supernovae/kybern-workshop) is
+one such repository; yours works the same way.
+
+```sh
+git clone https://github.com/you/your-models.git
+cd your-models/story-model
+klab tokenizer train tokenizer.yaml
+klab train model.yaml --run-id first
+```
+
+- **Run from anywhere.** `klab` is a command of the installed Lab, not of a
+  checkout. Paths inside a declaration resolve from that declaration's file, so
+  a project keeps working after it is cloned, moved or copied.
+- **Keep outputs out of Git.** Point `cache_dir`, the tokenizer `output_dir` and
+  `logging.root_dir` at a `work/` directory you ignore, or at absolute paths
+  under `$KLAB_WORK_DIR`. Lab-mode records go under `$KLAB_WORK_DIR/lab`.
+- **Check before you run.** `klab config validate FILE --kind run` (or
+  `tokenizer`, `model`, `optimizer`) checks a declaration against the current
+  schema without reading data or probing hardware, and `klab inspect FILE`
+  reports whether the model fits.
+- **Share with ordinary Git.** Commit the declarations and push. Nothing in Lab
+  names a repository, an organization or a project.
+- **Bring your own parts.** A project that needs its own attention,
+  feed-forward, memory or training objective ships a small Python package that
+  registers it; see [model components](components.md) and
+  [post-training](post-training.md#write-your-own-objective).
+
+For a release that must be reproduced byte for byte, a project can also carry a
+[portable recipe](portable-recipes.md): an inventory of its declarations with
+their digests, which Lab inspects and relocates without executing anything.
