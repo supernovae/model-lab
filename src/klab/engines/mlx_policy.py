@@ -28,8 +28,10 @@ def validate_config(config: RunConfig) -> None:
         )
     if config.runtime.device_index != 0:
         raise EngineCapabilityError("MLX Metal supports only device_index=0")
+    if config.model.layers:
+        raise EngineCapabilityError("MLX does not support a per-layer schedule")
     if config.model.ffn != "dense":
-        raise EngineCapabilityError("MLX does not support MoE")
+        raise EngineCapabilityError("MLX supports the dense feed-forward only")
     if config.model.memory != "none":
         raise EngineCapabilityError("MLX does not support memory modules")
     if config.attention.kind not in {"dense", "block_sparse"}:

@@ -151,8 +151,8 @@ def exercise_checkpoint(
     if not _finite_state(run):
         raise ValueError("checkpoint contains nonfinite model weights")
     if (
-        run.config.attention.kind != "dense"
-        or run.config.model.ffn != "dense"
+        run.config.attention_kinds != {"dense"}
+        or run.config.ffn_kinds != {"dense"}
         or not run.config.model.tie_embeddings
         or run.config.model.memory != "none"
     ):

@@ -68,6 +68,13 @@ class LatentAttention(nn.Module):
             output = torch.softmax(scores.float(), dim=-1).to(value.dtype) @ value
         return self.out_proj(output.transpose(1, 2).reshape(batch, length, -1))
 
+    cache_backend = "mla"
+
+    @property
+    def cache_layout(self) -> tuple[int, int, int]:
+        """K/V heads, key width and value width of one cached layer."""
+        return self.num_heads, self.head_dim, self.value_dim
+
     def create_cache(
         self, batch: int, capacity: int, *, device: torch.device, dtype: torch.dtype
     ) -> AttentionKVCache:

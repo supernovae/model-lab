@@ -16,7 +16,7 @@ from klab.model.attention.dense import DenseAttention
 from klab.model.attention.latent import LatentAttention
 from klab.model.attention.local_selected import LocalSelectedAttention
 from klab.model.moe import TopKMoE
-from klab.model.transformer import ATTENTION_BUILDERS, DenseLM
+from klab.model.transformer import DenseLM
 from klab.training.trainer import train
 
 ATTENTIONS = {
@@ -258,11 +258,6 @@ def test_every_attention_composes_with_every_ffn_at_long_context(
         before, after = model(ids), model(changed)
     torch.testing.assert_close(after[:, :700], before[:, :700], atol=1e-5, rtol=1e-5)
     assert not torch.allclose(after[:, 700:], before[:, 700:])
-
-
-def test_attention_kinds_are_built_from_one_table() -> None:
-    kinds = AttentionConfig.model_fields["kind"].annotation.__args__
-    assert set(ATTENTION_BUILDERS) == set(kinds)
 
 
 @pytest.mark.parametrize("ffn", FFNS)

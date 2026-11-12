@@ -344,15 +344,13 @@
       "properties": {
         "kind": {
           "default": "dense",
-          "enum": [
-            "dense",
-            "sliding_window",
-            "mla",
-            "block_sparse",
-            "local_selected"
-          ],
           "title": "Kind",
           "type": "string"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
         },
         "implementation": {
           "default": "reference",
@@ -1244,6 +1242,60 @@
       "title": "Execution",
       "type": "object"
     },
+    "FeedForwardOverride": {
+      "additionalProperties": false,
+      "description": "The feed-forward settings of the layers one ``model.layers`` entry names.",
+      "properties": {
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "ffn_dim": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ffn Dim"
+        },
+        "num_experts": {
+          "default": 1,
+          "title": "Num Experts",
+          "type": "integer"
+        },
+        "experts_per_token": {
+          "default": 1,
+          "title": "Experts Per Token",
+          "type": "integer"
+        },
+        "shared_expert": {
+          "default": false,
+          "title": "Shared Expert",
+          "type": "boolean"
+        },
+        "router_aux_loss_coefficient": {
+          "default": 0.0,
+          "minimum": 0,
+          "title": "Router Aux Loss Coefficient",
+          "type": "number"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "FeedForwardOverride",
+      "type": "object"
+    },
     "FixedValidationPanel": {
       "additionalProperties": false,
       "description": "Immutable prepared selection, independent of any particular checkpoint.",
@@ -1324,6 +1376,54 @@
         "max_forward_positions"
       ],
       "title": "FixedValidationPanel",
+      "type": "object"
+    },
+    "LayerOverride": {
+      "additionalProperties": false,
+      "description": "Replace the attention or feed-forward of some decoder blocks.\n\n``blocks`` is a list of zero-based block indices or a Python slice written\nas text (``\"::2\"``, ``\"6:\"``, ``\"0:12:3\"``).",
+      "properties": {
+        "blocks": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          ],
+          "title": "Blocks"
+        },
+        "attention": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AttentionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "ffn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FeedForwardOverride"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "blocks"
+      ],
+      "title": "LayerOverride",
       "type": "object"
     },
     "LoggingConfig": {
@@ -1628,12 +1728,21 @@
         },
         "ffn": {
           "default": "dense",
-          "enum": [
-            "dense",
-            "moe"
-          ],
           "title": "Ffn",
           "type": "string"
+        },
+        "ffn_params": {
+          "additionalProperties": true,
+          "title": "Ffn Params",
+          "type": "object"
+        },
+        "layers": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/LayerOverride"
+          },
+          "title": "Layers",
+          "type": "array"
         },
         "num_experts": {
           "default": 1,
@@ -1658,14 +1767,13 @@
         },
         "memory": {
           "default": "none",
-          "enum": [
-            "none",
-            "ngram",
-            "byte",
-            "portable"
-          ],
           "title": "Memory",
           "type": "string"
+        },
+        "memory_params": {
+          "additionalProperties": true,
+          "title": "Memory Params",
+          "type": "object"
         },
         "memory_injection": {
           "default": "final",

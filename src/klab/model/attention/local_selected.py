@@ -256,6 +256,13 @@ class LocalSelectedAttention(nn.Module):
         )
         return torch.cat((gathered, stored[:, :, near:stop]), dim=2)
 
+    cache_backend = "local_selected"
+
+    @property
+    def cache_layout(self) -> tuple[int, int, int]:
+        """K/V heads, key width and value width of one cached layer."""
+        return self.num_heads, self.head_dim, self.value_dim
+
     def create_cache(
         self, batch: int, capacity: int, *, device: torch.device, dtype: torch.dtype
     ) -> AttentionKVCache:

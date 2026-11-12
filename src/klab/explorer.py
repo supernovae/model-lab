@@ -97,7 +97,8 @@ def architecture(config: Any) -> dict[str, Any]:
         )
 
     layers = []
-    for index in range(m.num_layers):
+    base_model, base_attention = m, attention
+    for index, (m, attention) in enumerate(base_model.layer_specs(base_attention)):
         block = f"blocks.{index}"
         layer: dict[str, Any] = {
             "index": index,
@@ -120,8 +121,17 @@ def architecture(config: Any) -> dict[str, Any]:
             "norm_parameters": count(f"{block}.norm"),
         }
         layers.append(layer)
+    m, attention = base_model, base_attention
     memory = None
-    if m.memory != "none":
+    if m.external_memory:
+        memory = {
+            "kind": m.memory,
+            "injection": m.memory_injection,
+            "block_index": m.memory_block_index,
+            "params": dict(m.memory_params),
+            "parameters": count("memory."),
+        }
+    elif m.memory != "none":
         streams = (
             (len(m.memory_ngram_orders) or 1) * m.memory_hash_heads
             if m.memory == "ngram"

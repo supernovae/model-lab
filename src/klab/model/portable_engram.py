@@ -155,6 +155,8 @@ def load_portable_engram(
 class PortableEngramAdapter(nn.Module):
     """Frozen portable latent table plus trainable adapter for one backbone."""
 
+    address_source = "bytes"
+
     def __init__(self, package: PortableEngram, hidden_dim: int) -> None:
         super().__init__()
         self.table_size = package.manifest.table_size

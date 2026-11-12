@@ -87,7 +87,7 @@ def runtime_signature(config: RunConfig, runtime: RuntimeInfo) -> dict[str, obje
             "fp32" if config.runtime.precision == "auto" else config.runtime.precision
         ),
         "architecture_identity": {"model": model, "attention": attention},
-        "attention_family": config.attention.kind,
+        "attention_family": "+".join(sorted(config.attention_kinds)),
         "optimizer": optimizer,
         "sequence_length": config.training.seq_len,
         "micro_batch_size": config.training.micro_batch_size,

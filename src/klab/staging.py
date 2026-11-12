@@ -1245,7 +1245,7 @@ def stage(
                         effective["runtime"]["precision"] = "fp32"
                     if (
                         runtime.backend == "cuda"
-                        and config.attention.kind == "dense"
+                        and config.attention_kinds == {"dense"}
                         and (
                             config.model.num_kv_heads is None
                             or config.model.num_kv_heads == config.model.num_heads

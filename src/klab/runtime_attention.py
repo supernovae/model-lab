@@ -181,7 +181,7 @@ def attention_probe(
     """
     if config.runtime.engine != "pytorch":
         raise ValueError("attention probe requires the PyTorch engine")
-    if config.attention.kind != "dense":
+    if config.attention_kinds != {"dense"}:
         raise ValueError("attention probe requires attention.kind=dense")
     if (
         config.model.num_kv_heads is not None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 
 from torch import Tensor, nn
 
@@ -68,6 +69,135 @@ def _memory_table_name(name: str) -> bool:
     )
 
 
+@lru_cache(maxsize=64)
+def _built_shapes_cached(
+    slot: str, kind: str, model_json: str, attention_json: str, params_json: str
+) -> tuple[tuple[str, tuple[int, ...], bool], ...]:
+    import json
+
+    from klab.components import build
+
+    module = build(
+        slot,  # type: ignore[arg-type]
+        kind,
+        ModelConfig.model_validate_json(model_json),
+        AttentionConfig.model_validate_json(attention_json),
+        json.loads(params_json),
+    )
+    return tuple(
+        (name, tuple(parameter.shape), parameter.requires_grad)
+        for name, parameter in module.named_parameters()
+    )
+
+
+def _built_shapes(
+    slot: str,
+    kind: str,
+    model: ModelConfig,
+    attention: AttentionConfig,
+    params: Mapping[str, object],
+) -> tuple[tuple[str, tuple[int, ...], bool], ...]:
+    """Parameter shapes of a kind from another package, read from one instance.
+
+    Lab knows the shapes of its own kinds without building them. Another
+    package's kind is built once per distinct setting on the CPU and its
+    parameters are listed; the instance is then dropped.
+    """
+    from klab.training.manifest import canonical_json
+
+    return _built_shapes_cached(
+        slot,
+        kind,
+        model.model_dump_json(),
+        attention.model_dump_json(),
+        canonical_json(dict(params)).decode(),
+    )
+
+
+def _add_built(
+    tensors: dict[str, TensorSpec],
+    prefix: str,
+    shapes: tuple[tuple[str, tuple[int, ...], bool], ...],
+) -> None:
+    for name, shape, trainable in shapes:
+        _add(tensors, f"{prefix}.{name}", shape, trainable=trainable)
+
+
+def _add_attention(
+    tensors: dict[str, TensorSpec],
+    attention_prefix: str,
+    m: ModelConfig,
+    attention: AttentionConfig,
+) -> None:
+    from klab.components import is_builtin
+
+    d = m.hidden_dim
+    if not is_builtin("attention", attention.kind):
+        _add_built(
+            tensors,
+            attention_prefix,
+            _built_shapes("attention", attention.kind, m, attention, attention.params),
+        )
+        return
+    if attention.latent_dim is not None:
+        latent = attention.latent_dim
+        _add(tensors, f"{attention_prefix}.q_proj.weight", (d, d))
+        _add(tensors, f"{attention_prefix}.kv_down.weight", (latent, d))
+        _add(tensors, f"{attention_prefix}.k_up.weight", (d, latent))
+        _add(tensors, f"{attention_prefix}.out_proj.weight", (d, latent))
+    else:
+        kv_dim = (m.num_kv_heads or m.num_heads) * (d // m.num_heads)
+        _add(tensors, f"{attention_prefix}.q_proj.weight", (d, d))
+        _add(tensors, f"{attention_prefix}.k_proj.weight", (kv_dim, d))
+        _add(tensors, f"{attention_prefix}.v_proj.weight", (kv_dim, d))
+        _add(tensors, f"{attention_prefix}.out_proj.weight", (d, d))
+    if attention.selector == "learned":
+        assert attention.block_size is not None
+        _add(
+            tensors,
+            f"{attention_prefix}.pool_logits",
+            (m.num_heads, attention.block_size),
+        )
+        _add(tensors, f"{attention_prefix}.coarse_gate", (m.num_heads,))
+
+
+def _add_feed_forward(
+    tensors: dict[str, TensorSpec],
+    ffn_prefix: str,
+    m: ModelConfig,
+    attention: AttentionConfig,
+) -> None:
+    from klab.components import is_builtin
+
+    d, f = m.hidden_dim, m.ffn_dim
+    swiglu = (("gate", (f, d)), ("up", (f, d)), ("down", (d, f)))
+    if not is_builtin("ffn", m.ffn):
+        _add_built(
+            tensors,
+            ffn_prefix,
+            _built_shapes("ffn", m.ffn, m, attention, m.ffn_params),
+        )
+    elif m.ffn == "dense":
+        for projection, shape in swiglu:
+            _add(tensors, f"{ffn_prefix}.{projection}.weight", shape)
+    else:
+        _add(tensors, f"{ffn_prefix}.router.weight", (m.num_experts, d))
+        for expert in range(m.num_experts):
+            for projection, shape in swiglu:
+                _add(
+                    tensors,
+                    f"{ffn_prefix}.experts.{expert}.{projection}.weight",
+                    shape,
+                )
+        if m.shared_expert:
+            for projection, shape in swiglu:
+                _add(
+                    tensors,
+                    f"{ffn_prefix}.shared_expert.{projection}.weight",
+                    shape,
+                )
+
+
 def named_tensor_inventory(
     model_config: ModelConfig,
     attention_config: AttentionConfig | None = None,
@@ -82,72 +212,25 @@ def named_tensor_inventory(
     """
     attention = attention_config or AttentionConfig()
     m = model_config
-    d, f, l, v = m.hidden_dim, m.ffn_dim, m.num_layers, m.vocab_size
+    d, v = m.hidden_dim, m.vocab_size
     tensors: dict[str, TensorSpec] = {}
     _add(tensors, "embedding.weight", (v, d))
 
-    for index in range(l):
+    for index, (layer, layer_attention) in enumerate(m.layer_specs(attention)):
         prefix = f"blocks.{index}"
         _add(tensors, f"{prefix}.norm1.weight", (d,))
         _add(tensors, f"{prefix}.norm2.weight", (d,))
-        attention_prefix = f"{prefix}.attention"
-        if attention.latent_dim is not None:
-            latent = attention.latent_dim
-            _add(tensors, f"{attention_prefix}.q_proj.weight", (d, d))
-            _add(tensors, f"{attention_prefix}.kv_down.weight", (latent, d))
-            _add(tensors, f"{attention_prefix}.k_up.weight", (d, latent))
-            _add(tensors, f"{attention_prefix}.out_proj.weight", (d, latent))
-        else:
-            kv_dim = (m.num_kv_heads or m.num_heads) * (d // m.num_heads)
-            _add(tensors, f"{attention_prefix}.q_proj.weight", (d, d))
-            _add(tensors, f"{attention_prefix}.k_proj.weight", (kv_dim, d))
-            _add(tensors, f"{attention_prefix}.v_proj.weight", (kv_dim, d))
-            _add(tensors, f"{attention_prefix}.out_proj.weight", (d, d))
-
-        if attention.selector == "learned":
-            assert attention.block_size is not None
-            _add(
-                tensors,
-                f"{attention_prefix}.pool_logits",
-                (m.num_heads, attention.block_size),
-            )
-            _add(tensors, f"{attention_prefix}.coarse_gate", (m.num_heads,))
-
-        ffn_prefix = f"{prefix}.ffn"
-        if m.ffn == "dense":
-            for projection, shape in (
-                ("gate", (f, d)),
-                ("up", (f, d)),
-                ("down", (d, f)),
-            ):
-                _add(tensors, f"{ffn_prefix}.{projection}.weight", shape)
-        else:
-            _add(tensors, f"{ffn_prefix}.router.weight", (m.num_experts, d))
-            for expert in range(m.num_experts):
-                for projection, shape in (
-                    ("gate", (f, d)),
-                    ("up", (f, d)),
-                    ("down", (d, f)),
-                ):
-                    _add(
-                        tensors,
-                        f"{ffn_prefix}.experts.{expert}.{projection}.weight",
-                        shape,
-                    )
-            if m.shared_expert:
-                for projection, shape in (
-                    ("gate", (f, d)),
-                    ("up", (f, d)),
-                    ("down", (d, f)),
-                ):
-                    _add(
-                        tensors,
-                        f"{ffn_prefix}.shared_expert.{projection}.weight",
-                        shape,
-                    )
+        _add_attention(tensors, f"{prefix}.attention", layer, layer_attention)
+        _add_feed_forward(tensors, f"{prefix}.ffn", layer, layer_attention)
 
     _add(tensors, "norm.weight", (d,))
-    if m.memory != "none":
+    if m.external_memory:
+        _add_built(
+            tensors,
+            "memory",
+            _built_shapes("memory", m.memory, m, attention, m.memory_params),
+        )
+    elif m.memory != "none":
         streams = (
             (len(m.memory_ngram_orders) or 1) * m.memory_hash_heads
             if m.memory == "ngram"
@@ -304,10 +387,11 @@ def parameter_inventory(config: RunConfig) -> ParameterInventory:
     active = total
     if not m.tie_embeddings:
         active -= embedding - m.hidden_dim
-    if m.ffn == "moe":
-        per_expert = 3 * m.hidden_dim * m.ffn_dim
-        active -= routed - m.experts_per_token * per_expert * m.num_layers
-    if m.memory != "none":
+    for layer, _ in config.layer_specs:
+        if layer.ffn == "moe":
+            per_expert = 3 * layer.hidden_dim * layer.ffn_dim
+            active -= (layer.num_experts - layer.experts_per_token) * per_expert
+    if m.memory != "none" and not m.external_memory:
         streams = (
             (len(m.memory_ngram_orders) or 1) * m.memory_hash_heads
             if m.memory == "ngram"
@@ -369,7 +453,7 @@ def inspection_report(config: RunConfig) -> dict[str, int | str]:
             else {}
         ),
         "expert_note": "not present in dense model"
-        if config.model.ffn == "dense"
+        if "moe" not in config.ffn_kinds
         else "routed and shared expert storage; expert is a non-additive subtotal",
         "engram_note": "not present"
         if config.model.memory == "none"
@@ -428,9 +512,8 @@ def inspect_model(model: nn.Module) -> dict[str, int | str]:
     )
     output_head = 0 if tied else model.output.weight.numel()
     active = total if tied else total - embedding + model.config.hidden_dim
-    if model.config.ffn == "moe":
-        active -= routed_expert + shared_expert
-        active += active_expert
+    active -= routed_expert + shared_expert
+    active += active_expert
     memory_parameters = memory_tables = active_memory_rows = frozen = 0
     for memory in ([model.memory] if model.memory is not None else []) + list(
         model.extra_memories.values()
@@ -482,7 +565,7 @@ def inspect_model(model: nn.Module) -> dict[str, int | str]:
         "frozen": frozen,
         "expert_note": (
             "not present in dense model"
-            if model.config.ffn == "dense"
+            if not routed_expert
             else "routed and shared expert storage; expert is a non-additive subtotal"
         ),
         "engram_note": (

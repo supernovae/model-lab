@@ -1,0 +1,22 @@
+description: The moe preset with a hashed token n-gram memory (orders two and three) added at the embedding.
+model:
+  vocab_size: 32000
+  hidden_dim: 768
+  num_layers: 12
+  num_heads: 12
+  ffn_dim: 1024
+  max_seq_len: 2048
+  ffn: moe
+  num_experts: 8
+  experts_per_token: 2
+  shared_expert: true
+  router_aux_loss_coefficient: 0.01
+  memory: ngram
+  memory_injection: embedding
+  memory_table_size: 262144
+  memory_ngram_size: 3
+  memory_ngram_orders: [2, 3]
+  memory_dim: 64
+attention:
+  kind: dense
+  implementation: sdpa

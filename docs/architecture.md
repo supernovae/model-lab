@@ -69,9 +69,10 @@ See [sparse attention](sparse-attention.md#local-plus-selected-blocks).
 A decoder block pairs one attention kind with one feed-forward kind, and the
 two are independent: `dense`, `sliding_window`, `mla`, `block_sparse` and
 `local_selected` each work with `model.ffn: dense` or `moe`.
-`klab.model.transformer.ATTENTION_BUILDERS` maps each kind to its builder, so an
-experimental attention is one module plus one entry, with no change to the block
-or the MoE path. Attention keeps no `[max_seq_len, max_seq_len]` buffer: a large
+`klab.components` maps each kind to its builder, so an experimental attention is
+one module plus one registration, with no change to the block or the MoE path.
+Another package can register a kind through an entry point, and `model.layers`
+can vary both by block: see [model components](components.md). Attention keeps no `[max_seq_len, max_seq_len]` buffer: a large
 configured context costs nothing until a sequence that long runs.
 
 ## Block-sparse attention

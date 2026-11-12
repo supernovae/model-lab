@@ -3,124 +3,45 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from contextlib import nullcontext
 from typing import Literal
 
 import torch
 from torch import Tensor, nn
 
+from klab.components import build as build_component
 from klab.config.models import AttentionConfig, ModelConfig
 from klab.engram.semantic import (
     SemanticMemoryAdapter,
     SemanticQueryBatch,
     SemanticRetriever,
 )
-from klab.model.attention.dense import DenseAttention
-from klab.model.attention.latent import LatentAttention
-from klab.model.attention.local_selected import LocalSelectedAttention
-from klab.model.attention.sparse import BlockSparseAttention
 from klab.model.cache import (
     AttentionKVCache,
     GenerationCache,
     IncrementalCacheCapability,
 )
-from klab.model.ffn import SwiGLU
-from klab.model.memory import (
-    ByteAddressMemory,
-    TokenNgramMemory,
-    build_token_memory,
-)
-from klab.model.moe import (
-    TopKMoE,
-    diagnostic_writes_enabled,
-    suppress_diagnostic_writes,
-)
+from klab.model.memory import build_token_memory
+from klab.model.moe import diagnostic_writes_enabled, suppress_diagnostic_writes
 from klab.model.norm import RMSNorm
-from klab.model.portable_engram import PortableEngramAdapter, load_portable_engram
 
 SemanticQueryInput = SemanticQueryBatch | Mapping[str, SemanticQueryBatch] | None
 
 
-# Attention modules with ``create_cache``/``forward_cached`` for incremental decoding.
-_CACHED_ATTENTION = (DenseAttention, LatentAttention, LocalSelectedAttention)
-
-AttentionBuilder = Callable[[ModelConfig, AttentionConfig], nn.Module]
-
-
-def _dense_attention(model: ModelConfig, attention: AttentionConfig) -> nn.Module:
-    return DenseAttention(
-        model.hidden_dim,
-        model.num_heads,
-        model.max_seq_len,
-        attention.rope_base,
-        attention.window_size,
-        model.num_kv_heads,
-        implementation=attention.implementation,
-    )
-
-
-def _latent_attention(model: ModelConfig, attention: AttentionConfig) -> nn.Module:
-    return LatentAttention(
-        model.hidden_dim,
-        model.num_heads,
-        attention.latent_dim,
-        model.max_seq_len,
-        attention.rope_base,
-        implementation=attention.implementation,
-    )
-
-
-def _block_sparse_attention(
-    model: ModelConfig, attention: AttentionConfig
-) -> nn.Module:
-    return BlockSparseAttention(
-        model.hidden_dim,
-        model.num_heads,
-        model.max_seq_len,
-        attention.rope_base,
-        attention.block_size,
-        attention.selected_blocks,
-    )
-
-
-def _local_selected_attention(
-    model: ModelConfig, attention: AttentionConfig
-) -> nn.Module:
-    return LocalSelectedAttention(
-        model.hidden_dim,
-        model.num_heads,
-        model.max_seq_len,
-        attention.rope_base,
-        attention.block_size,
-        attention.window_size,
-        attention.selected_blocks,
-        attention.latent_dim,
-        selector=attention.selector,
-    )
-
-
-# One builder per attention kind. A decoder block pairs whichever attention this
-# returns with either feed-forward kind (dense SwiGLU or routed MoE), so a new
-# attention needs a module and an entry here, not changes to the block.
-ATTENTION_BUILDERS: dict[str, AttentionBuilder] = {
-    "dense": _dense_attention,
-    "sliding_window": _dense_attention,
-    "mla": _latent_attention,
-    "block_sparse": _block_sparse_attention,
-    "local_selected": _local_selected_attention,
-}
-
-
-def build_attention(model: ModelConfig, attention: AttentionConfig) -> nn.Module:
-    try:
-        builder = ATTENTION_BUILDERS[attention.kind]
-    except KeyError:
-        raise ValueError(f"unknown attention kind: {attention.kind}") from None
-    return builder(model, attention)
+def _offers(module: nn.Module, method: str) -> bool:
+    return callable(getattr(module, method, None))
 
 
 class DecoderBlock(nn.Module):
+    """Pre-norm block around one registered attention and one feed-forward module.
+
+    The block knows no concrete kind. A module that offers ``forward_with_aux``
+    receives the target mask and diagnostics policy and returns an auxiliary
+    loss; one that offers ``create_cache``/``forward_cached`` and names a
+    ``cache_backend`` can decode incrementally.
+    """
+
     def __init__(self, model: ModelConfig, attention: AttentionConfig) -> None:
         super().__init__()
         if (
@@ -132,20 +53,15 @@ class DecoderBlock(nn.Module):
                 "grouped-query attention is supported only for dense or sliding_window attention"
             )
         self.norm1 = RMSNorm(model.hidden_dim, model.rms_norm_eps)
-        self.attention: nn.Module = build_attention(model, attention)
-        self.norm2 = RMSNorm(model.hidden_dim, model.rms_norm_eps)
-        self.ffn: nn.Module = (
-            SwiGLU(model.hidden_dim, model.ffn_dim)
-            if model.ffn == "dense"
-            else TopKMoE(
-                model.hidden_dim,
-                model.ffn_dim,
-                model.num_experts,
-                model.experts_per_token,
-                model.shared_expert,
-                model.router_aux_loss_coefficient,
-            )
+        self.attention: nn.Module = build_component(
+            "attention", attention.kind, model, attention, attention.params
         )
+        self.norm2 = RMSNorm(model.hidden_dim, model.rms_norm_eps)
+        self.ffn: nn.Module = build_component(
+            "ffn", model.ffn, model, attention, model.ffn_params
+        )
+        self._attention_aux = _offers(self.attention, "forward_with_aux")
+        self._ffn_aux = _offers(self.ffn, "forward_with_aux")
 
     def forward_with_aux(
         self,
@@ -154,9 +70,10 @@ class DecoderBlock(nn.Module):
         valid_target_mask: Tensor | None = None,
         diagnostics: Literal["scalar", "full"] = "scalar",
     ) -> tuple[Tensor, Tensor]:
+        auxiliary_loss: Tensor | None = None
         attention_input = self.norm1(x)
-        if isinstance(self.attention, BlockSparseAttention):
-            attention = self.attention(
+        if self._attention_aux:
+            attention, auxiliary_loss = self.attention.forward_with_aux(
                 attention_input,
                 valid_target_mask=valid_target_mask,
                 diagnostics=diagnostics,
@@ -164,22 +81,40 @@ class DecoderBlock(nn.Module):
         else:
             attention = self.attention(attention_input)
         x = x + attention
-        if isinstance(self.ffn, TopKMoE):
-            ffn_output, auxiliary_loss = self.ffn.forward_with_aux(
+        if self._ffn_aux:
+            ffn_output, ffn_loss = self.ffn.forward_with_aux(
                 self.norm2(x),
                 valid_target_mask=valid_target_mask,
                 diagnostics=diagnostics,
             )
-            return x + ffn_output, auxiliary_loss
-        return x + self.ffn(self.norm2(x)), x.new_zeros(())
+            if ffn_loss is not None:
+                auxiliary_loss = (
+                    ffn_loss if auxiliary_loss is None else auxiliary_loss + ffn_loss
+                )
+        else:
+            ffn_output = self.ffn(self.norm2(x))
+        x = x + ffn_output
+        return x, x.new_zeros(()) if auxiliary_loss is None else auxiliary_loss
+
+    @property
+    def cache_backend(self) -> str | None:
+        """Name of the attention's incremental cache layout, or ``None``."""
+        if not (
+            _offers(self.attention, "create_cache")
+            and _offers(self.attention, "forward_cached")
+        ):
+            return None
+        return getattr(self.attention, "cache_backend", None)
 
     def forward_cached(
         self, x: Tensor, cache: AttentionKVCache
     ) -> tuple[Tensor, AttentionKVCache]:
         """Inference-only incremental block evaluation without auxiliary diagnostics."""
         attention_input = self.norm1(x)
-        if not isinstance(self.attention, _CACHED_ATTENTION):
-            raise TypeError("block-sparse attention requires prefix recomputation")
+        if self.cache_backend is None:
+            raise TypeError(
+                f"{type(self.attention).__name__} requires prefix recomputation"
+            )
         attention, next_cache = self.attention.forward_cached(attention_input, cache)
         x = x + attention
         return x + self.ffn(self.norm2(x)), next_cache
@@ -201,7 +136,8 @@ class DenseLM(nn.Module):
         self.config = model
         self.embedding = nn.Embedding(model.vocab_size, model.hidden_dim)
         self.blocks = nn.ModuleList(
-            DecoderBlock(model, attention) for _ in range(model.num_layers)
+            DecoderBlock(layer_model, layer_attention)
+            for layer_model, layer_attention in model.layer_specs(attention)
         )
         self.norm = RMSNorm(model.hidden_dim, model.rms_norm_eps)
         independent_memory = model.memory == "ngram" and model.memory_independent_init
@@ -209,23 +145,8 @@ class DenseLM(nn.Module):
         self.memory: nn.Module | None = (
             None
             if model.memory == "none"
-            else (
-                build_token_memory(model)
-                if model.memory == "ngram"
-                else (
-                    ByteAddressMemory(
-                        model.hidden_dim, model.memory_table_size, model.memory_dim
-                    )
-                    if model.memory == "byte"
-                    else PortableEngramAdapter(
-                        load_portable_engram(
-                            model.memory_package_path,
-                            expected_shape=(model.memory_table_size, model.memory_dim),
-                            expected_ngram_size=model.memory_ngram_size,
-                        ),
-                        model.hidden_dim,
-                    )
-                )
+            else build_component(
+                "memory", model.memory, model, attention, model.memory_params
             )
         )
         self.extra_memories = nn.ModuleDict(
@@ -278,31 +199,34 @@ class DenseLM(nn.Module):
             mask.dtype != torch.bool or mask.shape != hidden.shape[:2]
         ):
             raise ValueError("memory mask must be boolean and align with hidden states")
-        if isinstance(memory, TokenNgramMemory):
-            if mask is not None and memory.conv is not None:
-                raise ValueError("convolved token memory does not support memory_mask")
-            if cache is not None:
-                history = (
-                    cache.memory_histories.get(extra_key)
-                    if extra_key in self.extra_memories
-                    else cache.memory_history
-                )
-                updated, next_history = memory.forward_last(hidden, token_ids, history)
-                if extra_key in self.extra_memories:
-                    if next_history is not None:
-                        cache.memory_histories[extra_key] = next_history
-                else:
-                    cache.memory_history = next_history
-            else:
-                updated = memory(hidden, token_ids, position_mask=position_mask)
-        elif isinstance(memory, (ByteAddressMemory, PortableEngramAdapter)):
+        if getattr(memory, "address_source", "tokens") == "bytes":
             if byte_addresses is None:
                 raise ValueError(
                     "byte-addressed memory requires prepared byte addresses"
                 )
             updated = memory(hidden, byte_addresses)
+        elif cache is not None:
+            if mask is not None and getattr(memory, "conv", None) is not None:
+                raise ValueError("convolved token memory does not support memory_mask")
+            if not _offers(memory, "forward_last"):
+                raise TypeError(
+                    f"{type(memory).__name__} requires prefix recomputation"
+                )
+            history = (
+                cache.memory_histories.get(extra_key)
+                if extra_key in self.extra_memories
+                else cache.memory_history
+            )
+            updated, next_history = memory.forward_last(hidden, token_ids, history)
+            if extra_key in self.extra_memories:
+                if next_history is not None:
+                    cache.memory_histories[extra_key] = next_history
+            else:
+                cache.memory_history = next_history
         else:
-            raise TypeError(f"unsupported memory module: {type(memory).__name__}")
+            if mask is not None and getattr(memory, "conv", None) is not None:
+                raise ValueError("convolved token memory does not support memory_mask")
+            updated = memory(hidden, token_ids, position_mask=position_mask)
         return (
             updated
             if mask is None
@@ -522,7 +446,13 @@ class DenseLM(nn.Module):
         accelerator accumulation does not synchronize once per microbatch.
         """
         result: dict[str, Tensor] = {}
-        if self.memory is not None and self.memory.last_diagnostics is not None:
+        if self.memory is not None and _offers(self.memory, "metric_tensors"):
+            for name, value in self.memory.metric_tensors().items():
+                result[f"memory/{name}"] = value.detach()
+        elif (
+            self.memory is not None
+            and getattr(self.memory, "last_diagnostics", None) is not None
+        ):
             diagnostic = self.memory.last_diagnostics
             for name in (
                 "lookup_count",
@@ -627,64 +557,44 @@ class DenseLM(nn.Module):
                 diagnostic.gate_mean.new_ones(()).detach()
             )
         for index, block in enumerate(self.blocks):
-            if (
-                isinstance(block.ffn, TopKMoE)
-                and block.ffn.last_diagnostics is not None
-            ):
-                diagnostic = block.ffn.last_diagnostics
-                for metric, field in (
-                    ("router_entropy", "entropy"),
-                    ("maximum_expert_fraction", "maximum_fraction"),
-                    ("mean_topk_probability", "mean_topk_probability"),
-                ):
-                    result[f"moe/layer_{index}/{metric}"] = getattr(
-                        diagnostic, field
-                    ).detach()
-            diagnostic = getattr(block.attention, "last_diagnostics", None)
-            if diagnostic is not None:
-                for metric, field in (
-                    ("available_tokens", "available_tokens"),
-                    ("selected_tokens", "selected_tokens"),
-                    ("selection_ratio", "selection_ratio"),
-                    ("estimated_flops", "estimated_attention_flops"),
-                    ("dense_teacher_mass", "dense_teacher_mass"),
-                    ("dense_teacher_topk_recall", "dense_teacher_topk_recall"),
-                ):
-                    value = getattr(diagnostic, field)
-                    if value is not None:
-                        result[f"attention/layer_{index}/{metric}"] = value.detach()
+            for slot, module in (("ffn", block.ffn), ("attention", block.attention)):
+                if not _offers(module, "metric_tensors"):
+                    continue
+                namespace = getattr(module, "metric_namespace", slot)
+                for name, value in module.metric_tensors().items():
+                    result[f"{namespace}/layer_{index}/{name}"] = value.detach()
         return result
 
     @property
     def incremental_cache_capability(self) -> IncrementalCacheCapability:
         """Describe whether this architecture can decode from projected K/V state."""
-        if any(
-            isinstance(block.attention, BlockSparseAttention) for block in self.blocks
+        backends: list[str] = []
+        for block in self.blocks:
+            backend = block.cache_backend
+            if backend is None:
+                return IncrementalCacheCapability(
+                    False,
+                    getattr(
+                        block.attention,
+                        "cache_unsupported_reason",
+                        f"{type(block.attention).__name__} keeps no incremental "
+                        "cache; generation recomputes the active prefix",
+                    ),
+                )
+            if backend not in backends:
+                backends.append(backend)
+        memory = self.memory
+        if (
+            memory is not None
+            and getattr(memory, "address_source", "tokens") == "tokens"
+            and not _offers(memory, "forward_last")
         ):
             return IncrementalCacheCapability(
                 False,
-                "block_sparse selection is prefix-dependent; generation recomputes "
-                "the active prefix for exact reference semantics",
+                f"{type(memory).__name__} has no incremental lookup; generation "
+                "recomputes the active prefix",
             )
-        mode = (
-            "local_selected"
-            if any(
-                isinstance(block.attention, LocalSelectedAttention)
-                for block in self.blocks
-            )
-            else "mla"
-            if any(
-                isinstance(block.attention, LatentAttention) for block in self.blocks
-            )
-            else "sliding"
-            if any(
-                isinstance(block.attention, DenseAttention)
-                and block.attention.window_size is not None
-                for block in self.blocks
-            )
-            else "dense"
-        )
-        return IncrementalCacheCapability(True, backend=mode)
+        return IncrementalCacheCapability(True, backend="+".join(sorted(backends)))
 
     @torch.no_grad()
     def forward_cached(
@@ -737,7 +647,6 @@ class DenseLM(nn.Module):
                     dtype=projection_dtype,
                 )
                 for block in self.blocks
-                if isinstance(block.attention, _CACHED_ATTENTION)
             ]
             cache = GenerationCache(
                 layers=layers,
@@ -786,34 +695,15 @@ class DenseLM(nn.Module):
             ):
                 raise ValueError("generation cache layers are inconsistent")
             for block, layer in zip(self.blocks, cache.layers, strict=True):
-                attention = block.attention
-                if not isinstance(attention, _CACHED_ATTENTION):
-                    raise TypeError("generation cache contains a non-incremental layer")
-                value_dim = (
-                    attention.head_dim
-                    if isinstance(attention, DenseAttention)
-                    else attention.value_dim
-                )
-                kv_heads = (
-                    attention.num_kv_heads
-                    if isinstance(attention, DenseAttention)
-                    else attention.num_heads
-                )
+                layout = getattr(block.attention, "cache_layout", None)
+                if layout is None:
+                    continue
+                kv_heads, key_dim, value_dim = layout
                 if (
                     layer.key.shape
-                    != (
-                        cache.batch_size,
-                        kv_heads,
-                        cache.capacity,
-                        attention.head_dim,
-                    )
+                    != (cache.batch_size, kv_heads, cache.capacity, key_dim)
                     or layer.value.shape
-                    != (
-                        cache.batch_size,
-                        kv_heads,
-                        cache.capacity,
-                        value_dim,
-                    )
+                    != (cache.batch_size, kv_heads, cache.capacity, value_dim)
                     or layer.key.device != input_ids.device
                     or layer.value.device != input_ids.device
                     or layer.key.dtype != projection_dtype
@@ -826,7 +716,7 @@ class DenseLM(nn.Module):
                     raise ValueError(
                         "generation cache layer shape, device, or dtype is invalid"
                     )
-        if isinstance(self.memory, (ByteAddressMemory, PortableEngramAdapter)):
+        if getattr(self.memory, "address_source", "tokens") == "bytes":
             if byte_addresses is None:
                 raise ValueError(
                     "byte-addressed memory requires prepared byte addresses"
@@ -838,7 +728,7 @@ class DenseLM(nn.Module):
                 raise ValueError(
                     "byte_addresses must match cached input IDs in shape and device"
                 )
-        if isinstance(self.memory, TokenNgramMemory) and self.memory.conv is not None:
+        if getattr(self.memory, "conv", None) is not None:
             expected_history = (
                 cache.batch_size,
                 self.memory.conv_history_length,
@@ -864,7 +754,7 @@ class DenseLM(nn.Module):
         expected_extra = {
             key
             for key, memory in self.extra_memories.items()
-            if memory.conv is not None
+            if getattr(memory, "conv", None) is not None
         }
         if set(cache.memory_histories) - expected_extra or (
             cache.length and set(cache.memory_histories) != expected_extra

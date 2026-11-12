@@ -175,6 +175,18 @@ class TopKMoE(nn.Module):
                 )
         return output.reshape(original_shape), auxiliary_loss
 
+    metric_namespace = "moe"
+
+    def metric_tensors(self) -> dict[str, Tensor]:
+        diagnostic = self.last_diagnostics
+        if diagnostic is None:
+            return {}
+        return {
+            "router_entropy": diagnostic.entropy,
+            "maximum_expert_fraction": diagnostic.maximum_fraction,
+            "mean_topk_probability": diagnostic.mean_topk_probability,
+        }
+
     def forward(
         self,
         x: Tensor,

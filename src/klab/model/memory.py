@@ -506,6 +506,8 @@ _DEFAULT_ADDRESSES = TokenNgramMemory.addresses
 class ByteAddressMemory(nn.Module):
     """Apply precomputed causal byte addresses supplied by prepared data."""
 
+    address_source = "bytes"
+
     def __init__(self, hidden_dim: int, table_size: int, value_dim: int) -> None:
         super().__init__()
         self.table_size = table_size

@@ -84,7 +84,7 @@ def migrate_dense_to_ngram(
     context_transfer = None
     if extend_context:
         if (
-            source.attention.kind != "dense"
+            source.attention_kinds != {"dense"}
             or target.model.max_seq_len <= source.model.max_seq_len
         ):
             raise ValueError("context transfer requires a larger dense RoPE context")

@@ -72,3 +72,8 @@ For a long accelerator run, start from `configs/accelerator_scale.yaml`
 ([keep accelerators busy](training.md#keep-accelerators-busy)). Other starting shapes are in `configs/`: `dense_7m.yaml` to `dense_50m.yaml`,
 `first_model_20m_cpu.yaml` and `scale_dense_160m_cuda.yaml`. Copy one and
 replace its `dataset` and `tokenizer` sections with yours.
+
+To pick an architecture by name and size instead, scale a preset onto your
+config: `klab architecture derive moe --params 300M --base model.yaml --output
+moe-300m.yaml`. [Model components](components.md) lists the presets and covers
+per-layer schedules and kinds supplied by another package.

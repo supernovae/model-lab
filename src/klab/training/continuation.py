@@ -47,7 +47,7 @@ def runtime_optimization_transition(
     """Admit only explicitly requested execution changes with a fixed effective batch."""
     if source.runtime.engine != "pytorch" or target.runtime.engine != "pytorch":
         raise ValueError("runtime optimization transition requires PyTorch")
-    if source.attention.kind != "dense" or target.attention.kind != "dense":
+    if source.attention_kinds != {"dense"} or target.attention_kinds != {"dense"}:
         raise ValueError("runtime optimization transition requires dense attention")
     source_matched = source.training.matched_stories
     target_matched = target.training.matched_stories
