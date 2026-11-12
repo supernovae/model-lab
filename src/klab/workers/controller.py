@@ -196,7 +196,7 @@ class Controller:
         ):
             raise ValueError("worker discovery instance nonce mismatch")
         data["host"] = definition.host
-        for field in ("relay", "colab"):
+        for field in ("relay", "colab", "pricing"):
             value = getattr(definition, field, None)
             if value is not None:
                 data[field] = self._dump(value)
@@ -441,7 +441,49 @@ class Controller:
         ]
 
     def list_experiments(self) -> list[dict[str, object]]:
-        return self.store.attempts()
+        from datetime import UTC, datetime
+
+        from .cost import attempt_cost
+
+        now = datetime.now(UTC)
+        rows = self.store.attempts()
+        for row in rows:
+            worker = self._worker_for_attempt(row)
+            if worker is not None and worker.pricing is not None:
+                row["cost"] = attempt_cost(row, worker.pricing, now)
+        return rows
+
+    def spend_cap_reason(self, worker: Any) -> str | None:
+        """Why a capped worker takes no more work, or None while under its cap."""
+        pricing = getattr(worker, "pricing", None)
+        if pricing is None or pricing.max_spend is None:
+            return None
+        spent = self.spend(worker)
+        assert spent is not None
+        if spent["attributed"] < pricing.max_spend:
+            return None
+        return (
+            f"spend cap reached ({spent['attributed']:.2f} of "
+            f"{pricing.max_spend:.2f} {pricing.currency})"
+        )
+
+    def spend(self, worker: Any) -> dict[str, object] | None:
+        """Attributed spend and cap of one priced worker, or None if unpriced."""
+        from datetime import UTC, datetime
+
+        from .cost import worker_spend
+
+        if worker.pricing is None:
+            return None
+        amount = worker_spend(
+            self.store.attempts(), worker.worker_id, worker.pricing, datetime.now(UTC)
+        )
+        return {
+            "currency": worker.pricing.currency,
+            "hourly_rate": worker.pricing.hourly_rate,
+            "attributed": amount,
+            "max_spend": worker.pricing.max_spend,
+        }
 
     def cancel(
         self, run_id: str, *, deadline: float | None = None
@@ -814,6 +856,10 @@ class Controller:
                 for item in active
             ):
                 reasons.append(f"{capability.name}: controller slot occupied")
+                continue
+            capped = self.spend_cap_reason(capability)
+            if capped is not None:
+                reasons.append(f"{capability.name}: {capped}")
                 continue
             basic, reason = self._basic_eligibility(capability, spec)
             if not basic:

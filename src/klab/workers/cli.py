@@ -217,6 +217,19 @@ def _worker_definition(args: argparse.Namespace):
         device_index=args.device_index,
         relay=relay,
         colab=colab,
+        pricing=_pricing(args),
+    )
+
+
+def _pricing(args: argparse.Namespace):
+    from klab.workers.models import WorkerPricing
+
+    if args.hourly_cost is None:
+        if args.max_spend is not None:
+            raise ValueError("--max-spend requires --hourly-cost")
+        return None
+    return WorkerPricing(
+        hourly_rate=args.hourly_cost, currency=args.currency, max_spend=args.max_spend
     )
 
 
@@ -226,8 +239,15 @@ def _worker_register(args: argparse.Namespace) -> None:
 
 
 def _worker_status(args: argparse.Namespace) -> None:
-    capabilities = _controller(Path(args.store)).workers(args.name, refresh=True)
-    payload = [capability.model_dump(mode="json") for capability in capabilities]
+    controller = _controller(Path(args.store))
+    capabilities = controller.workers(args.name, refresh=True)
+    payload = []
+    for capability in capabilities:
+        row = capability.model_dump(mode="json")
+        spend = controller.spend(capability)
+        if spend is not None:
+            row["spend"] = spend
+        payload.append(row)
     _json(payload if args.name is None else (payload[0] if payload else None))
 
 
@@ -542,6 +562,19 @@ def add_commands(
     register.add_argument("--colab-auth", choices=("oauth2", "adc"))
     register.add_argument("--colab-job-timeout", type=float, default=3600)
     register.add_argument("--relay-profile", type=Path)
+    register.add_argument(
+        "--hourly-cost",
+        type=float,
+        help="What the worker costs per hour, to record attributed cost",
+    )
+    register.add_argument(
+        "--currency", default="USD", help="Currency of --hourly-cost and --max-spend"
+    )
+    register.add_argument(
+        "--max-spend",
+        type=float,
+        help="Stop assigning work once attributed spend in this store reaches this",
+    )
     register.add_argument("--python")
     register.add_argument("--root")
     _store_argument(register, default_store)
