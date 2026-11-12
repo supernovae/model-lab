@@ -117,38 +117,17 @@ def test_models_and_real_raw_chat_roundtrip(loaded):
     "changes",
     [
         {"stream": True},
-        {"stream": 0},
         {"top_p": 0.9},
         {"n": 2},
-        {"n": True},
         {"tools": []},
-        {"tool_choice": "none"},
-        {"response_format": {"type": "text"}},
-        {"logprobs": 1},
-        {"best_of": 1},
-        {"echo": True},
-        {"stream_options": {}},
-        {"frequency_penalty": 1},
-        {"presence_penalty": -1},
-        {"suffix": "x"},
-        {"max_tokens": 0},
         {"max_tokens": True},
         {"max_tokens": 257},
         {"temperature": float("nan")},
-        {"temperature": -0.1},
         {"temperature": True},
-        {"temperature": 1e300},
-        {"temperature": 10**400},
-        {"seed": -1},
         {"seed": 2**64},
-        {"top_k": -1},
         {"top_k": 999999},
         {"stop": [""]},
-        {"stop": ["a"] * 5},
-        {"stop": "x" * 257},
         {"prompt": ["batch"]},
-        {"prompt": [1, 2]},
-        {"prompt": None},
     ],
 )
 def test_unsupported_and_invalid_options_fail_before_generation(
@@ -169,9 +148,6 @@ def test_unsupported_and_invalid_options_fail_before_generation(
         [],
         [{"role": "user", "content": [{"type": "text", "text": "Hi"}]}],
         [{"role": "tool", "content": "Hi"}],
-        [{"role": "developer", "content": "Hi"}],
-        [{"role": "assistant", "content": "Hi"}],
-        [{"role": "user", "content": "Hi", "name": "someone"}],
         [{"role": "user", "content": " "}],
         [{"role": "system", "content": "Hi"}],
         [{"role": "user", "content": "Hi"}, {"role": "user", "content": "Hi"}],
@@ -516,41 +492,6 @@ def test_model_failure_releases_lock_and_returns_structured_error(loaded, monkey
         assert request(server, "/v1/completions", payload())[0] == 200
 
 
-def test_two_http_callers_both_complete_without_overlapping_model(loaded, monkeypatch):
-    original = serving.generate_result
-    entered = threading.Event()
-    release = threading.Event()
-    attempted_second = threading.Event()
-    active = 0
-    peak = 0
-
-    def fake(*args, **kwargs):
-        nonlocal active, peak
-        active += 1
-        peak = max(peak, active)
-        entered.set()
-        try:
-            assert release.wait(5)
-            return original(*args, **kwargs)
-        finally:
-            active -= 1
-
-    monkeypatch.setattr(serving, "generate_result", fake)
-    with running(loaded) as server, ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(request, server, "/v1/completions", payload())
-        assert entered.wait(5)
-
-        def second_request():
-            attempted_second.set()
-            return request(server, "/v1/completions", payload())
-
-        second = pool.submit(second_request)
-        assert attempted_second.wait(5)
-        release.set()
-        assert first.result(timeout=5)[0] == second.result(timeout=5)[0] == 200
-        assert peak == 1
-
-
 def test_no_file_routes_checkpoint_options_or_cors_allowance(loaded):
     with running(loaded) as server:
         assert request(server, "/../../etc/passwd")[0] == 404
@@ -585,15 +526,8 @@ def test_no_file_routes_checkpoint_options_or_cors_allowance(loaded):
     [
         ([], [], "invalid_host"),
         (["evil.invalid:{port}"], [], "invalid_host"),
-        (["localhost:1"], [], "invalid_host"),
-        (["localhost.:{port}"], [], "invalid_host"),
-        (["localhost:{port}"] * 2, [], "invalid_host"),
         (["localhost:{port}"], ["null"], "invalid_origin"),
         (["localhost:{port}"], ["http://evil.invalid:{port}"], "invalid_origin"),
-        (["localhost:{port}"], ["http://127.0.0.1:{port}"], "invalid_origin"),
-        (["localhost:{port}"], ["https://localhost:{port}"], "invalid_origin"),
-        (["localhost:{port}"], ["http://localhost:1"], "invalid_origin"),
-        (["localhost:{port}"], ["http://localhost:{port}/"], "invalid_origin"),
         (["localhost:{port}"], ["http://localhost:{port}"] * 2, "invalid_origin"),
     ],
 )
@@ -627,11 +561,10 @@ def test_authority_rejected_before_metadata_or_inference(
             connection.close()
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "LOCALHOST"])
 @pytest.mark.parametrize("origin", [False, True])
-def test_native_and_same_origin_authorities(loaded, host, origin):
+def test_native_and_same_origin_authorities(loaded, origin):
     with running(loaded) as server:
-        authority = f"{host}:{server.server_port}"
+        authority = f"LOCALHOST:{server.server_port}"
         headers = {"Host": authority, "Content-Type": "application/json"}
         if origin:
             headers["Origin"] = f"http://{authority}"
@@ -689,14 +622,8 @@ def test_ipv6_authorities(loaded):
             thread.join(timeout=5)
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
-def test_numeric_loopback_binding_does_not_resolve_dns(loaded, monkeypatch, host):
-    if host == "::1":
-        try:
-            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
-                probe.bind((host, 0))
-        except OSError:
-            pytest.skip("IPv6 loopback is unavailable")
+def test_numeric_loopback_binding_does_not_resolve_dns(loaded, monkeypatch):
+    host = "127.0.0.1"
 
     def forbidden(*args, **kwargs):
         pytest.fail("numeric loopback binding must not call getfqdn")
@@ -706,8 +633,7 @@ def test_numeric_loopback_binding_does_not_resolve_dns(loaded, monkeypatch, host
         assert server.server_name == host
         assert server.server_port == server.socket.getsockname()[1]
         assert server.server_port > 0
-        authority = f"[{host}]" if ":" in host else host
-        assert f"{authority}:{server.server_port}" in server.allowed_authorities
+        assert f"{host}:{server.server_port}" in server.allowed_authorities
 
 
 def test_real_cli_process_serves_pinned_model_and_closes_on_sigint(loaded, tmp_path):

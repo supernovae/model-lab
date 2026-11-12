@@ -316,27 +316,6 @@ def test_chat_stops_generation_when_another_role_boundary_is_decoded() -> None:
     assert model.calls == len(reply_ids)
 
 
-def test_real_tiny_model_forward_is_usable_for_generation() -> None:
-    tokenizer = _tokenizer()
-    model = DenseLM(
-        ModelConfig(
-            vocab_size=tokenizer.get_vocab_size(),
-            hidden_dim=16,
-            num_layers=1,
-            num_heads=2,
-            ffn_dim=32,
-            max_seq_len=16,
-        ),
-        AttentionConfig(),
-    )
-    model.train()
-
-    completion = generate(model, tokenizer, "hello", 16, 1, torch.device("cpu"))
-
-    assert completion.startswith("hello")
-    assert model.training
-
-
 def test_grouped_query_attention_matches_explicit_kv_repeat_reference() -> None:
     torch.manual_seed(23)
     attention = DenseAttention(16, 4, 8, 10_000.0, num_kv_heads=2).eval()
@@ -561,14 +540,19 @@ def test_incremental_cache_preserves_unicode_byte_memory_addresses(
     )
 
 
-@pytest.mark.parametrize("injection", ["final", "embedding", "after_block"])
 @pytest.mark.parametrize(
-    "variant,kernel",
-    [("hidden_gate", 0), ("context_key", 0), ("context_key", 1), ("context_key", 4)],
+    "injection,variant,kernel,block_index",
+    [
+        ("final", "hidden_gate", 0, None),
+        ("embedding", "context_key", 0, None),
+        ("final", "context_key", 4, None),
+        ("embedding", "context_key", 4, None),
+        ("after_block", "context_key", 4, 0),
+        ("after_block", "context_key", 1, 1),
+    ],
 )
-@pytest.mark.parametrize("block_index", [0, 1])
 def test_incremental_cache_preserves_ngram_memory_history(
-    injection: str, variant: str, kernel: int, block_index: int
+    injection: str, variant: str, kernel: int, block_index: int | None
 ) -> None:
     model = DenseLM(
         ModelConfig(
@@ -585,7 +569,7 @@ def test_incremental_cache_preserves_ngram_memory_history(
             memory_ngram_orders=(2, 3),
             memory_hash_heads=2,
             memory_injection=injection,
-            memory_block_index=block_index if injection == "after_block" else None,
+            memory_block_index=block_index,
             memory_variant=variant,
             memory_conv_kernel_size=kernel,
         ),

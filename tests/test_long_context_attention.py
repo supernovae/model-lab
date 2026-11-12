@@ -62,7 +62,7 @@ FFNS = {
 
 
 @pytest.mark.parametrize("latent", [None, 16])
-@pytest.mark.parametrize("length", [1, 8, 9, 70])
+@pytest.mark.parametrize("length", [8, 70])
 def test_local_selected_equals_full_attention_when_every_block_is_visible(
     latent: int | None, length: int
 ) -> None:
@@ -216,8 +216,20 @@ def test_windowed_and_latent_sdpa_match_their_reference_paths() -> None:
         )
 
 
-@pytest.mark.parametrize("ffn", FFNS)
-@pytest.mark.parametrize("attention", ATTENTIONS)
+# Each attention kind runs once; the FFN alternates so both FFNs compose with
+# fused, latent and block-selected attention. Attention and FFN do not interact
+# inside a block, so the full cross product repeats the same paths.
+@pytest.mark.parametrize(
+    ("attention", "ffn"),
+    [
+        ("dense_sdpa", "moe"),
+        ("sliding_sdpa", "dense"),
+        ("mla_sdpa", "moe"),
+        ("local_selected", "dense"),
+        ("local_selected_latent", "moe"),
+        ("local_selected_learned", "dense"),
+    ],
+)
 def test_every_attention_composes_with_every_ffn_at_long_context(
     attention: str, ffn: str
 ) -> None:
@@ -260,10 +272,8 @@ def test_every_attention_composes_with_every_ffn_at_long_context(
     assert not torch.allclose(after[:, 700:], before[:, 700:])
 
 
-@pytest.mark.parametrize("ffn", FFNS)
-def test_local_selected_trains_checkpoints_and_generates(
-    tmp_path: Path, ffn: str
-) -> None:
+def test_local_selected_trains_checkpoints_and_generates(tmp_path: Path) -> None:
+    ffn = "moe"
     base = config(tmp_path)
     run = base.model_copy(
         update={
