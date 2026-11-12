@@ -560,7 +560,9 @@ def _schedule(
             reserve_bytes=1024**3,
             operator_cap=int(cap) if cap else None,
         ).workers
-        read_workers = max(2 if workers >= 4 else 1, workers // 4) if workers > 1 else 0
+        # One source reader keeps up below eight workers (it measured about 5%
+        # busy), so the rest of a small plan goes to the encoder.
+        read_workers = max(1, workers // 4) if workers > 1 else 0
         encode_workers = max(1, workers - read_workers)
         metrics = {
             "workers": workers,
