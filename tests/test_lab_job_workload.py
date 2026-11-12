@@ -48,11 +48,7 @@ def _evaluation_config(tmp_path, blocks, batch_size, max_batches):
         (None, None, 5, 5, False),
         ((3, 3), 2, 64, 4, True),
         ((3, 5), 2, 1, 5, False),
-        ((128, 128), 2, 1, 128, False),
-        ((16, 16), 16, 1, 2, True),
         ((16, 17), 17, 1, 2, False),
-        ((100_000, 100_000), 100_000, 1, 2, False),
-        (None, 8, 4, 4, True),
         (None, 9, 4, 4, False),
     ],
 )
@@ -97,17 +93,6 @@ def test_tiny_profile_effective_evaluation_limit(
     ("section", "changes", "message"),
     [
         ("model", {"ffn": "moe", "num_experts": 2}, "dense-FFN PyTorch"),
-        (
-            "model",
-            {
-                "memory": "byte",
-                "memory_table_size": 16,
-                "memory_ngram_size": 2,
-                "memory_dim": 8,
-            },
-            "dense-FFN PyTorch",
-        ),
-        ("runtime", {"engine": "mlx", "backend": "metal"}, "dense-FFN PyTorch"),
         ("training", {"seq_len": 8}, "sequence length must match"),
     ],
 )

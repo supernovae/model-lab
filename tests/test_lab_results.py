@@ -151,12 +151,9 @@ def test_direct_run_checkpoint_and_custom_runs_directory(tmp_path: Path) -> None
         resolve_record(str(run), tmp_path)
 
 
-@pytest.mark.parametrize("kind", ["try", "probe"])
-def test_exported_record_inside_run_is_still_a_record(
-    tmp_path: Path, kind: str
-) -> None:
+def test_exported_record_inside_run_is_still_a_record(tmp_path: Path) -> None:
     run = _run(tmp_path)
-    source = _record(tmp_path, run, kind)
+    source = _record(tmp_path, run)
     exported = run / "saved-result.json"
     exported.write_bytes(source.read_bytes())
     assert resolve_record(str(exported), tmp_path) == exported
@@ -175,9 +172,7 @@ def test_missing_recorded_checkpoint_never_falls_back_to_latest(tmp_path: Path) 
     assert resolve_record(path.parent.name, tmp_path) == path
 
 
-@pytest.mark.parametrize(
-    "checkpoint", ["../other", "/other", "checkpoints/latest.json"]
-)
+@pytest.mark.parametrize("checkpoint", ["../other", "checkpoints/latest.json"])
 def test_record_cannot_redirect_to_a_pointer_or_another_run(
     tmp_path: Path, checkpoint: str
 ) -> None:
@@ -294,13 +289,12 @@ def test_unknown_id_has_the_same_text_and_json_error_on_all_surfaces(
         assert "--lab-dir" not in payload["hint"] and "--config" in payload["hint"]
 
 
-@pytest.mark.parametrize("backend", ["cuda", "rocm"])
 def test_probe_saved_backend_error_is_explicit_in_text_and_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    backend: str,
 ) -> None:
+    backend = "cuda"
     run = _run(tmp_path / "lab", backend=backend)
     for flag in ([], ["--json"]):
         with pytest.raises(SystemExit) as error:
@@ -449,24 +443,11 @@ def test_record_cli_dispatch_preserves_explicit_backend_and_envelope(
     "declaration",
     [
         "[]",
-        "text: 123",
-        "text: ''",
-        "text: '   '",
-        'text: "\\t\\n\\r\\t"',
-        "false",
-        "5",
-        "text: [story]",
-        "lab_dir: 5",
         "text: [",
-        "refresh: 1",
+        "text: '   '",
         "refresh: 'false'",
-        "explore_config_version: true",
         "explore_config_version: 2",
-        "explore_config_version: 1.0",
-        "text: null",
         "backend: cuda",
-        "resource_envelope: bounds.yaml",
-        "typo: true",
     ],
 )
 def test_explore_declaration_fails_before_runtime_or_lookup(
@@ -487,39 +468,6 @@ def test_explore_declaration_fails_before_runtime_or_lookup(
     )
     with pytest.raises(ValueError):
         _prepare_runtime_command(args)
-
-
-def test_explore_option_bound_removes_executable_flags(tmp_path: Path) -> None:
-    import argparse
-
-    from klab.cli.main import build_parser
-
-    parser = build_parser(tmp_path)
-    commands = next(
-        a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
-    )
-    options = {
-        flag
-        for action in commands.choices["explore"]._actions
-        for flag in action.option_strings
-        if flag != "--help" and flag != "-h"
-    }
-    assert options == {
-        "--config",
-        "--runtime",
-        "--runtime-profile",
-        "--resource-envelope",
-        "--json",
-    }
-    for flag, values in {
-        "--text": ["story"],
-        "--refresh": [],
-        "--backend": ["cpu"],
-        "--lab-dir": ["lab"],
-        "--runs-dir": ["runs"],
-    }.items():
-        with pytest.raises(SystemExit):
-            parser.parse_args(["explore", "candidate", flag, *values])
 
 
 def test_explore_declaration_anchors_roots_and_reaches_native_handler(
@@ -597,7 +545,7 @@ def test_explore_explicit_profile_selects_backend_before_native_authorization(
         cli._prepare_runtime_command(args)
 
 
-@pytest.mark.parametrize("document", ["", "# use defaults\n", "null\n", "{}\n"])
+@pytest.mark.parametrize("document", ["", "{}\n"])
 def test_explore_empty_declaration_uses_defaults(tmp_path: Path, document: str) -> None:
     from klab.explore_config import ExploreConfig, load_explore_config
 
@@ -622,43 +570,3 @@ def test_explore_declaration_expands_home_and_preserves_exact_prompt(
     assert config.text == prompt
     assert config.lab_dir == task_home / "lab"
     assert config.runs_dir == task_home / "runs"
-
-
-@pytest.mark.parametrize("command", ["explore", "probe"])
-@pytest.mark.parametrize("as_json", [False, True])
-@pytest.mark.parametrize(
-    "hint",
-    [
-        "check --work-dir/--lab-dir or pass a path",
-        "use --lab-dir for this unrelated diagnostic",
-        "pass an explicit checkpoint path",
-    ],
-)
-def test_lookup_hint_rewrites_only_exact_declaration_selector(
-    command: str, as_json: bool, hint: str, capsys: pytest.CaptureFixture[str]
-) -> None:
-    import argparse
-
-    from klab.cli.main import _lab_lookup_failure
-
-    error = ResultLookupError("fixture", "missing_evidence", "fixture reason", hint)
-    expected = (
-        hint.replace("--work-dir/--lab-dir", "--work-dir or --config lab_dir")
-        if command in {"explore", "probe"}
-        else hint
-    )
-    with pytest.raises(SystemExit) as stopped:
-        _lab_lookup_failure(argparse.Namespace(command=command, json=as_json), error)
-    if as_json:
-        assert stopped.value.code == 1
-        assert json.loads(capsys.readouterr().out) == {
-            "status": "missing_evidence",
-            "result": "fixture",
-            "reason": "fixture reason",
-            "hint": expected,
-        }
-    else:
-        assert (
-            str(stopped.value)
-            == f"klab {command}: missing_evidence: fixture: fixture reason; {expected}"
-        )

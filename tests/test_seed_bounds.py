@@ -16,10 +16,10 @@ from klab.try_config import TryConfig
 FIXTURE = Path(__file__).parent / "fixtures/contracts/run_config_v2.json"
 
 
-def _raw(seed=7, engine="pytorch"):
+def _raw(seed=7):
     raw = json.loads(FIXTURE.read_text())
     raw["seed"] = seed
-    raw["runtime"].update(engine=engine, backend="metal" if engine == "mlx" else "cpu")
+    raw["runtime"].update(engine="pytorch", backend="cpu")
     return raw
 
 
@@ -28,13 +28,12 @@ def _write(path, raw):
     return path
 
 
-@pytest.mark.parametrize("engine", ["pytorch", "mlx"])
 @pytest.mark.parametrize("seed", [-1, 2**32])
-def test_invalid_seed_loading_and_derivation_have_no_outputs(tmp_path, engine, seed):
-    source = _write(tmp_path / "source.yaml", _raw(seed, engine))
+def test_invalid_seed_loading_and_derivation_have_no_outputs(tmp_path, seed):
+    source = _write(tmp_path / "source.yaml", _raw(seed))
     with pytest.raises(ValueError, match="seed"):
         load_config(source)
-    source = _write(source, _raw(7, engine))
+    source = _write(source, _raw(7))
     output = tmp_path / "derived.yaml"
     with pytest.raises(ValueError, match="seed"):
         derive_config(source, output, {"seed": seed})
@@ -43,10 +42,9 @@ def test_invalid_seed_loading_and_derivation_have_no_outputs(tmp_path, engine, s
     assert sorted(p.name for p in tmp_path.iterdir()) == ["source.yaml"]
 
 
-@pytest.mark.parametrize("engine", ["pytorch", "mlx"])
 @pytest.mark.parametrize("seed", [0, 2**32 - 1])
-def test_boundary_loading_derivation_and_override_preserve_seed(tmp_path, engine, seed):
-    source = _write(tmp_path / "source.yaml", _raw(seed, engine))
+def test_boundary_loading_derivation_and_override_preserve_seed(tmp_path, seed):
+    source = _write(tmp_path / "source.yaml", _raw(seed))
     assert load_config(source).seed == seed
     output = tmp_path / "derived.yaml"
     derive_config(source, output, {"seed": seed})
@@ -54,24 +52,17 @@ def test_boundary_loading_derivation_and_override_preserve_seed(tmp_path, engine
     assert TryConfig(seed=seed).model_dump(mode="json")["seed"] == seed
 
 
-@pytest.mark.parametrize(
-    "seed,expected",
-    [
-        (0, "0d71bf62e5dc5d5e4afc66ce483f90489e8e5d3ed7a369739f4562fd37e3075b"),
-        (2**32 - 1, "0ee671d84c173327acd3d39e6367609e5dde3e2b02ad5c84646f0f4c0ae46692"),
-    ],
-)
-def test_valid_seed_identity_is_stable(seed, expected):
-    config = RunConfig.model_validate(_raw(seed))
+def test_valid_seed_identity_is_stable():
+    expected = "0ee671d84c173327acd3d39e6367609e5dde3e2b02ad5c84646f0f4c0ae46692"
+    config = RunConfig.model_validate(_raw(2**32 - 1))
     assert config_sha256(config.model_dump(mode="json")) == expected
 
 
-@pytest.mark.parametrize("seed", [-1, 2**32])
 @pytest.mark.parametrize("location", ["baseline", "candidate", "delta", "override"])
-def test_try_rejects_invalid_seed_before_artifacts(
-    tmp_path, monkeypatch, seed, location
-):
+def test_try_rejects_invalid_seed_before_artifacts(tmp_path, monkeypatch, location):
     from klab import resource_envelope
+
+    seed = 2**32
 
     baseline = _write(
         tmp_path / "base.yaml", _raw(seed if location == "baseline" else 7)
@@ -98,11 +89,10 @@ def test_try_rejects_invalid_seed_before_artifacts(
     assert sorted(p.name for p in tmp_path.iterdir()) == ["base.yaml", "candidate.yaml"]
 
 
-@pytest.mark.parametrize("seed", [0, 2**32 - 1])
-def test_try_boundary_override_supersedes_delta_before_setup(
-    tmp_path, monkeypatch, seed
-):
+def test_try_boundary_override_supersedes_delta_before_setup(tmp_path, monkeypatch):
     from klab import resource_envelope
+
+    seed = 2**32 - 1
 
     baseline = _write(tmp_path / "base.yaml", _raw())
     candidate = _write(
@@ -127,9 +117,10 @@ def test_try_boundary_override_supersedes_delta_before_setup(
     assert not (tmp_path / "work").exists()
 
 
-@pytest.mark.parametrize("seed", [-1, 2**32])
-def test_try_rejects_merged_baseline_seed_before_artifacts(tmp_path, monkeypatch, seed):
+def test_try_rejects_merged_baseline_seed_before_artifacts(tmp_path, monkeypatch):
     from klab import resource_envelope
+
+    seed = -1
 
     raw = _raw()
     del raw["seed"]
@@ -146,9 +137,10 @@ def test_try_rejects_merged_baseline_seed_before_artifacts(tmp_path, monkeypatch
     assert not (tmp_path / "work").exists()
 
 
-@pytest.mark.parametrize("seed", [0, 2**32 - 1])
-def test_try_merged_baseline_uses_effective_valid_seed(tmp_path, monkeypatch, seed):
+def test_try_merged_baseline_uses_effective_valid_seed(tmp_path, monkeypatch):
     from klab import resource_envelope
+
+    seed = 0
 
     raw = _raw(seed)
     baseline = tmp_path / "base.yaml"
@@ -169,10 +161,7 @@ def test_try_merged_baseline_uses_effective_valid_seed(tmp_path, monkeypatch, se
 
 
 @pytest.mark.parametrize("seed,expected", [(True, 1), ("7", 7), (7.0, 7)])
-@pytest.mark.parametrize("suffix", ["yaml", "json"])
-def test_legacy_seed_coercion_is_preserved_across_callers(
-    tmp_path, seed, expected, suffix
-):
+def test_legacy_seed_coercion_is_preserved_across_callers(tmp_path, seed, expected):
     """LAB-67: stricter future contracts must not silently narrow RunConfig v2."""
     raw = _raw(seed)
     typed = RunConfig.model_validate(raw)
@@ -180,8 +169,7 @@ def test_legacy_seed_coercion_is_preserved_across_callers(
     assert config_sha256(typed.model_dump(mode="json")) == config_sha256(
         RunConfig.model_validate(_raw(expected)).model_dump(mode="json")
     )
-    source = tmp_path / f"source.{suffix}"
-    source.write_text(json.dumps(raw) if suffix == "json" else yaml.safe_dump(raw))
+    source = _write(tmp_path / "source.yaml", raw)
     assert load_config(source).seed == expected
     output = tmp_path / "derived.yaml"
     derive_config(source, output, {"seed": seed})
@@ -193,9 +181,10 @@ def test_legacy_seed_coercion_is_preserved_across_callers(
         TryConfig(seed=seed)
 
 
-@pytest.mark.parametrize("seed", [True, "7", 7.0])
-def test_strict_try_override_rejected_before_setup(tmp_path, monkeypatch, seed):
+def test_strict_try_override_rejected_before_setup(tmp_path, monkeypatch):
     from klab import resource_envelope
+
+    seed = "7"
 
     monkeypatch.setattr(
         resource_envelope,

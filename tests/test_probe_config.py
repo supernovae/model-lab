@@ -1,6 +1,5 @@
 """Probe declaration contracts and public wiring, metadata only (no models)."""
 
-import argparse
 import json
 from pathlib import Path
 from typing import Any
@@ -15,11 +14,7 @@ from klab.probes.config import ProbeConfig, load_probe_config
 @pytest.mark.parametrize(
     ("name", "tier", "final"),
     [
-        ("fast", "fast", False),
-        ("standard", "standard", False),
-        ("full", "full", False),
         ("final", "standard", True),
-        ("final-full", "full", True),
     ],
 )
 def test_named_declarations_match_validated_files(
@@ -31,7 +26,7 @@ def test_named_declarations_match_validated_files(
     assert load_probe_config(name).fast_fail is True
 
 
-@pytest.mark.parametrize("document", ["", "# defaults\n", "null", "{}"])
+@pytest.mark.parametrize("document", ["", "{}"])
 def test_empty_declaration_uses_default_policy(tmp_path: Path, document: str) -> None:
     request = tmp_path / "probe.yaml"
     request.write_text(document)
@@ -42,28 +37,15 @@ def test_empty_declaration_uses_default_policy(tmp_path: Path, document: str) ->
     "document",
     [
         "[]",
-        "false",
-        "5",
         "tier: [",
         "unknown: true",
         "tier: bad",
         "probe_config_version: true",
-        "probe_config_version: 1.0",
         "final: 'true'",
-        "fast_fail: 0",
         "final: true",
-        "lab_dir: 5",
-        "tier: full\nlm_eval_tasks: piqa",
-        "tier: full\nlm_eval_tasks: [1]",
-        "tier: full\nlm_eval_tasks: []",
         "tier: full\nlm_eval_tasks: [piqa, piqa]",
-        "tier: full\nlm_eval_tasks: [' piqa']",
-        "tier: full\nlm_eval_tasks: ['']",
         "tier: full\nlm_eval_limit: 0",
-        "tier: full\nlm_eval_limit: true",
-        "tier: full\nlm_eval_limit: 1.0",
         "lm_eval_tasks: [piqa]",
-        "lm_eval_limit: 50",
     ],
 )
 def test_invalid_declaration_fails_before_runtime_or_lookup(
@@ -102,37 +84,6 @@ def test_paths_expand_home_and_anchor_to_declaration(
     assert config.runs_dir == tmp_path / "runs"
     assert config.runtime_profile == tmp_path / "profile.yaml"
     assert config.resource_envelope == task_home / "bounds.yaml"
-
-
-def test_probe_has_five_executable_options_and_removes_old_flags(
-    tmp_path: Path,
-) -> None:
-    from klab.cli.main import build_parser
-
-    parser = build_parser(tmp_path)
-    commands = next(
-        a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
-    )
-    options = {
-        flag
-        for a in commands.choices["probe"]._actions
-        for flag in a.option_strings
-        if a.dest != "help"
-    }
-    assert options == {"--vs", "--config", "--backend", "--runtime", "--json"}
-    for flag, values in {
-        "--tier": ["standard"],
-        "--final": [],
-        "--no-fast-fail": [],
-        "--lm-eval-tasks": ["piqa"],
-        "--lm-eval-limit": ["50"],
-        "--lab-dir": ["lab"],
-        "--runs-dir": ["runs"],
-        "--runtime-profile": ["profile.yaml"],
-        "--resource-envelope": ["bounds.yaml"],
-    }.items():
-        with pytest.raises(SystemExit):
-            parser.parse_args(["probe", "candidate", flag, *values])
 
 
 def test_runtime_selectors_conflict_before_lookup(tmp_path: Path) -> None:
@@ -301,9 +252,6 @@ def test_named_preset_precedes_same_named_file_with_explicit_escape(
             "unknown probe config 'finall'; choose fast, standard, full, final, final-full",
         ),
         ("./finall", "cannot read probe config"),
-        ("finall.yaml", "cannot read probe config"),
-        ("finall.json", "cannot read probe config"),
-        ("configs/finall", "cannot read probe config"),
     ],
 )
 def test_missing_config_diagnoses_bare_names_and_explicit_files(

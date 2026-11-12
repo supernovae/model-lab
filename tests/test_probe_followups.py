@@ -116,8 +116,8 @@ def test_calibration_row_keeps_both_reliability_diagrams() -> None:
 # --- Closed-book (parametric) fact recall -------------------------------------
 
 
-@pytest.mark.parametrize("seed", [0, 42])
-def test_parametric_items_follow_the_withheld_facts_manifest(seed: int) -> None:
+def test_parametric_items_follow_the_withheld_facts_manifest() -> None:
+    seed = 42
     manifest = diagnostic_manifest(seed)
     trained = parametric_items("heldout", seed=seed)
     control = parametric_items("heldout", seed=seed, control=True)

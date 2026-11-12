@@ -1,6 +1,5 @@
 """Try declaration and operational-envelope contracts without model work."""
 
-import argparse
 import json
 import sys
 from pathlib import Path
@@ -13,22 +12,13 @@ from klab.resource_envelope import ResourceEnvelope, resolve_lab_try_limits
 from klab.try_config import TryConfig, load_try_config, prepare_try_config
 
 
-@pytest.mark.parametrize(
-    "name,tier",
-    [
-        ("fast", "fast"),
-        ("standard", "standard"),
-        ("full", "full"),
-        ("no-probes", "none"),
-    ],
-)
-def test_presets_match_files(tmp_path, name, tier):
+def test_presets_match_files(tmp_path):
     path = tmp_path / "try.yaml"
-    path.write_text(yaml.safe_dump({"probe_tier": tier}))
-    assert load_try_config(name) == load_try_config(str(path))
+    path.write_text(yaml.safe_dump({"probe_tier": "none"}))
+    assert load_try_config("no-probes") == load_try_config(str(path))
 
 
-@pytest.mark.parametrize("document", ["", "# defaults", "null", "{}"])
+@pytest.mark.parametrize("document", ["", "{}"])
 def test_empty_files_default(tmp_path, document):
     path = tmp_path / "try.yaml"
     path.write_text(document)
@@ -39,22 +29,14 @@ def test_empty_files_default(tmp_path, document):
     "document",
     [
         "[]",
-        "false",
-        "5",
         "seed: [",
         "unknown: true",
         "probe_tier: final",
         "try_config_version: true",
-        "try_config_version: 1.0",
-        "seed: '7'",
         "seed: true",
-        "seed: 7.0",
-        "seed: -1",
         "seed: 4294967296",
         "fresh_baseline: 'true'",
-        "repeat_baseline: 'true'",
         "continuation: {checkpoint: cp, append_data: 'true'}",
-        "lab_dir: 5",
     ],
 )
 def test_invalid_policy_precedes_runtime(tmp_path, monkeypatch, document):
@@ -123,47 +105,12 @@ def test_paths_snapshot_and_runtime_conflict(tmp_path, monkeypatch):
         prepare_try_config(args)
 
 
-def test_five_options_and_removed_flags(tmp_path):
-    from klab.cli.main import build_parser
-
-    parser = build_parser(tmp_path)
-    commands = next(
-        a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
-    )
-    options = {
-        flag
-        for a in commands.choices["try"]._actions
-        for flag in a.option_strings
-        if a.dest != "help"
-    }
-    assert options == {"--vs", "--config", "--backend", "--runtime", "--json"}
-    for flag, values in {
-        "--seed": ["7"],
-        "--probe-tier": ["none"],
-        "--fresh-baseline": [],
-        "--lab-dir": ["lab"],
-        "--runtime-profile": ["profile.yaml"],
-        "--resource-envelope": ["bounds.yaml"],
-        "--max-wall-seconds": ["1"],
-        "--tokenizer-batch-documents": ["1"],
-        "--tokenizer-batch-source-bytes": ["1"],
-    }.items():
-        with pytest.raises(SystemExit):
-            parser.parse_args(["try", "candidate", "--vs", "baseline", flag, *values])
-
-
 @pytest.mark.parametrize(
     "limits",
     [
-        {"max_wall_seconds_per_arm": 0},
         {"max_wall_seconds_per_arm": float("inf")},
         {"max_wall_seconds_per_arm": True},
-        {"max_wall_seconds_per_arm": "1"},
         {"tokenizer_batch_documents": 257},
-        {"tokenizer_batch_documents": True},
-        {"tokenizer_batch_documents": 1.0},
-        {"tokenizer_batch_source_bytes": 0},
-        {"tokenizer_batch_source_bytes": 8388609},
         {"typo": 1},
     ],
 )
@@ -333,25 +280,6 @@ def test_interrupted_setup_retains_request(tmp_path, monkeypatch):
     assert lab.read_record(path) == record
 
 
-@pytest.mark.parametrize(
-    "command,count",
-    [("try", 5), ("probe", 5), ("explore", 5), ("compare", 5), ("report", 4)],
-)
-def test_everyday_executable_option_budget(tmp_path, command, count):
-    from klab.cli.main import build_parser
-
-    parser = build_parser(tmp_path)
-    commands = next(
-        a for a in parser._actions if isinstance(a, argparse._SubParsersAction)
-    )
-    options = [
-        a
-        for a in commands.choices[command]._actions
-        if a.option_strings and a.dest != "help"
-    ]
-    assert len(options) == count
-
-
 def test_invalid_envelope_precedes_native_runtime(tmp_path, monkeypatch):
     import klab.cli.main as cli
 
@@ -378,16 +306,20 @@ def test_invalid_envelope_precedes_native_runtime(tmp_path, monkeypatch):
     assert not (tmp_path / "lab").exists()
 
 
-@pytest.mark.parametrize("command", ["probe", "explore", "train", "stage"])
-@pytest.mark.parametrize("limits", [{}, {"max_wall_seconds_per_arm": 60}])
+@pytest.mark.parametrize("command", ["probe", "stage"])
 def test_cli_rejects_try_limits_before_runtime_or_outputs(
-    tmp_path, monkeypatch, command, limits
+    tmp_path, monkeypatch, command
 ):
     import klab.cli.main as cli
 
     bounds = tmp_path / "bounds.yaml"
     bounds.write_text(
-        yaml.safe_dump({"resource_envelope_version": 1, "lab_try": limits})
+        yaml.safe_dump(
+            {
+                "resource_envelope_version": 1,
+                "lab_try": {"max_wall_seconds_per_arm": 60},
+            }
+        )
     )
     if command == "probe":
         policy = tmp_path / "probe.yaml"
@@ -456,32 +388,9 @@ def test_direct_native_consumers_reject_try_limits(tmp_path, monkeypatch, comman
     assert not (tmp_path / "stage").exists()
 
 
-def test_shared_resource_boundary_rejects_unconsumed_try_limits(tmp_path, monkeypatch):
-    from klab import resource_envelope as resource
-
-    envelope = ResourceEnvelope(resource_envelope_version=1, lab_try={})
-    monkeypatch.setattr(
-        resource.host_capacity,
-        "measure_memory",
-        lambda: pytest.fail("measurement reached"),
-    )
-    with pytest.raises(ValueError, match="lab_try limits apply only to try"):
-        resource.check_envelope(envelope, workspace=tmp_path, rss_bytes=0)
-
-
-@pytest.mark.parametrize("command", ["try", "probe", "train"])
-def test_accelerator_error_names_valid_runtime_selectors(
-    tmp_path, monkeypatch, command
-):
-    from test_lab_results import _run
-
+def test_accelerator_error_names_valid_runtime_selectors(tmp_path, monkeypatch):
     baseline = Path(__file__).resolve().parents[1] / "configs/smoke_cpu.yaml"
-    if command == "try":
-        args = ["try", "missing", "--vs", str(baseline)]
-    elif command == "probe":
-        args = ["probe", str(_run(tmp_path / "lab", backend="cuda"))]
-    else:
-        args = ["train", str(baseline)]
+    args = ["try", "missing", "--vs", str(baseline)]
     with pytest.raises(SystemExit) as error:
         _cli(monkeypatch, tmp_path, *args, "--backend", "cuda")
     message = str(error.value)

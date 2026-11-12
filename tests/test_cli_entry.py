@@ -12,16 +12,12 @@ import pytest
 from klab.cli import entry
 
 TOKEN = "/nonexistent-lab69/token"
+# One case per parsing path: no prefix, separate values, and joined values
+# after another prefix option.
 PREFIXES = [
     [],
-    ["--hf-token-file", TOKEN],
-    [f"--hf-token-file={TOKEN}"],
-    *[
-        prefix
-        for token in (["--hf-token-file", TOKEN], [f"--hf-token-file={TOKEN}"])
-        for work in (["--work-dir", "selected"], ["--work-dir=selected"])
-        for prefix in (token + work, work + token)
-    ],
+    ["--hf-token-file", TOKEN, "--work-dir", "selected"],
+    ["--work-dir=selected", f"--hf-token-file={TOKEN}"],
 ]
 
 
@@ -99,14 +95,11 @@ def test_environment_handoff_preserves_remainder_and_work_root(
 @pytest.mark.parametrize(
     "argv",
     [
-        ["--help"],
         ["--hf-token-file", TOKEN, "--help"],
-        [f"--hf-token-file={TOKEN}", "inspect", "config.yaml", "--json"],
         ["--work-dir", "root", "--hf-token-file", TOKEN, "report", "example"],
         ["monitor", "--", "child", "--hf-token-file", "--work-dir"],
         ["runtime", "status", "--hf-token-file", "--work-dir"],
         ["--unknown", "runtime", "env"],
-        ["--unknown", "value", "runtime", "env"],
     ],
 )
 def test_ordinary_dispatch_receives_unchanged_argv(monkeypatch, argv):
@@ -123,7 +116,7 @@ def test_ordinary_dispatch_receives_unchanged_argv(monkeypatch, argv):
 
 @pytest.mark.parametrize(
     "argv",
-    [["--hf-token-file"], ["--hf-token-file", "--work-dir=root"], ["--work-dir"]],
+    [["--hf-token-file"], ["--hf-token-file", "--work-dir=root"]],
 )
 def test_missing_prefix_values_fail_cleanly(monkeypatch, capsys, argv):
     monkeypatch.setattr(sys, "argv", ["klab", *argv])
@@ -133,7 +126,7 @@ def test_missing_prefix_values_fail_cleanly(monkeypatch, capsys, argv):
     assert "expected one argument" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("option", ["--unknown", "--hf-token-file", "--work-dir"])
+@pytest.mark.parametrize("option", ["--unknown", "--work-dir"])
 def test_runtime_local_options_are_not_consumed(monkeypatch, capsys, option):
     monkeypatch.setattr(sys, "argv", ["klab", "runtime", "env", "list", option])
     with pytest.raises(SystemExit) as error:

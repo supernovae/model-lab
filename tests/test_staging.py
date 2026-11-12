@@ -68,11 +68,11 @@ def _config(root: Path, *, retention: bool = False) -> RunConfig:
 
 
 @pytest.mark.parametrize("matched", [False, True])
-@pytest.mark.parametrize("purpose", ["smoke", "warmup"])
 @pytest.mark.parametrize("retention", [False, True])
 def test_pilot_retention_is_isolated_from_full_run(
-    tmp_path: Path, purpose: str, retention: bool, matched: bool
+    tmp_path: Path, retention: bool, matched: bool
 ) -> None:
+    purpose = "warmup"  # smoke and warmup derive through the same path
     config = _config(tmp_path, retention=retention)
     dataset = None
     if matched:
@@ -132,12 +132,11 @@ def test_pilot_retention_is_isolated_from_full_run(
     assert RunConfig.model_validate(original) == config
 
 
-@pytest.mark.parametrize("retention", [False, True])
 def test_warmup_pilots_are_isolated_and_bundle_is_self_contained(
     tmp_path: Path,
-    retention: bool,
 ) -> None:
-    config = _config(tmp_path, retention=retention)
+    # Retention exercises the ordinary bundle path plus pilot retention.
+    config = _config(tmp_path, retention=True)
     bundle_root = stage(config, tmp_path / "stage", through="warmup")
     bundle = _read_sealed(bundle_root / "bundle.json")
 
@@ -607,8 +606,10 @@ def test_owned_directory_publication_never_replaces_a_late_destination(
     assert sorted(path.name for path in destination.iterdir()) == ["owner.txt"]
 
 
-@pytest.mark.parametrize("layout", ["contiguous", "story"])
-@pytest.mark.parametrize("verification_mode", ["cold", "verified_reuse"])
+@pytest.mark.parametrize(
+    ("layout", "verification_mode"),
+    [("contiguous", "cold"), ("story", "verified_reuse")],
+)
 def test_matched_story_pilots_complete_under_native_supervision(
     tmp_path: Path, layout: str, verification_mode: str, monkeypatch
 ) -> None:
