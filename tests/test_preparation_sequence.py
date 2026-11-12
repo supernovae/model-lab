@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -671,16 +672,10 @@ def _authenticated_fixture_tokenizer(
 
 
 def _native(root: Path, *words: str) -> list[str]:
-    return [
-        "uv",
-        "run",
-        "--locked",
-        "--no-sync",
-        "klab",
-        "--work-dir",
-        str(root),
-        *words,
-    ]
+    # The provisioned interpreter itself, as other subprocess tests run it.
+    # These were the only tests wrapping each command in `uv run`, and the only
+    # ones whose commands stalled past their bounds on loaded nightly runners.
+    return [sys.executable, "-m", "klab", "--work-dir", str(root), *words]
 
 
 def _out(paths: dict[str, Path | str], label: str) -> Path:
