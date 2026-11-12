@@ -409,6 +409,25 @@ def _config_migrate(args: argparse.Namespace) -> None:
     print("\n".join(changes))
 
 
+def _config_compose(args: argparse.Namespace) -> None:
+    """Publish one run config assembled from several declaration files."""
+    try:
+        from klab.derivation import compose_config, parse_parts
+
+        receipt = compose_config(parse_parts(args.parts), Path(args.output))
+    except (OSError, TypeError, ValueError) as error:
+        if args.json:
+            print(json.dumps({"status": "error", "error": str(error)}))
+        else:
+            print(f"klab config compose: {error}", file=sys.stderr)
+        raise SystemExit(2) from None
+    if args.json:
+        print(json.dumps({"status": "ok", **receipt}, sort_keys=True))
+    else:
+        print(f"Composed {len(receipt['parts'])} parts: {receipt['output']['path']}")
+        print("Schema valid; no artifact, runtime or capacity was checked.")
+
+
 def _config_derive(args: argparse.Namespace) -> None:
     """Publish a schema-validated config variant without replacing either input."""
     try:
@@ -3312,6 +3331,19 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     config_derive.set_defaults(handler=_config_derive)
     from klab.training.schedule import register_parser as register_schedule
 
+    config_compose = config_commands.add_parser(
+        "compose",
+        help="Assemble one run config from section and local-path files",
+    )
+    config_compose.add_argument(
+        "parts",
+        nargs="+",
+        metavar="PATH|FIELD=PATH",
+        help="YAML/JSON mappings merged in order; FIELD=PATH places a file at a field",
+    )
+    config_compose.add_argument("--output", required=True, help="New YAML output path")
+    config_compose.add_argument("--json", action="store_true")
+    config_compose.set_defaults(handler=_config_compose)
     register_schedule(config_commands)
     config_migrate = config_commands.add_parser("migrate")
     config_migrate.add_argument("input")

@@ -226,6 +226,76 @@ def derive_config(
     return receipt
 
 
+def _merged(base: Any, overlay: Any) -> Any:
+    """Overlay one mapping on another; mappings merge, any other value replaces."""
+    if isinstance(base, Mapping) and isinstance(overlay, Mapping):
+        merged = dict(base)
+        for key, value in overlay.items():
+            merged[key] = _merged(base[key], value) if key in base else value
+        return merged
+    return overlay
+
+
+def parse_parts(values: Sequence[str]) -> list[tuple[str | None, Path]]:
+    """Read ``PATH`` or ``FIELD=PATH`` arguments for :func:`compose_config`."""
+    parts: list[tuple[str | None, Path]] = []
+    for value in values:
+        field, separator, path = value.partition("=")
+        if not separator:
+            parts.append((None, Path(value)))
+        elif not is_dotted_path(field) or not path:
+            raise ValueError(f"expected PATH or FIELD=PATH: {value!r}")
+        else:
+            parts.append((field, Path(path)))
+    return parts
+
+
+def compose_config(
+    parts: Sequence[tuple[str | None, Path]], output: Path
+) -> dict[str, Any]:
+    """Author one run config from several declaration files.
+
+    Each part is a YAML/JSON mapping, merged in order with later parts winning.
+    A part given with a field is placed at that dotted field, so a model
+    section, an optimizer section and a file of local paths compose without a
+    script. Relative paths resolve from the part that declares them. The result
+    must be a complete, valid run config; nothing is read or executed.
+    """
+    if not parts:
+        raise ValueError("at least one part is required")
+    output = _destination(output)
+    origins: list[dict[str, str]] = []
+    document: Any = {}
+    for field, path in parts:
+        path = Path(path).absolute()
+        origins.append({**_snapshot(path), **({"field": field} if field else {})})
+        part: Any = read_document(path)
+        for name in reversed(field.split(".")) if field else ():
+            part = {name: part}
+        document = _merged(document, _resolve_paths(part, path.parent))
+    candidate = _config(document, output.parent)
+    body = _body(candidate)
+    receipt = {
+        "format": "klab-composition-v1",
+        "parts": origins,
+        "output": {
+            "path": str(output),
+            "file_sha256": hashlib.sha256(body).hexdigest(),
+        },
+        "validation": {
+            "scope": "typed_config",
+            "executable": False,
+            "runtime_verified": False,
+        },
+    }
+    snapshots = [
+        {key: value for key, value in origin.items() if key != "field"}
+        for origin in origins
+    ]
+    _publish(output, body, receipt, snapshots)
+    return receipt
+
+
 def _materialized_base(value: Any, source: Path) -> RunConfig:
     from klab.recovery.provenance import declaration_reference
 

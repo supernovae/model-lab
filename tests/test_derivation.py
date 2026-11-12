@@ -435,3 +435,147 @@ def test_config_cli_text_reports_published_handoff(
         "base": 0.003,
         "variant": 0.001,
     }
+
+
+def _sections(source_config: Path, root: Path) -> dict[str, Path]:
+    """Split a complete run config into a base, two sections and local paths."""
+    document = yaml.safe_load(source_config.read_text())
+    project, local = root / "project", root / "local"
+    project.mkdir()
+    local.mkdir()
+    paths = {
+        "base": project / "run.yaml",
+        "model": project / "sections/model.json",
+        "optimizer": project / "sections/optimizer.json",
+        "local": local / "paths.yaml",
+    }
+    paths["model"].parent.mkdir()
+    paths["model"].write_text(json.dumps(document.pop("model")))
+    paths["optimizer"].write_text(json.dumps(document.pop("optimizer")))
+    paths["local"].write_text(
+        yaml.safe_dump(
+            {
+                "tokenizer": {"path": "tokenizer/tokenizer.json"},
+                "dataset": {"cache_dir": "cache"},
+                "logging": {"root_dir": "runs"},
+            }
+        )
+    )
+    for section in ("tokenizer", "logging"):
+        document.pop(section, None)
+    document["dataset"].pop("cache_dir")
+    paths["base"].write_text(yaml.safe_dump(document))
+    return paths
+
+
+def test_compose_assembles_sections_and_local_paths_into_one_run_config(
+    source_config, tmp_path, monkeypatch, capsys
+):
+    parts = _sections(source_config, tmp_path)
+    output = tmp_path / "composed.yaml"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "klab",
+            "config",
+            "compose",
+            str(parts["base"]),
+            f"model={parts['model']}",
+            f"optimizer={parts['optimizer']}",
+            str(parts["local"]),
+            "--output",
+            str(output),
+            "--json",
+        ],
+    )
+    main()
+    receipt = json.loads(capsys.readouterr().out)
+    composed, original = load_config(output), load_config(source_config)
+    # Sections land where they were placed, and the result is a complete config.
+    assert composed.model == original.model
+    assert composed.optimizer == original.optimizer
+    # Paths resolve from the part that declared them, not from the output.
+    assert composed.tokenizer.path == tmp_path / "local/tokenizer/tokenizer.json"
+    assert composed.logging.root_dir == tmp_path / "local/runs"
+    assert receipt["output"]["file_sha256"] == sha256_file(output)
+    assert [part.get("field") for part in receipt["parts"]] == [
+        None,
+        "model",
+        "optimizer",
+        None,
+    ]
+    assert all(
+        part["file_sha256"] == sha256_file(Path(part["path"]))
+        for part in receipt["parts"]
+    )
+
+
+def test_compose_refuses_an_incomplete_or_invalid_result_without_output(
+    source_config, tmp_path, monkeypatch, capsys
+):
+    parts = _sections(source_config, tmp_path)
+    output = tmp_path / "composed.yaml"
+    for arguments in (
+        # No model section: not a complete run config.
+        [str(parts["base"]), f"optimizer={parts['optimizer']}", str(parts["local"])],
+        # A later part that sets an unknown field.
+        [
+            str(parts["base"]),
+            f"model={parts['model']}",
+            f"optimizer={parts['optimizer']}",
+            str(parts["local"]),
+            f"model.unknown={parts['local']}",
+        ],
+    ):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["klab", "config", "compose", *arguments, "--output", str(output)],
+        )
+        with pytest.raises(SystemExit) as stopped:
+            main()
+        assert stopped.value.code == 2
+        assert "klab config compose" in capsys.readouterr().err
+        assert not output.exists()
+        assert not output.with_name(output.name + ".derivation.json").exists()
+
+
+def test_validate_checks_every_declaration_in_a_directory(
+    source_config, tmp_path, monkeypatch, capsys
+):
+    parts = _sections(source_config, tmp_path)
+    project = tmp_path / "project"
+    (project / "complete.yaml").write_text(source_config.read_text())
+    (project / "notes.json").write_text(json.dumps({"title": "not a declaration"}))
+
+    def check() -> tuple[int, dict]:
+        monkeypatch.setattr(
+            sys, "argv", ["klab", "config", "validate", str(project), "--json"]
+        )
+        code = 0
+        try:
+            main()
+        except SystemExit as stopped:
+            code = stopped.code
+        return code, json.loads(capsys.readouterr().out)
+
+    code, result = check()
+    assert code == 0
+    assert {(row["kind"], row["path"]) for row in result["valid"]} == {
+        ("run", "complete.yaml"),
+        ("model", "sections/model.json"),
+        ("optimizer", "sections/optimizer.json"),
+    }
+    # The partial base and the notes are reported as skipped, never as valid.
+    assert result["skipped_documents"] == 2
+
+    broken = json.loads(parts["model"].read_text())
+    broken["num_heads"] = 3
+    parts["model"].write_text(json.dumps(broken))
+    code, result = check()
+    assert code == 1
+    assert [(row["kind"], row["path"]) for row in result["invalid"]] == [
+        ("model", "sections/model.json")
+    ]
+    assert not result["schema_valid"]
