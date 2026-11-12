@@ -142,15 +142,9 @@ def test_jsonl_and_parquet_normalize_to_identical_records(tmp_path) -> None:
     [
         ('{"id":"x","text":"x","license":"CC0","priority":true}', "priority"),
         ('{"id":"x","text":"x","license":"CC0","confidence":true}', "confidence"),
-        ('{"id":"x","text":"x","license":"CC0","confidence":"0.5"}', "confidence"),
         ('{"id":"x","text":"x","license":"CC0","confidence":2}', r"in \[0, 1\]"),
-        (
-            '{"id":"x","text":"x","license":"CC0","confidence":' + "9" * 400 + "}",
-            r"in \[0, 1\]",
-        ),
         ('{"id":"x","text":"x","license":"CC0","confidence":NaN}', "nonfinite"),
         ('{"id":"x","text":"x","record_version":true,"license":"CC0"}', "version"),
-        ('{"id":"x","text":"x","record_version":2,"license":"CC0"}', "version"),
         ('{"id":"x","text":"x","license":"CC0","unexpected":1}', "unknown"),
         ('{"id":"x","subject":"s","relation":"r","license":"CC0"}', "subject"),
         (

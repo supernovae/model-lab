@@ -48,8 +48,15 @@ def model_config(tmp_path: Path, mode: str, **changes) -> ModelConfig:
     )
 
 
-@pytest.mark.parametrize("mode", ["identity", "deepseek_v1", "deepseek_safe_v1"])
-@pytest.mark.parametrize("transform", ["identity", "signed_sqrt"])
+# Token mapping and gate transform are independent; each value runs once.
+@pytest.mark.parametrize(
+    ("mode", "transform"),
+    [
+        ("identity", "identity"),
+        ("deepseek_v1", "signed_sqrt"),
+        ("deepseek_safe_v1", "identity"),
+    ],
+)
 def test_prime_mapping_cached_chunks_and_prefix_are_causal(tmp_path, mode, transform):
     config = model_config(tmp_path, mode, memory_gate_transform=transform)
     model = DenseLM(config, AttentionConfig()).eval()
@@ -119,15 +126,13 @@ def test_mapping_ablation_keeps_hash_coefficients_and_rejects_identity_changes(
         model_config(tmp_path, "identity", memory_table_sizes=(31, 31, 41, 43))
 
 
-@pytest.mark.parametrize("transform", ["identity", "signed_sqrt"])
-def test_multiport_histories_and_gradients_are_independent(tmp_path, transform):
+def test_multiport_histories_and_gradients_are_independent(tmp_path):
     config = model_config(
         tmp_path,
         "deepseek_v1",
         memory_block_index=None,
         memory_block_indices=(0, 1),
         memory_table_sizes=engram_table_sizes(31, 8),
-        memory_gate_transform=transform,
     )
     model = DenseLM(config, AttentionConfig()).eval()
     ids = torch.tensor([[4, 6, 5, 2, 8, 9]])

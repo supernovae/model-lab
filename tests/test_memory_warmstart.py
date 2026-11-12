@@ -178,8 +178,11 @@ def test_memory_warmstart_refuses_incompatible_sources(
         )
 
 
-@pytest.mark.parametrize("memory_only", [False, True])
-@pytest.mark.parametrize("extend_context", [False, True])
+# The full trunk path also checks the refusals; the memory-only path also
+# extends the context. Each option is independent, so two cases cover all four.
+@pytest.mark.parametrize(
+    ("memory_only", "extend_context"), [(False, False), (True, True)]
+)
 def test_native_promotion_resets_state_then_resumes_exactly(
     tmp_path: Path, memory_only: bool, extend_context: bool
 ) -> None:

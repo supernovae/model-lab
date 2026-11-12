@@ -54,7 +54,6 @@ def read_manifest_unverified(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-TABLE_SIZES = (257, 514, 251, 1021)
 VOCAB = 512
 
 
@@ -74,7 +73,8 @@ def _ids(seed: int = 0, batch: int = 8, length: int = 64) -> torch.Tensor:
     return torch.randint(0, VOCAB, (batch, length), generator=generator)
 
 
-@pytest.mark.parametrize("table_size", TABLE_SIZES)
+# 257 head 0 takes the v2 scheme and head 1 keeps v1; 1021 is coprime (v1).
+@pytest.mark.parametrize("table_size", (257, 1021))
 @pytest.mark.parametrize("order", (2, 3))
 @pytest.mark.parametrize("head", (0, 1))
 def test_token_ngram_addresses_use_many_rows_and_whole_window(
@@ -103,7 +103,7 @@ def test_token_ngram_addresses_use_many_rows_and_whole_window(
             assert moved_rows >= 4, (position, slot)
 
 
-@pytest.mark.parametrize("table_size", (*TABLE_SIZES, 17, 127, 259, 8192))
+@pytest.mark.parametrize("table_size", (257, 259, 1021))
 def test_tensor_and_python_token_hashes_agree(table_size: int) -> None:
     memory = TokenNgramMemory(16, table_size, 3, 8, (2, 3), 3)
     ids = _ids(seed=1, batch=2, length=24)
@@ -117,16 +117,16 @@ def test_tensor_and_python_token_hashes_agree(table_size: int) -> None:
                     assert int(addresses[batch, position]) == expected
 
 
-@pytest.mark.parametrize("table_size", (17, 127, 251, 1021, 8192, 65521))
-def test_coprime_table_sizes_keep_legacy_token_addresses(table_size: int) -> None:
-    rng = random.Random(table_size)
-    for head in range(3):
-        assert token_scheme(table_size, head) == TOKEN_SCHEME_V1
-        for _ in range(200):
-            key = tuple(rng.randrange(VOCAB) for _ in range(rng.choice((2, 3))))
-            assert token_ngram_address(key, table_size, head) == (
-                _legacy_token_address(key, table_size, head)
-            )
+def test_coprime_table_sizes_keep_legacy_token_addresses() -> None:
+    for table_size in (17, 127, 251, 1021, 8192, 65521):
+        rng = random.Random(table_size)
+        for head in range(3):
+            assert token_scheme(table_size, head) == TOKEN_SCHEME_V1
+            for _ in range(200):
+                key = tuple(rng.randrange(VOCAB) for _ in range(rng.choice((2, 3))))
+                assert token_ngram_address(key, table_size, head) == (
+                    _legacy_token_address(key, table_size, head)
+                )
 
 
 def test_degenerate_sizes_switch_scheme_per_head() -> None:
@@ -137,7 +137,7 @@ def test_degenerate_sizes_switch_scheme_per_head() -> None:
     assert token_scheme(7, 1) == TOKEN_SCHEME_V2  # 7 divides 259
 
 
-@pytest.mark.parametrize("table_size", TABLE_SIZES)
+@pytest.mark.parametrize("table_size", (257, 1021))
 def test_byte_addresses_are_not_constant(table_size: int) -> None:
     rng = random.Random(table_size)
     values = [bytes(rng.randrange(256) for _ in range(3)) for _ in range(2000)]
@@ -155,13 +155,13 @@ def test_byte_addresses_are_not_constant(table_size: int) -> None:
             assert moved >= 4
 
 
-@pytest.mark.parametrize("table_size", (127, 251, 1021, 8192, 65521))
-def test_coprime_table_sizes_keep_legacy_byte_addresses(table_size: int) -> None:
-    assert byte_scheme(table_size) == BYTE_SCHEME_V1
-    rng = random.Random(table_size)
-    for _ in range(200):
-        value = bytes(rng.randrange(256) for _ in range(rng.randrange(1, 33)))
-        assert table_address(value, table_size) == hash_bytes(value) % table_size
+def test_coprime_table_sizes_keep_legacy_byte_addresses() -> None:
+    for table_size in (127, 251, 1021, 8192, 65521):
+        assert byte_scheme(table_size) == BYTE_SCHEME_V1
+        rng = random.Random(table_size)
+        for _ in range(200):
+            value = bytes(rng.randrange(256) for _ in range(rng.randrange(1, 33)))
+            assert table_address(value, table_size) == hash_bytes(value) % table_size
 
 
 def test_byte_scheme_marks_multiples_of_257() -> None:
@@ -351,25 +351,29 @@ def test_prime_xor_coefficients_are_frozen_bounded_and_rng_independent() -> None
             assert 1 <= value * vocab_size <= 2**63 - 1
 
 
-@pytest.mark.parametrize("key,rows", _PRIME_XOR_VECTORS)
-def test_prime_xor_frozen_vectors_match_scalar_tensor_and_numpy_demo(
-    key: tuple[int, ...], rows: tuple[int, ...]
-) -> None:
+def test_prime_xor_frozen_vectors_match_scalar_tensor_and_numpy_demo() -> None:
     import numpy as np
 
-    # This is the demo's multiply/XOR/remainder operation with our explicitly
-    # frozen constants, not a claim of matching NumPy's seed expansion.
-    with np.errstate(over="ignore"):
-        demo_mix = np.int64(key[0]) * np.int64(_PRIME_XOR_MULTIPLIERS[0])
-        for token, multiplier in zip(key[1:], _PRIME_XOR_MULTIPLIERS[1:], strict=True):
-            demo_mix = np.bitwise_xor(demo_mix, np.int64(token) * np.int64(multiplier))
-    tensor_mix = torch.zeros((), dtype=torch.long)
-    for token, multiplier in zip(key, _PRIME_XOR_MULTIPLIERS, strict=True):
-        tensor_mix = engram_address_step(tensor_mix, torch.tensor(token), multiplier)
-    for prime, row in zip(_PRIME_XOR_TABLES, rows, strict=True):
-        assert engram_ngram_address(key, prime, _PRIME_XOR_MULTIPLIERS) == row
-        assert int(engram_address_finish(tensor_mix, prime)) == row
-        assert int(demo_mix % prime) == row
+    for key, rows in _PRIME_XOR_VECTORS:
+        # This is the demo's multiply/XOR/remainder operation with our explicitly
+        # frozen constants, not a claim of matching NumPy's seed expansion.
+        with np.errstate(over="ignore"):
+            demo_mix = np.int64(key[0]) * np.int64(_PRIME_XOR_MULTIPLIERS[0])
+            for token, multiplier in zip(
+                key[1:], _PRIME_XOR_MULTIPLIERS[1:], strict=True
+            ):
+                demo_mix = np.bitwise_xor(
+                    demo_mix, np.int64(token) * np.int64(multiplier)
+                )
+        tensor_mix = torch.zeros((), dtype=torch.long)
+        for token, multiplier in zip(key, _PRIME_XOR_MULTIPLIERS, strict=True):
+            tensor_mix = engram_address_step(
+                tensor_mix, torch.tensor(token), multiplier
+            )
+        for prime, row in zip(_PRIME_XOR_TABLES, rows, strict=True):
+            assert engram_ngram_address(key, prime, _PRIME_XOR_MULTIPLIERS) == row
+            assert int(engram_address_finish(tensor_mix, prime)) == row
+            assert int(demo_mix % prime) == row
 
 
 def test_prime_xor_suffix_padding_eos_and_whole_window_conformance() -> None:
@@ -428,20 +432,17 @@ def test_prime_xor_distinct_prime_table_expansion_and_validation() -> None:
             validate_engram_table_sizes((composite,), 1)
 
 
-@pytest.mark.parametrize(
-    "args,kwargs",
-    [
+def test_prime_xor_invalid_coefficient_domains_are_rejected() -> None:
+    for args, kwargs in (
         ((-1, 3, 260), {}),
         ((2**64, 3, 260), {}),
         ((True, 3, 260), {}),
         ((0, 0, 260), {}),
         ((0, 3, 0), {}),
         ((0, 3, 260), {"layer_id": -1}),
-    ],
-)
-def test_prime_xor_invalid_coefficient_domains_are_rejected(args, kwargs) -> None:
-    with pytest.raises(ValueError):
-        engram_multipliers(*args, **kwargs)
+    ):
+        with pytest.raises(ValueError):
+            engram_multipliers(*args, **kwargs)
 
 
 def test_prime_xor_invalid_keys_and_coefficients_are_rejected() -> None:

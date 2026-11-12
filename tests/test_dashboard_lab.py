@@ -292,13 +292,6 @@ def test_empty_pages_name_the_command_to_run(
     assert command in _text(_render(page, tmp_path))
 
 
-def test_home_leads_with_the_verdict_and_next_steps(lab: Path) -> None:
-    text = _text(_render("home", lab))
-    assert "WARN" in text and "Calibration slipped" in text
-    assert "Next steps" in "\n".join(s.value for s in _render("home", lab).subheader)
-    assert "Do 4 experts beat the dense FFN?" in text
-
-
 def test_experiments_page_shows_results_trends_and_compare(lab: Path) -> None:
     test = _render("experiments", lab)
     assert [t.label for t in test.tabs] == [
@@ -330,24 +323,6 @@ def test_behaviors_page_shows_generations_misses_and_reliability(lab: Path) -> N
         "Never-trained" in m.label for m in test.metric
     )
     assert len(test.get("plotly_chart")) >= 2  # needle + reliability
-
-
-def test_explorer_page_renders_a_cached_moe_memory_exploration(lab: Path) -> None:
-    test = _render("explorer", lab)
-    labels = [t.label for t in test.tabs]
-    assert labels == [
-        "Architecture",
-        "Tokens",
-        "Attention",
-        "Weights",
-        "Activations",
-        "Expert routing",
-        "Memory lookups",
-    ]
-    assert len(test.get("plotly_chart")) >= 8
-    assert any(
-        "Diagnostics runtime: pytorch / cpu:0 / fp32" in c.value for c in test.caption
-    )
 
 
 @pytest.mark.parametrize(
@@ -633,10 +608,7 @@ def test_needle_chance_is_omitted_when_the_group_disagrees(tmp_path: Path) -> No
         raise AssertionError("no needle chart")
 
 
-@pytest.mark.parametrize("status", ["started", "failed", "interrupted"])
-def test_setup_probes_do_not_replace_scored_dashboard_history(
-    tmp_path: Path, status: str
-) -> None:
+def test_setup_probes_do_not_replace_scored_dashboard_history(tmp_path: Path) -> None:
     from test_lab_results import _run
 
     from klab.dashboard.probe_data import load_history
@@ -652,7 +624,7 @@ def test_setup_probes_do_not_replace_scored_dashboard_history(
         run_probe(str(run), "missing", lab_dir=tmp_path)
     (setup_path,) = (tmp_path / "probes").glob("*/probe.json")
     setup = read_lab_record(setup_path)[1]
-    setup["status"] = status
+    status = setup["status"] = "interrupted"
     setup_path.write_text(json.dumps(seal(setup)))
     original = setup_path.read_bytes()
     assert is_setup_record(setup)

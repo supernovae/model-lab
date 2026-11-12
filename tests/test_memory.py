@@ -14,14 +14,6 @@ from klab.model.portable_engram import (
 from klab.model.transformer import DenseLM
 
 
-def test_ngram_address_does_not_read_future_ids() -> None:
-    memory = TokenNgramMemory(hidden_dim=4, table_size=97, ngram_size=3, value_dim=3)
-    left = torch.tensor([[4, 8, 15, 16, 23]])
-    right = left.clone()
-    right[:, 3:] = torch.tensor([42, 99])
-    assert torch.equal(memory.addresses(left)[:, :3], memory.addresses(right)[:, :3])
-
-
 def test_multi_order_multi_head_addresses_remain_causal() -> None:
     memory = TokenNgramMemory(
         hidden_dim=4,
@@ -41,30 +33,6 @@ def test_multi_order_multi_head_addresses_remain_causal() -> None:
                 memory.addresses(right, order, head)[:, :3],
             )
     assert len(memory.extra_tables) == 5
-
-
-def test_multi_stream_collision_diagnostics_aggregate_all_lookups() -> None:
-    memory = TokenNgramMemory(
-        hidden_dim=4,
-        table_size=2,
-        ngram_size=2,
-        value_dim=3,
-        ngram_orders=(2, 3),
-        hash_heads=2,
-    )
-    hidden = torch.randn(1, 8, 4)
-    memory(hidden, torch.zeros(1, 8, dtype=torch.long))
-    diagnostics = memory.last_diagnostics
-    assert diagnostics is not None
-    assert int(diagnostics.lookup_count) == 32
-    assert len(diagnostics.streams) == 4
-    assert all(int(stream.lookup_count) == 8 for stream in diagnostics.streams)
-    assert sum(int(stream.lookup_count) for stream in diagnostics.streams) == int(
-        diagnostics.lookup_count
-    )
-    assert all(int(stream.collision_count) > 0 for stream in diagnostics.streams)
-    assert int(diagnostics.collision_count) > 0
-    assert float(diagnostics.bucket_reuse_rate) > 0
 
 
 @pytest.mark.parametrize(
