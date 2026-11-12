@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING, Any
 import torch
 from tokenizers import Tokenizer
 
+from klab.chat_template import PLAIN, ChatTemplate
+
 if TYPE_CHECKING:
     from klab.engines.mlx import MLXEngine
-
-_ROLE_BOUNDARIES = ("\nUser:", "\nSystem:", "\nAssistant:")
 
 
 @dataclass(frozen=True)
@@ -28,18 +28,16 @@ class ChatMessage:
 
 
 def format_chat_prompt(
-    history: Sequence[ChatMessage], message: str, *, system: str | None = None
+    history: Sequence[ChatMessage],
+    message: str,
+    *,
+    system: str | None = None,
+    template: ChatTemplate = PLAIN,
 ) -> str:
-    """Render an explicit plain-text transcript without tokenizer-specific tokens."""
-    if not message.strip():
-        raise ValueError("chat message must not be blank")
-    lines: list[str] = []
-    if system:
-        lines.extend((f"System: {system.strip()}", ""))
-    for item in history:
-        lines.extend((f"{item.role.title()}: {item.content.strip()}", ""))
-    lines.extend((f"User: {message.strip()}", "", "Assistant:"))
-    return "\n".join(lines)
+    """Render a transcript that ends where the assistant's reply begins."""
+    return template.prompt(
+        [(item.role, item.content) for item in history], message, system=system
+    )
 
 
 def _validate_complete_turns(history: Sequence[ChatMessage]) -> None:
@@ -58,6 +56,7 @@ def prepare_chat_prompt(
     max_new_tokens: int,
     *,
     system: str | None = None,
+    template: ChatTemplate = PLAIN,
 ) -> tuple[str, int]:
     """Return a completion-reserved chat prompt and dropped complete-turn count.
 
@@ -77,7 +76,9 @@ def prepare_chat_prompt(
     _validate_complete_turns(turns)
     dropped = 0
     while True:
-        prompt = format_chat_prompt(turns[dropped * 2 :], message, system=system)
+        prompt = format_chat_prompt(
+            turns[dropped * 2 :], message, system=system, template=template
+        )
         if len(tokenizer.encode(prompt, add_special_tokens=False).ids) <= budget:
             return prompt, dropped
         if dropped == len(turns) // 2:
@@ -87,12 +88,14 @@ def prepare_chat_prompt(
         dropped += 1
 
 
-def assistant_reply(completion: str, prompt: str) -> str:
-    """Extract one assistant turn and stop if the model starts another role."""
+def assistant_reply(
+    completion: str, prompt: str, template: ChatTemplate = PLAIN
+) -> str:
+    """Extract one assistant turn and stop where the template says a reply ends."""
     if not completion.startswith(prompt):
         raise ValueError("completion does not begin with its chat prompt")
     reply = completion.removeprefix(prompt)
-    for marker in _ROLE_BOUNDARIES:
+    for marker in template.stop:
         reply = reply.split(marker, 1)[0]
     return reply.strip()
 
@@ -111,12 +114,19 @@ def chat_turn(
     top_k: int = 0,
     seed: int = 0,
     engine: MLXEngine | None = None,
+    template: ChatTemplate = PLAIN,
 ) -> tuple[str, str]:
     """Generate one bounded assistant turn and return its prompt and reply."""
     from klab.evaluation.generation import generate
 
     prompt, _ = prepare_chat_prompt(
-        history, message, tokenizer, max_seq_len, max_new_tokens, system=system
+        history,
+        message,
+        tokenizer,
+        max_seq_len,
+        max_new_tokens,
+        system=system,
+        template=template,
     )
     completion = generate(
         model,
@@ -128,8 +138,9 @@ def chat_turn(
         temperature=temperature,
         top_k=top_k,
         seed=seed,
-        stop_sequences=_ROLE_BOUNDARIES,
+        stop_sequences=template.stop,
+        stop_token_ids=template.stop_token_ids(tokenizer),
         strict_context=True,
         engine=engine,
     )
-    return prompt, assistant_reply(completion, prompt)
+    return prompt, assistant_reply(completion, prompt, template)

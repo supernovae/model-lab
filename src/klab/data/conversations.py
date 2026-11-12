@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from klab.canonical import reject_duplicate_keys
+from klab.chat_template import PLAIN, ChatTemplate
 from klab.evaluation.chat import ChatMessage, format_chat_prompt
 
 
@@ -18,6 +19,15 @@ class RenderedConversation:
     text: str
     supervision_spans: tuple[tuple[int, int], ...]
     loss_mode: str
+
+
+@dataclass(frozen=True)
+class RenderedPair:
+    """One preference record: a shared prompt and its two candidate replies."""
+
+    prompt: str
+    chosen: str
+    rejected: str
 
 
 def _error(path: Path, line_number: int, detail: str) -> ValueError:
@@ -88,7 +98,9 @@ def _canonical_tool_calls(
     )
 
 
-def _v1_document(record: object, path: Path, line_number: int) -> RenderedConversation:
+def _v1_document(
+    record: object, path: Path, line_number: int, template: ChatTemplate
+) -> RenderedConversation:
     if not isinstance(record, dict) or set(record) != {"messages"}:
         raise _error(path, line_number, "record must contain only messages")
     messages = record["messages"]
@@ -127,16 +139,24 @@ def _v1_document(record: object, path: Path, line_number: int) -> RenderedConver
     document = ""
     for index in range(0, len(parsed), 2):
         user, assistant = parsed[index : index + 2]
-        prompt = format_chat_prompt(history, user.content, system=system)
+        prompt = format_chat_prompt(
+            history, user.content, system=system, template=template
+        )
         if document and not prompt.startswith(document):
             raise AssertionError("chat transcript rendering is not append-only")
-        document = f"{prompt} {assistant.content.strip()}"
+        document = (
+            f"{prompt}{template.answer_lead}{assistant.content.strip()}"
+            f"{template.answer_tail}"
+        )
         history.extend((user, assistant))
     return RenderedConversation(document, ((0, len(document)),), "all_tokens")
 
 
 def _v2_document(
-    record: dict[str, object], path: Path, line_number: int
+    record: dict[str, object],
+    path: Path,
+    line_number: int,
+    template: ChatTemplate = PLAIN,
 ) -> RenderedConversation:
     if (
         set(record) != {"format_version", "loss_mode", "messages"}
@@ -194,12 +214,16 @@ def _v2_document(
                 raise _error(
                     path, line_number, f"message {index} is not a complete user turn"
                 )
-            prefix = (
-                format_chat_prompt([], str(message["content"]), system=system)
+            rendered += (
+                format_chat_prompt(
+                    [], str(message["content"]), system=system, template=template
+                )
                 if not rendered
-                else f"\n\nUser: {str(message['content']).strip()}\n\nAssistant:"
+                else template.separator
+                + template.message("user", str(message["content"]))
+                + template.separator
+                + template.generation_prompt
             )
-            rendered += prefix
             expect_user = False
             continue
         if role == "assistant":
@@ -224,7 +248,7 @@ def _v2_document(
                     )
                 answer = str(content).strip()
                 start = len(rendered)
-                rendered += " " + answer
+                rendered += template.answer_lead + answer + template.answer_tail
                 spans.append((start, len(rendered)))
                 expect_user = True
                 continue
@@ -245,7 +269,7 @@ def _v2_document(
             seen_call_ids.update(call_ids)
             if isinstance(content, str) and content:
                 start = len(rendered)
-                rendered += " " + content
+                rendered += template.answer_lead + content
                 spans.append((start, len(rendered)))
             rendered += "\nToolCalls[v1]:"
             start = len(rendered)
@@ -282,7 +306,7 @@ def _v2_document(
             )
             rendered += f"\nToolResult[v1]: {result}"
             if not pending:
-                rendered += "\n\nAssistant:"
+                rendered += template.separator + template.generation_prompt
             continue
         raise _error(path, line_number, f"message {index} has unsupported role")
     if pending or not expect_user:
@@ -305,15 +329,73 @@ def _v2_document(
 
 
 def _conversation_document(
-    record: object, path: Path, line_number: int
+    record: object, path: Path, line_number: int, template: ChatTemplate
 ) -> RenderedConversation:
     if isinstance(record, dict) and "format_version" in record:
-        return _v2_document(record, path, line_number)
-    return _v1_document(record, path, line_number)
+        return _v2_document(record, path, line_number, template)
+    return _v1_document(record, path, line_number, template)
 
 
-def iter_rendered_conversations(path: Path) -> Iterator[RenderedConversation]:
-    """Yield validated local-chat records with explicit loss spans for v2."""
+def _preference_pair(
+    record: object, path: Path, line_number: int, template: ChatTemplate
+) -> RenderedPair:
+    if not isinstance(record, dict) or set(record) != {
+        "messages",
+        "chosen",
+        "rejected",
+    }:
+        raise _error(
+            path,
+            line_number,
+            "preference record must contain exactly messages, chosen and rejected",
+        )
+    chosen, rejected = record["chosen"], record["rejected"]
+    if not _nonblank_string(chosen) or not _nonblank_string(rejected):
+        raise _error(path, line_number, "chosen and rejected must not be blank")
+    if str(chosen).strip() == str(rejected).strip():
+        raise _error(path, line_number, "chosen and rejected must differ")
+    messages = record["messages"]
+    if not isinstance(messages, list) or not messages:
+        raise _error(path, line_number, "messages must be a nonempty array")
+    system: str | None = None
+    turns: list[tuple[str, str]] = []
+    for index, message in enumerate(messages):
+        if (
+            not isinstance(message, dict)
+            or set(message) != {"role", "content"}
+            or not _nonblank_string(message["content"])
+        ):
+            raise _error(
+                path,
+                line_number,
+                f"message {index} must contain only role and nonblank content",
+            )
+        role, content = message["role"], str(message["content"])
+        if role == "system" and index == 0:
+            system = content
+        elif role == ("user", "assistant")[len(turns) % 2]:
+            turns.append((role, content))
+        else:
+            raise _error(
+                path,
+                line_number,
+                "messages must be an optional system message, then alternate "
+                "user and assistant",
+            )
+    if len(turns) % 2 != 1:
+        raise _error(path, line_number, "messages must end with a user message")
+
+    def reply(text: object) -> str:
+        return template.answer_lead + str(text).strip() + template.answer_tail
+
+    return RenderedPair(
+        template.prompt(turns[:-1], turns[-1][1], system=system),
+        reply(chosen),
+        reply(rejected),
+    )
+
+
+def _records(path: Path) -> Iterator[tuple[int, object]]:
     with path.open("r", encoding="utf-8", newline="") as source:
         for line_number, line in enumerate(source, start=1):
             try:
@@ -326,9 +408,28 @@ def iter_rendered_conversations(path: Path) -> Iterator[RenderedConversation]:
                 )
             except (json.JSONDecodeError, ValueError) as error:
                 raise _error(path, line_number, f"invalid JSON: {error}") from error
-            yield _conversation_document(record, path, line_number)
+            yield line_number, record
 
 
-def iter_conversations(path: Path) -> Iterator[str]:
-    """Yield the historical text-only view; v1 rendering is byte-for-byte stable."""
-    yield from (conversation.text for conversation in iter_rendered_conversations(path))
+def iter_rendered_conversations(
+    path: Path, template: ChatTemplate = PLAIN
+) -> Iterator[RenderedConversation]:
+    """Yield validated local-chat records with explicit loss spans for v2."""
+    for line_number, record in _records(path):
+        yield _conversation_document(record, path, line_number, template)
+
+
+def iter_preference_pairs(
+    path: Path, template: ChatTemplate = PLAIN
+) -> Iterator[RenderedPair]:
+    """Yield validated preference records: one prompt, a chosen and a rejected reply."""
+    for line_number, record in _records(path):
+        yield _preference_pair(record, path, line_number, template)
+
+
+def iter_conversations(path: Path, template: ChatTemplate = PLAIN) -> Iterator[str]:
+    """Yield each conversation's rendered text."""
+    yield from (
+        conversation.text
+        for conversation in iter_rendered_conversations(path, template)
+    )

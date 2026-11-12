@@ -467,6 +467,11 @@ def train_tokenizer(
         "source_manifest_sha256": source_manifest_sha256,
         **({"corpus_export": corpus_export} if corpus_export is not None else {}),
         **(
+            {"chat_special_tokens": list(config.template.special_tokens)}
+            if config.template.special_tokens
+            else {}
+        ),
+        **(
             {
                 "sampling": config.sampling.model_dump(mode="json"),
                 "sampling_result": stats["sampling"],
@@ -504,7 +509,8 @@ def train_tokenizer(
         vocab_size=config.vocab_size,
         min_frequency=config.min_frequency,
         initial_alphabet=ByteLevel.alphabet(),
-        special_tokens=SPECIAL_TOKENS,
+        # The fixed four keep IDs 0..3; a chat template's markers follow them.
+        special_tokens=[*SPECIAL_TOKENS, *config.template.special_tokens],
     )
     bpe_started = time.monotonic()
     with progress_phase(

@@ -53,8 +53,14 @@ dataset:
   validation_max_tokens: 100000
 ```
 
+`dataset.chat_template` selects how conversations are rendered: `plain` (the
+default, shown above), `chatml`, `llama3` or a template you declare. The same
+template builds the prompt in `klab chat` and the local API. See
+[post-training](post-training.md#chat-templates), which also covers
+distillation, preference pairs and export.
+
 Each line is a complete conversation. Historical unversioned records remain valid and
-keep their exact plain-text rendering and whole-transcript loss:
+keep their whole-transcript loss:
 
 ```json
 {"messages":[{"role":"system","content":"Answer from the workshop handbook."},{"role":"user","content":"Which drawer holds the torque wrench?"},{"role":"assistant","content":"The labeled blue drawer."}]}
@@ -85,8 +91,8 @@ Prepared-data identity includes file contents, not just filenames. Changed data 
 Tokenizers are immutable artifacts. Training into an existing output directory succeeds only if source-content/training provenance and the tokenizer digest match. Otherwise choose a new tokenizer output directory. Referencing an already-trained tokenizer in a model config remains valid, including a pretrained tokenizer from another corpus.
 
 V2 local-chat records support either whole-transcript or assistant-only next-token
-loss, including inert tool-call transcripts; they do not execute functions, implement
-preference optimization, or import a hidden commercial chat template. Start with short,
+loss, including inert tool-call transcripts; they do not execute functions. Preference
+optimization uses its own [`local_preference` records](post-training.md#preference-optimization). Start with short,
 verifiable responses; train and evaluate the same system prefix. For a new domain, copy
 the small chat configuration, change dataset/tokenizer paths and budgets, inspect
 resource usage, and evaluate a separately versioned task card before increasing model size.

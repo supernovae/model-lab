@@ -31,6 +31,7 @@ from klab.data.allocation import AllocationManifest, load_allocation_manifest
 from klab.data.byte_hash import table_address, token_bytes
 from klab.data.conversations import (
     RenderedConversation,
+    iter_preference_pairs,
     iter_rendered_conversations,
 )
 from klab.data.datasets import iter_documents
@@ -137,6 +138,21 @@ def prepared_dataset_identity(dataset: DatasetConfig) -> dict[str, object]:
             "mixture_declaration_path",
             "mixture_output_path",
         }
+    }
+
+
+def packing_identity(config: RunConfig) -> dict[str, object]:
+    """Model and training settings that change the packed arrays."""
+    return {
+        "memory": config.model.memory,
+        "memory_table_size": config.model.memory_table_size,
+        "memory_ngram_size": config.model.memory_ngram_size,
+        # Preference pairs are padded to rows of this many tokens.
+        **(
+            {"pair_row_tokens": config.training.seq_len}
+            if config.dataset.source == "local_preference"
+            else {}
+        ),
     }
 
 
@@ -440,7 +456,7 @@ def _encoded_token_bytes(
 
 
 def _local_chat_identity(config: DatasetConfig) -> dict[str, str] | None:
-    if config.source not in {"local_chat", "local_text"}:
+    if config.source not in {"local_chat", "local_preference", "local_text"}:
         return None
     paths = (
         getattr(config, "train_path", None),
@@ -459,7 +475,7 @@ def _local_chat_identity(config: DatasetConfig) -> dict[str, str] | None:
 def _assert_local_chat_disjoint(
     config: DatasetConfig, *, local_text_source_bytes: int | None = None
 ) -> None:
-    if config.source not in {"local_chat", "local_text"}:
+    if config.source not in {"local_chat", "local_preference", "local_text"}:
         return
     train = {
         hashlib.sha256(document.encode("utf-8")).digest()
@@ -479,7 +495,7 @@ def _assert_local_chat_disjoint(
     )
     if overlap is not None:
         raise ValueError(
-            "local_chat train and validation contain an overlapping conversation"
+            f"{config.source} train and validation contain an overlapping conversation"
         )
 
 
@@ -488,10 +504,12 @@ def _assert_local_chat_supervision_consistent(config: DatasetConfig) -> None:
         return
     assert config.train_path is not None and config.validation_path is not None
     train_modes = {
-        item.loss_mode for item in iter_rendered_conversations(config.train_path)
+        item.loss_mode
+        for item in iter_rendered_conversations(config.train_path, config.template)
     }
     validation_modes = {
-        item.loss_mode for item in iter_rendered_conversations(config.validation_path)
+        item.loss_mode
+        for item in iter_rendered_conversations(config.validation_path, config.template)
     }
     if (
         len(train_modes) != 1
@@ -531,7 +549,7 @@ def _source_documents(
     if config.source == "local_chat":
         path = config.train_path if split == "train" else config.validation_path
         assert path is not None
-        yield from iter_rendered_conversations(path)
+        yield from iter_rendered_conversations(path, config.template)
         return
     documents = (
         iter_documents(config, split)
@@ -715,6 +733,95 @@ def _collect(
         np.asarray(values, dtype=np.int32),
         np.asarray(supervision, dtype=bool),
         None if byte_addresses is None else np.asarray(byte_addresses, dtype=np.int32),
+        stats,
+    )
+
+
+def _collect_pairs(
+    config: DatasetConfig, tokenizer: Tokenizer, split: str, seq_len: int
+) -> tuple[np.ndarray, np.ndarray, None, dict[str, int]]:
+    """Pack preference pairs as two padded rows each: chosen, then rejected.
+
+    The stored loss mask covers the chosen reply only, so every next-token
+    reader sees an ordinary assistant-only dataset. :class:`PairedBlockDataset`
+    recovers the rejected reply's targets from the shared prompt length and the
+    padding. A pair that does not fit in ``seq_len`` tokens is refused.
+    """
+    path = config.train_path if split == "train" else config.validation_path
+    assert path is not None
+    max_documents = (
+        config.train_max_documents
+        if split == "train"
+        else config.validation_max_documents
+    )
+    max_tokens = (
+        config.train_max_tokens if split == "train" else config.validation_max_tokens
+    )
+    eos, pad = tokenizer.token_to_id("<eos>"), tokenizer.token_to_id("<pad>")
+    if eos is None or pad is None:
+        raise ValueError("preference packing requires <eos> and <pad> tokens")
+    values: list[int] = []
+    supervision: list[bool] = []
+    stats = {
+        "acquired_documents": 0,
+        "retained_documents": 0,
+        "skipped_documents": 0,
+        "truncated_documents": 0,
+    }
+    longest = 0
+    for pair in iter_preference_pairs(path, config.template):
+        if (
+            stats["acquired_documents"] >= max_documents
+            or len(values) + 2 * seq_len + 1 > max_tokens
+        ):
+            break
+        stats["acquired_documents"] += 1
+        rows = []
+        for reply in (pair.chosen, pair.rejected):
+            encoding = tokenizer.encode(pair.prompt + reply, add_special_tokens=False)
+            # A token that straddles the prompt boundary belongs to the prompt.
+            prompt_tokens = sum(
+                start < len(pair.prompt) for start, _ in encoding.offsets
+            )
+            rows.append((encoding.ids, prompt_tokens))
+        (chosen, prompt_tokens), (rejected, rejected_prompt_tokens) = rows
+        if pad in chosen or pad in rejected:
+            raise ValueError(f"{path}: a preference record contains the <pad> token")
+        if (
+            prompt_tokens == 0
+            or prompt_tokens != rejected_prompt_tokens
+            or chosen[:prompt_tokens] != rejected[:prompt_tokens]
+            or prompt_tokens in {len(chosen), len(rejected)}
+        ):
+            raise ValueError(
+                f"{path}: chosen and rejected replies do not share one tokenized "
+                "prompt; end the chat template's generation prompt at a token boundary"
+            )
+        longest = max(longest, max(len(chosen), len(rejected)) + 1)
+        if longest > seq_len:
+            continue
+        for index, ids in enumerate((chosen, rejected)):
+            values.extend([*ids, eos, *([pad] * (seq_len - len(ids) - 1))])
+            supervision.extend(
+                index == 0 and prompt_tokens <= position <= len(ids)
+                for position in range(seq_len)
+            )
+        stats["retained_documents"] += 1
+    if longest > seq_len:
+        # A preference over a truncated reply is a different preference, and
+        # dropping pairs would change the dataset without saying so.
+        raise ValueError(
+            f"{path}: the longest preference pair needs {longest} tokens per "
+            f"reply; raise training.seq_len from {seq_len} or remove the pairs "
+            "that do not fit"
+        )
+    # The final row's last target position needs a following token.
+    values.append(pad)
+    supervision.append(False)
+    return (
+        np.asarray(values, dtype=np.int32),
+        np.asarray(supervision, dtype=bool),
+        None,
         stats,
     )
 
@@ -2103,6 +2210,13 @@ def _prepare_data(
     ):
         raise ValueError("corpus export vocabulary size does not match run model")
     local_chat = _local_chat_identity(config.dataset)
+    missing_tokens = config.dataset.template.missing_special_tokens(tokenizer)
+    if missing_tokens:
+        raise ValueError(
+            f"chat template {config.dataset.template.name!r} needs special tokens "
+            f"the tokenizer lacks: {', '.join(missing_tokens)}; train the "
+            "tokenizer with the same chat_template"
+        )
     # Allocation attestations retain their declared package identity. Ordinary
     # data caches depend on preparation implementation, not training/report/docs.
     source_digest = (
@@ -2151,11 +2265,7 @@ def _prepare_data(
             else {}
         ),
         "allocation_manifest_sha256": None if allocation is None else allocation.sha256,
-        "packing": {
-            "memory": config.model.memory,
-            "memory_table_size": config.model.memory_table_size,
-            "memory_ngram_size": config.model.memory_ngram_size,
-        },
+        "packing": packing_identity(config),
         "packing_version": PACKING_VERSION,
         "source_identity_sha256": source_digest,
         "tokenizer_sha256": canonical_tokenizer_sha256(tokenizer),
@@ -2571,6 +2681,15 @@ def _prepare_data(
                 **settings,
             )
         )
+    elif config.dataset.source == "local_preference":
+        train, train_supervision, train_byte, train_stats = _collect_pairs(
+            config.dataset, tokenizer, "train", config.training.seq_len
+        )
+        validation, validation_supervision, validation_byte, validation_stats = (
+            _collect_pairs(
+                config.dataset, tokenizer, "validation", config.training.seq_len
+            )
+        )
     else:
         train, train_supervision, train_byte, train_stats = _collect(
             config.dataset, tokenizer, "train", **settings
@@ -2602,7 +2721,10 @@ def _prepare_data(
         or len(validation) < config.training.seq_len + 1
     ):
         raise ValueError("prepared split lacks a full next-token block")
-    mask_enabled = config.dataset.source == "local_token_mixture" or (
+    mask_enabled = config.dataset.source in {
+        "local_token_mixture",
+        "local_preference",
+    } or (
         config.dataset.source == "local_chat"
         and (
             not bool(np.all(train_supervision))
@@ -2656,6 +2778,10 @@ def _prepare_data(
         "local_chat": {
             "license": config.dataset.license,
             "source_attribution": "user-provided local_chat",
+        },
+        "local_preference": {
+            "license": config.dataset.license,
+            "source_attribution": "user-provided local_preference",
         },
         "local_text": {
             "license": config.dataset.license,
@@ -3167,6 +3293,77 @@ class TokenBlockDataset:
             torch.from_numpy(inputs),
             torch.from_numpy(targets),
             torch.from_numpy(addresses),
+        )
+
+
+class PairedBlockDataset:
+    """Preference pairs as ``[2, seq_len]`` rows: the chosen reply, then the rejected.
+
+    Reads the layout :func:`_collect_pairs` writes. Indexing is by pair, so the
+    trainer's shuffling and budgets never separate the two replies.
+    """
+
+    def __init__(
+        self, ids: np.ndarray, seq_len: int, supervision: np.ndarray, pad: int
+    ) -> None:
+        if (
+            ids.ndim != 1
+            or supervision.shape != ids.shape
+            or (len(ids) - 1) % (2 * seq_len)
+        ):
+            raise ValueError(
+                "preference data is not packed as pairs of training.seq_len rows"
+            )
+        self.ids, self.seq_len, self.supervision, self.pad = (
+            ids,
+            seq_len,
+            supervision,
+            pad,
+        )
+
+    def __len__(self) -> int:
+        return (len(self.ids) - 1) // (2 * self.seq_len)
+
+    def exposure_supply(self) -> dict[str, int]:
+        """One pass over the pairs, counting both replies' targets."""
+        rows = 2 * len(self)
+        return {
+            "raw_packed_positions": len(self.ids),
+            "full_blocks": rows,
+            "eligible_blocks": rows,
+            "zero_target_blocks_skipped": 0,
+            "trailing_target_positions": 0,
+            "usable_supervised_targets_per_pass": sum(
+                int(np.count_nonzero(self.numpy_microblock(index)[1] != -100))
+                for index in range(len(self))
+            ),
+        }
+
+    def advise(self, indices: Sequence[int]) -> None:
+        """Preference sets are small; nothing is read ahead."""
+
+    def numpy_microblock(
+        self, index: int
+    ) -> tuple[np.ndarray, np.ndarray, None, None, None, None]:
+        width = self.seq_len
+        start = index * 2 * width
+        tokens = np.asarray(self.ids[start : start + 2 * width + 1], dtype=np.int64)
+        target_mask = np.array(self.supervision[start + 1 : start + 2 * width + 1])
+        prompt_tokens = int(np.argmax(self.supervision[start : start + width]))
+        # The rejected reply: everything after the shared prompt up to padding.
+        rejected = tokens[width + 1 : 2 * width + 1]
+        target_mask[width + prompt_tokens - 1 : 2 * width - 1] = (
+            rejected[prompt_tokens - 1 : width - 1] != self.pad
+        )
+        target_mask[2 * width - 1] = False
+        targets = np.where(target_mask, tokens[1:], -100)
+        return (
+            tokens[:-1].reshape(2, width),
+            targets.reshape(2, width),
+            None,
+            None,
+            None,
+            None,
         )
 
 

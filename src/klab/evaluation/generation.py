@@ -233,6 +233,7 @@ def generate(
     top_k: int = 0,
     seed: int = 0,
     stop_sequences: Sequence[str] = (),
+    stop_token_ids: Sequence[int] = (),
     strict_context: bool = False,
     use_cache: bool = True,
     engine: MLXEngine | None = None,
@@ -253,6 +254,7 @@ def generate(
         top_k=top_k,
         seed=seed,
         stop_sequences=stop_sequences,
+        stop_token_ids=stop_token_ids,
         strict_context=strict_context,
         use_cache=use_cache,
         engine=engine,
@@ -274,6 +276,7 @@ def generate_with_token_ids(
     top_k: int = 0,
     seed: int = 0,
     stop_sequences: Sequence[str] = (),
+    stop_token_ids: Sequence[int] = (),
     strict_context: bool = False,
     use_cache: bool = True,
     engine: MLXEngine | None = None,
@@ -293,6 +296,9 @@ def generate_with_token_ids(
     the model confirms, so greedy output is unchanged while model calls drop on
     repetitive text. It requires greedy decoding on the PyTorch KV-cache path
     without byte-addressed memory or semantic queries.
+
+    ``stop_token_ids`` end the reply like EOS does; a chat template names them
+    when its closing marker is a single token that decoding would hide.
 
     Returned IDs are sampled completion tokens (not prompt or EOS), before any
     text-only stop-sequence trimming. They preserve the exact decoding trajectory
@@ -486,7 +492,7 @@ def generate_with_token_ids(
                         blocked_ids=blocked_ids,
                         generator=generator,
                     )
-                if token == eos:
+                if token == eos or token in stop_token_ids:
                     break
                 generated.append(token)
                 ids.append(token)

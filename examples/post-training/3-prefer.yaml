@@ -1,0 +1,54 @@
+# Stage 3: preference optimization. Starts from the instruct run and learns
+# which of its two reply styles fits which situation.
+schema_version: 2
+name: post-training-prefer
+seed: 42
+model:
+  vocab_size: 512
+  hidden_dim: 96
+  num_layers: 3
+  num_heads: 4
+  ffn_dim: 288
+  max_seq_len: 96
+tokenizer:
+  path: work/tokenizer/tokenizer.json
+dataset:
+  source: local_preference
+  chat_template: chatml
+  license: CC0-1.0 (example pairs written for this repository)
+  train_path: data/pairs-train.jsonl
+  validation_path: data/pairs-validation.jsonl
+  cache_dir: work/data
+  train_max_documents: 200
+  validation_max_documents: 40
+  train_max_tokens: 65536
+  validation_max_tokens: 8192
+training:
+  seq_len: 96
+  max_steps: 60
+  max_tokens: 200000
+  micro_batch_size: 8
+  gradient_accumulation: 1
+  parent_checkpoint: work/runs/instruct
+  objective:
+    kind: preference
+    params:
+      beta: 1.0
+optimizer:
+  name: adamw
+  peak: 0.0003
+  floor: 0.00003
+  warmup_steps: 10
+  weight_decay: 0.0
+evaluation:
+  every_steps: 20
+  max_batches: 4
+checkpoint:
+  every_steps: 60
+logging:
+  root_dir: work/runs
+  every_steps: 10
+runtime:
+  engine: pytorch
+  backend: cpu
+  precision: fp32

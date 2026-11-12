@@ -454,6 +454,65 @@
       "title": "Axis",
       "type": "object"
     },
+    "ChatTemplate": {
+      "additionalProperties": false,
+      "description": "Role patterns, the prompt that opens a reply, and where a reply ends.",
+      "properties": {
+        "name": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "system": {
+          "title": "System",
+          "type": "string"
+        },
+        "user": {
+          "title": "User",
+          "type": "string"
+        },
+        "assistant": {
+          "title": "Assistant",
+          "type": "string"
+        },
+        "generation_prompt": {
+          "minLength": 1,
+          "title": "Generation Prompt",
+          "type": "string"
+        },
+        "separator": {
+          "default": "",
+          "title": "Separator",
+          "type": "string"
+        },
+        "stop": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Stop",
+          "type": "array"
+        },
+        "special_tokens": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Special Tokens",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "system",
+        "user",
+        "assistant",
+        "generation_prompt",
+        "stop"
+      ],
+      "title": "ChatTemplate",
+      "type": "object"
+    },
     "CheckpointConfig": {
       "additionalProperties": false,
       "properties": {
@@ -794,6 +853,7 @@
           "enum": [
             "local_text",
             "local_chat",
+            "local_preference",
             "local_token_mixture",
             "snapshot",
             "huggingface",
@@ -801,6 +861,18 @@
           ],
           "title": "Source",
           "type": "string"
+        },
+        "chat_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/ChatTemplate"
+            }
+          ],
+          "default": "plain",
+          "title": "Chat Template"
         },
         "dataset_id": {
           "anyOf": [
@@ -1946,6 +2018,37 @@
       "title": "ModelConfig",
       "type": "object"
     },
+    "ObjectiveConfig": {
+      "additionalProperties": false,
+      "description": "What an update minimizes; kinds are looked up in ``klab.objectives``.",
+      "properties": {
+        "kind": {
+          "default": "next_token",
+          "title": "Kind",
+          "type": "string"
+        },
+        "teacher_checkpoint": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Teacher Checkpoint"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        }
+      },
+      "title": "ObjectiveConfig",
+      "type": "object"
+    },
     "Phase": {
       "additionalProperties": false,
       "properties": {
@@ -2502,6 +2605,22 @@
           ],
           "default": null,
           "title": "Portability Manifest Path"
+        },
+        "parent_checkpoint": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Checkpoint"
+        },
+        "objective": {
+          "$ref": "#/$defs/ObjectiveConfig"
         }
       },
       "required": [

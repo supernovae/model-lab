@@ -35,10 +35,12 @@ work items and their status. It is not a second task board or a release promise.
   ROCm, Intel XPU and Apple MLX.
 - **Long context and sparse attention.** 32k to 256k context without dense
   attention memory ([#353](https://github.com/supernovae/model-lab/issues/353)).
-- **The loop after pretraining.** Distillation, preference optimization,
-  adapters, chat templates and export
-  ([#357](https://github.com/supernovae/model-lab/issues/357)), plus speculative
-  decoding with n-gram and draft-model drafters
+- **The loop after pretraining.** [Post-training](docs/post-training.md)
+  stages chain from a parent checkpoint under a registered objective:
+  instruction tuning, teacher distillation and preference optimization (DPO),
+  with chat templates and Hugging Face Llama export. Pending work: low-rank
+  adapters, rollout-based methods and quantization, plus speculative decoding
+  with n-gram and draft-model drafters
   ([#358](https://github.com/supernovae/model-lab/issues/358)).
 - **Trustworthy evaluation.** [PR #72](https://github.com/supernovae/model-lab/pull/72)
   has landed: held-back final evaluation, text-level needle comparisons, recall

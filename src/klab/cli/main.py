@@ -2408,7 +2408,8 @@ def _chat(args: argparse.Namespace) -> None:
         authorization=args.runtime_authorization,
     )
     context = _inference_context(args, loaded.config.model.max_seq_len)
-    stops = ["\nUser:", "\nSystem:", "\nAssistant:", *args.stop]
+    template = loaded.config.dataset.template
+    stops = [*template.stop, *args.stop]
     if not args.json:
         print(
             "Verified checkpoint: " + json.dumps(loaded.identity, sort_keys=True),
@@ -2437,6 +2438,7 @@ def _chat(args: argparse.Namespace) -> None:
             context,
             args.max_new_tokens,
             system=args.system,
+            template=template,
         )
         if args.show_prompt:
             print(
@@ -2455,10 +2457,11 @@ def _chat(args: argparse.Namespace) -> None:
             seed=args.seed,
             strict_context=True,
             stop_sequences=stops,
+            stop_token_ids=template.stop_token_ids(loaded.tokenizer),
             use_cache=not args.no_cache,
             engine=loaded.engine,
         )
-        reply = assistant_reply(completion, prompt)
+        reply = assistant_reply(completion, prompt, template)
         turn = {
             "format": "chat_transcript_v1",
             "user": message,
@@ -2542,6 +2545,19 @@ def _weights_import(args: argparse.Namespace) -> None:
         provenance=Path(args.provenance),
     )
     print(json.dumps(asdict(result), sort_keys=True, default=str))
+
+
+def _weights_export(args: argparse.Namespace) -> None:
+    from klab.training.weight_export import export_weights
+
+    print(
+        json.dumps(
+            export_weights(
+                Path(args.checkpoint), Path(args.output), export_format=args.format
+            ),
+            sort_keys=True,
+        )
+    )
 
 
 def _tokenizer_batch_integer(value: str, *, maximum: int) -> int:
@@ -2990,7 +3006,7 @@ _FALLBACK_HELP = {
     "generate": "Generate a raw continuation from a verified checkpoint",
     "dashboard": "Local read-only training/research dashboard",
     "readiness": "CPU wiring smoke checks for the shipped mechanisms",
-    "weights": "Import external weights with provenance",
+    "weights": "Import external weights with provenance, or export for Hugging Face",
     "config": "Derive or migrate typed run configs",
     "checkpoint": "Inspect or verify checkpoints",
     "workspace": "Storage preflight and cleanup plans",
@@ -3256,6 +3272,18 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     weight_import.add_argument("--source-tokenizer", required=True)
     weight_import.add_argument("--provenance", required=True)
     weight_import.set_defaults(handler=_weights_import)
+    weight_export = weight_commands.add_parser(
+        "export",
+        help="Write a checkpoint as a Hugging Face Llama directory",
+    )
+    weight_export.add_argument(
+        "checkpoint", help="run directory, checkpoint generation or latest.json"
+    )
+    weight_export.add_argument("output", help="new directory to create")
+    weight_export.add_argument(
+        "--format", default="hf_llama_safetensors", choices=("hf_llama_safetensors",)
+    )
+    weight_export.set_defaults(handler=_weights_export)
     config = commands.add_parser("config")
     config_commands = config.add_subparsers(dest="config_command", required=True)
     from klab.config.validation import add_arguments as validation_arguments

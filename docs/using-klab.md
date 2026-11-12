@@ -52,6 +52,7 @@ summarizes the direction for a smaller CLI. There is no `advanced` or `release` 
 | Train directly or continue a checkpoint | [Training](training.md), [checkpointing](checkpointing.md) |
 | Complete text, chat or serve saved weights | [Model guide](tinytext-model-guide.md), [local API](local-api.md) |
 | Change architecture or instruction objectives | [Architecture](architecture.md), [instruction training](instruction-training.md) |
+| Distill, tune on preferences, change the chat template or export | [Post-training](post-training.md) |
 | Schedule independent runs or matrices | [Workers](workers.md), [experiments](experiments.md) |
 | Declare release lineage, approvals and recovery | [Training programs](experiment-programs.md), [Campaigns](campaigns.md), [lifecycle](research/lifecycle-recovery.md) |
 | Run focused code checks | [Test feedback](test-speed.md) |

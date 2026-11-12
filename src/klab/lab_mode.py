@@ -194,6 +194,23 @@ def memory_packages(config: Any) -> dict[str, Any]:
     return packages
 
 
+def frozen_checkpoints(config: Any) -> dict[str, str]:
+    """Digest the parent and teacher checkpoints a config starts or learns from."""
+    from klab.training.manifest import checkpoint_selection
+
+    digests = {}
+    for role, path in (
+        ("parent", config.training.parent_checkpoint),
+        ("teacher", config.training.objective.teacher_checkpoint),
+    ):
+        if path is None:
+            continue
+        selected = checkpoint_selection(Path(path))
+        identity = selected if selected.is_file() else selected / "manifest.json"
+        digests[role] = _sha256_file(identity) if identity.is_file() else "missing"
+    return digests
+
+
 def current_inputs(config: Any) -> dict[str, Any]:
     """Hash tokenizer, dataset and memory-package inputs as they are on disk now."""
     from klab.data.packing import canonical_tokenizer_sha256
@@ -218,6 +235,9 @@ def current_inputs(config: Any) -> dict[str, Any]:
         if value is not None:
             inputs["dataset_paths"][field] = _path_digest(Path(value))
     inputs["memory_packages"] = memory_packages(config)
+    checkpoints = frozen_checkpoints(config)
+    if checkpoints:
+        inputs["checkpoints"] = checkpoints
     inputs["sha256"] = hashlib.sha256(_canonical(inputs)).hexdigest()
     return inputs
 

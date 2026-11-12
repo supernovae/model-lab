@@ -169,6 +169,12 @@ def config_sha256(config: Mapping[str, Any]) -> str:
     )
 
 
+def checkpoint_selection(path: Path) -> Path:
+    """Accept a run directory, or anything ``train --promote`` accepts."""
+    pointer = path / "checkpoints" / "latest.json"
+    return pointer if pointer.is_file() else path
+
+
 def sha256_file(
     path: Path,
     chunk_size: int = 1024 * 1024,

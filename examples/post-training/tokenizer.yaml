@@ -1,0 +1,16 @@
+schema_version: 1
+vocab_size: 512
+min_frequency: 1
+max_documents: 200
+output_dir: work/tokenizer
+dataset:
+  source: local_chat
+  chat_template: chatml
+  license: CC0-1.0 (example conversations written for this repository)
+  train_path: data/chat-train.jsonl
+  validation_path: data/chat-validation.jsonl
+  cache_dir: work/data
+  train_max_documents: 200
+  validation_max_documents: 40
+  train_max_tokens: 65536
+  validation_max_tokens: 8192

@@ -9,7 +9,7 @@ from datasets import load_dataset
 
 from klab.config.models import DatasetConfig
 from klab.data.chat_recall import iter_chat_recall
-from klab.data.conversations import iter_conversations
+from klab.data.conversations import iter_conversations, iter_preference_pairs
 from klab.data.engram_recall import iter_engram_recall
 from klab.data.instruction_reference import iter_instruction_reference
 from klab.data.synthetic import iter_synthetic
@@ -101,7 +101,14 @@ def iter_documents(
     if config.source == "local_chat":
         path = config.train_path if split == "train" else config.validation_path
         assert path is not None
-        yield from iter_conversations(path)
+        yield from iter_conversations(path, config.template)
+        return
+    if config.source == "local_preference":
+        path = config.train_path if split == "train" else config.validation_path
+        assert path is not None
+        # The text view of a pair is its prompt with the chosen reply.
+        for pair in iter_preference_pairs(path, config.template):
+            yield pair.prompt + pair.chosen
         return
     if config.source in {"local_text", "local_token_mixture"}:
         if config.source == "local_token_mixture" and split == "train":
