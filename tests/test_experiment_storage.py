@@ -199,3 +199,33 @@ def test_resumed_storage_counts_only_future_target_cadence(tmp_path):
     assert sum(r.projected_bytes for r in remaining) < sum(
         r.projected_bytes for r in old
     )
+
+
+def test_cold_cache_refuses_before_packing_when_the_run_cannot_fit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Room for the cache alone is not enough: the run copy and checkpoints count."""
+    import klab.workspace_preflight as preflight
+    from klab.training.trainer import train
+    from klab.workspace_preflight import projected_data_bytes
+
+    cfg = configured(tmp_path, every_steps=5)
+    (combined,) = training_storage_checks(cfg)
+    cache_only = projected_data_bytes(cfg) + combined.reserve_bytes
+    room = (cache_only + combined.projected_bytes + combined.reserve_bytes) // 2
+    assert cache_only < room < combined.projected_bytes + combined.reserve_bytes
+    real = preflight.os.statvfs
+
+    def partly_full(path):
+        original = real(path)
+        return SimpleNamespace(
+            f_bavail=room // original.f_frsize,
+            f_frsize=original.f_frsize,
+            f_favail=original.f_favail,
+            f_files=original.f_files,
+        )
+
+    monkeypatch.setattr(preflight.os, "statvfs", partly_full)
+    with pytest.raises(OSError, match="storage preflight failed"):
+        train(cfg, run_id="does-not-fit")
+    assert not list(cfg.dataset.cache_dir.glob("*/manifest.json"))

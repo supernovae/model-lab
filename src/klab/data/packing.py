@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
@@ -2022,6 +2022,7 @@ def _prepare_data(
     prefix_from: PreparedPrefix | None = None,
     append_from: PreparedAppend | None = None,
     require_prepared: bool = False,
+    before_packing: Callable[[], None] | None = None,
 ) -> PreparedData:
     """Prepare immutable IDs and causal sidecars."""
     tokenizer_batch_documents, tokenizer_batch_source_bytes = (
@@ -2263,6 +2264,8 @@ def _prepare_data(
             f"prepared data is not published at {root}; run `klab data prepare` "
             "with this config before training with --require-prepared"
         )
+    if before_packing is not None:
+        before_packing()
     if root.exists() or root.is_symlink():
         raise RuntimeError(f"unverified prepared-data destination exists: {root}")
     _assert_local_chat_disjoint(
@@ -2752,6 +2755,7 @@ def prepare_data(
     prefix_from: PreparedPrefix | None = None,
     append_from: PreparedAppend | None = None,
     require_prepared: bool = False,
+    before_packing: Callable[[], None] | None = None,
 ) -> PreparedData:
     """Prepare data and mark only new caches owned by the selected workspace.
 
@@ -2767,6 +2771,9 @@ def prepare_data(
 
     ``require_prepared`` refuses to tokenize or pack: an already published cache
     is verified and returned, and a miss raises ``PreparedDataMissing``.
+
+    ``before_packing`` runs only on a cache miss, before any tokenization or
+    allocation, so a caller can refuse work it could not finish.
     """
     if prefix_from is not None and append_from is not None:
         raise ValueError("prepared prefix and append are mutually exclusive")
@@ -2826,6 +2833,7 @@ def prepare_data(
                 prefix_from=prefix_from,
                 append_from=append_from,
                 require_prepared=require_prepared,
+                before_packing=before_packing,
             )
     with (
         workspace_lock(base),
@@ -2845,6 +2853,7 @@ def prepare_data(
             prefix_from=prefix_from,
             append_from=append_from,
             require_prepared=require_prepared,
+            before_packing=before_packing,
         )
         if prepared.root.name not in existing:
             mark_prepared_cache(workspace, prepared.root)
