@@ -11,6 +11,6 @@ exist on this machine, that the old commands work with current Lab, or that a
 rerun is approved. Preservation does not change the recorded result or supply a
 new model-quality claim.
 
-For current generic interfaces, use [checkpoint exploration](checkpoint-exploration.md),
-[the local API](local-api.md) and [result reports](result-reports.md) with your own
+For current generic interfaces, use [checkpoint exploration](../checkpoint-exploration.md),
+[the local API](../local-api.md) and [result reports](../result-reports.md) with your own
 verified checkpoint and runtime.

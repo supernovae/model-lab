@@ -312,9 +312,9 @@ and their limitations remain in the research archive.
 The remaining `test_kml_card03_context_check.py` and
 `test_kml_card03_review_receipts.py` modules were retired after review found that
 they imported deleted, research-specific scripts. Their historical allowlist is
-archived unchanged. Native `test_kml_card03_items` retains held-out family/source
+archived unchanged. A native `test_kml_card03_items` module, itself since retired, retained held-out family/source
 binding, exact chunk identity, control structure, immutable output and incomplete
-denominator checks. It does not replace the old token-context/phrase-overlap
+denominator checks. It did not replace the old token-context/phrase-overlap
 screen or independent gold-blind evaluation-review receipt protocol. Those old
 evaluation-specific guarantees are retired, not claimed as preparation coverage;
 current corpus admission review remains inspection-bound and independently tested.
@@ -389,7 +389,7 @@ Parquet names with the resolver's exact lowercase suffixes need no header read.
 This limit only removes the redundant full-file rights read. Full-file admission
 screening, acquisition budgets and normalizer identities are unchanged. Fallback
 preparation still materializes complete inputs (including JSON arrays, Parquet
-and monolithic text normalization); bounding that memory remains separate LAB-52
+and monolithic text normalization); bounding that memory remains separate
 work. The rights-header fix does not make all fallback formats memory-bounded.
 
 ## Reviewed split ratios and unique-target exports
@@ -608,7 +608,7 @@ another hold. Never reconcile a live transfer.
 
 Concrete preparation recipes belong in user-owned directories or repositories.
 The historical EXP1 declarations moved to the DevMind project in Workshop
-(recipe DevMind 340M Base); the [disposition record](exp1-retirement.json)
+(recipe DevMind 340M Base); the [disposition record](history/exp1-retirement.json)
 binds their original bytes to the destination commit. Lab supplies the native
 commands described here; Workshop and an internal runner are not prerequisites.
 A feasibility gate is not a new transfer allocation; never initialize a replacement

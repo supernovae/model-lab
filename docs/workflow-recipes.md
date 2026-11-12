@@ -311,13 +311,13 @@ is available only with valid complete native evidence for both cells. Pending,
 failed, censored or invalid evidence does not establish comparability. A successful
 pair is wiring evidence, not a scientific quality claim.
 
-| Contract boundary | Regression coverage in `tests/test_workflow_pair.py` |
+| Contract boundary | Coverage in the [historical `test_workflow_pair.py`](https://github.com/supernovae/model-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_workflow_pair.py), since retired |
 | --- | --- |
 | Current admission | Strict limits, pilot accounting, obsolete-input refusal and unchanged native seed semantics |
 | Authored graph | Renamed/reordered stages, distinct cells, approval, sequential runs and collection barriers |
 | Native input identity | Snapshot members, tokenizer bytes and prepared-array tampering refuse before submission |
 | Native comparability | Extra differences, invariant conflicts and unchanged declared interventions refuse |
-| Isolated admission guards | `test_workflow_pair_guards.py`: shared dataset/tokenizer, CPU/snapshot profile, comparison shape, recovery and planning/runtime/approval/evaluation connections |
+| Isolated admission guards | Historical `test_workflow_pair_guards.py`: shared dataset/tokenizer, CPU/snapshot profile, comparison shape, recovery and planning/runtime/approval/evaluation connections |
 | Native lifecycle | Zero-wait submission, replay, cancellation, lost submission and ambiguous controller observations |
 | Non-executing inspection | Import/effect fence; no payload reads or runtime launch |
 
@@ -448,7 +448,7 @@ from quality claims. That measured run and Workshop publication are subsequent
 work, not established by CLI unit tests. Snapshot TinyStories, multiple cells,
 continuations, generation panels and accelerators remain outside this profile.
 
-| CLI boundary | Evidence in `tests/test_workflow_cli.py` |
+| CLI boundary | Evidence in the [historical `test_workflow_cli.py`](https://github.com/supernovae/model-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_workflow_cli.py), since retired |
 | --- | --- |
 | Public entry → authenticated native Campaign | Real tiny preparation, approval gate, zero-wait queue, no-tick replay |
 | Admission → store/dispatch | Recipe/binding digest, interpreter, outside-Git, clean committed inventory and stale context refusals |
@@ -457,8 +457,8 @@ continuations, generation panels and accelerators remain outside this profile.
 | Native snapshot → report | Planned/evidence output, identical replay, no-clobber, corrupt-index and unpaired-input refusal |
 | Help → optional imports | Fresh-process fences for every new subcommand |
 
-These tests cover admission guards while preserving runtime contracts, native
-seed acceptance and historical hashes. Normal safe/fast/lab-loop CI remains the
+Those tests covered admission guards while preserving runtime contracts, native
+seed acceptance and historical hashes; they are not part of the current suite. Normal safe/fast/lab-loop CI remains the
 broader compatibility gate; no full measured training is added to CLI tests.
 
 ## Current workflow and evidence contract

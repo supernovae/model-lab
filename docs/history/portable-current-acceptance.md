@@ -145,7 +145,7 @@ preparation or training, accelerators, and the prepared-input workflow's
 | Criterion | State |
 | --- | --- |
 | Authoring lives in Lab; declarations live in the experiment repository | Met. `config validate`, `config derive`, `architecture derive`, `experiment recipe create/export` and `research scaffold` author; Workshop holds the declarations. |
-| One installed-Lab path for an arbitrary directory | Met. [Build](build.md#4-keep-the-model-in-its-own-repository) is the plain path; [portable recipes](portable-recipes.md) is the inventoried one. |
+| One installed-Lab path for an arbitrary directory | Met. [Build](../build.md#4-keep-the-model-in-its-own-repository) is the plain path; [portable recipes](../portable-recipes.md) is the inventoried one. |
 | Relative declarations survive relocation and an unrelated working directory | Met in the runs above. |
 | No Workshop checkout, repository or project name in runtime logic | Met. Lab's Python source contains no `workshop` or `devmind` string outside one scaffold help text. |
 | Executable functions in Lab; the experiment repository holds only declarations | Lab side met. Workshop `main` still tracks 21 Python files: four helper scripts, seven example handoff scripts and tests, and ten test modules. This is tracked in [#157](https://github.com/supernovae/model-lab/issues/157). |

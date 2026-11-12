@@ -41,6 +41,8 @@ summarizes the direction for a smaller CLI. There is no `advanced` or `release` 
 
 ## Find the next guide
 
+The [documentation index](README.md) lists every page; the common ones are below.
+
 | Need | Guide |
 | --- | --- |
 | Build a model from your own text | [Build guide](build.md) |

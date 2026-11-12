@@ -625,8 +625,8 @@ The optional local reference package is `artifacts/phase-g/micro-reference/`: th
 
 ### Completed multi-seed studies
 
-- [Context/Engram study](../context-engram-study.md#execution-results--2026-09-22): 24 endpoints spanning seeds 17/41/73, two exact target budgets, dense/backbone and dense-total comparisons, and collision/address-order diagnostics. Every untouched override endpoint remained 0/8. Added memory capacity and observed bucket collisions are not evidence of a generalization advantage.
-- [Domain adaptation](../path-domain-corpus.md#2026-09-22-execution-record): three pretraining/adaptation pairs with frozen supervision, provenance, semantic leakage checks, per-case results, and static-retention measurements. Training-case acquisition improved, but held-out reliability remained poor and retention worsened sharply.
+- [Context/Engram study](../history/context-engram-study.md#execution-results--2026-09-22): 24 endpoints spanning seeds 17/41/73, two exact target budgets, dense/backbone and dense-total comparisons, and collision/address-order diagnostics. Every untouched override endpoint remained 0/8. Added memory capacity and observed bucket collisions are not evidence of a generalization advantage.
+- [Domain adaptation](../history/path-domain-corpus.md#2026-09-22-execution-record): three pretraining/adaptation pairs with frozen supervision, provenance, semantic leakage checks, per-case results, and static-retention measurements. Training-case acquisition improved, but held-out reliability remained poor and retention worsened sharply.
 
 [Independent acceptance](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/scientific_studies_2026_09_22.json) binds the input inventories, endpoint identities, stored responses, paired deltas, and retention observations. These studies retain all declared seeds/endpoints and their negative outcomes; they are not a general model-selection or significance framework.
 

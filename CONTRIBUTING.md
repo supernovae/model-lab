@@ -85,14 +85,16 @@ Any later reproduction or regeneration is a new experiment with a new identity;
 retain the original result and its limitations. This policy grants no execution,
 recovery, acquisition or training authority.
 
+A change to a command, a config field or a default updates the page that
+describes it in the same pull request. Each subject has one page, listed in the
+[documentation index](docs/README.md); other pages link to it. A page that only
+records what happened on a date belongs in `docs/history/`.
+
 During PR review, check that a migration adapts declarations to current behavior,
 preserves archived evidence and separates historical claims from current
 validation. Reject changes whose purpose is restoring old execution behavior
 through compatibility code. Record current-interface gaps separately from a
-proposed reproduction. The [canonical migration plan][migration-plan] tracks the
-coordinated work and execution gates.
-
-[migration-plan]: https://app.notion.com/p/3f83b68cca2281f59998c5b285816910
+proposed reproduction, in a GitHub issue.
 
 ## Architecture experiments
 

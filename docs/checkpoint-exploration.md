@@ -6,7 +6,7 @@ Use the native lab interfaces to inspect and compare your own retained models.
 The [model exploration guide](tinytext-model-guide.md) covers the complete
 verify → raw completion → chat workflow and debugging controls. For client
 applications use the [local API guide](local-api.md); for the retained DevMind
-base checkpoint see [MODEL-0](model-0.md).
+base checkpoint see [MODEL-0](history/model-0.md).
 For a new training run, start with the [TinyStories microlab](tinystories-microlab.md).
 Existing weights, run-owned assets and a compatible runtime must be available;
 commands cannot reconstruct a missing checkpoint from its metadata.

@@ -4,15 +4,18 @@ Model Lab's local MoE replaces a dense SwiGLU block with independently parameter
 
 $$y = \sum_{e \in \operatorname{TopK}(p)} \frac{p_e}{\sum_{j \in \operatorname{TopK}(p)} p_j} E_e(x).$$
 
-`model.num_experts` chooses the routed expert count; `model.experts_per_token` chooses $K`; `model.shared_expert` adds a dense SwiGLU contribution for every token. `model.router_aux_loss_coefficient` enables the simple auxiliary load-balancing term $E\sum_e \bar p_e\bar l_e$, where $\bar p$ is mean router probability and $\bar l$ is selected-token load.
+`model.num_experts` chooses the routed expert count; `model.experts_per_token` chooses $K$; `model.shared_expert` adds a dense SwiGLU contribution for every token. `model.router_aux_loss_coefficient` enables the simple auxiliary load-balancing term $E\sum_e \bar p_e\bar l_e$, where $\bar p$ is mean router probability and $\bar l$ is selected-token load.
 
 The trainer records the auxiliary loss plus per-layer router entropy, maximum expert fraction, and mean selected routing probability. The latest forward pass retains detached router logits, selected experts, and normalized weights for diagnosis. These are local reference mechanics: there is no capacity limit, token dropping, distributed all-to-all exchange, or auxiliary-loss-free balancing strategy.
 
-Run the CPU smoke:
+Run the CPU smoke in the [activated environment](../README.md#first-run):
 
 ```sh
-uv run --locked --extra cpu klab train --runs-dir klab-work/runs configs/smoke_moe_cpu.yaml --run-id moe-smoke
+klab train --runs-dir klab-work/runs configs/smoke_moe_cpu.yaml --run-id moe-smoke
 ```
+
+`model.ffn: moe` selects this feed-forward for every block, and
+[`model.layers`](components.md#vary-the-block-by-layer) selects it for some.
 
 Compare it with `configs/smoke_cpu.yaml` only at matching tokenizer, data, and token budget. Total parameters include all routed experts; active-per-token accounting includes only the selected experts and an optional shared expert.
 

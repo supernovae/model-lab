@@ -7,7 +7,7 @@ identity and destination.
 
 These are historical claims, not guarantees of current Lab behavior. Reproduction
 belongs in the Workshop backlog as a new experiment with a new identity, using
-[current native authoring](external-research-resources.md). Preserved files alone
+[current native authoring](../external-research-resources.md). Preserved files alone
 do not establish input availability or a runnable recipe. This pointer grants no
 acquisition, execution, recovery, or scientific clearance.
 

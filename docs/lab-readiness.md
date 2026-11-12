@@ -10,11 +10,11 @@ speed, device fit, or model quality.
 
 ## Smallest capability gate
 
-Run from the repository root with the locked CPU-development environment. The output must be a
+Run from the repository root in the [activated environment](../README.md#first-run). The output must be a
 new task-owned directory; the command will not reuse or overwrite one.
 
 ```sh
-uv run --locked --extra cpu klab readiness smoke \
+klab readiness smoke \
   --output klab-work/experiments/lab-readiness-YYYYMMDD
 ```
 

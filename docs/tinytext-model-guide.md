@@ -15,7 +15,7 @@ historical guide named `TinyText`. Do not substitute TinyStories or DevMind
 MODEL-0 for an unidentified TinyText artifact. If TinyText is your local model's
 name, use its actual run directory and checkpoint below; a display name is not
 provenance. [TinyStories](tinystories-microlab.md) is the separate story-data
-teaching workflow. [MODEL-0](model-0.md) is a completed DevMind base checkpoint.
+teaching workflow. [MODEL-0](history/model-0.md) is a completed DevMind base checkpoint.
 
 ## Try the complete path with a tiny offline fixture
 
@@ -77,7 +77,7 @@ Campaign ingestion can put a run under a Campaign's `controller/` directory,
 not directly under `$KLAB_WORK_DIR/runs`. Use the run's actual parent for
 `--runs-dir`. Read the experiment's checked-in Family, checkpoint reference and
 result record when available; historical absolute paths are location hints,
-not proof the files exist on this machine. See [MODEL-0's recorded location](model-0.md).
+not proof the files exist on this machine. See [MODEL-0's recorded location](history/model-0.md).
 
 Set these three values to an existing run and immutable generation discovered
 above. The values shown here are placeholders, not downloadable model names:

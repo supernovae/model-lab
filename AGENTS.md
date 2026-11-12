@@ -205,8 +205,11 @@ fixtures, declaring fixture substitutions explicitly.
 Before pruning a test, map its useful guarantees to retained coverage,
 including provenance, zero-network reuse, review/sample binding, protected
 families, collisions, accounting and shutdown. Review `git diff --check`, Git
-status and current documentation examples before handoff; report exact passed,
-failed and unrun checks.
+status and current documentation examples before handoff. A change to a
+command, config field or default updates its page in the same change; pages are
+listed once in `docs/README.md`, dated records go in `docs/history/`, and
+`tests/test_docs.py` checks links and every `klab` command a page shows.
+Report exact passed, failed and unrun checks.
 
 ## 6. Keep changes and collaboration reviewable
 

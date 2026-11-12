@@ -169,10 +169,7 @@ decision:
   checkpoints, missing/invalid evidence and saved-backend inheritance.
 - `test_try_config.py`, `test_probe_config.py`, `test_explorer.py`:
   declaration validation, native dispatch and resource/runtime handling.
-- `test_runtime_id_selection.py`, `test_runtime_authorization_required.py`:
-  exclusive sources, early failures, interpreter handoff and acceleration gates.
-- `test_runtime_environments.py`, `test_runtime_env_cli.py`,
-  `test_runtime_env_provision.py`: separate roots/registry, no install on
+- `test_runtime_environments.py`: separate roots/registry, no install on
   read-only commands, registration-before-READY publication and retained recovery
   evidence.
 

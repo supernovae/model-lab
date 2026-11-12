@@ -21,7 +21,7 @@ Corpus Forge programs seal portable provenance with their prepared inputs; see
 
 This synthetic program is retained as a neutral teaching fixture. Its fixed
 settings demonstrate the native phase interface, not personal model research.
-The [disposition map](sample-disposition.json) records retained files and
+The [disposition map](history/sample-disposition.json) records retained files and
 [unchanged historical instructions](https://github.com/supernovae/kybern-workshop/blob/df5a43aff682d14c3a3481413b80f12e7894a042/provenance/lab/docs/experiment-programs.md).
 Preservation does not grant execution authority or transfer historical results.
 For your own experiment, supply current plan/run/tokenizer declarations with
@@ -247,7 +247,7 @@ are reused for dispatch.
 Training copies the evidence into the native run's authenticated artifact
 inventory. Controller ingestion preserves those bytes, and a dispatched child
 resume carries the parent's evidence and selected checkpoint. The bounded offline
-regressions in `tests/test_forge_dispatch.py` cover authored prepare/lock, relocated
+[historical regressions](https://github.com/supernovae/model-lab/blob/17446cfa9dc4fd8a528206e00b58de88527367c5/tests/test_forge_dispatch.py), since retired, covered authored prepare/lock, relocated
 smoke and warmup, parent ingestion, child resume, and missing/tampered provenance.
 They establish execution and integrity only; no accelerator or model-quality
 claim follows. Older sealed inputs without portable provenance must be rebuilt

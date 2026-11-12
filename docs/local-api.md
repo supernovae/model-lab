@@ -6,7 +6,7 @@ Commands below use the [activated, provisioned environment](../README.md#first-r
 nonstreaming OpenAI-compatible API. It uses the same checkpoint, tokenizer,
 prepared-asset and runtime validation as CLI inference. Start with
 [locating and verifying a run](tinytext-model-guide.md), or the
-[MODEL-0 guide](model-0.md). This is a local debugging interface, not a hosted
+[MODEL-0 guide](history/model-0.md). This is a local debugging interface, not a hosted
 service or a claim that a base model can follow instructions.
 
 Serving performs no dataset acquisition or preparation. Verified historical runs

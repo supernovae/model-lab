@@ -419,7 +419,7 @@ selects a deliberately narrower supported decoder contract.
 | --- | --- |
 | HTTP → authenticated private file | `test_bounded_acquisition`: loopback framing, typed Git/LFS hashes, auth stripping, redirect/error accounting, pre-request full-file/cache refusals |
 | Persistent admission → resume | Crash reservations, retry/request/deadline/cancel ceilings, missing/foreign ledger/cache, verification and scan exhaustion |
-| Recipe → native Campaign | `test_portable_acquisition`: inspect fences, authority/overlap/version refusals, public apply/resume, cancellation, interrupted publication commit |
+| Recipe → native Campaign | Historical `test_portable_acquisition`, since retired: inspect fences, authority/overlap/version refusals, public apply/resume, cancellation, interrupted publication commit |
 | Native scientific identity | Bounded HTTP and historical local Parquet decoder produce equal native manifests on the same locked bytes |
 | Legacy component boundaries | Existing preparation recipe/local-snapshot, registered verifier authority, source lifecycle and typed-plan regressions; normal safe/fast/lab-loop CI |
 

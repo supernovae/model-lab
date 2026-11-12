@@ -43,4 +43,4 @@ Inspect their parent IDs and evidence with `corpus sample` and `corpus lineage`.
 The default report counts each training view by origin, verification, and shape.
 `corpus describe RELEASE --tokenizer TOKENIZER_JSON` recounts exact tokens; no
 token count or capability improvement is inferred from the static bytes.
-See [provenance and controlled ablations](../../docs/corpus-provenance.md).
+See [provenance and controlled ablations](../../../docs/corpus-provenance.md).

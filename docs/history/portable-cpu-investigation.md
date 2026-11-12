@@ -50,5 +50,5 @@ measured peak process-tree RSS was 1,558,810,624 bytes and workspace growth was
 Artifact transfer/verification took 62.2 seconds, consistent with the earlier
 interrupted ingestion. This used an explicitly authored native Campaign;
 it did not establish portable workflow execution admission or scientific quality.
-The [prepared-input bridge](workflow-recipes.md#prepared-input-cpu-execution)
+The [prepared-input bridge](../workflow-recipes.md#prepared-input-cpu-execution)
 carries the external declaration context through that existing native path.

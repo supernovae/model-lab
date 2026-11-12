@@ -79,7 +79,7 @@ are retired from the packaged defaults. Their [original config][tinystories-conf
 and [catalog card][tinystories-card] remain immutable Workshop evidence, not a
 current runnable recipe. Historical protocol and results remain unchanged.
 
-The [retirement inventory](research-resource-retirement.json) records original
+The [retirement inventory](history/research-resource-retirement.json) records original
 hashes and landed Workshop destinations. The archived populated registry is
 historical evidence only. The [preservation supplement][supplement] records five
 references absent from the pinned tracked trees; they were not recovered.

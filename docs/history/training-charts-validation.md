@@ -63,7 +63,7 @@ points per series, then checks unchanged cycles again.
   high series counts were not tested. Native full-screen mode is not exposed by
   this component; Plotly zoom, pan, selection and image export remain available.
 
-[Machine-readable refresh summary](assets/training-refresh.json).
+[Machine-readable refresh summary](../validation/assets/training-refresh.json).
 The optional browser check writes raw samples to the chosen output directory;
 only the summary is committed. CI covers Python identity/revision, serialized
 UIDs, per-chart payload size, page color wiring and the loader call outside the
@@ -72,11 +72,11 @@ checks remain an opt-in browser test.
 
 Desktop, **1440 × 1200**:
 
-![Training chart at desktop width](assets/training-desktop.png)
+![Training chart at desktop width](../validation/assets/training-desktop.png)
 
 Narrow, **390 × 1100**:
 
-![Training chart at narrow width](assets/training-narrow.png)
+![Training chart at narrow width](../validation/assets/training-narrow.png)
 
 The warning in these screenshots is the existing triage reader correctly
 refusing a synthetic run with no real run-directory artifacts.
