@@ -9,10 +9,10 @@ on:
   workflow_dispatch:
     inputs:
       suite:
-        description: "Manual scope; model suites require a separate reviewed allocation"
+        description: "fast: the PR checks; release-candidate: the full CPU suite on Linux and macOS"
         type: choice
-        options: [safe, fast, integration-linux, platform-macos, release-candidate]
-        default: safe
+        options: [fast, release-candidate]
+        default: fast
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -35,9 +35,8 @@ env:
   PYTHONDONTWRITEBYTECODE: "1"
 
 jobs:
-  safe:
-    # Fast static checks and core config/authority sanity checks.
-    if: github.event_name != 'workflow_dispatch' || inputs.suite == 'safe'
+  lint:
+    if: github.event_name != 'workflow_dispatch' || inputs.suite == 'fast'
     runs-on: ubuntu-24.04
     timeout-minutes: 8
     steps:
@@ -52,80 +51,21 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv sync --locked --extra cpu --dev
-      - name: Static format
-        env:
-          UV_OFFLINE: "1"
-        run: |
-          uv run --locked --no-sync ruff check .
-          uv run --locked --no-sync ruff format --check .
-      - name: Core config and verifier authority sanity
-        env:
-          UV_OFFLINE: "1"
-          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
-          KLAB_WORK_DIR: ${{ runner.temp }}/pr-safe-work
-        run: |
-          uv run --locked --no-sync pytest -q -n 0 -p no:cacheprovider \
-            --basetemp "$RUNNER_TEMP/pr-safe-pytest" \
-            tests/test_verifier_authority_current.py \
-            tests/test_slow_list.py \
-            tests/test_config.py \
-            tests/test_first_model_config.py \
-            tests/test_instruction_config.py
+      - run: uv run --locked --no-sync ruff check .
+      - run: uv run --locked --no-sync ruff format --check .
 
-  lab-loop:
-    # Outcome validation (CPU): build, train, checkpoint, resume, try, probe,
-    # explore, and generate from real models within a fast iteration budget.
-    if: github.event_name != 'workflow_dispatch' || inputs.suite == 'safe'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 12
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@v10.2.0
-        with:
-          version: "0.12.19"
-          enable-cache: true
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.14"
-      - run: uv sync --locked --extra cpu --dev
-      - name: Model build, training, lab loop, probes, explorer, and generation
-        env:
-          UV_OFFLINE: "1"
-          KLAB_WORK_DIR: ${{ runner.temp }}/lab-loop-work
-          KLAB_LAB_LOOP_BUDGET_SECONDS: "300"
-        run: |
-          uv run --locked --no-sync pytest -q -p no:cacheprovider \
-            --basetemp "$RUNNER_TEMP/lab-loop-pytest" \
-            -n auto --maxprocesses=4 --dist worksteal --durations=25 \
-            -m "not slow and not mps and not mlx and not cuda and not rocm and not xpu and not network" \
-            tests/test_language_model.py \
-            tests/test_dense_sdpa.py \
-            tests/test_sparse_attention.py \
-            tests/test_sliding_attention.py \
-            tests/test_latent_attention.py \
-            tests/test_moe.py \
-            tests/test_memory.py \
-            tests/test_combined.py \
-            tests/test_training.py \
-            tests/test_gradient_accumulation.py \
-            tests/test_checkpoints.py \
-            tests/test_lab_mode.py \
-            tests/test_probes.py \
-            tests/test_eval_integrity.py \
-            tests/test_references.py \
-            tests/test_explorer.py \
-            tests/test_generation.py \
-            tests/test_inference.py
-
-
-  fast:
-    # Remaining fast CPU suite.
-    # Modules already run in safe and lab-loop are excluded to avoid duplication.
+  test:
+    # The fast suite (everything not marked slow), split by file across two
+    # jobs. tests/conftest.py assigns each file to a shard by a hash of its
+    # path, so no job keeps a list of files.
     if: github.event_name != 'workflow_dispatch' || inputs.suite == 'fast'
+    name: test (${{ matrix.shard }}/2)
     runs-on: ubuntu-24.04
     timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -138,43 +78,21 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv sync --locked --extra cpu --dev
-      - name: Fast CPU suite (not slow)
+      - name: Fast CPU suite
         env:
           UV_OFFLINE: "1"
-          KLAB_WORK_DIR: ${{ runner.temp }}/fast-work
+          KLAB_WORK_DIR: ${{ runner.temp }}/test-work
+          KLAB_LAB_LOOP_BUDGET_SECONDS: "300"
+          KLAB_TEST_SHARD: ${{ matrix.shard }}/2
         run: >-
           uv run --locked --no-sync pytest -q -p no:cacheprovider
-          --basetemp "$RUNNER_TEMP/fast-pytest"
-          -n auto --maxprocesses=4
-          --dist loadfile --durations=25
-          --ignore=tests/test_verifier_authority_current.py
-          --ignore=tests/test_slow_list.py
-          --ignore=tests/test_config.py
-          --ignore=tests/test_first_model_config.py
-          --ignore=tests/test_instruction_config.py
-          --ignore=tests/test_language_model.py
-          --ignore=tests/test_dense_sdpa.py
-          --ignore=tests/test_sparse_attention.py
-          --ignore=tests/test_sliding_attention.py
-          --ignore=tests/test_latent_attention.py
-          --ignore=tests/test_moe.py
-          --ignore=tests/test_memory.py
-          --ignore=tests/test_combined.py
-          --ignore=tests/test_training.py
-          --ignore=tests/test_gradient_accumulation.py
-          --ignore=tests/test_checkpoints.py
-          --ignore=tests/test_lab_mode.py
-          --ignore=tests/test_probes.py
-          --ignore=tests/test_eval_integrity.py
-          --ignore=tests/test_references.py
-          --ignore=tests/test_explorer.py
-          --ignore=tests/test_generation.py
-          --ignore=tests/test_inference.py
+          --basetemp "$RUNNER_TEMP/test-pytest"
+          -n auto --maxprocesses=4 --dist worksteal --durations=15
           -m "not slow and not mps and not mlx and not cuda and not rocm and not xpu and not network"
 
   staging:
-    # Focused supervised staging regressions. They launch real pilot children, so
-    # they run beside the fast suite instead of after it.
+    # Supervised staging regressions launch real pilot children. They are
+    # slow-listed, so they run here beside the fast suite on every PR.
     if: github.event_name != 'workflow_dispatch' || inputs.suite == 'fast'
     runs-on: ubuntu-24.04
     timeout-minutes: 12
@@ -193,58 +111,17 @@ jobs:
       - name: Supervised staging regressions
         env:
           UV_OFFLINE: "1"
-          KLAB_WORK_DIR: ${{ runner.temp }}/matched-story-staging-work
+          KLAB_WORK_DIR: ${{ runner.temp }}/staging-work
         run: |
           uv run --locked --no-sync pytest -q -p no:cacheprovider \
             -n auto --maxprocesses=4 --dist worksteal --durations=10 \
-            --basetemp "$RUNNER_TEMP/matched-story-staging-pytest" \
+            --basetemp "$RUNNER_TEMP/staging-pytest" \
             tests/test_staging.py::test_pilot_retention_is_isolated_from_full_run \
             tests/test_staging.py::test_matched_story_pilots_complete_under_native_supervision \
             tests/test_staging.py::test_warmup_pilots_are_isolated_and_bundle_is_self_contained
-  integration-linux:
-    # Model work is manual-only. Dispatch requires its own reviewed allocation.
-    if: github.event_name == 'workflow_dispatch' && inputs.suite == 'integration-linux'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.2.0
-        with:
-          version: "0.12.19"
-          enable-cache: true
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.14"
-      - run: uv sync --locked --extra cpu --dev
-      - name: Manual optimizer and generation integration
-        run: >-
-          uv run --locked --extra cpu pytest -q -n 0
-          tests/test_training.py tests/test_generation.py
-          tests/test_serving.py
-
-  platform-macos:
-    # Platform model behavior is not inferred from the Linux PR checks.
-    if: github.event_name == 'workflow_dispatch' && inputs.suite == 'platform-macos'
-    runs-on: macos-15
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.2.0
-        with:
-          version: "0.12.19"
-          enable-cache: true
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.14"
-      - run: uv sync --locked --extra cpu --dev
-      - name: Manual macOS optimizer and generation integration
-        run: >-
-          uv run --locked --extra cpu pytest -q -n 0
-          tests/test_training.py tests/test_generation.py
-          tests/test_serving.py
 
   release-candidate:
-    # Broad suites are available only through explicit manual selection.
+    # The full CPU suite, slow tests included, on manual dispatch.
     if: github.event_name == 'workflow_dispatch' && inputs.suite == 'release-candidate'
     name: Full CPU suite (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -255,6 +132,8 @@ jobs:
         os: [ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           version: "0.12.19"
@@ -263,10 +142,10 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv sync --locked --extra cpu --dev
-      - name: Manual release-candidate CPU suite
+      - name: Full CPU suite
         run: >-
-          uv run --locked --extra cpu pytest -q -n auto --maxprocesses=4
+          uv run --locked --no-sync pytest -q -n auto --maxprocesses=4
           --dist worksteal --durations=25
           -m "not mps and not mlx and not cuda and not rocm and not xpu and not network"
-      - run: uv run --locked --extra cpu klab --help
-      - run: uv run --locked --extra cpu klab inspect configs/micro_dense.yaml --json
+      - run: uv run --locked --no-sync klab --help
+      - run: uv run --locked --no-sync klab inspect configs/micro_dense.yaml --json

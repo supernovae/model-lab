@@ -17,33 +17,17 @@ uv run --locked --extra cpu pytest -q tests/test_config.py tests/test_datasets.p
 uv run --locked --extra cpu pytest -q tests/test_hf_auth.py
 ```
 
-Pushes to `main` and all PRs run four non-overlapping Linux jobs in parallel:
-`safe` (Ruff and fast config and authority checks), `lab-loop` (model
-construction, training, checkpointing, resume, `try` + probe, explorer,
-references and generation), `fast` (the remaining non-slow CPU suite) and
-`staging` (three supervised staging regressions from `tests/test_staging.py`,
-which launch real pilot children, with a 12-minute limit and the same
-four-worker cap).
-See the [workflow](../.github/workflows/ci.yml) for exact nodes and budgets.
+Pushes to `main` and all PRs run three Linux jobs in parallel: `lint` (Ruff
+check and format), `test` (the fast suite, split by file into two shards) and
+`staging` (three supervised staging regressions from `tests/test_staging.py`
+that launch real pilot children). `tests/conftest.py` assigns each test file to
+a shard by a hash of its path when `KLAB_TEST_SHARD=INDEX/COUNT` is set, so no
+job keeps a list of files; a new test file lands in a shard on its own. See the
+[workflow](../.github/workflows/ci.yml) for budgets.
 
-Draft PRs receive the same checks. Opening, synchronizing (new commits), or
-reopening a PR runs CI; changing only draft/ready state does not rerun unchanged
-code. Pushes to `main` still validate the merged tree. A draft/ready transition
-also does not retry a failed or cancelled run: inspect the failure or cancellation
-first, then explicitly rerun the applicable check if warranted, or push a fix.
-Do not use blind retries to mask a failure.
-
-The `lab-loop` job uses work stealing with the same four-worker cap so an
-expensive file does not hold one worker while others finish. Its 25 slowest
-test phases are printed in the job log, as in `fast`. Module fixtures can run
-once per worker; their temporary directories remain worker-local.
-
-Manual `workflow_dispatch` with `safe` selects `safe` and `lab-loop`. Additional
-`integration-linux`, `platform-macos` and `release-candidate` choices need a
-separately reviewed allocation. Do not dispatch them for prose changes. For
-documentation, check links, anchors, parser arguments and configuration schemas
-without calling command handlers. Ordinary PR success does not certify all
-training paths, accelerator behavior or macOS behavior.
+Opening, synchronizing or reopening a PR runs CI; changing only draft or ready
+state does not. Inspect a failed or cancelled run before rerunning it; do not
+retry blindly to mask a failure.
 
 Plain `pytest` is parallel by default (`-n auto --dist worksteal` in
 `pyproject.toml`). `tests/conftest.py` sizes `auto` to one worker per usable
@@ -77,10 +61,9 @@ uv run --locked --extra cpu pytest -q -m slow
 
 `tests/conftest.py` applies the `slow` marker to the base node ids listed in
 [`tests/slow_tests.txt`](../tests/slow_tests.txt), so every parametrized case
-of a listed test follows. The slow tests are fewer than a tenth of the suite
-but take more than 90% of its test time: end-to-end worker, corpus and
-lifecycle runs, tiny training, and native subprocess monitors.
-`tests/test_slow_list.py` fails when an entry no longer names a real test.
+of a listed test follows. The slow tests are a few dozen of the suite but most
+of its test time: end-to-end worker, corpus and lifecycle runs, tiny training,
+and native subprocess monitors.
 
 ### Where each suite runs
 
@@ -88,8 +71,8 @@ lifecycle runs, tiny training, and native subprocess monitors.
   tests for the areas you touched (`pytest -q path/to/test_file.py::test_name`,
   or `-m slow` restricted to the relevant files). Don't run the full suite
   locally; nightly covers it.
-- **Every PR and push to main:** `safe`, `lab-loop`, `fast` and `staging` on
-  Linux.
+- **Every PR and push to main:** `lint`, `test` (two shards) and `staging`
+  on Linux.
 - **Nightly** ([`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml),
   08:17 UTC, also runnable manually): the full CPU suite, slow tests included,
   on `main`. A failure opens the issue "Nightly full suite failing on main",
@@ -164,11 +147,6 @@ conftest, the conftest also caps Torch's intra-op pool without importing Torch
 for Torch-free tests. Like CI, it leaves the inter-op pool unchanged. These limits
 apply only to test processes; they do not change lab runtime defaults.
 
-Verifier authority walks deduplicate module scheduling and file discovery only
-within one closure walk. Each later authority lookup still reads and hashes the
-verifier source bytes. Proof lookup diagnostics use the same authority that was
-compared with the receipt, rather than walking the closure again for telemetry.
-
 The CPU gate includes worker integrations with real worker startup,
 staging, training, checkpoint transfer, continuation, and evaluation. These can
 take several minutes. A whole-command deadline must allow all separately
@@ -200,9 +178,8 @@ Always pass `-n 0` for MLX/MPS or run another accelerator test/training process 
 
 ## Why the gate is structured this way
 
-The full CPU jobs on Linux and macOS keep their hardware exclusions and
-30-minute limits and run only on manual dispatch. The automatic `safe`, `lab-loop`, `fast` and `staging` jobs have 8-, 12-, 12- and 12-minute limits; the nightly full suite has 25 minutes. The manual hosted
-CPU jobs use up to four workers with work-stealing, as local runs do by default.
-
-Locked uv downloads are cached through `setup-uv`. Accelerator and network
-checks are separate explicit opt-ins.
+PRs run the fast suite and the staging regressions; the nightly full suite
+(25-minute limit) and the manual `release-candidate` dispatch (Linux and
+macOS, 30 minutes) run everything else. Locked uv downloads are cached through
+`setup-uv`, so most of each job is test time. Accelerator and network checks are
+separate explicit opt-ins.
