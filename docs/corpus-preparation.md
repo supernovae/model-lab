@@ -310,6 +310,8 @@ quota and floor is met; a shortfall is reported per stratum.
 
 - **Resume.** An interrupted run resumes from its last committed segment in
   `.OUTPUT.assembly`; keep that directory and the output parent's `cache`.
+  Once the output is published, the segments and commit markers are removed;
+  `progress.json` stays.
   `KLAB_MIXTURE_COMMIT_CANDIDATES=N` sets how often it commits (default 4096
   candidates, 64 MiB or 30 seconds).
 - **Workers.** Encoding uses the shared [encoder pool](token-store.md#one-encoder)
@@ -366,7 +368,8 @@ Admission, splitting, building and mixtures stream metadata through temporary
 on-disk databases under the work root and spool encoded data to disk, so memory
 is bounded by individual records rather than corpus size. Individual rows are
 limited to 8 MiB in admission and splitting and 64 MiB in mixtures. Scratch
-space is real: indexes, spools, committed segments and outputs can coexist, so
+space is real: indexes, spools, committed segments and the output coexist until it is
+published, so
 watch free space on the corpus filesystem throughout. Reuse of completed work
 depends on a private verification key under `XDG_CONFIG_HOME`; keep it, the work
 root and the service user the same across restarts.
