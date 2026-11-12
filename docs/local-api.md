@@ -1,21 +1,13 @@
-# A local API for verified checkpoints
+# Local API
 
-Commands below use the [activated, provisioned environment](../README.md#first-run).
+`klab serve` loads one checkpoint and serves a small, non-streaming,
+OpenAI-compatible API on your machine. It verifies the checkpoint, tokenizer,
+prepared data and runtime the same way the CLI does, so it needs the whole run
+directory, not just a weights file. See [inspecting models](models.md) for
+finding and verifying a run.
 
-`klab serve` loads one pinned Model Lab checkpoint and exposes a small,
-nonstreaming OpenAI-compatible API. It uses the same checkpoint, tokenizer,
-prepared-asset and runtime validation as CLI inference. Start with
-[locating and verifying a run](tinytext-model-guide.md), or the
-[MODEL-0 guide](history/model-0.md). This is a local debugging interface, not a hosted
-service or a claim that a base model can follow instructions.
-
-Serving performs no dataset acquisition or preparation. Verified historical runs
-remain usable with their original run-owned assets, including runs whose old
-input declarations are retired for new execution. New inputs use
-[`data lock` → `data snapshot` and explicit migration](datasets.md); migration
-creates a new identity and is not required merely to serve a valid old run.
-The server needs the validated run closure, not a bare weight file, an array
-cache from `data prepare`, or a `stage --prepared-inputs` bundle by itself.
+It is for local use: there is no authentication, and it listens only on a
+loopback address.
 
 ## Start one model
 
@@ -31,7 +23,7 @@ klab serve "$RUN_ID" \
 
 For a provisioned accelerator use `klab` with the authorized
 `--runtime ID` or `--runtime-profile PATH` as documented in
-[runtime setup](runtime.md#machine-local-runtime-environments). The server
+[runtime setup](runtime.md#register-an-interpreter). The server
 resolves lookup pointers once; changing `latest.json` does not hot-swap a running
 model. Restart to select another checkpoint. The model alias is a routing name;
 `GET /v1/models` exposes the pinned provenance and capabilities.
@@ -77,9 +69,9 @@ curl --fail-with-body http://127.0.0.1:8000/v1/chat/completions \
 Read `choices[0].text` for completion or `choices[0].message.content` for chat.
 Responses include actual token usage and a `klab` extension with the exact
 serialized prompt, checkpoint identity and policy. Preserve it when reporting a
-surprising output; avoid logging private prompts into shared research artifacts.
-A raw prompt is unchanged. Chat uses `System:`, `User:` and `Assistant:` lines
-with blank-line separators, not a learned or auto-detected model template.
+surprising output; avoid logging private prompts where others can read them.
+A raw prompt is sent unchanged. Chat messages are rendered with the run's
+[chat template](post-training.md#chat-templates).
 
 Each request is independent; send the whole desired conversation. Chat accepts
 an optional initial system message and alternating user/assistant text messages,
@@ -149,5 +141,4 @@ network arrangement that shares the host loopback, or use the native CLI/client;
 do not expose this unauthenticated server through a public tunnel. Instructions
 or chat training, a compatible transcript format and measured behavior determine
 whether a checkpoint suits a chat UI; there is no minimum parameter-count rule.
-MODEL-0 is a base checkpoint with repetitive samples, so start with raw prefixes
-and compare checkpoint-bound outputs before judging it as an assistant.
+A base model is better judged on raw prefixes than in a chat window.

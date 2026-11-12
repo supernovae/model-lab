@@ -558,42 +558,6 @@ class PlanMetadata(WorkerModel):
         return None if value is None else _sha256(value, info.field_name)
 
 
-class StudySubmissionMetadata(WorkerModel):
-    """Forward-only study binding in existing declaration provenance."""
-
-    submission_id: str
-    intent_sha256: str
-    study_sha256: str
-    matrix_sha256: str
-    cards_sha256: str
-    index: int = Field(ge=0, strict=True)
-    coordinate: dict[str, str]
-    config_sha256: str
-
-    @field_validator("submission_id")
-    @classmethod
-    def submission_identity(cls, value: str) -> str:
-        if len(value) != 32 or any(char not in "0123456789abcdef" for char in value):
-            raise ValueError("study submission_id must be lowercase UUID hex")
-        return value
-
-    @field_validator(
-        "intent_sha256",
-        "study_sha256",
-        "matrix_sha256",
-        "cards_sha256",
-        "config_sha256",
-    )
-    @classmethod
-    def binding_digest(cls, value: str, info: Any) -> str:
-        return _sha256(value, info.field_name)
-
-    @field_validator("coordinate")
-    @classmethod
-    def binding_coordinate(cls, value: dict[str, str]) -> dict[str, str]:
-        return MatrixMetadata(matrix_sha256="0" * 64, coordinate=value).coordinate
-
-
 class ExperimentSpec(WorkerModel):
     schema_version: int = SCHEMA_VERSION
     experiment_id: str
@@ -627,13 +591,6 @@ class ExperimentSpec(WorkerModel):
     storage_checks: list[dict[str, str]] = Field(
         default_factory=list, exclude_if=lambda value: not value
     )
-
-    @field_validator("declaration_provenance")
-    @classmethod
-    def study_binding(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        if value is not None and "study_submission" in value:
-            StudySubmissionMetadata.model_validate(value["study_submission"])
-        return value
 
     @field_validator(
         "tokenizer_batch_documents", "tokenizer_batch_source_bytes", mode="before"

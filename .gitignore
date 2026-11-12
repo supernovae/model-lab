@@ -12,5 +12,3 @@ dist/
 /corpora/
 /workdir/
 /storage/
-/experiments/research/*
-!/experiments/research/README.md

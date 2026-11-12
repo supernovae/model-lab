@@ -8,8 +8,7 @@ sealed records and cancellation. The adapter verifies their dependent outputs;
 it does not implement another trainer, DAG, queue or scheduler. Ordinary lab work
 needs no Campaign or locked ExperimentPlan. Those remain available for release
 work and larger queued workflows. There is no shell-command field, dependency
-sync, automatic execution retry or deletion operation. GPU admission is outside
-this slice and remains parent-gated after CPU verification.
+sync, automatic retry or deletion operation. Jobs run on CPU.
 
 ## Select source, host and native declarations
 
@@ -196,39 +195,12 @@ has no launch path. For a running try, its native printed `CANCEL` file is the
 normal cancellation mechanism; the watchdog remains the outer limit. Interrupted
 records and failed gate evidence remain, with no automatic retry.
 
-## CPU acceptance and retained cleanup preview
+## Workload and cleanup preview
 
-After external review, merge and applicable CI for the selected merged source:
-
-1. Parent verifies actual lock/state-v2/marker paths, retained prior receipts,
-   filesystem/free bytes/inodes and provisioned runtime. Seal and approve the
-   explicit envelope and generated local input hashes. No host qualification was
-   performed by this authoring PR.
-2. Admit once. Inspect all six gates, native `COMPLETE`, cleanup verification,
-   summary checks and retained logs. Confirm two fresh trained runs, declared
-   update/token counters, finite held-out losses, native report and comparison.
-   Accept lower/higher/tied loss; acceptance concerns correct execution.
-3. Redeliver and collect; confirm identical manifest hash, runner/try/run IDs,
-   unchanged summary and one native pending/completion pair. Coordinator records
-   acceptance separately against job ID/hash. Failed/uncertain attempts require
-   inspection and new authorization, never a replay launch.
-4. GPU rollout requires separate parent approval after CPU verification. This
-   profile neither executes nor qualifies ROCm or other accelerators.
-
-The public workload is the typed native `lab_try` profile; pytest and arbitrary
-command payloads are rejected. The original pytest pilot surface was removed
-because it had no product use beyond the pilot scaffold. Global work-directory
-and token-file options are unsupported: this path is offline and manifest-bound.
-
-Product regressions use temporary repositories and internally substituted native
-operations to test admission, replay, actual gate exits/skips, evidence retention
-and cleanup refusal without model work. They do not qualify a real CPU host.
-These subprocess cases remain explicit in serial safe CI; measured slow cases
-are excluded from parallel fast CI. Their 90-second synthetic fixture allowance
-accounts for cold imports on CI; it does not set host job budgets. Separate
-lab-loop integration uses the real
-native tokenizer/model/report path and checked-in inputs, including cancellation
-and verifier refusal mutations against one completed result.
+The workload is the typed native `lab_try` profile; pytest and arbitrary
+command payloads are refused. Global work-directory and token-file options are
+unsupported: a job is offline and bound to its manifest. A failed or uncertain
+attempt needs inspection and a new authorization, never a replay launch.
 
 Cleanup is **preview only**:
 

@@ -1,67 +1,108 @@
-# Experiment workspaces and retained evidence
+# Workspaces and storage
 
-Commands below use the [activated, provisioned environment](../README.md#first-run).
+The repository holds source, tests, configs and documentation. Model
+definitions, named datasets and studies live in
+[Kybern Workshop](https://github.com/supernovae/kybern-workshop) or your own
+repository. Everything a run produces (downloads, prepared data, checkpoints,
+logs, receipts) lives in a work directory outside Git.
 
-For command-by-command storage and interpreter choices, see
-[location and runtime selection](location-runtime-controls.md), including why
-historical lab/run readers and controller stores retain separate selectors.
+## Choose the work directory
 
-One experiment has one local workspace. Seeds, architecture cells, budget
-coordinates, and resumed children are scientific coordinates identified by run
-IDs and immutable manifests; they are not peer repository-root directories.
+The work directory is the first of:
 
-Name every workspace for its task or experiment, independently of its execution
-backend. CPU, ROCm, CUDA, and other backends are runtime parameters recorded in
-configs and manifests. For example, runtime acceptance across devices shares
-`$KLAB_WORK_DIR/experiments/runtime-acceptance/runs/`; runtime smoke configs
-share `$KLAB_WORK_DIR/experiments/runtime-smoke/runs/`. Use distinct run IDs
-for each execution, including backend labels when useful, rather than separate
-`runs-rocm` or `runs-cpu` stores. Worker environments remain backend-specific.
+1. the global `--work-dir PATH`, given before the command;
+2. `KLAB_WORK_DIR`;
+3. `$XDG_DATA_HOME/klab`, when `XDG_DATA_HOME` is absolute and nonempty;
+4. `~/.local/share/klab`.
 
-The implicit persistent root is `${XDG_DATA_HOME}/klab` when
-`XDG_DATA_HOME` is nonempty and absolute; otherwise it is
-`~/.local/share/klab`. For large campaigns, explicitly choose an adequately
-sized filesystem, for example `export KLAB_WORK_DIR=/data/klab`.
-The global `--work-dir PATH` overrides that environment variable, which overrides
-the implicit root. An explicit relative path remains relative to the current
-directory, including legacy `KLAB_WORK_DIR=klab-work`. The root is not
-derived from the repository, branch, or worktree. Merely resolving it does not
-create it; read-only inspection does not need to initialize it.
+For large work, put it on a filesystem with room to spare:
+`export KLAB_WORK_DIR=/data/klab`. A relative path stays relative to the
+current directory. The work directory never depends on the checkout, branch or
+worktree, and resolving it does not create it. A work directory or long-lived
+output inside a Git checkout works but warns `STORAGE_INSIDE_GIT_CHECKOUT`.
 
 ```text
-<persistent-root>/
-  experiments/dense-lm-v1/
-    receipt.json
-    runs/              # shared controller/store, run IDs, parent and child runs
+WORK_DIR/
+  lab/                  # lab-mode tries, probes, explorer cache and their runs
+  runs/                 # default run store and controller store
+  experiments/NAME/     # one workspace per experiment
+    runs/               # its controller store: seeds, cells, parents and children
     staging/
-    exercises/
-    captures/
     local-reports/
-  runs/                # implicit generic controller/store
-  scratch/             # disposable temporary files; real directory, not a symlink
-  cache/               # optional reconstructable caches, never scientific evidence
+  scratch/              # disposable temporary files; must be a real directory
+  cache/                # optional caches that can be rebuilt
 ```
 
-The `scratch/` child must be a real directory contained in the resolved work
-root; scratch symlinks, including links within that root, are refused. Choose
-a different `--work-dir` or `KLAB_WORK_DIR` if the selected root has a
-symlinked scratch child. Symlink aliases for the work root itself remain supported.
+`scratch/` must be a real directory inside the work directory, not a symlink.
+The work directory itself may be reached through a symlink.
 
-The source tree holds source, tests, configs, documentation, and declarative
-research/lifecycle records. The persistent root holds downloads, prepared arrays,
-checkpoints, immutable execution evidence, receipts, and logs. Its `scratch/`
-directory contains disposable temporary files; `cache/` is reserved for optional
-reconstructable caches. The old ignored in-checkout `klab-work/` remains
-selectable explicitly, but is not moved or pruned automatically. A selected
-persistent root or explicit long-lived output/cache destination inside any Git
-checkout receives a `STORAGE_INSIDE_GIT_CHECKOUT` warning: execution is permitted,
-but losing the checkout may lose the bytes. Published compact evidence may be
-versioned separately; a digest or commit identifies content, not its root path.
-Promoting a model does not promote its full mutable workspace into version
-control. Reusable tokenizer and prepared-data caches keep their configured
-identities and locations; they need not be duplicated into each experiment.
+Name a workspace for its task, not its backend. Backends are runtime settings
+recorded in configs and manifests: a runtime acceptance across CPU, ROCm and
+CUDA shares `experiments/runtime-acceptance/runs/` with distinct run IDs, not
+separate `runs-rocm` and `runs-cpu` stores. Seeds, architecture cells and
+resumed children are run IDs within one store.
 
-## Guarding one operational command
+## Which option selects what
+
+| Command | Storage | Runtime |
+| --- | --- | --- |
+| `try` | Work directory, or `lab_dir` in the declaration | `--runtime ID` or `runtime_profile`; `--backend` overrides the workload |
+| `report`, `compare` | Work directory, a record path or `--lab-dir`; `report --kind run` uses `--runs-dir` | None: read only |
+| `probe` | Work directory, or `lab_dir` and `runs_dir` in the declaration | `--runtime ID` or `runtime_profile`; the saved backend unless `--backend` |
+| `explore` | Work directory, or `lab_dir` and `runs_dir` in the declaration | `--runtime ID` or `--runtime-profile FILE`; CPU by default |
+| `eval`, `generate`, `chat`, `serve` | `WORK_DIR/runs`, or `--runs-dir` | `--runtime ID` or `--runtime-profile FILE` |
+| `train`, `stage` | The config's `logging.root_dir`, or `train --runs-dir`; `stage --output` | `--runtime ID` or `--runtime-profile FILE` |
+| `experiment`, `worker`, `controller` | `--store`: the same store for registration, submission and control | A named worker, or a local runtime for single-config submissions |
+| `campaign` | Declared workspace and bindings | Declared runtime or worker bindings |
+| `runtime env` | Host-local registry and runtime root, independent of the work directory | Manages interpreters; never launches an experiment |
+
+- **`--lab-dir`** selects lab records; **`--runs-dir`** selects runs and
+  checkpoints; **`--store`** selects a controller database with its workers,
+  attempts and receipts. They are not interchangeable.
+- **`--runtime ID`** names a registered interpreter on this host;
+  **`--runtime-profile FILE`** gives the same description as a file, without
+  registering it. See [runtime](runtime.md).
+- **`--backend`** requests where the workload runs. It never selects an
+  interpreter or installs a framework.
+
+Paths inside try, probe and explore declarations resolve relative to the
+declaration file, with `~` expanded. Explicit paths are always used exactly as
+given; choosing a work directory never moves them.
+
+## Verified reuse
+
+Iterations often share a corpus, tokenizer and prepared arrays. Rehashing all of
+them before every phase can cost more than the phase itself, so Lab keeps signed
+proofs of what it has verified:
+
+| Situation | Verification |
+| --- | --- |
+| A new or changed input | Full byte and content verification. |
+| An unchanged input in an owner-only registered store | Signed host-local proofs are reused. |
+| Transfer to another worker or store | Bytes and contents verified before publishing. |
+| Campaign recovery | Always full verification. |
+
+Changed fingerprints, dependencies, code identity, unsafe paths, or missing or
+foreign proofs fall back to full verification. Another process running as the
+same user is outside what local proofs protect against. `stage`, experiment plan
+commands and campaign commands accept `--cold-verify` to turn reuse off; use it
+at a new host or trust boundary.
+
+Preparation work is bounded by the [resource envelope](runtime.md#resource-envelopes):
+worker counts follow available CPU, memory and explicit limits, and results are
+reduced in input order so concurrency never changes the prepared data.
+
+### Phase observations
+
+`data prepare`, `stage` and campaign `plan`, `status`, `next`, `explain`,
+`apply` and `resume` accept `--observations-output PATH.json`, a new file under
+an existing directory outside the prepared cache, stage output and campaign
+state. It records each phase's timings, host coverage and verification
+counters. Observations are operational evidence only and never enter a model,
+data or plan identity. Unavailable counters are `null` with a reason, and a
+failure to write observations only warns.
+
+## Guard a command
 
 `klab monitor` launches one command once, records versioned launch,
 per-sample and completion JSON under a new exclusive log directory, and returns
@@ -120,25 +161,21 @@ Sampling cannot discover a process that was born and orphaned entirely between
 samples; plan critical workloads accordingly. Missing requested metrics fail
 closed; monitoring does not resume, retry or authenticate scientific inputs.
 
-For immutable bounded native CPU lab handoffs with job IDs, replay-safe admission and
-retained finalization, use [lab jobs](lab-jobs.md). Its host configuration is
-explicit; existing CPU state-v2 and `.lab-cpu.blocked.json`, and ROCm
-`.lab-rocm.blocked.json`, must not be renamed to match the illustrative paths below.
+For bounded CPU handoffs from an external scheduler, use [lab jobs](lab-jobs.md).
 
-## Shared Linux runner ownership
+### Share a Linux host between runners
 
 Opt into the same native monitor with all three paths below. Every contender
 on a host must use the same paths on a local filesystem with reliable `flock`
-and `fsync`. The actual CPU host/SSH alias is `cpu`; it runs CPU workloads.
-The agreed lock paths and suggested local state locations are:
+and `fsync`. For example, with hosts named
+`cpu` and `rocm`:
 
 | Host | Canonical lock | Blocked marker | Receipt directory |
 | --- | --- | --- | --- |
 | `cpu` | `~/src/.lab-cpu-runner.lock` | `~/src/.lab-cpu-runner.blocked` | `~/src/.lab-cpu-runner-state` |
 | `rocm` | `~/src/.lab-rocm.lock` | `~/src/.lab-rocm.blocked` | `~/src/.lab-rocm-state` |
 
-Marker and receipt locations are configurable so an external runner can keep
-its existing marker convention; agree on one triplet before adopting this tool.
+All three paths are configurable; every job on a host must agree on one set.
 Parent directories and the receipt directory must already exist, belong to the
 caller, and exclude group and other write access. After establishing that the
 host has no outstanding work, provision an empty receipt directory once (for
@@ -149,39 +186,6 @@ caller, and exclude group/other writes. Symlinked lock/state entries are refused
 These are trusted local owner files, not a boundary against malicious workloads
 under that UID. Never unlink, replace or truncate the lock: its inode is the
 stable lock identity.
-
-Inspect the **existing agreed triplet** without launching or provisioning anything:
-
-```sh
-klab runner-status --json \
-  --runner-lock "$RUNNER_LOCK" --runner-state "$RUNNER_STATE" \
-  --runner-blocked "$RUNNER_BLOCKED"
-```
-
-Here the variables denote the paths already configured for the job, not new
-locations. This Linux-only read opens the existing lock read-only and uses a
-nonblocking shared probe while verifying history. It never initializes a missing
-lock/state/contract, truncates a lock, removes a marker or repairs receipts.
-An initially present marker yields `BLOCKED`, including malformed or dangling
-entries; a marker arriving during verification yields `UNRESOLVED` and remains
-untouched. `BUSY`
-means the lock is contended, with no claim about who owns it. Empty existing state
-with an existing safe lock is `UNINITIALIZED`; a missing lock is `UNRESOLVED` and
-is never created by inspection. `UNRESOLVED` reports the failing evidence path and exception;
-missing or invalid history never becomes proof of a dead owner. `VERIFIED_HISTORY`
-means existing native receipts checked at this observation only; it cannot
-resolve a lab job with missing launch evidence. Every result has
-`launch_authorized: false`; availability can change immediately afterward.
-Inspection returns JSON with exit zero, so callers must inspect its `status`.
-Ordinary exclusive launch admission remains mandatory. PID/heartbeat metadata
-never permits reclaiming a lock. There is no repair, reconcile or unblock action.
-
-The shared probe can make a concurrent exclusive launch admission refuse.
-For `lab-job`, that refusal is sealed as `REFUSED_BEFORE_LAUNCH` and consumes the
-job/attempt IDs even though no workload starts; redelivery returns the refusal.
-Do not poll status while launches may begin. Coordinate inspection before
-scheduling admission. A new attempt needs explicit new authorization; inspection
-does not grant an automatic retry.
 
 For a CPU command already authorized by the owner (use a fresh log directory):
 
@@ -194,10 +198,9 @@ klab monitor --policy /data/klab/monitor.yaml \
   python -c 'print("tiny CPU command")'
 ```
 
-Invoke the workload directly. Do not wrap a legacy launcher that acquires the
-same lock again. Contention refuses immediately; there is no queue, retry,
-takeover, unblock command or lock-keeper process. Omitting all three flags keeps
-the existing monitor CLI behavior. Supplying a subset is an error.
+Invoke the workload directly, not through another launcher that takes the
+same lock. Contention refuses immediately; there is no queue, retry,
+takeover, unblock command or lock-keeper process. Give all three flags or none.
 
 The minimal local contract is `contract.json` (format `klab-runner-v1`,
 canonical lock path, device/inode and blocked path) plus one UUID directory per
@@ -233,16 +236,13 @@ power loss cannot write a new marker; pending state remains authoritative and
 is never automatically recovered. A human must establish that owned work is
 gone, preserve the failed evidence and reconcile the host before provisioning a
 new state contract. Removing the marker alone does not repair an incomplete
-attempt. The tool never deletes state, trusts a stale PID as clearance, acquires
-credentials or contacts Notion. Updating a remote task/blocker is best effort
-work for the external runner after enforcing local launch safety.
+attempt. The tool never deletes state or trusts a stale PID as clearance.
 
-## Explicit campaign cleanup
+## Clean up
 
-Choose the campaign workspace under the selected persistent root when preparing
-campaign-local data caches. New prepared-data caches inside that workspace receive
-an ownership marker; existing caches without a marker and caches outside it are
-never cleanup candidates. Shared data and worker dispatch caches are outside this
+Prepared-data caches created inside an experiment workspace get an ownership
+marker; caches without one, or outside the workspace, are never cleanup
+candidates. Shared data and worker dispatch caches are outside this
 workflow. Keep `KLAB_WORK_DIR` pointing at the persistent root, not a nested
 experiment: explicit cache locations remain separate.
 
@@ -269,99 +269,11 @@ campaign run or worker attempt. Applying a plan rechecks the database, candidate
 inventory, and writer leases; changed plans must be created again. The command
 never scans arbitrary sibling workspaces or deletes unmarked directories.
 
-Use one variable for a study, including worker registration, submission,
-controller operation, collection, and resume:
+## Move retained data
 
-```sh
-WORK="${KLAB_WORK_DIR:-$HOME/.local/share/klab}/experiments/dense-lm-v1"
-mkdir -p "$WORK"
-klab study submit configs/references/dense-lm-v1/study.yaml \
-  --store "$WORK/runs" --receipt "$WORK/receipt.json"
-klab controller run --store "$WORK/runs"
-# After completion and verified ingestion:
-klab study collect configs/references/dense-lm-v1/study.yaml \
-  "$WORK/receipt.json" --runs-dir "$WORK/runs"
-```
-
-Register eligible workers in that same store before execution. One receipt
-contains all submitted seed coordinates. Device leases serialize work where
-required; separate seed stores are not required. Resume a controller run using
-`experiment resume RUN_ID --store "$WORK/runs"`. The parent and child remain in
-that store, linked by IDs and checkpoint identities. Keep the original submission
-receipt as history; do not replace its submitted run IDs with resumed child IDs.
-
-Choose `export KLAB_WORK_DIR=/data/klab` on a disk sized for the
-campaign, then set `WORK="$KLAB_WORK_DIR/experiments/dense-lm-v1"`.
-Explicit `--store`, `--runs-dir`, `--output`, transcript destinations, old
-`logging.root_dir`, and `dataset.cache_dir` retain their supplied meaning.
-The global `--work-dir /data/klab` (before the subcommand) overrides the
-environment for implicit stores and scratch but never relocates explicit paths.
-Direct training should pass `--runs-dir "$WORK/runs"` on every parent and child
-command when using a task-specific store.
-
-A study without store or receipt overrides chooses
-`<work-dir>/experiments/<study-name>/runs` and a sibling `receipt.json`. The generic
-non-study CLI store/reader default is `<work-dir>/runs/`. Existing root-level
-runs remain readable with explicit `--runs-dir runs`; defaults do not search
-historical locations or silently reinterpret configured paths.
-
-Future experiments follow the same pattern:
-
-```text
-<persistent-root>/experiments/
-  new-study/
-  independent-replication/
-```
-
-## Historical paths and relocation
-
-The original dense-lm-v1 seed YAMLs explicitly selected three root-level
-`runs-dense-lm-v1-seed*` directories. The reference matrix repeated those paths,
-and the manual instructions invoked direct training without overriding them.
-This was a workflow convention, not controller isolation. New instructions use
-one explicit shared store; frozen source configs and published evidence retain
-their original values.
-
-Intentional relocation to a genuinely different persistent root requires a new
-location binding or manifest and re-verification of the referenced bytes. Do not
-rewrite past receipts to imply that historical absolute paths moved.
-
-Before moving retained bytes, distinguish scientific identity (hashes, run IDs,
-checkpoint and input identities), historical location (where execution or capture
-occurred), and current local location (where readers should find retained bytes).
-Preserve the first two. Update only supported current-location indexes or explicit
-reader paths, and verify checkpoint integrity, lineage, evidence, observations,
-static reports, and baseline descriptions afterward. Never edit old observations
-or acceptance records to claim they were originally captured at a new path.
-Do not move active runs or blindly merge controller databases. Prefer same-device
-atomic renames when relocation is supported. If the evidence cannot be loaded
-without rewriting scientific artifacts, retain the original locations and record
-the limitation.
-
-Some older instructional documents are themselves registered, byte-hashed
-research evidence: [domain corpus study](history/path-domain-corpus.md) and
-[portable adapter notes](portable-engram.md). Their original commands remain
-historical records. Apply the workspace convention above to new execution rather
-than copying their old root-level output paths. Updating those bytes would
-invalidate the evidence; no registry hash is changed by this hygiene work.
-
-The original context-study guide bytes are preserved in
-[Workshop at `b74dff53259343aafd336cd00e3480246d70133b`](https://github.com/supernovae/kybern-workshop/blob/b74dff53259343aafd336cd00e3480246d70133b/provenance/lab/docs/context-engram-study.md).
-The [Lab context-study page](history/context-engram-study.md) is navigation only; its
-original byte-hashed guide is mapped by [the retirement record](history/context-retirement.json).
-
-The [dense-lm-v1 migration audit](history/dense-lm-v1-workspace-audit.md) records the actual
-consolidation, preserved history, verification results, and remaining unrelated
-lifecycle availability limits.
-
-On 2026-09-27, the remaining local `runs-rocm/` store was relocated to
-`klab-work/experiments/runtime-acceptance/runs/`. Its sole completed run,
-`rocm-wsl2-acceptance-20260926T035145Z`, retains its original ID, backend metadata,
-and historical paths. All 34 run files retained their hashes, inodes, sizes, and
-modification times; all five checkpoint generations verified before and after
-the move, and the integrity-bound evaluation evidence was identical. The current
-checkpoint locator was rebased using the same standalone-store helper. The
-original database and sidecars, inventory, relocation script, and verification
-record are retained under the workspace's `local-reports/relocation/`. No new
-training or hardware acceptance was performed. Earlier accounts of leaving
-`runs-rocm/` untouched describe those earlier operations and remain unchanged.
+Separate three things before moving anything: identity (hashes, run IDs,
+checkpoint and input digests), where the work originally ran, and where readers
+should find the bytes now. Keep the first two; update only the current
+location. Never move an active run or merge controller databases by hand.
+Prefer same-device renames, then verify checkpoints, lineage and evidence
+afterward.

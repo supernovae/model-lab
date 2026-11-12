@@ -52,13 +52,12 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv sync --locked --extra cpu --dev
-      - name: Static format and research records
+      - name: Static format
         env:
           UV_OFFLINE: "1"
         run: |
           uv run --locked --no-sync ruff check .
           uv run --locked --no-sync ruff format --check .
-          uv run --locked --no-sync python -m klab.research.lint --json
       - name: Core config and verifier authority sanity
         env:
           UV_OFFLINE: "1"

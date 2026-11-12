@@ -1,113 +1,158 @@
-# Lab mode: from a YAML delta to a scored comparison
+# Lab mode
 
-Commands below use the [activated, provisioned environment](../README.md#first-run).
-
-Lab mode is the default path for normal, authorized local experiments. One
-command trains a baseline and a candidate, scores both on the same held-out
-split and writes one compact record. For a complete input setup, start with
-[TinyStories](tinystories-microlab.md); for a larger budget use the
-[first-model guide](first-model.md). The placeholders below assume an existing
-RunConfig and tokenizer:
+Lab mode answers one question at a time: does this change help? One command
+trains a baseline and a candidate, scores both on the same held-out split, runs
+behavioral probes and writes one sealed record.
 
 ```sh
-export KLAB_WORK_DIR="$HOME/.local/share/klab"
 cat > wider-ffn.yaml <<'YAML'
-question: Does a wider FFN lower held-out loss at a fixed token budget?
+question: Does a wider feed-forward lower held-out loss at a fixed token budget?
 set:
   model.ffn_dim: 128
 YAML
 klab try wider-ffn.yaml --vs BASELINE.yaml
-klab report TRY_ID      # reread later, no compute
+klab report TRY_ID
 ```
 
-`BASELINE.yaml` is any RunConfig whose tokenizer already exists. The candidate is
-either a **lab delta** (`set:` with dotted fields, optional `question:`) or a full
-RunConfig. Output looks like:
+`BASELINE.yaml` is any run config whose tokenizer exists. The candidate is a
+**lab delta** (`set:` with dotted fields and an optional `question:`) or a whole
+run config. The output looks like:
 
 ```text
 LAB TRY try-20261010T052417Z-b9361b7d  status: completed  (lab mode)
-  question: Does a wider FFN lower held-out loss at a fixed token budget?
+  question: Does a wider feed-forward lower held-out loss at a fixed token budget?
   delta model.ffn_dim: 96 -> 128
   baseline  lab-base-759596ad32b5bf50  held-out loss 3.8764  ppl 48.25  targets 512
   candidate lab-try-20261010T052417Z-b9361b7d  held-out loss 3.8451  ppl 46.76  targets 512
   verdict: CANDIDATE_LOWER_LOSS  Δ held-out loss -0.0313
 ```
 
-Every try then runs the fast [probe battery](probe-battery.md) tier on both
-arms (held-out loss with a window-clustered SE, calibration, top-1 agreement,
-degeneration) and prints a verdict with a next action; the result is stored in
-the record under `probe`. Pass `--config standard` or `--config full` for more
-probes, or `--config no-probes` to skip. Custom policy uses
-[try declarations](try-config.md). The battery reuses each arm's scoring pass,
-loads one arm at a time and runs under the try's own cancellation and resource context. Probe
-problems never fail a try, but they are never a pass either: a probe error, an
-unavailable optional tier, a resource-envelope violation or an out-of-memory
-error makes the battery `incomplete` (action `rerun`, gaps listed in
-`probe.verdict.missing`) and the comparison stands. `CANCEL` or a signal during
-probing marks the try `interrupted` at `phase: probing` and keeps both scored
-arms, the comparison and the finalized partial battery (completed probes kept,
-unrun probes listed as missing evidence).
+`report TRY_ID` prints the record again without computing anything; `--json`
+gives all of it.
 
-Each scored arm also records what the Pareto view and `klab compare`
-need, whether or not probes ran: `eval_group` (the same digest a probe battery
-records for that checkpoint and protocol), resident and active parameters and
-weight bytes (`parameters`, `active_parameters`, `parameter_bytes`,
-`active_parameter_bytes`) and, under `heldout`, `ms_per_token` plus the
-per-window loss sums and counts that give a paired standard error against any
-other result in the same eval group. See
-[reference models and compare](probe-battery.md#reference-models-and-klab-compare).
+## Probes
 
-Use `--json` for the full record. A baseline is reused only when an earlier try
-*completed* with the same reuse key: effective config, code (source identity)
-and the tokenizer, dataset input files and external memory packages
-(`model.memory_package_path`, `training.portability_manifest_path`) hashed
-**now**, plus a matching prepared tokenizer digest. Editing a training file,
-validation file, tokenizer or memory package therefore retrains the baseline;
-interrupted or failed tries are never reused. A delta that points at a different
-memory package is an explicit changed variable (`memory_packages` in the
-record); otherwise both arms must have trained with identical package contents.
-Set declaration `fresh_baseline: true` to retrain anyway.
+After scoring, `try` runs the fast [probe](probes.md) tier on both arms: held-out
+loss with a standard error, calibration, top-1 agreement and degeneration. It
+prints a verdict and a next action. `--config standard` or `--config full` runs
+more probes and `--config no-probes` skips them.
 
-Declaration `seed: N` is authoritative: both arms use seed N, overriding any
-seed in the baseline or the delta. Without it, a delta that sets `seed` is an explicit
-changed variable. The record keeps `seed` (`override`, `baseline`,
-`candidate`, `changed_by_delta`) and `changed_variables`.
+A probe that cannot run (an optional dependency missing, an error, a resource
+stop) makes the battery `incomplete`, with action `rerun` and the gaps listed in
+`probe.verdict.missing`. It never fails the try and never counts as a pass.
 
-## What lab mode skips
+## What is kept the same
 
-ExperimentPlan locks, Campaign approvals and reconciliation, corpus admission
-reviews, attempt ledgers and proposal/binding/stop documents. Those remain the
-release path ([training programs](experiment-programs.md),
-[campaigns](campaigns.md)) for results that will be promoted, published or used
-as release parents, and for paid compute.
+Both arms are scored under one evaluation protocol: the baseline's context
+length, batch size and batch count over the same tokenized validation data. Each
+arm records its protocol: split, validation and tokenizer digests, packing
+version, loss mode and loss-mask digest. The comparison also requires the same
+training data unless the delta changes `dataset` or `tokenizer`, and a
+validation split distinct from training. Anything else makes the verdict
+`NOT_COMPARABLE` (exit 3) with no delta. So does a candidate that cannot read the
+baseline's evaluation context.
 
-## What lab mode keeps
+## Reusing a baseline
 
-| Rail | How |
-|---|---|
-| Resource limits | Native storage preflight before training; declaration `resource_envelope` (checked before any work); optional envelope `lab_try.max_wall_seconds_per_arm`. There is no implicit short timeout. |
-| Data identity | Each arm records tokenizer, train and validation digests and the prepared-data manifest digest; the record also carries the source identity, Git commit/dirty state, seed and both configs (the candidate is derived with a `config derive` receipt). |
-| Safe cancellation | Covers the whole try: setup and input hashing, training, scoring and the record write. Before any parsing or hashing, `try` installs its SIGINT/SIGTERM/CANCEL handling and writes a sealed `started` record; a stop during setup finalizes it as `interrupted` at `phase: setup`. Ctrl-C, SIGTERM or `touch <try>/CANCEL` stops training at a checkpointed step boundary; outside training (loading, scoring) `try` handles SIGINT/SIGTERM itself and checks `CANCEL` between phases. The record is published atomically (temp file, fsync, exclusive link) as `interrupted` with `arm`, `phase` (`setup`, `training`, `scoring` or `probing`) and `reason`; interrupted tries are kept and never reused. |
-| Held-out checks | Both arms are scored by native checkpoint-bound evaluation under **one shared evaluation protocol**: the baseline's eval `seq_len` (context windows), batch size and batch count over the same tokenized validation bytes. Each arm records `eval_protocol` (split, validation and tokenizer digests, packing version, objective mode and validation loss-mask digest, windowing, batching, scored blocks, evaluator) and its sha256, so assistant-only and whole-transcript scoring on identical tokens are never compared. The comparison requires the same protocol, validation bytes, tokenizer, scored targets and training data (unless the delta changes `dataset.*`/`tokenizer.*`), and a validation split distinct from train; otherwise the verdict is `NOT_COMPARABLE` (exit 3) and no delta is reported. A candidate whose model cannot take the baseline's eval window (e.g. smaller `model.max_seq_len`) is `NOT_COMPARABLE`. |
+A baseline is reused only from an earlier completed try with the same effective
+config, the same Lab source, and the same tokenizer, data files, memory packages
+and parent or teacher checkpoints, all hashed now. Editing any of them retrains
+it; interrupted and failed tries are never reused. `fresh_baseline: true` always
+retrains.
+
+## Declarations
+
+`--config` takes a preset (`fast`, `standard`, `full`, `no-probes`) or a YAML
+file; `./standard` selects a file named like a preset. Every field is optional:
+
+```yaml
+try_config_version: 1
+seed: 7
+probe_tier: standard          # none, fast, standard or full
+fresh_baseline: false
+repeat_baseline: false
+lab_dir: ./lab
+runtime_profile: ./cpu-profile.yaml
+resource_envelope: ./bounds.yaml
+```
+
+- **`seed`** applies to both arms, overriding any seed in the baseline or the
+  delta (0 to 2³²−1). Without it, a delta that sets `seed` makes the seed a
+  changed variable. The record shows which.
+- **Paths** resolve relative to the declaration.
+- **Runtime.** Use `runtime_profile` or `--runtime ID`, not both. `--backend`
+  overrides the backend.
+- **Resource limits** go in the envelope:
+
+  ```yaml
+  resource_envelope_version: 1
+  max_rss_bytes: 2147483648
+  lab_try:
+    max_wall_seconds_per_arm: 600
+    tokenizer_batch_documents: 32
+    tokenizer_batch_source_bytes: 1048576
+  ```
+
+  There is no default wall-time limit. Smaller tokenizer batches lower peak
+  preparation memory.
+
+### Repeat the baseline
+
+`repeat_baseline: true` trains three fresh arms (baseline, candidate, baseline
+again) with identical inputs for the two baselines, and records how far the two
+baselines differ. Use it to see run-to-run drift next to the candidate's effect.
+`train_seconds` covers each arm's whole training, including preparation,
+compilation, validation and checkpoints, and the arms share one process, so it
+is not a throughput benchmark.
+
+### Start every arm from one checkpoint
+
+```yaml
+repeat_baseline: true
+probe_tier: none
+continuation:
+  checkpoint: /data/runs/parent/checkpoints/step_00023691_gen_000001
+  append_data: true
+  allow_runtime_optimization: true
+  allow_runtime_drift: false
+```
+
+Every arm extends the same finished checkpoint with
+[`--extend-budget`](checkpointing.md#extend-a-finished-run), keeping its weights,
+optimizer, random state, cursor and schedule. The baseline config sets larger
+limits and an appended dataset; the delta changes one runtime setting (for
+example `training.matched_stories.padding_multiple`). `append_from_checkpoint:
+true` continues from a checkpoint that is not the final one.
+
+## Records
 
 Records live in `WORK_DIR/lab/tries/<try_id>/try.json` and runs in
-`WORK_DIR/lab/runs` (override with declaration `lab_dir`). A record carries its own
-`record_sha256`; `report` rejects edited records. Exit status is 0 for a
-completed comparison, 3 for `NOT_COMPARABLE`, 130 for an interrupted try and
-1 for a failure (the record keeps the error).
+`WORK_DIR/lab/runs`. A record carries its own digest, and `report` refuses an
+edited record. Each arm also records what `klab compare` and the dashboard's
+Pareto view need: its evaluation group, parameter counts and bytes, time per
+token and per-window losses for paired standard errors.
 
-The same sealed record ID works with `report`, `compare`, `probe` and `explore`.
-The latter two load its recorded candidate checkpoint; they never substitute
-the run's newer `latest`. See [result lookup](result-lookup.md) for the distinction
-between a run, checkpoint and sealed result, and for backend selection.
+The same record ID works with `report`, `compare`, `probe` and `explore`, which
+load the record's own candidate checkpoint, never a newer one. See
+[results](results.md).
+
+Exit status: 0 for a completed comparison, 3 for `NOT_COMPARABLE`, 130 for an
+interrupted try, 1 for a failure. The record keeps the error.
+
+## Stopping
+
+Ctrl-C, SIGTERM or `touch <try>/CANCEL` stops at a checkpointed step during
+training and between phases otherwise. The record is sealed as `interrupted`
+with the arm, the phase (`setup`, `training`, `scoring` or `probing`) and the
+reason, and keeps everything already scored. Interrupted tries are kept and
+never reused.
 
 ## Limits
 
-One seed per arm and one held-out loss: a lab verdict is a direction to follow
-up, not a significance test or a promotion. Training runs in the `try` process
-on one device; use a runtime profile (declaration `runtime_profile` or `--runtime`) for
-accelerators exactly as with `train`. Remote and multi-seed sweeps still go
-through workers or Campaigns. The `lab-loop` CI job runs
-`tests/test_lab_mode.py::test_cpu_smoke_loop_yaml_to_report_within_budget`, which
-times this path on CPU (tokenizer → try → report) against a generous budget
-(`KLAB_LAB_LOOP_BUDGET_SECONDS`, 900 s).
+One seed per arm and one held-out loss make a lab verdict a direction to
+follow up, not a significance test. Confirm a gain with paired seeds before
+claiming it. Each try runs in one process on one device; spread larger sweeps
+over [workers](workers.md).
+
+Lab mode deliberately skips plan locks, approvals and campaign reconciliation.
+Results you will publish or build a model family on use [campaigns](campaigns.md).

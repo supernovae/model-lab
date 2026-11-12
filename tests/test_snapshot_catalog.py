@@ -43,16 +43,15 @@ def test_catalog_excludes_incomplete_unverified_and_unsafe_rows(tmp_path):
     ]
 
 
-def test_missing_corrupt_and_archived_candidates_fail_without_fallback(tmp_path):
+def test_missing_and_corrupt_candidates_fail_without_fallback(tmp_path):
     item = selected()
-    mapping = tmp_path / "mapping.json"
     with pytest.raises(FileNotFoundError):
-        resolve_candidate(tmp_path, item, mapping)
+        resolve_candidate(tmp_path, item)
     path = tmp_path / item.run / item.checkpoint
     path.mkdir(parents=True)
     (path / "manifest.json").write_text(json.dumps({"sha256": "wrong", "step": 1}))
     with pytest.raises(ValueError, match="identity"):
-        resolve_candidate(tmp_path, item, mapping)
+        resolve_candidate(tmp_path, item)
     (path / "manifest.json").write_text(
         json.dumps(
             {
@@ -63,14 +62,7 @@ def test_missing_corrupt_and_archived_candidates_fail_without_fallback(tmp_path)
         )
     )
     (path / "weights.safetensors").write_bytes(b"x")
-    assert resolve_candidate(tmp_path, item, mapping) == path
-    mapping.write_text(
-        json.dumps(
-            {"checkpoints": [{"source": str(path), "archive": "/archive/generation"}]}
-        )
-    )
-    with pytest.raises(ValueError, match="Archived"):
-        resolve_candidate(tmp_path, item, mapping)
+    assert resolve_candidate(tmp_path, item) == path
 
 
 def test_owner_serializes_load_and_generation_and_reuses_exact_identity():
@@ -179,14 +171,8 @@ def test_available_catalog_orders_utc_instants_and_skips_unavailable(tmp_path):
                         }
                     )
                 )
-    mapping = tmp_path / "archive.json"
-    rows = available_catalog(tmp_path, mapping)
+    rows = available_catalog(tmp_path)
     assert [row.step for row in rows] == [2, 1]
     assert rows[0].label.startswith("2026-01-01 11:00:00 UTC")
     (tmp_path / "run" / rows[0].checkpoint / "weights").write_bytes(b"")
-    assert [row.step for row in available_catalog(tmp_path, mapping)] == [1]
-    source = str(tmp_path / "run" / rows[1].checkpoint)
-    mapping.write_text(
-        json.dumps({"checkpoints": [{"source": source, "archive": "/archive/run"}]})
-    )
-    assert available_catalog(tmp_path, mapping) == []
+    assert [row.step for row in available_catalog(tmp_path)] == [1]

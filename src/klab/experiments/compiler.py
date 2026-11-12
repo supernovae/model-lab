@@ -1,7 +1,7 @@
 """Pure expansion and comparison of validated concrete run configurations.
 
-This module deliberately does not depend on the authored plan language or legacy
-matrix/study formats. Those formats adapt their declarations to this authority.
+This module does not depend on the authored plan language or the matrix format;
+both adapt their declarations to this authority.
 """
 
 from __future__ import annotations

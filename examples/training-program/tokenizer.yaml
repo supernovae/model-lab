@@ -1,0 +1,13 @@
+schema_version: 1
+vocab_size: 512
+min_frequency: 1
+max_documents: 2000
+output_dir: ../tokenizer
+dataset:
+  source: synthetic
+  cache_dir: ../tokenizer-data
+  train_max_documents: 2000
+  validation_max_documents: 100
+  train_max_tokens: 32768
+  validation_max_tokens: 8192
+  synthetic_seed: 42

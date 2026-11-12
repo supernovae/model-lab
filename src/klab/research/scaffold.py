@@ -16,7 +16,6 @@ from klab.canonical import canonical_digest, canonical_json
 from klab.config.models import RunConfig, TokenizerTrainConfig
 from klab.engram.packs import _rename_noreplace
 from klab.experiments.compiler import apply_patch, patchable_config
-from klab.experiments.study import study_workspace
 from klab.model.portable_engram import load_portable_engram
 from klab.research.catalog import (
     MechanismLesson,
@@ -28,6 +27,7 @@ from klab.research.catalog import (
     resource_sha256,
 )
 from klab.training.manifest import config_sha256, sha256_file
+from klab.workdir import resolve_work_dir
 
 
 def _dataset_names(*, root: Path | None = None) -> tuple[str, ...]:
@@ -828,13 +828,7 @@ def scaffold_lesson(
         package = None
 
     destination, temporary = _destination(output)
-    workspace_name = (
-        destination.name
-        if destination.parent.name in {"samples", "research"}
-        and destination.parent.parent.name == "experiments"
-        else f"lesson-{identifier}"
-    )
-    workspace = study_workspace(workspace_name)
+    workspace = resolve_work_dir() / "experiments" / f"lesson-{identifier}"
     try:
         lesson_payload: dict[str, object] = {
             "format": "klab-lesson-scaffold",

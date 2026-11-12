@@ -1038,11 +1038,6 @@ def explorer_page(lab_dir: Path, runs_dirs: Sequence[Path]) -> None:
                 f"{(cached[i].get('target') or {}).get('run_id')} · "
                 f"“{cached[i]['text'][:48]}” · {_when(cached[i]['created_at'])} · "
                 f"{ex.runtime_label(cached[i])}"
-                + (
-                    " · historical: re-explore for activations"
-                    if cached[i].get("format") != ex.EXPLORER_FORMAT
-                    else ""
-                )
                 + (" · ⚠ unverified" if cached[i].get("cache_issue") else "")
             ),
             key="explorer_cached",
@@ -1176,7 +1171,7 @@ def explorer_page(lab_dir: Path, runs_dirs: Sequence[Path]) -> None:
 
 
 def render_exploration(exploration: Mapping[str, Any]) -> None:
-    from klab.explorer import EXPLORER_FORMAT, runtime_label
+    from klab.explorer import runtime_label
 
     arch = exploration["architecture"]
     target = exploration.get("target") or {}
@@ -1186,11 +1181,6 @@ def render_exploration(exploration: Mapping[str, Any]) -> None:
         st.markdown(xv.architecture_html(arch), unsafe_allow_html=True)
         return
     st.caption(f"Diagnostics runtime: {runtime_label(exploration)}")
-    if exploration.get("format") != EXPLORER_FORMAT:
-        st.info(
-            "ⓘ Historical v1 cache record (historical: re-explore for activations). "
-            "Not eligible for paired activation comparison."
-        )
     if exploration.get("cache_issue"):
         st.warning(f"Cache provenance unverified: {exploration['cache_issue']}")
     tokens = exploration["tokens"]

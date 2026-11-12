@@ -5,7 +5,10 @@
   "title": "Verified semantic retrieval",
   "mechanism_kind": "artifact",
   "summary": "Inspect a verified EngramPack semantic asset through exact bounded vector retrieval and a frozen-pack adapter. Queries are externally encoded canonical vectors, not natural-language prompts or a text encoder.",
-  "benefit_scope": ["inference", "capacity"],
+  "benefit_scope": [
+    "inference",
+    "capacity"
+  ],
   "steps": [
     {
       "explanation": "Load a pack only after its manifest, canonical records, semantic metadata, and semantic tensor assets verify. The semantic component binds ordered record IDs to finite FP32 key and value matrices plus declared key/value encoder identities; key width, value width, and backbone hidden width are independent.",
@@ -130,8 +133,6 @@
     }
   ],
   "docs": [
-    "docs/research/semantic-memory.md",
-    "docs/portable-engram.md",
     "docs/engram.md"
   ]
 }

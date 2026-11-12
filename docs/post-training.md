@@ -1,4 +1,4 @@
-# Post-training: instruction tuning, distillation, preference and export
+# Post-training
 
 Everything after pretraining is the same loop: start from a checkpoint, choose
 what an update minimizes, choose the data, train, compare, repeat. In Lab each
@@ -37,6 +37,57 @@ checkpoint digest.
 
 Resuming a stage (`--resume`, `--recover`, `--extend-budget`) continues the
 stage's own state; the parent is not loaded again as the model.
+
+## Conversation data
+
+`dataset.source: local_chat` reads JSONL conversations, one per line. Paths are
+relative to the config; train and validation must be separate files, and a
+conversation that appears in both is refused. Use the same `dataset` section in
+the tokenizer config and the run config.
+
+```yaml
+dataset:
+  source: local_chat
+  chat_template: chatml
+  train_path: data/train.jsonl
+  validation_path: data/validation.jsonl
+  license: CC0-1.0
+  cache_dir: work/data
+  train_max_documents: 10000
+  validation_max_documents: 1000
+  train_max_tokens: 1000000
+  validation_max_tokens: 100000
+```
+
+A record is either a plain conversation, trained on every token:
+
+```json
+{"messages":[{"role":"system","content":"Answer from the workshop handbook."},{"role":"user","content":"Which drawer holds the torque wrench?"},{"role":"assistant","content":"The labeled blue drawer."}]}
+```
+
+or a version 2 record that chooses its loss and may include tool calls:
+
+```json
+{"format_version":2,"loss_mode":"assistant_only","messages":[{"role":"user","content":"Look up the drawer."},{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","name":"lookup_drawer","arguments":{"item":"torque wrench"}}]},{"role":"tool","tool_call_id":"call-1","content":"blue"},{"role":"assistant","content":"The labeled blue drawer."}]}
+```
+
+- **`loss_mode`.** `all_tokens` trains on the whole transcript. With
+  `assistant_only`, system, user and tool-result text are context only, and
+  assistant replies, serialized tool calls and the final EOS are supervised. A
+  token that straddles a role boundary is not supervised, and EOS is supervised
+  only when the whole record fits.
+- **Structure.** An optional system message comes first; user turns and
+  assistant answers alternate. Tool-call IDs are unique, and their results come
+  in call order before the final answer. Arguments and results must be finite
+  JSON. Tool calls are rendered as text; nothing is executed.
+- **One mode per dataset.** Train and validation must use the same loss mode.
+
+`synthetic_task: instruction_reference` generates a small offline curriculum
+(arithmetic, word reversal, lookups, definitions) for checking the chat path, and
+`configs/instruction_starter.yaml` and `configs/instruction_100m.yaml` train on
+it. Those models learn the format, not general conversation; the
+[from-toy-to-useful](from-toy-to-useful.md) guide walks from there to a narrow
+useful task.
 
 ## Chat templates
 
@@ -78,8 +129,7 @@ dataset:
 Each role is a pattern with `{content}` once. The assistant pattern starts with
 `generation_prompt`. With `loss_mode: assistant_only`, everything after the
 generation prompt is supervised, the closing text included, so the model learns
-to end its turn. Record format and loss modes are in
-[instruction training](instruction-training.md).
+to end its turn.
 
 ## Distill from a teacher
 

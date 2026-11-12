@@ -1,8 +1,0 @@
-readiness_version: 1
-id: rocm-acceptance
-require_verified_checkpoint: true
-required_gate_ids:
-- heldout
-min_completed_evaluations: 1
-max_heldout_loss: null
-require_human_review: false

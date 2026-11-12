@@ -23,11 +23,6 @@ from klab.training.manifest import sha256_file
 
 _RESOURCE_ROOT = Path(str(files("klab.research").joinpath("resources"))).resolve()
 _MAX_JSON_BYTES = 2 * 1024 * 1024
-_RUNNER_ONLY_ENTRY_ID = "learned-engram-portability-v1"
-_RUNNER_ONLY_GUIDANCE = (
-    "learned-engram-portability-v1 uses research portability build "
-    "--experiment learned-engram-portability-v1, not research scaffold"
-)
 _ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _SCALE_IDS = ("smoke", "nano", "micro", "tiny")
 

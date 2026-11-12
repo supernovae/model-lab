@@ -22,7 +22,7 @@
 | `allocation/raw_tokens` | Packed input-token positions consumed by an optimizer update, including prompt/context positions without a valid next-token label. | Runtime input count; separate from supervised targets and weighted neural mass. |
 | `allocation/valid_targets` | Count of targets whose label is not `-100` in the update. | Counts all valid owner types once; not raw input tokens. |
 | `allocation/weighted_neural_supervision_mass` | `neural_loss_weight × (neural-owned + hybrid-owned valid targets)`. | Weighted target mass, not optimizer updates, compute, or FLOPs. |
-| `allocation/owner/*_raw_tokens` | Raw positions by owner sidecar code. | In the path-domain builder, unsupervised/context positions use the neural code; do not read this as neural supervised mass. |
+| `allocation/owner/*_raw_tokens` | Raw positions by owner sidecar code. | Context positions without a target use the neural code; this is not neural supervised mass. |
 | `allocation/owner/*_targets` | Valid target count by owner sidecar code. | The owner-specific partition of `allocation/valid_targets`. |
 
 The memory-allocation report adds static parameter counts and a rough
@@ -37,7 +37,7 @@ or a FLOP-saving claim.
 | Metric or family | Interpretation |
 |---|---|
 | `performance/step_seconds` | Synchronized successful-update duration; includes forward/backward, recomputation and transfers, but excludes staging, validation and checkpointing. |
-| `performance/primary_compute_seconds`, `performance/replica_compute_seconds`, `performance/device_wait_seconds`, `performance/gradient_merge_seconds` | Reported only for updates that ran on [several devices](gradient-accumulation.md#several-devices-on-one-host): each side's compute time, how long finished devices waited for the slowest, and the time to merge collected gradients. |
+| `performance/primary_compute_seconds`, `performance/replica_compute_seconds`, `performance/device_wait_seconds`, `performance/gradient_merge_seconds` | Reported only for updates that ran on [several devices](training.md#several-gpus-on-one-host): each side's compute time, how long finished devices waited for the slowest, and the time to merge collected gradients. |
 | `batch/micro_batch_size`, `batch/accumulation_steps`, `batch/effective_batch_size` | Configured microbatch size and actual microbatches/examples in the committed update. Epoch boundaries and final budgets can shorten a window. |
 | `batch/tokens_per_micro_batch`, `batch/effective_tokens_per_update` | Valid supervised prediction targets, not raw prompt length or a nominal batch-size product. |
 | `memory/device_allocated_bytes`, `memory/device_reserved_bytes` | Native allocation/reservation where exposed; MLX active allocation is distinct from `memory/device_cache_bytes`. |
@@ -48,13 +48,13 @@ or a FLOP-saving claim.
 | `offload/bytes_to_cpu`, `offload/bytes_to_device`, `offload/peak_host_bytes` | Actual saved-activation transfers and peak live host offload storage. |
 | `offload/transfer_seconds`, `offload/transfer_fraction` | Synchronized transfer cost, included in total update time rather than subtracted from throughput. |
 
-Unavailable readings are omitted with explanatory events, not written as zero. Engine/backend/worker/precision/optimizer names are manifest metadata rather than numeric metrics. Apple unified memory is one physical pool: do not add device recommendations and system RAM, or claim extra capacity from MPS host offload. See [memory accounting](memory.md), [runtime policy](runtime.md), and [offload](offload.md).
+Unavailable readings are omitted with explanatory events, not written as zero. Engine, backend, precision and optimizer names are run metadata, not metrics. See [memory](memory.md).
 
-## Runtime forecast and progress records
+## Forecasts and progress
 
 | Record | Interpretation |
 |---|---|
-| `runtime_forecast.planning` | Optimizer-only estimate from the most recent exact-compatible historical observations; missing matches produce unavailable fields, not a theoretical time. |
+| `runtime_forecast.planning` | Optimizer-only estimate from the most recent earlier runs with a matching runtime; missing matches produce unavailable fields, not a theoretical time. |
 | `runtime_forecast.warmup_calibrated` | Separate estimate from measured disposable pilot updates; it is used only when the pilot and run signatures match. |
 | `runtime_forecast.live.optimizer_only_eta` | Raw low/high seconds and status for remaining optimizer work, based on completed supervised targets and robust recent/long windows. It excludes future non-optimizer phases. |
 | `runtime_final_observation.phases.*` | Actual seconds, availability, and observation count for preparation, planning, batch assembly (host-side selection and stacking of each update's blocks, while the device waits), optimizer updates, validation, checkpointing, and reporting. Attempts are separate; evaluation and generation are `not_observed` unless measured by their own operation. |
@@ -64,15 +64,17 @@ Unavailable readings are omitted with explanatory events, not written as zero. E
 All durations and rates are raw numeric JSON values. A completed run has zero
 remaining optimizer ETA; unavailable or unobserved telemetry remains `null`
 with an availability/status reason. The dashboard presents the same runtime
-records as the status command. See [runtime policy](runtime.md#runtime-forecasting-and-progress)
-for matching rules, commands, and forecast limitations.
+records as the status command.
 
-## Diagnostics and durable aggregation
+## Architecture diagnostics
 
-Architecture diagnostics (`engram/*`, per-layer MoE and attention values) are persisted from the **last nonempty training microbatch before validation**, not averaged over an accumulation window. They expose routing/address use; they do not prove successful retrieval. Scalar diagnostics do not archive full router tensors.
+Architecture diagnostics (`engram/*` and per-layer mixture-of-experts and
+attention values) come from the last nonempty training microbatch before each
+validation, not an average over the update. They show how routing and addressing
+are used, not whether retrieval works. See
+[architecture](architecture.md#parameter-accounting) for how parameters are
+counted.
 
-Parameter counts use the direct per-token convention documented in [model scaling](model-scaling.md). Routed experts, shared experts and routers have disjoint inventory categories; any readable expert subtotal must not be added again. Engram totals include every table and adapter, while active accounting includes one retrieved row per stream plus the adapter. These are parameter-use conventions, not measured FLOPs or sparse optimizer storage savings.
-
-Every worker's SQLite database/WAL remains local. The controller imports contiguous, checksum-bound `(origin_id, sequence)` records idempotently, without re-emitting them into its own outbox. A controller disconnect can leave its view stale while the worker continues; terminal execution and verified artifact ingestion are separate states.
-
-The read-only dashboard uses this local projection and retains actual step/target coordinates. Runtime, Memory, Checkpoints, Stages and Learn expose execution conditions and their limits alongside the loss curves. Different backends, optimizers, precision, tokenizers, objectives or observed budgets prevent an unqualified controlled comparison. See [worker acceptance](workers.md#observed-acceptance--2026-09-23).
+Each worker keeps its own run database; the controller imports its records in
+order and without duplicates. A disconnected controller can show a stale view
+while the worker continues. See [workers](workers.md).

@@ -1,6 +1,6 @@
 # Build a model from your own text
 
-Commands below use the [activated, provisioned environment](../README.md#first-run).
+Commands below use the [activated, provisioned environment](../README.md#install).
 
 This is the shortest path from a text corpus to a model you can sample from.
 It uses five commands and no experiment, study or comparison vocabulary.
@@ -64,7 +64,7 @@ yours, then change these fields in both declarations:
   [runtime guide](runtime.md) for accelerator setup.
 
 Other inputs use the same five commands. `dataset.source` selects how data is
-read: a [pinned snapshot](datasets.md#source-declaration-and-lock), a
+read: a [pinned snapshot](datasets.md#pin-a-dataset), a
 [Hugging Face dataset](datasets.md#source-kinds), chat transcripts or a
 [token mixture](token-store.md#mixture-output).
 
@@ -110,5 +110,5 @@ klab train model.yaml --run-id first
   [post-training](post-training.md#write-your-own-objective).
 
 For a release that must be reproduced byte for byte, a project can also carry a
-[portable recipe](portable-recipes.md): an inventory of its declarations with
+[portable recipe](recipes.md): an inventory of its declarations with
 their digests, which Lab inspects and relocates without executing anything.

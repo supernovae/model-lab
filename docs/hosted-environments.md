@@ -1,16 +1,13 @@
 # Optional hosted GPU environments
 
-Commands below use the [activated, provisioned environment](../README.md#first-run).
-
 Model Lab can execute a prepared run on a user-provisioned CUDA host, including
 an explicitly supplied Google Colab session or a full-SSH machine. Placement is
 operational: it does not change the declaration's scientific identity or make a
 hosted backend the default. The feature does **not** create, upgrade, stop, or
 delete provider instances, and it never authorizes paid allocation.
 
-This guide is an operational procedure, not evidence that a particular account,
-GPU, provider, relay, or kernel is available. All paths below are task-owned and
-outside the checkout unless stated otherwise.
+All paths below are inside a task workspace outside the checkout unless stated
+otherwise.
 
 ## Boundaries and gates
 
@@ -25,9 +22,8 @@ outside the checkout unless stated otherwise.
   FP16 scaler evidence, and successful forward **and backward** evidence for
   the memory-efficient SDPA candidate. If unrestricted SDPA selects math, retain
   that result and do not claim fused acceptance.
-- TPUs are detected and reported as `TPU_UNSUPPORTED`; Model Lab has no
-  executable TPU backend. PyTorch/XLA is a separate backlog item, not a CPU
-  fallback.
+- TPUs are detected and reported as `TPU_UNSUPPORTED`; Lab has no TPU
+  backend.
 - Relay publication is synchronous at finalized checkpoint boundaries. It
   protects the last verified committed checkpoint, not in-flight optimizer work.
   A user-mounted Drive filesystem is not a training/runtime root and is not
@@ -44,25 +40,12 @@ integrated: its FA2 CUDA path excludes T4/Turing, while FA3 is a separate
 H100/H800 CUDA >=12.3 build.
 
 
-## Sample and local CPU preparation
+## Prepare locally on CPU
 
-The copyable declaration set is
-[`experiments/samples/hosted-tinystories/`](../experiments/samples/hosted-tinystories/).
-It retains the TinyStories microlab's exact pinned source and train-only
-2,048-token tokenizer declarations. The acceptance declaration is a 6-layer,
-256-hidden, 4-head dense model with FFN 704 and max sequence 256. It uses SDPA,
-FP16 CUDA, sequence length 128, `(microbatch, accumulation) = (8, 1)`, 20
-steps / 20,480 targets, AdamW peak/floor `0.0003`/`0.00003`, four warmup steps,
-and checkpoints/evaluation every five steps.
-
-The declaration explicitly sets `training.deterministic: false` for this CUDA
-performance sample. It is not a bitwise-reproducibility claim. The checked-in
-sample remains `(8, 1)`. The two matrix declarations are pilots only: reference
-versus SDPA changes only `attention.implementation`; `(4, 2)` versus `(8, 1)`
-changes only the divisible batch pair. Preserve OOM and unavailable-kernel
-observations; select a proposal only after a successful measurement at at most
-90% observed VRAM, recording targets/second, post-initialization step
-distribution, memory, and failures.
+The declarations are in [`examples/hosted-cuda/`](../examples/hosted-cuda/),
+whose README describes each file: a pinned TinyStories source, a 2,048-token
+tokenizer, a 20-update CUDA FP16 run (`run-t4.yaml`) and two one-factor pilot
+matrices.
 
 Prepare inputs locally on CPU; these commands must not initialize CUDA:
 
@@ -70,9 +53,9 @@ Prepare inputs locally on CPU; these commands must not initialize CUDA:
 export KLAB_WORK_DIR="$HOME/.local/share/klab"
 WORK="$KLAB_WORK_DIR/experiments/hosted-environments-acceptance"
 mkdir -p "$WORK/inputs"
-cp experiments/samples/hosted-tinystories/source.yaml "$WORK/inputs/"
-cp experiments/samples/hosted-tinystories/tokenizer.yaml "$WORK/inputs/"
-cp experiments/samples/hosted-tinystories/run-t4.yaml "$WORK/inputs/"
+cp examples/hosted-cuda/source.yaml "$WORK/inputs/"
+cp examples/hosted-cuda/tokenizer.yaml "$WORK/inputs/"
+cp examples/hosted-cuda/run-t4.yaml "$WORK/inputs/"
 klab workspace preflight "$WORK/inputs/tokenizer.yaml" --tokenizer
 klab inspect "$WORK/inputs/run-t4.yaml" --json
 klab workspace preflight "$WORK/inputs/run-t4.yaml"
@@ -89,7 +72,7 @@ tokenizer merely because execution changes host.
 ## Relay profile
 
 Copy either `relay-drive.example.yaml` or `relay-s3.example.yaml` from the
-sample directory to `$WORK/relay.yaml`. Both sides must name the same namespace
+example directory to `$WORK/relay.yaml`. Both sides must name the same namespace
 and remote prefix. The profile holds only local rclone configuration *paths*,
 never credentials. Configure rclone interactively or through the provider's
 least-privilege environment credentials; do not copy a controller credential
@@ -143,9 +126,8 @@ Use rclone API copies for portable independent recovery. Linux and macOS are
 the Colab CLI's advertised platforms; native Windows is not currently supported.
 Treat WSL2 as a separate Linux installation with its own ADC/rclone authorization
 and private Linux paths, not a silently shared Windows credential directory.
-Cross-platform Drive acceptance remains qualification work (see the
-[feature roadmap](../ROADMAP.md#longer-term-directions)); do not claim a platform
-or mount option verified without its actual transfer/loss-recovery run.
+Do not treat a platform or mount option as verified until a transfer and
+loss-recovery run has passed on it.
 
 Every attempt also has a controller-private, exact 32-byte HMAC relay key.
 It authenticates immutable commit descriptors but is delivered separately to
@@ -303,7 +285,7 @@ verified generation, retain `UNKNOWN` with `NO_DURABLE_CHECKPOINT`.
 ### Manual notebook fallback
 
 If CLI execution is unavailable but an explicitly supplied session is usable,
-use [`colab-fallback.ipynb`](../experiments/samples/hosted-tinystories/colab-fallback.ipynb).
+use [`colab-fallback.ipynb`](../examples/hosted-cuda/colab-fallback.ipynb).
 It contains only the native worker execution invocation. Fill its values from
 the fixed setup and already-prepared attempt receipts; do not write a separate
 Python trainer, hashing loop, relay client, or orchestrator. First complete
@@ -357,11 +339,9 @@ root as durable solely because the VM remains running.
 - [Thunder Compute pricing](https://www.thundercompute.com/pricing) is another
   full-SSH/per-minute reference.
 
-These links report live pricing and availability; this document deliberately
-does not rank a "cheapest" host or promise inventory. Compare warmup/setup,
-transfer, persistent storage, and egress with GPU time. No lifecycle adapter in
-this repository authorizes purchasing, upgrading, stopping, or deleting an
-instance.
+Prices and availability change; check them live. Compare warmup/setup,
+transfer, persistent storage, and egress with GPU time. Lab never buys, upgrades,
+stops or deletes an instance.
 
 Runpod, Vast, Thunder Compute, and future SSH providers remain
 user-provisioned only: require key-authenticated, strict-host-key,
@@ -369,10 +349,10 @@ noninteractive full SSH, an explicit private root, and the native setup
 receipt. Do not use Docker requirements, auto-allocation, password/proxy SSH,
 or automatic host-key acceptance.
 
-## Recording acceptance
+## Record the outcome
 
 A successful local CPU preparation, a CUDA recipe installation, and a relay
-round-trip are separate observations. For the T4 sample, retain actual device,
+round-trip are separate observations. For the T4 run, retain actual device,
 CUDA build, probe report, staged runtime identity, targets/second, VRAM,
 checkpoint/relay timings, collected immutable checkpoint, and terminal
 ingestion evidence. Do not claim model quality from this 20-update smoke.
