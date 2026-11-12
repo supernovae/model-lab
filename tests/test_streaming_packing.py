@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import os
@@ -15,7 +14,6 @@ from test_training import config
 
 from klab.data.conversations import RenderedConversation
 from klab.data.encoding import PreparationEncoder, validate_tokenizer_batch_limits
-from klab.data.local_stories import LICENSE, REVISION
 from klab.data.packing import _collect, _collect_streaming, prepare_data
 from klab.data.tokenizer import load_tokenizer
 
@@ -398,129 +396,6 @@ def test_token_cap_failure_does_not_acquire_subsequent_source_record(
     assert not (tmp_path / "train.npy").exists()
 
 
-def test_source_verified_before_cached_packing_is_reused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run = config(tmp_path)
-    tokenizer = load_tokenizer(run.tokenizer.path)
-    train = [f"The fox explored grove number {n}." for n in range(15)]
-    validation = [f"The fox rested in meadow number {n}." for n in range(15)]
-    snapshot = {
-        "splits": {
-            "train": {"count": len(train), "sha256": "original"},
-            "validation": {"count": len(validation), "sha256": "original"},
-        }
-    }
-    monkeypatch.setattr("klab.data.packing.verify_snapshot", lambda _cfg: snapshot)
-    monkeypatch.setattr(
-        "klab.data.packing._source_documents",
-        lambda _cfg, split, **_kwargs: (
-            RenderedConversation(text, ((0, len(text)),), "all_tokens")
-            for text in (train if split == "train" else validation)
-        ),
-    )
-    dataset = run.dataset.model_copy(
-        update={
-            "source": "local_stories",
-            "train_max_documents": 15,
-            "validation_max_documents": 15,
-            "train_max_tokens": 10_000,
-            "validation_max_tokens": 10_000,
-        }
-    )
-    local = run.model_copy(update={"dataset": dataset})
-    first = prepare_data(local, tokenizer)
-    assert prepare_data(local, tokenizer).root == first.root
-    snapshot["splits"]["train"]["sha256"] = "changed"
-    assert prepare_data(local, tokenizer).root != first.root
-
-    def corrupted(_cfg):
-        raise ValueError("snapshot content digest mismatch")
-
-    monkeypatch.setattr("klab.data.packing.verify_snapshot", corrupted)
-    with pytest.raises(ValueError, match="snapshot content digest mismatch"):
-        prepare_data(local, tokenizer)
-
-
-def test_cached_local_stories_rejects_corrupted_saved_source(
-    tmp_path: Path,
-) -> None:
-    run = config(tmp_path)
-    source = tmp_path / "snapshot"
-    source.mkdir()
-    splits: dict[str, dict[str, int | str]] = {}
-    for split in ("train", "validation"):
-        stories = [
-            f"{split} story {number} has a happy ending." for number in range(15)
-        ]
-        path = source / f"{split}.jsonl"
-        path.write_bytes(
-            b"".join(
-                (json.dumps({"ordinal": number, "text": story}) + "\n").encode("utf-8")
-                for number, story in enumerate(stories)
-            )
-        )
-        splits[split] = {
-            "path": path.name,
-            "count": len(stories),
-            "text_bytes": sum(len(story.encode("utf-8")) for story in stories),
-            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            "content_sha256": hashlib.sha256(
-                b"".join(
-                    len(story.encode("utf-8")).to_bytes(8, "big")
-                    + story.encode("utf-8")
-                    for story in stories
-                )
-            ).hexdigest(),
-            "source_records_consumed": len(stories),
-            "duplicates": 0,
-            "overlap": 0,
-            "empty": 0,
-        }
-    (source / "excluded.jsonl").write_bytes(b"")
-    manifest_path = source / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "source": "roneneldan/TinyStories",
-                "revision": REVISION,
-                "license": LICENSE,
-                "splits": splits,
-                "excluded": {
-                    "path": "excluded.jsonl",
-                    "count": 0,
-                    "sha256": hashlib.sha256(b"").hexdigest(),
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    dataset = run.dataset.model_copy(
-        update={
-            "source": "local_stories",
-            "revision": REVISION,
-            "license": LICENSE,
-            "train_path": source / "train.jsonl",
-            "validation_path": source / "validation.jsonl",
-            "source_manifest_path": manifest_path,
-            "train_max_documents": 15,
-            "validation_max_documents": 15,
-            "train_max_tokens": 10_000,
-            "validation_max_tokens": 10_000,
-        }
-    )
-    local = run.model_copy(update={"dataset": dataset})
-    tokenizer = load_tokenizer(run.tokenizer.path)
-    cached = prepare_data(local, tokenizer)
-    assert cached.manifest["train"]["retained_documents"] == 15
-    assert prepare_data(local, tokenizer).root == cached.root
-    train_path = source / "train.jsonl"
-    train_path.write_bytes(train_path.read_bytes().replace(b"happy", b"quiet", 1))
-    with pytest.raises(ValueError, match="snapshot content or digest mismatch"):
-        prepare_data(local, tokenizer)
-
-
 def test_empty_records_resume_in_order_without_encoding_or_overconsuming(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -851,9 +726,15 @@ def test_worker_adoption_refuses_changed_raw_bytes(tmp_path: Path):
         assert not list(owner.root.glob("*.receipt.json"))
 
 
-@pytest.mark.parametrize("model_change", [{"dropout": 0.1}, {"byte_fallback": True}])
+@pytest.mark.parametrize(
+    ("model_change", "reason"),
+    [
+        ({"dropout": 0.1}, "BPE dropout is enabled"),
+        ({"byte_fallback": True}, "byte fallback is enabled"),
+    ],
+)
 def test_unsafe_parallel_tokenizer_uses_reported_serial_fallback(
-    tmp_path: Path, monkeypatch, model_change
+    tmp_path: Path, monkeypatch, capsys, model_change, reason
 ):
     from tokenizers import Tokenizer
 
@@ -898,3 +779,7 @@ def test_unsafe_parallel_tokenizer_uses_reported_serial_fallback(
     assert receipt["worker_pool"]["effective_workers"] == 1
     assert receipt["worker_pool"]["fallback"] == "tokenizer_not_parallel_eligible"
     assert prepared.manifest["train"]["retained_documents"] == 1
+    # The slower route is announced with its cause, not only recorded.
+    assert f"one worker and without the reusable token store, because {reason}" in (
+        capsys.readouterr().err
+    )

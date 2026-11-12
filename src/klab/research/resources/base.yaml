@@ -34,7 +34,8 @@ attention:
 tokenizer:
   path: artifacts/tokenizer/tokenizer.json
 dataset:
-  source: chat_recall
+  source: synthetic
+  synthetic_task: chat_recall
   revision: null
   dataset_config: null
   cache_dir: artifacts/data

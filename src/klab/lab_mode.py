@@ -719,7 +719,6 @@ def run_try(
 
     from klab.config.loading import load_config
     from klab.config.models import RunSeed
-    from klab.data.legacy import require_current_dataset
     from klab.derivation import _config, _delta, derive_config
     from klab.documents import read_document
     from klab.experiments.compiler import patchable_config
@@ -834,7 +833,6 @@ def run_try(
             )
             context.check_cancel()
             candidate = read_candidate(candidate_path)
-            require_current_dataset(load_config(baseline_path).dataset)
             baseline_file = baseline_path
             if seed is not None:
                 baseline_file = try_dir / "baseline.yaml"
@@ -860,7 +858,6 @@ def run_try(
             cand_config = _with_backend(
                 _with_runs_dir(load_config(candidate_file), runs), backend
             )
-            require_current_dataset(cand_config.dataset)
             delta = _delta(
                 _config(
                     patchable_config(load_config(baseline_file)), baseline_file.parent

@@ -112,26 +112,6 @@ example. Acquisition can download substantial bytes; it is separate from trying
 an already retained checkpoint. Do not repeat acquisition or preparation merely
 to open chat or start the server.
 
-The retired `tinystories` and `local_stories` authoring forms remain readable for
-historical verification and inference. New execution must use the supported
-snapshot flow. `data migrate` writes a new identity; it does not repair an old
-run in place. To import an existing legacy snapshot, use its authenticated
-manifest and a fresh output directory:
-
-```sh
-klab data migrate /path/to/legacy/snapshot/manifest.json \
-  --kind snapshot --output "$KLAB_WORK_DIR/imported-snapshot-1" --json
-```
-
-This preserves the original evidence and writes a generic snapshot plus a new
-dataset binding. Direct-prefix migration from an old run config instead requires
-an explicit resource policy and `--accept-policy-change`; its output remains
-pending until the new source is locked and acquired. Follow
-[legacy migration](datasets.md#legacy-input-migration), review its receipt and
-rebuild/verify downstream inputs for new execution. Neither migration route
-proves that old and new training inputs or results are interchangeable. A
-verified historical checkpoint keeps using its original run-owned assets.
-
 These three locations serve different purposes:
 
 | Location | What it provides |

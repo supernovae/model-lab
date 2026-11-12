@@ -45,7 +45,11 @@ def _result(
             "memory_table_size": 0 if memory == "none" else 31,
             "hidden_dim": 64,
         },
-        "dataset": {"cache_dir": path, "source": "chat_recall"},
+        "dataset": {
+            "cache_dir": path,
+            "source": "synthetic",
+            "synthetic_task": "chat_recall",
+        },
         "tokenizer": {"path": f"{path}/tokenizer.json"},
         "training": {"max_steps": 12},
         "logging": {"root_dir": path},

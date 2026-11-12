@@ -11,7 +11,10 @@ model:
 tokenizer:
   path: ../artifacts/tokenizer_8k/tokenizer.json
 dataset:
-  source: tinystories
+  source: huggingface
+  dataset_id: roneneldan/TinyStories
+  validation_split: validation
+  license: CDLA-Sharing-1.0
   revision: f54c09fd23315a6f9c86f9dc80f725de7d8f9c64
   cache_dir: ../artifacts/data
   train_max_documents: 20000

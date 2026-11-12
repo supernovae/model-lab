@@ -1,0 +1,46 @@
+schema_version: 2
+name: build-local-text
+seed: 42
+model:
+  vocab_size: 384
+  hidden_dim: 64
+  num_layers: 2
+  num_heads: 2
+  ffn_dim: 192
+  max_seq_len: 64
+tokenizer:
+  path: work/tokenizer/tokenizer.json
+dataset:
+  source: local_text
+  license: CC0-1.0 (example sentences written for this repository)
+  train_path: corpus/train.jsonl
+  validation_path: corpus/validation.jsonl
+  cache_dir: work/data
+  train_max_documents: 600
+  validation_max_documents: 80
+  train_max_tokens: 65536
+  validation_max_tokens: 8192
+training:
+  seq_len: 64
+  max_steps: 200
+  max_tokens: 102400
+  micro_batch_size: 8
+  gradient_accumulation: 1
+optimizer:
+  name: adamw
+  peak: 0.003
+  floor: 0.0003
+  warmup_steps: 10
+  weight_decay: 0.1
+evaluation:
+  every_steps: 50
+  max_batches: 4
+checkpoint:
+  every_steps: 100
+logging:
+  root_dir: work/runs
+  every_steps: 10
+runtime:
+  engine: pytorch
+  backend: cpu
+  precision: fp32

@@ -275,12 +275,13 @@ def parametric_binding(loaded: Any, *, reference: bool = False) -> dict[str, Any
         )
     dataset = getattr(getattr(loaded, "config", None), "dataset", None)
     source = getattr(dataset, "source", None)
+    task = getattr(dataset, "synthetic_task", None)
     if source is None:
         raise ProbeUnsupported(
             "no dataset provenance in the run config: cannot tell which facts "
             "were trained"
         )
-    if source != "withheld_facts":
+    if (source, task) != ("synthetic", "withheld_facts"):
         raise ProbeInapplicable(
             f"inapplicable: the run trained on {source}, not withheld_facts "
             "(no facts manifest to bind)"
@@ -299,10 +300,11 @@ def parametric_binding(loaded: Any, *, reference: bool = False) -> dict[str, Any
                 "the run's prepared-data provenance (data/manifest.json) is "
                 "missing or unreadable: cannot bind the facts manifest"
             ) from None
-        if (prepared.get("source"), prepared.get("synthetic_seed")) != (
-            source,
-            seed,
-        ):
+        if (
+            prepared.get("source"),
+            prepared.get("synthetic_task"),
+            prepared.get("synthetic_seed"),
+        ) != (source, task, seed):
             raise ProbeUnsupported(
                 "the run's prepared data does not match its config "
                 f"(prepared {prepared.get('source')} seed "

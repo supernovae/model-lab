@@ -21,7 +21,6 @@ from klab.batch_calibration import calibrate_batch
 from klab.config.loading import load_config, load_tokenizer_config
 from klab.config.migrate import migrate_file
 from klab.dashboard.stores import configured_stores, parse_run_store
-from klab.data.bakeoff import bakeoff
 from klab.data.encoding import (
     TOKENIZER_BATCH_DOCUMENTS,
     TOKENIZER_BATCH_SOURCE_BYTES,
@@ -749,11 +748,6 @@ def _runtime_probe(args: argparse.Namespace) -> None:
     print(json.dumps(result, indent=2 if args.json else None, sort_keys=True))
 
 
-def _data_bakeoff(args: argparse.Namespace) -> None:
-    config = load_config(Path(args.config))
-    print(bakeoff(config.dataset, Path(args.output)))
-
-
 def _data_prepare(args: argparse.Namespace) -> None:
     config = load_config(Path(args.config))
     if config.dataset.source != "local_token_mixture":
@@ -839,11 +833,9 @@ def _prepared_input_summary(
 
 
 def _data_prepared_inputs(args: argparse.Namespace) -> None:
-    from klab.data.legacy import require_current_dataset
     from klab.staging import materialize_prepared_inputs, verify_prepared_inputs
 
     config = load_config(Path(args.config))
-    require_current_dataset(config.dataset)
     root = Path(args.output if args.inputs_command == "publish" else args.bundle)
     if args.inputs_command == "publish":
         materialize_prepared_inputs(
@@ -895,10 +887,6 @@ def _stage(args: argparse.Namespace) -> None:
         resolve_work_dir(args.work_dir), cold=args.cold_verify
     )
     config = load_config(Path(args.config))
-    if args.through != "inspect":
-        from klab.data.legacy import require_current_dataset
-
-        require_current_dataset(config.dataset)
     if args.prepared_inputs is not None:
         from klab.experiments.artifacts import _safe_path
         from klab.staging import verify_prepared_inputs
@@ -2897,18 +2885,23 @@ def _explore(args: argparse.Namespace) -> None:
     print("  open the dashboard's Explorer page to see it: klab dashboard")
 
 
-# Help groups: lab-mode fast path first; release/full-provenance last. Every
-# registered command appears exactly once (see tests/test_lab_mode.py).
+# Help groups: building a model first, then the lab-mode comparison loop;
+# release/full-provenance last. Every registered command appears exactly once
+# (see tests/test_lab_mode.py).
+BUILD_COMMANDS = (
+    "inspect",
+    "tokenizer",
+    "data",
+    "train",
+    "generate",
+)
 FAST_PATH_COMMANDS = (
     "try",
     "probe",
     "report",
     "compare",
     "explore",
-    "inspect",
-    "train",
     "eval",
-    "generate",
     "chat",
     "dashboard",
     "readiness",
@@ -2947,8 +2940,8 @@ _FALLBACK_HELP = {
     "checkpoint": "Inspect or verify checkpoints",
     "workspace": "Storage preflight and cleanup plans",
     "runtime": "Runtime probes and status",
-    "tokenizer": "Train or verify tokenizers",
-    "data": "Prepare, verify and inspect training data",
+    "tokenizer": "Train or verify a tokenizer on your data",
+    "data": "Prepare, verify and inspect training data (data prepare CONFIG)",
     "facts": "Synthetic fact manifests and recall evaluation",
     "engram": "Export, inspect and pack Engram memory",
     "stage": "Pilot a config through staged gates",
@@ -2972,10 +2965,12 @@ def _group_command_help(
     tools = [
         name
         for name in names
-        if name not in FAST_PATH_COMMANDS and name not in RELEASE_COMMANDS
+        if name not in (*BUILD_COMMANDS, *FAST_PATH_COMMANDS, *RELEASE_COMMANDS)
     ]
     missing = [
-        name for name in (*FAST_PATH_COMMANDS, *RELEASE_COMMANDS) if name not in names
+        name
+        for name in (*BUILD_COMMANDS, *FAST_PATH_COMMANDS, *RELEASE_COMMANDS)
+        if name not in names
     ]
     if missing:
         raise AssertionError(f"help groups name unregistered commands: {missing}")
@@ -2988,15 +2983,20 @@ def _group_command_help(
     parser.epilog = "\n\n".join(
         (
             section(
-                "Fast path (lab mode: YAML delta -> scored comparison):",
+                "Build (your text -> tokenizer -> prepared data -> model):",
+                BUILD_COMMANDS,
+            ),
+            section(
+                "Compare (lab mode: YAML delta -> scored comparison):",
                 FAST_PATH_COMMANDS,
             ),
-            section("Data, models and diagnostics:", tools),
+            section("Models and diagnostics:", tools),
             section(
                 "Advanced / release (full provenance, approvals, campaigns):",
                 RELEASE_COMMANDS,
             ),
-            "Start with: klab try DELTA.yaml --vs BASELINE.yaml",
+            "Build a model: klab train CONFIG.yaml (docs/build.md)",
+            "Test a change: klab try DELTA.yaml --vs BASELINE.yaml",
         )
     )
     parser.formatter_class = argparse.RawDescriptionHelpFormatter
@@ -3352,16 +3352,10 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
 
     register_benchmark(data_commands)
     from klab.data.coverage import register_parser as register_coverage
-    from klab.data.legacy import register_parser as register_data_migration
     from klab.data.source_cli import register_parser as register_dataset_sources
 
     register_dataset_sources(data_commands)
     register_coverage(data_commands)
-    register_data_migration(data_commands)
-    data_bakeoff = data_commands.add_parser("bakeoff")
-    data_bakeoff.add_argument("config")
-    data_bakeoff.add_argument("output", type=Path)
-    data_bakeoff.set_defaults(handler=_data_bakeoff)
     facts = commands.add_parser("facts")
     fact_commands = facts.add_subparsers(dest="fact_command", required=True)
     manifest = fact_commands.add_parser("manifest")
@@ -4706,19 +4700,6 @@ def main() -> None:
 
                 argument_error(args.campaign_command, str(error))
             raise
-        from klab.data.legacy import require_current_dataset
-
-        if (
-            args.command in {"train", "stage"}
-            or _is_config_submission(args)
-            or (
-                args.command == "data"
-                and args.data_command in {"prepare", "bakeoff", "prepared-inputs"}
-            )
-        ):
-            require_current_dataset(load_config(Path(args.config)).dataset)
-        elif args.command == "tokenizer" and args.tokenizer_command == "train":
-            require_current_dataset(load_tokenizer_config(Path(args.config)).dataset)
         _prepare_runtime_command(args)
     except (ValueError, OSError) as error:
         _lab_lookup_failure(args, error)

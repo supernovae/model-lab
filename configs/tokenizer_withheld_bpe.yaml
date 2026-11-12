@@ -4,7 +4,8 @@ min_frequency: 1
 max_documents: 6
 output_dir: ../artifacts/tokenizer_withheld_bpe
 dataset:
-  source: withheld_facts
+  source: synthetic
+  synthetic_task: withheld_facts
   cache_dir: ../artifacts/data
   train_max_documents: 6
   validation_max_documents: 6

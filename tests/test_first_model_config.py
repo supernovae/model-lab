@@ -21,7 +21,8 @@ def test_first_model_configs_share_one_model_and_eval_protocol() -> None:
     assert cuda.tokenizer == cpu.tokenizer
     assert eval_protocol(cuda) == eval_protocol(cpu)
     assert eval_protocol(cuda) == {"seq_len": 512, "batch_size": 16, "max_batches": 32}
-    assert cuda.dataset.source == "fineweb_edu"
+    assert cuda.dataset.source == "huggingface"
+    assert cuda.dataset.dataset_id == "HuggingFaceFW/fineweb-edu"
     assert cuda.dataset.revision == FINEWEB_EDU_REVISION
     assert inspection_report(cuda)["total"] == 17_308_032
 

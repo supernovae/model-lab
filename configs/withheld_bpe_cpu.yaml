@@ -15,7 +15,8 @@ model:
 tokenizer:
   path: ../artifacts/tokenizer_withheld_bpe/tokenizer.json
 dataset:
-  source: withheld_facts
+  source: synthetic
+  synthetic_task: withheld_facts
   cache_dir: ../artifacts/data
   train_max_documents: 6
   validation_max_documents: 6

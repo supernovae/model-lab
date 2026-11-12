@@ -28,7 +28,7 @@ from klab.corpus.acquisition import (
     verify_snapshot,
 )
 from klab.corpus.project import SourceDeclaration, load_project
-from klab.data import datasets, local_stories
+from klab.data import datasets
 from klab.research import pythia
 
 
@@ -327,7 +327,7 @@ def test_http_hub_denial_redacts_token(
 
 
 @pytest.mark.parametrize("status", [401, 403])
-def test_streaming_denial_at_iteration_and_tinystories_snapshot(
+def test_streaming_denial_at_iteration_is_sanitized(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int
 ) -> None:
     token = "DO-NOT-LOG-stream-token"
@@ -340,7 +340,9 @@ def test_streaming_denial_at_iteration_and_tinystories_snapshot(
 
     monkeypatch.setattr(datasets, "load_dataset", reject)
     config = DatasetConfig(
-        source="tinystories",
+        source="huggingface",
+        dataset_id="example/corpus",
+        license="CC0-1.0",
         revision="a" * 40,
         cache_dir=tmp_path,
         train_max_documents=1,
@@ -351,11 +353,6 @@ def test_streaming_denial_at_iteration_and_tinystories_snapshot(
     with pytest.raises(RuntimeError, match="Hugging Face access denied") as error:
         list(datasets.iter_documents(config, "train"))
     assert token not in str(error.value)
-    monkeypatch.setattr("datasets.load_dataset", reject)
-    with pytest.raises(RuntimeError, match="Hugging Face access denied") as error:
-        local_stories.snapshot(tmp_path / "stories", train_count=1, validation_count=1)
-    assert token not in str(error.value)
-    assert not (tmp_path / "stories").exists()
 
 
 @pytest.mark.parametrize("status", [401, 403, "gated"])

@@ -2217,10 +2217,6 @@ class CampaignEngine:
                     lock = resolve_plan(
                         plan, source, prepared=prepared, **self._verification()
                     )
-                from klab.data.legacy import require_current_dataset
-
-                for cell in lock.cells:
-                    require_current_dataset(cell.config.dataset)
                 self._check_lock(stage, rows, lock)
                 path = publish_lock(lock, workspace)
                 lock = open_lock(path, **self._verification())
@@ -2247,10 +2243,6 @@ class CampaignEngine:
             cells = [cell for cell in lock.cells if cell.id in selected]
             if len(cells) != len(selected):
                 raise ValueError("runtime references an absent locked cell")
-            from klab.data.legacy import require_current_dataset
-
-            for cell in cells:
-                require_current_dataset(cell.config.dataset)
             profile = self.runtime_profile if stage.profile_id is not None else None
             if stage.worker is not None and self.runtime_profile is not None:
                 return self._result(
@@ -2408,9 +2400,6 @@ class CampaignEngine:
                     "LOST_SUBMISSION: refusing to replace prior run attempt"
                 )
             if not matches:
-                from klab.data.legacy import require_current_dataset
-
-                require_current_dataset(cell.config.dataset)
                 try:
                     binding = self._runtime_binding(
                         rows, stage.runtime, lock, cell, controller
@@ -2591,9 +2580,6 @@ class CampaignEngine:
                 stage.backend,
                 **self._verification(),
             )
-            from klab.data.legacy import require_current_dataset
-
-            require_current_dataset(config.dataset)
             authorization = None
             if stage.runtime is not None:
                 run_stage = self.stages[collect.run]
@@ -2684,9 +2670,6 @@ class CampaignEngine:
                 stage.backend,
                 **self._verification(),
             )
-            from klab.data.legacy import require_current_dataset
-
-            require_current_dataset(config.dataset)
             run_stage = self.stages[collect.run]
             cell = next(cell for cell in lock.cells if cell.id == run_stage.cell)
             workspace = Path(rows[collect.plan]["availability"]["workspace"])

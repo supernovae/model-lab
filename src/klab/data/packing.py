@@ -40,7 +40,6 @@ from klab.data.encoding import (
     PreparationEncoder,
     validate_tokenizer_batch_limits,
 )
-from klab.data.local_stories import verify_snapshot
 from klab.data.preparation_chunks import PreparationChunks
 from klab.data.preparation_telemetry import PreparationTelemetry
 from klab.data.preparation_workers import (
@@ -1248,21 +1247,37 @@ def _collect_streaming(
     return stats
 
 
-def _documents_encode_independently(tokenizer: Tokenizer) -> bool:
-    """Whether batched, parallel and one-at-a-time encoding give the same IDs."""
+def _serial_encoding_reason(tokenizer: Tokenizer) -> str | None:
+    """Why batched, parallel and one-at-a-time encoding could give different IDs."""
     tokenizer_spec = json.loads(tokenizer.to_str())
     bpe = tokenizer_spec.get("model", {})
-    return (
-        bpe.get("type") == "BPE"
-        and bpe.get("dropout") in (None, 0.0)
-        and not bpe.get("byte_fallback", False)
-        and bpe.get("continuing_subword_prefix") in (None, "")
-        and bpe.get("end_of_word_suffix") in (None, "")
-        and tokenizer_spec.get("pre_tokenizer", {}).get("type") == "ByteLevel"
-        and tokenizer_spec.get("normalizer") is None
-        and tokenizer_spec.get("pre_tokenizer", {}).get("add_prefix_space") is False
-        and tokenizer_spec.get("padding") is None
+    pre_tokenizer = tokenizer_spec.get("pre_tokenizer") or {}
+    checks = (
+        (bpe.get("type") == "BPE", "the model is not BPE"),
+        (bpe.get("dropout") in (None, 0.0), "BPE dropout is enabled"),
+        (not bpe.get("byte_fallback", False), "byte fallback is enabled"),
+        (
+            bpe.get("continuing_subword_prefix") in (None, "")
+            and bpe.get("end_of_word_suffix") in (None, ""),
+            "a subword prefix or word suffix is set",
+        ),
+        (
+            pre_tokenizer.get("type") == "ByteLevel",
+            "the pre-tokenizer is not ByteLevel",
+        ),
+        (tokenizer_spec.get("normalizer") is None, "a normalizer is set"),
+        (
+            pre_tokenizer.get("add_prefix_space") is False,
+            "ByteLevel add_prefix_space is not false",
+        ),
+        (tokenizer_spec.get("padding") is None, "padding is enabled"),
     )
+    return next((reason for passed, reason in checks if not passed), None)
+
+
+def _documents_encode_independently(tokenizer: Tokenizer) -> bool:
+    """Whether batched, parallel and one-at-a-time encoding give the same IDs."""
+    return _serial_encoding_reason(tokenizer) is None
 
 
 # Staging directories of the token-store path, removed if preparation fails.
@@ -2025,7 +2040,7 @@ def _prepare_data(
             tokenizer_batch_documents, tokenizer_batch_source_bytes
         )
     )
-    streaming = config.dataset.source in {"local_stories", "local_text", "snapshot"}
+    streaming = config.dataset.source in {"local_text", "snapshot"}
     if (
         streaming
         and resource_envelope is not None
@@ -2041,11 +2056,6 @@ def _prepare_data(
             workspace=config.dataset.cache_dir,
             rss_bytes=telemetry.snapshot()["current_rss_bytes"],
         )
-    local_stories = (
-        verify_snapshot(config.dataset)
-        if config.dataset.source == "local_stories"
-        else None
-    )
     generic_snapshot = None
     token_mixture = None
     if config.dataset.source == "local_token_mixture":
@@ -2080,7 +2090,6 @@ def _prepare_data(
             raise ValueError(
                 "supplied tokenizer differs from verified snapshot tokenizer"
             )
-    selected_snapshot = generic_snapshot or local_stories
     corpus_export = (
         verify_release_export(
             config.dataset, proof_store=proof_store, verification_mode=verification_mode
@@ -2132,15 +2141,6 @@ def _prepare_data(
             else {}
         ),
         **({"corpus_export": corpus_export} if corpus_export is not None else {}),
-        **(
-            {
-                "local_stories_source_sha256": hashlib.sha256(
-                    canonical_json(local_stories)
-                ).hexdigest()
-            }
-            if local_stories is not None
-            else {}
-        ),
         **(
             {
                 "snapshot_source_sha256": hashlib.sha256(
@@ -2460,11 +2460,16 @@ def _prepare_data(
         validation = np.load(
             temporary_root / "validation.npy", mmap_mode="r", allow_pickle=False
         )
-    elif config.dataset.source in {"local_stories", "local_text", "snapshot"}:
-        if config.dataset.source == "local_stories":
-            assert local_stories is not None
+    elif config.dataset.source in {"local_text", "snapshot"}:
         assert chunks_owner is not None
-        parallel_supported = _documents_encode_independently(tokenizer)
+        serial_reason = _serial_encoding_reason(tokenizer)
+        parallel_supported = serial_reason is None
+        if serial_reason is not None:
+            print(
+                "klab: tokenizing with one worker and without the reusable "
+                f"token store, because {serial_reason}",
+                file=sys.stderr,
+            )
         results = {}
         with (
             chunks_owner,
@@ -2487,8 +2492,8 @@ def _prepare_data(
                 measured = PreparationTelemetry(temporary_root)
                 chunks.telemetry = measured
                 count = getattr(config.dataset, f"{split}_max_documents")
-                if selected_snapshot is not None:
-                    count = min(count, selected_snapshot["splits"][split]["count"])
+                if generic_snapshot is not None:
+                    count = min(count, generic_snapshot["splits"][split]["count"])
                 diagnostics = {}
                 if workers.count > 1:
                     eos = tokenizer.token_to_id("<eos>")
@@ -2620,7 +2625,6 @@ def _prepare_data(
             if values is not None:
                 proofs[name] = _atomic_array(temporary_root / name, values)
     if config.dataset.source not in {
-        "local_stories",
         "local_text",
         "snapshot",
         "local_token_mixture",
@@ -2645,17 +2649,9 @@ def _prepare_data(
                 temporary_root / "validation_byte_addresses.npy", validation_byte
             )
     attributions = {
-        "tinystories": {
-            "license": "CDLA-Sharing-1.0",
-            "source_attribution": "roneneldan/TinyStories",
-        },
-        "fineweb_edu": {
-            "license": "ODC-By-1.0; Common Crawl Terms of Use",
-            "source_attribution": "HuggingFaceFW/fineweb-edu",
-        },
-        "cosmopedia": {
-            "license": "Apache-2.0",
-            "source_attribution": "HuggingFaceTB/cosmopedia dataset card",
+        "huggingface": {
+            "license": config.dataset.license,
+            "source_attribution": f"{config.dataset.dataset_id}@{config.dataset.revision}",
         },
         "local_chat": {
             "license": config.dataset.license,
@@ -2673,29 +2669,11 @@ def _prepare_data(
             "license": config.dataset.license,
             "source_attribution": "declarative pinned dataset snapshot",
         },
-        "local_stories": {
-            "license": "CDLA-Sharing-1.0",
-            "source_attribution": "roneneldan/TinyStories pinned local snapshot",
-        },
         "synthetic": {
             "license": "synthetic fixture",
-            "source_attribution": "klab synthetic",
-        },
-        "instruction_reference": {
-            "license": "synthetic fixture",
-            "source_attribution": "klab instruction_reference",
-        },
-        "chat_recall": {
-            "license": "synthetic fixture",
-            "source_attribution": "klab chat_recall",
-        },
-        "engram_recall": {
-            "license": "synthetic fixture",
-            "source_attribution": "klab engram_recall",
-        },
-        "withheld_facts": {
-            "license": "project fixture",
-            "source_attribution": "klab withheld_facts",
+            "source_attribution": "klab synthetic"
+            if config.dataset.synthetic_task == "stories"
+            else f"klab {config.dataset.synthetic_task}",
         },
     }
 
@@ -2945,7 +2923,7 @@ def prepare_data(
     )
     if resource_envelope is not None:
         if (
-            config.dataset.source in {"local_stories", "local_text", "snapshot"}
+            config.dataset.source in {"local_text", "snapshot"}
             and not resource_envelope.spill_to_disk
         ):
             raise ValueError(

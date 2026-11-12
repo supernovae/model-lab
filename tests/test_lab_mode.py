@@ -19,7 +19,12 @@ import pytest
 import yaml
 from lab_fixtures import write_smoke_inputs
 
-from klab.cli.main import FAST_PATH_COMMANDS, RELEASE_COMMANDS, build_parser
+from klab.cli.main import (
+    BUILD_COMMANDS,
+    FAST_PATH_COMMANDS,
+    RELEASE_COMMANDS,
+    build_parser,
+)
 from klab.lab_mode import (
     EXIT_INTERRUPTED,
     EXIT_NOT_COMPARABLE,
@@ -316,9 +321,9 @@ def test_noop_and_malformed_deltas_are_refused(lab: tuple[Path, Path]) -> None:
     assert read_candidate(baseline).kind == "config"
 
 
-def test_help_lists_fast_path_first_and_every_command_once() -> None:
+def test_help_lists_build_first_and_every_command_once() -> None:
     parser = build_parser()
-    text = parser.format_help()
+    parser.format_help()
     epilog = parser.epilog or ""
     (commands,) = [action for action in parser._actions if action.dest == "command"]
     names = set(commands.choices)
@@ -329,9 +334,11 @@ def test_help_lists_fast_path_first_and_every_command_once() -> None:
         if line.startswith("  ") and line.strip()
     ]
     assert sorted(listed) == sorted(names)
-    assert listed[: len(FAST_PATH_COMMANDS)] == list(FAST_PATH_COMMANDS)
+    assert listed[: len(BUILD_COMMANDS)] == list(BUILD_COMMANDS)
+    assert listed[len(BUILD_COMMANDS) :][: len(FAST_PATH_COMMANDS)] == list(
+        FAST_PATH_COMMANDS
+    )
     assert listed[-len(RELEASE_COMMANDS) :] == list(RELEASE_COMMANDS)
-    assert text.index("Fast path") < text.index("Advanced / release")
 
 
 def test_cpu_smoke_loop_yaml_to_report_within_budget(tmp_path: Path) -> None:

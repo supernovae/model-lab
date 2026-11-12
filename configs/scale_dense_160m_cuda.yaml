@@ -11,7 +11,9 @@ model:
 tokenizer:
   path: ../klab-work/experiments/dense-scale/tokenizer/tokenizer.json
 dataset:
-  source: fineweb_edu
+  source: huggingface
+  dataset_id: HuggingFaceFW/fineweb-edu
+  license: ODC-By-1.0; Common Crawl Terms of Use
   revision: 87f09149ef4734204d70ed1d046ddc9ca3f2b8f9
   dataset_config: sample-10BT
   cache_dir: ../klab-work/experiments/dense-scale/data

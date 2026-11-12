@@ -224,9 +224,9 @@ config from the preparation stage and rebases the evaluation-suite reference
 without changing its content identity. Ordinary standalone binding still requires
 suite paths to resolve consistently between template and output locations.
 
-Historical `tinystories` and `local_stories` artifacts remain verifiable, but
-new authoring/execution requires [write-new migration](datasets.md#legacy-input-migration).
-Do not rewrite old manifests, source paths or receipts to claim a new identity.
+The earlier `tinystories` and `local_stories` sources are no longer accepted;
+declare a [snapshot](datasets.md#source-kinds) instead. Do not rewrite old
+manifests, source paths or receipts to claim a new identity.
 
 ### Forge worker provenance
 

@@ -34,7 +34,6 @@ def verify_configured_tokenizer(config_path: Path) -> dict[str, object]:
         and dataset.source
         not in {
             "snapshot",
-            "local_stories",
             "local_token_mixture",
         }
     ):

@@ -62,12 +62,7 @@ def _bind_config(manifest: dict, config: RunConfig) -> dict | None:
         "local_chat_source": _local_chat_identity(config.dataset),
     }
     snapshot = None
-    if config.dataset.source == "local_stories":
-        from klab.data.local_stories import verify_snapshot
-
-        snapshot = verify_snapshot(config.dataset)
-        expected["local_stories_source_sha256"] = canonical_digest(snapshot)
-    elif config.dataset.source == "snapshot":
+    if config.dataset.source == "snapshot":
         from klab.data.sources import verify_snapshot
 
         snapshot = verify_snapshot(config.dataset)
@@ -251,9 +246,6 @@ def derive_budget(
         raise FileExistsError(f"budget output already exists: {output}")
     config_path = Path(config_path).absolute()
     config = load_config(config_path)
-    from klab.data.legacy import require_current_dataset
-
-    require_current_dataset(config.dataset)
     if (
         config.dataset.allocation_manifest_path is not None
         or config.training.neural_loss_weight != 1

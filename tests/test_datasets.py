@@ -24,11 +24,14 @@ class Stream:
         return iter(self.records[self.skipped :])
 
 
-def remote_config(tmp_path: Path, source: str) -> DatasetConfig:
+def remote_config(tmp_path: Path, **overrides: object) -> DatasetConfig:
     return DatasetConfig(
-        source=source,
+        source="huggingface",
+        dataset_id="example/corpus",
+        license="CC0-1.0",
         revision="pinned-revision",
         dataset_config="sample",
+        **overrides,
         cache_dir=tmp_path,
         train_max_documents=2,
         validation_max_documents=1,
@@ -37,9 +40,8 @@ def remote_config(tmp_path: Path, source: str) -> DatasetConfig:
     )
 
 
-@pytest.mark.parametrize("source", ("fineweb_edu", "cosmopedia"))
-def test_train_only_remote_sources_use_disjoint_validation_prefix(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source: str
+def test_train_only_remote_source_uses_disjoint_validation_prefix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls: list[dict[str, object]] = []
 
@@ -48,11 +50,38 @@ def test_train_only_remote_sources_use_disjoint_validation_prefix(
         return Stream([{"text": "zero"}, {"text": "one"}, {"text": "two"}])
 
     monkeypatch.setattr(datasets, "load_dataset", load)
-    config = remote_config(tmp_path, source)
+    config = remote_config(tmp_path)
     assert list(datasets.iter_documents(config, "train")) == ["zero", "one", "two"]
     assert list(datasets.iter_documents(config, "validation")) == ["two"]
     assert all(call["split"] == "train" for call in calls)
     assert all(call["streaming"] is True for call in calls)
+    assert {(call["dataset_name"], call["name"]) for call in calls} == {
+        ("example/corpus", "sample")
+    }
+
+
+def test_remote_source_reads_named_splits_and_text_field(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    splits: list[object] = []
+
+    def load(dataset_name: str, **kwargs: object) -> Stream:
+        splits.append(kwargs["split"])
+        return Stream([{"body": "zero"}, {"body": "one"}])
+
+    monkeypatch.setattr(datasets, "load_dataset", load)
+    config = remote_config(
+        tmp_path, train_split="fit", validation_split="heldout", text_field="body"
+    )
+    assert list(datasets.iter_documents(config, "train")) == ["zero", "one"]
+    # A named validation split is read from its start, not after training.
+    assert list(datasets.iter_documents(config, "validation")) == ["zero", "one"]
+    assert splits == ["fit", "heldout"]
+    monkeypatch.setattr(
+        datasets, "load_dataset", lambda *_, **__: Stream([{"text": "wrong field"}])
+    )
+    with pytest.raises(ValueError, match="missing or non-string body"):
+        list(datasets.iter_documents(config, "train"))
 
 
 def test_instruction_reference_uses_plain_chat_transcripts() -> None:
@@ -77,7 +106,8 @@ def test_instruction_reference_uses_plain_chat_transcripts() -> None:
 
 def test_instruction_reference_is_available_as_a_dataset_source(tmp_path: Path) -> None:
     config = DatasetConfig(
-        source="instruction_reference",
+        source="synthetic",
+        synthetic_task="instruction_reference",
         cache_dir=tmp_path,
         train_max_documents=1,
         validation_max_documents=1,
@@ -92,7 +122,8 @@ def test_chat_recall_has_finite_held_out_validation_and_cyclic_train(
     tmp_path: Path,
 ) -> None:
     config = DatasetConfig(
-        source="chat_recall",
+        source="synthetic",
+        synthetic_task="chat_recall",
         cache_dir=tmp_path,
         train_max_documents=1,
         validation_max_documents=1,
@@ -157,7 +188,8 @@ def test_engram_recall_source_has_held_out_prompt_wording(tmp_path: Path) -> Non
     train_prompt, train_answer = recall_case(42, 0)
     held_out_prompt, held_out_answer = recall_case(42, 2_000_000)
     config = DatasetConfig(
-        source="engram_recall",
+        source="synthetic",
+        synthetic_task="engram_recall",
         cache_dir=tmp_path,
         train_max_documents=1,
         validation_max_documents=1,
@@ -172,14 +204,27 @@ def test_engram_recall_source_has_held_out_prompt_wording(tmp_path: Path) -> Non
     )
 
 
-def test_remote_sources_require_subset_and_revision(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="revision"):
-        DatasetConfig(
-            source="fineweb_edu",
-            dataset_config="sample",
-            cache_dir=tmp_path,
-            train_max_documents=1,
-            validation_max_documents=1,
-            train_max_tokens=1,
-            validation_max_tokens=1,
-        )
+def test_remote_source_requires_identity_revision_and_license(tmp_path: Path) -> None:
+    limits = {
+        "cache_dir": tmp_path,
+        "train_max_documents": 1,
+        "validation_max_documents": 1,
+        "train_max_tokens": 1,
+        "validation_max_tokens": 1,
+    }
+    complete = {
+        "source": "huggingface",
+        "dataset_id": "example/corpus",
+        "revision": "pinned-revision",
+        "license": "CC0-1.0",
+    }
+    DatasetConfig(**complete, **limits)
+    for missing in ("dataset_id", "revision", "license"):
+        declared = {key: value for key, value in complete.items() if key != missing}
+        with pytest.raises(ValueError, match=missing):
+            DatasetConfig(**declared, **limits)
+    # A named dataset is a recipe value, never a source kind.
+    with pytest.raises(ValueError, match="source"):
+        DatasetConfig(source="fineweb_edu", revision="pinned-revision", **limits)
+    with pytest.raises(ValueError, match="require source=huggingface"):
+        DatasetConfig(source="synthetic", dataset_id="example/corpus", **limits)

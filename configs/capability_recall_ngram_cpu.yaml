@@ -15,7 +15,8 @@ model:
 tokenizer:
   path: ../artifacts/tokenizer_smoke/tokenizer.json
 dataset:
-  source: engram_recall
+  source: synthetic
+  synthetic_task: engram_recall
   cache_dir: ../artifacts/data
   train_max_documents: 2000
   validation_max_documents: 200

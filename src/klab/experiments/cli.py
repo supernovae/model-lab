@@ -221,11 +221,9 @@ def _inspect_declaration(args: argparse.Namespace) -> None:
 
 def _prepare(args: argparse.Namespace) -> None:
     from klab.canonical import canonical_json
-    from klab.data.legacy import require_current_dataset
     from klab.experiments.prepare import prepare_plan
 
     plan, source = _declaration(args)
-    require_current_dataset(base_run_config(plan, source).dataset)
     from klab.recovery.provenance import declaration_preflight
     from klab.workdir import ensure_work_dir
 
@@ -281,11 +279,9 @@ def _prepare(args: argparse.Namespace) -> None:
 
 
 def _lock(args: argparse.Namespace) -> None:
-    from klab.data.legacy import require_current_dataset
     from klab.experiments.lock import publish_lock, resolve_plan
 
     plan, source = _declaration(args)
-    require_current_dataset(base_run_config(plan, source).dataset)
     workspace = _workspace(plan.id)
     resolved = resolve_plan(
         plan,
@@ -294,8 +290,6 @@ def _lock(args: argparse.Namespace) -> None:
         max_runs=args.max_runs,
         **_verification(args),
     )
-    for cell in resolved.cells:
-        require_current_dataset(cell.config.dataset)
     path = publish_lock(resolved, workspace, **_verification(args))
     _emit(
         args,
@@ -311,11 +305,8 @@ def _lock(args: argparse.Namespace) -> None:
 
 
 def _bind_inputs(args: argparse.Namespace) -> None:
-    from klab.config.loading import load_config
-    from klab.data.legacy import require_current_dataset
     from klab.experiments.direct_inputs import bind_direct_inputs
 
-    require_current_dataset(load_config(Path(args.run_config)).dataset)
     plan = bind_direct_inputs(
         Path(args.run_config),
         Path(args.template),
@@ -518,7 +509,6 @@ def _run_cells(locked: Any, args: argparse.Namespace) -> list[Any]:
 
 
 def _run(args: argparse.Namespace) -> None:
-    from klab.data.legacy import require_current_dataset
     from klab.experiments.binding import bind_runtime, open_runtime_binding
     from klab.experiments.lock import open_lock
     from klab.workers.controller import Controller
@@ -528,8 +518,6 @@ def _run(args: argparse.Namespace) -> None:
     locked = open_lock(Path(args.lock), **verification)
     _require_executable_profile(locked)
     selected = _run_cells(locked, args)
-    for cell in selected:
-        require_current_dataset(cell.config.dataset)
     from klab.recovery.provenance import declaration_preflight
 
     if not locked.evaluations and not locked.evaluation_suite:

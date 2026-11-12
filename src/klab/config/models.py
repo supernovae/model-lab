@@ -261,10 +261,7 @@ class TokenizerOrigin(StrictModel):
             self.mixture_declaration_sha256 is None
         ):
             raise ValueError("tokenizer origin mixture declaration requires its digest")
-        if self.dataset is not None and self.dataset.source not in {
-            "snapshot",
-            "local_stories",
-        }:
+        if self.dataset is not None and self.dataset.source != "snapshot":
             raise ValueError("explicit tokenizer origin requires a frozen snapshot")
         return self
 
@@ -278,20 +275,33 @@ class TokenizerConfig(StrictModel):
 
 class DatasetConfig(StrictModel):
     source: Literal[
-        "tinystories",
+        "local_text",
+        "local_chat",
+        "local_token_mixture",
+        "snapshot",
+        "huggingface",
         "synthetic",
+    ]
+    # Hugging Face dataset repository, for source=huggingface.
+    dataset_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    text_field: str = Field(
+        default="text", min_length=1, exclude_if=lambda value: value == "text"
+    )
+    train_split: str = Field(
+        default="train", min_length=1, exclude_if=lambda value: value == "train"
+    )
+    # Without a validation split, validation follows the training documents.
+    validation_split: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    # Built-in offline generator, for source=synthetic.
+    synthetic_task: Literal[
+        "stories",
         "instruction_reference",
         "chat_recall",
-        "local_chat",
-        "local_text",
-        "local_token_mixture",
-        "local_stories",
-        "snapshot",
-        "withheld_facts",
         "engram_recall",
-        "fineweb_edu",
-        "cosmopedia",
-    ]
+        "withheld_facts",
+    ] = Field(default="stories", exclude_if=lambda value: value == "stories")
     revision: str | None = None
     dataset_config: str | None = None
     cache_dir: Path
@@ -346,12 +356,25 @@ class DatasetConfig(StrictModel):
             raise ValueError(
                 "dataset.allocation_manifest_path requires source=local_chat"
             )
-        if self.source_manifest_path is not None and self.source not in {
-            "local_stories",
+        if self.source_manifest_path is not None and self.source != "snapshot":
+            raise ValueError("dataset.source_manifest_path requires source=snapshot")
+        if self.source != "synthetic" and self.synthetic_task != "stories":
+            raise ValueError("dataset.synthetic_task requires source=synthetic")
+        if self.dataset_config is not None and self.source not in {
+            "huggingface",
             "snapshot",
         }:
             raise ValueError(
-                "dataset.source_manifest_path requires source=local_stories or snapshot"
+                "dataset.dataset_config requires source=huggingface or snapshot"
+            )
+        if self.source != "huggingface" and (
+            self.dataset_id is not None
+            or self.validation_split is not None
+            or self.text_field != "text"
+            or self.train_split != "train"
+        ):
+            raise ValueError(
+                "dataset_id, text_field and split names require source=huggingface"
             )
         if (self.corpus_release_path is None) != (self.corpus_export_path is None):
             raise ValueError(
@@ -366,14 +389,8 @@ class DatasetConfig(StrictModel):
                 or any(char not in "0123456789abcdef" for char in self.revision)
             ):
                 raise ValueError("corpus export requires full SHA-256 dataset.revision")
-        if self.source in {"local_stories", "snapshot"}:
-            from klab.local_stories_pins import LICENSE, REVISION
-
-            if self.source == "local_stories" and (
-                self.revision != REVISION or self.license != LICENSE
-            ):
-                raise ValueError("local_stories requires pinned revision and license")
-            if self.source == "snapshot" and (
+        if self.source == "snapshot":
+            if (
                 not self.revision
                 or len(self.revision) not in {40, 64}
                 or any(char not in "0123456789abcdef" for char in self.revision)
@@ -403,16 +420,21 @@ class DatasetConfig(StrictModel):
                 self.validation_path.resolve(),
             }:
                 raise ValueError(
-                    f"{self.source} manifest must be separate from story files"
+                    f"{self.source} manifest must be separate from split files"
                 )
             return self
-        if (
-            self.source in {"tinystories", "fineweb_edu", "cosmopedia"}
-            and not self.revision
-        ):
-            raise ValueError("dataset.revision is required for remote datasets")
-        if self.source in {"fineweb_edu", "cosmopedia"} and not self.dataset_config:
-            raise ValueError("dataset.dataset_config is required for this source")
+        if self.source == "huggingface":
+            if not self.dataset_id or not self.dataset_id.strip():
+                raise ValueError("huggingface requires dataset.dataset_id")
+            if not self.revision:
+                raise ValueError("dataset.revision is required for remote datasets")
+            if not self.license or not self.license.strip():
+                raise ValueError(
+                    "huggingface requires explicit dataset.license provenance"
+                )
+            if self.train_path is not None or self.validation_path is not None:
+                raise ValueError("huggingface reads splits, not local paths")
+            return self
         if self.source in {"local_chat", "local_text", "local_token_mixture"}:
             if self.train_path is None or self.validation_path is None:
                 raise ValueError(
@@ -431,7 +453,7 @@ class DatasetConfig(StrictModel):
             for value in (self.train_path, self.validation_path, self.license)
         ):
             raise ValueError(
-                "train_path, validation_path and license are only for local_chat, local_text or local_stories"
+                "train_path, validation_path and license are only for local, snapshot or huggingface sources"
             )
         return self
 
@@ -947,7 +969,6 @@ class RunConfig(StrictModel):
             )
         if self.tokenizer.origin is not None and self.dataset.source not in {
             "snapshot",
-            "local_stories",
             "local_text",
             "local_chat",
         }:

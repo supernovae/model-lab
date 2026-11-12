@@ -380,7 +380,13 @@ class ProfilesFile(_Versioned):
 
 
 class DatasetProfile(StrictModel):
-    source: Literal["chat_recall", "tinystories", "fineweb_edu", "snapshot"]
+    source: Literal["synthetic", "huggingface", "snapshot"]
+    synthetic_task: StrictStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    dataset_id: StrictStr | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     source_declaration: StrictStr | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -427,8 +433,10 @@ class DatasetProfile(StrictModel):
             )
         ):
             raise ValueError("dataset and tokenizer limits must be positive")
-        if self.source == "fineweb_edu" and not self.dataset_config:
-            raise ValueError("fineweb_edu requires dataset_config")
+        if (self.source == "huggingface") != (self.dataset_id is not None):
+            raise ValueError("huggingface profiles require exactly one dataset_id")
+        if self.source != "synthetic" and self.synthetic_task is not None:
+            raise ValueError("synthetic_task requires a synthetic profile")
         if (self.source == "snapshot") != (self.source_declaration is not None):
             raise ValueError("snapshot profiles require exactly one source_declaration")
         return self

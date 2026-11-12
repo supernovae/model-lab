@@ -520,20 +520,6 @@ def test_forge_locations_do_not_change_scientific_lock(tmp_path, offline, monkey
     assert b"snapshot_path" not in first.read_bytes()
 
 
-def test_import_dispatch_preserves_distinct_verifier(tmp_path, monkeypatch):
-    from klab.data import snapshot_import
-
-    manifest = tmp_path / "manifest.json"
-    payload = sources.seal_snapshot_payload(
-        {"format": "klab-dataset-import-v1"}, "manifest_sha256"
-    )
-    manifest.write_text(json.dumps(payload))
-    monkeypatch.setattr(
-        snapshot_import, "verify_import", lambda config: {"verified": str(config)}
-    )
-    assert sources.verify_snapshot(manifest) == {"verified": str(manifest)}
-
-
 def test_existing_snapshot_work_requires_explicit_resume_without_rewriting(
     tmp_path, offline, monkeypatch
 ):

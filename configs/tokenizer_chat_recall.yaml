@@ -4,7 +4,8 @@ min_frequency: 1
 max_documents: 384
 output_dir: ../artifacts/tokenizer_chat_recall_dense_small_v1
 dataset:
-  source: chat_recall
+  source: synthetic
+  synthetic_task: chat_recall
   cache_dir: ../artifacts/data
   train_max_documents: 384
   validation_max_documents: 12

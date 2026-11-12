@@ -114,6 +114,10 @@ def _dataset_mapping(name: str, *, root: Path | None = None) -> dict[str, object
         "license": None,
         "allocation_manifest_path": None,
     }
+    if profile.synthetic_task is not None:
+        result["synthetic_task"] = profile.synthetic_task
+    if profile.dataset_id is not None:
+        result.update(dataset_id=profile.dataset_id, license=profile.license)
     if profile.source_declaration is not None:
         source = load_dataset_source(profile, root=root)
         result.update(

@@ -853,19 +853,6 @@ def verify_snapshot(
             and not _snapshot_cold.get()
             and verification_mode != "cold"
         )
-        if source is None:
-            from klab.data.snapshot_import import verify_import
-
-            cold_started = monotonic()
-            if state is not None:
-                state.statistics["cold_verifications"] += 1
-            try:
-                return verify_import(config)
-            finally:
-                if state is not None:
-                    state.statistics["cold_verification_seconds"] += (
-                        monotonic() - cold_started
-                    )
         key = _snapshot_key(path, manifest)
         if reuse:
             evidence = state.evidence.get(locator)
@@ -912,8 +899,6 @@ def _snapshot_preflight(config: Any) -> tuple[Path, dict, DatasetSource | None]:
     path = _manifest_path(config)
     _reject_snapshot_symlinks(path)
     manifest = _read(path, "manifest_sha256")
-    if manifest.get("format") == "klab-dataset-import-v1":
-        return path, manifest, None
     if manifest["format"] != "klab-dataset-snapshot-v1":
         raise ValueError("unsupported snapshot format")
     lock = manifest["lock"]
@@ -1150,13 +1135,6 @@ def _verify_snapshot_cold(path: Path, manifest: dict, source: DatasetSource) -> 
     ] != all(s["source_exhausted"] for s in manifest["splits"].values()):
         raise ValueError("inconsistent full-source exhaustion claim")
     return manifest
-
-
-def import_legacy_snapshot(config_or_manifest: Any, output: Path) -> Path:
-    """Write a distinct import identity without relabeling historical evidence."""
-    from klab.data.snapshot_import import import_legacy_snapshot as import_snapshot
-
-    return import_snapshot(config_or_manifest, output)
 
 
 def iter_snapshot(config: Any, split: str) -> Iterator[str]:

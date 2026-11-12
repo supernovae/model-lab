@@ -4,7 +4,10 @@ min_frequency: 2
 max_documents: 20000
 output_dir: ../artifacts/tokenizer_dense_lm_v1
 dataset:
-  source: tinystories
+  source: huggingface
+  dataset_id: roneneldan/TinyStories
+  validation_split: validation
+  license: CDLA-Sharing-1.0
   revision: f54c09fd23315a6f9c86f9dc80f725de7d8f9c64
   cache_dir: ../artifacts/data
   train_max_documents: 20000

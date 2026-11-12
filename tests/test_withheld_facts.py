@@ -88,7 +88,8 @@ def test_manifest_audit_reports_verified_split_evidence(tmp_path: Path) -> None:
 
 def test_withheld_fact_source_never_yields_evaluation_values(tmp_path: Path) -> None:
     config = DatasetConfig(
-        source="withheld_facts",
+        source="synthetic",
+        synthetic_task="withheld_facts",
         cache_dir=tmp_path,
         train_max_documents=6,
         validation_max_documents=6,
