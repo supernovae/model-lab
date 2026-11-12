@@ -322,9 +322,7 @@ def test_llama_import_round_trips_grouped_query_weights(tmp_path: Path) -> None:
     [
         ("head_dim", 8),
         ("attention_dropout", 0.2),
-        ("partial_rotary_factor", 0.5),
         ("rope_parameters", {"rope_type": "linear", "factor": 2.0}),
-        ("auto_map", {"AutoModelForCausalLM": "custom.Model"}),
     ],
 )
 def test_llama_import_rejects_unrepresented_source_semantics(

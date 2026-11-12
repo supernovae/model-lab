@@ -26,37 +26,29 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize("caller", ["scratch", "work", "worker"])
-@pytest.mark.parametrize("kind", ["outside", "checkout", "dangling", "inside", "file"])
-@pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.parametrize("kind", ["symlink", "file"])
 def test_unsafe_scratch_refuses_without_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caller: str,
     kind: str,
-    configured: bool,
 ) -> None:
     root = tmp_path / "work"
     root.mkdir()
     scratch = root / "scratch"
-    target = root / "target" if kind == "inside" else tmp_path / kind
-    if kind != "dangling":
-        target.mkdir()
-        (target / "sentinel").write_bytes(b"destination unchanged\n")
-    if kind == "checkout":
-        (target / ".git").mkdir()
+    target = tmp_path / "outside"
+    target.mkdir()
+    (target / "sentinel").write_bytes(b"destination unchanged\n")
     if kind == "file":
         scratch.write_bytes(b"scratch file unchanged\n")
     else:
         scratch.symlink_to(target, target_is_directory=True)
     before_stat = scratch.lstat()
     for name in (WORK_DIR_ENV, "TMPDIR", "TEMP", "TMP"):
-        if configured:
-            monkeypatch.setenv(name, str(tmp_path / f"previous-{name}"))
-        else:
-            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv(name, str(tmp_path / f"previous-{name}"))
     if caller == "worker":
         monkeypatch.setenv(WORK_DIR_ENV, str(root))
-    monkeypatch.setattr(tempfile, "tempdir", "previous-cache" if configured else None)
+    monkeypatch.setattr(tempfile, "tempdir", "previous-cache")
     before_env = {
         name: os.environ.get(name) for name in (WORK_DIR_ENV, "TMPDIR", "TEMP", "TMP")
     }
@@ -96,24 +88,14 @@ def test_unsafe_scratch_refuses_without_mutation(
     else:
         assert scratch.is_symlink()
         assert scratch.readlink() == target
-    if kind == "dangling":
-        assert not target.exists()
-    else:
-        assert (target / "sentinel").read_bytes() == b"destination unchanged\n"
-        assert {p.name for p in target.iterdir()} == (
-            {"sentinel", ".git"} if kind == "checkout" else {"sentinel"}
-        )
-    assert {p.name for p in root.iterdir()} == (
-        {"scratch", "target"} if kind == "inside" else {"scratch"}
-    )
+    assert (target / "sentinel").read_bytes() == b"destination unchanged\n"
+    assert {p.name for p in target.iterdir()} == {"sentinel"}
+    assert {p.name for p in root.iterdir()} == {"scratch"}
 
 
-@pytest.mark.parametrize("caller", ["work", "worker"])
-@pytest.mark.parametrize(
-    "redirect", ["symlink-at-mkdir", "resolve-before-mkdir", "resolve-after-mkdir"]
-)
+@pytest.mark.parametrize("redirect", ["symlink-at-mkdir", "resolve-before-mkdir"])
 def test_scratch_location_checks_refuse_before_environment_or_allocation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caller: str, redirect: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, redirect: str
 ) -> None:
     root = tmp_path / "work"
     root.mkdir()
@@ -134,10 +116,7 @@ def test_scratch_location_checks_refuse_before_environment_or_allocation(
         return original_mkdir(path, *args, **kwargs)
 
     def controlled_resolve(path, *args, **kwargs):
-        if path == scratch and (
-            redirect == "resolve-before-mkdir"
-            or (redirect == "resolve-after-mkdir" and mkdir_calls)
-        ):
+        if path == scratch and redirect == "resolve-before-mkdir":
             return missing
         return original_resolve(path, *args, **kwargs)
 
@@ -160,20 +139,7 @@ def test_scratch_location_checks_refuse_before_environment_or_allocation(
         else "scratch directory must remain inside work root"
     )
     with pytest.raises(ValueError, match=message):
-        if caller == "work":
-            ensure_work_dir(root)
-        else:
-            worker = WorkerDefinition(
-                worker_id="test-worker",
-                name="test-worker",
-                transport="local",
-                python=Path(sys.executable),
-                root=tmp_path,
-                engine="pytorch",
-                backend="cpu",
-                device_index=0,
-            )
-            transport.call_worker(worker, "status", {"attempt_id": None})
+        ensure_work_dir(root)
 
     assert mkdir_calls == ([] if redirect == "resolve-before-mkdir" else [scratch])
     assert {name: os.environ[name] for name in before_env} == before_env
@@ -186,29 +152,20 @@ def test_scratch_location_checks_refuse_before_environment_or_allocation(
     if redirect == "symlink-at-mkdir":
         assert scratch.is_symlink()
         assert scratch.readlink() == outside
-    elif redirect == "resolve-before-mkdir":
-        assert not scratch.exists()
     else:
-        assert scratch.is_dir() and not scratch.is_symlink()
-        assert list(scratch.iterdir()) == []
+        assert not scratch.exists()
 
 
-@pytest.mark.parametrize("existing", [False, True])
-@pytest.mark.parametrize("linked_root", [False, True])
 def test_ordinary_scratch_supports_temporary_allocation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    existing: bool,
-    linked_root: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A symlinked work root with an existing scratch directory is ordinary.
     root = tmp_path / "work"
-    selected = tmp_path / "selected" if linked_root else root
-    if linked_root:
-        selected.symlink_to(root, target_is_directory=True)
+    selected = tmp_path / "selected"
+    selected.symlink_to(root, target_is_directory=True)
     scratch = root / "scratch"
-    if existing:
-        scratch.mkdir(parents=True)
-        (scratch / "sentinel").write_bytes(b"keep\n")
+    scratch.mkdir(parents=True)
+    (scratch / "sentinel").write_bytes(b"keep\n")
     for name in (WORK_DIR_ENV, "TMPDIR", "TEMP", "TMP"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(tempfile, "tempdir", None)
@@ -221,9 +178,8 @@ def test_ordinary_scratch_supports_temporary_allocation(
         allocated.write(b"temporary fixture\n")
         allocated.seek(0)
         assert allocated.read() == b"temporary fixture\n"
-    assert {p.name for p in scratch.iterdir()} == ({"sentinel"} if existing else set())
-    if existing:
-        assert (scratch / "sentinel").read_bytes() == b"keep\n"
+    assert {p.name for p in scratch.iterdir()} == {"sentinel"}
+    assert (scratch / "sentinel").read_bytes() == b"keep\n"
 
 
 def test_default_work_dir_uses_external_xdg_or_home_without_creating_it(

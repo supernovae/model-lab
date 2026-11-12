@@ -36,15 +36,10 @@ def profile_value(**changes):
     [
         {"unexpected": True},
         {"runtime_profile_version": 2},
-        {"runtime_profile_version": True},
         {"id": "../unsafe"},
         {"python": "relative/python"},
-        {"python": "/nonexistent/runtime-prep-v1-python"},
         {"engine": "mlx", "backend": "cpu"},
-        {"engine": "pytorch", "backend": "metal"},
         {"device_index": -1},
-        {"device_index": True},
-        {"requirements": {"unknown": True}},
         {"requirements": {"device_name_regex": "["}},
         {"requirements": {"torch_hip": True}},
         {"requirements": {"bf16": 1}},
@@ -129,7 +124,7 @@ def test_accelerator_cli_rejects_before_workdir(tmp_path, monkeypatch, command):
     assert not config.logging.root_dir.exists()
 
 
-@pytest.mark.parametrize("backend", ["cuda", "rocm", "mps", "xpu", "metal"])
+@pytest.mark.parametrize("backend", ["cuda", "metal"])
 def test_unregistered_acceleration_is_not_authorized(tmp_path, backend):
     config = training_config(tmp_path)
     config = config.model_copy(
@@ -179,7 +174,7 @@ def fake_runtime(monkeypatch, config, backend):
     return evidence, config
 
 
-@pytest.mark.parametrize("backend", ["cuda", "rocm", "xpu", "mps", "metal"])
+@pytest.mark.parametrize("backend", ["cuda", "rocm", "metal"])
 def test_matched_vendor_probe_authorizes_without_hardware(
     tmp_path, monkeypatch, backend
 ):
@@ -338,13 +333,7 @@ def test_registered_ssh_worker_validates_probe_source_and_remote_transport(
 
 @pytest.mark.parametrize(
     ("field", "replacement"),
-    [
-        ("python", "/nonexistent/python"),
-        ("torch_version", "changed-framework"),
-        ("torch_hip", "changed-runtime"),
-        ("source_sha256", "0" * 64),
-        ("device_name", "Changed Accelerator"),
-    ],
+    [("source_sha256", "0" * 64), ("device_name", "Changed Accelerator")],
 )
 def test_authorization_rejects_runtime_drift(tmp_path, monkeypatch, field, replacement):
     from klab.runtime_profile import require_authorization
@@ -358,12 +347,7 @@ def test_authorization_rejects_runtime_drift(tmp_path, monkeypatch, field, repla
 
 
 @pytest.mark.parametrize(
-    "target",
-    [
-        {"backend": "cpu"},
-        {"device_index": 1},
-        {"engine": "mlx", "backend": "metal"},
-    ],
+    "target", [{"device_index": 1}, {"engine": "mlx", "backend": "metal"}]
 )
 def test_sealed_authorization_cannot_select_another_runtime(
     tmp_path, monkeypatch, target

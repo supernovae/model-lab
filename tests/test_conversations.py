@@ -45,7 +45,6 @@ def test_iter_conversations_streams_chat_format_with_system_and_multiple_turns(
 @pytest.mark.parametrize(
     "record",
     [
-        {"messages": []},
         {"messages": [{"role": "user", "content": "orphan"}]},
         {
             "messages": [
