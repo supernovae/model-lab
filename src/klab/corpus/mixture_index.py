@@ -8,6 +8,7 @@ SQLite's bounded cache is not a hard process RSS limit.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 from pathlib import Path
@@ -203,13 +204,17 @@ class MixtureIndex:
             (stratum, *(frontier or ["", ""])),
         )
 
+        descriptor = self.documents.fileno()
+
         def fetch(row):
-            # Independent file descriptions: seek positions are never shared.
-            with open(self.documents.name, "rb") as stream:
-                stream.seek(row[0])
-                raw = stream.readline(MAX_ROW_BYTES + 1)
-            if len(raw) > MAX_ROW_BYTES:
+            # A positional read on the index's descriptor: concurrent fetches
+            # share no seek position and open no file per record.
+            offset, size = row[0], row[4]
+            if size > MAX_ROW_BYTES:
                 raise ValueError("mixture record-byte cap exceeded")
+            raw = os.pread(descriptor, size, offset)
+            if len(raw) != size:
+                raise ValueError("mixture source changed during materialization")
             return json.loads(raw)
 
         try:

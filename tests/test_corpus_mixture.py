@@ -1221,3 +1221,30 @@ def test_retained_handle_eviction_does_not_invalidate_active_read(
         release.set()
         for handle in index.handles.values():
             handle.close()
+
+
+def test_ordinary_fetch_reads_records_by_position(tmp_path, monkeypatch):
+    """Records come from positional reads of one descriptor, not a file per record."""
+    from klab.corpus import mixture_index
+
+    declaration, _, _ = _fixture(tmp_path, monkeypatch)
+    baseline = tmp_path / "baseline"
+    expected = mixture._materialize_mixture(declaration, baseline, reuse_tokens=False)
+    reads = []
+    original = mixture_index.os.pread
+
+    def counted(descriptor, size, offset):
+        reads.append((size, offset))
+        return original(descriptor, size, offset)
+
+    monkeypatch.setattr(mixture_index.os, "pread", counted)
+    monkeypatch.setenv("KLAB_MIXTURE_WORKERS", "3")
+    actual = mixture._materialize_mixture(
+        declaration, tmp_path / "positional", reuse_tokens=False
+    )
+    assert actual == expected
+    assert reads
+    for name in ("train.tokens.ids", "train.records.jsonl"):
+        assert (tmp_path / "positional" / name).read_bytes() == (
+            baseline / name
+        ).read_bytes()
