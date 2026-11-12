@@ -82,7 +82,9 @@ def _diagnostics(
             hidden_norm=((hidden.norm(dim=-1) * weights).sum() / denominator).detach(),
         )
     counts = torch.bincount(addresses.flatten(), minlength=table_size)
-    lookup_count = torch.tensor(addresses.numel(), device=addresses.device)
+    lookup_count = torch.full(
+        (), addresses.numel(), dtype=torch.long, device=addresses.device
+    )
     unique = (counts > 0).sum()
     collisions = lookup_count - unique
     denominator = lookup_count.clamp_min(1)
@@ -298,8 +300,8 @@ class TokenNgramMemory(nn.Module):
                 )
                 self.last_diagnostics = replace(stream, streams=(stream,))
                 return hidden + gate * values, None
-            stream_values = [self.output(value) for value in retrieved]
-            stacked_values = torch.stack(stream_values)
+            # One projection over every stream instead of one call per stream.
+            stacked_values = self.output(torch.stack(retrieved))
             values = stacked_values.mean(dim=0)
             gate = torch.sigmoid(self.gate(hidden))
             num_streams = len(addresses)
@@ -307,7 +309,10 @@ class TokenNgramMemory(nn.Module):
             hidden_norm = hidden.norm(dim=-1).mean().detach()
             stream_value_norms = stacked_values.norm(dim=-1).mean(dim=(1, 2)).detach()
             per_stream_lookups = addresses[0].numel()
-            lookup_tensor = torch.tensor(per_stream_lookups, device=hidden.device)
+            # Build counts on the device: no host-to-device copy per forward.
+            lookup_tensor = torch.full(
+                (), per_stream_lookups, dtype=torch.long, device=hidden.device
+            )
             stream_denom = lookup_tensor.clamp_min(1)
             flat_addresses = torch.stack([address.flatten() for address in addresses])
             stream_offsets = (
@@ -340,9 +345,7 @@ class TokenNgramMemory(nn.Module):
                 for index in range(num_streams)
             )
             combined_counts = counts_by_stream.sum(dim=0)
-            total_lookups = torch.tensor(
-                per_stream_lookups * num_streams, device=hidden.device
-            )
+            total_lookups = lookup_tensor * num_streams
             total_unique = (combined_counts > 0).sum()
             total_collisions = total_lookups - total_unique
             total_denom = total_lookups.clamp_min(1)
@@ -367,8 +370,9 @@ class TokenNgramMemory(nn.Module):
             gate = torch.sigmoid(self.gate(hidden, self.key(concatenated)))
             stream_values = retrieved
         else:
-            stream_values = [self.output(value) for value in retrieved]
-            values = torch.stack(stream_values).mean(dim=0)
+            stacked_values = self.output(torch.stack(retrieved))
+            stream_values = stacked_values.unbind(0)
+            values = stacked_values.mean(dim=0)
             gate = torch.sigmoid(self.gate(hidden))
         stream_diagnostics = tuple(
             _diagnostics(address, gate, value, hidden, size, position_mask)
