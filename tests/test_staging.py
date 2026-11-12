@@ -250,6 +250,55 @@ def test_bundle_inventory_hashes_prepared_arrays_once_per_verification(
         staging_module.verify_stage_bundle(bundle, config)
 
 
+def test_matched_pilot_hashes_staged_arrays_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from klab.config.models import MatchedStoryConfig
+    from klab.data.story_packing import MatchedStoryDataset
+
+    base = _config(tmp_path)
+    tokenizer = load_tokenizer(base.tokenizer.path)
+    plan = MatchedStoryDataset(
+        prepare_data(base, tokenizer).train,
+        base.training.seq_len,
+        tokenizer.token_to_id("<eos>"),
+        layout="contiguous",
+        targets_per_update=1,
+    )
+    config = base.model_copy(
+        update={
+            "training": base.training.model_copy(
+                update={
+                    "matched_stories": MatchedStoryConfig(
+                        layout="contiguous", targets_per_update=1
+                    ),
+                    "micro_batch_size": 16,
+                    "max_steps": 3,
+                    "max_tokens": plan.targets_for_updates(3),
+                }
+            )
+        }
+    )
+    bundle = stage(config, tmp_path / "stage", through="validate")
+    original = manifest_module.sha256_file
+    hashed: list[Path] = []
+
+    def count(path: Path) -> str:
+        hashed.append(Path(path))
+        return original(path)
+
+    monkeypatch.setattr(manifest_module, "sha256_file", count)
+    seals: dict = {}
+    pilot = staging_module.pilot_config(config, "smoke", bundle, _proofs=seals)
+    staging_module.verify_stage_bundle(bundle, pilot, purpose="smoke", _seals=seals)
+    arrays = [
+        path.name
+        for path in hashed
+        if path.parent == bundle / "assets" / "data" and path.suffix == ".npy"
+    ]
+    assert sorted(arrays) == ["train.npy", "validation.npy"]
+
+
 def test_prepared_inputs_inventory_hashes_arrays_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

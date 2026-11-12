@@ -648,6 +648,7 @@ def _train_impl(
     allow_runtime_drift: bool = False,
     allow_runtime_optimization: bool = False,
     stage_bundle: Path | None = None,
+    stage_seals: dict[str, object] | None = None,
     cancel_path: Path | None = None,
     purpose: str = "training",
     experiment_id: str | None = None,
@@ -845,6 +846,7 @@ def _train_impl(
                     config,
                     purpose=purpose,
                     _proofs=staged_proofs,
+                    _seals=stage_seals,
                     proof_store=proof_store,
                     verification_mode=verification_mode,
                 )

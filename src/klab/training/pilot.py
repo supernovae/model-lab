@@ -52,12 +52,16 @@ def run_pilot(
     require_model_runtime_allowed()
     with pilot_phase("input_validation"):
         inputs = _read_sealed(root / "inputs.json")
+        # A matched-story budget verifies the staged inputs; the trainer reuses
+        # those proofs instead of hashing the same files a second time.
+        seals: dict[str, object] = {}
         config = pilot_config(
             RunConfig.model_validate(inputs["requested_config"]),
             purpose,
             root,
             proof_store=proof_store,
             verification_mode=verification_mode,
+            _proofs=seals,
         )
         tokenizer_batch_documents, tokenizer_batch_source_bytes = (
             validate_tokenizer_batch_limits(
@@ -82,6 +86,7 @@ def run_pilot(
     _train_impl(
         config,
         stage_bundle=root,
+        stage_seals=seals,
         run_id=run_id,
         purpose=purpose,
         cancel_path=cancel_path,
