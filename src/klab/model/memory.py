@@ -288,6 +288,16 @@ class TokenNgramMemory(nn.Module):
             and self.addressing == "legacy"
             and position_mask is None
         ):
+            if len(addresses) == 1:
+                # One stream has nothing to batch: its diagnostics are the
+                # table's, so skip the stacking and the second count pass.
+                values = self.output(retrieved[0])
+                gate = torch.sigmoid(self.gate(hidden))
+                stream = _diagnostics(
+                    addresses[0], gate, values, hidden, self.table_size
+                )
+                self.last_diagnostics = replace(stream, streams=(stream,))
+                return hidden + gate * values, None
             stream_values = [self.output(value) for value in retrieved]
             stacked_values = torch.stack(stream_values)
             values = stacked_values.mean(dim=0)
