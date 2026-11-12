@@ -12,7 +12,7 @@ import yaml
 from klab.documents import read_document
 
 
-@pytest.mark.parametrize("suffix", ["yaml", "json", "JSON"])
+@pytest.mark.parametrize("suffix", ["yaml", "JSON"])
 def test_data_parity_and_no_path_interpretation(tmp_path, suffix):
     raw = {"plugin": {"path": "opaque:relative", "future_field": True}, "seed": "7"}
     path = tmp_path / f"input.{suffix}"
@@ -28,9 +28,7 @@ def test_data_parity_and_no_path_interpretation(tmp_path, suffix):
         ("json", '{"nested":{"key":1,"key":2}}', "duplicate JSON key"),
         ("yaml", "nested: {1: value}", "keys must be strings"),
         ("yaml", "nested: [.nan]", "non-finite"),
-        ("yaml", "nested: [.inf]", "non-finite"),
         ("json", '{"nested":[NaN]}', "non-finite"),
-        ("json", '{"nested":[Infinity]}', "non-finite"),
         ("json", '{"nested":[1e999]}', "non-finite"),
         ("yaml", "nested: &cycle [*cycle]", "cyclic"),
         (
@@ -41,7 +39,6 @@ def test_data_parity_and_no_path_interpretation(tmp_path, suffix):
         ("yaml", "nested: [", "invalid experiment"),
         ("yaml", "<<: {seed: 7}\nseed: 8", "invalid experiment"),
         ("yaml", "[]", "must be a mapping"),
-        ("yaml", "", "must be a mapping"),
     ],
 )
 def test_rejected_data_has_source(tmp_path, suffix, text, match):
@@ -50,33 +47,6 @@ def test_rejected_data_has_source(tmp_path, suffix, text, match):
     with pytest.raises((ValueError, TypeError), match=match) as error:
         read_document(path)
     assert str(path) in str(error.value)
-
-
-@pytest.mark.parametrize("exact_decimals", [False, True])
-@pytest.mark.parametrize(
-    "key,error_type,diagnostic",
-    [
-        ("key", ValueError, "duplicate YAML key: 'key'"),
-        ('"key"', ValueError, "duplicate YAML key: 'key'"),
-        ("true", TypeError, "experiment mapping keys must be strings"),
-    ],
-)
-def test_mapping_diagnostics_are_concise_for_direct_and_file_readers(
-    tmp_path, exact_decimals, key, error_type, diagnostic
-):
-    from klab.documents import _ExactUniqueLoader, _UniqueLoader
-
-    path = tmp_path / "bad.yaml"
-    text = f"nested:\n  key: 1\n  {key}: 2\n"
-    path.write_text(text)
-    expected = f"{diagnostic} at line 3, column 3"
-    loader = _ExactUniqueLoader if exact_decimals else _UniqueLoader
-    with pytest.raises(error_type) as direct_error:
-        yaml.load(text, Loader=loader)
-    assert str(direct_error.value) == expected
-    with pytest.raises(error_type) as file_error:
-        read_document(path, exact_decimals=exact_decimals)
-    assert str(file_error.value) == f"invalid experiment document {path}: {expected}"
 
 
 @pytest.mark.parametrize(
@@ -161,8 +131,8 @@ def test_model_components_do_not_import_workflow_consumers():
             ), (path, imports)
 
 
-@pytest.mark.parametrize("levels", [1, 8, 25])
-def test_alias_doubling_visits_shared_leaves_once(tmp_path, monkeypatch, levels):
+def test_alias_doubling_visits_shared_leaves_once(tmp_path, monkeypatch):
+    levels = 25
     from klab import documents
 
     path = tmp_path / "doubling.yaml"

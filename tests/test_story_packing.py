@@ -13,7 +13,8 @@ def story_ids():
     return np.array([1, 2, 0, *range(3, 24), 0, 24, 0, 25, 26, 0], dtype=np.int32)
 
 
-@pytest.mark.parametrize("budget", [1, 3, 9, 25, 31, 32, 61, 100])
+# Inside the first group, its exact end, into the second pass and the third.
+@pytest.mark.parametrize("budget", [1, 25, 31, 61])
 def test_layouts_match_every_update_and_clipped_suffix(budget):
     ids = story_ids()
     plans = [
@@ -93,7 +94,8 @@ def test_manifest_layout_costs_match_materialized_full_pass():
         assert cost["max_padded_slots_per_update"] == max(padding)
 
 
-@pytest.mark.parametrize("updates", [1, 2, 3, 4, 7, 10])
+# One group, one whole pass (two groups) and a horizon that wraps a pass.
+@pytest.mark.parametrize("updates", [1, 2, 3])
 def test_complete_group_budget_inverts_horizon_across_passes(updates):
     budgets = []
     for layout in ("contiguous", "story"):

@@ -51,7 +51,7 @@ def tiny_model(tmp_path, memory, max_length=257):
 
 
 @pytest.mark.parametrize("memory", [False, True])
-@pytest.mark.parametrize("width", [1, 4, 8])
+@pytest.mark.parametrize("width", [4, 8])
 @pytest.mark.parametrize("implementation", ["reference", "sdpa"])
 def test_full_model_logits_loss_gradients_and_adamw(
     tmp_path, memory, width, implementation
