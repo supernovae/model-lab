@@ -1008,6 +1008,11 @@ def test_mixture_frontier_resumes_without_committed_candidate_replay(
     for name in ("train.tokens.ids", "train.records.jsonl"):
         assert (output / name).read_bytes() == (baseline / name).read_bytes()
     assert len(visited) == 3 - committed
+    # Segments kept for the resume are removed once the output is published;
+    # the progress report stays.
+    assert not list(checkpoints.glob("segment-*"))
+    assert not list(checkpoints.glob("commit-*.json"))
+    assert (checkpoints / "progress.json").is_file()
 
 
 @pytest.mark.parametrize(

@@ -488,6 +488,16 @@ def _materialize_mixture(
                 capture([output]),
                 limit=MAX_RECEIPT_BYTES,
             )
+        # The published output and its sealed receipt are the record now. The
+        # committed segments and their markers existed only to resume an
+        # interrupted schedule; progress.json and request.json stay.
+        assembly = output.parent / ("." + output.name + ".assembly")
+        if assembly.is_dir() and not assembly.is_symlink():
+            for marker in sorted(assembly.glob("commit-*.json")):
+                marker.unlink()
+            for segment in assembly.glob("segment-*"):
+                if segment.is_dir() and not segment.is_symlink():
+                    shutil.rmtree(segment)
         return receipt
     except BaseException:
         if staging.exists():
