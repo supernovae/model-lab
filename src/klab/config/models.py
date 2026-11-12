@@ -38,6 +38,221 @@ class MemoryTokenMapping(StrictModel):
         return self
 
 
+def _with_normalized_params(
+    data: Any, slot: str, kind_field: str, params_field: str, default_kind: str
+) -> Any:
+    """Validate a component's ``params`` and store them with defaults filled in."""
+    if not isinstance(data, dict):
+        return data
+    params = data.get(params_field)
+    kind = data.get(kind_field, default_kind)
+    if not params and (not isinstance(kind, str) or kind == default_kind):
+        return data
+    from klab.components import component, is_builtin, normalized_params
+
+    if not isinstance(kind, str):
+        return data
+    if not is_builtin(slot, kind):  # type: ignore[arg-type]
+        component(slot, kind)  # type: ignore[arg-type]
+    normalized = normalized_params(slot, kind, params)  # type: ignore[arg-type]
+    result = dict(data)
+    if normalized:
+        result[params_field] = normalized
+    else:
+        result.pop(params_field, None)
+    return result
+
+
+def _validate_feed_forward(
+    kind: str,
+    num_experts: int,
+    experts_per_token: int,
+    shared_expert: bool,
+    router_aux_loss_coefficient: float,
+) -> None:
+    if kind != "moe" and (
+        num_experts != 1
+        or experts_per_token != 1
+        or shared_expert
+        or router_aux_loss_coefficient
+    ):
+        raise ValueError(f"{kind} model.ffn does not accept MoE settings")
+    if kind == "moe" and (num_experts < 2 or not 1 <= experts_per_token <= num_experts):
+        raise ValueError("invalid MoE expert configuration")
+
+
+class AttentionConfig(StrictModel):
+    kind: str = "dense"
+    params: dict[str, Any] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    implementation: Literal["reference", "sdpa"] = Field(
+        default="reference", exclude_if=lambda value: value == "reference"
+    )
+    rope_base: float = Field(default=10000.0, gt=0)
+    window_size: int | None = Field(default=None, gt=0)
+    latent_dim: int | None = Field(default=None, gt=0)
+    block_size: int | None = Field(default=None, gt=0)
+    selected_blocks: int | None = Field(default=None, gt=0)
+    selector: Literal["mean_key", "learned"] = Field(
+        default="mean_key", exclude_if=lambda value: value == "mean_key"
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_params(cls, data: Any) -> Any:
+        return _with_normalized_params(data, "attention", "kind", "params", "dense")
+
+    @model_validator(mode="after")
+    def validate_kind(self) -> AttentionConfig:
+        from klab.components import is_builtin
+
+        sparse = (
+            self.window_size,
+            self.latent_dim,
+            self.block_size,
+            self.selected_blocks,
+        )
+        if not is_builtin("attention", self.kind):
+            if (
+                any(value is not None for value in sparse)
+                or self.selector != "mean_key"
+                or self.implementation != "reference"
+            ):
+                raise ValueError(
+                    f"attention kind {self.kind!r} comes from another package and "
+                    "is configured through attention.params; only rope_base is "
+                    "shared"
+                )
+            return self
+        if self.kind == "dense" and any(value is not None for value in sparse):
+            raise ValueError("dense attention does not accept sparse settings")
+        if self.kind == "sliding_window" and (
+            self.window_size is None or any(value is not None for value in sparse[1:])
+        ):
+            raise ValueError("sliding_window attention requires only window_size")
+        if self.kind == "mla" and (
+            self.latent_dim is None
+            or self.window_size is not None
+            or self.block_size is not None
+            or self.selected_blocks is not None
+        ):
+            raise ValueError("mla attention requires only latent_dim")
+        if self.kind == "block_sparse" and (
+            self.block_size is None
+            or self.selected_blocks is None
+            or self.window_size is not None
+            or self.latent_dim is not None
+        ):
+            raise ValueError(
+                "block_sparse attention requires block_size and selected_blocks"
+            )
+        if self.kind == "local_selected":
+            if (
+                self.block_size is None
+                or self.selected_blocks is None
+                or self.window_size is None
+            ):
+                raise ValueError(
+                    "local_selected attention requires block_size, window_size "
+                    "and selected_blocks"
+                )
+            if self.window_size % self.block_size:
+                raise ValueError(
+                    "local_selected window_size must be a multiple of block_size"
+                )
+            if self.implementation != "reference":
+                raise ValueError(
+                    "local_selected attention has one implementation; "
+                    "leave attention.implementation unset"
+                )
+        if self.selector != "mean_key" and self.kind != "local_selected":
+            raise ValueError("attention.selector requires kind=local_selected")
+        if self.implementation == "sdpa" and self.kind not in {
+            "dense",
+            "sliding_window",
+            "mla",
+        }:
+            raise ValueError(
+                "SDPA implementation requires dense, sliding_window or mla attention"
+            )
+        return self
+
+
+class FeedForwardOverride(StrictModel):
+    """The feed-forward settings of the layers one ``model.layers`` entry names."""
+
+    kind: str
+    ffn_dim: int | None = Field(
+        default=None, gt=0, exclude_if=lambda value: value is None
+    )
+    num_experts: int = Field(default=1, exclude_if=lambda value: value == 1)
+    experts_per_token: int = Field(default=1, exclude_if=lambda value: value == 1)
+    shared_expert: bool = Field(default=False, exclude_if=lambda value: not value)
+    router_aux_loss_coefficient: float = Field(
+        default=0.0, ge=0, exclude_if=lambda value: not value
+    )
+    params: dict[str, Any] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_params(cls, data: Any) -> Any:
+        return _with_normalized_params(data, "ffn", "kind", "params", "dense")
+
+    @model_validator(mode="after")
+    def validate_kind(self) -> FeedForwardOverride:
+        _validate_feed_forward(
+            self.kind,
+            self.num_experts,
+            self.experts_per_token,
+            self.shared_expert,
+            self.router_aux_loss_coefficient,
+        )
+        return self
+
+
+class LayerOverride(StrictModel):
+    """Replace the attention or feed-forward of some decoder blocks.
+
+    ``blocks`` is a list of zero-based block indices or a Python slice written
+    as text (``"::2"``, ``"6:"``, ``"0:12:3"``).
+    """
+
+    blocks: str | tuple[Annotated[int, Field(strict=True, ge=0)], ...]
+    attention: AttentionConfig | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    ffn: FeedForwardOverride | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @model_validator(mode="after")
+    def validate_override(self) -> LayerOverride:
+        if self.attention is None and self.ffn is None:
+            raise ValueError("a model.layers entry must set attention or ffn")
+        if isinstance(self.blocks, str):
+            parts = self.blocks.split(":")
+            if not 2 <= len(parts) <= 3 or any(
+                part and not part.lstrip("-").isdigit() for part in parts
+            ):
+                raise ValueError(
+                    "model.layers blocks text must be a slice such as '::2' or '6:'"
+                )
+            if len(parts) == 3 and parts[2] and int(parts[2]) <= 0:
+                raise ValueError("model.layers blocks slice step must be positive")
+        elif not self.blocks or tuple(sorted(set(self.blocks))) != self.blocks:
+            raise ValueError("model.layers blocks must be sorted unique indices")
+        return self
+
+    def indices(self, num_layers: int) -> tuple[int, ...]:
+        if isinstance(self.blocks, str):
+            bounds = [int(part) if part else None for part in self.blocks.split(":")]
+            return tuple(range(num_layers)[slice(*bounds)])
+        return self.blocks
+
+
 class ModelConfig(StrictModel):
     vocab_size: int
     hidden_dim: int
@@ -48,12 +263,21 @@ class ModelConfig(StrictModel):
     max_seq_len: int
     rms_norm_eps: float = 1e-6
     tie_embeddings: bool = True
-    ffn: Literal["dense", "moe"] = "dense"
+    ffn: str = "dense"
+    ffn_params: dict[str, Any] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    layers: tuple[LayerOverride, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     num_experts: int = 1
     experts_per_token: int = 1
     shared_expert: bool = False
     router_aux_loss_coefficient: float = Field(default=0.0, ge=0)
-    memory: Literal["none", "ngram", "byte", "portable"] = "none"
+    memory: str = "none"
+    memory_params: dict[str, Any] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
     memory_injection: Literal["final", "embedding", "after_block"] = "final"
     memory_block_index: int | None = Field(
         default=None, strict=True, ge=0, exclude_if=lambda value: value is None
@@ -102,6 +326,52 @@ class ModelConfig(StrictModel):
             () if self.memory_block_index is None else (self.memory_block_index,)
         )
 
+    @property
+    def external_memory(self) -> bool:
+        """Whether the memory kind comes from another package."""
+        from klab.components import is_builtin
+
+        return not is_builtin("memory", self.memory)
+
+    def layer_specs(
+        self, attention: AttentionConfig
+    ) -> tuple[tuple[ModelConfig, AttentionConfig], ...]:
+        """Return each block's effective model and attention settings.
+
+        A block's model settings carry its own feed-forward fields and no
+        ``layers``; everything else is shared with the whole model.
+        """
+        base = self.model_copy(update={"layers": ()}) if self.layers else self
+        specs = [(base, attention)] * self.num_layers
+        for override in self.layers:
+            for index in override.indices(self.num_layers):
+                model, current = specs[index]
+                if override.ffn is not None:
+                    ffn = override.ffn
+                    model = base.model_copy(
+                        update={
+                            "ffn": ffn.kind,
+                            "ffn_params": ffn.params,
+                            "ffn_dim": ffn.ffn_dim or base.ffn_dim,
+                            "num_experts": ffn.num_experts,
+                            "experts_per_token": ffn.experts_per_token,
+                            "shared_expert": ffn.shared_expert,
+                            "router_aux_loss_coefficient": (
+                                ffn.router_aux_loss_coefficient
+                            ),
+                        }
+                    )
+                specs[index] = (model, override.attention or current)
+        return tuple(specs)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_params(cls, data: Any) -> Any:
+        data = _with_normalized_params(data, "ffn", "ffn", "ffn_params", "dense")
+        return _with_normalized_params(
+            data, "memory", "memory", "memory_params", "none"
+        )
+
     @model_serializer(mode="wrap")
     def _serialize_legacy_final(
         self, handler: SerializerFunctionWrapHandler
@@ -140,17 +410,31 @@ class ModelConfig(StrictModel):
             )
         if self.rms_norm_eps <= 0:
             raise ValueError("model.rms_norm_eps must be positive")
-        if self.ffn == "dense" and (
-            self.num_experts != 1
-            or self.experts_per_token != 1
-            or self.shared_expert
-            or self.router_aux_loss_coefficient
-        ):
-            raise ValueError("dense model.ffn does not accept MoE settings")
-        if self.ffn == "moe" and (
-            self.num_experts < 2 or not 1 <= self.experts_per_token <= self.num_experts
-        ):
-            raise ValueError("invalid MoE expert configuration")
+        _validate_feed_forward(
+            self.ffn,
+            self.num_experts,
+            self.experts_per_token,
+            self.shared_expert,
+            self.router_aux_loss_coefficient,
+        )
+        claimed: dict[str, set[int]] = {"attention": set(), "ffn": set()}
+        for override in self.layers:
+            indices = override.indices(self.num_layers)
+            if not indices or indices[-1] >= self.num_layers:
+                raise ValueError(
+                    "model.layers blocks must name existing decoder blocks"
+                )
+            for slot, value in (
+                ("attention", override.attention),
+                ("ffn", override.ffn),
+            ):
+                if value is None:
+                    continue
+                if claimed[slot] & set(indices):
+                    raise ValueError(
+                        f"model.layers sets {slot} more than once for one block"
+                    )
+                claimed[slot].update(indices)
         if self.memory_block_indices and (
             self.memory_block_index is not None
             or tuple(sorted(set(self.memory_block_indices)))
@@ -159,6 +443,8 @@ class ModelConfig(StrictModel):
             raise ValueError(
                 "memory_block_indices must be sorted unique and excludes memory_block_index"
             )
+        if self.external_memory:
+            return self._validate_external_memory()
         if self.memory_injection == "after_block":
             if self.memory != "ngram" or not self.memory_block_sites:
                 raise ValueError(
@@ -235,6 +521,35 @@ class ModelConfig(StrictModel):
             raise ValueError("byte memory uses its configured raw-byte ngram size")
         if (self.memory == "portable") != (self.memory_package_path is not None):
             raise ValueError("portable memory requires exactly memory_package_path")
+        return self
+
+    def _validate_external_memory(self) -> ModelConfig:
+        """A memory kind from another package owns its settings in memory_params."""
+        defaults = type(self).model_fields
+        builtin_only = sorted(
+            name
+            for name in defaults
+            if name.startswith("memory_")
+            and name not in {"memory_params", "memory_injection", "memory_block_index"}
+            and getattr(self, name) != defaults[name].default
+        )
+        if builtin_only:
+            raise ValueError(
+                f"memory kind {self.memory!r} comes from another package and is "
+                "configured through model.memory_params; unset "
+                + ", ".join(builtin_only)
+            )
+        if (self.memory_injection == "after_block") != (
+            self.memory_block_index is not None
+        ):
+            raise ValueError("after_block memory injection needs memory_block_index")
+        if (
+            self.memory_block_index is not None
+            and self.memory_block_index >= self.num_layers
+        ):
+            raise ValueError(
+                "memory_block_index must identify an existing decoder block"
+            )
         return self
 
 
@@ -692,84 +1007,6 @@ class AdafactorConfig(StrictModel):
 OptimizerConfig = Annotated[AdamWConfig | AdafactorConfig, Field(discriminator="name")]
 
 
-class AttentionConfig(StrictModel):
-    kind: Literal[
-        "dense", "sliding_window", "mla", "block_sparse", "local_selected"
-    ] = "dense"
-    implementation: Literal["reference", "sdpa"] = Field(
-        default="reference", exclude_if=lambda value: value == "reference"
-    )
-    rope_base: float = Field(default=10000.0, gt=0)
-    window_size: int | None = Field(default=None, gt=0)
-    latent_dim: int | None = Field(default=None, gt=0)
-    block_size: int | None = Field(default=None, gt=0)
-    selected_blocks: int | None = Field(default=None, gt=0)
-    selector: Literal["mean_key", "learned"] = Field(
-        default="mean_key", exclude_if=lambda value: value == "mean_key"
-    )
-
-    @model_validator(mode="after")
-    def validate_kind(self) -> AttentionConfig:
-        sparse = (
-            self.window_size,
-            self.latent_dim,
-            self.block_size,
-            self.selected_blocks,
-        )
-        if self.kind == "dense" and any(value is not None for value in sparse):
-            raise ValueError("dense attention does not accept sparse settings")
-        if self.kind == "sliding_window" and (
-            self.window_size is None or any(value is not None for value in sparse[1:])
-        ):
-            raise ValueError("sliding_window attention requires only window_size")
-        if self.kind == "mla" and (
-            self.latent_dim is None
-            or self.window_size is not None
-            or self.block_size is not None
-            or self.selected_blocks is not None
-        ):
-            raise ValueError("mla attention requires only latent_dim")
-        if self.kind == "block_sparse" and (
-            self.block_size is None
-            or self.selected_blocks is None
-            or self.window_size is not None
-            or self.latent_dim is not None
-        ):
-            raise ValueError(
-                "block_sparse attention requires block_size and selected_blocks"
-            )
-        if self.kind == "local_selected":
-            if (
-                self.block_size is None
-                or self.selected_blocks is None
-                or self.window_size is None
-            ):
-                raise ValueError(
-                    "local_selected attention requires block_size, window_size "
-                    "and selected_blocks"
-                )
-            if self.window_size % self.block_size:
-                raise ValueError(
-                    "local_selected window_size must be a multiple of block_size"
-                )
-            if self.implementation != "reference":
-                raise ValueError(
-                    "local_selected attention has one implementation; "
-                    "leave attention.implementation unset"
-                )
-        if self.selector != "mean_key" and self.kind != "local_selected":
-            raise ValueError("attention.selector requires kind=local_selected")
-        if self.implementation == "sdpa" and self.kind not in {
-            "dense",
-            "sliding_window",
-            "mla",
-        }:
-            raise ValueError(
-                "SDPA implementation requires dense, sliding_window or mla attention"
-            )
-        return self
-
-
 class FixedValidationPanel(StrictModel):
     """Immutable prepared selection, independent of any particular checkpoint."""
 
@@ -933,6 +1170,32 @@ class RunConfig(StrictModel):
     staging: StagingConfig = StagingConfig()
     logging: LoggingConfig
 
+    @property
+    def layer_specs(self) -> tuple[tuple[ModelConfig, AttentionConfig], ...]:
+        """Each decoder block's effective model and attention settings."""
+        return self.model.layer_specs(self.attention)
+
+    @property
+    def attention_kinds(self) -> frozenset[str]:
+        return frozenset(attention.kind for _, attention in self.layer_specs)
+
+    @property
+    def ffn_kinds(self) -> frozenset[str]:
+        return frozenset(model.ffn for model, _ in self.layer_specs)
+
+    @property
+    def external_components(self) -> dict[str, str]:
+        """Package and version behind each kind Lab does not ship itself."""
+        from klab.components import sources
+
+        return sources(
+            {
+                "attention": self.attention_kinds,
+                "ffn": self.ffn_kinds,
+                "memory": {self.model.memory},
+            }
+        )
+
     @model_validator(mode="after")
     def validate_cross_section(self) -> RunConfig:
         matched = self.training.matched_stories
@@ -961,8 +1224,8 @@ class RunConfig(StrictModel):
             matched is not None
             and matched.document_batching == "padded"
             and (
-                self.attention.kind != "dense"
-                or self.model.ffn != "dense"
+                self.attention_kinds != {"dense"}
+                or self.ffn_kinds != {"dense"}
                 or self.training.gradient_accumulation != 1
                 or self.dataset.allocation_manifest_path is not None
                 or self.training.portability_manifest_path is not None
@@ -996,7 +1259,7 @@ class RunConfig(StrictModel):
             if (
                 self.runtime.engine != "pytorch"
                 or self.model.memory not in {"none", "ngram"}
-                or self.model.ffn != "dense"
+                or self.ffn_kinds != {"dense"}
                 or self.dataset.allocation_manifest_path is not None
                 or self.model.semantic_memory_dim is not None
             ):
@@ -1021,31 +1284,39 @@ class RunConfig(StrictModel):
                 raise ValueError(
                     "portability runs require an explicit trainable_parameters list"
                 )
-        if (
-            self.attention.latent_dim is not None
-            and self.attention.latent_dim % self.model.num_heads
-        ):
-            raise ValueError("attention.latent_dim must divide evenly across heads")
-        if (
+        grouped_query = (
             self.model.num_kv_heads is not None
             and self.model.num_kv_heads != self.model.num_heads
-            and (
-                self.attention.kind in {"mla", "block_sparse", "local_selected"}
+        )
+        attentions: list[AttentionConfig] = []
+        for _, layer_attention in self.layer_specs:
+            if layer_attention not in attentions:
+                attentions.append(layer_attention)
+        for attention in attentions:
+            if (
+                attention.latent_dim is not None
+                and attention.latent_dim % self.model.num_heads
+            ):
+                raise ValueError("attention.latent_dim must divide evenly across heads")
+            if grouped_query and (
+                attention.kind in {"mla", "block_sparse", "local_selected"}
                 or self.runtime.engine == "mlx"
-            )
+            ):
+                raise ValueError(
+                    "grouped-query attention is supported only for PyTorch dense or sliding_window attention"
+                )
+            if attention.implementation == "sdpa" and (
+                self.runtime.engine != "pytorch" or grouped_query
+            ):
+                raise ValueError(
+                    "SDPA requires PyTorch dense attention with equal Q/KV head counts"
+                )
+        if self.runtime.engine == "mlx" and (
+            self.model.layers or self.external_components
         ):
             raise ValueError(
-                "grouped-query attention is supported only for PyTorch dense or sliding_window attention"
-            )
-        if self.attention.implementation == "sdpa" and (
-            self.runtime.engine != "pytorch"
-            or (
-                self.model.num_kv_heads is not None
-                and self.model.num_kv_heads != self.model.num_heads
-            )
-        ):
-            raise ValueError(
-                "SDPA requires PyTorch dense attention with equal Q/KV head counts"
+                "the MLX engine builds one built-in block for every layer; "
+                "model.layers and kinds from other packages need the PyTorch engine"
             )
         policy = self.checkpoint.retention
         if policy is not None and (

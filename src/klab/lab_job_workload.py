@@ -196,7 +196,7 @@ def declarations(workload: TryWorkload, root: Path) -> tuple:
         raise ValueError("tokenizer must consume the same bounded input declaration")
     for config in (base, candidate):
         if (
-            config.model.ffn != "dense"
+            config.ffn_kinds != {"dense"}
             or config.model.memory != "none"
             or config.model.vocab_size != token.vocab_size
         ):

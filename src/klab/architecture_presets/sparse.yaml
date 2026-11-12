@@ -1,0 +1,13 @@
+description: Long-context decoder whose attention reads a local window plus a few selected earlier blocks.
+model:
+  vocab_size: 32000
+  hidden_dim: 768
+  num_layers: 12
+  num_heads: 12
+  ffn_dim: 2048
+  max_seq_len: 8192
+attention:
+  kind: local_selected
+  block_size: 64
+  window_size: 256
+  selected_blocks: 8

@@ -173,6 +173,15 @@ class DenseAttention(nn.Module):
         weights = self._probabilities(query, key, length)
         return weights.flatten(1, 2) if weights.ndim == 5 else weights
 
+    @property
+    def cache_backend(self) -> str:
+        return "dense" if self.window_size is None else "sliding"
+
+    @property
+    def cache_layout(self) -> tuple[int, int, int]:
+        """K/V heads, key width and value width of one cached layer."""
+        return self.num_kv_heads, self.head_dim, self.head_dim
+
     def create_cache(
         self, batch: int, capacity: int, *, device: torch.device, dtype: torch.dtype
     ) -> AttentionKVCache:

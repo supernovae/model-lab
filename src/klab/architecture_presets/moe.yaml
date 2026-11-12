@@ -1,0 +1,16 @@
+description: Dense attention with a routed feed-forward of eight experts, two per token, plus a shared expert.
+model:
+  vocab_size: 32000
+  hidden_dim: 768
+  num_layers: 12
+  num_heads: 12
+  ffn_dim: 1024
+  max_seq_len: 2048
+  ffn: moe
+  num_experts: 8
+  experts_per_token: 2
+  shared_expert: true
+  router_aux_loss_coefficient: 0.01
+attention:
+  kind: dense
+  implementation: sdpa

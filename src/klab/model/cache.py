@@ -8,7 +8,6 @@ checkpoint, or reusable model state.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
 
 import torch
 from torch import Tensor
@@ -20,7 +19,8 @@ class IncrementalCacheCapability:
 
     supported: bool
     reason: str | None = None
-    backend: Literal["dense", "sliding", "mla", "local_selected"] | None = None
+    # One attention layout name, or several joined by "+" for a per-layer schedule.
+    backend: str | None = None
 
 
 @dataclass
@@ -87,7 +87,7 @@ class GenerationCache:
     input_ids: Tensor
     length: int
     capacity: int
-    mode: Literal["dense", "sliding", "mla", "local_selected"]
+    mode: str
     owner: object
     batch_size: int
     device: torch.device

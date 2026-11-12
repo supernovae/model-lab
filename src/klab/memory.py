@@ -19,7 +19,7 @@ import yaml
 
 from klab import host_capacity
 from klab.canonical import canonical_json
-from klab.config.models import RunConfig
+from klab.config.models import AttentionConfig, RunConfig
 from klab.model.inspection import (
     ParameterInventory,
     named_tensor_inventory,
@@ -164,14 +164,16 @@ def registered_runtime_buffers_bytes(config: RunConfig) -> int:
     return layers * rope + mapping_bytes
 
 
-def _attention_reach(config: RunConfig) -> tuple[int, int, str]:
+def _attention_reach(
+    config: RunConfig, attention: AttentionConfig
+) -> tuple[int, int, str]:
     """Keys scored per query, gathered K/V width per position, and the assumption.
 
     Score and probability tensors are sized by how many keys each query
     actually scores, so a bounded attention is not charged for a ``[T, T]``
     matrix it never builds.
     """
-    attention, model, t = config.attention, config.model, config.training.seq_len
+    model, t = config.model, config.training.seq_len
     if attention.kind == "local_selected":
         assert attention.block_size and attention.window_size
         assert attention.selected_blocks is not None
@@ -212,6 +214,18 @@ def _attention_reach(config: RunConfig) -> tuple[int, int, str]:
                 "retain a [T, T] score matrix; verify with a measured warmup"
             ),
         )
+    from klab.components import is_builtin
+
+    if not is_builtin("attention", attention.kind):
+        return (
+            t,
+            0,
+            (
+                f"{attention.kind} attention comes from another package and is "
+                "charged a full [T, T] score/probability allowance and dense "
+                "projections; verify with a measured warmup"
+            ),
+        )
     return (
         t,
         0,
@@ -234,38 +248,46 @@ def estimate_memory(
     ``calibration`` is a conservative multiplier derived from a matching native
     peak observation. Callers must not derive it from sampled MPS observations.
     """
-    b, t, d, f, l, h, v = (
+    b, t, d, l, h, v = (
         config.training.micro_batch_size,
         config.training.seq_len,
         config.model.hidden_dim,
-        config.model.ffn_dim,
         config.model.num_layers,
         config.model.num_heads,
         config.model.vocab_size,
     )
-    model, attention = config.model, config.attention
+    model = config.model
     weights = inventory.total * 4
     buffers = registered_runtime_buffers_bytes(config)
     gradients = inventory.trainable * 4
     optimizer = optimizer_state_bytes(config, inventory)
-    if model.ffn == "dense":
-        per_block_nonattention = b * t * (4 * 6 * d + 4 * 3 * f)
-    else:
-        direct = model.experts_per_token + int(model.shared_expert)
-        per_block_nonattention = (
-            b * t * (4 * 6 * d + 4 * (3 * f * direct + 2 * model.num_experts))
+    # Each block is charged for its own feed-forward and attention kind. A
+    # feed-forward kind from another package is charged as one dense SwiGLU.
+    nonattention: list[int] = []
+    attention_working_per_block: list[int] = []
+    attention_notes: list[str] = []
+    for layer, layer_attention in config.layer_specs:
+        f = layer.ffn_dim
+        if layer.ffn == "moe":
+            direct = layer.experts_per_token + int(layer.shared_expert)
+            nonattention.append(
+                b * t * (4 * 6 * d + 4 * (3 * f * direct + 2 * layer.num_experts))
+            )
+        else:
+            nonattention.append(b * t * (4 * 6 * d + 4 * 3 * f))
+        projected_width = (
+            2 * d + (layer_attention.latent_dim or d)
+            if layer_attention.kind == "mla"
+            else d + 2 * (model.num_kv_heads or h) * (d // h)
         )
-    projected_width = (
-        2 * d + (attention.latent_dim or d)
-        if attention.kind == "mla"
-        else d + 2 * (model.num_kv_heads or h) * (d // h)
-    )
-    keys_per_query, gathered_width, attention_note = _attention_reach(config)
-    per_block_attention = (
-        4 * b * t * projected_width
-        + 2 * 4 * b * h * t * keys_per_query
-        + 4 * b * t * gathered_width
-    )
+        keys_per_query, gathered_width, note = _attention_reach(config, layer_attention)
+        if note not in attention_notes:
+            attention_notes.append(note)
+        attention_working_per_block.append(
+            4 * b * t * projected_width
+            + 2 * 4 * b * h * t * keys_per_query
+            + 4 * b * t * gathered_width
+        )
     streams = (
         (len(model.memory_ngram_orders) or 1) * model.memory_hash_heads
         if model.memory == "ngram"
@@ -273,13 +295,11 @@ def estimate_memory(
     )
     logits_and_memory = 2 * 4 * b * t * v + 2 * 4 * b * t * streams * d
     if config.runtime.memory.activation_checkpointing.enabled:
-        activations = (
-            (l + 1) * 4 * b * t * d + per_block_nonattention + logits_and_memory
-        )
-        attention_working = per_block_attention
+        activations = (l + 1) * 4 * b * t * d + max(nonattention) + logits_and_memory
+        attention_working = max(attention_working_per_block)
     else:
-        activations = l * per_block_nonattention + logits_and_memory
-        attention_working = l * per_block_attention
+        activations = sum(nonattention) + logits_and_memory
+        attention_working = sum(attention_working_per_block)
     workspace = max(
         64 * _MIB, int(0.1 * (weights + gradients + optimizer)) + 8 * b * t * v
     )
@@ -320,7 +340,7 @@ def estimate_memory(
     assumptions = [
         "reference-v2: FP32 master parameters and gradients; autocast does not reduce resident model or optimizer state",
         "categories are disjoint: registered buffers, retained activations, attention working tensors, workspace, and headroom",
-        attention_note,
+        *attention_notes,
     ]
     if config.runtime.memory.activation_offload.enabled:
         assumptions.append(

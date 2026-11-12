@@ -1521,6 +1521,17 @@ def _train_impl(
             store.log_event(
                 run_id, step, tokens, cumulative_wall, str(decision["kind"]), decision
             )
+        if config.external_components:
+            # The config names each kind; this records which package and
+            # version supplied the code that actually ran.
+            store.log_event(
+                run_id,
+                step,
+                tokens,
+                cumulative_wall,
+                "external_components",
+                config.external_components,
+            )
         started = time.perf_counter()
         interrupted = False
         latest_record: CheckpointRecord | None = None

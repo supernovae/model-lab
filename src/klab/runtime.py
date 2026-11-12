@@ -644,7 +644,11 @@ def _validate_mlx_runtime(config: Any) -> RuntimeInfo:
         precision=precision,
         optimizer=config.optimizer.name,
         checkpointing=runtime.memory.activation_checkpointing.enabled,
-        attention=config.attention.kind,
+        attention=(
+            "block_sparse"
+            if "block_sparse" in config.attention_kinds
+            else config.attention.kind
+        ),
     )
     return _validated_probe_info(
         result,

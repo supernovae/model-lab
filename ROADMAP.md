@@ -21,10 +21,10 @@ work items and their status. It is not a second task board or a release promise.
 - **A general model-building lab.** Lab is the engine for building consistent,
   repeatable and comparable models at any size; experiments are one use of it.
   Model projects and recipes live in
-  [Kybern Workshop](https://github.com/supernovae/kybern-workshop). Pending work:
-  pluggable components, per-layer schedules and named architecture presets
-  ([#352](https://github.com/supernovae/model-lab/issues/352)), and moving
-  study- and corpus-specific schema out of the core
+  [Kybern Workshop](https://github.com/supernovae/kybern-workshop). [Components](docs/components.md) are registered by kind and can come from
+  another package, blocks can differ by layer, and named presets scale to a
+  parameter target. Pending work: moving the remaining study- and
+  corpus-specific schema out of the core
   ([#359](https://github.com/supernovae/model-lab/issues/359)).
 - **Scale without idle accelerators.** Prepare data completely on CPU with the
   whole host, then keep devices busy: preparation at 10B to 100B tokens

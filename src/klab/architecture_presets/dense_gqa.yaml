@@ -1,0 +1,11 @@
+description: Dense decoder with grouped-query attention (three query heads per key/value head).
+model:
+  vocab_size: 32000
+  hidden_dim: 768
+  num_layers: 12
+  num_heads: 12
+  num_kv_heads: 4
+  ffn_dim: 2048
+  max_seq_len: 2048
+attention:
+  kind: dense

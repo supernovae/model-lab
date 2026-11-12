@@ -871,6 +871,11 @@ def _cache_layout(config: Any) -> dict[str, object]:
             "status": "runtime_specific",
             "reason": "static PyTorch cache layout is not applied to the native MLX engine",
         }
+    if config.model.layers or config.external_components:
+        return {
+            "status": "runtime_specific",
+            "reason": "a per-layer schedule or a kind from another package has no single static cache layout",
+        }
     if kind == "block_sparse":
         return {
             "status": "unsupported",

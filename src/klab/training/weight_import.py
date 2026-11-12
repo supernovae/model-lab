@@ -321,7 +321,11 @@ def _llama_weights(
         raise ValueError("Hugging Face source must be a non-symlinked local directory")
     config = _llama_config(source)
     model, attention = destination.model, destination.attention
-    if model.ffn != "dense" or model.memory != "none" or attention.kind != "dense":
+    if (
+        destination.ffn_kinds != {"dense"}
+        or model.memory != "none"
+        or destination.attention_kinds != {"dense"}
+    ):
         raise ValueError(
             "Llama import requires dense attention, dense SwiGLU, and no memory adapter"
         )

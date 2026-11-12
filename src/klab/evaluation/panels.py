@@ -114,7 +114,7 @@ def run_panel(
             if (
                 loaded.engine is not None
                 or loaded.config.model.memory not in {"none", "ngram"}
-                or loaded.config.model.ffn != "dense"
+                or loaded.config.ffn_kinds != {"dense"}
                 or loaded.config.dataset.allocation_manifest_path is not None
                 or loaded.config.model.semantic_memory_dim is not None
                 or not isinstance(loaded.device, torch.device)

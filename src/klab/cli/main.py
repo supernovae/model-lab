@@ -447,6 +447,60 @@ def _config_derive(args: argparse.Namespace) -> None:
         print(f"delta {field}: {change['base']!r} -> {change['variant']!r}")
 
 
+def _architecture_list(args: argparse.Namespace) -> None:
+    from klab.architectures import count_parameters, load_preset, preset_names
+
+    rows = []
+    for name in preset_names():
+        _, preset = load_preset(name)
+        rows.append(
+            {
+                "name": name,
+                "description": preset.description,
+                "reference_parameters": count_parameters(
+                    preset.model, preset.attention
+                ),
+            }
+        )
+    if args.json:
+        print(json.dumps(rows, sort_keys=True))
+        return
+    for row in rows:
+        print(f"{row['name']:<10} {row['description']}")
+
+
+def _architecture_derive(args: argparse.Namespace) -> None:
+    try:
+        from klab.architectures import derive_run_config, parse_parameter_count
+
+        result = derive_run_config(
+            args.preset,
+            parse_parameter_count(args.params),
+            Path(args.base),
+            Path(args.output),
+            vocab_size=args.vocab_size,
+            max_seq_len=args.max_seq_len,
+            num_layers=args.layers,
+            name=args.name,
+        )
+    except (OSError, TypeError, ValueError) as error:
+        if args.json:
+            print(json.dumps({"status": "error", "error": str(error)}))
+        else:
+            print(f"klab architecture derive: {error}", file=sys.stderr)
+        raise SystemExit(2) from None
+    if args.json:
+        print(json.dumps({"status": "ok", **result}, sort_keys=True))
+        return
+    print(
+        f"{result['preset']}: {result['parameters']:,} parameters "
+        f"({result['relative_error']:+.2%} of the {result['target_parameters']:,} "
+        f"target), {result['num_layers']} layers x {result['hidden_dim']} wide, "
+        f"{result['num_heads']} heads"
+    )
+    print(f"output: {result['output']}")
+
+
 def _legacy_checkpoint_inventory(path: Path, expected_config=None) -> dict[str, object]:
     from klab.training.weight_import import load_legacy_weights
 
@@ -2889,6 +2943,7 @@ def _explore(args: argparse.Namespace) -> None:
 # release/full-provenance last. Every registered command appears exactly once
 # (see tests/test_lab_mode.py).
 BUILD_COMMANDS = (
+    "architecture",
     "inspect",
     "tokenizer",
     "data",
@@ -3562,6 +3617,44 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     training.add_argument("--resource-envelope", type=Path)
     _tokenizer_batch_arguments(training)
     training.set_defaults(handler=_train)
+    architecture = commands.add_parser(
+        "architecture",
+        help="List named architecture presets or scale one to a parameter target.",
+    )
+    architecture_commands = architecture.add_subparsers(
+        dest="architecture_command", required=True
+    )
+    architecture_list = architecture_commands.add_parser("list")
+    architecture_list.add_argument("--json", action="store_true")
+    architecture_list.set_defaults(handler=_architecture_list)
+    architecture_derive = architecture_commands.add_parser(
+        "derive",
+        help="Scale a preset to a parameter count and write a run config from a base",
+    )
+    architecture_derive.add_argument(
+        "preset", help="Shipped preset name or a preset YAML path"
+    )
+    architecture_derive.add_argument(
+        "--params", required=True, help="Target total parameters, such as 300M or 1B"
+    )
+    architecture_derive.add_argument(
+        "--base",
+        required=True,
+        help="Run config supplying everything except model and attention",
+    )
+    architecture_derive.add_argument("--output", required=True, help="New YAML path")
+    architecture_derive.add_argument(
+        "--vocab-size", type=int, help="Default: the base config's vocabulary"
+    )
+    architecture_derive.add_argument(
+        "--max-seq-len", type=int, help="Default: the base config's context"
+    )
+    architecture_derive.add_argument(
+        "--layers", type=int, help="Fix the depth and search width only"
+    )
+    architecture_derive.add_argument("--name", help="Run name for the new config")
+    architecture_derive.add_argument("--json", action="store_true")
+    architecture_derive.set_defaults(handler=_architecture_derive)
     model = commands.add_parser("model")
     model_commands = model.add_subparsers(dest="model_command", required=True)
     model_exercise = model_commands.add_parser(

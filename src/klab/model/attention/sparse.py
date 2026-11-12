@@ -69,6 +69,41 @@ class BlockSparseAttention(nn.Module):
         self.last_diagnostics: SparseAttentionDiagnostics | None = None
         self.last_backend: SparseBackend | None = None
 
+    cache_unsupported_reason = (
+        "block_sparse selection is prefix-dependent; generation recomputes "
+        "the active prefix for exact reference semantics"
+    )
+
+    def forward_with_aux(
+        self,
+        x: Tensor,
+        *,
+        valid_target_mask: Tensor | None = None,
+        diagnostics: Literal["scalar", "full"] = "scalar",
+    ) -> tuple[Tensor, None]:
+        """Attend with the block's target mask; this attention adds no loss."""
+        return (
+            self(x, valid_target_mask=valid_target_mask, diagnostics=diagnostics),
+            None,
+        )
+
+    def metric_tensors(self) -> dict[str, Tensor]:
+        diagnostic = self.last_diagnostics
+        if diagnostic is None:
+            return {}
+        return {
+            metric: value
+            for metric, value in (
+                ("available_tokens", diagnostic.available_tokens),
+                ("selected_tokens", diagnostic.selected_tokens),
+                ("selection_ratio", diagnostic.selection_ratio),
+                ("estimated_flops", diagnostic.estimated_attention_flops),
+                ("dense_teacher_mass", diagnostic.dense_teacher_mass),
+                ("dense_teacher_topk_recall", diagnostic.dense_teacher_topk_recall),
+            )
+            if value is not None
+        }
+
     def forward(
         self,
         x: Tensor,
