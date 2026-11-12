@@ -22,7 +22,7 @@ from klab.workspace_cleanup import (
 
 
 def _workspace(tmp_path: Path, *, status: str = "completed") -> tuple[Path, Path]:
-    workspace = tmp_path / "campaign"
+    workspace = tmp_path / "experiment"
     cache = workspace / "cache"
     store = ExperimentStore(workspace / "runs")
     store.create_run("tiny", {"dataset": {"cache_dir": str(cache)}}, {})
@@ -123,13 +123,13 @@ def test_cleanup_skips_cache_during_worker_attempt(tmp_path: Path) -> None:
     assert plan_cleanup(workspace, max_cache_entries=0)["candidates"] == []
 
 
-def test_prepared_data_marks_new_campaign_cache(tmp_path: Path, monkeypatch) -> None:
+def test_prepared_data_marks_new_workspace_cache(tmp_path: Path, monkeypatch) -> None:
     from test_training import config
 
     from klab.data.packing import prepare_data
     from klab.data.tokenizer import load_tokenizer
 
-    workspace = tmp_path / "campaign"
+    workspace = tmp_path / "experiment"
     configured = config(workspace)
     monkeypatch.setenv("KLAB_WORK_DIR", str(workspace))
     prepared = prepare_data(configured, load_tokenizer(configured.tokenizer.path))
@@ -255,7 +255,7 @@ def test_cleanup_refuses_unresolved_manifest_lineage(tmp_path):
     digest = canonical_digest(payload)
     source.register_manifest("tiny", digest, payload)
     source.finish_run("tiny", "completed")
-    workspace = tmp_path / "campaign"
+    workspace = tmp_path / "experiment"
     target = ExperimentStore(workspace / "runs")
     target.import_records(source.export_records()["records"])
     with pytest.raises(ValueError, match="unresolved manifest reference for tiny"):

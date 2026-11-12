@@ -87,11 +87,6 @@ class ChatRecallCase:
     kind: str
 
 
-def alias_mapping() -> dict[str, str]:
-    """Return a copy so callers cannot mutate the corpus definition."""
-    return dict(_MAPPING)
-
-
 def _prompt(history: tuple[ChatMessage, ...], message: str) -> str:
     return format_chat_prompt(history, message, system=_SYSTEM)
 
@@ -145,28 +140,6 @@ def _evaluation_cases(split: str) -> tuple[ChatRecallCase, ...]:
                 _prompt(history, template.format(alias=alias)),
                 value,
                 "alias_recall",
-            )
-        )
-    return tuple(cases)
-
-
-def context_override_cases() -> tuple[ChatRecallCase, ...]:
-    """Held-out controls where explicit conversation context overrides static recall."""
-    cases: list[ChatRecallCase] = []
-    for index, (alias, known_value) in enumerate(tuple(_MAPPING.items())[::3]):
-        override = _VALUES[(_VALUES.index(known_value) + 5) % len(_VALUES)]
-        history = (
-            ChatMessage(
-                "user", f"For this conversation only, {alias} means {override}."
-            ),
-            ChatMessage("assistant", "I will use that temporary mapping."),
-        )
-        cases.append(
-            ChatRecallCase(
-                f"context-override-{alias}",
-                _prompt(history, f"Which value should I return when I see {alias}?"),
-                override,
-                "context_override",
             )
         )
     return tuple(cases)

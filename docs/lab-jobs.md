@@ -5,9 +5,7 @@
 **tokenizer train → try → report**: `try` owns data preparation, candidate
 derivation, initialized baseline/candidate training, held-out evaluation, probes,
 sealed records and cancellation. The adapter verifies their dependent outputs;
-it does not implement another trainer, DAG, queue or scheduler. Ordinary lab work
-needs no Campaign or locked ExperimentPlan. Those remain available for release
-work and larger queued workflows. There is no shell-command field, dependency
+it does not implement another trainer, DAG, queue or scheduler. There is no shell-command field, dependency
 sync, automatic retry or deletion operation. Jobs run on CPU.
 
 ## Select source, host and native declarations

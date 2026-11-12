@@ -11,14 +11,7 @@ from klab.training.attempt_budget import AttemptBudget
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
-_RECEIPT_KINDS = (
-    "train",
-    "panel",
-    "campaign_run",
-    "campaign_panel",
-    "campaign_evaluation",
-    "none",
-)
+_RECEIPT_KINDS = ("train", "none")
 
 
 def _absolute(path: Path, name: str) -> Path:
@@ -140,16 +133,9 @@ def handle_attempt(args: argparse.Namespace) -> None:
     )
     if any(type(counter) is not int or counter < 0 for counter in counters):
         raise ValueError("attempt reservations must be nonnegative integers")
-    campaign_kind = args.receipt_kind in {
-        "campaign_run",
-        "campaign_panel",
-        "campaign_evaluation",
-    }
     if args.receipt_kind == "none":
-        if args.receipt_path is not None or args.campaign_stage is not None:
-            raise ValueError(
-                "receipt-kind none cannot bind a receipt or Campaign stage"
-            )
+        if args.receipt_path is not None:
+            raise ValueError("receipt-kind none cannot bind a receipt")
         if any(counters):
             raise ValueError("nonzero reservations require a native receipt binding")
         receipt = None
@@ -157,19 +143,6 @@ def handle_attempt(args: argparse.Namespace) -> None:
         if args.receipt_path is None:
             raise ValueError("native receipt path is required")
         receipt = _absolute(args.receipt_path, "native receipt")
-    if campaign_kind:
-        if args.campaign_stage is None:
-            raise ValueError("Campaign receipt requires --campaign-stage")
-        _id(args.campaign_stage, "Campaign stage")
-        if args.campaign_work_dir is None:
-            raise ValueError("Campaign receipt requires --campaign-work-dir")
-        campaign_work_dir = _absolute(args.campaign_work_dir, "Campaign work directory")
-    elif args.campaign_stage is not None:
-        raise ValueError("Campaign stage is only valid for Campaign receipts")
-    elif args.campaign_work_dir is not None:
-        raise ValueError("Campaign work directory is only valid for Campaign receipts")
-    else:
-        campaign_work_dir = None
 
     parent_checkpoint = (
         _absolute(args.parent_checkpoint, "parent checkpoint")
@@ -192,8 +165,6 @@ def handle_attempt(args: argparse.Namespace) -> None:
         generated_tokens=args.generated_tokens,
         native_receipt_kind=args.receipt_kind,
         native_receipt_path=receipt,
-        campaign_stage=args.campaign_stage,
-        campaign_work_dir=campaign_work_dir,
         parent_checkpoint_path=parent_checkpoint,
     )
     if returncode != 0:
@@ -276,8 +247,6 @@ def register_attempt_parser(
         run.add_argument(f"--{field}", type=int, required=True)
     run.add_argument("--receipt-kind", choices=_RECEIPT_KINDS, required=True)
     run.add_argument("--receipt-path", type=Path)
-    run.add_argument("--campaign-stage")
-    run.add_argument("--campaign-work-dir", type=Path)
     run.add_argument("--parent-checkpoint", type=Path)
     run.add_argument("command_args", nargs=argparse.REMAINDER)
     run.set_defaults(handler=handle_attempt)

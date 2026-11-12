@@ -139,12 +139,8 @@ def record_storage_observation(
     This is execution evidence, not a scientific digest. A replay returns the
     original record and timestamp without writing it again.
     """
-    from klab.campaign.state import (
-        digest,
-        publish_immutable,
-        read_canonical,
-        utc_now,
-    )
+    from klab.canonical import domain_digest
+    from klab.result_publication import publish_immutable, read_canonical, utc_now
 
     if not operation or not isinstance(operation, str):
         raise ValueError("storage observation needs an operation")
@@ -158,7 +154,7 @@ def record_storage_observation(
         ),
         "storage_checks": checks,
     }
-    identity = digest("operational-storage-observation-v1", body)
+    identity = domain_digest("operational-storage-observation-v1", body)
     path = selected / "execution" / f"storage-{identity}.json"
     if path.exists() or path.is_symlink():
         existing = read_canonical(path)
@@ -168,7 +164,7 @@ def record_storage_observation(
             or existing.get("observation_sha256") != identity
             or {key: existing.get(key) for key in body} != body
             or existing.get("receipt_sha256")
-            != digest(
+            != domain_digest(
                 "operational-storage-receipt-v1",
                 {
                     key: value
@@ -180,6 +176,6 @@ def record_storage_observation(
             raise ValueError(f"conflicting storage observation: {path}")
         return path
     record = {**body, "observation_sha256": identity, "observed_at_utc": utc_now()}
-    record["receipt_sha256"] = digest("operational-storage-receipt-v1", record)
+    record["receipt_sha256"] = domain_digest("operational-storage-receipt-v1", record)
     publish_immutable(path, record)
     return path

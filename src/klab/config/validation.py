@@ -23,12 +23,26 @@ KINDS = {
 }
 
 
-def validate_config(source: Path, kind: str) -> dict:
-    # Use the same bounded, symlink-refusing metadata reader as portable recipes.
-    from klab.experiments.recipe import _metadata_bytes
+MAX_DOCUMENT_BYTES = 1024 * 1024
 
+
+def _document_bytes(path: Path) -> bytes:
+    """Read one bounded declaration, refusing symlinks anywhere on its path."""
+    for component in (path, *path.parents):
+        if component.is_symlink():
+            raise ValueError(f"symlinked declaration: {component}")
+    if not path.is_file():
+        raise ValueError(f"unavailable declaration: {path}")
+    with path.open("rb") as stream:
+        data = stream.read(MAX_DOCUMENT_BYTES + 1)
+    if len(data) > MAX_DOCUMENT_BYTES:
+        raise ValueError(f"declaration exceeds {MAX_DOCUMENT_BYTES} bytes: {path}")
+    return data
+
+
+def validate_config(source: Path, kind: str) -> dict:
     source = Path(source).absolute()
-    raw = _metadata_bytes(source)
+    raw = _document_bytes(source)
     document = parse_document(raw.decode("utf-8"), source=source)
     config = TypeAdapter(KINDS[kind]).validate_python(document)
     return {
@@ -54,7 +68,7 @@ _MAX_DECLARATION_BYTES = 1024 * 1024
 def declaration_kind(document: object) -> str | None:
     """Name the native schema a complete declaration is written for, if any.
 
-    Partial sections, plans, campaigns and other documents are not recognized;
+    Partial sections and other documents are not recognized;
     a directory check reports them as skipped, never as valid.
     """
     if not isinstance(document, dict):

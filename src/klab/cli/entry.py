@@ -21,13 +21,6 @@ def main() -> None:
         if args.work_dir is not None:
             os.environ["KLAB_WORK_DIR"] = str(resolve_work_dir(args.work_dir))
         environment_main(args.command[2:])
-    elif not extras and args.command[:2] == ["experiment", "recipe"]:
-        from klab.experiments.recipe_cli import main as recipe_main
-
-        # Inspection ignores execution-only global work/token selectors. In
-        # particular it neither reads credentials nor configures a work root.
-        # Preparation apply/resume requires its own explicit command-local root.
-        recipe_main(args.command[2:])
     elif not extras and args.command[:2] == ["config", "validate"]:
         from klab.config.validation import main as validation_main
 

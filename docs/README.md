@@ -24,6 +24,7 @@ only read records. A run ID names weights; a try or probe ID names a result. Use
 | --- | --- |
 | [Build a model from your own text](build.md) | Corpus to tokenizer to model in five commands; keeping a model in its own repository |
 | [Lab mode](lab-mode.md) | `try` and `report`: one change against a baseline |
+| [Configs](configs.md) | Validating, composing and deriving configs |
 | [First real model](first-model.md) | A 17M decoder on FineWeb-Edu with paired seeds |
 | [From a toy model to a useful one](from-toy-to-useful.md) | From an instruction-learning toy to a narrow useful model |
 
@@ -84,12 +85,9 @@ Lab mode needs none of these.
 
 | Page | Covers |
 | --- | --- |
-| [Experiments](experiments.md) | Choosing a launch path, matrices, plans and locks, checks between iterations |
+| [Experiments](experiments.md) | Choosing a launch path, queues and matrices |
 | [Workers](workers.md) | Independent local, SSH and Colab workers |
 | [Lab jobs](lab-jobs.md) | Bounded CPU handoffs from an external scheduler |
-| [Training programs](experiment-programs.md) | Multi-phase plans with checkpoint lineage |
-| [Campaigns](campaigns.md) | Dependent stages, approvals and recovery |
-| [Portable recipes](recipes.md) | Validating and composing configs, and running recipes from another repository |
 
 ## Contributing
 

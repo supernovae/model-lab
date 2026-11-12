@@ -202,18 +202,12 @@ reports the interpreter, framework, device and source identity it finds.
 
 `train`, `stage`, `eval`, `generate`, `chat`, `serve` and `explore` take
 `--runtime ID` or `--runtime-profile FILE`; `try` and `probe` take `--runtime ID`
-or `runtime_profile` in their declaration. Single-config `experiment submit`,
-`experiment bind` and `run`, and `campaign apply` and `resume` accept them too.
+or `runtime_profile` in their declaration. Single-config `experiment submit`
+accepts them too.
 A different interpreter replaces the CLI process once, with the same arguments
 and environment, after authorization and before any workspace is created.
 Profiles and probe results are operational evidence; they never enter a config
 or cache identity.
-
-Experiment plans bind runtimes per cell; see
-[experiments](experiments.md#run-a-lock). Reopening a binding probes the
-interpreter again, and a changed source, device, framework or profile is
-refused. Campaign runtime stages name a `profile_id` or a `worker`, never an
-interpreter path.
 
 ## Inspect and stage before a run
 

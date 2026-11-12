@@ -70,7 +70,7 @@ checkpoint transitions use `train`; see [choosing a path](experiments.md#choose-
 ## Machine-local runtime selection
 
 `klab runtime env` manages a host-local interpreter registry, not worker
-registrations or scientific locks. Inspect hardware and installed Python environments
+registrations. Inspect hardware and installed Python environments
 separately; inventory alone does not authorize a backend. A CPU checkout example:
 
 ```sh
@@ -87,7 +87,7 @@ absolute, else `$XDG_DATA_HOME/klab/runtimes` if XDG is absolute/nonblank,
 else `~/.local/share/klab/runtimes`. The registry uses the corresponding
 `$XDG_CONFIG_HOME/klab/runtimes.yaml` or
 `~/.config/klab/runtimes.yaml`. Both are independent of
-`KLAB_WORK_DIR` and the scientific lock. Existing interpreters can be
+`KLAB_WORK_DIR`. Existing interpreters can be
 registered outside the runtime root. Never copy registry entries to another
 host: register and doctor the actual interpreter there; remote worker capabilities
 remain authoritative on that host. `--runtime ID` resolves a local profile,

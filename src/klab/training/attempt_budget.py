@@ -1271,17 +1271,8 @@ class AttemptBudget:
         generation_calls: int = 0,
         generated_tokens: int = 0,
         grace_seconds: float = 1.0,
-        native_receipt_kind: Literal[
-            "train",
-            "panel",
-            "campaign_run",
-            "campaign_panel",
-            "campaign_evaluation",
-            "none",
-        ] = "none",
+        native_receipt_kind: Literal["train", "none"] = "none",
         native_receipt_path: Path | None = None,
-        campaign_stage: str | None = None,
-        campaign_work_dir: Path | None = None,
         parent_checkpoint_path: Path | None = None,
     ) -> int:
         """Reserve before work, then run one phase under the owned supervisor."""
@@ -1565,36 +1556,10 @@ class AttemptBudget:
                 )
 
                 verify_accepted_prepared_config(Path(classified.args[3]), review)
-        if classified.effect in {"fixed_score", "continuation"} and (
-            (
-                contract.fixed_profile_sha256 is not None
-                and classified.options["--expected-profile-sha256"]
-                != contract.fixed_profile_sha256
-            )
-            or (
-                contract.fixed_family_inventory_sha256 is not None
-                and classified.options["--expected-family-sha256"]
-                != contract.fixed_family_inventory_sha256
-            )
-        ):
-            raise AttemptBudgetError("fixed evaluation identity differs from contract")
         if classified.effect == "train" and activity != "train":
             raise AttemptBudgetError("training command requires training activity")
-        if (
-            classified.effect in {"fixed_score", "continuation"}
-            and activity != "evaluate"
-        ):
-            raise AttemptBudgetError(
-                "fixed model evaluation requires evaluation activity"
-            )
-        if classified.effect not in {"train", "campaign"} and activity == "train":
+        if classified.effect != "train" and activity == "train":
             raise AttemptBudgetError("training activity requires native training")
-        if classified.effect == "campaign" and native_receipt_kind not in {
-            "campaign_run",
-            "campaign_panel",
-            "campaign_evaluation",
-        }:
-            raise AttemptBudgetError("Campaign work requires a native stage receipt")
         if classified.monitor is not None:
             nested = classified.monitor
             policy_digest = hashlib.sha256(
@@ -1603,7 +1568,6 @@ class AttemptBudget:
             preparation_wrapper = (
                 policy_digest == contract.preparation_monitor_policy_sha256
                 and Path(nested["--baseline"]) == workspace_baseline_path
-                and classified.effect not in {"fixed_score", "continuation"}
             )
             evaluation_baseline = self._resolved_artifact(
                 "evaluation_baseline", workspace_root=resolved_root
@@ -1617,20 +1581,6 @@ class AttemptBudget:
                 preparation_wrapper or evaluation_wrapper
             ):
                 raise AttemptBudgetError("nested monitor policy or baseline is unbound")
-        if (
-            classified.effect in {"fixed_score", "continuation"}
-            and contract.require_evaluation_baseline_binding
-            and (
-                classified.monitor is None
-                or hashlib.sha256(
-                    Path(classified.monitor["--policy"]).read_bytes()
-                ).hexdigest()
-                != contract.evaluation_monitor_policy_sha256
-            )
-        ):
-            raise AttemptBudgetError(
-                "fixed evaluation requires the bound output monitor"
-            )
         if (
             classified.operation == "corpus acquire"
             and not classified.options.get("--offline")
@@ -1735,52 +1685,17 @@ class AttemptBudget:
         reserved = (updates, target_positions, generation_calls, generated_tokens)
         if native_receipt_kind == "none" and any(reserved):
             raise AttemptBudgetError("nonzero reservation requires a native receipt")
-        metered_fixed = classified.effect in {"fixed_score", "continuation"}
-        if native_receipt_kind == "none" and not (
-            self._approved_counter_free_command(command) or metered_fixed
+        if native_receipt_kind == "none" and not self._approved_counter_free_command(
+            command
         ):
             raise AttemptBudgetError(
                 "counter-free phase requires an explicit supported native command"
             )
-        if metered_fixed:
-            status = self.status()
-            required_fixed = (
-                int(classified.options["--max-forward-positions"])
-                if classified.effect == "fixed_score"
-                else 0
-            )
-            required_total = required_fixed if required_fixed else 8 * 6112
-            if (
-                contract.max_nontraining_forward_positions is None
-                or contract.max_fixed_profile_forward_positions is None
-                or status["charged_nontraining_forward_positions"] + required_total
-                > contract.max_nontraining_forward_positions
-                or status["charged_fixed_profile_forward_positions"] + required_fixed
-                > contract.max_fixed_profile_forward_positions
-                or (
-                    classified.effect == "continuation"
-                    and (
-                        status["charged_generation_calls"] + 8
-                        > contract.max_generation_calls
-                        or status["charged_generated_tokens"] + 512
-                        > contract.max_generated_tokens
-                    )
-                )
-            ):
-                raise AttemptBudgetError(
-                    "fixed evaluation lacks declared model allocation"
-                )
-        if activity in ("train", "warmup") and native_receipt_kind not in {
-            "train",
-            "campaign_run",
-        }:
+        if activity in ("train", "warmup") and native_receipt_kind != "train":
             raise AttemptBudgetError("training requires a native run receipt")
-        if (generation_calls or generated_tokens) and native_receipt_kind not in {
-            "panel",
-            "campaign_panel",
-        }:
-            raise AttemptBudgetError("generation requires a native panel receipt")
-        if native_receipt_kind in {"train", "panel"}:
+        if generation_calls or generated_tokens:
+            raise AttemptBudgetError("generation has no supervised native command")
+        if native_receipt_kind == "train":
             if native_receipt_path is None or native_receipt_path.exists():
                 raise AttemptBudgetError("direct native receipt must be a fresh path")
             receipt_parent = native_receipt_path.parent.resolve(strict=True)
@@ -1789,55 +1704,17 @@ class AttemptBudget:
                 and resolved_root not in receipt_parent.parents
             ):
                 raise AttemptBudgetError("native receipt must be inside common root")
-        if native_receipt_kind in {
-            "campaign_run",
-            "campaign_panel",
-            "campaign_evaluation",
-        }:
-            if (
-                campaign_stage is None
-                or campaign_work_dir is None
-                or native_receipt_path is None
-            ):
-                raise AttemptBudgetError("Campaign receipt binding is incomplete")
-            campaign_root = campaign_work_dir.resolve(strict=True)
-            if (
-                campaign_root != resolved_root
-                and resolved_root not in campaign_root.parents
-            ):
-                raise AttemptBudgetError(
-                    "Campaign work directory is outside common root"
-                )
-            stage_limits = self._preflight_campaign_receipt(
-                native_receipt_path,
-                campaign_work_dir,
-                campaign_stage,
-                expected_kind=(
-                    "experiment_run"
-                    if native_receipt_kind == "campaign_run"
-                    else "generation_panel"
-                    if native_receipt_kind == "campaign_panel"
-                    else "evaluation"
-                ),
-                content_identity_sha256=content_identity_sha256,
-                contract_sha256=self.status()["contract_sha256"],
-            )
-        else:
-            stage_limits = None
         if native_receipt_kind != "none":
             self._preflight_native_command(
                 command,
                 native_receipt_kind=native_receipt_kind,
                 native_receipt_path=native_receipt_path,
-                campaign_stage=campaign_stage,
-                stage_limits=stage_limits,
                 reserved=reserved,
                 parent_checkpoint_path=parent_checkpoint_path,
                 content_identity_sha256=train_identity,
             )
         if (
             contract.max_optimizer_updates == 0
-            and native_receipt_kind not in {"campaign_panel", "campaign_evaluation"}
             and not self._approved_zero_update_command(command)
         ):
             raise AttemptBudgetError(
@@ -1988,48 +1865,6 @@ class AttemptBudget:
             raise AttemptBudgetError("workspace baseline changed during phase")
         actual: tuple[int, int, int, int] | None = None
         if rc == 0:
-            if metered_fixed:
-                charged = self.status()
-                phase_forward = [
-                    row
-                    for row in charged.get("forward_reservations", [])
-                    if row["label"].startswith(f"{label}:")
-                ]
-                expected = (
-                    int(classified.options["--max-forward-positions"])
-                    if classified.effect == "fixed_score"
-                    else 8 * 6112
-                )
-                kind = (
-                    "fixed_profile"
-                    if classified.effect == "fixed_score"
-                    else "generation"
-                )
-                if sum(row["positions"] for row in phase_forward) != expected or any(
-                    row["kind"] != kind for row in phase_forward
-                ):
-                    self._final_storage_receipt(
-                        completion=completion,
-                        workspace_root=workspace_root,
-                        baseline=baseline,
-                        policy=policy,
-                        label=label,
-                        native_status="UNVERIFIED",
-                    )
-                    raise AttemptBudgetError(
-                        "fixed evaluation forward charges unverified"
-                    )
-                if classified.effect == "continuation":
-                    phase_requests = [
-                        row
-                        for row in charged["reservations"]
-                        if row["label"].startswith(f"{label}:")
-                    ]
-                    if (
-                        sum(row["generation_calls"] for row in phase_requests) != 8
-                        or sum(row["generated_tokens"] for row in phase_requests) != 512
-                    ):
-                        raise AttemptBudgetError("fixed generation charges unverified")
             from klab.training.attempt_receipts import verify_native_phase_counters
             from klab.training.manifest import sha256_file
 
@@ -2044,10 +1879,7 @@ class AttemptBudget:
                 actual = verify_native_phase_counters(
                     native_receipt_kind,
                     native_receipt_path,
-                    campaign_stage=campaign_stage,
-                    campaign_work_dir=campaign_work_dir,
                     parent_checkpoint_path=parent_checkpoint_path,
-                    expected_content_sha256=train_identity,
                 )
             except (OSError, ValueError, TypeError, KeyError) as error:
                 self._final_storage_receipt(
@@ -2100,76 +1932,6 @@ class AttemptBudget:
         if now_ns >= deadline_ns:
             raise AttemptBudgetError("shared wall-time limit reached")
 
-    @staticmethod
-    def _preflight_campaign_receipt(
-        source: Path,
-        work_dir: Path,
-        stage_id: str,
-        *,
-        expected_kind: str,
-        content_identity_sha256: str,
-        contract_sha256: str,
-    ) -> tuple[int, int]:
-        from klab.campaign.engine import CampaignEngine
-
-        engine = CampaignEngine(source, work_dir, cold_verify=True)
-        projection = engine.inspect("next")
-        action = projection["next_action"]
-        if (
-            action.get("stage") != stage_id
-            or action.get("action") not in {"apply", "resume"}
-            or engine.stages[stage_id].kind != expected_kind
-        ):
-            raise AttemptBudgetError("Campaign stage is not the next unused action")
-        rows = {row["id"]: row for row in projection["stages"]}
-        stage = engine.stages[stage_id]
-        run_stage = (
-            stage
-            if expected_kind == "experiment_run"
-            else engine.stages[engine.stages[stage.collect].run]
-        )
-        lock = engine._lock(rows, run_stage.plan)
-        if lock.scientific_sha256 != content_identity_sha256:
-            raise AttemptBudgetError("Campaign scientific lock differs from contract")
-        reference = lock.execution.get("attempt_contract")
-        if (
-            not isinstance(reference, dict)
-            or reference.get("sha256") != contract_sha256
-        ):
-            raise AttemptBudgetError("Campaign lock lacks the pinned attempt contract")
-        if expected_kind == "experiment_run":
-            runtime = engine.stages[stage.runtime]
-            if runtime.worker is not None:
-                raise AttemptBudgetError(
-                    "contracted Campaign run requires an owned local runtime profile"
-                )
-            cells = [cell for cell in lock.cells if cell.id == stage.cell]
-            if len(cells) != 1:
-                raise AttemptBudgetError("Campaign run cell selection is ambiguous")
-            training = cells[0].config.training
-            return training.max_steps, training.max_tokens
-        if expected_kind == "generation_panel":
-            from klab.evaluation.panel import load_panel
-
-            panel = load_panel(engine._path(stage.panel))
-            return len(panel.prompts), len(panel.prompts) * panel.decoder.max_new_tokens
-        from klab.evaluation.suite import load_suite
-
-        suite = load_suite(engine._path(stage.suite))
-        if any(
-            item.kind not in {"heldout_lm", "surface_review"}
-            for item in suite.evaluations
-        ):
-            raise AttemptBudgetError("Campaign evaluation has unaccounted generation")
-        return 0, 0
-
-    @staticmethod
-    def _native_command_args(command: list[str]) -> list[str]:
-        try:
-            return list(classify_attempt_command(command).args)
-        except ValueError as error:
-            raise AttemptBudgetError(str(error)) from error
-
     @classmethod
     def _preflight_native_command(
         cls,
@@ -2177,54 +1939,11 @@ class AttemptBudget:
         *,
         native_receipt_kind: str,
         native_receipt_path: Path | None,
-        campaign_stage: str | None,
-        stage_limits: tuple[int, int] | None,
         reserved: tuple[int, int, int, int],
         parent_checkpoint_path: Path | None,
         content_identity_sha256: str,
     ) -> None:
         args = cls._native_command_args(command)
-        if native_receipt_kind in {
-            "campaign_run",
-            "campaign_panel",
-            "campaign_evaluation",
-        }:
-            if (
-                len(args) < 3
-                or args[:2] != ["campaign", "apply"]
-                or Path(args[2]).resolve() != native_receipt_path.resolve()
-                or args.count("--only-stage") != 1
-                or args[args.index("--only-stage") + 1 : args.index("--only-stage") + 2]
-                != [campaign_stage]
-                or stage_limits is None
-            ):
-                raise AttemptBudgetError("Campaign command differs from phase binding")
-            if native_receipt_kind == "campaign_run":
-                if (
-                    "--execute-runs" not in args
-                    or reserved[0] < stage_limits[0]
-                    or reserved[1] < stage_limits[1]
-                    or reserved[2] != 0
-                    or reserved[3] != 0
-                ):
-                    raise AttemptBudgetError(
-                        "Campaign run exceeds reserved native config"
-                    )
-            elif native_receipt_kind == "campaign_panel" and (
-                "--execute-runs" in args
-                or reserved[0] != 0
-                or reserved[1] != 0
-                or reserved[2] < stage_limits[0]
-                or reserved[3] < stage_limits[1]
-            ):
-                raise AttemptBudgetError("Campaign panel exceeds reserved declaration")
-            elif native_receipt_kind == "campaign_evaluation" and (
-                "--execute-runs" in args or any(reserved)
-            ):
-                raise AttemptBudgetError("Campaign evaluation must have zero counters")
-            return
-        if native_receipt_kind == "panel":
-            raise AttemptBudgetError("direct panel execution has no native CLI binding")
         if native_receipt_kind != "train" or len(args) < 2 or args[0] != "train":
             raise AttemptBudgetError("native run receipt requires klab train")
         if args.count("--run-id") != 1 or args.count("--runs-dir") != 1:

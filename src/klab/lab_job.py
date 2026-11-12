@@ -15,8 +15,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from klab import runner_control as runner
-from klab.campaign.state import digest, publish_immutable, read_canonical
-from klab.canonical import canonical_json
+from klab.canonical import canonical_json, domain_digest
 from klab.lab_job_workload import (
     TryWorkload,
     declarations,
@@ -25,6 +24,7 @@ from klab.lab_job_workload import (
     verify_native_result,
 )
 from klab.operational_monitor import MonitorCompletion, MonitorPolicy
+from klab.result_publication import publish_immutable, read_canonical
 from klab.training.manifest import sha256_file
 from klab.workdir import ensure_scratch_dir
 from klab.workers.transport import _strict_json
@@ -100,7 +100,7 @@ class Job(BaseModel):
         return self.model_dump(mode="json")
 
     def identity(self) -> str:
-        return digest("klab-lab-job-v1", self.payload())
+        return domain_digest("klab-lab-job-v1", self.payload())
 
 
 def load_job(path: Path) -> Job:
@@ -174,7 +174,7 @@ def _refusal(job: Job, prepared: dict) -> dict | None:
         or not isinstance(payload.get("reason"), dict)
         or set(payload["reason"]) != {"type", "message"}
         or not all(isinstance(v, str) for v in payload["reason"].values())
-        or sealed["sha256"] != digest("klab-lab-job-refusal-v1", payload)
+        or sealed["sha256"] != domain_digest("klab-lab-job-refusal-v1", payload)
         or os.path.lexists(evidence / "summary.json")
     ):
         raise ValueError("invalid sealed prelaunch refusal")
@@ -300,7 +300,7 @@ def admit(job: Job) -> dict:
             evidence / "refusal.json",
             {
                 "payload": refusal,
-                "sha256": digest("klab-lab-job-refusal-v1", refusal),
+                "sha256": domain_digest("klab-lab-job-refusal-v1", refusal),
             },
         )
         return status(job)

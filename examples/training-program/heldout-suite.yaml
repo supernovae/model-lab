@@ -1,7 +1,0 @@
-evaluation_suite_version: 1
-id: sample-heldout-lm
-# Operational sample gate, not a model-quality claim.
-evaluations:
-  - id: heldout-loss
-    role: gate
-    kind: heldout_lm

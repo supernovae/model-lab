@@ -16,7 +16,7 @@ klab report TRY_ID
 the same held-out split and writes one sealed record: config, seed, code
 revision, data identity, resource limits and result. See [lab mode](docs/lab-mode.md).
 Iterate by reading the record, changing one setting and trying again. Do not
-write proposals, plan locks or approval documents for this kind of work. A lab
+write proposals or approval documents. A lab
 record describes one local comparison; it is not a release or a scientific
 conclusion.
 
@@ -59,17 +59,11 @@ cannot. Reference models (`ref:NAME`) are scored on text-level probes only and
 are never a `--vs` baseline. `klab explore RUN` shows a small checkpoint's
 internals; it describes, it does not judge.
 
-### When to use the release path
+### Paid compute
 
-Write plans, locks and approval documents only for:
-
-- **release runs**: results that will be published, cited or used as the parent
-  of a model family. These use [campaigns](docs/campaigns.md).
-- **paid compute**: rented GPUs or hosted providers. Spending always needs the
-  user's explicit authorization; never infer it from a plan or an earlier
-  allocation.
-
-If you are unsure, run in lab mode and say so.
+Rented GPUs and hosted providers cost money. Spending always needs the user's
+explicit authorization; never infer it from an earlier allocation. Run the same
+`try`, `train` or queued work there through [workers](docs/workers.md).
 
 ## 2. Establish scope first
 

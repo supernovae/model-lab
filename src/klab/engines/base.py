@@ -3,16 +3,11 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import Literal, Protocol
 
 import numpy as np
-
-if TYPE_CHECKING:
-    from klab.config.models import RunConfig
-    from klab.runtime import RuntimeInfo
-    from klab.runtime_profile import RuntimeAuthorization
 
 
 class EngineError(RuntimeError):
@@ -131,33 +126,3 @@ class EvaluationResult:
             "valid_targets": self.valid_targets,
             "batches": self.batches,
         }
-
-
-class ExecutionEngine(Protocol):
-    """No budgets, cursor, lifecycle, checkpoint cadence, store, or transport here."""
-
-    def validate(
-        self, config: RunConfig, *, authorization: RuntimeAuthorization | None = None
-    ) -> RuntimeInfo: ...
-
-    def initialize(
-        self, config: RunConfig, initial_weights: Mapping[str, object] | None = None
-    ) -> None: ...
-
-    def train_update(
-        self, microbatches: list[Microbatch], update_index: int, valid_targets: int
-    ) -> UpdateResult: ...
-
-    def evaluate(self, batches: Iterable[Microbatch]) -> EvaluationResult: ...
-
-    def export_weights(self) -> WeightSource: ...
-
-    def export_training_state(self) -> EngineState: ...
-
-    def restore_training_state(self, state: EngineState) -> None: ...
-
-    def memory_snapshot(self) -> dict[str, float]: ...
-
-    def synchronize(self) -> None: ...
-
-    def close(self) -> None: ...

@@ -183,10 +183,6 @@ def _current_reason(binding: dict[str, object]) -> str | None:
         return "changed_fingerprint"
 
 
-def _current(binding: dict[str, object]) -> bool:
-    return _current_reason(binding) is None
-
-
 class ProofStore:
     """One signed receipt index under an explicitly selected task-owned work root."""
 
@@ -569,8 +565,7 @@ class ProofStore:
     def _binding_size(binding: dict[str, object]) -> int | None:
         members = binding.get("members")
         if (
-            binding.get("kind")
-            in {"file", "prepared_array", "run_artifact", "ingested_run_artifact"}
+            binding.get("kind") in {"file", "prepared_array", "run_artifact"}
             and isinstance(members, list)
             and len(members) == 1
             and members[0][0] == "."

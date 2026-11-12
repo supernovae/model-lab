@@ -737,7 +737,7 @@ These records are original tutorial-only CC0 triples. They are not a sealed eval
 
 {lesson.summary}
 
-**Selection:** `{scale}` / `{data}` / `{backend}`. This standalone path can be used without a campaign or worker.
+**Selection:** `{scale}` / `{data}` / `{backend}`. This standalone path can be used without a worker.
 
 `model.yaml`, `tokenizer.yaml`, and `lesson.json` are the versioned source. `$WORK/staging/` holds disposable pilots and `$WORK/runs/` holds mutable runs and checkpoints.
 

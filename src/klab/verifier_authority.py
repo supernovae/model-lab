@@ -17,9 +17,8 @@ from klab.canonical import canonical_digest
 
 AUTHORITY_SCHEMA = 2
 _COMMON = ("__init__", "verification_proofs", "verifier_authority", "training.manifest")
-_ARTIFACT = ("experiments.artifacts", "experiments.plan")
+_ARTIFACT = ("experiments.artifacts",)
 _CORPUS = (
-    "campaign.state",
     "config.models",
     "corpus.project",
     "corpus.provenance",
@@ -87,14 +86,6 @@ _CLOSURES: dict[str, tuple[str, ...]] = {
         "model.inspection",
         "config.models",
     ),
-    "ingested_run_artifact": (
-        "data.verification",
-        "experiments.evidence",
-        "training.checkpoints",
-        "training.mlx_checkpoints",
-        "model.inspection",
-        "config.models",
-    ),
     "source_snapshot": _ARTIFACT + _CORPUS,
     "corpus_build": _ARTIFACT + _CORPUS,
     "corpus_release": _ARTIFACT + _CORPUS,
@@ -107,7 +98,7 @@ _CLOSURES: dict[str, tuple[str, ...]] = {
         "corpus.export",
         "config.loading",
         "data.tokenizer",
-        "recovery.evidence",
+        "corpus.tokenizer_bakeoff",
     ),
     "prepared_data": _ARTIFACT + _ARRAY,
     "stage_bundle": _ARTIFACT
@@ -129,9 +120,6 @@ _CLOSURES: dict[str, tuple[str, ...]] = {
         "config.models",
         "data.verification",
     ),
-    "capability_card": _ARTIFACT
-    + ("evaluation.capabilities", "experiments.compiler", "config.models"),
-    "prompt_set": _ARTIFACT,
 }
 
 # These existing imports belong to other operations in shared source files.
@@ -144,8 +132,6 @@ _COMMON_EXCLUDED_EDGES = frozenset(
         ("verification_proofs", "experiments.artifacts"),
         ("training.manifest", "runtime"),
         ("data", "data.tokenizer"),  # package convenience re-export
-        ("recovery.evidence", "evaluation.suite"),
-        ("recovery.evidence", "experiments.lock"),
     }
 )
 _ARRAY_EXCLUDED_EDGES = frozenset(
@@ -173,7 +159,6 @@ _ARRAY_EXCLUDED_EDGES = frozenset(
         ("data.packing", "data.preparation_chunks"),
         ("data.packing", "data.preparation_telemetry"),
         ("data.packing", "data.preparation_workers"),
-        ("data.packing", "experiments.source_compatibility"),
         ("data.packing", "progress"),
         ("data.packing", "resource_envelope"),
         ("data.packing", "workdir"),
@@ -192,22 +177,15 @@ _ARTIFACT_BRANCHES = {
     "prepared_data": "data.packing",
     "stage_bundle": "staging",
     "checkpoint": "training.checkpoints",
-    "capability_card": "evaluation.capabilities",
 }
 _ARTIFACT_IMPORTS = frozenset(
     ("experiments.artifacts", name) for name in set(_ARTIFACT_BRANCHES.values())
 )
-_PLAN_OPERATIONAL_EDGES = frozenset(
-    {
-        ("experiments.plan", "campaign.plan"),
-        ("experiments.plan", "recovery.provenance"),
-        ("corpus.tokenizer_bakeoff", "corpus.cli"),
-    }
-)
+_OPERATIONAL_EDGES = frozenset({("corpus.tokenizer_bakeoff", "corpus.cli")})
 
 
 def _excluded_edges(kind: str) -> frozenset[tuple[str, str]]:
-    result = _COMMON_EXCLUDED_EDGES | _PLAN_OPERATIONAL_EDGES
+    result = _COMMON_EXCLUDED_EDGES | _OPERATIONAL_EDGES
     if kind == "source_snapshot":
         # Snapshot verification needs worker identity schemas transitively,
         # not the package's convenience exports for dispatch and transport.
@@ -218,125 +196,25 @@ def _excluded_edges(kind: str) -> frozenset[tuple[str, str]]:
         result |= _ARTIFACT_IMPORTS - {
             ("experiments.artifacts", _ARTIFACT_BRANCHES[kind])
         }
-    elif kind == "prompt_set":
-        result |= _ARTIFACT_IMPORTS
     return result
 
 
-# Pinned below to the AST of each excluded import and all existing uses of its
-# imported names. A new use in a verifier, or any change to an existing user,
-# makes authority unavailable until the exclusion is explicitly re-audited.
-# Context-transfer audit 2026-11-04: only _prepare_data changes.
-# It validates short unpadded splits through MatchedStoryDataset; all byte-loader
-# verifiers and their uses of excluded imports are unchanged. No exclusions added.
-# Combined PR290/305 audit 2026-11-03: versus integrated PR290 only
-# _prepare_data changes, to verify the explicit tokenizer origin.
-# load_prepared_data and _verified_receipt ASTs are unchanged; semantic
-# tokenizer/stage authorities retain origin verification and source closure.
-# data.packing re-audited 2026-11-01: AST owner comparison against 903ad2f
-# changes only _collect_streaming and _prepare_data, adding the producer-only
-# _streaming_values helper. preparation_workers is only used by _prepare_data;
-# it cannot authorize loading already packed bytes. New chunk scheduling,
-# cancellation and telemetry are producer-only; load_prepared_data and
-# _verified_receipt remain byte-for-byte unchanged. No excluded producer
-# operation is reachable from those verifier entry points.
-# data.packing re-audited 2026-10-29: stage-scoped cache identity and resumable
-# token-target packing change producer uses only; load_prepared_data and
-# _verified_receipt do not invoke any newly excluded preparation operation.
-# data.packing edges re-audited 2026-10-10: since ba6370d only _prepare_data
-# (token-mixture preparation) changed; no verifier gained a use of an excluded name.
-# corpus.mixture audited 2026-10-11: its sole import/use is in _prepare_data;
-# load_prepared_data/_verified_receipt and prepared artifact verification do not
-# call it. Pin that import and its complete owner, as for the other preparation
-# edges, so any new verifier use or owner change requires another audit.
-# experiments.artifacts re-audited 2026-10-14: the new dataset_snapshot branch
-# calls only data.sources.verify_snapshot (cold) and existing identity checks.
-# Existing artifact branches and their excluded imports/uses are unchanged.
-# The pins cover the complete dispatch owner. The new data.sources import is
-# used only by dataset_snapshot, so exclude that branch for other artifact kinds
-# using the existing branch map. Semantic domains retain their native source
-# chains; prepared-data inventory proofs remain independent of preparation.
-# data.packing re-audited 2026-11-03: the dataset projection in _prepare_data
-# moved verbatim to prepared_dataset_identity. Inlining that helper restores
-# the prior module AST exactly; no imports, verifier calls or exclusions changed.
-# Re-pin the affected complete owners without broadening the excluded edges.
-# verification_proofs record re-audited 2026-11-03: only a diagnostic event
-# was added before the existing unavailable-key return. Removing that call
-# restores the complete record AST; imported artifact uses, cold-evidence
-# validation, trust checks and excluded edges are unchanged.
-# verification_proofs record re-audited 2026-11-03: promoting receipt_path
-# and record_event changes only method names. Reversing the public API renames
-# and removing their docstrings restores the complete module AST exactly;
-# artifact imports/uses, cold evidence, trust checks and exclusions are unchanged.
-# data.packing re-audited 2026-11-04 against f61763f: reversing the
-# _tokenizer_sha256 -> canonical_tokenizer_sha256 promotion and removing the
-# producer-only map/tokenizer-object check in prepare_data restores the complete
-# baseline module AST. Only _prepare_data and prepare_data owners changed;
-# load_prepared_data and receipt validators are unchanged. The new tokenizer
-# load is confined to prepare_data; no excluded edge gained a verifier use.
-# Re-pin the existing complete-owner signatures without excluding new edges.
-# Integration re-audit 2026-11-11: preserved main prefix block checks and proofs;
-# only producer owners change. load_prepared_data and receipt validation ASTs
-# remain identical to main; no exclusion edges are added or removed.
-# Verified append producer re-audit: existing exclusion edge set is unchanged.
-# New append production calls native collectors/preflight only; load_prepared_data,
-# receipt verification and all verifier closure membership remain unchanged.
-# Whole-owner pins below include append dispatch and producer-only helpers.
-# data.packing re-audited 2026-11-11 (preparation worker budget): the only change
-# is one keyword argument, token_budget, passed to PreparationWorkers inside the
-# producer owner _prepare_data. load_prepared_data, receipt validators and the
-# exclusion edge set are unchanged; no excluded edge gained a verifier use.
-# Re-pin the existing complete-owner signatures.
-# data.packing re-audited 2026-11-11 (require_prepared, merged over the worker
-# budget re-pin above): prepare_data and _prepare_data gain a require_prepared
-# flag that raises PreparedDataMissing on a cache miss, after the unchanged
-# verified cache-hit return and before any production. A cache hit takes the same
-# load_prepared_data path as before; receipt validators and the exclusion edge
-# set are unchanged, and no excluded edge gained a verifier use. Re-pin the
-# existing complete-owner signatures.
-# data.packing re-audited 2026-11-11 (token store): _prepare_data gains a branch
-# that takes a local_text split from the reusable token store instead of chunked
-# tokenization; new producer-only helpers (_token_stores, _copy_from_token_store,
-# _documents_encode_independently, token_store_root, the staging guard on
-# prepare_data) use the existing writer mint. The published arrays, manifest and
-# receipt are byte-identical to the chunked path (tested). The cache-hit path,
-# load_prepared_data, receipt validators and the exclusion edge set are
-# unchanged; no excluded edge gained a verifier use. Re-pin the existing
-# complete-owner signatures.
-# data.packing re-audited 2026-11-11 (one encoder pool): the streaming collector
-# no longer passes a scratch directory to PreparationEncoder; no verifier edge
-# changed.
-# data.packing re-audited 2026-11-11 (binary mixture output):
-# _collect_token_mixture copies raw int32 targets instead of parsing JSON rows
-# and _prepare_data no longer stages mixture chunks; producer-only, no
-# verifier edge changed.
-# data.packing re-audited 2026-11-11 (generic dataset sources): the
-# local_stories source and its verifier were removed; no excluded edge gained
-# a new caller.
-# experiments.artifacts, experiments.lock, data.tokenizer and data.sources re-
-# audited 2026-11-11 (generic dataset sources): only the local_stories
-# branches and the legacy snapshot import were removed; no excluded edge
-# gained a new caller.
-# data.packing re-audited 2026-11-11 (serial tokenization reason):
-# _serial_encoding_reason names the failed eligibility check and prints it; no
-# excluded edge gained a new caller.
-# data.packing re-audited 2026-11-12 (preference pairs and chat templates):
-# _prepare_data gained the local_preference branch (_collect_pairs), the chat
-# template's special-token check and the shared packing_identity; producer-
-# only, no excluded edge gained a new caller.
+# Pinned to the AST of each excluded import and every use of its imported
+# names. A new use in a verifier, or any change to an existing owner, makes
+# authority unavailable until the exclusion is reviewed and re-pinned.
 _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.preparation_workers",
-    ): "5c7806e994760bc86aa84aa5ca202ff351acfc2de8bd2a11263cfa855cf4d099",
+    ): "5e086ce8ceca8b3127478e060a5a968cc80582a5548ceb59a30a1567ac80d54d",
     (
         "experiments.artifacts",
         "data.sources",
-    ): "706bf76a2a036c3c83d38c58f02033cf366258ac01ed6df75c40563ba0a50cdc",
+    ): "9354fdbb38a405e6230e9fe5142fca72dcfa3f448abefc4de158fa3e193557e4",
     (
         "data.packing",
         "corpus.mixture",
-    ): "2fdebb54eb1d826b85277c540c17ef66e687899d568f3aed4088e627350de135",
+    ): "0c2486f0aeb1c034e9de76db918770500608d2fb755752ba948afb8edb2cf9f7",
     (
         "workers",
         "workers.transport",
@@ -344,31 +222,23 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.tokenizer",
-    ): "e58279c1f697868b5ecbd7953686dab169b56e674bb3d841a06f78528b6e4189",
+    ): "618ba492e2ac509b1cd2e257cfe6209a354873a0558e06fdbf02f0713b78a8b4",
     (
         "data.packing",
         "data.sources",
-    ): "f91fc487f75859a237e962ce704679d30d7092d679bd81adfc5c038de1b9f6b2",
+    ): "44cb37844603d9a093e69b4a11b9b38493eca2b24859598b23da3ad1a5d29396",
     (
         "data",
         "data.tokenizer",
     ): "059401c5074a0f0dd2e82528082ea94222d5eda531f750ed942fdb5ede1cca99",
     (
-        "recovery.evidence",
-        "evaluation.suite",
-    ): "8a213bf93de72dcf87e89d0d32d0588294ab9b3b85431a9b6bb4651e620f6c7a",
-    (
-        "recovery.evidence",
-        "experiments.lock",
-    ): "2539a4683cda81622323231021f41ea11aa7d6490ce7fa7b738136b55242f9d8",
-    (
         "data.packing",
         "corpus.export",
-    ): "ebcae28af4ba59c167bcc102bdd901fee3dce3d9d48a25c8a2f62855c659409d",
+    ): "e04de0bd3021a670d2eee8cbb868b82cad982b383d09f00d29499de012386dac",
     (
         "data.packing",
         "data.allocation",
-    ): "ecfa93fde64a9f88e21d97a208100c97fc66cb0943244fb09795178c919f18ef",
+    ): "ed92c9172b03dd1ab110c888ec5b3ce134ec4d54a7264bf218dbe4179ec2a4ce",
     (
         "data.packing",
         "data.byte_hash",
@@ -384,39 +254,35 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.encoding",
-    ): "27fc1395234d56f2ad212a18d885450456524ea472ef255c2fff3146a65abdd7",
+    ): "82cb7052d56f89c1d9e6b293940614aafd639c73dd70fc7252ac648b7e0756ad",
     (
         "data.packing",
         "data.preparation_chunks",
-    ): "4a0d0386dd9311c39038f8d0396228ef207295bc2e511e52352693851775d1d6",
+    ): "71348c6a27c30a061d13e963d436c82975b67931da5c061bbf5381e02805a69d",
     (
         "data.packing",
         "data.preparation_telemetry",
-    ): "1522d1c8f8d47dd3edcd3d977ee22ec05269d233ae4de7414c4e69704c08fd74",
-    (
-        "data.packing",
-        "experiments.source_compatibility",
-    ): "a5758efc23187ee0727f3408d09ea97d613ba28951d3fb899b2dd7daa200ac35",
+    ): "ca48717c503fe73c0469313091486ca2fb4f9769463df60683b843f4f1052b9b",
     (
         "data.packing",
         "progress",
-    ): "05797bba775f0b59a65e3ea19ae0fdc7005b95a539d750db88cec1bf078ad273",
+    ): "762203d8b59e303d75ddc9830248066a1c777640852886c0349f52a8e9cbda3a",
     (
         "data.packing",
         "resource_envelope",
-    ): "002adcb2506c8a696658eabb3d04d79e32b030addf64afd3dc4d684ff333e551",
+    ): "ebda9ba10a9d01becd50e52419b850c0dca5cb1d74c56be00eec0512a60a1504",
     (
         "data.packing",
         "workdir",
-    ): "e0f73da63d0b441165991225e296c5850114812cc494cb635e6f2d176f0a8011",
+    ): "1f0ab102bf42545b33e722956b1c14330811ab61143b93ae1f65a013088a95a1",
     (
         "data.packing",
         "workspace_cleanup",
-    ): "66fb2a041966232213546fad111e6d1e9b1b451efb2c654e6c69a63a5c1e43ce",
+    ): "084043609715ba72e1b9f601f4e36213ca5666ed72e096c3af34ccd2c8834e08",
     (
         "data.packing",
         "workspace_preflight",
-    ): "09cd03e501983cc06169e3fac0f4729f59620ab466ed01618d5d7ac9f7d8bf55",
+    ): "f6e7ef55bb92150ac798d39951764de558aa94183e978ed7a1fbe29d1a87b78c",
     (
         "corpus.tokenizer_bakeoff",
         "corpus.cli",
@@ -424,15 +290,15 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "experiments.artifacts",
         "corpus.acquisition",
-    ): "37c56efb4e040464c41a8c0a3437f9d6dcc2dd1407737527fc221e2651d78a37",
+    ): "b180e30b88fbee9d9304009a57f499a6ff2f6eb760a5ea171131038b9092f3db",
     (
         "experiments.artifacts",
         "corpus.export",
-    ): "00fbfafe5ece02d10261a60ef6367f3facdd31192a0d866520c7d6a804f5baf9",
+    ): "65f10b6fecfccd25dae0cf40a12705242de6d71ffb18710c639d713a026037dd",
     (
         "experiments.artifacts",
         "corpus.release",
-    ): "f4220be0bcfe6855e57f9be19cabb39bcc545367c1d262f7ef652bdba2fc607a",
+    ): "0b73a1e79b98751471fe107adbb9b770e7500210911e2eeb214b9814acd2949e",
     (
         "experiments.artifacts",
         "data.packing",
@@ -440,27 +306,15 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "experiments.artifacts",
         "data.tokenizer",
-    ): "582dea3c0d69825034105e4d746a616dda682efd18ac6c648b43d31539721135",
-    (
-        "experiments.artifacts",
-        "evaluation.capabilities",
-    ): "3ebc94b9a6f6da87d38a69843fb7ec43f66ef129980f949bf1b4249872ffe457",
+    ): "ca3d690025dcc61773bc027ab652a774db7803b409d82565799d4b53de33271b",
     (
         "experiments.artifacts",
         "staging",
-    ): "c77477899ebd374c17a271d85052b09a8f456abca33c0d07833ed22467e46707",
+    ): "1251f82759d06e3151e6ac8a10341451fde9d112da98ab235035b1d7df5d05c0",
     (
         "experiments.artifacts",
         "training.checkpoints",
-    ): "beb71cae5b1f352d21fa738ecc67142680b4dcc049b38ff3f2c1124509b489e4",
-    (
-        "experiments.plan",
-        "campaign.plan",
-    ): "2a02bc1d20f9f43903a9c22c641279554787e2d1a3cdf38bea0bc732398ebd4b",
-    (
-        "experiments.plan",
-        "recovery.provenance",
-    ): "822b9fa9b416fa20e29b3b21509615e98cd35b6cfe30b14f147332da30b10696",
+    ): "86d8022b8d245568476766a0128d631528c069e210823c35e28f04c7e996d563",
     (
         "training.manifest",
         "runtime",

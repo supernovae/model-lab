@@ -14,7 +14,6 @@ from uuid import uuid4
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.admission_inspection_cache import InspectionCache, capture
 from klab.result_publication import sync_directory
-from klab.training.manifest import sha256_file
 
 BUFFER_BYTES = 32 * 1024**2  # Sort buffer, never a limit on the workload.
 FAN_IN = 32
@@ -240,12 +239,3 @@ class SplitStages:
         self.previous = digest
         self.sequence += 1
         return result
-
-
-def file_record(path):
-    path = Path(path)
-    return {
-        "path": str(path),
-        "sha256": sha256_file(path),
-        "bytes": path.stat().st_size,
-    }

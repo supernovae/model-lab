@@ -17,7 +17,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from klab.campaign.state import digest, publish_immutable, read_canonical
+from klab.canonical import domain_digest
+from klab.result_publication import publish_immutable, read_canonical
 from klab.training.manifest import sha256_file
 
 
@@ -62,7 +63,7 @@ def runtime_identity() -> dict:
         "python_sha256": sha256_file(Path(sys.executable)),
         "packages": packages,
     }
-    return {**body, "runtime_sha256": digest("klab-lab-runtime-v1", body)}
+    return {**body, "runtime_sha256": domain_digest("klab-lab-runtime-v1", body)}
 
 
 def verify_inputs(workload: TryWorkload, root: Path) -> None:

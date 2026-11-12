@@ -35,7 +35,7 @@ from klab.data.tokenizer import load_tokenizer
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
-    from klab.campaign.policy import CorpusReadinessPolicy
+    from klab.corpus.readiness_policy import CorpusReadinessPolicy
 
 _VERSION = 1
 _SELECTION = {
@@ -66,8 +66,8 @@ def _operation(
 
 
 def _policy(path: Path) -> tuple[CorpusReadinessPolicy, str]:
-    # Lazy: campaign.policy imports this module to share the streaming primitive.
-    from klab.campaign.policy import CorpusReadinessPolicy
+    # Lazy: readiness_policy imports this module to share the streaming primitive.
+    from klab.corpus.readiness_policy import CorpusReadinessPolicy
     from klab.documents import _ExactUniqueLoader
 
     raw = path.read_bytes()
@@ -134,7 +134,7 @@ def _scientific(receipt: dict[str, Any]) -> str:
         "domains",
         "rows_scanned",
     )
-    from klab.campaign.state import digest
+    from klab.canonical import domain_digest
 
     bound = (
         {
@@ -152,7 +152,7 @@ def _scientific(receipt: dict[str, Any]) -> str:
         if "tokenizer_origin_release_id" in receipt
         else {}
     )
-    return digest(
+    return domain_digest(
         "source-token-denominator-v1",
         {
             **{name: receipt[name] for name in fields},

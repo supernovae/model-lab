@@ -5,8 +5,7 @@ derives the candidate through native ``config derive``, trains both arms through
 the native trainer, scores both on the held-out validation split through native
 checkpoint-bound evaluation and writes one compact, self-hashed run record.
 
-Lab mode deliberately skips ExperimentPlan locks, Campaign approvals and
-reconciliation, corpus admission reviews and proposal/stop documents. It keeps:
+It keeps:
 
 * resource limits: storage preflight, optional ``ResourceEnvelope`` and an
   optional, caller-chosen wall limit (no implicit short timeout);
@@ -20,7 +19,7 @@ reconciliation, corpus admission reviews and proposal/stop documents. It keeps:
   the same tokenizer, or the comparison is refused.
 
 A lab record is evidence of one local comparison, not a release, promotion or
-scientific conclusion. Release runs keep the full ExperimentPlan/Campaign path.
+scientific conclusion.
 """
 
 from __future__ import annotations
@@ -341,14 +340,16 @@ def code_revision() -> dict[str, Any]:
     """Best-effort Git revision of the running checkout (read-only Git calls)."""
     import subprocess
 
-    from klab.recovery.provenance import _git, repository_root
+    def git(*arguments: str) -> bytes:
+        return subprocess.run(
+            ["git", "-C", str(Path(__file__).parent), *arguments],
+            check=True,
+            capture_output=True,
+        ).stdout
 
-    root = repository_root(Path(__file__).parent)
-    if root is None:
-        return {"git_commit": None, "git_dirty": None}
     try:
-        commit = _git(root, "rev-parse", "HEAD").decode().strip()
-        dirty = bool(_git(root, "status", "--porcelain=v1", "--untracked-files=no"))
+        commit = git("rev-parse", "HEAD").decode().strip()
+        dirty = bool(git("status", "--porcelain=v1", "--untracked-files=no"))
     except OSError, subprocess.CalledProcessError, UnicodeError:
         return {"git_commit": None, "git_dirty": None}
     return {"git_commit": commit, "git_dirty": dirty}
@@ -967,12 +968,6 @@ def run_try(
                     "source_identity_sha256": source_identity()["sha256"],
                     **code_revision(),
                 },
-                "skipped_release_gates": [
-                    "experiment_plan_lock",
-                    "campaign_approval_and_reconciliation",
-                    "corpus_admission_review",
-                    "proposal_binding_stop_documents",
-                ],
                 "limitations": [
                     _LIMIT_SEED,
                     _LIMIT_SCOPE,

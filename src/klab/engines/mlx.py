@@ -507,24 +507,3 @@ class MLXEngine:
             self.monitor.close()
             self.monitor = None
         self.model = self.optimizer = self._value_and_grad = None
-
-
-def infer_canonical(
-    config: RunConfig,
-    weights: Mapping[str, object],
-    input_ids: np.ndarray,
-    *,
-    aliases: Mapping[str, str] | None = None,
-    authorization: RuntimeAuthorization | None = None,
-) -> np.ndarray:
-    """Run MLX inference from canonical promoted weights; never falls back to Torch."""
-    engine = MLXEngine()
-    engine.validate(config, authorization=authorization)
-    engine.initialize(config, weights)
-    if aliases is not None and dict(aliases) != dict(engine.export_weights().aliases):
-        raise ValueError("canonical aliases differ from the model architecture")
-    mx = engine._mx
-    assert mx is not None
-    logits = engine.logits(mx.array(np.asarray(input_ids, dtype=np.int32)))
-    mx.eval(logits)
-    return np.asarray(logits)

@@ -221,7 +221,7 @@ def test_config_derivation_removes_only_its_receipt_after_payload_failure(
     from klab import derivation
 
     output = tmp_path / "derived.yaml"
-    original = derivation._exclusive_bytes
+    original = derivation.write_bytes_exclusive
     calls = 0
 
     def fail_payload(path: Path, content: bytes) -> None:
@@ -231,7 +231,7 @@ def test_config_derivation_removes_only_its_receipt_after_payload_failure(
             raise OSError("injected payload publication failure")
         original(path, content)
 
-    monkeypatch.setattr(derivation, "_exclusive_bytes", fail_payload)
+    monkeypatch.setattr(derivation, "write_bytes_exclusive", fail_payload)
     with pytest.raises(OSError, match="injected"):
         derive_config(source_config, output, {"optimizer.peak": 0.001})
     assert not output.exists()
@@ -384,14 +384,14 @@ def test_competing_publication_never_overwrites_competitor(
     from klab import derivation
 
     output = tmp_path / "derived.yaml"
-    original = derivation._exclusive_bytes
+    original = derivation.write_bytes_exclusive
 
     def race(path, content):
         if path == output:
             output.write_bytes(b"competing writer")
         original(path, content)
 
-    monkeypatch.setattr(derivation, "_exclusive_bytes", race)
+    monkeypatch.setattr(derivation, "write_bytes_exclusive", race)
     with pytest.raises(FileExistsError):
         derive_config(source_config, output, {"optimizer.peak": 0.001})
     assert output.read_bytes() == b"competing writer"

@@ -35,7 +35,7 @@ def _verify_bakeoff_selection(
     verification_mode: VerificationMode = "cold",
 ) -> str:
     """Authenticate the original selection and its train/held-out receipts."""
-    from klab.recovery.evidence import _selection
+    from klab.corpus.tokenizer_bakeoff import verify_selection
 
     path = path.absolute()
     report = path.parent.parent.parent / "report.json"
@@ -58,7 +58,7 @@ def _verify_bakeoff_selection(
         )
     ):
         raise ValueError("invalid bakeoff candidate path")
-    digest, identifier = _selection(
+    digest, identifier = verify_selection(
         report, proof_store=proof_store, verification_mode=verification_mode
     )
     binding = manifest["corpus_forge_bakeoff"]
@@ -224,8 +224,7 @@ def verify_tokenizer_artifact(
             and dataset is not None
             and dataset.corpus_export_path is not None
         ):
-            from klab.experiments.artifacts import verify_artifact
-            from klab.experiments.plan import Artifact
+            from klab.experiments.artifacts import Artifact, verify_artifact
 
             path = Path(path)
             manifest = json.loads(

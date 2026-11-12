@@ -304,8 +304,7 @@ def verify_release_export(
             and verification_mode == "verified_reuse"
             and dataset.corpus_export_path is not None
         ):
-            from klab.experiments.artifacts import verify_artifact
-            from klab.experiments.plan import Artifact
+            from klab.experiments.artifacts import Artifact, verify_artifact
 
             path = dataset.corpus_export_path
             export = json.loads((path / "export.json").read_text(encoding="utf-8"))

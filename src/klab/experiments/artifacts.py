@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import weakref
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
+from pydantic import Field, model_validator
 
 from klab.canonical import canonical_json
+from klab.config.models import StrictModel
 from klab.experiments.artifact_paths import artifact_path
 from klab.training.manifest import sha256_file
 from klab.verification_proofs import (
@@ -22,10 +25,43 @@ from klab.verification_proofs import (
     validate_mode,
 )
 
+_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_HEX = re.compile(r"^[0-9a-f]{64}$")
+
+
+class Artifact(StrictModel):
+    """An external immutable input: its kind, producer, identity and location."""
+
+    kind: Literal[
+        "source_snapshot",
+        "dataset_snapshot",
+        "corpus_build",
+        "corpus_release",
+        "corpus_export",
+        "tokenizer",
+        "prepared_data",
+        "stage_bundle",
+        "checkpoint",
+    ]
+    version: int = Field(ge=1)
+    producer: str
+    identifier: str
+    sha256: str
+    path: str
+    state: Literal["full", "weights"] | None = None
+
+    @model_validator(mode="after")
+    def valid_reference(self) -> Artifact:
+        if not _ID.fullmatch(self.identifier) or not self.producer:
+            raise ValueError("artifact requires safe identifier and producer")
+        if not _HEX.fullmatch(self.sha256):
+            raise ValueError(f"{self.kind} artifact requires a full SHA-256")
+        return self
+
+
 if TYPE_CHECKING:
     from klab.config.models import DatasetConfig
     from klab.data.verification import VerifiedPreparedData
-    from klab.experiments.plan import Artifact, ExperimentPlan
 
 
 def _safe_path(reference: str, source: Path) -> Path:
@@ -285,40 +321,6 @@ def _verify_domain(
         if raw.get("format_version") != artifact.version:
             raise ValueError("checkpoint format version mismatch")
         _identity(artifact, path.name, raw.get("sha256"))
-    elif kind == "capability_card":
-        from klab.evaluation.capabilities import load_capability_card
-
-        if not path.is_file():
-            raise ValueError("capability card must be a JSON file")
-        card = load_capability_card(path)
-        if card.version != artifact.version:
-            raise ValueError("capability card version mismatch")
-        _identity(artifact, card.name, sha256_file(path))
-    elif kind == "prompt_set":
-        if artifact.version != 1 or not path.is_file() or path.suffix != ".json":
-            raise ValueError("prompt_set v1 requires a JSON file")
-        panel = _json_file(path)
-        prompts = panel.get("prompts")
-        if (
-            panel.get("format") != "dense_lm_decoding_prompts_v1"
-            or panel.get("split") not in {"development", "test"}
-            or not isinstance(prompts, list)
-            or not prompts
-        ):
-            raise ValueError("unsupported prompt-set format or empty panel")
-        ids: set[str] = set()
-        for row in prompts:
-            if (
-                not isinstance(row, dict)
-                or any(
-                    not isinstance(row.get(key), str) or not row[key]
-                    for key in ("id", "text", "category")
-                )
-                or row["id"] in ids
-            ):
-                raise ValueError("invalid or duplicate prompt in frozen panel")
-            ids.add(row["id"])
-        _identity(artifact, path.stem, sha256_file(path))
     else:
         raise ValueError(f"no immutable external verifier for {kind}")
 
@@ -345,28 +347,6 @@ def _load_verified_prepared(
         artifact, manifest.get("settings_sha256"), manifest.get("manifest_sha256")
     )
     return data.receipt
-
-
-def verify_prepared_artifact(
-    artifact: Artifact,
-    source: Path,
-    *,
-    proof_store: ProofStore | None = None,
-    verification_mode: VerificationMode = "cold",
-) -> VerifiedPreparedData:
-    """Authenticate a typed existing prepared artifact and return its sealed proof."""
-    if artifact.kind != "prepared_data" or artifact.from_phase is not None:
-        raise ValueError(
-            "prepared storage planning requires an existing prepared artifact"
-        )
-    if artifact.path is None or artifact.sha256 is None:
-        raise ValueError("prepared storage planning requires pinned path and digest")
-    return _load_verified_prepared(
-        artifact,
-        _safe_path(artifact.path, source),
-        proof_store=proof_store,
-        verification_mode=verification_mode,
-    )
 
 
 _MEMO_SEAL = object()
@@ -604,38 +584,6 @@ def _artifact_key(
     )
 
 
-def _reuse_verified_artifact(
-    artifact: Artifact,
-    source: Path,
-    memo: dict[tuple[object, ...], _VerifiedArtifact],
-    *,
-    dataset: DatasetConfig | None = None,
-) -> dict[str, object]:
-    """Fail closed if a resolved artifact or its path changed before publication."""
-    if artifact.from_phase is not None or artifact.path is None:
-        raise ValueError("unresolved artifact cannot reuse verification")
-    path = _safe_path(artifact.path, source)
-    key = _artifact_key(artifact, path, dataset)
-    evidence = memo.get(key)
-    if (
-        not isinstance(evidence, _VerifiedArtifact)
-        or evidence._seal is not _MEMO_SEAL
-        or evidence.issuer_pid != os.getpid()
-        or evidence not in _MINTED_ARTIFACTS
-        or evidence.key != key
-        or evidence.identity
-        != {
-            "kind": artifact.kind,
-            "version": artifact.version,
-            "identifier": artifact.identifier,
-            "sha256": artifact.sha256,
-            "path": str(path),
-        }
-    ):
-        raise ValueError(f"artifact changed since resolution: {path}")
-    return dict(evidence.identity)
-
-
 def verify_artifact(
     artifact: Artifact,
     source: Path,
@@ -647,12 +595,6 @@ def verify_artifact(
 ) -> dict[str, object]:
     """Verify one pinned external identity and return JSON-native identity/availability."""
     validate_mode(verification_mode)
-    if artifact.from_phase is not None:
-        raise ValueError(
-            f"{artifact.kind} planned output {artifact.identifier} is unresolved until execution"
-        )
-    if artifact.path is None or artifact.sha256 is None:
-        raise ValueError(f"{artifact.kind} external artifact lacks path or digest")
     try:
         path = _safe_path(artifact.path, source)
         key = _artifact_key(artifact, path, dataset)
@@ -724,26 +666,3 @@ def verify_artifact(
     if memo is not None:
         memo[key] = evidence
     return dict(verified)
-
-
-def verify_inputs(
-    plan: ExperimentPlan,
-    source: Path,
-    *,
-    dataset: DatasetConfig | None = None,
-    memo: dict[tuple[object, ...], _VerifiedArtifact] | None = None,
-    proof_store: ProofStore | None = None,
-    verification_mode: VerificationMode = "cold",
-) -> dict[str, dict[str, object]]:
-    """Resolve named plan inputs only; planned phase outputs remain unresolved."""
-    return {
-        name: verify_artifact(
-            plan.artifacts[reference],
-            source,
-            dataset=dataset,
-            memo=memo,
-            proof_store=proof_store,
-            verification_mode=verification_mode,
-        )
-        for name, reference in plan.inputs.items()
-    }

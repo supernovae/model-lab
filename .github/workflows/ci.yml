@@ -220,7 +220,7 @@ jobs:
         run: >-
           uv run --locked --extra cpu pytest -q -n 0
           tests/test_training.py tests/test_generation.py
-          tests/test_generation_panel.py tests/test_serving.py
+          tests/test_serving.py
 
   platform-macos:
     # Platform model behavior is not inferred from the Linux PR checks.
@@ -241,7 +241,7 @@ jobs:
         run: >-
           uv run --locked --extra cpu pytest -q -n 0
           tests/test_training.py tests/test_generation.py
-          tests/test_generation_panel.py tests/test_serving.py
+          tests/test_serving.py
 
   release-candidate:
     # Broad suites are available only through explicit manual selection.

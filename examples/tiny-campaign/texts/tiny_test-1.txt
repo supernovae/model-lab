@@ -1,2 +1,0 @@
-Local Campaign example tiny_test document 1.
-Heldout families remain separate from training documents and decisions.

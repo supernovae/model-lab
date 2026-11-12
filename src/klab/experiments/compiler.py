@@ -7,10 +7,9 @@ both adapt their declarations to this authority.
 from __future__ import annotations
 
 import copy
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from itertools import product
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel
 
@@ -257,70 +256,3 @@ def _owner(path: str) -> str:
         "logging": "Operations/retention",
         "staging": "Operations/retention",
     }.get(root, "Implementation")
-
-
-def compare_configs(
-    base: RunConfig | Mapping[str, object],
-    variant: RunConfig | Mapping[str, object],
-    *,
-    expected: Collection[str],
-    invariants: Collection[str] = (),
-    artifacts: Mapping[str, object] | None = None,
-    require_all: bool = True,
-    include_derived: bool = False,
-) -> dict[str, dict[str, object]]:
-    """Assert exact declared interventions and invariant equality on actual leaf values.
-
-    ``artifacts`` may contain ``base``/``variant`` mappings of typed identities.
-    Legacy category comparisons use ``require_all=False`` to permit subsets of a
-    registered category while still rejecting every out-of-category change.
-    """
-    left = flatten_config(base, include_derived=include_derived)
-    right = flatten_config(variant, include_derived=include_derived)
-    if artifacts is not None:
-        for side, target in (("base", left), ("variant", right)):
-            inventory = artifacts.get(side, {})
-            if not isinstance(inventory, Mapping):
-                raise TypeError(f"{side} artifacts must be a mapping")
-            for key, value in flatten_config({"artifacts": inventory}).items():
-                target[key] = value
-    paths = set(left) | set(right)
-    expected_set, invariant_set = set(expected), set(invariants)
-    for declaration, kind in (
-        (expected_set, "intervention"),
-        (invariant_set, "invariant"),
-    ):
-        for dotted in declaration:
-            if not isinstance(dotted, str) or not dotted or dotted not in paths:
-                raise ValueError(f"unknown {kind} field: {dotted!r}")
-    for dotted in expected_set:
-        for invariant in invariant_set:
-            if paths_overlap(dotted, invariant):
-                raise ValueError(
-                    f"intervention {dotted} conflicts with invariant {invariant}"
-                )
-    differences = {
-        key: {"base": left.get(key), "variant": right.get(key)}
-        for key in sorted(paths)
-        if left.get(key) != right.get(key)
-    }
-    violations = sorted(invariant_set & differences.keys())
-    if violations:
-        raise ValueError(f"invariant changed: {', '.join(violations)}")
-    hidden = sorted(set(differences) - expected_set)
-    if hidden:
-        raise ValueError(f"undeclared changed fields: {', '.join(hidden)}")
-    missing = sorted(expected_set - set(differences)) if require_all else []
-    if missing:
-        raise ValueError(f"declared interventions unchanged: {', '.join(missing)}")
-    return differences
-
-
-def describe_differences(
-    differences: Mapping[str, Mapping[str, object]],
-) -> tuple[dict[str, Any], ...]:
-    """Attach stable field ownership without changing legacy difference payloads."""
-    return tuple(
-        {"path": path, "owner": _owner(path), **values}
-        for path, values in differences.items()
-    )

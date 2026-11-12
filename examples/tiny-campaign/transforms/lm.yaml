@@ -1,8 +1,0 @@
-id: tiny_lm
-inputs:
-- tiny_docs
-- tiny_developer
-- tiny_test
-kind: lm_text
-parameters: {}
-version: '1'
