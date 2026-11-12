@@ -31,72 +31,16 @@ def _read(path: Path, expected: str, *, limit: int = 4 * 1024 * 1024) -> bytes:
     return raw
 
 
-def _relocation_mapper(source_work, target_work, source_receipts, target_receipts):
-    """Map only the two explicitly bound absolute source roots."""
-    roots = tuple(
-        Path(item)
-        for item in (source_work, target_work, source_receipts, target_receipts)
-    )
-    if any(
-        not root.is_absolute() or ".." in root.parts or root == Path(root.anchor)
-        for root in roots
-    ):
-        raise ValueError("invalid tokenizer relocation root")
-    source_work, target_work, source_receipts, target_receipts = roots
-    if (
-        source_work.is_relative_to(source_receipts)
-        or source_receipts.is_relative_to(source_work)
-        or target_work.is_relative_to(target_receipts)
-        or target_receipts.is_relative_to(target_work)
-    ):
-        raise ValueError("overlapping tokenizer relocation roots")
-
-    def mapped(value):
-        path = Path(value)
-        if not path.is_absolute() or ".." in path.parts:
-            raise ValueError("invalid tokenizer relocation path")
-        if path.is_relative_to(source_work):
-            return target_work / path.relative_to(source_work)
-        if path.is_relative_to(source_receipts):
-            return target_receipts / path.relative_to(source_receipts)
-        raise ValueError("tokenizer observation path is outside relocation roots")
-
-    def mapped_values(value):
-        if isinstance(value, dict):
-            return {key: mapped_values(item) for key, item in value.items()}
-        if isinstance(value, list):
-            return [mapped_values(item) for item in value]
-        if isinstance(value, str) and value.startswith("/"):
-            return str(mapped(value))
-        return value
-
-    return mapped, mapped_values
-
-
 def verify_observed_tokenizer(
     observation, config_path, config, release, release_manifest
 ):
     """Validate bounded metadata and current bytes, not a historical digest proof."""
     values = observation.model_dump(mode="json")
     files = values["files"]
-    relocation = values.get("relocation")
-    if relocation:
-        from klab.corpus.release_migration import migrated_roots
-
-        source_root, target_root = migrated_roots(release, release_manifest)
-        map_path, map_values = _relocation_mapper(
-            source_root,
-            target_root,
-            relocation["source_receipts_root"],
-            relocation["target_receipts_root"],
-        )
-    else:
-        map_path = Path
-        map_values = lambda value: value
 
     def read(name):
         entry = files[name]
-        return _read(map_path(entry["path"]), entry["sha256"])
+        return _read(Path(entry["path"]), entry["sha256"])
 
     job_spec = json.loads(read("job_spec"))
     session_spec = json.loads(read("session_spec"))
@@ -111,20 +55,13 @@ def verify_observed_tokenizer(
     token_manifest = json.loads(manifest_raw)
 
     token_path = config.output_dir / "tokenizer.json"
-    names = {name: map_path(entry["path"]).resolve() for name, entry in files.items()}
-    historical_config_path = Path(files["tokenizer_config"]["path"])
-    if relocation:
-        historical_config = load_tokenizer_config(names["tokenizer_config"])
-        if map_values(historical_config.model_dump(mode="json")) != config.model_dump(
-            mode="json"
-        ):
-            raise ValueError("relocated tokenizer configuration differs")
+    names = {name: Path(entry["path"]).resolve() for name, entry in files.items()}
     if (
-        (not relocation and names["tokenizer_config"] != Path(config_path).resolve())
+        names["tokenizer_config"] != Path(config_path).resolve()
         or names["tokenizer"] != token_path.resolve()
         or names["tokenizer_manifest"]
         != token_path.with_name("tokenizer_manifest.json").resolve()
-        or (str(map_path(stdout)) if relocation else stdout) != str(token_path)
+        or stdout != str(token_path)
     ):
         raise ValueError("tokenizer observation paths do not match the completed job")
     slots = session_spec.get("slots", [])
@@ -142,12 +79,10 @@ def verify_observed_tokenizer(
         != [
             "tokenizer",
             "train",
-            str(historical_config_path if relocation else config_path),
+            str(config_path),
         ]
         or slots[0].get("argv") != argv
-        or job_spec.get("required_files", {}).get(
-            str(historical_config_path if relocation else config_path)
-        )
+        or job_spec.get("required_files", {}).get(str(config_path))
         != hashlib.sha256(config_raw).hexdigest()
         or job_spec.get("job_id") != job.get("job_id")
         or job_spec.get("source", {}).get("path")
@@ -159,13 +94,12 @@ def verify_observed_tokenizer(
             / str(session_spec.get("session_id", ""))
             / str(slots[0].get("root", ""))
         ).resolve()
-        or names["job_report"] != map_path(expected_job / "report.json").resolve()
-        or names["stdout"] != map_path(expected_job / "stdout.log").resolve()
-        or names["stderr"] != map_path(expected_job / "stderr.log").resolve()
-        or names["session_report"]
-        != map_path(receipt_root / "shared/report.json").resolve()
+        or names["job_report"] != (expected_job / "report.json").resolve()
+        or names["stdout"] != (expected_job / "stdout.log").resolve()
+        or names["stderr"] != (expected_job / "stderr.log").resolve()
+        or names["session_report"] != (receipt_root / "shared/report.json").resolve()
         or names["container_report"]
-        != map_path(receipt_root / "shared/container-report.json").resolve()
+        != (receipt_root / "shared/container-report.json").resolve()
         or receipt_root.name != session_spec.get("session_id")
         or job.get("source") != job_spec.get("source")
         or job.get("spec_sha256") != files["job_spec"]["sha256"]
@@ -291,11 +225,9 @@ def verify_observed_tokenizer(
         != release_manifest["files"]["report.json"]["sha256"]
         or export.get("license_report_sha256")
         != release_manifest["files"]["license-report.json"]["sha256"]
-        or map_values(
-            load_config(export_path / "run.yaml").dataset.model_dump(mode="json")
-        )
+        or load_config(export_path / "run.yaml").dataset.model_dump(mode="json")
         != config.dataset.model_dump(mode="json")
-        or map_values(exported_tokenizer.dataset.model_dump(mode="json"))
+        or exported_tokenizer.dataset.model_dump(mode="json")
         != config.dataset.model_dump(mode="json")
         or exported_tokenizer.vocab_size != config.vocab_size
         or exported_tokenizer.min_frequency != request.get("min_frequency", 1)
@@ -342,13 +274,4 @@ def verify_observed_tokenizer(
         "limitation": "output digests were observed after completion; the job receipt did not attest them",
         "deferred": "export split and license recomputation, tokenizer sample selection and disjoint audit were not replayed",
     }
-    if relocation:
-        result["relocation"] = {
-            "source_work_root": str(source_root),
-            "target_work_root": str(target_root),
-            **relocation,
-            "target_tokenizer_config_sha256": hashlib.sha256(
-                Path(config_path).read_bytes()
-            ).hexdigest(),
-        }
     return result

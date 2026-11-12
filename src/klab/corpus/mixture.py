@@ -55,22 +55,12 @@ class ObservationFile(BaseModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
-class TokenizerRelocation(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    source_receipts_root: Path
-    target_receipts_root: Path
-
-
 class TokenizerObservation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     method: Literal["post_run_observation"]
     observed_at_utc: datetime
     files: dict[str, ObservationFile]
-    relocation: TokenizerRelocation | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
 
     @model_validator(mode="after")
     def exact_inputs(self) -> TokenizerObservation:

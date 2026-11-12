@@ -113,6 +113,20 @@ def _trusted(root: Path, path: Path, *, private: bool = False) -> bool:
         return False
 
 
+SMALL_METADATA_LIMIT = 4 * 1024**2
+
+
+def read_trusted_small(path: Path, root: Path, *, private: bool = False) -> bytes:
+    """Read a small metadata file only from an owned, trusted location."""
+    path = Path(path)
+    if (
+        not _trusted(root, path, private=private)
+        or path.stat().st_size > SMALL_METADATA_LIMIT
+    ):
+        raise ValueError("unsafe retained metadata")
+    return path.read_bytes()
+
+
 def file_binding(
     path: Path,
     sha256: str,
@@ -411,31 +425,6 @@ class ProofStore:
         only key access, not receipt-directory availability.
         """
         return self._key(create=create) is not None
-
-    def migration_signature(self, observation: dict[str, object]) -> str:
-        """Authenticate a relocation observation, not a native execution proof.
-
-        As with this store's other receipts, the service UID is trusted. This
-        does not protect against that UID fabricating its own observations.
-        """
-        if observation.get("kind") not in {
-            "source-release-migration-v1",
-            "target-release-migration-v1",
-            "source-release-migration-progress-v1",
-            "target-release-migration-progress-v1",
-            "source-mixture-stage-migration-v1",
-            "target-mixture-stage-migration-v1",
-            "target-mixture-stage-migration-progress-v1",
-        }:
-            raise ValueError("invalid migration observation kind")
-        key = self._key(create=False)
-        if key is None:
-            raise ValueError("existing private verification key unavailable")
-        return hmac.new(
-            key,
-            b"klab-release-migration-v1\0" + canonical_json(observation),
-            hashlib.sha256,
-        ).hexdigest()
 
     def lookup(self, binding: dict[str, object]) -> bool:
         authority: dict[str, object] | None = None

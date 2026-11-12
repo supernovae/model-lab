@@ -332,37 +332,10 @@ quota and floor is met; a shortfall is reported per stratum.
 `tools/benchmark_mixture.py` runs a synthetic mixture cold and warm and writes
 timings and output hashes, for comparing two Lab revisions on one host.
 
-## Move a release to another host
-
-On the original host:
-
-```sh
-klab corpus attest-release-migration RELEASE --verifier-checkout CHECKOUT --verifier-revision COMMIT
-klab corpus attest-mixture-stages RELEASE
-```
-
-Copy the release and the resulting observation files to the new host's work
-root, then:
-
-```sh
-klab corpus adopt-release-migration RELEASE --source-observation FILE
-klab corpus adopt-mixture-stages RELEASE --source-observation FILE
-```
-
-The target hashes every mapped file once against the source's verified digests
-and records its own fingerprints. Both hosts must share the private verification
-key. To reuse a tokenizer after the move, add `relocation` (with
-`source_receipts_root` and `target_receipts_root`) to the mixture's
-`tokenizer_observation`.
-
 A mixture declaration's `tokenizer_observation` (`method:
 post_run_observation`) reuses a tokenizer from a completed local job by binding
 that job's records and the tokenizer files, instead of verifying the fit from
 scratch.
-
-After a reviewed change to Lab's verification bookkeeping, `corpus
-adopt-retained-renders` lets one `build` invocation reuse exact renders from
-before the change; it records the decision and every use.
 
 ## Resources
 
