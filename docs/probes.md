@@ -234,6 +234,7 @@ actions are:
 |---|---|---|
 | numerical failure (NaN/inf held-out loss) | fail | `abandon` |
 | inside a try whose comparison is `NOT_COMPARABLE` | incomplete | `rerun` (names the failed held-out checks; never escalates) |
+| inside a try whose training data contains held-out or final probe items, or could not be screened ([leakage](#held-out-leakage)) | incomplete | `rerun` (`missing` names `leakage`) |
 | no baseline, any requested evidence missing (unavailable, error, not comparable, stopped by cancel/resources/OOM/interrupt) | incomplete | `rerun` (names each gap) |
 | no baseline, every requested check produced evidence (a reference model only once every task and item is scored) | info | `compare` |
 | a hard probe failed | fail | `abandon` |
@@ -264,7 +265,8 @@ klab probe CANDIDATE --vs BASELINE --backend cpu --config final
 (held-out loss stays on the run's validation split) and records `final: true`
 and `suite.verdict_split: "final"`. Reading the final split anywhere else raises
 `FinalSplitLocked`, and `tests/test_eval_integrity.py` checks that only the
-probe CLI's final-declaration path can open it. Final items have their own item groups,
+probe CLI's final-declaration path can open it (besides `suite.py` itself,
+which opens it only to hash it and to count [leaked items](#held-out-leakage)). Final items have their own item groups,
 so a final result never pairs with an iteration result. Final evidence is also
 kept out of every selection view: points carry `final`/`verdict_split`
 provenance, and ordinary `compare` (subjects, others and the same-checkpoint
@@ -281,6 +283,41 @@ an idea pass: changing any item or threshold changes the suite digest, and a
 digest change requires bumping `SUITE_VERSION` (a test enforces this). Compare
 results only within one suite digest; the dashboard warns when history mixes
 suites.
+
+## Held-out leakage
+
+Held-out items only measure anything if the model never trained on them. After
+scoring, `try` screens each arm's prepared training tokens (the run's verified
+`data/train.npy`) for the probe items that must stay held out, once per
+distinct prepared data and tokenizer. Items are tokenized with the run's own
+tokenizer, and an item is contaminated when any window of `n = min(13, item
+tokens)` consecutive tokens that includes an answer token occurs verbatim in
+the training tokens (standard n-gram screening; a one-token difference is not a
+match). Each item is matched as written and after a space, as it would appear
+inside a document.
+
+| Split | Items screened |
+|---|---|
+| `heldout` | fact recall question + answer; closed-book control facts of a `withheld_facts` run (its trained facts are in its data by design and are exempt, `exempt.heldout_trained_facts`); needle contexts + code word; agreement/generation prompts (any window) |
+| `final` | the same kinds in the held-back wording, every closed-book fact included; only counts are kept |
+| `dev` | not screened: dev items are not held out |
+
+The record's `leakage` field is `{status, n, arms, seconds}`: `status` is
+`CLEAN`, `CONTAMINATED` or `ERROR` (the screen could not run), and each arm
+keeps `checked` and `contaminated` counts per split, the contaminated held-out
+item ids (`items`, e.g. `fact_recall/0`), the prepared manifest, tokenizer and
+suite digests, the cache outcome and its seconds. Nothing about a final item
+beyond its count is returned or recorded. Contaminated or unscreened data makes
+the try's verdict `incomplete`/`rerun` with `leakage` in `verdict.missing`:
+remove the items from the training data and try again. `report` prints the
+counts.
+
+The scan hashes 8-token windows of the training array in vectorized passes and
+verifies every candidate token by token: about 0.06 s per 10M tokens on one CPU
+core. Results are cached in `WORK_DIR/lab/cache/leakage-v1/`, keyed by the
+prepared manifest digest, tokenizer digest, suite digest and `n`; a cache that
+cannot be written prints why and records `cache.status: not_written`. Standalone
+`klab probe` does not screen.
 
 ## Result schema (`klab-probe-v1`)
 

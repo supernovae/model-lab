@@ -1051,6 +1051,8 @@ def run_try(
             record["arms"]["candidate"],
             changed_variables,
         )
+        context.checkpoint()
+        record["leakage"] = leakage_screen(record["arms"], runs, root)
         record["status"] = "completed"
         if record["comparison"]["verdict"] == "NOT_COMPARABLE":
             exit_status = EXIT_NOT_COMPARABLE
@@ -1126,6 +1128,57 @@ def run_try(
     return sealed, record_path
 
 
+def leakage_screen(
+    arms: Mapping[str, Mapping[str, Any]], runs: Path, root: Path
+) -> dict[str, Any]:
+    """Screen each arm's prepared training data for held-out probe items.
+
+    Arms that trained on the same prepared data with the same tokenizer share
+    one screen. A screen that cannot run is recorded as ``ERROR`` (missing
+    evidence), never as clean.
+    """
+    from klab.probes.contamination import (
+        CLEAN,
+        CONTAMINATED,
+        ERROR,
+        WINDOW,
+        check_prepared,
+        leakage_cache_dir,
+    )
+
+    started = time.monotonic()
+    screened: dict[tuple[Any, Any], dict[str, Any]] = {}
+    rows: dict[str, Any] = {}
+    for name, arm in arms.items():
+        data = arm.get("data") or {}
+        key = (data.get("prepared_manifest_sha256"), data.get("tokenizer_sha256"))
+        if key not in screened:
+            run = runs / str(arm["run_id"])
+            try:
+                screened[key] = check_prepared(
+                    run / "data",
+                    run / "tokenizer.json",
+                    cache_dir=leakage_cache_dir(root),
+                )
+            except Exception as error:  # noqa: BLE001 - recorded as missing evidence
+                screened[key] = {
+                    "status": ERROR,
+                    "error": f"{type(error).__name__}: {error}",
+                }
+        rows[name] = screened[key]
+    statuses = {row["status"] for row in rows.values()}
+    return {
+        "status": CONTAMINATED
+        if CONTAMINATED in statuses
+        else ERROR
+        if ERROR in statuses
+        else CLEAN,
+        "n": WINDOW,
+        "arms": rows,
+        "seconds": round(time.monotonic() - started, 3),
+    }
+
+
 def _probe_arms(
     record: Mapping[str, Any],
     runs: Path,
@@ -1168,6 +1221,7 @@ def _probe_arms(
             progress=progress_writer(try_dir / "probe-progress.json"),
             context=context,
             comparison=record.get("comparison"),
+            leakage=record.get("leakage"),
         )
     except Exception as error:  # noqa: BLE001 - probes inform, never fail a try
         return {"status": "error", "error": f"{type(error).__name__}: {error}"}
@@ -1216,6 +1270,22 @@ def summarize(
                 f"  verdict: {comparison['verdict']}  Δ held-out loss "
                 f"{comparison['heldout_loss_delta']:+.4f}"
             )
+    leakage = record.get("leakage")
+    if leakage:
+        lines.append(f"  leakage: {leakage['status']}  (n={leakage.get('n')})")
+        for arm, row in (leakage.get("arms") or {}).items():
+            if row.get("error"):
+                lines.append(f"    {arm:<9} {row['error']}")
+            elif row.get("checked"):
+                counts = ", ".join(
+                    f"{split} {row['contaminated'][split]}/{checked}"
+                    for split, checked in row["checked"].items()
+                )
+                items = ", ".join(row.get("items") or [])
+                lines.append(
+                    f"    {arm:<9} contaminated {counts}"
+                    + (f"  held-out items: {items}" if items else "")
+                )
     if record.get("interruption"):
         stop = record["interruption"]
         lines.append(

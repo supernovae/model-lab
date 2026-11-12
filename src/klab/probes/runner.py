@@ -45,7 +45,7 @@ from klab.probes.suite import (
     ProbeSpec,
     fact_items,
     final_verdict_access,
-    needle_split,
+    needle_items,
     ordered,
     parametric_items,
     parametric_manifest_sha256,
@@ -336,42 +336,6 @@ def _ranked(loaded: Any, items: list[dict[str, Any]]) -> dict[str, Any]:
         ],
         "picked": [scoring.top_candidate(s) for s in scores],
     }
-
-
-def needle_items(split: str, char_lengths: Sequence[int]) -> list[dict]:
-    """Text-level needle items: every prefix is exactly N characters long.
-
-    Independent of any tokenizer, so a lab run and a reference model are asked
-    identical strings (one ``item_group``). The code word opens the context,
-    filler sentences (rotated per item) push it back, and the filler is cut to
-    the exact length before the closing question.
-    """
-    spec = needle_split(split)
-    filler = spec["filler"]
-    items = []
-    for length in char_lengths:
-        for offset, word in enumerate(spec["needles"]):
-            head = spec["statement"].format(w=word) + " "
-            tail = " " + spec["question"]
-            room = int(length) - len(head) - len(tail)
-            if room < 0:
-                raise ValueError(f"needle length {length} is too short")
-            stream = ""
-            k = offset
-            while len(stream) < room:
-                stream += filler[k % len(filler)] + " "
-                k += 1
-            prefix = head + stream[:room] + tail
-            assert len(prefix) == int(length)
-            items.append(
-                {
-                    "prefix": prefix,
-                    "answer": word,
-                    "candidates": spec["needles"],
-                    "chars": int(length),
-                }
-            )
-    return items
 
 
 def _measure(
@@ -907,7 +871,7 @@ def run_battery(
     """
     if not final:
         return _run_battery(target, baseline, **options)
-    if options.get("comparison") is not None:
+    if options.get("comparison") is not None or options.get("leakage") is not None:
         raise ValueError("a final verdict is a standalone probe, not part of a try")
     with final_verdict_access():
         result = _run_battery(target, baseline, **options)
@@ -926,12 +890,14 @@ def _run_battery(
     now: Callable[[], datetime] | None = None,
     lm_eval: ProbeSpec | None = None,
     comparison: Mapping[str, Any] | None = None,
+    leakage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the battery through TIER and return one result (never raises on probes).
 
     COMPARISON is the enclosing try's held-out comparison, when there is one;
     a ``NOT_COMPARABLE`` try gets a non-escalating verdict whatever the probes
-    say.
+    say. LEAKAGE is the try's held-out leakage screen: contaminated training
+    data makes the verdict ``rerun``.
 
     TARGET/BASELINE are :class:`Arm` loaders or already loaded runs. Arms are
     opened one at a time per tier: the baseline first, then the candidate,
@@ -1137,6 +1103,7 @@ def _run_battery(
         stop=stop,
         reference=t_arm.reference,
         comparison=comparison,
+        leakage=leakage,
     )
     protocol_used = state["protocol"] or {}
 

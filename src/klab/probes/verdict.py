@@ -307,6 +307,49 @@ def try_not_comparable(comparison: Mapping[str, Any] | None) -> dict[str, Any] |
     )
 
 
+LEAKAGE_SUGGESTION = (
+    "Probe items that must stay held out occur verbatim in the training data "
+    "({found}), so the probe scores are not held-out evidence. Remove them from "
+    "the training data (held-out ids: `leakage.arms.ARM.items`) and re-run the "
+    "try."
+)
+
+
+def try_leakage(leakage: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The verdict for a try whose training data leaks probe items, else None.
+
+    ``leakage`` is the try's held-out leakage screen. Contaminated or
+    unscreened training data is missing held-out evidence: ``rerun``.
+    """
+    if not leakage or leakage.get("status") == "CLEAN":
+        return None
+    arms = leakage.get("arms") or {}
+    if leakage.get("status") == "CONTAMINATED":
+        found = "; ".join(
+            f"{arm}: "
+            + ", ".join(
+                f"{split} {count}" for split, count in row["contaminated"].items()
+            )
+            for arm, row in arms.items()
+            if row.get("status") == "CONTAMINATED"
+        )
+        status, note = "contaminated", f"items per split, {found}"
+    else:
+        found = "; ".join(
+            f"{arm}: {row.get('error')}"
+            for arm, row in arms.items()
+            if row.get("error")
+        )
+        status, note = "error", f"the screen did not run, {found}"
+    return _verdict(
+        "incomplete",
+        "rerun",
+        [f"missing evidence: leakage ({status})"],
+        LEAKAGE_SUGGESTION.format(found=note),
+        [{"id": "leakage", "status": status, "note": note}],
+    )
+
+
 def respect_try_comparison(
     verdict: Mapping[str, Any] | None, comparison: Mapping[str, Any] | None
 ) -> Mapping[str, Any] | None:
@@ -328,6 +371,7 @@ def decide(
     stop: Mapping[str, Any] | None = None,
     reference: bool = False,
     comparison: Mapping[str, Any] | None = None,
+    leakage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Overall verdict and a recommended next action for humans and agents.
 
@@ -336,7 +380,9 @@ def decide(
     resources or OOM makes the battery ``incomplete`` (action ``rerun``) unless
     a failure already decides it. ``comparison`` is the enclosing try's
     held-out comparison: ``NOT_COMPARABLE`` takes precedence over every
-    probe outcome except a numerical failure.
+    probe outcome except a numerical failure. ``leakage`` is the try's
+    held-out leakage screen: contaminated (or unscreened) training data comes
+    next, as missing evidence (``rerun``).
     """
     missing = missing_evidence(results, stop)
     by_id = {row["id"]: row for row in results}
@@ -356,6 +402,9 @@ def decide(
     not_comparable = try_not_comparable(comparison)
     if not_comparable is not None:
         return not_comparable
+    leaked = try_leakage(leakage)
+    if leaked is not None:
+        return leaked
     last = tiers_run[-1] if tiers_run else requested_tier
     next_tier = (
         TIERS[TIERS.index(last) + 1] if last in TIERS and last != TIERS[-1] else None
