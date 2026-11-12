@@ -819,6 +819,11 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
         assert run("three-workers", reuse_tokens=False) == (result, output)
         progress = json.loads((root / "three-workers/progress.json").read_bytes())
         assert (progress["read_workers"], progress["encoder_rayon_threads"]) == (1, 2)
+        # A four-worker plan still reads with one worker and encodes with three.
+        worker_patch.setenv("KLAB_MIXTURE_WORKERS", "4")
+        assert run("four-workers", reuse_tokens=False) == (result, output)
+        progress = json.loads((root / "four-workers/progress.json").read_bytes())
+        assert (progress["read_workers"], progress["encoder_rayon_threads"]) == (1, 3)
 
     calls.clear()
     warm_result, warm_output = run("warm")
