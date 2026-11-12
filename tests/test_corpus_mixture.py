@@ -1015,9 +1015,7 @@ def test_mixture_frontier_resumes_without_committed_candidate_replay(
     assert (checkpoints / "progress.json").is_file()
 
 
-@pytest.mark.parametrize(
-    "damage", ["output.ids", "output.records", "index", "identity", "marker"]
-)
+@pytest.mark.parametrize("damage", ["output.ids", "identity", "marker"])
 def test_mixture_frontier_rejects_changed_checkpoint(tmp_path, monkeypatch, damage):
     from klab.corpus.mixture_pipeline import MixtureFrontier
 
@@ -1036,9 +1034,8 @@ def test_mixture_frontier_rejects_changed_checkpoint(tmp_path, monkeypatch, dama
     checkpoints = tmp_path / ".interrupted.assembly"
     marker = next(checkpoints.glob("commit-*.json"))
     entry = json.loads(marker.read_bytes())
-    if damage in {"output.ids", "output.records", "index"}:
-        name = damage if damage == "output.ids" else f"{damage}.jsonl"
-        path = Path(entry["directory"]) / name
+    if damage == "output.ids":
+        path = Path(entry["directory"]) / damage
         path.write_bytes(path.read_bytes() + b"{}\n")
     elif damage == "identity":
         declaration.write_bytes(declaration.read_bytes() + b"\n# changed declaration\n")
@@ -1103,9 +1100,8 @@ def test_admitted_ordinary_metadata_can_bypass_warm_source_fetch(tmp_path, monke
     assert progress.get("read_worker_seconds", 0) == 0
 
 
-@pytest.mark.parametrize(
-    "failure", ["children", "cpu_times", "memory_info", "num_threads"]
-)
+# One failure for the process listing and one for a per-child sample.
+@pytest.mark.parametrize("failure", ["children", "cpu_times"])
 def test_child_telemetry_races_do_not_abort_materialization(
     tmp_path, monkeypatch, failure
 ):

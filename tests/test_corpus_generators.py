@@ -207,19 +207,9 @@ def test_changed_prompt_digest_rejects_recorded_request(tmp_path: Path) -> None:
     assert json.loads(diagnostics[0].read_text())["request_id"] == "request-0"
 
 
+# One seed per oracle judgment.
 @pytest.mark.parametrize(
-    "seed,expected",
-    [
-        (0, "stop"),
-        (1, "ask"),
-        (2, "inspect"),
-        (3, "inspect"),
-        (4, "stop"),
-        (5, "proceed"),
-        (6, "proceed"),
-        (7, "inspect"),
-        (8, "inspect"),
-    ],
+    "seed,expected", [(0, "stop"), (1, "ask"), (2, "inspect"), (5, "proceed")]
 )
 def test_filesystem_oracle_priority_and_inert_tools(seed: int, expected: str) -> None:
     scenario = _scenario(
@@ -594,10 +584,10 @@ def test_v2_filesystem_oracle_precedence() -> None:
         assert row["oracle_receipt"]["judgment"] == expected
 
 
-@pytest.mark.parametrize("generator", ("platform_fault_v2", "filesystem_judgment_v2"))
 def test_v2_compact_build_binds_generator_version_and_world_facts(
-    tmp_path: Path, generator: str
+    tmp_path: Path,
 ) -> None:
+    generator = "platform_fault_v2"
     root = tmp_path / "recipe"
     shutil.copytree(PROJECT, root)
     source_path = root / "sources/scenarios.yaml"

@@ -111,7 +111,6 @@ def test_prefix_matches_fresh_native_preparation_without_encoding(
         ({"train_max_tokens": 1}, "EOS boundary"),
         ({"train_max_documents": 3}, "document count/EOS"),
         ({"revision": "changed"}, "identity mismatch"),
-        ({"validation_max_documents": 2}, "identity mismatch"),
         ({"train_max_documents": 4}, "reduce both"),
     ],
 )

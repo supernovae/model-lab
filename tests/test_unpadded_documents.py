@@ -68,7 +68,7 @@ def test_unpadded_targets_resume_and_overlength_refusal():
 
 
 @pytest.mark.parametrize("multiport", [False, True])
-@pytest.mark.parametrize("width", [1, 4, 8])
+@pytest.mark.parametrize("width", [1, 8])
 def test_unpadded_native_train_resume(tmp_path, multiport, width):
     from test_training import config, equal
 

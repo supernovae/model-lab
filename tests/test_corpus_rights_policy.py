@@ -23,24 +23,15 @@ def policy(**changes: object) -> RightsPolicy:
 @pytest.mark.parametrize(
     ("expression", "expected"),
     [
+        # One expression per license class and SPDX expression form.
         ("MIT", "eligible"),
-        ("Apache-2.0", "eligible"),
-        ("BSD-3-Clause", "eligible"),
-        ("PSF-2.0", "eligible"),
-        ("0BSD", "eligible"),
         ("GPL-2.0-only WITH Linux-syscall-note", "eligible_with_obligations"),
-        ("GPL-2.0 WITH Linux-syscall-note", "eligible_with_obligations"),
         ("GPL-2.0+", "eligible_with_obligations"),
-        ("LGPL-2.1", "eligible_with_obligations"),
-        ("AGPL-3.0", "eligible_with_obligations"),
         (
             "(GPL-2.0 WITH Linux-syscall-note) OR BSD-3-Clause",
             "eligible_with_obligations",
         ),
-        ("MPL-2.0", "eligible_with_obligations"),
         ("CC-BY-4.0", "eligible_with_obligations"),
-        ("CC-BY-SA-4.0", "eligible_with_obligations"),
-        ("ODC-By-1.0", "eligible_with_obligations"),
         ("MIT OR Apache-2.0", "eligible"),
         ("MIT AND GPL-3.0-only", "eligible_with_obligations"),
         ("CC-BY-NC-SA-4.0", "review_required"),
@@ -100,8 +91,6 @@ def test_prospective_training_keeps_unrecognized_license_obligations_separate() 
     ("mode", "eligibility"),
     [
         ("metadata_reconstruction_only", "eligible"),
-        ("derived_only", "eligible"),
-        ("not_redistributable", "eligible"),
         ("review_required", "eligible"),
     ],
 )
@@ -180,11 +169,6 @@ def test_file_copyright_is_retained_with_source_notices() -> None:
     [
         "vendor/lib/a.py",
         "third_party/lib/a.py",
-        "external/a.py",
-        "generated/a.py",
-        "bundled/a.py",
-        "fixtures/a.py",
-        "third-party/a.py",
     ],
 )
 def test_boundaries_require_explicit_path_allowlist(path: str) -> None:

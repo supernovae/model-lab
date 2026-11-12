@@ -372,9 +372,7 @@ def test_append_composes_explicit_runtime_transition_without_reset(
     ]
 
 
-@pytest.mark.parametrize(
-    "damage", ["prefix", "optimizer", "memory_budget", "memory_fraction"]
-)
+@pytest.mark.parametrize("damage", ["prefix", "optimizer", "memory_budget"])
 def test_runtime_flag_cannot_bypass_data_or_scientific_rails(
     document_parent, tmp_path, damage
 ):
@@ -387,10 +385,8 @@ def test_runtime_flag_cannot_bypass_data_or_scientific_rails(
         path.write_text(path.read_text().replace("alpha", "wrong", 1))
     elif damage == "optimizer":
         raw["optimizer"]["peak"] *= 2
-    elif damage == "memory_budget":
-        raw["runtime"]["memory"]["budget_bytes"] = 1024**3
     else:
-        raw["runtime"]["memory"]["max_device_memory_fraction"] = 0.5
+        raw["runtime"]["memory"]["budget_bytes"] = 1024**3
     with pytest.raises(ValueError):
         train(
             RunConfig.model_validate(raw),

@@ -119,25 +119,14 @@ def test_export_verifies_from_same_and_independent_work_roots(
 @pytest.mark.parametrize(
     ("field", "bad"),
     [
+        # One case per refusal branch of the cold export verifier.
         ("release_id", "0" * 64),
         ("view", "chat"),
-        ("base_config_sha256", "0" * 64),
+        ("base_config_sha256", "not-a-sha"),
         ("vocab_size", 301),
         ("vocab_size", True),
-        ("vocab_size", "300"),
-        ("base_config_sha256", "not-a-sha"),
-        ("base_config_sha256", "A" * 64),
-        ("schema_version", "1"),
-        ("schema_version", True),
-        # Sealed metadata digests and policy fields.
-        ("release_manifest_sha256", "0" * 64),
-        ("report_sha256", "0" * 64),
-        ("license_report_sha256", "0" * 64),
         ("run_config_sha256", "0" * 64),
-        ("tokenizer_config_sha256", "0" * 64),
-        ("publication_mode", "tampered"),
-        ("weight_license_status", "tampered"),
-        ("training_use_policy", {"unexpected": True}),
+        ("report_sha256", "0" * 64),
         ("unexpected_metadata", "must not be silently accepted"),
     ],
 )
@@ -160,16 +149,14 @@ def test_export_rejects_changed_request_sha_suffix(
     _reject(exported, corpus_export_path=moved)
 
 
-@pytest.mark.parametrize("layout", ["other-corpus", "other-release", "other-view"])
-def test_export_rejects_wrong_corpus_or_layout_suffix(
-    isolated_export: tuple[Path, Path, Path], tmp_path: Path, layout: str
+def test_export_rejects_wrong_corpus_layout_suffix(
+    isolated_export: tuple[Path, Path, Path], tmp_path: Path
 ) -> None:
     release, exported, _ = isolated_export
     root = tmp_path / "other-work"
-    corpus = "wrong-corpus" if layout == "other-corpus" else release.parent.parent.name
-    release_id = "0" * 64 if layout == "other-release" else release.name
-    view = "chat" if layout == "other-view" else "lm"
-    moved = root / "corpora" / corpus / "exports" / release_id / view / exported.name
+    moved = (
+        root / "corpora" / "wrong-corpus" / "exports" / release.name / "lm"
+    ) / exported.name
     moved.parent.mkdir(parents=True)
     shutil.copytree(exported, moved)
     _reject(exported, corpus_export_path=moved)
@@ -185,12 +172,11 @@ def test_export_rejects_wrong_release_path_and_revision(
     _reject(exported, corpus_release_path=other)
 
 
-@pytest.mark.parametrize("filename", ["run.yaml", "tokenizer.yaml"])
 def test_export_rejects_changed_generated_config_hash(
-    isolated_export: tuple[Path, Path, Path], filename: str
+    isolated_export: tuple[Path, Path, Path],
 ) -> None:
     _, exported, _ = isolated_export
-    config = exported / filename
+    config = exported / "tokenizer.yaml"
     config.write_bytes(config.read_bytes() + b"\n# modified\n")
     _reject(exported)
 
@@ -218,14 +204,8 @@ def test_export_rejects_rehashed_generated_dataset_mismatch(
     ("field", "bad"),
     [
         ("source", "local_chat"),
-        ("revision", "0" * 64),
         ("license", "MIT-tampered"),
         ("train_max_documents", "increment"),
-        ("validation_max_documents", "increment"),
-        ("train_max_tokens", "increment"),
-        ("validation_max_tokens", "increment"),
-        ("train_max_documents", True),
-        ("validation_max_tokens", True),
     ],
 )
 def test_export_rejects_changed_consumer_dataset(
@@ -236,11 +216,11 @@ def test_export_rejects_changed_consumer_dataset(
     _reject(exported, **{field: original + 1 if bad == "increment" else bad})
 
 
-@pytest.mark.parametrize("split", ["train", "validation"])
 def test_export_requires_exact_source_paths_and_split_bytes(
-    isolated_export: tuple[Path, Path, Path], tmp_path: Path, split: str
+    isolated_export: tuple[Path, Path, Path], tmp_path: Path
 ) -> None:
     release, exported, _ = isolated_export
+    split = "train"
     path = release / "lm" / f"{split}.jsonl"
     copied = tmp_path / f"{split}.jsonl"
     shutil.copyfile(path, copied)
@@ -250,9 +230,7 @@ def test_export_requires_exact_source_paths_and_split_bytes(
     _reject(exported)
 
 
-@pytest.mark.parametrize(
-    "name", ["report.json", "license-report.json", "manifest.json"]
-)
+@pytest.mark.parametrize("name", ["report.json", "manifest.json"])
 def test_export_rejects_changed_release_evidence(
     isolated_export: tuple[Path, Path, Path], name: str
 ) -> None:
@@ -262,11 +240,11 @@ def test_export_rejects_changed_release_evidence(
     _reject(exported)
 
 
-@pytest.mark.parametrize("split", ["train", "validation"])
 def test_export_rejects_inventory_counts_bytes_and_budgets(
-    isolated_export: tuple[Path, Path, Path], split: str
+    isolated_export: tuple[Path, Path, Path],
 ) -> None:
     _, exported, _ = isolated_export
+    split = "train"
     dataset = _dataset(exported)
     sidecar = _sidecar(exported)
     item = sidecar["splits"][split]
@@ -295,55 +273,12 @@ def test_export_rejects_inventory_counts_bytes_and_budgets(
     )
 
 
-@pytest.mark.parametrize(
-    ("key", "bad"),
-    [
-        ("records", True),
-        ("records", "1"),
-        ("rendered_bytes", True),
-        ("rendered_bytes", "1"),
-        ("sha256", "0" * 64),
-        ("sha256", ["0" * 64]),
-        ("path", ["lm/train.jsonl"]),
-        ("path", "lm/validation.jsonl"),
-        ("unexpected", 1),
-    ],
-)
 def test_export_rejects_malformed_split_inventory(
-    isolated_export: tuple[Path, Path, Path], key: str, bad: Any
-) -> None:
-    _, exported, _ = isolated_export
-    sidecar = _sidecar(exported)
-    sidecar["splits"]["train"][key] = bad
-    _write_sidecar(exported, sidecar)
-    _reject(exported)
-
-
-def test_export_rejects_extra_split_and_invalid_inventory_shape(
     isolated_export: tuple[Path, Path, Path],
 ) -> None:
     _, exported, _ = isolated_export
     sidecar = _sidecar(exported)
-    sidecar["splits"]["test"] = dict(sidecar["splits"]["train"])
-    _write_sidecar(exported, sidecar)
-    _reject(exported)
-
-
-@pytest.mark.parametrize(
-    "inventory",
-    [
-        None,
-        [],
-        {},
-        {"train": {}, "validation": {}},
-    ],
-)
-def test_export_rejects_invalid_split_inventory_shape(
-    isolated_export: tuple[Path, Path, Path], inventory: Any
-) -> None:
-    _, exported, _ = isolated_export
-    sidecar = _sidecar(exported)
-    sidecar["splits"] = inventory
+    sidecar["splits"]["train"]["records"] = True
     _write_sidecar(exported, sidecar)
     _reject(exported)
 

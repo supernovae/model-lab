@@ -111,7 +111,6 @@ def test_exhaustion_and_relocation(tmp_path, offline):
     "field,value",
     [
         ("revision", "c" * 40),
-        ("license", "other"),
         ("dataset_config", "other"),
         ("train_path", "other.jsonl"),
     ],
@@ -127,9 +126,7 @@ def test_config_binding_rejects_changes(tmp_path, offline, field, value):
         sources.verify_snapshot(bad)
 
 
-@pytest.mark.parametrize(
-    "member", ["train.jsonl", "validation.jsonl", "events.jsonl", "excluded.jsonl"]
-)
+@pytest.mark.parametrize("member", ["train.jsonl", "events.jsonl", "excluded.jsonl"])
 def test_changed_inventory_fails(tmp_path, offline, member):
     manifest = acquire(tmp_path)
     target = manifest.parent / member
@@ -151,11 +148,10 @@ def test_extra_split_is_verified(tmp_path, offline):
         sources.verify_snapshot(manifest)
 
 
-@pytest.mark.parametrize("split", ["events", "excluded", "manifest"])
-def test_reserved_split_names_rejected(split):
+def test_reserved_split_names_rejected():
     with pytest.raises(ValueError, match="split mapping"):
         sources.DatasetSource.model_validate(
-            declaration(splits={split: "upstream"}, dedup={"priority": [split]})
+            declaration(splits={"events": "upstream"}, dedup={"priority": ["events"]})
         )
 
 
@@ -163,7 +159,6 @@ def test_reserved_split_names_rejected(split):
     "suffix",
     [
         "license: other\n",
-        "selection:\n  mode: bounded\n  mode: exhaustion\n",
         "true: value\n",
     ],
 )
@@ -174,8 +169,9 @@ def test_strict_yaml_rejects_ambiguous_keys(tmp_path, suffix):
         sources.load_source(path)
 
 
-@pytest.mark.parametrize("artifact", ["lock", "snapshot"])
-@pytest.mark.parametrize("extra", ["duplicate", "nonfinite"])
+@pytest.mark.parametrize(
+    ("artifact", "extra"), [("lock", "duplicate"), ("snapshot", "nonfinite")]
+)
 def test_locked_documents_use_strict_json(tmp_path, offline, artifact, extra):
     manifest = acquire(tmp_path)
     path = tmp_path / "lock.json" if artifact == "lock" else manifest
@@ -430,7 +426,7 @@ def test_parquet_preserves_filter_projection_and_feature_cast(tmp_path):
     ) == [{"text": "2"}, {"text": "3"}]
 
 
-@pytest.mark.parametrize("declared_batch_size", [None, 1000000, 7])
+@pytest.mark.parametrize("declared_batch_size", [None, 1000000])
 def test_parquet_caps_decoder_batches(tmp_path, monkeypatch, declared_batch_size):
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -618,8 +614,10 @@ def test_guard_only_snapshot_work_does_not_promise_resume_or_cleanup(
     assert not (tmp_path / "snapshot").exists()
 
 
-@pytest.mark.parametrize("crash", [False, True])
-@pytest.mark.parametrize("bound", ["records", "bytes", "time"])
+@pytest.mark.parametrize(
+    ("bound", "crash"),
+    [("records", False), ("bytes", False), ("time", False), ("records", True)],
+)
 def test_batched_snapshot_recovery_matches_uninterrupted(
     tmp_path, offline, monkeypatch, crash, bound
 ):

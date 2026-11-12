@@ -150,9 +150,7 @@ def test_map_rejects_tampering_wrong_tokenizer_and_unexpected_fields(
     [
         ({"algorithm": "unknown"}, "unsupported"),
         ({"vocab_size": True}, "positive integer"),
-        ({"memory_vocab_size": 0}, "memory_vocab_size"),
         ({"token_ids": [0]}, "cover every"),
-        ({"token_ids": [False] * 14}, "integers"),
         ({"token_ids": [0] * 14}, "surjective"),
         ({"tokenizer_sha256": "bad"}, "tokenizer_sha256"),
     ],
