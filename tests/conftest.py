@@ -6,6 +6,7 @@ its workers.  Child processes inherit the environment established here.
 
 import os
 import sys
+import zlib
 from pathlib import Path
 from types import ModuleType
 
@@ -161,3 +162,18 @@ def pytest_collection_modifyitems(
         reason = _KNOWN.get(base) or _KNOWN.get(module)
         if reason:
             item.add_marker(pytest.mark.skip(reason=f"known failure: {reason}"))
+    # CI splits the suite across jobs by file: KLAB_TEST_SHARD=INDEX/COUNT keeps
+    # the files whose path hashes to INDEX (1-based), so no job lists files.
+    shard = os.environ.get("KLAB_TEST_SHARD")
+    if shard:
+        index, count = (int(part) for part in shard.split("/"))
+        if not 1 <= index <= count:
+            raise pytest.UsageError(f"invalid KLAB_TEST_SHARD: {shard}")
+        keep, drop = [], []
+        for item in items:
+            module = item.nodeid.split("::", 1)[0]
+            bucket = zlib.crc32(module.encode()) % count + 1
+            (keep if bucket == index else drop).append(item)
+        if drop:
+            config.hook.pytest_deselected(items=drop)
+            items[:] = keep

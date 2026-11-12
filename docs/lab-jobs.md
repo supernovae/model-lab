@@ -66,7 +66,7 @@ length. The position cap also applies to explicit evaluation batch sizes.
 The local input closure is limited to 1 MiB. It requires fresh arms, retained
 checkpoints, CPU fp32 and explicit
 native per-arm wall bounds (at most 120 seconds). The example selects 30 seconds
-per arm and 90 seconds for the entire monitored job. The lab-loop CI's separate
+per arm and 90 seconds for the entire monitored job. The CI's separate
 900-second ceiling is **not** a host allocation. Every host pilot still needs the
 owner-approved outer RSS/time/disk envelope in its manifest.
 

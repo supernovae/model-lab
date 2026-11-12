@@ -169,7 +169,7 @@ goes in GitHub issues; keep `ROADMAP.md` short and directional.
   Never depend on CI's umask, user, disk or `HOME`; always isolate
   `KLAB_WORK_DIR`.
 - **Removing code is a change too.** After deleting tests, imports or helpers,
-  run `ruff check .`, the touched tests and the `lab-loop` tests. A red `main`
+  run `ruff check .`, the touched tests and the fast suite. A red `main`
   blocks everyone.
 - **No silent degradation.** A cache or proof that cannot be written says why.
   If a check refuses an ordinary local setup, fix the check rather than the test.
