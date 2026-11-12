@@ -22,16 +22,25 @@ tokens proposed per model call. The JSON result gains a `speculation` object
 
 | Field | Meaning |
 |---|---|
-| `model_calls` | Cached forwards after the prompt was encoded. Plain greedy decoding uses one per generated token. |
+| `model_calls` | Cached forwards that fed a token together with a draft to verify. Encoding the prompt and re-encoding a full context window are not counted. Plain greedy decoding uses one forward per generated token. |
 | `drafted_tokens` | Tokens proposed by the drafter. |
 | `accepted_tokens` | Proposed tokens the model confirmed. Each one is a model call saved. |
 
-Compare `model_calls` with the completion length to see the effect on a prompt;
-measure wall time on the target device before claiming a speedup, because a call
-that verifies a draft processes more positions than a single-token call.
+While the prompt and completion fit in the model's context, compare
+`model_calls` with the completion length to see the effect on a prompt. Measure
+wall time on the target device before claiming a speedup, because a call that
+verifies a draft processes more positions than a single-token call.
+
+Drafting stops once the context window is full. From then on each token
+re-encodes the whole window in one uncounted forward and no draft is proposed,
+so a prompt that already fills the context reports `model_calls: 0` and
+`drafted_tokens: 0` however long the completion is. The tokens are still the
+model's greedy tokens.
 
 ## Scope
 
+- Drafts run only while the prompt and completion fit in `max_seq_len`; see
+  the note under the table.
 - Greedy decoding only (`--temperature 0`), on the PyTorch KV-cache path: dense,
   grouped-query, sliding-window and MLA attention, with or without token n-gram
   memory. Block-sparse attention, byte-addressed or portable memory, semantic
