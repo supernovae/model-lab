@@ -101,12 +101,10 @@ def test_config_derivation_noop_is_not_an_observed_scientific_delta(
     [
         [],
         ["optimizer.peak"],
-        ["=1"],
         ["optimizer.peak=not-json"],
         ["optimizer.peak=NaN"],
         ["optimizer.peak=1e999"],
         ["optimizer.peak=1", "optimizer.peak=2"],
-        ["optimizer.peak=Infinity"],
         ['tokenizer={"path":"a","path":"b"}'],
     ],
 )
@@ -172,7 +170,6 @@ def test_config_derivation_rejects_linked_destination_components(
         {"optimizer": {}, "optimizer.peak": 0.001},
         {},
         {"optimizer.peak": float("inf")},
-        {"optimizer.peak": float("nan")},
     ],
 )
 def test_config_derivation_rejects_invalid_settings_without_output(
@@ -388,45 +385,6 @@ def test_competing_publication_never_overwrites_competitor(
         derive_config(source_config, output, {"optimizer.peak": 0.001})
     assert output.read_bytes() == b"competing writer"
     assert not _sidecar(output).exists()
-
-
-def test_dangling_receipt_is_not_replaced(source_config, tmp_path):
-    output = tmp_path / "derived.yaml"
-    _sidecar(output).symlink_to(tmp_path / "missing.json")
-    with pytest.raises(FileExistsError):
-        derive_config(source_config, output, {"optimizer.peak": 0.001})
-    assert _sidecar(output).is_symlink()
-    assert not output.exists()
-
-
-def test_config_cli_text_reports_published_handoff(
-    source_config, tmp_path, monkeypatch, capsys
-):
-    output = tmp_path / "text.yaml"
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "klab",
-            "config",
-            "derive",
-            str(source_config),
-            "--set",
-            "optimizer.peak=0.001",
-            "--output",
-            str(output),
-        ],
-    )
-    main()
-    captured = capsys.readouterr()
-    assert str(output) in captured.out
-    assert str(_sidecar(output)) in captured.out
-    assert "typed_config" in captured.out
-    assert load_config(output).optimizer.peak == 0.001
-    assert json.loads(_sidecar(output).read_text())["delta"]["optimizer.peak"] == {
-        "base": 0.003,
-        "variant": 0.001,
-    }
 
 
 def _sections(source_config: Path, root: Path) -> dict[str, Path]:

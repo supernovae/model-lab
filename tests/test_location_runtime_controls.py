@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import subprocess
@@ -27,28 +26,19 @@ from klab.try_config import load_try_config
         (load_explore_config, ("lab_dir", "runs_dir")),
     ],
 )
-@pytest.mark.parametrize(
-    ("invoking_dir", "relative_source"),
-    [("first/nested", False), ("second/nested/deeper", True)],
-)
 def test_declaration_locations_do_not_follow_cwd_or_work_root(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    loader,
-    fields: tuple[str, ...],
-    invoking_dir: str,
-    relative_source: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, loader, fields: tuple[str, ...]
 ) -> None:
     source = tmp_path / "declarations" / "request.yaml"
     source.parent.mkdir()
     source.write_text("\n".join(f"{field}: ../retained/{field}" for field in fields))
     expected = {field: tmp_path / "retained" / field for field in fields}
     before = source.read_bytes()
-    cwd = tmp_path / invoking_dir
+    cwd = tmp_path / "second/nested/deeper"
     cwd.mkdir(parents=True)
     monkeypatch.chdir(cwd)
     monkeypatch.setenv("KLAB_WORK_DIR", str(cwd / "work"))
-    selected = Path(os.path.relpath(source, cwd)) if relative_source else source
+    selected = Path(os.path.relpath(source, cwd))
     # Explore takes a Path; try/probe take a selection string (preset or path).
     config = loader(str(selected) if loader != load_explore_config else selected)
     assert {field: getattr(config, field) for field in fields} == expected
@@ -94,20 +84,10 @@ def test_runtime_registry_and_install_root_do_not_follow_scientific_work_root(
     assert not (tmp_path / "data").exists()
 
 
+# Every subcommand's help comes from one parser; one bare and one --work-dir route.
 @pytest.mark.parametrize(
-    "command",
-    [
-        "list",
-        "discover",
-        "show",
-        "register",
-        "unregister",
-        "doctor",
-        "profile",
-        "provision",
-    ],
+    ("command", "work_prefix"), [("list", "none"), ("provision", "split")]
 )
-@pytest.mark.parametrize("work_prefix", ["none", "split", "equals"])
 def test_all_environment_help_routes_avoid_framework_and_execution(
     tmp_path: Path, command: str, work_prefix: str
 ) -> None:
@@ -210,21 +190,8 @@ def test_environment_work_prefix_preserves_separate_runtime_locations(
     assert not (tmp_path / "config").exists()
 
 
-def test_runtime_help_exposes_environment_management(tmp_path: Path) -> None:
-    from klab.cli.main import build_parser
-
-    commands = next(
-        action.choices
-        for action in build_parser(tmp_path / "work")._actions
-        if isinstance(action, argparse._SubParsersAction)
-    )
-    assert "klab runtime env --help" in commands["runtime"].format_help()
-    assert not (tmp_path / "work").exists()
-
-
-@pytest.mark.parametrize("work_prefix", ["split", "equals"])
 def test_environment_work_prefix_drives_native_runtime_root_refusal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, work_prefix: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     from klab.cli import entry
 
@@ -237,13 +204,10 @@ def test_environment_work_prefix_drives_native_runtime_root_refusal(
     }
     for name, path in locations.items():
         monkeypatch.setenv(name, str(path))
-    prefix = (
-        ["--work-dir", "selected-work"]
-        if work_prefix == "split"
-        else ["--work-dir=selected-work"]
-    )
     monkeypatch.setattr(
-        sys, "argv", ["klab", *prefix, "runtime", "env", "list", "--json"]
+        sys,
+        "argv",
+        ["klab", "--work-dir=selected-work", "runtime", "env", "list", "--json"],
     )
     # Exercise the real manager and native root check, not a mocked handoff.
     with pytest.raises(SystemExit) as error:

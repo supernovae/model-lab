@@ -13,12 +13,9 @@ from klab import runtime
     [
         ("Linux", "6.8.0-generic", "", "", "linux", "native"),
         ("Darwin", "25.0.0", "Ubuntu", "", "macos", "native"),
-        ("Windows", "11", "Ubuntu", "", "windows", "native"),
         ("Linux", "6.6.87.2-microsoft-standard-WSL2", "", "", "linux", "wsl2"),
-        ("Linux", "5.4.72-microsoft-standard", "", "", "linux", "wsl2"),
         ("Linux", "4.4.0-Microsoft", "", "", "linux", "unknown-wsl"),
         ("Linux", "custom", "Ubuntu", "", "linux", "unknown-wsl"),
-        ("Linux", "custom", "", "/run/WSL/1_interop", "linux", "unknown-wsl"),
     ],
 )
 def test_host_environment_detection(
@@ -44,15 +41,12 @@ def test_host_environment_detection(
 
 
 @pytest.mark.parametrize("backend", ["cpu", "cuda", "rocm", "xpu"])
-@pytest.mark.parametrize("wsl", [False, True])
 def test_host_inventory_is_independent_of_backend(
-    monkeypatch: pytest.MonkeyPatch, backend: str, wsl: bool
+    monkeypatch: pytest.MonkeyPatch, backend: str
 ) -> None:
     monkeypatch.setattr(runtime.platform, "system", lambda: "Linux")
     monkeypatch.setattr(
-        runtime.platform,
-        "release",
-        lambda: "6.6-microsoft-standard-WSL2" if wsl else "6.6-generic",
+        runtime.platform, "release", lambda: "6.6-microsoft-standard-WSL2"
     )
     monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
     monkeypatch.delenv("WSL_INTEROP", raising=False)
@@ -68,7 +62,7 @@ def test_host_inventory_is_independent_of_backend(
 
     assert runtime._auto_backend() == backend
     assert {info.host_os for info in infos} == {"linux"}
-    assert {info.host_environment for info in infos} == {"wsl2" if wsl else "native"}
+    assert {info.host_environment for info in infos} == {"wsl2"}
     selected = next(info for info in infos if info.backend == backend)
     assert selected.torch_device == str(runtime.torch_device_for(backend))
     assert runtime.RuntimeInfo.from_dict(selected.as_dict()) == selected

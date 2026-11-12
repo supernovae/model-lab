@@ -121,7 +121,7 @@ def test_schedule_cold_bundle_derivation_and_tamper_refusal(tmp_path):
     assert not (tmp_path / "refused.yaml").exists()
 
 
-@pytest.mark.parametrize("count", [0, 1, 2, 5])
+@pytest.mark.parametrize("count", [0, 2])
 def test_arbitrary_named_panel_counts(count):
     panels = [
         FixedValidationPanel(

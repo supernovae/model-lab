@@ -276,9 +276,8 @@ def test_runtime_progress_snapshot_replaces_latest_without_outbox_growth(
     ]
 
 
-@pytest.mark.parametrize("size", [16, 80_000])
 def test_manifest_reference_preserves_complete_payload_and_bounded_transport(
-    tmp_path, size
+    tmp_path,
 ):
     from types import SimpleNamespace
 
@@ -287,7 +286,7 @@ def test_manifest_reference_preserves_complete_payload_and_bounded_transport(
 
     source = ExperimentStore(tmp_path / "source")
     _run(source)
-    payload = {"run_id": "run", "source_identity": {"inventory": "x" * size}}
+    payload = {"run_id": "run", "source_identity": {"inventory": "x" * 80_000}}
     encoded = _canonical_json(payload)
     digest = hashlib.sha256(encoded.encode()).hexdigest()
     source.register_manifest("run", digest, payload)

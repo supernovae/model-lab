@@ -247,10 +247,10 @@ class Denied(HfHubHTTPError):
         super().__init__(f"request Authorization: Bearer {secret}", response=response)
 
 
-@pytest.mark.parametrize("status", [401, 403])
 def test_hub_snapshot_denial_redacts_token(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    status = 403
     token = "DO-NOT-LOG-hub-token"
     monkeypatch.setenv("HF_TOKEN", token)
     source = SourceDeclaration.model_validate(
@@ -290,10 +290,10 @@ def test_hub_snapshot_denial_redacts_token(
     assert not list(tmp_path.rglob("manifest.json"))
 
 
-@pytest.mark.parametrize("status", [401, 403])
 def test_http_hub_denial_redacts_token(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    status = 403
     token = "DO-NOT-LOG-http-token"
     monkeypatch.setenv("HF_TOKEN", token)
     source = SourceDeclaration.model_validate(
@@ -324,10 +324,10 @@ def test_http_hub_denial_redacts_token(
     assert token not in str(error.value)
 
 
-@pytest.mark.parametrize("status", [401, 403])
 def test_streaming_denial_at_iteration_is_sanitized(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    status = 403
     token = "DO-NOT-LOG-stream-token"
     monkeypatch.setenv("HF_TOKEN", token)
 

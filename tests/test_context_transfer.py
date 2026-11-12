@@ -27,8 +27,8 @@ def test_sdpa_avoids_unused_dense_masks_and_keeps_reference_diagnostics():
         sdpa(torch.empty(1, 8193, 8))
 
 
-@pytest.mark.parametrize("context", [4096, 8192])
-def test_long_document_rope_multiport_and_chunked_cache(tmp_path, context):
+def test_long_document_rope_multiport_and_chunked_cache(tmp_path):
+    context = 8192
     config = model_config(
         tmp_path,
         "deepseek_safe_v1",

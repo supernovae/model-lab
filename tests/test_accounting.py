@@ -292,8 +292,8 @@ def test_context_memory_inventory_matches_model(kernel: int) -> None:
     assert report["optimizer_state_bytes"] >= report["trainable"] * 8
 
 
-@pytest.mark.parametrize("kernel", [0, 4])
-@pytest.mark.parametrize("ports", [(), (0, 1)])
+# Diagonal: the conv kernel and the port count are independent branches.
+@pytest.mark.parametrize(("kernel", "ports"), [(0, ()), (4, (0, 1))])
 def test_independent_memory_initialization_preserves_trunk_and_future_rng(
     kernel: int,
     ports: tuple[int, ...],

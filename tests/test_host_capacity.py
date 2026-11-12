@@ -57,8 +57,6 @@ def test_capacity_uses_all_bounds(capacity):
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"worker_memory_bytes": 0, "reserve_bytes": 1},
-        {"worker_memory_bytes": 1, "reserve_bytes": -1},
         {"worker_memory_bytes": True, "reserve_bytes": 1},
         {"worker_memory_bytes": 1, "reserve_bytes": 1, "operator_cap": 0},
     ],

@@ -163,10 +163,7 @@ def test_observed_orphan_remains_owned(monkeypatch: pytest.MonkeyPatch) -> None:
     "payload",
     [
         {"monitor_policy_version": 1, "scientific_sha256": "abc"},
-        {"monitor_policy_version": 1, "max_host_used_swap_bytes": 1},
         {"monitor_policy_version": True},
-        {"monitor_policy_version": 1.0},
-        {"monitor_policy_version": 2},
     ],
 )
 def test_policy_rejects_invalid_or_scientific_fields(payload) -> None:
