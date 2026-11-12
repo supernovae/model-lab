@@ -7,6 +7,7 @@ the [README](../README.md), then the first two pages under Start.
 
 ```sh
 klab try DELTA.yaml --vs BASELINE.yaml     # train and score one change
+klab sweep sweep.yaml                      # several values or seeds of a change
 klab report TRY_ID                         # read the sealed result
 klab probe TRY_ID --vs BASELINE_RUN --backend cpu --config standard
 klab compare TRY_ID --references           # place it next to public models
@@ -23,7 +24,7 @@ only read records. A run ID names weights; a try or probe ID names a result. Use
 | Page | Covers |
 | --- | --- |
 | [Build a model from your own text](build.md) | Corpus to tokenizer to model in five commands; keeping a model in its own repository |
-| [Lab mode](lab-mode.md) | `try` and `report`: one change against a baseline |
+| [Lab mode](lab-mode.md) | `try`, `sweep` and `report`: changes against a baseline |
 | [Configs](configs.md) | Validating, composing and deriving configs |
 | [First real model](first-model.md) | A 17M decoder on FineWeb-Edu with paired seeds |
 | [From a toy model to a useful one](from-toy-to-useful.md) | From an instruction-learning toy to a narrow useful model |

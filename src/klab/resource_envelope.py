@@ -139,7 +139,11 @@ def require_envelope_applicability(
     envelope: ResourceEnvelope | None, *, operation: str
 ) -> None:
     """Reject scoped limits before a consumer can silently ignore them."""
-    if envelope is not None and envelope.lab_try is not None and operation != "try":
+    if (
+        envelope is not None
+        and envelope.lab_try is not None
+        and operation not in {"try", "sweep"}
+    ):
         raise ValueError(
             f"resource envelope lab_try limits apply only to try, not {operation}; "
             "remove lab_try for this operation or select klab try"

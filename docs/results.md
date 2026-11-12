@@ -49,8 +49,9 @@ run store.
 
 ## How lookup works
 
-- **Record IDs** are found under `LAB/tries` and `LAB/probes` (`LAB` is
-  `WORK_DIR/lab`). A bare ID that also matches something in the current
+- **Record IDs** are found under `LAB/tries`, `LAB/probes` and `LAB/sweeps`
+  (`LAB` is `WORK_DIR/lab`). A sweep record lists its tries; `probe`, `explore`
+  and `compare` take one of those try IDs, not the sweep's. A bare ID that also matches something in the current
   directory is reported as `ambiguous_result`; pass a path to choose.
 - **Record files** can be passed directly, including exported copies under
   another name. Their digest is checked.

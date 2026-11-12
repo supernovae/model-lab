@@ -147,9 +147,50 @@ with the arm, the phase (`setup`, `training`, `scoring` or `probing`) and the
 reason, and keeps everything already scored. Interrupted tries are kept and
 never reused.
 
+## Sweeps
+
+To see how a model responds across several values of a setting, run a sweep:
+every value is a try against the same baseline, at every seed.
+
+```yaml
+# sweep.yaml
+baseline: baseline.yaml
+question: Does a longer context help?
+vary:
+  training.seq_len: [128, 512, 1024, 4096]
+seeds: [1, 2, 3]
+config: standard        # try policy: fast, standard, full, no-probes or a YAML path
+```
+
+```sh
+klab sweep sweep.yaml
+klab report SWEEP_ID
+```
+
+- **Grid.** Several fields under `vary` run every combination, in the order
+  written. A sweep runs at most 256 tries.
+- **Baseline once per seed.** The first try at each seed trains the baseline;
+  the others reuse it. A value equal to the baseline's own is reported as the
+  baseline point, not trained again.
+- **Seeds.** Without `seeds`, each try uses the baseline's seed. With seeds,
+  each point is compared at every seed against the baseline at the same seed.
+- **Paths.** `baseline` and a `config` file resolve from the sweep file.
+
+`report` shows one row per point: the mean change in held-out loss across seeds
+with its standard error, a verdict, parameters and wall time, then every try ID.
+A verdict needs two or more seeds: `LOWER_LOSS` or `HIGHER_LOSS` when the mean is
+more than two standard errors from zero, otherwise `WITHIN_SEED_NOISE`. With one
+seed the verdict says `SINGLE_SEED_*`, a direction to follow up rather than a
+result. The sealed record lives in `LAB/sweeps/SWEEP_ID/sweep.json` beside a
+`series.csv` for plotting.
+
+An interrupted try stops the sweep and records how far it got. A failed or not
+comparable try is recorded and the sweep continues. Each try is an ordinary
+record, so `report`, `probe`, `explore` and `compare` work on any of them.
+
 ## Limits
 
 One seed per arm and one held-out loss make a lab verdict a direction to
-follow up, not a significance test. Confirm a gain with paired seeds before
-claiming it. Each try runs in one process on one device; spread larger sweeps
-over [workers](workers.md).
+follow up, not a significance test. Confirm a gain with a sweep over paired
+seeds before claiming it. Each try runs in one process on one device; spread
+larger independent runs over [workers](workers.md).

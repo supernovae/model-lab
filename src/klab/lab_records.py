@@ -1,7 +1,7 @@
 """Sealed lab records: one writer and one verified reader for every lab surface.
 
-Lab tries (``tries/<id>/try.json``) and probe runs (``probes/<id>/probe.json``)
-are self-hashed JSON documents. ``try``, ``probe``, ``report`` and the dashboard
+Lab tries (``tries/<id>/try.json``), probe runs (``probes/<id>/probe.json``)
+and sweeps (``sweeps/<id>/sweep.json``) are self-hashed JSON documents. ``try``, ``probe``, ``report`` and the dashboard
 all read them through :func:`read_lab_record`, so an edited record is rejected
 everywhere, not only on the command line.
 """
@@ -20,10 +20,12 @@ from typing import Any
 DIGEST_FIELD = "record_sha256"
 TRY_FORMAT = "klab-lab-try-v1"
 PROBE_FORMAT = "klab-probe-v1"
+SWEEP_FORMAT = "klab-lab-sweep-v1"
 # kind -> (format, folder under the lab root, file name in a record folder)
 KINDS = {
     "try": (TRY_FORMAT, "tries", "try.json"),
     "probe": (PROBE_FORMAT, "probes", "probe.json"),
+    "sweep": (SWEEP_FORMAT, "sweeps", "sweep.json"),
 }
 _BY_FORMAT = {fmt: kind for kind, (fmt, _, _) in KINDS.items()}
 
@@ -157,7 +159,9 @@ def read_lab_record(path: Path, kind: str | None = None) -> tuple[str, dict[str,
         _BY_FORMAT.get(record.get("format")) if isinstance(record, dict) else None
     )
     if found_kind is None or (kind is not None and found_kind != kind):
-        expected = "lab try" if kind == "try" else "probe" if kind else "lab"
+        expected = {"try": "lab try", "probe": "probe", "sweep": "sweep"}.get(
+            kind or "", "lab"
+        )
         raise ValueError(f"not a {expected} record: {path}")
     if not is_sealed(record):
         raise ValueError(f"{found_kind} record digest mismatch: {path}")
@@ -165,12 +169,13 @@ def read_lab_record(path: Path, kind: str | None = None) -> tuple[str, dict[str,
 
 
 def iter_lab_records(
-    lab_dir: Path, limit: int = 500
+    lab_dir: Path, limit: int = 500, kinds: tuple[str, ...] = ("try", "probe")
 ) -> tuple[list[tuple[str, Path, dict[str, Any]]], list[tuple[Path, str]]]:
-    """Verified records under LAB_DIR plus (path, reason) for rejected ones."""
+    """Verified records of KINDS under LAB_DIR plus (path, reason) for rejected ones."""
     accepted: list[tuple[str, Path, dict[str, Any]]] = []
     rejected: list[tuple[Path, str]] = []
-    for kind, (_, folder, name) in KINDS.items():
+    for kind in kinds:
+        _, folder, name = KINDS[kind]
         for path in sorted((lab_dir / folder).glob(f"*/{name}"))[-limit:]:
             try:
                 accepted.append((kind, path, read_lab_record(path, kind)[1]))

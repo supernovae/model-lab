@@ -15,8 +15,11 @@ klab report TRY_ID
 `try` derives the candidate from the baseline, trains both arms, scores them on
 the same held-out split and writes one sealed record: config, seed, code
 revision, data identity, resource limits and result. See [lab mode](docs/lab-mode.md).
-Iterate by reading the record, changing one setting and trying again. Do not
-write proposals or approval documents. A lab
+Iterate by reading the record, changing one setting and trying again. To try
+several values of a setting, or to confirm a result over paired seeds, run
+`klab sweep SWEEP.yaml` instead of a hand-written loop of tries: it trains the
+baseline once per seed and reports every point in one table. Do not write
+proposals or approval documents. A lab
 record describes one local comparison; it is not a release or a scientific
 conclusion.
 
@@ -48,7 +51,8 @@ you have already chosen. Never use it to rank candidates, and never run it again
 after changing the idea. `klab compare --final A B` shows final results side by
 side; they never enter ordinary comparisons or the dashboard.
 
-A single-seed gain is within-run noise until paired seeds confirm it. A try
+A single-seed gain is within-run noise until paired seeds confirm it (a sweep with
+`seeds: [1, 2, 3]` does this). A try
 marked `NOT_COMPARABLE` is never promoted. Do not edit probe items, thresholds
 or prompts to make an idea pass; `guard.overfit_suspected` means the idea is
 fitting the probes. A probe suite change needs a `SUITE_VERSION` bump.
