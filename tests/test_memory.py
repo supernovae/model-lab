@@ -67,7 +67,13 @@ def test_multi_stream_collision_diagnostics_aggregate_all_lookups() -> None:
     assert float(diagnostics.bucket_reuse_rate) > 0
 
 
-def test_vectorized_stream_diagnostics_match_per_stream_reference() -> None:
+@pytest.mark.parametrize(
+    ("ngram_orders", "hash_heads"), [((2, 3, 4), 2), ((), 1)], ids=["six", "one"]
+)
+def test_stream_diagnostics_match_per_stream_reference(
+    ngram_orders: tuple[int, ...], hash_heads: int
+) -> None:
+    """Several streams take the batched path and a single stream its own."""
     from klab.model.memory import _diagnostics
 
     torch.manual_seed(7)
@@ -76,14 +82,15 @@ def test_vectorized_stream_diagnostics_match_per_stream_reference() -> None:
         table_size=31,
         ngram_size=3,
         value_dim=5,
-        ngram_orders=(2, 3, 4),
-        hash_heads=2,
+        ngram_orders=ngram_orders,
+        hash_heads=hash_heads,
     )
     hidden = torch.randn(3, 12, 8)
     input_ids = torch.randint(0, 64, (3, 12))
     output = memory(hidden, input_ids)
     actual = memory.last_diagnostics
     assert actual is not None
+    assert len(actual.streams) == max(len(ngram_orders), 1) * hash_heads
 
     addresses = [
         memory.addresses(input_ids, order, head)
