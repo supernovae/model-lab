@@ -430,11 +430,11 @@ builders as a runtime dependency, or introduce another executor. Commit:
 Freeze the final installed lab source identity **before fresh preparation**.
 Commit preparation declarations at A and run them with admission for A. COMPLETE
 preparation JSON stages expose `outputs` (native `kind`, `identifier`, `sha256`)
-and `availability.path` (local location). A standard-library authoring helper can
-select the expected stage IDs/kinds, require COMPLETE, copy those native identity
+and `availability.path` (local location). Lab has no command for the next step
+yet: for each expected stage, require COMPLETE, copy those native identity
 fields into the workflow's version-1 artifact records with an explicit producer,
-and place paths in local bindings. It must not invent identities for missing or
-failed stages. Commit that independently authored workflow at B and admit B.
+and place paths in local bindings. Do it by hand and never write an identity for
+a missing or failed stage; a recipe repository should not carry a script for it. Commit that independently authored workflow at B and admit B.
 Retain the A checkout and exact local binding/admission bytes for preparation
 replay: advancing its checkout to B invalidates A's admission. Artifacts measured
 under an earlier installed lab source identity are not reusable evidence for a
