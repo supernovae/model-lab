@@ -118,10 +118,6 @@ print(json.dumps({'module':klab.__file__,'torch':torch.__version__,'uid':os.getu
                 "/observe/work/runs",
                 "--lab-dir",
                 "/observe/work/lab",
-                "--reports-dir",
-                "/observe/work/reports",
-                "--evidence-root",
-                "/observe/evidence",
             ],
         )
         for _ in range(60):
