@@ -8,7 +8,7 @@ tokenizing again.
 It is used automatically by `klab data prepare` (and by `klab train` when it
 prepares data) for `dataset.source: local_text` with a byte-level BPE tokenizer
 and no byte-addressed memory. Other sources use the chunked path described in
-[runtime](runtime.md#operational-resource-envelopes). The prepared arrays and
+[runtime](runtime.md#resource-envelopes). The prepared arrays and
 manifest are byte-identical either way.
 
 ## Where it lives and what it holds
@@ -148,12 +148,11 @@ documents, and that retained copy is still JSON.
 Synthetic release of 40,000 documents, 210M scheduled tokens, RAM-backed
 storage, 48 threads, same output tokens in every row:
 
-| Step | Before | Now |
+| Step | Time | Rate |
 | --- | --- | --- |
-| Cold mixture build | 77.9 s (2.7M tokens/s) | 24.2 s (8.7M tokens/s) |
-| Rebuild with a warm content token store | not measured | 12.9 s (16M tokens/s) |
-| Packing the mixture for training | 9.8M tokens/s | 126M tokens/s |
+| Cold mixture build | 24.2 s | 8.7M tokens/s |
+| Rebuild with a warm content token store | 12.9 s | 16M tokens/s |
+| Packing the mixture for training | | 126M tokens/s |
 
-"Before" is the single JSON-speaking tokenizer child, the SQLite token cache
-and the JSONL token export. About 6 s of each build is fixed verification
-work that does not grow with the corpus.
+About 6 s of each build is fixed verification work that does not grow with the
+corpus.

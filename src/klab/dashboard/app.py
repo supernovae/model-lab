@@ -20,15 +20,14 @@ import plotly.express as px
 import streamlit as st
 
 from klab.dashboard import generation, inspection, lab_pages, training_charts, ui
+from klab.dashboard.learn import learn_page
 from klab.dashboard.queries import DashboardSnapshot, RunRecord, runs, snapshot
-from klab.dashboard.research import learn_page, research_page
 from klab.dashboard.stores import (
     available_stores,
     discovery_roots,
     parse_run_store,
 )
 from klab.evaluation.post_train_triage import read_triage, triage_summary
-from klab.evaluation.surface_overlay import surface_review_status
 from klab.training.checkpoints import CheckpointManager, _safe_member
 from klab.training.metric_registry import metric_spec
 
@@ -70,10 +69,6 @@ def arguments() -> argparse.Namespace:
     parser.add_argument(
         "--run-store", action="append", type=parse_run_store, default=[]
     )
-    parser.add_argument("--reports-dir", default="artifacts/research-reports")
-    parser.add_argument("--lifecycle")
-    parser.add_argument("--evidence-root", default=".")
-    parser.add_argument("--surface-dir")
     parser.add_argument("--lab-dir")
     args, _ = parser.parse_known_args()
     return args
@@ -483,9 +478,7 @@ def _runtime_forecast_panel(view: DashboardSnapshot, selected_ids: list[str]) ->
         st.json(detail, expanded=False)
 
 
-def _triage_panel(
-    root: Path, selected_ids: list[str], surface_dir: Path | None = None
-) -> None:
+def _triage_panel(root: Path, selected_ids: list[str]) -> None:
     st.subheader("Post-train triage (read-only)")
     for run_id in selected_ids:
         try:
@@ -497,18 +490,9 @@ def _triage_panel(
             st.info(f"{run_id}: UNKNOWN — no verified post-train triage artifact")
             continue
         st.write(f"{run_id}: {triage_summary(report)}")
-        if surface_dir is not None:
-            overlay = surface_review_status(run_id, root, surface_dir)
-            st.write(
-                f"{run_id}: independent subjective quality — {overlay['independent_subjective_quality']}"
-            )
-            for bundle in overlay["bundles"]:
-                st.caption(f"{bundle['status']}: {bundle['path']}")
 
 
-def training(
-    view: DashboardSnapshot, root: Path | None = None, surface_dir: Path | None = None
-) -> None:
+def training(view: DashboardSnapshot, root: Path | None = None) -> None:
     ui.page_header("Training", "How is the current run progressing?")
     records, selected_ids = selected(view)
     inspection.learning_summary(view, selected_ids)
@@ -516,7 +500,7 @@ def training(
     _runtime_forecast_panel(view, selected_ids)
     comparison([record for record in records if record.run_id in selected_ids], view)
     if root is not None:
-        _triage_panel(root, selected_ids, surface_dir)
+        _triage_panel(root, selected_ids)
     points = _rows_for(view.metrics, selected_ids)
     if not points:
         st.info("Select a run with recorded metrics.")
@@ -1042,7 +1026,7 @@ def _read_snapshot(
     return fresh, observed_at, None
 
 
-def render(root: Path, page: str, surface_dir: Path | None = None) -> None:
+def render(root: Path, page: str) -> None:
     if page == "generate":
         generation.generation_page(None, root, [])
         return
@@ -1082,7 +1066,7 @@ def render(root: Path, page: str, surface_dir: Path | None = None) -> None:
             value, root, selected(value)[1]
         ),
         "overview": lambda value: overview(value, root),
-        "training": lambda value: training(value, root, surface_dir),
+        "training": lambda value: training(value, root),
         "evaluation": evaluation,
         "architecture": architecture_diagnostics,
         "engram": lambda value: inspection.engram_summary(value, selected(value)[1]),
@@ -1097,7 +1081,7 @@ def render(root: Path, page: str, surface_dir: Path | None = None) -> None:
     pages[page](view)
 
 
-def _run_page(root: Path, page: str, surface_dir: Path | None = None) -> None:
+def _run_page(root: Path, page: str) -> None:
     """Keep run views unavailable until a read-only projection exists."""
     run_ids = tuple(st.session_state.get("selected_runs", []))
     key = f"dashboard_snapshot:{root.resolve()}:{run_ids}"
@@ -1107,10 +1091,10 @@ def _run_page(root: Path, page: str, surface_dir: Path | None = None) -> None:
     if page == "training":
         training_charts.load_plotly()
     if page == "generate":
-        render(root, page, surface_dir)
+        render(root, page)
         return
     interval = st.session_state.get("refresh_seconds", 10)
-    st.fragment(run_every=interval or None)(render)(root, page, surface_dir)
+    st.fragment(run_every=interval or None)(render)(root, page)
 
 
 def main() -> None:
@@ -1136,10 +1120,6 @@ def main() -> None:
 
         with st.sidebar:
             watch_stores()
-    reports_dir = Path(args.reports_dir)
-    lifecycle = Path(args.lifecycle) if args.lifecycle else None
-    evidence_root = Path(args.evidence_root)
-    surface_dir = Path(args.surface_dir) if args.surface_dir else None
     lab_dir = (
         Path(args.lab_dir)
         if args.lab_dir
@@ -1183,9 +1163,7 @@ def main() -> None:
     pages.update({p.url_path: p for p in lab})
     run_pages = [
         st.Page(
-            (lambda name=name: _run_page(root, name, surface_dir))
-            if name == "training"
-            else (lambda name=name: _run_page(root, name)),
+            lambda name=name: _run_page(root, name),
             title={
                 "engram": "Engram memory",
                 "snapshots": "Snapshot inspector",
@@ -1217,14 +1195,7 @@ def main() -> None:
         {
             "Lab": lab,
             "Run telemetry": run_pages,
-            "Learn": [
-                st.Page(lambda: learn(), title="Learn", url_path="learn"),
-                st.Page(
-                    lambda: research_page(reports_dir, lifecycle, evidence_root),
-                    title="Research",
-                    url_path="research",
-                ),
-            ],
+            "Learn": [st.Page(lambda: learn(), title="Learn", url_path="learn")],
         }
     )
     st.sidebar.markdown("### 🔬 Kybern Model Lab")

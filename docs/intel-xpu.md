@@ -1,7 +1,5 @@
 # Intel Arc acceleration
 
-Commands below use the [activated, provisioned environment](../README.md#first-run).
-
 Model Lab uses upstream PyTorch's `torch.xpu` backend for Intel GPUs. The
 `xpu-arc-v1` recipe provisions an isolated Linux x86_64 / Python 3.14 environment
 with `torch==2.15.0+xpu` and the Intel runtime pins in
@@ -14,37 +12,15 @@ PyTorch's [Intel GPU guide](https://docs.pytorch.org/docs/2.15/notes/get_start_x
 lists Arc A-series and B-series on supported Ubuntu and WSL2 environments.
 The A380 is an A-series device. Arc Pro B60/B70 use the same XPU execution path,
 but support for each SKU, host and precision must be checked against the current
-vendor driver matrix and a fresh Model Lab doctor/stage; this guide does not
-record hardware acceptance for those cards. The recipe selects device index 0
+vendor driver matrix and a fresh Model Lab doctor/stage; check each card
+with doctor and a stage before relying on it. The recipe selects device index 0
 and requires a discrete Intel Arc A-series or B-series SKU in the device name;
 integrated `Intel(R) Arc(TM) Graphics` does not match. Check
 `torch.xpu.get_device_name(0)` in the XPU interpreter before provisioning. On
 multi-GPU machines, register a separate explicit profile with `--device-index`
 for the desired GPU.
 
-## Reproducing the dependency lock
-
-Use the repository's uv version and Python 3.14. Export common application
-constraints from `uv.lock`, excluding Torch, then resolve the vendor recipe for
-Linux x86_64. This does not install a runtime or exercise a device:
-
-```sh
-uv export --locked --extra cpu --no-dev --no-hashes --no-emit-project \
-  --no-emit-package torch -o /tmp/lab-common.txt
-uv pip compile pyproject.toml requirements/xpu-arc.txt container/build-requirements.txt \
-  --constraint /tmp/lab-common.txt --python-version 3.14 \
-  --python-platform x86_64-manylinux_2_28 --generate-hashes \
-  --no-header --no-annotate --emit-index-url --emit-find-links \
-  -o container/backends/xpu/requirements.lock
-```
-
-For find-links entries where uv omits hashes, retain the SHA-256 published by
-the official package index for the selected CPython 3.14 Linux x86_64 wheel;
-never leave an unhashed pin. `container/image_plan.py plan xpu` validates all
-lock entries and their shared application versions. The lock includes Torch
-2.15.0+xpu, Triton XPU 3.9.0, Intel compiler/SYCL runtime 2026.1.2, oneCCL
-2022.1.2, PTI 1.1.0, and pyzes 0.1.3. These are Python dependency changes;
-the separately pinned driver userspace is unchanged and requires native testing.
+The XPU container uses the same pins; see [containers](containers.md#intel-xpu).
 
 ## Host prerequisites
 
@@ -97,7 +73,7 @@ Provision uses an existing Python 3.14 executable; supply
 requires 20 GiB free and 100,000 free inodes on a writable local filesystem,
 outside Git and distinct from the scientific work root. It preserves failures
 and logs without registering a failed environment; choose a fresh ID after
-fixing a failed installation. See [runtime environments](runtime.md#machine-local-runtime-environments)
+fixing a failed installation. See [runtime environments](runtime.md#register-an-interpreter)
 for receipts, roots and source repair.
 
 To use an already provisioned XPU interpreter instead:
@@ -123,9 +99,8 @@ that FP16 works. A failed precision pilot is an error, never CPU fallback.
 
 ## Run the native lab loop
 
-Prepare the [TinyStories microlab inputs](tinystories-microlab.md), then author a
-new baseline with this runtime section. Retain explicit tokenizer/data paths
-and scientific settings; changing precision should be a visible declaration.
+Write a baseline config with this runtime section (see [lab mode](lab-mode.md)).
+Changing precision is a scientific change, so state it in the delta.
 
 ```yaml
 runtime:
@@ -166,7 +141,7 @@ not Intel kernels.
 [`runtime_smoke_xpu_bf16.yaml`](../configs/runtime_smoke_xpu_bf16.yaml) retain the
 ROCm smoke workload: 20 steps, 640 supervised targets, block recomputation,
 checkpointing and held-out evaluation. Follow the
-[runtime acceptance commands](runtime.md#runtime-acceptance-on-a-provisioned-host)
+[host acceptance commands](runtime.md#accept-a-provisioned-host)
 with `RUNTIME=intel-arc` and `CONFIG=configs/runtime_smoke_xpu.yaml` (BF16 only
 after its doctor passes). These configs retain the existing explicit smoke
 input paths; author external paths when persistent inputs are desired.
@@ -184,7 +159,5 @@ checkpoint/resume state equality and checkpoint-bound held-out evidence. CPU
 contract tests cover isolated provisioning, failure retention, PCI filtering,
 selected-device memory queries and diagnostic RNG preservation. CPU tests do
 not establish GPU throughput, driver compatibility or numerical acceptance.
-Real Arc execution and exact full-versus-resumed checkpoint equality remain
-unverified until the FP32 doctor JSON and this hardware test output are retained
-from a provisioned card. The equality check requires deterministic XPU kernels
-for the repeated training sequence.
+The equality check needs deterministic XPU kernels for the repeated training
+sequence.

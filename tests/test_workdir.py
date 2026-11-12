@@ -323,46 +323,6 @@ def test_worker_rpc_fallback_allocates_under_work_dir_and_cleans_up(
     assert list((work_dir / "scratch").iterdir()) == []
 
 
-def test_research_scaffold_cli_uses_explicit_work_dir(tmp_path: Path) -> None:
-    from research_fixtures import make_study_resources
-
-    resources = make_study_resources(tmp_path)
-    work_dir = tmp_path / "scratch"
-    output = tmp_path / "scaffold"
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "from klab.cli.main import main; main()",
-            "--work-dir",
-            str(work_dir),
-            "research",
-            "scaffold",
-            "neutral-study",
-            "--resource-root",
-            str(resources),
-            "--output",
-            str(output),
-            "--scale",
-            "smoke",
-            "--data",
-            "offline",
-            "--backend",
-            "cpu",
-        ],
-        cwd=_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-
-    assert result.stdout.strip() == str(output)
-    assert (output / "study.yaml").is_file()
-    assert (work_dir / "scratch").is_dir()
-    assert list(work_dir.iterdir()) == [work_dir / "scratch"]
-
-
 def test_checkout_storage_checks_find_git_ancestor_without_creating_destinations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

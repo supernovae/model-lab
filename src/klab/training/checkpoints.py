@@ -1,4 +1,4 @@
-"""Validated immutable checkpoint generations and legacy v1 readers."""
+"""Validated immutable checkpoint generations."""
 
 from __future__ import annotations
 
@@ -1855,47 +1855,6 @@ def existing_run_recovery_report(
 ) -> RecoveryResult:
     """Read-only report for a pre-existing run; never creates or repairs files."""
     return CheckpointManager(run_dir, manifest_sha256=manifest_sha256).recovery_report()
-
-
-# Legacy v1 is promotion-only. These readers deliberately never create or publish
-# legacy files; artifact import code can validate an already-existing snapshot.
-def verify_legacy_checkpoint(path: Path) -> VerificationReport:
-    errors: list[dict[str, str]] = []
-    files: list[dict[str, str]] = []
-    try:
-        manifest = path.with_suffix(".json")
-        if not manifest.is_file():
-            raise ValueError(f"checkpoint manifest missing: {manifest}")
-        record = strict_json(manifest)
-        if not isinstance(record, dict) or record.get("format_version") != 1:
-            raise ValueError("invalid legacy checkpoint manifest")
-        if _sha256(path) != record.get("sha256"):
-            raise ValueError("checkpoint hash mismatch")
-        state = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-        required = {"model", "optimizer", "step", "tokens_seen", "cursor", "config"}
-        if not isinstance(state, dict) or not required <= state.keys():
-            raise ValueError("invalid legacy checkpoint schema")
-        files.append({"name": path.name, "sha256": str(record["sha256"])})
-    except (
-        OSError,
-        RuntimeError,
-        TypeError,
-        ValueError,
-        KeyError,
-        json.JSONDecodeError,
-        pickle.UnpicklingError,
-    ) as error:
-        errors.append({"field": "legacy_checkpoint", "reason": str(error)})
-    return VerificationReport(not errors, tuple(errors), tuple(files), "weights_only")
-
-
-def load_legacy_checkpoint(path: Path) -> dict[str, object]:
-    report = verify_legacy_checkpoint(path)
-    if not report.valid:
-        raise ValueError(f"invalid legacy checkpoint: {report.errors}")
-    state = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-    assert isinstance(state, dict)
-    return state
 
 
 def restore_optimizer_state(

@@ -45,8 +45,6 @@ LM_TASKS = BY_ID["lm_eval"].params["tasks"]
 
 
 def test_registry_pins_immutable_commits_and_declared_facts() -> None:
-    from klab.research.pythia import checkpoint_for_step
-
     assert set(REFERENCES) == {
         "pythia-70m-deduped",
         "pythia-160m-deduped",
@@ -57,11 +55,6 @@ def test_registry_pins_immutable_commits_and_declared_facts() -> None:
         assert len(ref.revision) == 40 and int(ref.revision, 16) >= 0
         assert ref.repo_id.split("/")[0] in {"EleutherAI", "HuggingFaceTB"}
         assert ref.training_tokens > 0 and ref.training_tokens_source
-    # One pin for Pythia-70M across the trajectory adapter and the references.
-    assert (
-        checkpoint_for_step("step143000").commit
-        == REFERENCES["pythia-70m-deduped"].revision
-    )
     assert reference_for("ref:SmolLM2-135M") is REFERENCES["SmolLM2-135M"]
     with pytest.raises(ValueError, match="known: ref:pythia-70m-deduped"):
         reference_for("ref:gpt2")

@@ -138,7 +138,7 @@ def test_config_derivation_rejects_invalid_schema_without_publication(
     ("content", "match"),
     [
         ("- not-a-mapping\n", "mapping"),
-        ("schema_version: 1\n", "migrated"),
+        ("schema_version: 1\n", "schema_version"),
         (
             "schema_version: 2\nname: first\nname: second\n",
             "duplicate",

@@ -1,152 +1,79 @@
 # Contributing
 
-Use Python 3.14 (selected by `.python-version`) and
-`uv sync --locked --extra cpu --dev`. For the Linux CPU checks:
+## Set up
+
+Lab uses Python 3.14 (pinned in `.python-version`) and uv:
 
 ```sh
-uv run --locked --extra cpu ruff check .
-uv run --locked --extra cpu ruff format --check .
-OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 \
-uv run --locked --extra cpu pytest -q -n auto --maxprocesses=4 \
-  --dist worksteal --durations=25 \
-  -m "not mps and not mlx and not cuda and not rocm and not xpu and not network"
+uv sync --locked --extra cpu --dev
 ```
 
-Automatic CI runs the explicit zero-model Linux `safe` job and the CPU
-`lab-loop` job on pull requests and pushes to `main`. The latter trains tiny
-models and exercises probes/explorer/dashboard. Manual `safe` dispatch runs
-both too; additional integration, platform and full-suite choices require a
-separate reviewed allocation. Do not dispatch those to validate documentation.
-New commits cancel superseded runs on the same ref.
-The manually selected full CPU suite runs on Linux x64 and macOS arm64, with up
-to four pytest workers and one BLAS/OpenMP thread per worker.
-Work stealing redistributes pending tests when one worker falls behind; module
-fixtures can be instantiated on more than one worker and must use isolated paths.
-The slowest 25 tests are printed in each job log. Full-suite jobs have a 30-minute
-limit so a hung test cannot occupy a runner for six hours. Hardware and network
-tests retain their separate opt-in gates. PR checkout uses GitHub's synthetic
-merge commit to test integration with the base branch; detached HEAD is expected.
-
-Base installation is Torch-free: the lightweight `klab runtime env` CLI
-works without Torch, but the full CLI currently imports a backend framework.
-For a provisioned vendor interpreter use it directly or set
-`UV_PROJECT_ENVIRONMENT` to its environment prefix and run with
-`uv run --locked --no-sync`; never sync the CPU extra into it. Do not commit
-downloaded corpora, prepared arrays, run directories, or checkpoints. Reports
-should include the resolved configuration and relevant run evidence.
-
-For a local CPU example, run `klab runtime env discover --json`, then
-`klab runtime env register cpu-py314 --python "$PWD/.venv/bin/python" --backend cpu --json`
-and `klab runtime env doctor cpu-py314 --json`. Select it with
-`klab stage configs/runtime_smoke_cpu.yaml --through inspect --runtime cpu-py314 --output /absolute/disposable/stage`.
-The XDG runtime root and host-local registry are separate from
-`KLAB_WORK_DIR` and scientific locks; never copy runtime IDs as capability
-claims to another host. See [machine-local runtime environments](docs/runtime.md#machine-local-runtime-environments).
-
-Work on an ordinary branch in the existing checkout, not an automatically created
-worktree:
+Work on a branch of your checkout and keep run outputs in a work directory
+outside it:
 
 ```sh
-git switch main
-git pull --ff-only
-git switch -c feat/<task>
-export KLAB_WORK_DIR=/data/klab
+git switch main && git pull --ff-only
+git switch -c feat/my-change
+export KLAB_WORK_DIR="$HOME/.local/share/klab"
 ```
 
-Choose an external persistent filesystem with enough space for actual campaigns.
-For ordinary local experiments, follow [lab mode](docs/lab-mode.md); the sealed
-record captures source state and effective inputs. For **release work**, commit
-corpus/source-rights pins, ExperimentPlan/base run, evaluation suite and runtime
-requirement **before** acquisition, tokenizer fitting, preparation or training.
-Inspect `klab research snapshot <plan-or-campaign> --json` before
-expensive execution. Retain a compact verified evidence reference in Git instead
-of copying datasets/checkpoints into the repository. `scratch/` and optional
-`cache/` under the persistent root are disposable; neither is proof. A reviewed
-decision about model quality requires an explicit human receipt. Read the
-[recovery and lineage operating protocol](docs/research/lifecycle-recovery.md)
-before changing paths or archiving rights-bound corpus content.
+Never commit corpora, prepared arrays, run directories or checkpoints.
 
-## Pre-production migration policy
+## Check a change
 
-Until a production release is tagged, adapt experiment plans, recipes and models
-to current supported Lab behavior. Do not change Lab to preserve old execution
-behavior or add backward compatibility or version adapters for legacy recipes.
-A production tag permits reassessing this policy; it does not automatically
-authorize legacy adapters.
+```sh
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked pytest tests -q -m 'not slow and not mps and not mlx and not cuda and not rocm and not xpu and not network'
+```
 
-Preserve historical evidence bytes and identities unchanged. Keep historical
-claims in Workshop, labeled as historical rather than guarantees of current Lab
-behavior. Read-only interpretation, hash verification and audits of that evidence
-are allowed; they do not make old artifacts executable or establish current
-compatibility.
+The last command is the fast suite. Also run the slow tests for the area you
+touched; [test speed](docs/test-speed.md) explains the split and how to find
+them.
 
-Track reproduction and regeneration in the backlog against current interfaces.
-Any later reproduction or regeneration is a new experiment with a new identity;
-retain the original result and its limitations. This policy grants no execution,
-recovery, acquisition or training authority.
+Every pull request runs four jobs: `safe` (configuration and verifier checks),
+`lab-loop` (tiny models through `try`, probes, the explorer and the dashboard),
+`fast` (the rest of the fast suite) and `staging`. The container workflow builds
+the CPU image and smoke-tests it. Integration, macOS and full-suite runs are
+started by hand from the Actions tab. Hardware and network tests run only on
+machines that have them.
 
-A change to a command, a config field or a default updates the page that
-describes it in the same pull request. Each subject has one page, listed in the
-[documentation index](docs/README.md); other pages link to it. A page that only
-records what happened on a date belongs in `docs/history/`.
+## Change formats forward
 
-During PR review, check that a migration adapts declarations to current behavior,
-preserves archived evidence and separates historical claims from current
-validation. Reject changes whose purpose is restoring old execution behavior
-through compatibility code. Record current-interface gaps separately from a
-proposed reproduction, in a GitHub issue.
-
-## Architecture experiments
-
-The [research contribution workflow](docs/research/contributing.md) explains validated local catalog/recipe forks, declared controls and variations, train-only data boundaries, retained negative outcomes, and evidence identities. Do not commit downloaded corpora, prepared arrays, run directories, or checkpoints; a static report bundle is small evidence, not a replacement for its stated limitations.
-
-## Planning and contributions
-
-[ROADMAP.md](ROADMAP.md) summarizes feature direction. Use
-[GitHub issues](https://github.com/supernovae/model-lab/issues) for feature
-requests, bug reports and proposed code work. Search existing issues first;
-include the use case, expected behavior and relevant reproduction details.
-Link related issues in pull requests, where implementation, review and CI checks
-are tracked. Keep the roadmap directional rather than duplicating issue status.
+Lab has one current interface for each operation. When a config field, a
+command or a file format changes, update every caller in the same pull request
+and say in the description what users must rebuild or re-prepare. Do not add
+readers for old formats, version adapters or aliases. A rerun with new code is
+a new experiment with a new identity.
 
 ## Documentation
 
-Write for someone running their own experiment. Use native `klab` commands
-and YAML/JSON declarations, through the locked environment; keep Python snippets
-out of user workflows. If a required operation is API-only, describe the missing
-CLI/DSL input, output and failure criteria in a GitHub issue instead of inventing a command or teaching a private script. Label placeholders and prerequisites, and
-use fresh task directories under the persistent work root. A config with an
-explicit in-checkout destination keeps it; setting the root does not relocate it.
+Each subject has one page, listed in the [documentation index](docs/README.md).
+A change to a command, config field or default updates its page in the same pull
+request, and other pages link to it rather than repeating it.
 
-Keep the beginner route small: `try`, `report`, `probe`, `compare`, `explore`.
-Link advanced operations separately. Remove superseded instructions rather than
-adding deprecation labels, alias tables or compatibility walkthroughs. Preserve
-original evidence and research data; documentation cleanup never authorizes
-pruning run artifacts. Track proposed command removals in a GitHub issue before changing runtime behavior.
+Write for someone building their own model:
 
-Keep feature availability in the [README matrix](README.md#feature-matrix),
-runtime restrictions in [runtime](docs/runtime.md), and scientific lessons in the
-[experiment ledger](docs/research/experiment-ledger.md). Link to the owner of a
-topic instead of copying status summaries. Describe features by behavior rather
-than the branch, release phase or author who introduced them. Retain schema and
-protocol versions, source pins, checkpoint IDs, license attribution and historical
-paths where they identify evidence. Never rewrite a prior result to modernize a
-tutorial, or erase a failed result as obsolete documentation.
+- Describe how Lab behaves now. Leave out how it used to behave, which pull
+  request introduced something and why it changed; Git keeps that history.
+- Show `klab` commands and YAML. If an operation has no command, open an issue
+  for one rather than documenting a script.
+- Mark placeholders, and put outputs under the work directory.
+- Describe an experiment by its question and what changed, then where it ran:
+  "feed-forward width, PyTorch on an AMD GPU". Name the hardware as the subject
+  only when the experiment compares hardware.
+- Named datasets, model projects and their results belong in [Kybern
+  Workshop](https://github.com/supernovae/kybern-workshop) or your own
+  repository.
 
-Describe research by its question and changed variables, then state where it
-ran: “FFN-width comparison, run with PyTorch on an AMD GPU,” for example.
-CPU, CUDA, ROCm, XPU and MPS describe PyTorch execution capabilities; MLX is a
-separate engine using Metal on Apple Silicon. Reserve “runtime validation” and
-“acceptance” for checks of Model Lab software behavior in an environment. Do not
-present the processor as the subject of a model experiment unless the protocol
-explicitly compares execution backends.
+`tests/test_docs.py` checks links, the index and every `klab` command a page
+shows. Run it after a docs change; do not train a model to check prose.
 
-Keep general guides independent of the experiments used to develop the lab.
-Explain the DSL, its value and supported behavior; put named campaigns, run
-budgets and measured outcomes in research records. Dataset-specific walkthroughs
-are optional teaching references. Preserve required schema fields such as
-`campaign_version: 1`, but call the feature “Campaigns,” not “Campaign v1.”
+## Issues and planning
 
-For documentation-only changes, check local links and heading anchors, code-fence
-balance, CLI parser support and explicit path semantics. Do not launch a research
-run to validate prose. Record unavailable hardware or execution checks at handoff.
+Use [GitHub issues](https://github.com/supernovae/model-lab/issues) for bugs,
+feature requests and proposed work. Search first, and describe the use case and
+the expected behavior. [ROADMAP.md](ROADMAP.md) is a short summary of direction,
+not a task list.
+
+Agents follow [AGENTS.md](AGENTS.md) as well.

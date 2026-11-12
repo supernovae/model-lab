@@ -11,9 +11,8 @@ from test_training import config
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.loading import load_config
-from klab.config.models import AttentionConfig, DatasetConfig, ModelConfig
+from klab.config.models import AttentionConfig, ModelConfig
 from klab.data.allocation import build_allocation_manifest
-from klab.data.allocation_tasks import _collect_provenance
 from klab.data.packing import (
     canonical_tokenizer_sha256,
     load_prepared_data,
@@ -259,6 +258,7 @@ def _array_metadata(
         "shape": list(values.shape),
         "tokens": int(values.shape[0]),
         "sha256": sha256_file(path),
+        "size_bytes": path.stat().st_size,
     }
 
 
@@ -300,7 +300,7 @@ def _prepared_cache(root: Path) -> None:
             ),
         }
     manifest = {
-        "packing_version": "contiguous-eos-v5",
+        "packing_version": "contiguous-eos-v6",
         "cache_identity": identity,
         "settings_sha256": canonical_digest(identity),
         "train": _array_metadata(root / "train.npy"),
@@ -393,65 +393,6 @@ def test_allocation_corpus_digest_mismatch_fails_before_preparation(
     )
     with pytest.raises(ValueError, match="corpus digests"):
         prepare_data(base.model_copy(update={"dataset": local}), tokenizer)
-
-
-@pytest.mark.parametrize(
-    ("audited_path", "audited_answer", "message"),
-    [
-        ("/tmp/file.py", "wrong.py", "source answer differs"),
-        ("/tmp/other.py", "file.py", "source prompt differs"),
-    ],
-)
-def test_provenance_requires_audited_path_and_answer(
-    tmp_path: Path,
-    audited_path: str,
-    audited_answer: str,
-    message: str,
-) -> None:
-    corpus = tmp_path / "train.jsonl"
-    corpus.write_text(
-        json.dumps(
-            {
-                "format_version": 2,
-                "loss_mode": "assistant_only",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "Return the name for path /tmp/file.py.",
-                    },
-                    {"role": "assistant", "content": "file.py"},
-                ],
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    validation_corpus = tmp_path / "validation.jsonl"
-    validation_corpus.write_text(corpus.read_text(encoding="utf-8"), encoding="utf-8")
-    base = config(tmp_path / "tokenizer")
-    tokenizer = load_tokenizer(base.tokenizer.path)
-    dataset = DatasetConfig(
-        source="local_chat",
-        cache_dir=tmp_path / "cache",
-        train_max_documents=1,
-        validation_max_documents=1,
-        train_max_tokens=256,
-        validation_max_tokens=256,
-        train_path=corpus,
-        validation_path=validation_corpus,
-        license="MIT",
-    )
-    record = {
-        "record_id": "path-domain-train-01",
-        "rendered_assistant_label": audited_answer,
-        "semantic_key": {
-            "path": audited_path,
-            "operation": "name",
-            "argument": None,
-        },
-    }
-    with pytest.raises(ValueError, match=message):
-        _collect_provenance(dataset, tokenizer, "train", [record])
 
 
 def test_explicit_trainable_parameters_freeze_optimizer_and_update():

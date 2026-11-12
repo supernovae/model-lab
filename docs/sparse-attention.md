@@ -176,25 +176,18 @@ memory-observer overhead.
 | 128 | 1.435 ms | 432.850 ms | 2,334,452 |
 | 512 | 3.184 ms | 1,733.562 ms | 9,813,716 |
 
-These are attention-component measurements, not optimizer, full-training, or
-end-to-end generation speedups. Host timing varies: the preceding operator
-baseline measured the same MPS loop reference at 1,125.005 ms for length 512.
-Do not infer a stable cross-run latency ratio. At that length, the earlier
-gathered-operator path used 417,926,100 MLX native peak bytes under the same
-measurement procedure. Both MLX peaks use the same allocator high-water
-method; MPS sampled peaks are lower bounds and are not directly comparable.
+These measure the attention operation alone, not training or generation speed.
+Host timing varies between runs, so treat the ratio as approximate. MLX peaks
+come from the allocator's high-water mark; MPS peaks are sampled and are lower
+bounds.
 
-Raw samples, runtime identities, source identities, errors, and limitations:
-`artifacts/benchmarks/mlx_sparse_metal_2026_09_22.json` and
-`artifacts/benchmarks/mlx_sparse_operator_2026_09_22.json` are the recorded
-artifact locations; these payloads are not present in this checkout.
-Regressions cover prefix causality, partial blocks, batch/head unions, input
-and projection gradients, a 40-channel head spanning the 32-lane SIMD width,
-and recomputed sparse blocks. Full MLX checkpoint/inference lifecycle
-acceptance is tracked separately from this attention component.
+## Try it
 
 ```sh
-klab train --runs-dir klab-work/runs configs/smoke_sparse_cpu.yaml --run-id sparse-smoke
+klab train configs/smoke_sparse_cpu.yaml --run-id sparse-smoke
+klab learn describe sparse-attention
 ```
 
-The [`sparse-attention` lesson](research/lesson-paths.md) scaffolds the block-16/select-2 PyTorch configuration and exposes selector diagnostics without a campaign. The [memory/selection study](research/engram-sparse-budget.md) keeps endpoint comparisons and observed deltas separate from Python timing; batch/head selection unions can exceed a per-head budget.
+The `sparse-attention` lesson scaffolds a block-16, select-2 configuration and
+shows the selector's diagnostics without training. Because selection is shared
+across batch and heads, the selected union can exceed one head's budget.

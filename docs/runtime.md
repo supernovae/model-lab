@@ -1,73 +1,16 @@
-# Runtime policy
+# Runtime
 
-Commands below use the [activated, provisioned environment](../README.md#first-run).
+A run executes in one process on one host. Its manifest records the engine,
+backend, precision, device, memory readings and framework versions it actually
+used. That record describes the machine that ran it, not what another machine
+can do.
 
-Each Model Lab experiment runs in one process on one host/device. An optional controller schedules multiple whole independent experiments on local or SSH workers; it never shares their optimizer state or gradients. A run records its selected engine, backend, precision, device index, available memory readings, framework/runtime versions, and probe result in its manifest. That record describes the machine that ran it; it is not evidence that another machine has the same capability.
+- An **engine** is the framework running the model: PyTorch or MLX.
+- A **backend** is its execution route: PyTorch CPU, NVIDIA CUDA, AMD ROCm,
+  Intel XPU or Apple MPS; MLX uses Metal on Apple Silicon.
+- A **device** is the selected processor.
 
-An **engine** is the framework executing the model: PyTorch or MLX. A **backend**
-is its CPU/GPU execution route: PyTorch CPU, NVIDIA CUDA, AMD ROCm, Intel XPU or
-Apple MPS; MLX uses Metal on Apple Silicon. A device is the selected processor.
-Runtime checks ask whether Model Lab can execute a workload in that environment.
-Research experiments ask about their declared model, data or training variables;
-recording the device does not make it the subject of the experiment. A study
-explicitly comparing execution backends must declare that as its own question.
-
-## Host environment and compute backend
-
-Host OS, execution environment, and compute backend are independent dimensions.
-WSL2 is a Linux environment; it does not select AMD, NVIDIA, Intel, or CPU.
-macOS likewise does not imply that a run must use its GPU. Runtime discovery
-records `host_os`, `host_environment`, and `host_architecture` alongside the
-existing OS description and backend/device metadata. Historical records without
-these fields keep them unknown rather than inheriting the reader's current host.
-Linux kernel WSL2 markers identify `wsl2`; a WSL hint without a known generation
-is recorded as `unknown-wsl`. Host detection never initializes a GPU.
-
-| Dimension | Examples | Role |
-| --- | --- | --- |
-| Host OS/environment | Native Linux, Linux under WSL2, macOS | OS behavior and installation context |
-| Host architecture | `x86_64`, `arm64` | CPU instruction architecture, independent of GPU vendor |
-| Engine/backend | PyTorch CPU, CUDA, ROCm, XPU, MPS; MLX Metal | Actual execution APIs and device capabilities |
-| Workspace | `runtime-acceptance`, a named research campaign | Task-owned storage shared across backend coordinates |
-
-CPU execution uses the same path on Linux, WSL2, and macOS. NVIDIA CUDA, AMD
-ROCm, and Intel XPU use their installed framework APIs on native Linux or WSL2
-where the vendor supports that host/device combination. Apple MPS and MLX use
-Metal on supported Macs. Discovery reports local availability, and a disposable
-workload checks the requested operations and precision before execution.
-A host label alone neither selects a device nor enables a fallback.
-
-WSL2 uses the Linux process, locking, and filesystem paths in Model Lab. Keep
-Linux training data, caches, and checkpoints in the Linux filesystem where
-practical, and measure the actual chosen storage; Microsoft's
-[filesystem guidance](https://learn.microsoft.com/en-us/windows/wsl/filesystems)
-explains the cost of crossing into Windows-mounted storage. Memory readings
-describe the Linux environment and available device APIs, not an assumed share
-of all physical Windows host RAM. Missing driver or device telemetry remains
-unavailable, including under WSL2.
-
-Provision GPU drivers and framework wheels for the actual host and device.
-For WSL2, follow the vendor's WSL instructions: NVIDIA's
-[CUDA guide](https://docs.nvidia.com/cuda/wsl-user-guide/) uses the Windows host
-driver and explicitly excludes installing a Linux GPU driver inside WSL;
-PyTorch's [Intel GPU guide](https://docs.pytorch.org/docs/stable/notes/get_start_xpu.html)
-lists supported XPU host/device combinations; AMD's
-[installation guide](https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest/frameworks/pytorch/install.html)
-covers its framework packages. Model Lab does not install or infer drivers from
-the presence of WSL. Native Windows execution is not established by WSL2 tests.
-
-The base installation has no Torch dependency. The lightweight
-`klab runtime env` command family is available without Torch; the rest of the CLI
-currently imports a backend framework and needs an appropriate provisioned
-environment. For CPU development, use `uv sync --locked --extra cpu --dev`
-then activate `.venv` (`. .venv/bin/activate`) and invoke `klab` directly.
-The extra installs dependencies; it does not select the execution backend.
-Do not sync the CPU extra
-into an accelerator environment.
-
-## Choose an execution target
-
-A schema-v2 run config has a `runtime` section:
+## Choose where a run executes
 
 ```yaml
 runtime:
@@ -77,84 +20,77 @@ runtime:
   precision: fp32       # auto | fp32 | bf16 | fp16
 ```
 
-For the PyTorch engine, `auto` prefers an available local MPS device, then CUDA or ROCm, then XPU, then CPU. An explicit unavailable backend is an error—Model Lab does not retry it on CPU. ROCm uses PyTorch's `cuda` device API internally but is recorded as `rocm`; a CUDA request does not silently select a HIP build. CPU and MPS have index 0 only; CUDA/ROCm/XPU validate the requested index against the local runtime.
+With PyTorch, `auto` picks an available MPS device, then CUDA or ROCm, then XPU,
+then CPU. An explicit backend that is unavailable is an error; Lab never retries
+on CPU. ROCm uses PyTorch's `cuda` device API but is recorded as `rocm`, and a
+CUDA request never selects a HIP build. CPU and MPS have only index 0.
 
-`precision: auto` resolves to FP32. BF16 and FP16 are not merely labels: validation starts a disposable subprocess that performs a tiny forward, backward, and optimizer update at the requested precision. CPU rejects FP16. FP16 is accepted only on backends with the current GradScaler path; BF16 is passed through PyTorch autocast when the requested probe succeeds. Parameters, gradients, reductions, and the conservative estimator remain accounted as FP32 even when autocast is used.
+`precision: auto` means FP32. BF16 and FP16 are checked by a disposable
+subprocess that runs a tiny forward, backward and optimizer update at that
+precision. CPU and MPS reject FP16; BF16 runs through autocast. Parameters,
+gradients and the memory estimate stay FP32.
 
-The optional MLX engine is separate from PyTorch: use `engine: mlx` and
-`backend: metal`, never a `torch.device`. The dependency pin is `mlx==0.32.4`;
-new-wheel hardware validation remains pending as described in the native delivery
-guide below. The engine supports FP32 dense and native block-sparse attention, block recomputation,
-common immutable generations, same-engine resume/recovery, canonical-weight
-promotion, evaluation, generation, chat, and capability/evidence reports.
-MLX decoding currently uses full-prefix evaluation, not a KV cache. MoE,
-Engram memory, MLA, sliding-window attention, mixed precision, activation
-offload, and Adafactor remain explicitly unsupported on this engine.
+MLX is a separate engine: `engine: mlx` with `backend: metal`. It supports FP32
+dense and native block-sparse attention, recomputation, resume, promotion,
+evaluation, generation and chat, and decodes without a KV cache. MoE, Engram
+memory, MLA, sliding-window attention, mixed precision, offload and Adafactor
+are refused. See [MLX on Apple Silicon](macos-mlx.md).
 
-On Apple arm64, MLX is opt-in: use `uv sync --locked --dev --extra cpu --extra mlx`
-then activate that environment for the full CLI and native MLX tests. Its eager imports currently need PyTorch even
-when the selected execution engine is MLX. MLX itself remains a separate engine;
-the CPU extra is not a fallback for a requested Metal backend. See the
-[native macOS delivery guide](macos-mlx.md) for installation and dependency reuse.
+### Host and backend are separate
 
-## Framework baseline and capability boundaries
+The host OS and the compute backend are independent. WSL2 is a Linux
+environment; it does not select AMD, NVIDIA, Intel or CPU. macOS does not imply
+the GPU. Discovery records `host_os`, `host_environment` and `host_architecture`
+beside the backend, and never initializes a GPU to do so.
 
-The target lab baseline is **PyTorch 2.15.0 / CPython 3.14**. Version equality
-is a packaging target, not evidence of identical kernels, precision, throughput,
-or numerical results. Current repository pins are:
+Under WSL2, keep training data, caches and checkpoints in the Linux filesystem;
+crossing into Windows-mounted storage is slow (see Microsoft's
+[filesystem guidance](https://learn.microsoft.com/en-us/windows/wsl/filesystems)).
+Memory readings describe the Linux environment, not the Windows host. Install
+drivers per vendor: NVIDIA's [CUDA on WSL guide](https://docs.nvidia.com/cuda/wsl-user-guide/)
+uses the Windows driver, PyTorch's [Intel GPU guide](https://docs.pytorch.org/docs/stable/notes/get_start_xpu.html)
+lists supported XPU setups, and AMD's
+[PyTorch install guide](https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest/frameworks/pytorch/install.html)
+covers ROCm. Lab never installs drivers.
 
-| Runtime | Package / source | Qualification boundary |
+### Framework versions
+
+The base package has no PyTorch dependency. `klab runtime env` works without
+it; the rest of the CLI needs a provisioned framework. For CPU development,
+`uv sync --locked --extra cpu --dev`. Never sync the CPU extra into an
+accelerator environment: it replaces the vendor PyTorch.
+
+| Runtime | Package | Notes |
 | --- | --- | --- |
-| Linux CPU | `2.15.0+cpu`, official CPU index in `uv.lock` | CPU tests; no accelerator evidence |
-| Mac CPU / PyTorch MPS | `2.15.0`, PyPI macOS 14+ arm64 wheel in `uv.lock` | Native Mac execution still required |
-| Intel XPU | `2.15.0+xpu`, official XPU index | Recipe and hashed container lock; native device validation still required |
-| AMD gfx1100 local recipe / container | `2.15.0+rocm10.0`, official PyTorch index; SDK `10.0.0` | Bounded host smoke reported; full native Lab/container qualification remains separate |
-| NVIDIA container | `2.14.1+cu132` | Outside the CPU/Intel/Mac/ROCm migration; remains separately pinned |
-| Mac MLX / Metal | `mlx==0.32.4`, `mlx-metal==0.32.4` | Separate engine; not PyTorch MPS or a Torch version |
+| Linux CPU | `torch 2.15.0+cpu` (`uv.lock`) | CPU tests |
+| Mac CPU / MPS | `torch 2.15.0` (`uv.lock`) | Validate on the Mac |
+| Intel XPU | `torch 2.15.0+xpu` | [Intel Arc](intel-xpu.md) |
+| AMD gfx1100 | `torch 2.15.0+rocm10.0`, ROCm SDK `10.0.0` | [ROCm image](containers.md#rocm) |
+| NVIDIA container | `torch 2.14.1+cu132` | [CUDA image](containers.md#cuda) |
+| Mac MLX | `mlx==0.32.4`, `mlx-metal==0.32.4` | Separate engine |
 
-The [official PyTorch ROCm 10.0 source](https://download.pytorch.org/whl/rocm10.0/torch/)
-provides the CPython 3.14 `2.15.0+rocm10.0` wheel (HIP `7.15.26333`). It uses
-`triton-rocm==3.9.0` and `rocm[device-all,libraries]==10.0.0`; the latter's
-complete SDK closure is retained, including all declared device wheels. Do not
-mix this with AMD's former `torch[device-gfx1100]` / `amd-torch-device-*` recipe.
-The new recipe updates future provisioning, not registered or active runtimes.
-See [ROCm packaging](containers-rocm.md) for dependency and validation details.
+Matching versions do not mean identical kernels, numerics or speed.
 
-| Feature | PyTorch CPU | PyTorch MPS | PyTorch XPU / ROCm | MLX Metal |
+| Feature | PyTorch CPU | PyTorch MPS | PyTorch XPU / ROCm / CUDA | MLX Metal |
 | --- | --- | --- | --- | --- |
-| Dense training, evaluation, generation | Implemented | Implemented; native validation required | Implemented; native validation required | Implemented |
-| FP32 | Supported | Requires available MPS | Requires available vendor device | Supported |
-| BF16 | Explicit precision probe | Explicit precision probe | Explicit precision probe | Rejected |
-| FP16 training | Rejected | Rejected: no Lab GradScaler path | Explicit precision/scaler probe | Rejected |
-| Block-sparse attention | PyTorch implementation | PyTorch implementation | Kernel selection and hardware support must be validated | Native implementation |
-| MoE, Engram, MLA, sliding attention | PyTorch implementation | Device validation required | Device validation required | Rejected |
-| Compiled transformer blocks | Explicit opt-in, compiler required | No qualification claimed | Explicit opt-in, compiler/device validation required | Rejected |
-| Probe battery / explorer | Available | PyTorch path; validate workload | PyTorch path; validate workload | Not implemented |
+| Dense training, evaluation, generation | Yes | Yes | Yes | Yes |
+| BF16 | Probe | Probe | Probe | No |
+| FP16 training | No | No | Probe with GradScaler | No |
+| Block-sparse attention | Reference | Reference | Reference kernels | Native |
+| MoE, Engram, MLA, sliding window | Yes | Yes | Yes | No |
+| Compiled transformer blocks | Opt-in | Not validated | Opt-in | No |
+| Probes and explorer | Yes | Yes | Yes | No |
 
-Discovery reports declared APIs; `tested_precisions` and `tested_features` report
-only exercised capabilities. MPS discovery omits FP16 because validation rejects
-it. FP32 eager execution is the conservative starting declaration, not an automatic
-retry after a failed compiled or mixed-precision run. Never silently switch device,
-precision, engine, tokenizer, or model to manufacture parity.
+Discovery reports `tested_precisions` and `tested_features` only for what it
+exercised. Lab never switches device, precision, engine, tokenizer or model to
+make a run work.
 
-Provision a new idle checkout/environment for upgrades, record its exact framework
-build with the runtime profile, and retain the prior checkout and environment for
-rollback. Do not sync the CPU extra into vendor environments. If qualification
-fails, explicitly select the retained runtime and start a new comparison identity;
-never relabel historical results or mutate an active run. An existing 2.15 host
-installation is not proven by these repository pins.
+## Register an interpreter
 
-PRs [#303](https://github.com/supernovae/model-lab/pull/303) (compiled output
-loss) and [#305](https://github.com/supernovae/model-lab/pull/305) (shared
-tokenizer provenance) remain separate changes. Their behavior is not implied by
-this baseline; test the combined revision before using either for comparisons.
-
-## Machine-local runtime environments
-
-`klab runtime env` is a lightweight, Torch-free management entry point.
-It distinguishes four things: passive **hardware observations**, installed
-**Python environments**, strict **profiles**, and fresh **execution authorization**.
-An RX 7900 XTX observed by `rocminfo` does not make a CPU Torch interpreter ROCm-ready.
+`klab runtime env` manages interpreters on this host. It keeps four things
+apart: hardware it observed, Python environments installed, registered
+profiles, and authorization to run. A GPU seen by `rocminfo` does not make a
+CPU PyTorch interpreter ROCm-ready.
 
 ```sh
 klab runtime env discover --json
@@ -168,187 +104,83 @@ klab stage configs/runtime_smoke_cpu.yaml \
   --through inspect --runtime cpu-py314 --output /absolute/disposable/stage
 ```
 
-The runtime root is `KLAB_RUNTIME_DIR` when explicitly absolute; otherwise
-an absolute, nonblank `XDG_DATA_HOME` gives `$XDG_DATA_HOME/klab/runtimes`,
-falling back to `~/.local/share/klab/runtimes`. Relative explicit roots,
-checkout-contained roots and a root equal to `KLAB_WORK_DIR` are rejected.
-Root resolution is passive. Provisioning additionally requires writable local
-storage and capacity. Existing registered interpreters may live outside that
-root, including the checkout CPU `.venv`.
-
-The operational registry lives at `$XDG_CONFIG_HOME/klab/runtimes.yaml`
-when XDG is absolute/nonblank, else `~/.config/klab/runtimes.yaml`:
-
-```yaml
-runtime_registry_version: 1
-runtimes:
-  cpu-py314:
-    python: /absolute/checkout/.venv/bin/python
-    engine: pytorch
-    backend: cpu
-    device_index: 0
-    requirements: {}
-```
-
-Unknown fields, duplicate YAML keys/IDs, invalid regexes and relative interpreter
-paths fail closed. Missing interpreters remain visible as `NOT_PROVISIONED`;
-strict `profile` resolution needs a live executable. Missing registry means
-empty v1, not a write. Register/unregister use a file lock and fsynced atomic
-replacement with private permissions. `unregister ID` removes only the mapping;
-there is no environment removal or automatic garbage collection.
-
-Discovery probes only the active Python, project `.venv`, 32 immediate runtime
-children and 32 distinct registered interpreter paths. Directory aliases dedup;
-different venv prefixes remain distinct even when `bin/python` symlinks share a
-base executable. Each candidate has a 20-second/32-KiB output bound; passive host
-tools have 5-second/32-KiB bounds. Truncation is explicit. JSON v1 reports hardware
-separately from environment `READY`, `UNAVAILABLE`, `SOURCE_MISMATCH`, `ERROR`,
-`NOT_PROVISIONED` or `UNOBSERVED` states. List retains all registrations in ID
-order: an existing interpreter omitted by the observation bounds is `UNOBSERVED`
-with an omission reason and no environment observation; a missing interpreter
-remains `NOT_PROVISIONED`. Aliases reuse observations of the same canonical path,
-including paths observed through another origin. `show ID` observes that entry
-even beyond the inventory cap. Inventory READY is not authorization for a run.
-
-`register` checks current source, backend/device and requirements, then runs
-the same doctor as `doctor ID` before publishing. Backend inference chooses one
-unambiguous accelerator/MLX backend, or CPU only when CPU is the sole executable
-backend; otherwise specify `--backend`. Doctor runs in the selected interpreter
-and reuses profile authorization plus the existing disposable forward/backward/
-AdamW optimizer pilot, FP32 unless BF16 is required. It does not acquire data,
-train a dataset, create checkpoints or initialize a scientific workspace.
-Only `provision` installs packages. Read-only commands never sync or repair source.
-
-Source mismatch prints a shell-quoted source-only repair:
-`uv pip install --python <registered-python> --no-deps --editable <checkout>`.
-Run it explicitly outside the CLI family. An editable installation normally
-tracks checkout changes without reinstalling; this command preserves vendor Torch.
-Registry IDs and locations never enter plan/science/config digests, CAS or
-checkpoints. Do not copy this host's registry to an SSH worker.
-
-### Versioned vendor provisioning
-
-The built-in `rocm-gfx1100-v1` recipe binds official PyTorch 2.15.0/ROCm 10.0.0/Python 3.14 pins
-and indexes in `requirements/rocm-gfx1100.txt`; it is not a portable ROCm extra
-or a global ROCm version. First establish the actual Windows/WSL/Linux driver
-and GPU combination against AMD's
-[compatibility matrix](https://rocm.docs.amd.com/en/latest/compatibility/compatibility-matrix.html),
-[WSL installation prerequisites](https://rocm.docs.amd.com/en/latest/install/rocm.html?fam=radeon&gpu=amd-radeon-rx-7900-xtx&gfx=gfx1100&os=wsl),
-and [PyTorch installer](https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest/frameworks/pytorch/install.html).
-Model Lab does not install drivers or certify vendor support.
+Accelerator interpreters register the same way:
 
 ```sh
-# Only on a supported host with the existing driver stack:
+klab runtime env register cuda-local --python /absolute/cuda/bin/python --backend cuda --json
+klab runtime env register xpu-local --python /absolute/xpu/bin/python --backend xpu --json
+klab runtime env register mps-local --python /absolute/mps/bin/python --backend mps --json
+klab runtime env register mlx-local --python /absolute/mlx/bin/python --backend metal --json
+```
+
+`register` checks the installed Lab source, backend, device and requirements,
+then runs the same optimizer check as `doctor` before saving anything. It does
+not touch data, train or create checkpoints. If the source does not match this
+checkout it prints the fix:
+`uv pip install --python <registered-python> --no-deps --editable <checkout>`,
+which keeps the vendor PyTorch. `unregister ID` removes only the registration.
+
+- **Registry:** `$XDG_CONFIG_HOME/klab/runtimes.yaml`, else
+  `~/.config/klab/runtimes.yaml`. Unknown fields, duplicates and relative
+  paths are refused. Never copy it to another host; register there.
+- **Runtime root** (where `provision` installs): `KLAB_RUNTIME_DIR`, else
+  `$XDG_DATA_HOME/klab/runtimes`, else `~/.local/share/klab/runtimes`. It must
+  be absolute, outside Git and not equal to the work directory. Registered
+  interpreters can live anywhere.
+- **Discovery** checks the active Python, the project `.venv`, and up to 32
+  runtime-root children and 32 registered interpreters, each with a time and
+  output bound. Each reports `READY`, `UNAVAILABLE`, `SOURCE_MISMATCH`,
+  `ERROR`, `NOT_PROVISIONED` or `UNOBSERVED`. `READY` is not authorization to
+  run.
+
+### Provision a vendor environment
+
+`provision` is the only command that installs packages. It builds a new
+environment under the runtime root from a pinned recipe, installs Lab with
+`--no-deps`, and registers it only after a real device check passes.
+
+| Recipe | Pins | Check |
+| --- | --- | --- |
+| `rocm-gfx1100-v1` | [`requirements/rocm-gfx1100.txt`](../requirements/rocm-gfx1100.txt): PyTorch 2.15.0, ROCm 10.0.0 | BF16 optimizer update |
+| `cuda-cu126-v1` | [`requirements/cuda-cu126.txt`](../requirements/cuda-cu126.txt): CUDA 12.6 PyTorch | FP16 update with GradScaler |
+| `xpu-arc-v1` | Upstream PyTorch XPU | FP32 optimizer update; see [Intel Arc](intel-xpu.md) |
+
+```sh
+# On a host whose driver stack already supports the device:
 export KLAB_RUNTIME_DIR="$HOME/.local/share/klab/runtimes"
-klab runtime env provision rocm-7900xtx \
-  --recipe rocm-gfx1100-v1 --json
+klab runtime env provision rocm-7900xtx --recipe rocm-gfx1100-v1 --json
 klab runtime env doctor rocm-7900xtx --json
-# The accelerator command re-execs into the registered interpreter:
 klab stage /absolute/rocm-run.yaml \
   --through warmup --runtime rocm-7900xtx --output /absolute/disposable/rocm-stage
 ```
 
-Provision requires Linux x86_64, an existing Python 3.14 executable (optional
-`--python /absolute/python`), a unique ID and absent target, writable local
-runtime storage, at least 20 GiB free and 100,000 free inodes including cache
-headroom. It exclusively reserves `<runtime-root>/<ID>`, disables interpreter
-downloads, and keeps its cache/scratch/logs on that filesystem. It exports only
-locked common dependencies, rejects Torch/CPU-index contamination, installs
-the explicit vendor pins, then installs editable Model Lab with `--no-deps`.
-Torch version/path/HIP must be unchanged by that last source-only install.
-Linux overlay mounts are accepted only at a resolved, writable runtime ancestor
-whose actual statvfs is not read-only and has the required byte/inode headroom.
-The receipt records the observed filesystem and mount. This supports ephemeral
-hosted VM storage, not a persistence guarantee; network, Drive/FUSE, Windows
-share and unknown filesystem types remain refused.
+Check the driver and GPU against the vendor's support matrix first (for AMD,
+the [ROCm compatibility matrix](https://rocm.docs.amd.com/en/latest/compatibility/compatibility-matrix.html)).
+Provisioning needs Linux x86_64, an existing Python 3.14 (`--python` to choose
+it), a new ID, local writable storage with 20 GiB and 100,000 inodes free, and
+never downloads an interpreter. Network, FUSE and Windows-share filesystems are
+refused; overlay mounts are accepted when writable with enough headroom.
 
-The locked common-dependency export uses the same validated absolute Python as
-environment creation. Installer isolation removes inherited uv interpreter
-settings; it must not rediscover Python or download a substitute.
+The target keeps three evidence files: `provision-registration.json` (the
+intent, written before registering), `provision-ready-staged.json` and
+`provision-receipt.json` (the READY receipt, two links to one file). A failure
+writes `provision-failure.json` with `registration_state`:
 
-The receipt records recipe/file SHA, source commit/SHA, Python/Torch/device,
-package inventory, indexes, commands, profile/probe and tested optimizer
-identity. Registration occurs only after the full import, matching real device
-and recipe-precision doctor succeed. Before attempting registration, the
-provisioner fsyncs `provision-registration.json`: a `REGISTRATION_PENDING` intent
-containing the full evidence, intended profile and exact registry path. Only
-after registration returns successfully does it stage and fsync the READY
-receipt, then exclusively link it as `provision-receipt.json` and fsync the
-directory. `provision-ready-staged.json` alone is not a completed receipt.
-
-After a successful return, the target retains the environment and common
-requirements plus three evidence files: `provision-registration.json`,
-`provision-ready-staged.json`, and `provision-receipt.json`. The staged file and
-canonical receipt are two hard links to the same inode. READY supersedes the
-retained intent's `REGISTRATION_PENDING` / `unknown` fields; the intent is an
-immutable audit trail, not a current-state projection. The READY receipt also
-records the exact registry path. There is no failure record on success.
-
-Failure and interruption states require different recovery decisions:
-
-| Evidence / outcome | Meaning | Recovery |
+| State | Meaning | What to do |
 | --- | --- | --- |
-| Failure before intent, no READY | Validation or preparation failed before registration. | Preserve the environment and logs; do not reuse the reserved target. |
-| Failure with `registration_state: refused`, no READY | Registration raised `ValueError` before publication; this call did not modify the registry. | Preserve any conflicting entry; do not overwrite or unregister it. |
-| Failure with `registration_state: unknown`, no READY | Registration raised `OSError`; registry replacement may have happened before failure. | Inspect the recorded registry path; a matching entry alone does not prove durability. |
-| Failure with `registration_state: registered` | Registration returned successfully; receipt publication failed. | Preserve staged evidence and resolve receipt durability before use. |
-| Intent only, possibly staged evidence | The process may have stopped before or after registration. Staging alone is not completion. | Inspect the recorded registry; do not infer success or absence. |
-| READY after an interrupted or failed call | Registration succeeded, but receipt directory durability may be unconfirmed. | Retain all evidence and reconcile the storage failure before use. |
-| Successful READY return, retained intent and staged link | Registration and receipt publication completed. | READY supersedes intent; keep all three evidence files. |
+| no intent | Failed before registering | Keep the logs; do not reuse the target |
+| `refused` | Registration rejected; registry unchanged | Keep any conflicting entry |
+| `unknown` | Registry write may have happened | Inspect the registry path in the intent |
+| `registered` | Registered; receipt not published | Resolve the storage error before use |
 
-A caught receipt-directory fsync failure attempts to withdraw only the newly
-created receipt link, retaining staged evidence. If withdrawal fails, the
-reported error includes both publication and withdrawal errors, and READY can
-remain visible. Failure recording is also fallible: `provision-failure.json`
-may be absent, partial, or visible without confirmed durability. If its write or
-fsync fails, the call raises with both the original provisioning error and the
-failure-recording error; it does not report a completed failure record. The
-pre-registration intent remains the recovery anchor. An ERROR describes the
-provisioning operation, not a claim that the registry entry is absent.
+Never rerun provisioning into the same target or fabricate a receipt; choose a
+new ID. Lab never repairs the registry for you.
 
-For uncertain outcomes, compare the entry's Python, engine, backend, device and
-requirements with the intent's profile at the **recorded** registry path. An
-absent entry requires a separately authorized registration decision; a different
-entry is a conflict and must not be overwritten. A matching entry is visible
-evidence only: it does not prove a failed directory fsync succeeded. Resolve
-filesystem durability and revalidate through the existing registration/doctor
-workflow under separate authorization before use. Do not synthesize a historical
-READY receipt or rerun provisioning into the reserved target. Choose a fresh ID
-for a new provision; unregister never deletes an environment. No automatic
-registry repair is performed.
+## Runtime profiles
 
-`cuda-cu126-v1` is the analogous bounded Linux x86_64/Python 3.14 CUDA recipe.
-It pins the CUDA 12.6 Torch closure in
-[`requirements/cuda-cu126.txt`](../requirements/cuda-cu126.txt), requires a
-CUDA—not CPU or HIP—build, and registers only after a real FP16
-forward/backward/GradScaler update. Use `runtime env provision ID --recipe
-cuda-cu126-v1 --python /absolute/python --json`, then `runtime env doctor ID
---precision fp16 --json`. The provisioner never downloads an interpreter;
-the hosted bootstrap is the separate, fixed path that installs task-owned
-Python 3.14/tools before calling this recipe. See
-[hosted environments](hosted-environments.md) for the receipt-bound workflow.
-Its Torch wheel is selected through the official CUDA `--find-links` listing;
-other frozen dependencies use PyPI. This avoids uv's first-index package
-shadowing without disabling dependency-confusion protection. The closure is
-resolved for Linux x86_64/Python 3.14 against the locked common dependencies,
-using the selected Torch wheel's actual metadata rather than another release's
-CUDA package versions.
-
-Intel Arc uses the analogous `xpu-arc-v1` recipe, upstream PyTorch XPU and an
-FP32 optimizer pilot. See [Intel acceleration](intel-xpu.md) for A380/Arc Pro
-setup, driver/device access, optional BF16 checks and the native lab loop.
-
-## Executable runtime profiles
-
-The [location/runtime selection guide](location-runtime-controls.md) maps these
-controls to each journey and records the retention decision for runtime IDs,
-profile files, backend overrides and the eight Torch-free environment paths.
-
-Hardware inventory does not select a Python environment. Accelerator execution
-requires a registered machine-local runtime ID, an explicit runtime profile, or
-a registered worker with an absolute Python interpreter. Ambient CPU execution
-remains supported.
-`auto` resolving to an accelerator does not authorize it.
+Accelerator execution needs a registered runtime ID, a runtime profile file or
+a registered worker. CPU runs without one, and `auto` resolving to a GPU does not
+authorize it.
 
 ```yaml
 runtime_profile_version: 1
@@ -363,157 +195,44 @@ requirements:
   device_name_regex: "Radeon"
 ```
 
-Profiles are frozen, reject unknown fields/versions, and require an executable
-absolute Python path and a safe ID. PyTorch accepts CPU/ROCm/CUDA/MPS/XPU;
-MLX accepts Metal. Requirement fields are optional; `torch_hip: true` is valid
-only for ROCm. BF16 requirements need a disposable optimizer update, not just
-a passive support declaration. Device-name matching uses regular-expression
-search against the selected device.
+Profiles refuse unknown fields and need an absolute, executable interpreter.
+`torch_hip` is valid only for ROCm; `bf16` needs a disposable optimizer update;
+`device_name_regex` searches the device name. `klab runtime probe PROFILE --json`
+reports the interpreter, framework, device and source identity it finds.
 
-`klab runtime probe PROFILE --json` queries the selected interpreter and
-records its real executable, Python version and prefixes, Torch path/version,
-HIP/CUDA/XPU versions, selected device and available names, source identity,
-and host fields. Missing optional APIs remain null.
-MLX profiles record the loaded `mlx.core` module's path and version, not the
-`mlx` namespace package, and do not import Torch.
-Profiles never install or synchronize environments. A mismatched installed
-source fails before execution; provision the vendor environment and install
-this source before retrying.
+`train`, `stage`, `eval`, `generate`, `chat`, `serve` and `explore` take
+`--runtime ID` or `--runtime-profile FILE`; `try` and `probe` take `--runtime ID`
+or `runtime_profile` in their declaration. Single-config `experiment submit`,
+`experiment bind` and `run`, and `campaign apply` and `resume` accept them too.
+A different interpreter replaces the CLI process once, with the same arguments
+and environment, after authorization and before any workspace is created.
+Profiles and probe results are operational evidence; they never enter a config
+or cache identity.
 
-Direct `train`, `stage`, `eval`, `generate`, and `chat` accept mutually exclusive
-`--runtime ID` or `--runtime-profile PROFILE`; single-config `experiment submit`
-also accepts these when auto-registering a local worker (exclusive with
-`--worker`, unavailable with `--matrix`). Without `--wait`, process the existing
-queued submission with `klab controller run --store ROOT` using the same
-store; see [workers](workers.md). Experiment
-bind/run, Campaign apply/resume, evaluation suite run and research snapshot
-support logical IDs wherever they support profile files. A different interpreter
-replaces the CLI once with that Python, preserving arguments and environment.
-Authorization happens before workspace initialization.
-`inspect` and `stage --through inspect` remain passive. Worker dispatch performs
-fresh interpreter/runtime/source validation, and pilot children rederive
-authorization from sealed operational evidence. Persisted evidence or an arbitrary
-worker ID does not authorize acceleration. Profiles and probe records are
-operational evidence, not scientific config or prepared-cache identity.
-
-### Scientific locks and operational bindings
-
-`experiment lock PLAN` validates explicit scientific requirements without probing
-hardware. Supported engine/backend pairs and precision semantics must be valid;
-an explicit accelerator lock does not claim that it is executable locally.
-`auto` is permitted only with an explicit CPU execution selection.
-
-Bind each selected cell separately:
-
-```sh
-klab experiment bind LOCK --runtime-profile PROFILE --cell main:single --json
-klab experiment run LOCK --runtime-profile PROFILE --cell main:single --json
-# Logical ID, resolved on this host before the same fresh authorization:
-klab experiment bind LOCK --runtime cpu-py314 --cell main:single --json
-# Alternatively: --worker NAME, or run --binding RECEIPT (mutually exclusive).
-```
-
-Runtime receipts live under the task workspace's `runtime-bindings/`, outside the
-immutable lock and availability sidecar. Reopening re-probes the exact interpreter
-or calls the registered worker's actual-config validation RPC. Changed source,
-device, framework build, profile, receipt bytes or selected cell fails closed.
-Requested BF16 always requires a disposable optimizer update.
-
-Campaign runtime stages can declare a logical `profile_id` or a registered
-`worker`, never an interpreter path. Supply the matching operational
-`--runtime-profile` on each apply/resume that needs a profile. Dispatch revalidates
-the accepted cell binding; only explicit PyTorch CPU cells can use implicit local
-execution. Research snapshots remain read-only and report `RUNTIME_REQUIRED` for
-valid unbound accelerator plans; deterministic recovery stops at that boundary.
-
-Checkpoint evaluation selects a separate FP32/device-0 operational runtime,
-retaining `identity.training_runtime`. `evaluation suite run` accepts a profile or
-`--worker NAME --store CONTROLLER_STORE` for a local worker. SSH suite evaluation
-is unsupported: run files are locally ingested and there is no evaluation RPC.
-Explicit PyTorch `--backend cpu` needs no accelerator token and never edits the
-training checkpoint. Campaign evaluation references the upstream runtime stage
-with `runtime: STAGE`; an explicit `backend: cpu` must omit that reference.
-Absent authorization is UNAVAILABLE, not a CPU fallback. Suite index identity
-binds the requested/observed evaluation runtime; saved authorization JSON is
-operational evidence only, never a reusable token.
-Portable archives verify the same runtime-bound evaluation index identity.
-
-### Runtime contract acceptance
-
-Validate each provisioned host/device using the
-[native acceptance workflow](#runtime-acceptance-on-a-provisioned-host).
-Use the actual candidate config, registered interpreter and explicit backend.
-`runtime env doctor`, `inspect` and a full-shape `stage --through warmup` provide
-separate environment, configuration and optimizer-execution observations.
-A check executed on CPU does not exercise Model Lab’s GPU execution path;
-that path needs a workload run in the selected GPU environment.
-
-For a declared Campaign, use its runtime stage and input-bound approval gate,
-then `campaign status`, `next` and `explain` to inspect the same attempt. Follow
-[Campaign execution and recovery](campaigns.md) for explicit dispatch and
-reconciliation. A lock or saved probe never authorizes source/runtime drift.
-
-Acceptance requires the requested device and precision, completed optimizer
-updates, verified full-state checkpoints, completed ingestion and collection,
-and evaluation bound to the selected checkpoint and observed evaluation runtime.
-Use `checkpoint verify`, `evidence` and `evaluation suite run` through their native
-interfaces. A separate CPU evaluation retains the original training identity.
-Keep missing, failed and interrupted observations visible. No automatic model
-promotion follows from completing this execution contract.
-
-The [registered-runtime acceptance record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/runtime-contract-rocm-20261001T134938Z.json)
-preserves a software integration check run on the recorded GPU. Its device,
-source and checkpoint identities describe the execution environment and outputs;
-new users declare their own runtime.
-
-## Discovery, validation, and measurements
-
-Discovery is passive: it inventories CPU, MPS, CUDA, ROCm, XPU, and MLX availability without creating a model. It records unavailable runtimes and API limitations rather than guessing. Validation separately exercises a disposable forward/backward/optimizer probe for the requested engine and precision. This checks workload compatibility with the installed framework and device; it does not evaluate a model or certify the hardware.
-
-Per-update timing synchronizes at update boundaries. `performance/step_seconds` and `performance/tokens_per_second` cover successful update work; validation, checkpointing, staging, and setup are outside that interval. Memory monitoring samples process RSS and supported allocator readings at update phases. CUDA/ROCm/XPU-shaped allocator APIs may supply native peak counters; MPS has a driver allocation reading and an observed sampled peak, not an allocator high-water guarantee. Unsupported readings are omitted and recorded as unavailable rather than emitted as zero.
-
-MPS and MLX use unified memory. Their device recommendation/driver allocation and host RAM are not independent pools, so reports and estimates must never add them together.
+Experiment plans bind runtimes per cell; see
+[experiments](experiments.md#run-a-lock). Reopening a binding probes the
+interpreter again, and a changed source, device, framework or profile is
+refused. Campaign runtime stages name a `profile_id` or a `worker`, never an
+interpreter path.
 
 ## Inspect and stage before a run
 
-`inspect` builds a shape-only parameter inventory and a conservative memory estimate; it does not construct the model or load tokenizer/data/package assets. The estimate uses disjoint categories—resident weights, registered runtime buffers, gradients, optimizer state, retained activations, attention working tensors, workspace, and headroom. It is a planning model, not a measured peak. Missing capacity information produces `UNKNOWN`; an artificial `budget_bytes` can demonstrate an exceedance but cannot prove physical fit.
-
 ```sh
 klab inspect configs/runtime_smoke_cpu.yaml --json
-klab stage configs/runtime_smoke_cpu.yaml --through smoke --output klab-work/stages/runtime-smoke
-klab stage configs/runtime_smoke_cpu.yaml --through warmup --output klab-work/stages/runtime-warmup
+klab stage configs/runtime_smoke_cpu.yaml --through smoke --output "$WORK/stages/smoke"
+klab stage configs/runtime_smoke_cpu.yaml --through warmup --output "$WORK/stages/warmup"
 ```
 
-A stage bundle is an immutable, verified copy of the effective inputs. `inspect` records only preflight inspection; `validate` additionally validates backend and artifacts; `smoke` and `warmup` run short, disposable subprocess pilots. Pilots do not advance the eventual training run's optimizer, schedule, cursor, counters, or RNG. A stage output must be new, or an identical complete bundle is re-verified and reused. If estimation or a pilot exceeds its safe ceiling, staging writes a proposal and stops; it does not rewrite the requested config.
+`inspect` builds a shape-only parameter inventory and memory estimate without
+loading the model, tokenizer or data; see [memory](memory.md). A stage bundle is
+a verified copy of the effective inputs: `inspect` and `validate` check them,
+`smoke` and `warmup` run short disposable pilots that never advance the real
+run. A stage output must be new, or an identical complete bundle is verified
+and reused. If a pilot exceeds its ceiling, staging writes a proposal and stops
+without editing the config. `train --stage-bundle DIR` links the pilot to the
+run; it never initializes from pilot weights.
 
-A direct `train` performs configured, inspected, and validated stages, but never silently runs pilots. Supplying `--stage-bundle DIR` adds verified pilot linkage to the resulting manifest; it does not use pilot weights as initialization.
-
-### Operational pilot deadlines
-
-`stage --pilot-deadline-policy POLICY.yaml` controls disposable pilot supervision,
-not `RunConfig`, optimizer horizons or ExperimentPlan scientific identity.
-Without a file, the documented staging defaults are:
-
-```yaml
-pilot_deadline_version: 1
-initialization_timeout_seconds: 1800
-no_progress_timeout_seconds: 1200
-absolute_timeout_seconds: 7200
-termination_grace_seconds: 5
-```
-
-The 30-minute initialization allowance includes input verification/materialization
-and runtime/model/data initialization, ending when training starts. The 20-minute
-no-progress allowance detects absence of trusted phase/counter progress, not
-absence of a completed optimizer update. The two-hour absolute cap applies even
-when progress continues. These defaults are operational protection for staging,
-not a performance promise; operators can supply a versioned policy for larger
-inputs with individual smoke/warmup overrides.
-
-Initialization and idle limits apply concurrently; genuine counters refresh idle
-time but never extend the initialization or absolute cap. A phase with no
-observable counters can exhaust idle time. That stop censors the operation; it
-does not establish a hung kernel or an inability to fit.
+`stage --pilot-deadline-policy POLICY.yaml` bounds pilots. The defaults:
 
 ```yaml
 pilot_deadline_version: 1
@@ -523,133 +242,147 @@ absolute_timeout_seconds: 7200
 termination_grace_seconds: 5
 smoke:
   initialization_timeout_seconds: 3600
-  absolute_timeout_seconds: 10800
 warmup:
   absolute_timeout_seconds: 14400
 ```
 
-The three deadline durations remain finite and positive; termination grace is
-finite and nonnegative. Policy files reject unknown/scientific
-fields and symlinked locations. Policy identity and effective purpose overrides
-are recorded separately from the unchanged requested scientific configuration.
-No deadline automatically retries or rewrites a run.
+Initialization covers input verification and model, data and runtime setup.
+No-progress resets only when real counters advance. The absolute cap applies
+even while progress continues. `smoke` and `warmup` override per pilot. A
+timeout stops an owned pilot and keeps its bundle; it says the pilot did not
+finish in time, not that the model does not fit.
 
-Pilots emit durable metadata-only phase/progress JSON Lines independently of
-their final report. Input validation encloses Corpus Forge/export/tokenizer
-authentication before stage-bundle verification, including the portable worker
-binding gate. Other known boundaries cover owned input materialization,
-runtime/engine/model/optimizer initialization, data opening, validation, optimizer
-updates, checkpoint write/verification, reload and finite forward. PyTorch model
-construction and optimizer construction have separate observed boundaries.
-Events carry sequence,
-purpose, PID/create-time identity, current/completed steps, completed targets and
-phase elapsed time. Long hashing and copying report meaningful bounded byte
-counters. Corpus text, tensors and weights never enter progress records.
-Validation reports consumed batches; optimizer work reports backward dispatches.
-Neither is GPU-completion evidence or an additional committed optimizer update;
-the observer introduces no device synchronization.
+### Readiness smoke
 
-Owned copies hash the bytes while writing them. Later inventory checks within
-that operation reuse only registered, process-local proofs whose file identity,
-size, modification time and change time still match. Reconstructed/transferred
-proofs and files rewritten with restored modification time are not authority.
-Independent staging, pilot and worker processes still authenticate actual bytes;
-stored SHA metadata alone never enables a fast path.
+`klab readiness smoke` runs every shipped mechanism through the public CLI on
+tiny synthetic data: inspect, preflight, prepare, stage, train, verify,
+evaluate, generate and resume a child.
 
-The supervisor accepts the private child progress channel, not arbitrary stdout,
-heartbeat text or a timer thread. Repeated/nonadvancing counters do not extend a
-deadline. Unobservable work is enclosed by an honest phase; it is not assigned
-invented subphase timing. Successful reports retain actual update/target
-accounting and checkpoint/reload evidence. Phase observation does not advance
-training state or certify model quality.
+```sh
+klab readiness smoke --output "$KLAB_WORK_DIR/experiments/readiness-1"
+klab readiness smoke --family dense --output "$KLAB_WORK_DIR/experiments/readiness-2"
+```
 
-Timeout evidence records initialization/no-progress/absolute classification,
-policy identity, last completed/current phase, progress time, elapsed total and
-idle time, completed update/target counters, owned child identity and observed
-resource peaks/minima. Cancellation, OOM and resource-monitor violations remain
-distinct. The supervisor terminates only owned PID/create-time identities and
-preserves failed bundles. A timeout is a censored execution gate, not proof of
-OOM, non-fit, throughput or scientific failure.
+| Family | Config |
+| --- | --- |
+| Dense | `smoke_cpu.yaml` |
+| MoE | `smoke_moe_cpu.yaml` |
+| Block sparse | `smoke_sparse_cpu.yaml` |
+| Local + selected blocks | `smoke_local_selected_cpu.yaml` |
+| Sliding window | `smoke_sliding_cpu.yaml` |
+| MLA | `smoke_mla_cpu.yaml` |
+| Token Engram | `smoke_memory_cpu.yaml` |
+| Byte Engram | `smoke_byte_memory_cpu.yaml` |
+| Combined | `smoke_combined_cpu.yaml` |
 
-## Runtime forecasting and progress
+All families run on CPU in FP32. The output must be a new directory; every
+command, outcome and identity goes into `readiness.json`, and a failure leaves
+its runs in place. Passing shows the wiring works, not that a model learns or
+fits a GPU. New architecture code needs a focused test and a path here first.
 
-Runtime forecasts are operational aids, not scientific results or performance
-guarantees. Model Lab keeps four records distinct: a planning estimate from
-compatible historical optimizer throughput, an optional warmup-calibrated
-estimate from a disposable pilot, a live target-based ETA, and a final
-observation of actual phase costs. Missing evidence is `null`/unavailable, not
-zero.
+### Scale up on a GPU
+
+`configs/scale_dense_160m_cuda.yaml` (162,554,880 parameters) is the first CUDA
+capacity pilot, and `configs/scale_dense_1b_cuda.yaml` (950,621,952) a larger
+skeleton. Run these from the provisioned CUDA environment (`uv run --locked
+--no-sync`, or the interpreter directly) so the CPU extra never replaces its
+PyTorch. Both read FineWeb-Edu sample-10BT with
+`configs/tokenizer_fineweb_scale_8k.yaml`. They are capacity checks, not
+recipes for a useful model.
+
+```sh
+WORK="$KLAB_WORK_DIR/experiments/dense-scale"
+klab inspect configs/scale_dense_160m_cuda.yaml --json
+klab workspace preflight configs/scale_dense_160m_cuda.yaml
+klab tokenizer train configs/tokenizer_fineweb_scale_8k.yaml
+klab data prepare configs/scale_dense_160m_cuda.yaml
+klab stage configs/scale_dense_160m_cuda.yaml --runtime cuda-local \
+  --through warmup --output "$WORK/staging/160m"
+klab batch calibrate configs/scale_dense_160m_cuda.yaml \
+  --output "$WORK/calibration/160m"
+```
+
+`workspace preflight` budgets three checkpoint generations with 25% headroom
+plus prepared data, against the real free bytes and inodes of each destination.
+`batch calibrate` tries microbatch and accumulation pairs with the same
+effective batch, ranks them by measured throughput after two warmup updates,
+and writes `proposal.yaml` only for a stable candidate with headroom; the
+original config is unchanged.
+
+Before a long allocation, train a short parent and resume a child from it:
+
+```sh
+klab train configs/scale_dense_160m_cuda.yaml --runtime cuda-local \
+  --run-id dense-160m-parent --runs-dir "$WORK/runs" --stop-after-step 10
+klab train configs/scale_dense_160m_cuda.yaml --runtime cuda-local \
+  --run-id dense-160m-child --runs-dir "$WORK/runs" \
+  --resume "$WORK/runs/dense-160m-parent/checkpoints/latest.json" --stop-after-step 20
+klab checkpoint verify "$WORK/runs/dense-160m-child/checkpoints/latest.json" --json
+```
+
+Run long jobs from a fixed, committed checkout, and develop in a separate
+worktree while they train.
+
+### Accept a provisioned host
+
+To check that Lab trains, checkpoints and evaluates on a newly provisioned
+host, run the 20-step, 640-target runtime smoke with its registered runtime:
+
+```sh
+WORK="$KLAB_WORK_DIR/experiments/runtime-acceptance"
+CONFIG=configs/runtime_smoke_cpu.yaml     # or the ROCm or XPU smoke config
+RUNTIME=cpu-py314
+RUN_ID="runtime-acceptance-$(date -u +%Y%m%dT%H%M%SZ)"
+klab tokenizer train configs/tokenizer_smoke.yaml
+klab inspect "$CONFIG" --json
+klab stage "$CONFIG" --runtime "$RUNTIME" --through warmup --output "$WORK/staging/$RUN_ID"
+klab train "$CONFIG" --runs-dir "$WORK/runs" --runtime "$RUNTIME" \
+  --stage-bundle "$WORK/staging/$RUN_ID" --run-id "$RUN_ID"
+klab eval "$RUN_ID" --runs-dir "$WORK/runs" --runtime "$RUNTIME"
+```
+
+The stage, manifest and evaluation must record the requested backend, training
+must commit 20 steps and 640 targets, and evaluation must use that checkpoint.
+For CUDA, copy the config and change `runtime.backend`.
+
+## Forecasts and progress
 
 ```sh
 klab inspect CONFIG --estimate-runtime --json
-klab stage CONFIG --through warmup --output klab-work/stages/forecast
-klab train --runs-dir klab-work/runs CONFIG --stage-bundle klab-work/stages/forecast
-klab runtime status RUN_ID --runs-dir klab-work/runs --json
+klab stage CONFIG --through warmup --output "$WORK/stages/forecast"
+klab train CONFIG --runs-dir "$WORK/runs" --stage-bundle "$WORK/stages/forecast"
+klab runtime status RUN_ID --runs-dir "$WORK/runs" --json
 ```
 
-`inspect --estimate-runtime` is read-only. Planning uses up to the 25 most
-recent observations whose full runtime signatures match: engine, backend and
-device identity; OS, framework/runtime and driver versions; precision; model
-and attention architecture; optimizer; sequence length, microbatch and
-accumulation; recomputation and offload. The JSON reports matching dimensions
-and rejection reasons. It does not convert theoretical work or parameter counts
-into wall time. Without compatible observations—or when device identity is
-unknown—the planning estimate remains unavailable.
+Lab keeps four records apart:
 
-`stage --through warmup` adds a separate estimate from measured disposable
-optimizer updates. It does not change the requested training state. The first
-pilot update is excluded as initialization; the staged estimate is used only
-when its runtime signature exactly matches the eventual run. Without a warmup
-bundle, no warmup estimate is implied.
+- **Planning estimate** (`inspect --estimate-runtime`): from up to 25 earlier
+  runs whose runtime signature matches exactly (device, framework and driver
+  versions, precision, architecture, optimizer, sequence length, batch shape,
+  recomputation and offload). Without one it is unavailable.
+- **Warmup estimate**: from the measured updates of a matching warmup pilot,
+  excluding the first.
+- **Live progress**: completed supervised targets against the budget, with
+  `optimizer_only_eta`. When targets stop advancing the state becomes
+  `NO_PROGRESS` and the ETA is withdrawn; the run keeps going.
+- **Final observation** (`runtime_final_observation`): preparation, updates,
+  validation, checkpointing and wall time, kept separate.
 
-Training progress counts completed supervised targets against the configured
-target budget and reports steps separately. Live throughput uses robust recent
-and longer windows; ETA is named `optimizer_only_eta`. Initial updates are not
-used as completed-run throughput calibration. Disagreeing windows are marked
-unstable. When targets stop advancing for the stall interval, state becomes
-`NO_PROGRESS` and ETA is suspended; the process is not killed.
+Progress is JSON lines on stderr, so stdout results are unchanged. Missing
+measurements are `null`, never zero. A compatible history is a guide, not a
+promise: contention and thermals change throughput without changing the
+signature.
 
-Versioned progress JSON Lines go to stderr, leaving existing stdout result
-payloads unchanged. Runtime status reads the latest bounded progress snapshot
-and the separate `runtime_final_observation` event. SQLite retains one
-replaceable progress snapshot per run outside the replication outbox. Status is
-read-only; if the snapshot is stale, it marks progress `NO_PROGRESS` and clears
-ETA in the returned view without rewriting stored state.
+`performance/step_seconds` and `tokens_per_second` cover update work only.
+Memory sampling reads process RSS and allocator counters where the backend has
+them. MPS and MLX share unified memory with the host, so the two are never
+added together.
 
-The final observation keeps preparation, planning, optimizer updates,
-validation, checkpointing, reporting, and end-to-end wall time separate. Phase
-times with no observation, including evaluation or generation that did not run,
-remain unavailable rather than appearing as zero cost. The dashboard reads the
-same records and does not schedule runs or tune configuration.
+## Resource envelopes
 
-**Illustrative planning miss (hypothetical, not a recorded run):** compatible
-history predicts 2 hours of optimizer work, but the completed run observes 2.5
-hours. New contention or thermal throttling can change device throughput without
-changing the signature, so a compatible historical rate is not a guarantee.
-The final observation makes that error visible; only an eligible completed run
-with enough post-initialization updates can contribute to later calibration.
-
-In an implementation CPU smoke, no compatible history meant planning was
-unavailable. A separate warmup forecast for 640 targets was 0.0588 seconds
-(0.0582–0.0614); the 20-update run observed 0.0750 seconds of optimizer-update
-time. The bounded pilot had four measured update intervals after discarding its
-first update. This tiny smoke demonstrates forecast error, not general
-throughput or model quality.
-
-The existing `fast` resource proposal can preserve effective batch while
-changing microbatch/accumulation based on capacity rules. It is not an empirical
-throughput search. Use separately declared candidates and compare measured warmup observations;
-there is no automatic empirical throughput search in this proposal interface.
-
-## Operational resource envelopes
-
-`data prepare`, `stage`, `train`, single-config `experiment submit`, and
-`experiment prepare` accept `--resource-envelope PATH`. For `experiment submit`,
-the option works with or without `--wait` and is rejected with `--matrix`.
-`explore` also accepts that direct flag. `try` and `probe` select the same native
-envelope through declaration `resource_envelope` (see [try](try-config.md) and
-[probe](probe-config.md)); profile files use declaration `runtime_profile`, while
-`--runtime ID` remains available. Policies are strict, frozen YAML mappings:
+`data prepare`, `stage`, `train`, `explore`, single-config `experiment submit`
+and `experiment prepare` accept `--resource-envelope FILE`; `try` and `probe`
+take `resource_envelope` in their declaration.
 
 ```yaml
 resource_envelope_version: 1
@@ -664,7 +397,15 @@ max_queue_depth: 1
 spill_to_disk: true
 ```
 
-Try envelopes may also include the optional scoped section:
+Every limit is optional. Unknown fields fail. RAM and swap come from psutil and
+storage from the destination's filesystem; a missing measurement fails only if
+a limit needs it. `max_host_memory_fraction` is process RSS over host RAM, not
+accelerator memory. Limits are checked before writing, at streaming boundaries
+and before publishing. An envelope never changes batch size, sequence length,
+precision or data.
+
+A try envelope may add a section that applies only to its arms, and is refused
+anywhere else:
 
 ```yaml
 resource_envelope_version: 1
@@ -674,133 +415,37 @@ lab_try:
   tokenizer_batch_source_bytes: 1048576
 ```
 
-`lab_try` applies only to try arms. A non-null section, including `{}`, is
-rejected by non-try CLI/native consumers before execution; remove it for
-`probe`, `explore`, `train`, `stage`, preparation or worker execution. Try
-resolves it into native trainer arguments, uses the tighter of declared and
-direct API limits, and delegates only common host/storage bounds. Full original
-envelopes remain in sealed try records. The wall limit must be positive and
-finite, with no implicit timeout. Batching uses strict integers (documents
-1–256, source bytes 1–8388608); omitted values retain native defaults (256 and
-1048576). Absent or null `lab_try` preserves legacy envelope serialization.
+## Prepared data
 
-All numeric limits are optional. Maxima are positive; minima are nonnegative;
-host fraction is in `(0, 1]`. Booleans are not integers. Unknown fields and
-versions fail. RAM/swap come from psutil, storage from the actual filesystem's
-existing ancestor without creating the destination. Missing measurements are
-null and fail closed only when a requested limit needs them. Host fraction is
-process RSS divided by host RAM, not accelerator memory. Policies never rewrite
-batch size, sequence length, source, precision, or scientific config.
+`data prepare` writes a progress stream and a sibling `<cache>.preparation.json`
+with records, bytes, tokens, throughput, sampled memory, free disk and the time
+spent iterating the source, encoding, writing, syncing and hashing. These are
+operational measurements and never enter the cache identity.
 
-Limits are checked before outputs, at bounded streaming boundaries, and before
-publication. Streaming preparation rejects `spill_to_disk: false`.
-`max_workers` bounds tokenizer workers; `max_queue_depth` bounds pending work.
-Version-1 worker specs optionally carry the policy; old specs omit it unchanged.
+- **Batches.** For `local_text`, `--tokenizer-batch-documents` (1 to 256,
+  default 256) and `--tokenizer-batch-source-bytes` (up to 8 MiB, default 1 MiB)
+  bound each encode call. An oversized document fails rather than being cut.
+  Encoding uses the shared [encoder pool](token-store.md#one-encoder).
+- **Supervision.** `contiguous-eos-v6` caches state their supervision:
+  `{kind: all_tokens}` stores no mask, `{kind: token-loss-mask-v1}` stores a
+  boolean mask for both splits.
+- **Hashing.** Arrays are hashed while they are written, and later checks in
+  the same process reuse that digest only while the file's identity is
+  unchanged. A new process always hashes from disk.
 
-Preparation progress on stderr and a sibling `<cache>.preparation.json` receipt
-record records, source UTF-8 bytes, output tokens, elapsed seconds, source MB/s,
-tokens/s, sampled current/peak process RSS, available host RAM, logical input/output
-bytes, disk free bytes/inodes, and six independently timed counters:
-`source_iteration_seconds`, `tokenizer_encoding_seconds`,
-`python_bookkeeping_seconds`, `spool_write_seconds`, `finalize_fsync_seconds`,
-and `deep_verification_hash_seconds`. Peak RSS is the maximum observed psutil
-sample, not a guaranteed OS lifetime high-water mark. Unavailable measurements
-remain null. These receipts and timings are operational evidence, outside the
-scientific manifest and cache identity; they are not model-quality metrics.
+### Interrupted preparation
 
-## Prepared data: bounded encoding and verification
+Streaming preparation writes sealed chunks of at most 4,096 records and 16 MiB,
+ending on whole documents. A restart verifies the source, tokenizer and every
+sealed chunk, discards only the unfinished one, and continues from the exact
+record where it stopped without re-encoding earlier ones. A finished train split
+survives an interrupted validation split. Preparation holds a lock, so a live
+producer is never mistaken for a crashed one.
 
-For `local_text`, `data prepare`, `stage`, `train`,
-single-config `experiment submit`, and `experiment prepare` accept
-`--tokenizer-batch-documents` (1–256, default 256) and
-`--tokenizer-batch-source-bytes` (1–8388608, default 1048576). Both bounds apply.
-For `experiment submit`, these options work with or without `--wait` and are
-rejected with `--matrix`, including explicitly supplied default values.
-Oversized documents fail before encoding; token limits never truncate a selected
-story. Batch 1 uses scalar `Tokenizer.encode`; larger batches use Rust
-`encode_batch` in source order, preserving EOS and byte-address semantics.
-Preparation uses fresh, Torch-free, single-threaded tokenizer workers from the
-shared [encoder pool](token-store.md#one-encoder): four by default, or the
-explicit envelope's `max_workers`, always bounded by measured CPU and RAM
-capacity. A batch is spread over the workers and returned in source order.
-Tokenizer training remains scalar with its existing parallelism policy.
-Document and byte caps, resource policies, timings, and profiles do not enter
-the scientific manifest or cache identity.
+### Parallel preparation
 
-New `contiguous-eos-v6` caches describe supervision explicitly:
-`{kind: all_tokens}` omits loss-mask arrays and loads masks as `None`;
-`{kind: token-loss-mask-v1}` requires exact bool masks for both splits.
-Historical v4 no-mask and v5 mandatory-mask artifacts retain their meaning and
-are never rewritten. Loss, evaluation, and batching treat implicit all-token
-supervision identically to an explicit all-true mask.
-
-Final NPY headers and data feed SHA-256 during their original writes.
-`PreparedData.receipt` is sealed **in-process** evidence binding the canonical
-root, scientific manifest SHA, file digests/sizes, validated header dtype/shape,
-and device/inode/size/mtime_ns fingerprints. Structural reload rejects changed
-files, symlinks, unsigned descriptors, and unexpected inventory. The sibling
-JSON preparation receipt records measurements only; copying it to a new
-process never permits skipping cold array hashes.
-
-The deep-scan call graph changed as follows:
-
-| Path | Before | V6 behavior |
-| --- | --- | --- |
-| `_prepare_data` fresh write | `_array_metadata` re-read, then postpublish deep load | SHA during write, sealed structural postpublish load |
-| `prepare_variant` | Immediate second deep load | Reuse returned `PreparedData` |
-| Existing cache | Discovery/deep load, possible caller re-load | One cold deep load |
-| `verify_artifact` / `resolve_plan` | Repeated artifact references re-scanned | Operation-local memo, canonical path and fingerprint guarded |
-| `verify_prepared_inputs` | Inventory hash then loader hash | Inventory's verified digests feed structural loader |
-| `verify_stage_bundle` | Inventory, loader, final bundle inventory could repeat | Same-call digest evidence reused after fingerprint checks |
-| External `load_prepared_data` | Deep scan | Still deep by default; no persisted skip authority |
-
-On the generated 2,351-token CPU fixture, v5 creation re-read four arrays
-twice: 8 SHA file reads / 24,534 bytes. V6 all-token creation re-read 0 arrays;
-cold load, existing-cache hit, and prepared-input verification each read the
-two arrays once (2 / 9,660 bytes). The stage bundle has two distinct copies of
-each split, so it reads 4 physical array files once each—not one shared file
-four times. IDs were exact-byte equal, and omitted masks saved 2,607 bytes.
-These are fixture measurements, not predictions for other data or devices.
-
-### Interrupted local preparation
-
-Streaming preparation keeps task-owned `<identity>.tmp` chunks with at most
-4096 acquired records and 16 MiB total raw output bytes, ending at whole
-documents. One encoded document larger than the raw cap fails with an actionable
-error. IDs and byte-address sidecars carry ordered, checksummed receipts with
-raw SHA/length/dtype and acquired/retained/token counts. Raw files are fsynced;
-the receipt commits last, followed by directory fsync.
-
-A restart verifies source/tokenizer/packing identity and every sealed chunk's
-raw bytes. It discards only the known next unsealed chunk, rejects unexpected
-files and changed sealed data, re-iterates the verified source, and skips exactly
-the sealed acquired count without encoding those records. Completed train
-chunks survive validation interruption. Final arrays remain ordinary contiguous
-NPYs; interrupted final arrays are recomputed from verified chunks. Cache
-preparation is locked even outside the managed workspace, so a live producer is
-never mistaken for a crashed one.
-
-Manifest fsync precedes atomic no-replace publication. Owned chunks are retired
-only afterward; a durable cleanup intent and owner-last removal make cleanup
-itself resumable. Recovery of an already published cache still cold-hashes its
-final arrays once and never retokenizes them. Persisted cleanup metadata does
-not authorize structural loading without those hashes.
-
-The generated recovery regression has 13 train and 7 validation records with
-byte-address sidecars and a forced four-record test chunk. SIGKILL after the
-fifth train record's unsealed write preserved records 1–4; restart encoded only
-train records 5–13 and all 7 validation records. All four final NPY digests and
-the full scientific manifest matched uninterrupted preparation. Interrupting
-validation after its first sealed chunk encoded only the remaining 3 validation
-records, not the completed train split. Tests also reject changed sealed bytes,
-source/tokenizer/owner identity, unexpected entries, and replacement publication.
-
-### Concurrent preparation chunks
-
-Streaming `local_text` and `snapshot` preparation can
-use independent chunk workers **within each split**. Train and validation share
-one operation-scoped pool; validation does not reserve capacity while train runs.
-Opt in through `data prepare --resource-envelope envelope.yaml`:
+Streaming `local_text` and `snapshot` preparation can encode chunks in parallel
+within each split:
 
 ```yaml
 resource_envelope_version: 1
@@ -810,243 +455,51 @@ max_queue_depth: 4
 spill_to_disk: true
 ```
 
-Inside an envelope, `preparation_shard_workers` defaults to 1, retaining one
-tokenizer child shared across sequential splits, and `max_workers` is the total
-native thread budget (four when omitted). The capacity planner bounds that
-budget by available CPUs and RAM. Requested chunk workers (1–32) are reduced by
-that budget and the queue cap. Without any envelope, preparation sizes itself:
-one child of four threads per 32M declared tokens, up to measured capacity, so
-small preparations keep one child and large ones use the host. One child stops
-scaling near eight threads, which is why capacity is spread over children.
-Worker counts never change prepared arrays or cache identity. An odd native budget is fully assigned: three threads with two workers
-uses pools of two and one. Receipts disclose requested/effective counts, actual
-per-child threads, capacity and fallback reasons. Native CPU tokenization uses
-the existing Rust-backed `tokenizers` package; no CUDA or NVIDIA dependency is added.
+`max_workers` is the total thread budget and `preparation_shard_workers` (1 to
+32) the number of chunk workers, both bounded by measured CPU and memory.
+Without an envelope, preparation sizes itself: one four-thread worker per 32M
+declared tokens, up to capacity. Worker counts never change the prepared arrays:
+one coordinator selects records, enforces quotas and commits chunks in source
+order. Parallel encoding needs a deterministic ByteLevel BPE tokenizer; others
+run serially and the receipt says why. The receipt's `shards` and `worker_pool`
+sections report per-split and per-worker measurements.
 
-Parallel dispatch requires deterministic, unnormalized ByteLevel BPE without
-padding, prefix-space insertion, dropout, byte fallback or model word affixes. Other tokenizers retain the serial path,
-with the fallback recorded. UTF-8 bytes plus EOS reserve a conservative token
-bound before reading ahead. Near a token cap, outstanding work is drained before
-acquiring more records; a document whose conservative bound exceeds the remaining
-budget is resolved alone. Actual token counts still enforce the exact cap.
-The coordinator alone selects source records and advances the ordered frontier;
-worker settings do not change document order, quotas, EOS or causal byte addresses.
-
-At most one bounded work item per worker is outstanding, including finished work
-waiting for an earlier item; the coordinator may buffer one additional item. Work
-items use the existing chunk record bound and at most 8 MiB of source text, with
-actual limits reported. Each worker encodes small byte/document-bounded batches
-into its chunks, amortizing receipts and fsync across those calls. It writes exclusive raw
-chunks and receipts in an owned `work-SPLIT-SEQUENCE` directory. The coordinator
-checks receipt contents and writer fingerprints, renames raw files without copying
-their bytes, and commits receipts in source order. Worker receipts alone are never
-resume authority. On interruption, the verified committed prefix survives;
-uncommitted worker directories are discarded on resume, with unexpected files or
-symlinks rejected rather than deleted. A sibling failure stops work at record/batch
-boundaries and joins workers before returning. A tokenizer call retains its existing
-bounded reply timeout. Final NPY assembly and atomic verified bundle publication
-remain the existing path.
-
-The operational `.preparation.json` receipt contains split measurements under
-`shards` and cumulative worker measurements under `worker_pool`: stage times,
-throughput, queue peak, coordinator queue wait, IPC bytes/wait, worker busy time,
-and child CPU utilization over the pool lifetime and allocated native threads.
-Worker job busy time is null on the serial path, which does not dispatch jobs.
-Summed worker stage times overlap and are not an additive wall-time decomposition.
-RSS there remains parent RSS; the benchmark separately samples the process tree.
-Restored records/tokens count toward operation rates, not new encoding throughput.
-JSON IPC, Python bookkeeping, source replay and final contiguous copying remain
-costs. Acquisition/mixture deduplication and cache commits are unchanged. The design
-uses ideas from [HF batched tokenization](https://huggingface.co/learn/llm-course/chapter6/3)
-and [NVIDIA's worker-based preparation](https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/dataset/MEGATRON_DATA_PREP.md);
-no NVIDIA source or dependency chain was copied.
-
-For later host acceptance, use the native offline benchmark below with `threads:
-[1, 2, 3, 4]`, `batch_documents: [256]`, `sizes_bytes: [1048576]` and
-`shard_workers: 1`, then separate absent workspaces with `shard_workers: 2`, `4`
-and `8` (the over-capacity case). Compare actual counts, array/manifest digests,
-wall time, stage times, queue bounds and process-tree RSS. Repeat with the same
-bounded inputs and comparable cache/host activity before increasing size. Measure
-HDD and NVMe separately; planned hardware is not installed capacity or evidence.
-Keep active experiments and their pinned checkouts untouched. These synthetic
-checks do not establish production throughput, storage causality or a Gen4/Gen5
-recommendation.
-
-### Offline performance evidence
-
-The retained [preparation benchmark](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/benchmarks/runtime-prep-v1.json)
-measured generated 1/8/32 MiB prose/code JSONL, one local BPE tokenizer,
-scalar and batched encoding, and bounded Rayon thread counts. Wall time includes
-imports, child startup and instrumentation; sampled process-tree RSS includes
-the tokenizer child. This is historical operational evidence, not a CI timing
-assertion or model-quality result.
-
-Use the native bounded replacement for new operational measurements:
+To measure preparation on a host:
 
 ```sh
 klab data benchmark-preparation declaration.yaml --json
 ```
 
-The strict `klab-preparation-benchmark-v1` declaration names an **absent**
-workspace and bounds generated sizes (32 MiB each, 64 MiB total), coordinate
-count (32), document batches, CPU threads and worker timeout. Admission checks
-the existing parent filesystem before it claims the workspace, preserving a
-512 MiB/2048-inode reserve and retaining any post-claim failure report. Each
-coordinate runs in a fresh offline CPU process with one Rayon cap and reports
-the native arrays, manifest and cache identities. `report.json` is exclusively
-published in the claimed workspace; a failed/timed-out case or a per-size
-identity mismatch remains visible and makes the report failed. The command does
-not train a model, choose a recommended batch size, or establish a performance
-or quality claim.
-
-The recorded 32 MiB, four-Rayon-thread cases selected the final default **256**
-documents: 5.404 MB/s and 458.2 MiB sampled process-tree peak, versus scalar
-1.638 MB/s / 391.4 MiB. The observed input batches stayed below 1 MiB and tree
-peak stayed below 1.5 times scalar. At one Rayon thread, batch 16 was faster
-than 64/256 on this fixture; the declared default selection uses the bounded
-four-thread configuration. Results are one fresh execution per case, not a
-statistical portability or causal Rust-only speedup claim. Source re-iteration
-on resume, scalar tokenizer training, JSON IPC, and the contiguous final copy
-remain measured-performance questions.
-
-The [runtime-prep-v1 acceptance record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/runtime-prep-v1.json)
-binds the actual CPU profile probe, preparation/hash measurements, bounded
-recovery checks, CLI smoke, and final focused/broader suite results. It is
-operational implementation evidence, not a research finding or a hardware
-portability claim.
-
-The [Campaign integration rebase record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/runtime-prep-v1-rebase.json)
-adds actual worker-dispatch/ingestion CLI proof and the combined CPU suites
-after integrating Campaign orchestration. Original benchmark measurements retain their
-original source identities; they were not rerun or relabeled as rebase measurements.
-
+The declaration (`klab-preparation-benchmark-v1`) names a new workspace and
+bounds the generated sizes (32 MiB each, 64 MiB total), coordinates, batches,
+threads and timeout. Each coordinate runs in a fresh offline CPU process and
+reports its arrays and cache identity; a mismatch fails the report. It measures,
+it does not choose settings.
 
 ## Storage and checkpoint headroom
 
-`experiment inspect` reports checkpoint *write volume* separately from peak
-durable growth. The trainer writes an initial generation and one at the terminal
-update. Explicit steps, step/token cadence and a new best at validation can
-cause additional writes, but coincident triggers write only one generation.
-All cadence watermarks reset on a save. A configured minute cadence may write
-at every update because optimizer-update duration has no guaranteed bound;
-without that cadence it does not add an unconditional per-update allowance.
-For example, a 100-update run with checkpoint and validation intervals of 40 and
-no other trigger has four writes (initial, 40, 80, terminal).
+`experiment inspect` and `workspace preflight` report checkpoint write volume
+apart from peak disk growth. Training writes a generation at the start and the
+end, plus at each step, token or minute cadence and each new best; coincident
+triggers write once. A 100-update run with checkpoint and validation every 40
+updates writes four (initial, 40, 80, final).
 
-`checkpoint.keep_periodic: false` in the run config leaves the checkpoint
-manager's latest two and best generations, potentially three distinct durable
-generations; an in-flight fourth must fit before pruning. Experiment-plan
-`retention.keep_periodic: false` does not change that manager setting and cannot
-lower training headroom. Retaining periodic checkpoints instead budgets every
-possible generation. Write volume does **not** represent occupied space
-when old generations are pruned. Preflight checks future checkpoint growth,
-run-owned prepared-array copies, cache growth when a cache has not been
-authenticated, and task overhead against actual available bytes and inodes on
-each destination filesystem. It never subtracts an already allocated cache
-from free space again. A same-operation sealed prepared receipt can provide
-the verified arrays plus the measured complete regular-file inventory that the
-trainer copies. It establishes zero new cache allocation; unsigned manifest size
-fields do not suffice. The run copy still consumes space. Without that receipt,
-conservative cache and copy allowances remain, and genuinely insufficient future
-headroom fails preflight.
-Worker materialization and other remote copies require their own destination
-headroom; a source host's existing prepared cache is not free storage there.
+`checkpoint.keep_periodic: false` keeps latest, previous and best: up to three
+generations, plus room for a fourth in flight. `checkpoint.retention` keeps a
+declared set within a byte budget; see
+[checkpointing](checkpointing.md#keep-milestones). Preflight checks future
+checkpoints, the run's copy of prepared arrays and any unverified cache growth
+against each destination's free bytes and inodes. A worker's copy needs its own
+headroom.
 
-## Resource proposals
+## Memory proposals and optimizers
 
-Memory policy can propose an explicit complete config; it never changes the config supplied to training. `fast`, `balanced`, `low_memory`, and `max_fit` order candidate choices differently, but unsupported actions receive no imagined savings. In particular, changing micro-batch/accumulation can preserve an effective example batch, while changing precision or sequence length is scientifically significant and must remain visible.
+The memory policy can propose a complete alternative config; it never changes
+the one you train. `fast`, `balanced`, `low_memory` and `max_fit` order the
+candidates differently. Changing microbatch and accumulation keeps the effective
+batch; changing precision or sequence length is a scientific change and is
+shown as one. Recomputation and offload are covered in [memory](memory.md).
 
-Transformer-block recomputation is implemented for both engines. PyTorch
-activation offload requires an actual saved-tensor roundtrip/backward probe,
-records synchronized transfer metrics, and checks incremental host headroom
-before run creation. MPS has zero estimated physical-capacity gain; discrete
-device estimates are conditional and need paired hardware measurements before
-a capacity claim. Optimizer-state offload remains rejected.
-
-## Optimizer semantics
-
-AdamW is the default. PyTorch Adafactor is an explicit alternative with
-shape-factored second-moment state, `foreach=False`, and recorded algorithm
-settings. The shared peak/floor schedule controls Adafactor's **relative
-step-size cap**, not an AdamW-equivalent absolute learning rate. Parameter RMS
-scaling and its own update clipping still apply. An optimizer change requires
-a fresh or promoted run, never full resume.
-
-## Runtime acceptance on a provisioned host
-
-This software integration check covers training, checkpointing and evaluation
-in a selected execution environment. Use the same workflow for native Linux,
-WSL2, and macOS. Select a
-config with an explicit backend and precision supported by the provisioned
-environment. The CPU, ROCm and XPU runtime smoke configs use the same 20-step,
-640-target workload; a CUDA candidate can copy that config and change
-`runtime.backend` in its own source config. Do not change a running or frozen
-experiment's config. Backend names in configs and run IDs are useful coordinates;
-host/backend combinations do not define separate storage layouts.
-
-Set `KLAB_WORK_DIR` to an external persistent root. Register and doctor the
-interpreter first using [runtime environments](#machine-local-runtime-environments).
-The example uses the registered CPU runtime `cpu-py314`; for an accelerator,
-select its config and registered runtime together. These smoke configs retain
-explicit tokenizer/cache paths in the checkout; the work root does not relocate
-those paths. Use a separately authored config for external input destinations.
-
-```sh
-WORK="$KLAB_WORK_DIR/experiments/runtime-acceptance"
-CONFIG=configs/runtime_smoke_cpu.yaml
-RUNTIME=cpu-py314
-RUN_ID="runtime-acceptance-$(date -u +%Y%m%dT%H%M%SZ)"
-STAGE_DIR="$WORK/staging/$RUN_ID"
-# Direct invocation preserves the already provisioned framework.
-klab tokenizer train configs/tokenizer_smoke.yaml
-klab inspect "$CONFIG" --json
-klab stage "$CONFIG" --runtime "$RUNTIME" --through warmup --output "$STAGE_DIR"
-klab train --runs-dir "$WORK/runs" "$CONFIG" --runtime "$RUNTIME" \
-  --stage-bundle "$STAGE_DIR" --run-id "$RUN_ID"
-klab eval "$RUN_ID" --runs-dir "$WORK/runs" --runtime "$RUNTIME"
-```
-
-The stage, training manifest, and evaluation must record the requested backend;
-training must commit 20 steps / 640 targets for these runtime smoke configs, and
-evaluation must use the committed checkpoint. Inspect the measured host/device
-identity and probe result. An explicit unavailable backend is a failed
-software check. Run it in the environment intended for your workload; its
-results concern Model Lab execution there, not the scientific question.
-
-## Recorded local acceptance
-
-The [Host CLI acceptance record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/host_cli_2026_09_22.json) contains
-fresh-process CPU FP32 20/640 versus 10+resume, CPU BF16 and Adafactor 4/128
-versus 2+resume, and native MLX FP32 2/64 versus 1+resume. Model, optimizer,
-schedule, scaler, cursor, and RNG match bitwise within each pair; parent
-generations remain unchanged. Native logits differed from canonical PyTorch
-by at most `5.97e-7` on the fixed probe, and a PyTorch-to-MLX promotion committed
-one fresh update. These are bounded implementation checks, not cross-engine
-training equivalence or model-quality results. Their execution environment is
-part of the record, not the subject of a scientific finding.
-
-The [integrated single-host gate](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/single_host_gate_2026_09_22.json) also retains actual MPS continuation/promotion, corruption and signal recovery, installed-wheel/offline checks, and populated dashboard evidence. The [independent-worker gate](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/independent_workers_2026_09_23.json) adds three overlapping CPU workers, controller disconnect/replay, acknowledged cancellation, explicit recovery after executor loss, offline promotion, actual CLI matrix execution, genuine source-mismatch rejection, and a real MLX/Metal worker.
-
-Native CUDA sparse kernels remain an [implementation direction](../ROADMAP.md#longer-term-directions). Retained
-software integration records do not yet include execution on Intel XPU or a
-simultaneous multi-host Apple/AMD/Intel worker setup. Native HIP sparse-attention
-measurements were collected on an AMD RX 7900 XTX under WSL2; that names the
-environment used for the measurements, not the purpose of the model studies.
-
-The [registered-runtime ROCm gate](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/runtime-contract-rocm-20261001T134938Z.json)
-records isolated `rocm-gfx1100-v1` provisioning and a fresh RX 7900 XTX BF16
-Campaign: one ingested attempt, two optimizer steps, 64 supervised targets,
-and a verified full-state checkpoint. Explicit ROCm and CPU FP32 evaluation
-share that checkpoint and retain ROCm training identity; threshold-free
-readiness is `READY_FOR_NEXT_STAGE`. The checkout's CPU Torch version, paths,
-and hashes remained unchanged. This is local execution/runtime-contract
-acceptance, not a model-quality, performance, or cross-host portability result.
-
-See [memory accounting](memory.md), [activation recomputation](activation-checkpointing.md),
-and [activation offload](offload.md) for the estimate/measurement boundaries.
-
-Opt-in [`checkpoint.retention`](checkpoint-milestones.md) additionally preserves
-scientific milestones and reserves its declared peak bytes plus free-space
-headroom. Its keep-set replaces the default latest/previous/best-only bound.
-This RunConfig policy differs from experiment-plan `retention.keep_periodic`,
-which describes plan storage expectations and does not configure the trainer.
+AdamW is the default. PyTorch Adafactor factors its second moment, and the
+learning-rate schedule sets its relative step-size cap rather than an absolute
+rate. Changing the optimizer needs a fresh or promoted run, never a resume.

@@ -1,12 +1,12 @@
 # Dashboard tour
 
-Commands below use the [activated, provisioned environment](../README.md#first-run).
+Commands below use the [activated, provisioned environment](../README.md#install).
 
 `klab dashboard` opens a local, read-only Streamlit app. The **Lab** pages
-come first. Each one answers a single researcher question, opens with the
-verdict, explains its numbers in plain words and, when it has nothing to show,
-names the command that would fill it. Run telemetry (training curves, runtime,
-memory, checkpoints) and the Learn/Research pages follow in their own sections.
+come first. Each answers one question, opens with the verdict, explains its
+numbers in plain words and, when it has nothing to show, names the command that
+would fill it. Run telemetry (training curves, runtime, memory, checkpoints) and
+the Learn page follow in their own sections.
 
 ```sh
 klab dashboard               # WORK_DIR/runs + WORK_DIR/lab
@@ -90,6 +90,14 @@ lists tries that never ran a probe battery, each with the command to probe it.
 
 ![Compare: paired deltas, refused across groups](assets/dashboard-compare.png)
 
+When the verdict suggests a rerun or escalation, the page shows a read-only
+follow-up plan built from the sealed request: benchmark selectors, runtime and
+resource values, checkpoint digests and baseline provenance. Fields the record
+does not hold are listed as missing. The plan is not an executable declaration;
+review it and write a new probe config yourself. For a `NOT_COMPARABLE` try the
+plan lists the failed comparison checks instead: fix those inputs before a new
+`klab try`, since an unchanged rerun cannot fix comparability.
+
 **Compare** runs the same engine as `klab compare`: paired deltas ± SE for
 each metric against other results and, optionally, the reference models. Cells
 read **better**, **worse** or **within noise** (|Δ| ≤ 2 SE). **Not comparable**
@@ -111,7 +119,7 @@ that a column is only comparable inside one group.
 recall) against a cost (resident or active parameters, weight bytes, training
 tokens, scoring latency) within one comparison group. Reference models appear
 as purple diamonds wherever they share the group (lm-eval and fact recall,
-never our held-out loss). Details: [probe battery](probe-battery.md#dashboard).
+never our held-out loss). Details: [probes](probes.md#dashboard).
 
 **Reference models** lists the pinned public checkpoints and their packaged
 scores, and explains what they can and cannot tell you. **Not yet scored**
@@ -139,15 +147,15 @@ places it in the catalog and on the frontier.
   the same candidate for every question of a relation (`red`, `panda`), which
   no aggregate accuracy would tell you. It is the near-uniform prior of an
   untrained model, not candidate order (shuffling the candidates changes
-  nothing; see the constant-picks note in [probe-battery.md](probe-battery.md)); the page flags it
-  as a constant pick.
+  nothing; see [probes](probes.md#probes)); the page flags it as a constant
+  pick.
 - **Needle in a haystack.** Retrieval accuracy against context length, one line
   per checkpoint (its newest result) within one item group. Needle lengths are
-  fixed character counts from suite v4 on, so lab runs and re-scored
-  references share a group; older results (sized in each model's own tokens)
-  and results with other items or lengths are another group: pick it in the selector (default: the newest
-  result's group; the others are counted as hidden). The chance line comes from
-  that group's own results and is omitted when it is unknown or they disagree.
+  fixed character counts, so lab runs and references share a group; results
+  with other items or lengths form another group. Pick the group in the
+  selector (default: the newest result's; the others are counted as hidden).
+  The chance line comes from that group's own results and is omitted when it is
+  unknown or they disagree.
 - **Calibration.** A reliability diagram (confidence of the top guess against
   how often it was right; marker size = share of tokens), candidate against
   baseline, with ECE.
@@ -157,64 +165,35 @@ places it in the catalog and on the frontier.
 ## Explorer
 
 The explorer looks inside a small checkpoint: up to
-`klab.explorer.MAX_PARAMETERS` (60M) parameters and `MAX_TOKENS` (128)
-tokens of sample text. Bigger models get a clear message and only the
-architecture diagram, which comes from the config alone, so nothing is loaded.
-Explore from the page by selecting an immutable `step_*_gen_*` checkpoint
-generation or a pinned try/probe record and entering a sentence. Generations under
-`LAB/runs` and configured run roots appear with their step; mutable `latest.json`
-pointers and reference-model records are excluded. Duplicate selector paths are
-listed once. A record and its generation can still name the same checkpoint;
-comparison refuses their identical checkpoint digest. You can also use the CLI:
-
-For a custom sentence, save `explore.yaml` (see [explorer declarations](explore-config.md)):
-
-```yaml
-explore_config_version: 1
-text: Once upon a time
-```
+`klab.explorer.MAX_PARAMETERS` (60M) parameters and `MAX_TOKENS` (128) tokens
+of sample text. Bigger models show only the architecture diagram, which comes
+from the config alone, so nothing is loaded. On the page, pick an immutable
+`step_*_gen_*` generation or a pinned try or probe record and enter a sentence.
+Generations under `LAB/runs` and the configured run stores are listed with
+their step; `latest.json` pointers and reference models are not. The page
+always explores on CPU. From the CLI (see [looking inside](models.md#look-inside)):
 
 ```sh
 klab explore RUN --config explore.yaml
 klab explore RUN --json        # the full payload
 ```
 
-Results are cached as sealed records under
-`LAB/explorer/<checkpoint sha>/<key>.json`, keyed by checkpoint digest, sample
-text, explorer format and the native loader's actual runtime: engine, backend,
-device index and precision. ROCm is distinct from CUDA even when Torch calls
-both devices `cuda`. Requested backends (including `auto`) are not identities.
-The full producer runtime (including framework version, OS and device name) is
-recorded in sealed diagnostics; only the four canonical fields bind reuse.
-This is runtime provenance, not hardware qualification or a science identity.
-Loading and authorization still happen before every cache lookup.
-An edited cache file is ignored and recomputed. Missing or malformed runtime
-provenance and sealed payload/key mismatches cannot yield a verified hit.
-Text/JSON output reports the producer runtime and invocation `cache_reuse`
-status/reason (a sealed overlay, not persisted into diagnostic cache bytes).
-New v2 cache records include activation diagnostics. Historical v1 records
-remain readable in place, labeled "historical: re-explore for activations", and
-are excluded from paired comparison. New format-bound paths do not overwrite
-legacy cache bytes. The dashboard can display sealed legacy diagnostics, explicitly
-labeling missing/malformed provenance or key mismatches as unverified.
-Exploration goes through the same runtime preparation as `klab probe` and
-`klab try`: the run is resolved, the CPU default or
-`--runtime`/`--runtime-profile` is applied and authorized by the run's runtime
-policy (an accelerator needs a runtime profile, exactly as for probe), and the
-checkpoint loads through the verified loader. `--resource-envelope FILE` is
-checked before the command and again before every explorer stage; a violation
-stops it with the reason. The dashboard page always explores on CPU. Loading the
-checkpoint is a stage like the others: the cancel sentinel and envelope are
-checked before it, an out-of-memory error while loading or exploring becomes a
-clear message, memory is released either way and nothing is cached. It stops
-at the next stage if its invocation-specific cancel file appears. Before loading,
-the explorer prints `LAB/explorer/operations/<invocation-id>/CANCEL` to stderr
-(also with `--json`, whose stdout remains JSON). Touch that exact path to stop
-only that invocation. Each call gets a fresh operation directory, including cache
-hits; old operation directories and cancel files are retained. The old shared
-`LAB/explorer/CANCEL` is left untouched and no longer controls new invocations.
-Cache keys bind the explorer format as well as checkpoint, text and runtime. MLX checkpoints and
-attached semantic packs are refused with a reason.
+Results are sealed records under `LAB/explorer/<checkpoint sha>/<key>.json`,
+keyed by checkpoint digest, sample text, explorer format and the runtime that
+produced them (engine, backend, device index, precision). ROCm and CUDA are
+distinct even though Torch calls both `cuda`. The checkpoint is loaded and
+authorized before every cache lookup, and an edited or mismatched cache file is
+recomputed. Output reports the producing runtime and whether the cache was
+reused.
+
+Exploration uses the same runtime preparation as `klab probe`: CPU by default,
+or `--runtime`/`--runtime-profile` authorized by the run's runtime policy.
+`--resource-envelope FILE` is checked before the command and before every
+stage. An out-of-memory error becomes a clear message, memory is released and
+nothing is cached. Each invocation prints its own
+`LAB/explorer/operations/<invocation-id>/CANCEL` path to stderr; touch it to
+stop that invocation at the next stage. MLX checkpoints and attached semantic
+packs are refused with a reason.
 
 ![Explorer: architecture and parameters (MoE run)](assets/dashboard-explorer.png)
 
@@ -237,7 +216,7 @@ attached semantic packs are refused with a reason.
   (attention sink) and its spread (entropy). Latent and block-sparse layers
   select or compress keys and expose no per-key weights; the page says so
   rather than showing something made up.
-- **Activations** (v2 records). Token-aligned residual-stream RMS, calculated in
+- **Activations.** Token-aligned residual-stream RMS, calculated in
   FP32 before reduction: `residual_pre` is the input to the attention normalization,
   `residual_mid` follows the attention residual, and `residual_post` follows the
   FFN residual (the next block's normalization input, or final normalization input).
@@ -258,57 +237,15 @@ attached semantic packs are refused with a reason.
   (↺ marks a row an earlier position already read: the same n-gram or a hash
   collision), each table's reuse rate and the per-token memory gate. When every
   address of an n-gram table is just one earlier token's id modulo the table
-  size, a warning says the table is acting as a single-token table. In the demo
-  this caught a real problem: with `memory_table_size: 257` the legacy n-gram
-  hash multiplier (257) was a multiple of the row count, so the order-2 and
-  order-3 tables read the previous token and the one before it, not n-grams.
-  The hash now switches to a mixed scheme at such sizes (`klab.address_hash`;
-  see [re-baselining guidance](first-model.md#re-baseline-the-hash-affected-configs));
-  the screenshot predates the fix.
-
-## For developers
-
-- `klab.dashboard.lab_data`: everything the lab pages show, with no
-  Streamlit import (tested in `tests/test_dashboard_lab.py`).
-- `klab.dashboard.lab_pages`: the five pages. `probes.py` keeps the
-  shared probe components (banner, table, charts, Pareto). `explorer_view.py`
-  turns an exploration into figures and HTML. `ui.py` holds the palette, chips,
-  page headers and empty states.
-- `klab.explorer`: the explorer data layer. It reads architecture from
-  the config, and weights and activations from the verified loader. Attention
-  comes from the module's own softmax, memory reads from forward hooks on the
-  tables (the hash is never re-implemented), and routing from
-  `diagnostics="full"`.
-- Page renders are tested with `streamlit.testing.v1.AppTest` (empty and
-  populated labs, the real `app.py` entry point). CI's `lab-loop` job runs
-  them together with the probe and explorer tests.
-
-Rerun and escalation hints show a read-only follow-up plan from the sealed
-request, including custom benchmark selectors, runtime/resource values,
-checkpoint digests and baseline provenance. Rerun changes no policy; escalation
-names its intended tier change. Historical missing fields remain explicit.
-These plans are not executable declarations and do not promise reproduction.
-Authoring a new ProbeConfig and copying saved runtime/resource descriptors into
-native files is a separate explicit action. Verify checkpoint, suite and
-benchmark identities and review relocated paths before executing; source files
-and current defaults may have changed. Opening the dashboard never materializes
-these files or launches work.
-
-For a `NOT_COMPARABLE` try, the plan instead carries its failed comparison
-checks and sealed try inputs. Diagnose and explicitly repair those inputs
-before a new `klab try`; an unchanged rerun cannot fix comparability.
-Probe-only settings absent from TryConfig are labelled separately from
-historical missing fields. Recorded verdict tier advice is labelled as such;
-a bare named tier does not retain the sealed effective policy.
+  size, a warning says the table is acting as a single-token table.
 
 ### Compare checkpoints
 
 Choose two pinned selectors and a shared sentence, then press **Compare**. Both
-explorations run on CPU. Paired v2 records must be sealed and verified, identify
-distinct checkpoints, and have the same tokenizer digest, exact text, token IDs
-(including initial EOS), and canonical runtime (engine, backend, device index,
-precision). Truncated inputs and missing or malformed activation diagnostics are
-refused. Historical v1 records must be re-explored before comparison.
+explorations run on CPU. The two records must be sealed and verified, name
+distinct checkpoints, and share the tokenizer digest, exact text, token IDs
+(including the initial EOS) and runtime. Truncated inputs and missing activation
+diagnostics are refused.
 
 The paired RMS heatmaps share a scale; signed deltas are **right minus left**,
 centered on zero. Different architectures show their layer overlap and individual
@@ -317,10 +254,10 @@ separately for each checkpoint; dense FFNs have no MoE router. Changing a select
 or sentence hides the previous result until you run again. A failed new comparison
 clears the prior comparison, so old charts cannot appear under a new selection.
 
-### Training, memory and snapshot inspection
+## Run telemetry
 
-Run telemetry includes **Engram memory** (separate from device/RAM memory) and
-**Snapshot inspector**. Training opens with a compact memory summary and three
+Run telemetry includes **Engram memory** (separate from device and host memory)
+and **Snapshot inspector**. Training opens with a compact memory summary and three
 curves: training loss, validation loss and throughput, when recorded. Use the
 metric selector to add other curves. The quick navigation links retain the run
 selection across telemetry pages.
@@ -338,44 +275,41 @@ and inspects an explicitly selected checkpoint generation (newest by default).
 It reads projected metadata only; no weights are loaded and no inference runs.
 Save-time verification is distinct from a current local file check. Existing
 **Checkpoints** verification and **Explorer** remain available through the quick
-links. Explorer's native size/runtime restrictions still apply.
+links.
 
 Automatic refresh defaults to ten seconds and offers two seconds, thirty seconds,
 or paused. **Refresh now** refreshes the telemetry fragment without a full-page
-rerun. The query reads telemetry for selected runs only. A failed read retains
-that selection's last successful snapshot with a visible stale-data warning;
-it never substitutes another selection's data. Charts retain their existing
-interaction-preserving component.
+rerun. Only the selected runs are read. A failed read keeps that selection's
+last successful snapshot with a visible stale-data warning; it never shows
+another selection's data.
 
 ### Browse separate run stores
 
-Keep the existing `--runs-dir` as the primary store and add named directories:
+`--runs-dir` is the primary store; add named directories alongside it:
 
 ```sh
-klab dashboard --runs-dir /data/history/runs \
-  --run-store 'Devmind pilot=/data/devmind/pilot/runs' \
-  --lab-dir /data/history/lab
+klab dashboard --runs-dir /data/klab/runs \
+  --run-store 'Pilot=/data/pilot/runs' \
+  --lab-dir /data/klab/lab
 ```
 
 `--run-store LABEL=DIRECTORY` is repeatable. The **Run store** sidebar selector
 appears only when extra stores are configured. It switches the entire telemetry
-view without merging, copying or migrating databases. Labels and directories
-must be distinct. Missing stores remain unavailable rather than being created or
-falling back to another store. Run selections are remembered per directory;
+view without merging or copying databases. Labels and directories must be
+distinct. A missing store is shown as unavailable, never created or replaced by
+another store. Run selections are remembered per directory;
 checkpoint and metric selectors reset on a store change, and stale snapshots are
 also scoped to that directory. Identical run IDs in different stores stay separate.
 
-The existing `--lab-dir` still selects the Lab records for Home, Experiments,
-Models and Behaviors. Explorer sees the selected run store plus `LAB/runs`, as
-before. Changing the run store does not silently change the Lab records directory.
-With no extra stores, existing single-store commands behave as before.
-
+`--lab-dir` selects the Lab records for Home, Experiments, Models and
+Behaviors. Explorer sees the selected run store plus `LAB/runs`. Changing the
+run store does not change the Lab records directory.
 
 ### Focus and evidence
 
 The sidebar shows model names, exact run IDs, recorded status and update timestamps.
-“Focus recorded running runs” selects running records in the chosen store; stored
-status does not verify process liveness. “Open this run” links to Training with the
+**Focus recorded running runs** selects running records in the chosen store; stored
+status does not verify process liveness. **Open this run** links to Training with the
 configured store path and run ID. Missing linked stores stop rendering; missing or
 hidden runs select nothing instead of silently substituting another model. Store
 links only select configured/discovered stores, never arbitrary filesystem paths.
@@ -387,7 +321,7 @@ lookup plot maps token positions to recorded table/row addresses. It does not la
 hashed rows as concepts or claim neuron connections. It reads existing exploration
 payloads and adds no model execution.
 
-### Native snapshot completion
+## Generate
 
 **Generate** uses native dashboard controls, with prompt and continuation side by
 side. It lists complete eligible local snapshots across the selected run store,
@@ -399,10 +333,9 @@ An unpinned session defaults to that newest save. **Refresh snapshots** reads th
 catalog without loading weights. Explicit choices and deep links stay pinned;
 **Use latest** clears the pin and refreshes the list. Stable links accept `store`,
 `run`, and `checkpoint`. Missing links fail without substitution. A new save never
-changes an in-flight request. Archived, missing and incomplete file inventories
-are excluded; native cold verification remains mandatory on Generate.
+changes an in-flight request. Missing and incomplete file inventories are excluded; every load is verified again.
 
-#### Checkpoint counts
+### Checkpoint counts
 
 The Overview and Checkpoints summaries distinguish the store-wide available count,
 the selected runs' available count, and the newest saved step. The retained-save
@@ -412,7 +345,7 @@ numbers (Gen 2 or checkpoint_id 2) identify one run's second save, not the total
 number of checkpoints. Lab Home's **Scored checkpoints** counts sealed lab scores,
 including references, and is separate from training snapshots.
 
-#### CPU sampler setup and boundaries
+### CPU sampler
 
 The dashboard sends bounded JSON requests to a separate loopback CPU sampler.
 `KLAB_SNAPSHOT_SERVICE_CONFIG` points to a JSON file containing the allowed
@@ -422,13 +355,11 @@ The dashboard sends bounded JSON requests to a separate loopback CPU sampler.
 {"store": "/data/experiment/runs", "url": "http://127.0.0.1:8502"}
 ```
 
-Set that environment variable for both processes. Run
-`python src/klab/dashboard/snapshot_sampler.py` in the compatible provisioned
-inference environment/source, rather than launching that file with Streamlit.
-The historical `run`, `checkpoint`, and `checkpoint_sha256` configuration fields
-are ignored; they are not restrictions or automatic loading instructions.
+Set that environment variable for both processes, and run
+`python src/klab/dashboard/snapshot_sampler.py` in the provisioned environment
+(not through Streamlit).
 
-Keep the sampler's existing 10 GiB memory cap, two CPU threads and 200% CPU quota,
+Keep the sampler's 10 GiB memory cap, two CPU threads and 200% CPU quota,
 separate from the dashboard's resource envelope. Checkpoints exceeding 5 GiB of
 inventoried files are refused. The service only binds the configured 127.0.0.1
 port, rejects browser origins and unexpected Host values, and does not log prompts
@@ -445,18 +376,9 @@ Failed loading leaves no fallback model. The UI distinguishes the selected snaps
 sampler status at observation time and output identity. Cold verification can take
 minutes; generation is token-bounded, not forcibly cancelled at a wall-clock limit.
 
-Historical mappings are consulted before generation reads when
-`KLAB_CHECKPOINT_ARCHIVE_MAP` names a relocation map (set it for both the dashboard
-and the sampler service); without it no relocations are assumed. Mapped archived
-checkpoints report their archive location as unavailable: the native loader requires
-a generation inside its original run and does not support the relocated archive
-layout. No copy, symlink workaround or stale-source fallback is used. Other stores
-and incompatible model schemas fail explicitly.
+### Prompts and sampling
 
-#### Prompts and sampling
-
-Prompts start blank. Technical, code and story examples require visible selection;
-no TinyStories text is silently appended. Sampling defaults are temperature **0.7**,
+Prompts start blank; example prompts are added only when you pick one. Sampling defaults are temperature **0.7**,
 top-k **40**, seed **42** and **32** new tokens. Temperature 0–2, top-k 0–200
 (0 disables), a seed and 8–512 new tokens are supported. The combined prompt/output
 limit is 1,024 tokens and is checked before generation. Longer requests take longer;
@@ -468,7 +390,22 @@ defaults** restores the controls, keeps the prompt and snapshot, and clears the
 prior result without inference. Results retain the exact input, controls and
 verified identity, and the continuation can be downloaded.
 
-No prompts or outputs are added to training data. Generate refreshes manually to
-avoid interrupting a request. Explorer remains a separate ≤60M internal-diagnostics
-tool and uses blank sample text by default. No probe-suite prompts or scientific
-settings are changed.
+Prompts and outputs are never added to training data. Generate refreshes
+manually so it does not interrupt a request.
+
+## For developers
+
+- `klab.dashboard.lab_data`: everything the lab pages show, with no
+  Streamlit import (tested in `tests/test_dashboard_lab.py`).
+- `klab.dashboard.lab_pages`: the five pages. `probes.py` keeps the
+  shared probe components (banner, table, charts, Pareto). `explorer_view.py`
+  turns an exploration into figures and HTML. `ui.py` holds the palette, chips,
+  page headers and empty states.
+- `klab.explorer`: the explorer data layer. It reads architecture from
+  the config, and weights and activations from the verified loader. Attention
+  comes from the module's own softmax, memory reads from forward hooks on the
+  tables (the hash is never re-implemented), and routing from
+  `diagnostics="full"`.
+- Page renders are tested with `streamlit.testing.v1.AppTest` (empty and
+  populated labs, the real `app.py` entry point). CI's `lab-loop` job runs
+  them together with the probe and explorer tests.

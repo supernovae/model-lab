@@ -1,18 +1,14 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import shutil
 from pathlib import Path
 
 import numpy as np
 import pytest
-import torch
-import torch.nn.functional as F
 from test_training import config
 
 from klab.canonical import canonical_digest, canonical_json
-from klab.data.packing import TokenBlockDataset, load_prepared_data, prepare_data
+from klab.data.packing import load_prepared_data, prepare_data
 from klab.data.tokenizer import load_tokenizer
 from klab.training.manifest import sha256_file
 
@@ -125,65 +121,6 @@ def test_v6_assistant_only_requires_exact_masks(tmp_path: Path) -> None:
     (prepared.root / "train_supervision.npy").unlink()
     with pytest.raises(FileNotFoundError):
         load_prepared_data(prepared.root, byte_enabled=False)
-
-
-def test_named_v4_v5_and_implicit_v6_supervise_same_targets(tmp_path: Path) -> None:
-    configured = config(tmp_path)
-    current = prepare_data(configured, load_tokenizer(configured.tokenizer.path))
-    assert not any(current.root.glob("*supervision.npy"))
-    logits = torch.linspace(-1, 1, 4 * configured.model.vocab_size).reshape(
-        4, configured.model.vocab_size
-    )
-    datasets = [
-        TokenBlockDataset(current.train, 4, supervision=current.train_supervision)
-    ]
-    for version in ("contiguous-eos-v4", "contiguous-eos-v5"):
-        root = tmp_path / version
-        shutil.copytree(current.root, root)
-        manifest_path = root / "manifest.json"
-        manifest = json.loads(manifest_path.read_text())
-        manifest["packing_version"] = version
-        manifest["cache_identity"]["packing_version"] = version
-        manifest["settings_sha256"] = hashlib.sha256(
-            canonical_json(manifest["cache_identity"])
-        ).hexdigest()
-        if version.endswith("v5"):
-            entries = {}
-            for split in ("train", "validation"):
-                array = np.load(root / f"{split}.npy")
-                mask_path = root / f"{split}_supervision.npy"
-                np.save(mask_path, np.ones(array.shape, dtype=bool), allow_pickle=False)
-                entries[split] = {
-                    "dtype": "bool",
-                    "shape": list(array.shape),
-                    "tokens": len(array),
-                    "sha256": sha256_file(mask_path),
-                }
-            manifest["supervision"] = {"kind": "token-loss-mask-v1", **entries}
-        else:
-            manifest["supervision"] = None
-        _resign(manifest)
-        manifest_path.write_bytes(canonical_json(manifest) + b"\n")
-        loaded = load_prepared_data(root, byte_enabled=False)
-        assert (loaded.train_supervision is None) == version.endswith("v4")
-        datasets.append(
-            TokenBlockDataset(loaded.train, 4, supervision=loaded.train_supervision)
-        )
-    assert [dataset.block_indices.tolist() for dataset in datasets] == [
-        datasets[0].block_indices.tolist()
-    ] * 3
-    targets = torch.from_numpy(np.asarray(current.train[1:5], dtype=np.int64))
-    assert torch.equal(
-        targets, torch.from_numpy(np.asarray(datasets[2].ids[1:5], dtype=np.int64))
-    )
-    per_target = F.cross_entropy(logits, targets, reduction="none")
-    implicit_loss = per_target.mean()
-    explicit_mask = torch.tensor(
-        datasets[2].supervision[1:5].tolist(), dtype=torch.bool
-    )
-    explicit_loss = per_target[explicit_mask].mean()
-    assert int(explicit_mask.sum()) == len(targets)
-    assert torch.equal(implicit_loss, explicit_loss)
 
 
 @pytest.mark.parametrize("truncated", [False, True])

@@ -15,8 +15,6 @@ from functools import cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-# Dated records and design history show commands as they were.
-HISTORICAL = ("docs/history/", "docs/research/", "docs/decisions/")
 _LINK = re.compile(r"\]\(([^)\s]+)\)")
 
 
@@ -75,19 +73,14 @@ def test_every_docs_page_is_indexed_once() -> None:
         targets = _LINK.findall((ROOT / index).read_text(encoding="utf-8"))
         return [target.partition("#")[0] for target in targets if "/" not in target]
 
-    for directory in ("docs", "docs/history"):
-        index = Path(directory) / "README.md"
-        pages = {
-            path.name
-            for pattern in ("*.md", "*.json")
-            for path in (ROOT / directory).glob(pattern)
-        } - {"README.md"}
-        listed = [name for name in linked(index) if name in pages]
-        assert sorted(listed) == sorted(pages), (
-            f"{index} must list every page in {directory} exactly once: "
-            f"missing {sorted(pages - set(listed))}, "
-            f"repeated {sorted({name for name in listed if listed.count(name) > 1})}"
-        )
+    index = Path("docs/README.md")
+    pages = {path.name for path in (ROOT / "docs").glob("*.md")} - {"README.md"}
+    listed = [name for name in linked(index) if name in pages]
+    assert sorted(listed) == sorted(pages), (
+        f"{index} must list every page in docs exactly once: "
+        f"missing {sorted(pages - set(listed))}, "
+        f"repeated {sorted({name for name in listed if listed.count(name) > 1})}"
+    )
 
 
 def _subcommands(parser: argparse.ArgumentParser) -> dict:
@@ -125,8 +118,6 @@ def test_commands_shown_in_current_pages_exist() -> None:
     global_options = _options(root)
     problems = []
     for page in _pages():
-        if str(page).startswith(HISTORICAL):
-            continue
         for shown in _shown_commands((ROOT / page).read_text(encoding="utf-8")):
             invocation = re.search(r"(?:^|[\s\"'/])klab[\"']?\s+(.*)", shown)
             if invocation is None or "-m klab." in shown:

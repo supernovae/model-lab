@@ -11,24 +11,18 @@ from typing import Literal
 
 from pydantic import (
     Field,
-    StrictBool,
     StrictInt,
     StrictStr,
     field_validator,
     model_validator,
 )
 
-from klab.canonical import canonical_json, reject_duplicate_keys
+from klab.canonical import reject_duplicate_keys
 from klab.config.models import StrictModel
 from klab.training.manifest import sha256_file
 
 _RESOURCE_ROOT = Path(str(files("klab.research").joinpath("resources"))).resolve()
 _MAX_JSON_BYTES = 2 * 1024 * 1024
-_RUNNER_ONLY_ENTRY_ID = "learned-engram-portability-v1"
-_RUNNER_ONLY_GUIDANCE = (
-    "learned-engram-portability-v1 uses research portability build "
-    "--experiment learned-engram-portability-v1, not research scaffold"
-)
 _ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 _SCALE_IDS = ("smoke", "nano", "micro", "tiny")
 
@@ -47,251 +41,10 @@ class _Versioned(StrictModel):
         return value
 
 
-class Metric(StrictModel):
-    name: StrictStr
-    unit: StrictStr
-    kind: Literal["architectural", "measured", "capability"]
-    direction: Literal["lower", "higher", "descriptive"]
-
-
-class CardReference(StrictModel):
-    reference: StrictStr
-    role: Literal["development", "stress", "final"]
-    category: StrictStr
-    applicability: dict[StrictStr, StrictStr]
-
-
 class PaperReference(StrictModel):
     title: StrictStr
     url: StrictStr
     claim_boundary: StrictStr
-
-
-class ImplementationLink(StrictModel):
-    path: StrictStr
-    symbol: StrictStr
-
-
-class EvaluationPolicy(StrictModel):
-    periodic_validation_steps: dict[StrictStr, StrictInt]
-    endpoint_cards: list[StrictStr]
-    endpoint_policy: Literal["first_configured_limit"]
-    milestones_supported: StrictBool
-    primary_thresholds: list[dict[str, object]]
-
-
-class ResearchEntry(_Versioned):
-    format: Literal["klab-research-entry"]
-    version: Literal[1]
-    classification: Literal["recipe_study", "learning_reference"] = "recipe_study"
-    id: StrictStr
-    title: StrictStr
-    question: StrictStr
-    mechanisms: list[StrictStr]
-    hypothesis: StrictStr
-    failure_interpretation: StrictStr
-    controls: list[StrictStr]
-    independent_variables: list[StrictStr]
-    dependent_metrics: list[Metric]
-    confounders: list[StrictStr]
-    minimum_useful_scale: StrictStr
-    recommended_scale: StrictStr
-    hardware_notes: StrictStr
-    runtime_class: StrictStr
-    evaluation_policy: EvaluationPolicy
-    cards: list[CardReference]
-    papers: list[PaperReference]
-    implementation_links: list[ImplementationLink]
-    docs: list[StrictStr]
-    can_establish: list[StrictStr]
-    cannot_establish: list[StrictStr]
-    prerequisites: list[StrictStr]
-    recipe: StrictStr | None
-
-    @field_validator("id")
-    @classmethod
-    def valid_id(cls, value: str) -> str:
-        if not _ID.fullmatch(value):
-            raise ValueError("id must be lowercase kebab case")
-        return value
-
-    @field_validator("minimum_useful_scale", "recommended_scale")
-    @classmethod
-    def valid_scale(cls, value: str) -> str:
-        if value not in (
-            *_SCALE_IDS,
-            "reference-small",
-            "medium-research",
-            "large-local",
-        ):
-            raise ValueError(f"unsupported scale class: {value}")
-        return value
-
-    @field_validator("recipe")
-    @classmethod
-    def safe_recipe(cls, value: str | None) -> str | None:
-        if value is not None:
-            _relative_resource(value, "recipe")
-        return value
-
-    @model_validator(mode="after")
-    def validate_record(self) -> ResearchEntry:
-        required_text = (
-            self.title,
-            self.question,
-            self.hypothesis,
-            self.failure_interpretation,
-            self.hardware_notes,
-            self.runtime_class,
-        )
-        if any(not item.strip() for item in required_text):
-            raise ValueError(
-                "research title, question, hypothesis, interpretation, hardware, and runtime text must be nonempty"
-            )
-        if self.classification == "learning_reference":
-            if self.recipe is not None:
-                raise ValueError("learning reference entries must not declare a recipe")
-            if (
-                self.evaluation_policy.milestones_supported
-                or self.evaluation_policy.primary_thresholds
-            ):
-                raise ValueError(
-                    "learning reference entries do not declare recipe thresholds"
-                )
-        elif self.id == _RUNNER_ONLY_ENTRY_ID:
-            if self.recipe is not None:
-                raise ValueError(
-                    "runner-only learned portability entry must not declare a recipe"
-                )
-            if (
-                not self.evaluation_policy.milestones_supported
-                or self.evaluation_policy.primary_thresholds
-                != [{"metric": "held_out_accuracy", "value": 0.75}]
-            ):
-                raise ValueError(
-                    "learned portability entry must declare its milestone policy and held-out threshold"
-                )
-        elif self.recipe is None:
-            raise ValueError(
-                "only runner or learning reference entries may omit a recipe"
-            )
-        elif (
-            self.evaluation_policy.milestones_supported
-            or self.evaluation_policy.primary_thresholds
-        ):
-            raise ValueError(
-                "Phase A recipes do not support milestones or primary thresholds"
-            )
-        if any(card.role == "final" for card in self.cards):
-            raise ValueError("public catalog cards cannot be marked final")
-        if len({card.reference for card in self.cards}) != len(self.cards):
-            raise ValueError("card references must be unique")
-        if len({metric.name for metric in self.dependent_metrics}) != len(
-            self.dependent_metrics
-        ):
-            raise ValueError("dependent metric names must be unique")
-        for path in self.docs:
-            _relative_resource(path, "documentation path")
-        for link in self.implementation_links:
-            _relative_resource(link.path, "implementation path")
-        return self
-
-
-class MatrixOption(StrictModel):
-    label: StrictStr
-    set: dict[StrictStr, object]
-
-
-class FactorialFactor(StrictModel):
-    axis: StrictStr
-    control: StrictStr
-    treatment: StrictStr
-
-    @model_validator(mode="after")
-    def validate_levels(self) -> FactorialFactor:
-        if not self.axis or not self.control or not self.treatment:
-            raise ValueError("factorial axis and levels must be nonempty")
-        if self.control == self.treatment:
-            raise ValueError("factorial control and treatment must differ")
-        return self
-
-
-class FactorialDesign(_Versioned):
-    format: Literal["klab-factorial-design"]
-    version: Literal[1]
-    id: StrictStr
-    factors: tuple[FactorialFactor, FactorialFactor]
-
-    @field_validator("id")
-    @classmethod
-    def valid_id(cls, value: str) -> str:
-        if not _ID.fullmatch(value):
-            raise ValueError("factorial design id must be lowercase kebab case")
-        return value
-
-    @model_validator(mode="after")
-    def validate_factors(self) -> FactorialDesign:
-        if self.factors[0].axis == self.factors[1].axis:
-            raise ValueError("factorial factors must use distinct axes")
-        return self
-
-
-class ScaleRecipe(StrictModel):
-    base_set: dict[StrictStr, object]
-    axes: dict[StrictStr, list[MatrixOption]]
-    comparisons: list[dict[str, object]]
-    factorial_designs: list[FactorialDesign] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def validate_factorial_designs(self) -> ScaleRecipe:
-        identifiers = [design.id for design in self.factorial_designs]
-        if len(set(identifiers)) != len(identifiers):
-            raise ValueError("factorial design ids must be unique")
-        for design in self.factorial_designs:
-            for factor in design.factors:
-                options = self.axes.get(factor.axis)
-                if options is None:
-                    raise ValueError(
-                        f"factorial {design.id} uses unknown axis {factor.axis!r}"
-                    )
-                labels = [option.label for option in options]
-                if len(set(labels)) != len(labels):
-                    raise ValueError(
-                        f"factorial axis {factor.axis!r} has duplicate labels"
-                    )
-                if factor.control not in labels or factor.treatment not in labels:
-                    raise ValueError(
-                        f"factorial {design.id} levels must exist on {factor.axis!r}"
-                    )
-        return self
-
-
-class ResearchRecipe(_Versioned):
-    format: Literal["klab-research-recipe"]
-    version: Literal[1]
-    id: StrictStr
-    designs: dict[StrictStr, dict[StrictStr, ScaleRecipe]]
-
-    @field_validator("id")
-    @classmethod
-    def valid_id(cls, value: str) -> str:
-        if not _ID.fullmatch(value):
-            raise ValueError("id must be lowercase kebab case")
-        return value
-
-    @model_validator(mode="after")
-    def validate_designs(self) -> ResearchRecipe:
-        if "default" not in self.designs:
-            raise ValueError("research recipe must define a default design")
-        for name, scales in self.designs.items():
-            if not _ID.fullmatch(name):
-                raise ValueError(f"invalid design name: {name!r}")
-            if set(scales) != set(_SCALE_IDS):
-                raise ValueError(f"design {name} must define smoke, nano, micro, tiny")
-            for scale_name, recipe in scales.items():
-                if not recipe.axes or not recipe.comparisons:
-                    raise ValueError(f"{name}/{scale_name} needs axes and comparisons")
-        return self
 
 
 class LessonStep(StrictModel):
@@ -547,93 +300,13 @@ def _validate_https(value: str, field: str) -> str:
     return value
 
 
-def _validate_links(entry: ResearchEntry | MechanismLesson) -> None:
+def _validate_links(entry: MechanismLesson) -> None:
     for paper in entry.papers:
         _validate_https(paper.url, "paper URL")
 
 
-def _validate_recipe_file(path: Path, entry_id: str) -> ResearchRecipe:
-    raw, _ = _read_json(path)
-    recipe = ResearchRecipe.model_validate(raw)
-    if recipe.id != entry_id:
-        raise ValueError(f"recipe id {recipe.id!r} does not match entry {entry_id!r}")
-    return recipe
-
-
 def _available_ids(folder: str, *, root: Path | None = None) -> list[str]:
     return sorted(path.stem for path in (resource_root(root) / folder).glob("*.json"))
-
-
-def load_research(reference: str | Path, *, root: Path | None = None) -> ResearchEntry:
-    """Load a packaged entry id or an explicit local JSON fork."""
-    candidate = Path(reference).expanduser()
-    local_file = candidate.suffix.lower() == ".json"
-    if local_file:
-        if not candidate.exists():
-            raise ValueError(
-                f"research entry file does not exist: {candidate}; packaged IDs: "
-                f"{', '.join(_available_ids('catalog', root=root))}"
-            )
-        if candidate.is_symlink():
-            raise ValueError("local research entry must not be a symlink")
-        source = candidate.resolve(strict=True)
-        if root is not None:
-            selected_root = resource_root(root)
-            try:
-                relative = candidate.absolute().relative_to(selected_root)
-            except ValueError as error:
-                raise ValueError(
-                    "local research entry must be inside resource root"
-                ) from error
-            source = resource_path(relative.as_posix(), root=selected_root)
-        raw, _ = _read_json(source)
-        entry = ResearchEntry.model_validate(raw)
-        recipe_path = (
-            None
-            if entry.recipe is None
-            else _validate_contained(source.parent, entry.recipe, "recipe")
-        )
-    else:
-        identifier = str(reference)
-        if not _ID.fullmatch(identifier) or identifier not in _available_ids(
-            "catalog", root=root
-        ):
-            raise ValueError(
-                f"unknown research entry {identifier!r}; available IDs: "
-                f"{', '.join(_available_ids('catalog', root=root))}"
-            )
-        raw, _, _ = _read_packaged(f"catalog/{identifier}.json", root=root)
-        entry = ResearchEntry.model_validate(raw)
-        recipe_path = (
-            None
-            if entry.recipe is None
-            else _validate_contained(resource_root(root), entry.recipe, "recipe")
-        )
-    if entry.id != (candidate.stem if local_file else str(reference)):
-        raise ValueError("research entry id does not match requested identifier")
-    _validate_links(entry)
-    if recipe_path is not None:
-        _validate_recipe_file(recipe_path, entry.id)
-    return entry
-
-
-def load_recipe(
-    entry: ResearchEntry, *, local_root: Path | None = None
-) -> ResearchRecipe:
-    if entry.id == _RUNNER_ONLY_ENTRY_ID:
-        raise ValueError(_RUNNER_ONLY_GUIDANCE)
-    if entry.recipe is None:
-        raise ValueError(f"research entry {entry.id!r} has no runnable recipe")
-    root = local_root.resolve(strict=True) if local_root else _RESOURCE_ROOT
-    path = _validate_contained(root, entry.recipe, "recipe")
-    return _validate_recipe_file(path, entry.id)
-
-
-def list_research(*, root: Path | None = None) -> tuple[ResearchEntry, ...]:
-    identifiers = sorted(
-        path.stem for path in (resource_root(root) / "catalog").glob("*.json")
-    )
-    return tuple(load_research(identifier, root=root) for identifier in identifiers)
 
 
 def load_lesson(identifier: str, *, root: Path | None = None) -> MechanismLesson:
@@ -708,7 +381,3 @@ def load_dataset_source(
 def resource_sha256(relative: str, *, root: Path | None = None) -> str:
     _, _, path = _read_packaged(relative, root=root)
     return sha256_file(path)
-
-
-def canonical_payload(value: object) -> bytes:
-    return canonical_json(value)

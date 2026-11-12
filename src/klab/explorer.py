@@ -43,8 +43,6 @@ from klab.lab_context import LabContext, is_out_of_memory, release_memory
 from klab.lab_records import is_sealed, jsonable, seal, write_json_atomic
 
 EXPLORER_FORMAT = "klab-explorer-v2"
-_LEGACY_EXPLORER_FORMAT = "klab-explorer-v1"
-_READABLE_EXPLORER_FORMATS = frozenset({EXPLORER_FORMAT, _LEGACY_EXPLORER_FORMAT})
 ACTIVATION_SITES = ("residual_pre", "residual_mid", "residual_post")
 _ARCH_COMPARE_FIELDS = (
     "hidden_dim",
@@ -530,7 +528,7 @@ def runtime_identity(runtime: Any) -> dict[str, Any]:
 
 
 def runtime_label(value: Mapping[str, Any]) -> str:
-    """Human-readable producer identity, including explicit legacy uncertainty."""
+    """Human-readable producer identity, or why it cannot be verified."""
     try:
         runtime = runtime_identity(value.get("runtime"))
     except ValueError as error:
@@ -576,17 +574,6 @@ def _cache_path_for_format(
     )
 
 
-def _v1_cache_path(
-    lab_dir: Path,
-    checkpoint_sha256: str,
-    text: str,
-    runtime: Mapping[str, Any] | None = None,
-) -> Path:
-    return _cache_path_for_format(
-        _LEGACY_EXPLORER_FORMAT, lab_dir, checkpoint_sha256, text, runtime
-    )
-
-
 def cache_path(
     lab_dir: Path,
     checkpoint_sha256: str,
@@ -604,7 +591,7 @@ def read_cached(path: Path) -> dict[str, Any] | None:
         value = json.loads(path.read_text(encoding="utf-8"))
     except OSError, json.JSONDecodeError:
         return None
-    if not is_sealed(value) or value.get("format") not in _READABLE_EXPLORER_FORMATS:
+    if not is_sealed(value) or value.get("format") != EXPLORER_FORMAT:
         return None
     return value
 
@@ -612,7 +599,7 @@ def read_cached(path: Path) -> dict[str, Any] | None:
 def cache_issue(value: Mapping[str, Any], path: Path) -> str | None:
     """Why sealed bytes cannot verify a producer-matched cache hit."""
     fmt = value.get("format")
-    if fmt not in _READABLE_EXPLORER_FORMATS:
+    if fmt != EXPLORER_FORMAT:
         return "unsupported explorer cache format"
     try:
         runtime = runtime_identity(value.get("runtime"))
@@ -800,28 +787,6 @@ def explore(
                 reason = issue
             elif not refresh and path.exists():
                 reason = "unreadable, unsealed or wrong-format cache"
-            elif not refresh:
-                v1_runtime = _v1_cache_path(lab_dir, sha, text, runtime)
-                if v1_runtime.exists():
-                    v1_value = read_cached(v1_runtime)
-                    reason = (
-                        (
-                            cache_issue(v1_value, v1_runtime)
-                            or "historical v1 cache has no activation diagnostics"
-                        )
-                        if v1_value is not None
-                        and v1_value.get("format") == _LEGACY_EXPLORER_FORMAT
-                        else "unreadable, unsealed or wrong-format legacy cache"
-                    )
-                else:
-                    legacy = _v1_cache_path(lab_dir, sha, text)
-                    if legacy.exists():
-                        legacy_value = read_cached(legacy)
-                        reason = (
-                            cache_issue(legacy_value, legacy)
-                            if legacy_value is not None
-                            else "unreadable, unsealed or wrong-format legacy cache"
-                        ) or "legacy cache has no verified actual-runtime binding"
             result = explore_loaded(loaded, text, context=context, arch=arch)
         except Exception as error:
             if not is_out_of_memory(error):
@@ -935,7 +900,7 @@ def compare_explorations(
         if side.get("format") != EXPLORER_FORMAT:
             raise ExplorerUnavailable(
                 f"{side_name} exploration uses format {side.get('format')!r}; "
-                f"paired comparison requires {EXPLORER_FORMAT} (historical v1 has no activations)"
+                f"paired comparison requires {EXPLORER_FORMAT}"
             )
     try:
         left_runtime = runtime_identity(left.get("runtime"))

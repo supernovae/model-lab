@@ -16,5 +16,5 @@
   "try_changes": ["Predict the [B,T,V] logit shape before probing.", "Change exactly one ordinary model knob, then compare the hook shapes.", "Train briefly and compare training-format acquisition with held-out wording rather than assuming initialized behavior is learned behavior."],
   "limits": ["This is a readable PyTorch reference implementation, not a speed claim.", "A probe uses fresh initialized weights and is mechanism evidence only, not evaluation evidence."],
   "papers": [],
-  "docs": ["docs/architecture.md", "docs/references.md"]
+  "docs": ["docs/architecture.md"]
 }

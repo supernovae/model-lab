@@ -1,6 +1,0 @@
-evaluation_suite_version: 1
-id: runtime-contract-heldout
-evaluations:
-- id: heldout
-  role: gate
-  kind: heldout_lm

@@ -2,8 +2,7 @@
 
 Every reference is a fixed Hugging Face repository at an immutable commit. Only
 static metadata and ``*.safetensors`` weights may enter a snapshot (no pickles,
-no remote code, no quantization configs). The snapshot rules are shared with
-the Pythia trajectory adapter in :mod:`klab.research.pythia`.
+no remote code, no quantization configs).
 
 A loaded reference behaves like a loaded Model Lab run for the probe battery
 (``model``, ``tokenizer``, ``config.model.max_seq_len``, ``identity``), so it

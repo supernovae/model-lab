@@ -1,185 +1,163 @@
-# Training, checkpoints, and local continuation
+# Training
 
-Commands below use the [activated, provisioned environment](../README.md#first-run).
+`klab train CONFIG --run-id NAME` trains one config on one host. It prepares
+data if needed, validates at step zero, at the configured cadence and at the
+end, writes verified checkpoints and records metrics and events in the run
+store: the config's `logging.root_dir`, or `--runs-dir` when given. Commands that
+read runs (`eval`, `chat`, `generate`, `report --kind run`, `dashboard`) default
+to `$KLAB_WORK_DIR/runs`.
 
-For an ordinary baseline/candidate comparison use [lab mode](lab-mode.md), or
-start with [TinyStories](tinystories-microlab.md). This reference explains direct
-training, runtime behavior and explicit checkpoint transitions.
+Data is packed as token IDs with one EOS after each document, cut into blocks of
+`training.seq_len` and shuffled. A block can span documents; EOS separates them
+but does not mask attention. For whole-document training see
+[document batching](document-batching.md). Training budgets count supervised
+next-token targets.
 
-Model Lab packs plain token IDs with one EOS per document. A sequence may cross an EOS boundary: EOS separates records but does not create an attention mask. Source-acquisition budgets include EOS; training budgets count valid next-token targets.
+## Where it runs
 
-## Local runtime contract
+`runtime.backend` is `cpu`, `mps`, `cuda`, `rocm`, `xpu` or `auto` with the
+PyTorch engine (`auto` picks an available device and never falls back silently),
+or `runtime.engine: mlx` with `backend: metal`. Accelerator commands select a
+registered interpreter with `--runtime ID`; see [runtime](runtime.md).
 
-A run uses one local process on one host and one explicitly configured or automatically detected device. Use `runtime.backend: cpu|mps|cuda|rocm|xpu|auto` with the PyTorch engine. `auto` selects only an available local backend; an explicitly unavailable backend fails rather than falling back to CPU. The optional MLX engine requires `runtime.engine: mlx` and `runtime.backend: metal`.
+For bitwise repeatable CPU runs, keep `training.deterministic: true` (the
+default). Accelerators run the same lifecycle but are not bitwise identical to
+CPU.
 
-CPU reproducibility uses `runtime.backend: cpu` and `training.deterministic: true`. MPS and other accelerators can exercise the same local lifecycle, but are not claimed to be bitwise-identical to CPU.
+## Prepare before you hold an accelerator
 
-## Prepare on CPU before holding an accelerator
-
-`klab train` tokenizes and packs a missing data cache itself, before the model is
-built. For a large corpus that can take a long time on CPU while a reserved or
-rented accelerator waits. Prepare first, then make the training command refuse
-to do that work:
+`klab train` tokenizes a missing data cache itself, which for a large corpus can
+take a long time while a GPU waits. Prepare first on CPU, then make training
+refuse to prepare:
 
 ```sh
-klab data prepare RUN.yaml                 # CPU only; uses host cores, resumable
+klab data prepare RUN.yaml
 klab train RUN.yaml --run-id RUN --require-prepared
 ```
 
-For `local_text` sources, tokens are kept in a [reusable token store](token-store.md),
-so preparing the same data for another model or a larger budget copies them
-instead of tokenizing again.
-
-With `--require-prepared`, a published cache for this config is verified and
-used; a missing cache fails immediately with the `data prepare` command to run,
-and nothing is tokenized. Use it in any launch script that starts on a GPU host.
+With `--require-prepared`, a missing cache fails immediately and names the
+`data prepare` command to run.
 
 ## Smoke runs
 
 ```sh
-klab train --runs-dir klab-work/runs configs/smoke_cpu.yaml --run-id dense-smoke
-klab train --runs-dir klab-work/runs configs/smoke_moe_cpu.yaml --run-id moe-smoke
-klab train --runs-dir klab-work/runs configs/smoke_sparse_cpu.yaml --run-id sparse-smoke
-klab train --runs-dir klab-work/runs configs/smoke_combined_cpu.yaml --run-id combined-smoke
+klab train configs/smoke_cpu.yaml --run-id dense-smoke
+klab train configs/smoke_moe_cpu.yaml --run-id moe-smoke
+klab train configs/smoke_sparse_cpu.yaml --run-id sparse-smoke
+klab train configs/smoke_combined_cpu.yaml --run-id combined-smoke
 ```
 
-A smoke run validates a path through training, checkpointing, evaluation, and metrics. It is not a quality benchmark. Compare runs only when data, tokenizer, device, sequence length, token budget, optimizer, and seed are recorded and intentionally matched.
-
-## Compiled output projection and loss
-
-For PyTorch XPU BF16 runs, `runtime.compile_output_head_loss: true` optionally
-compiles the output projection and summed FP32 cross-entropy together. It keeps
-the same token IDs, tied weights, masking and effective batch; measured speed
-depends on the device and workload. The option is currently unavailable with
-activation offload, allocation ownership or portability runs. The default is
-off. Enabling it on a full-state continuation is an explicit runtime change:
-use `--allow-runtime-optimization` and retain its recorded transition.
-
-## Runtime forecast and target progress
-
-Planning is available only from compatible historical optimizer timings; without
-matching runtime/device identity, the estimate is unavailable rather than
-inferred from model size. An optional disposable warmup adds a separate
-measurement without advancing training state:
-
-```sh
-klab inspect CONFIG --estimate-runtime --json
-klab stage CONFIG --through warmup --output klab-work/stages/warmup
-klab train --runs-dir klab-work/runs CONFIG --stage-bundle klab-work/stages/warmup
-klab runtime status RUN_ID --runs-dir klab-work/runs --json
-```
-
-Live progress uses completed supervised targets as its primary denominator.
-`optimizer_only_eta` forecasts remaining optimizer work; it is not a whole-job
-ETA. Preparation, validation, checkpoint, reporting, and end-to-end costs stay
-separate in the final observation. Evaluation and generation are unavailable in
-a training record unless observed as separate operations. Stalled target
-progress suspends ETA but does not terminate the run.
-
-Progress JSON Lines are emitted on stderr. `runtime status` and the dashboard
-read the latest bounded snapshot plus the final timing record without changing
-run state. The dashboard's Training and Runtime views are operational telemetry,
-not a scheduler or automatic tuning interface. See [runtime policy](runtime.md#runtime-forecasting-and-progress)
-for exact-history matching and interpretation limits.
+A smoke run checks the path through training, checkpointing, evaluation and
+metrics. It says nothing about quality.
 
 ## Keep accelerators busy
 
-An accelerator is idle whenever the trainer waits on something other than an
-optimizer update. These settings bound that time; the
-[`accelerator_scale.yaml`](../configs/accelerator_scale.yaml) preset sets all of
-them and is the starting point for a long run.
+An accelerator idles whenever the trainer waits on something other than an
+update. [`configs/accelerator_scale.yaml`](../configs/accelerator_scale.yaml)
+sets all of the following and is the starting point for a long run.
 
 | Setting | Effect |
 | --- | --- |
-| `checkpoint.background` (default `true`) | A PyTorch checkpoint is copied to host memory, then written, hashed and verified off the training thread. Training waits only for the copy. |
-| `checkpoint.every_tokens`, `every_minutes` | Checkpoint by trained tokens or wall time instead of a step count. Set `every_steps: null` to use only these. |
-| `checkpoint.save_on_new_best: false` | An improving validation loss no longer writes a checkpoint by itself; `best` is then the best of the cadence checkpoints. |
+| `checkpoint.background` (default `true`) | Checkpoints are copied to host memory, then written, hashed and verified off the training thread. Training waits only for the copy. |
+| `checkpoint.every_tokens`, `every_minutes` | Checkpoint by trained tokens or wall time. Set `every_steps: null` to use only these. |
+| `checkpoint.save_on_new_best: false` | A better validation loss no longer writes a checkpoint by itself. |
 | `evaluation.every_tokens` | Validate by trained tokens. Set `every_steps: null` to use only this. |
-| `logging.every_steps` | Record update metrics every N updates (the first and last are always kept). |
-| `training.deterministic: false` | Lets the backend pick its fastest kernels and use all host threads. Runs are then not bitwise repeatable. |
-| `runtime.precision: bf16`, `attention.implementation: sdpa`, `runtime.compile_transformer_blocks: true` | Faster updates where the backend supports them. Test the workload first. |
+| `logging.every_steps` | Record update metrics every N updates (first and last always kept). |
+| `training.deterministic: false` | Lets the backend pick its fastest kernels and use all host threads. |
+| `runtime.precision: bf16`, `attention.implementation: sdpa`, `runtime.compile_transformer_blocks: true` | Faster updates where the backend supports them. |
+| `runtime.compile_output_head_loss: true` | Compiles the output projection and FP32 cross-entropy together (PyTorch XPU, BF16). |
 
 Background checkpoints need host memory for one copy of the weights and
-optimizer state. If less than 1.5 times that is available, that checkpoint is
-written inline instead. The final checkpoint of a run, milestone-retention
-runs and MLX runs are always written inline. One checkpoint is written at a
-time: if the next one is due before the previous has finished, training waits
-for it. A failed background write fails the run at the next update.
+optimizer state; with less than 1.5 times that available, a checkpoint is
+written inline. The final checkpoint, retention-policy runs and MLX runs always
+write inline. One checkpoint is written at a time, and a failed background write
+fails the run at the next update. Metrics and `progress.json` are written at most
+once a second, so the dashboard can trail training slightly.
 
-Update metrics and `progress.json` are written at most once a second and are
-held while a checkpoint is being written, because small synced writes stall
-behind its disk writeback. The dashboard can therefore trail training by that
-long.
+`runtime_final_observation` records where the run's wall time went: `checkpoint`
+(training waited), `checkpoint_background` (overlapped), `validation`, and the
+other phases.
 
-Every run records where its wall time went in the `runtime_final_observation`
-event: `checkpoint` is time training waited, `checkpoint_background` is write
-time that overlapped training, and `validation` is inline validation.
+Measured on one Arc Pro B70 with a 155M-parameter dense model (bf16, 200 updates
+of 4,096 tokens, about 1.9 GB per checkpoint), one run per row:
 
-Measured on one Arc Pro B70 with a 155M-parameter dense model (bf16, 200
-updates of 4,096 tokens, about 1.9 GB per checkpoint):
-
-| Run | End to end | Waiting on checkpoints | Validation | Checkpoints |
+| Configuration | End to end | Waiting on checkpoints | Validation | Checkpoints |
 | --- | --- | --- | --- | --- |
-| Before, default cadences | 105.6 s | 46.2 s (43.8%) | 9.4 s | 6 |
-| After, same config | 68.8 s | 10.6 s (15.5%) | 9.4 s | 6 |
-| After, token cadences and no best saves | 60.2 s | 10.5 s (17.4%) | 5.3 s | 3 |
-| After, plus SDPA, compiled blocks, relaxed determinism | 51.9 s | 11.9 s (22.8%) | 10.6 s | 3 |
+| Default cadences | 68.8 s | 10.6 s | 9.4 s | 6 |
+| Token cadences, no best saves | 60.2 s | 10.5 s | 5.3 s | 3 |
+| Plus SDPA, compiled blocks, relaxed determinism | 51.9 s | 11.9 s | 10.6 s | 3 |
 
-About 8 s of the remaining wait in each row is the final checkpoint, which is
-written inline; on a long run that is a fixed cost. The last row's validation
-time includes compiling the blocks. This is one short run per row on one
-machine, not a benchmark of long runs.
+About 8 s of each wait is the final checkpoint, written inline. The last row's
+validation includes compiling the blocks.
 
-## Checkpoint and resume workflow
+## Several GPUs on one host
 
-PyTorch checkpoints are immutable local generations under `klab-work/runs/<run-id>/checkpoints/`; `latest.json` points to the newest validated generation. Verify a checkpoint before continuing it:
+`runtime.secondary_device_indices` lists more devices of the same backend. Each
+holds a replica; one update's microbatches are dealt across the primary and the
+replicas, their gradients are summed on the primary in a fixed order, and the
+primary alone clips, steps and saves. The update and its checkpoint are the same
+as on one device, so a run can resume with or without secondaries.
 
-```sh
-klab train --runs-dir klab-work/runs configs/smoke_moe_cpu.yaml --run-id moe-part --stop-after-step 20
-klab checkpoint inspect klab-work/runs/moe-part/checkpoints/latest.json --json
-klab checkpoint verify klab-work/runs/moe-part/checkpoints/latest.json --json
-klab train --runs-dir klab-work/runs configs/smoke_moe_cpu.yaml --run-id moe-resumed \
-  --resume klab-work/runs/moe-part/checkpoints/latest.json
+```yaml
+runtime:
+  backend: xpu
+  device_index: 0
+  secondary_device_indices: [1]
+training:
+  gradient_accumulation: 16   # every device needs a share of each update
 ```
 
-Resume creates a child run and retains parent telemetry. It rejects changed model, optimizer, data, tokenizer, budget, engine, or backend configuration. Source or runtime identity drift requires `--allow-runtime-drift` and is recorded as `best_effort`; the flag never bypasses scientific compatibility. Recovery applies the same checks. Completed budgets cannot be resumed. Run-owned data, tokenizer, and memory-package artifacts—including their manifests—are verified before continuation.
+Each replica runs its share on its own host thread and exchanges weights and
+gradients alongside the primary's compute. Updates that used replicas report
+`performance/primary_compute_seconds`, `replica_compute_seconds`,
+`device_wait_seconds` and `gradient_merge_seconds`, and `batch/devices_used`
+shows how many devices took part. A persistent device wait means the devices or
+their shares are uneven. Clipping, the optimizer step and reporting are fixed
+costs per update, so with more devices raise `gradient_accumulation` rather than
+shrinking updates. `benchmarks/device_busy.py` shows device idle time directly.
 
-For supported dense PyTorch resumes and recovery, `--allow-runtime-optimization` permits a narrow set of execution changes while preserving scientific settings, effective training batch and validation coverage. The child records a best-effort transition; see [explicit runtime optimization on resume](checkpointing.md#explicit-runtime-optimization-on-resume).
+An update with a single microbatch runs on the primary alone. FP16, activation
+offload and memory-allocation runs are refused with secondaries. Validation runs
+on the primary.
 
-An explicit PyTorch/AdamW `--extend-budget CHECKPOINT` is different from ordinary
-resume: only a verified terminal full-state generation may grow both whole-update
-caps, with `optimizer.decay_steps` fixed to the parent's original step limit.
-It retains optimizer moments, cursor, RNG, and the old cosine schedule's floor;
-it does not restart a new longer cosine. An interrupted extended child then
-uses ordinary `--resume` with its unchanged extended config. The
-[checkpointing contract](checkpointing.md#explicit-terminal-budget-extension)
-specifies the compatibility checks; the [dense-LM budget study](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/experiments/research/history/dense-lm-token-budget-v1/results.md)
-records one executed ROCm continuation rather than a generic performance guarantee.
+## Forecasts and progress
 
-Current run manifests retain `manifest_version: 1` with `identity_version: run-identity-v2`. Requested/effective configuration digests exclude machine-local paths; architecture identity covers model and attention semantics separately. Historical identity-less manifests keep their original digest interpretation. A child's `parent_run_id` and `checkpoint_sha256` bind the exact selected parent generation, not a moving pointer.
+```sh
+klab inspect CONFIG --estimate-runtime --json
+klab stage CONFIG --through warmup --output "$WORK/stages/warmup"
+klab train CONFIG --stage-bundle "$WORK/stages/warmup"
+klab runtime status RUN_ID --runs-dir "$RUNS" --json
+```
 
-Full PyTorch continuation uses checkpoint directory format 2 with native state codec version 2. Verification checks the resolved RunConfig and its digests, canonical tensors/aliases/trainability, named optimizer coverage and moment shapes, completed-update schedule and learning rate, counters/cursor, and safe host/selected-device RNG envelopes. PyTorch saves copy the state to host memory and write it off the training thread; see [keep accelerators busy](#keep-accelerators-busy). Older format-2 native envelopes remain weights-only: use `checkpoint verify --weights-only` for inference/promotion eligibility, not as proof that full optimizer continuation is supported.
+`inspect --estimate-runtime` forecasts update time from earlier runs on the
+same runtime and device; without one it reports the forecast as unavailable.
+`stage --through warmup` runs a disposable pilot that measures real updates
+without advancing training. While training, progress counts completed
+supervised targets, and `optimizer_only_eta` estimates the remaining optimizer
+work, not the whole job. Progress is emitted as JSON lines on stderr;
+`runtime status` and the dashboard read the latest snapshot. See
+[metrics](metrics.md#forecasts-and-progress).
 
-A POSIX advisory writer lease covers either engine's training session; another writer or recovery operation fails rather than modifying the same run. Explicit `--recover klab-work/runs/<parent-id>` reconciles finalized verified generations, repairs `latest.json`/`best.json`, and starts a child from the selected generation. Temporary or corrupt generations are not adopted. Equal finite validation losses retain the earlier generation as best. `checkpoint.keep_periodic: false` preserves latest, best, and the immediate verified predecessor; it does not preserve a fully verifiable historical learning curve.
+## Stopping
 
-Promotion reuses compatible weights with a fresh optimizer/cursor, using the **destination** dataset and budgets. Source architecture semantics and tokenizer contents must match. It is useful for continuing a model on a new domain/chat corpus, not for automatically resizing a backbone or converting dense weights into MoE.
+Ctrl-C, SIGTERM or creating the printed `CANCEL` file stops at the next update
+boundary with a validated checkpoint. A cancellation before the run exists stops
+without creating it. Never kill a process while it writes a checkpoint.
 
-MLX uses the same immutable generation, artifact, provenance, promotion, recovery, and evidence contract. Its native codec stores validated JSON and optimizer safetensors. Same-engine continuation restores native state; cross-engine promotion copies canonical weights and starts fresh training state. Native files can be verified without the MLX SDK; execution still requires it. See [checkpointing](checkpointing.md#native-mlx-generations).
+## Evaluation during training
 
-A cancellation already present during startup stops before the next startup phase, without creating a run or inventing a checkpoint. The trainer raises `InterruptedError`; native workers acknowledge a retained regular, non-symlink cancel marker and lab tries seal an interruption without a completed arm. A worker receiving `InterruptedError` without that marker records `FAILED` and re-raises the original error. The trainer's broader existence check also stops on a directory or a symlink to an existing target, but those are not worker cancellation acknowledgment authority; they remain retained failure evidence. If cancellation or a handled signal arrives after run creation but before initial validation, the run records `interrupted` with no new checkpoint. Existing parent checkpoints and cancel markers remain untouched. A stop after committed updates retains the normal safe checkpoint boundary behavior.
+Validation runs at step zero, at `evaluation.every_steps` or `every_tokens`, and
+at the end or interruption, scoring `evaluation.max_batches` batches of the
+held-out split. Every report is bound to its checkpoint, with the exact number of
+targets scored. `evaluation.panels` replaces the ordinary sample with named fixed
+panels; see [evaluation](evaluation.md#during-training).
 
-Both engines validate at step zero (unless startup was cancelled), each configured cadence, and the terminal update. Exact supervised-target counts, finite loss, protocol settings, and artifact identities accompany each checkpoint-bound report. Non-multiple budgets mask only the remaining valid targets; wholly masked chunks do not update state. Validation selects nonempty blocks before applying its batch limit and binds supervision/byte-address files when present. Training and validation modes are restored; diagnostics are captured before validation can replace them.
+After a run completes, `train` writes a bounded post-training triage (loss
+trend, a short generation probe and integrity checks); `klab report RUN_ID --kind
+run` shows it beside the run's evidence.
 
-## Mechanism-specific diagnostics
+## Continue, branch and recover
 
-The MoE smoke configuration has local Top-K experts with configurable selection. It has no capacity clipping or distributed expert dispatch. Routing metrics include the auxiliary balance loss, entropy, maximum expert fraction, and selected-probability mass; none demonstrates expert specialization by itself.
-
-Block-sparse attention reports selected and available causal key positions, selection ratio, and a relative selected-key score-product estimate. These are resource diagnostics, not a quality conclusion or a custom-kernel speed claim. Use a matched dense run for a controlled ablation.
-
-See [runtime policy](runtime.md), [metrics](metrics.md), and [architecture](architecture.md) for the terms used by run reports.
-
-Opt-in [`checkpoint.retention`](checkpoint-milestones.md) additionally preserves
-scientific milestones and reserves its declared peak bytes plus free-space
-headroom. Its keep-set replaces the default latest/previous/best-only bound.
-This RunConfig policy differs from experiment-plan `retention.keep_periodic`,
-which describes plan storage expectations and does not configure the trainer.
+Checkpoints, resume, promotion, budget extension and recovery are described in
+[checkpointing](checkpointing.md). Memory planning, gradient accumulation,
+recomputation and offload are in [memory](memory.md).

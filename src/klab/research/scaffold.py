@@ -13,28 +13,21 @@ import yaml
 from pydantic import ValidationError
 
 from klab.canonical import canonical_digest, canonical_json
-from klab.config.loading import load_config
 from klab.config.models import RunConfig, TokenizerTrainConfig
 from klab.engram.packs import _rename_noreplace
 from klab.experiments.compiler import apply_patch, patchable_config
-from klab.experiments.matrix import expand
-from klab.experiments.study import plan_study, study_workspace
 from klab.model.portable_engram import load_portable_engram
 from klab.research.catalog import (
     MechanismLesson,
-    ResearchEntry,
-    ResearchRecipe,
     load_dataset_source,
     load_datasets,
     load_lesson,
     load_profiles,
-    load_recipe,
-    load_research,
     resource_path,
-    resource_root,
     resource_sha256,
 )
 from klab.training.manifest import config_sha256, sha256_file
+from klab.workdir import resolve_work_dir
 
 
 def _dataset_names(*, root: Path | None = None) -> tuple[str, ...]:
@@ -75,20 +68,6 @@ def _write(path: Path, data: bytes | str) -> None:
 
 def _yaml_bytes(value: object) -> bytes:
     return yaml.safe_dump(value, sort_keys=False, allow_unicode=True).encode("utf-8")
-
-
-def _source_paths(
-    reference: str | Path, entry: ResearchEntry, *, root: Path | None = None
-) -> tuple[Path | None, Path]:
-    candidate = Path(reference).expanduser()
-    if candidate.suffix.lower() == ".json" and candidate.is_file():
-        entry_path = candidate.resolve(strict=True)
-        recipe_path = (entry_path.parent / entry.recipe).resolve(strict=True)
-        return entry_path, recipe_path
-    return (
-        resource_path(f"catalog/{entry.id}.json", root=root),
-        resource_path(entry.recipe, root=root),
-    )
 
 
 def _dataset_mapping(name: str, *, root: Path | None = None) -> dict[str, object]:
@@ -229,48 +208,6 @@ def _apply_overlay(
     return apply_patch(config, nested) if nested else config
 
 
-def _research_config_sha256(config: RunConfig) -> str:
-    payload = config.model_dump(mode="json")
-    allocation_path = config.dataset.allocation_manifest_path
-    if allocation_path is not None:
-        if allocation_path.is_symlink() or not allocation_path.is_file():
-            raise ValueError("allocation research config requires a regular manifest")
-        dataset = payload["dataset"]
-        if not isinstance(dataset, dict):
-            raise TypeError("allocation research config lacks a dataset mapping")
-        dataset["allocation_manifest_sha256"] = sha256_file(allocation_path)
-    return config_sha256(payload)
-
-
-def _write_resolved_config(config: RunConfig, root: Path, directory: Path) -> bytes:
-    value = config.model_dump(mode="json")
-
-    def rebase(item: object, key: str | None = None) -> object:
-        if isinstance(item, dict):
-            return {name: rebase(child, name) for name, child in item.items()}
-        if isinstance(item, list):
-            return [rebase(child) for child in item]
-        if key in _PATH_KEYS and isinstance(item, str):
-            absolute = Path(item)
-            if not absolute.is_absolute():
-                absolute = root / absolute
-            absolute = absolute.resolve()
-            scaffold_root = root.resolve()
-            workspace_root = Path(__file__).resolve().parents[3]
-            if (
-                not absolute.is_relative_to(scaffold_root)
-                and not absolute.is_relative_to(workspace_root)
-                and key != "root_dir"
-            ):
-                raise ValueError(
-                    f"generated config path escapes scaffold and workspace roots: {item}"
-                )
-            return Path(os.path.relpath(absolute, directory.resolve())).as_posix()
-        return item
-
-    return _yaml_bytes(rebase(value))
-
-
 def _load_base(*, root: Path | None = None) -> dict[str, object]:
     value = yaml.safe_load(
         resource_path("base.yaml", root=root).read_text(encoding="utf-8")
@@ -311,19 +248,6 @@ def _cleanup(temporary: Path) -> None:
         shutil.rmtree(temporary)
 
 
-def _read_recipe(
-    entry: ResearchEntry, reference: str | Path, *, root: Path | None = None
-) -> tuple[ResearchRecipe, Path | None, Path]:
-    entry_path, recipe_path = _source_paths(reference, entry, root=root)
-    local_root = (
-        entry_path.parent
-        if Path(reference).suffix.lower() == ".json"
-        else resource_root(root)
-    )
-    recipe = load_recipe(entry, local_root=local_root)
-    return recipe, entry_path, recipe_path
-
-
 def _command_environment(backend: str) -> tuple[str, str]:
     if backend in {"cpu", "mps"}:
         return "uv run --locked --extra cpu", ""
@@ -336,375 +260,6 @@ def _command_environment(backend: str) -> tuple[str, str]:
             "Do not run `uv sync` into that environment: it would replace vendor wheels."
         ),
     )
-
-
-def _study_readme(
-    entry: ResearchEntry,
-    scale: str,
-    data: str,
-    backend: str,
-    design: str,
-    coordinates: list[dict[str, object]],
-    run_count: int,
-    pair_count: int,
-    factorial_count: int,
-    workspace: str,
-    *,
-    root: Path | None = None,
-) -> str:
-    profile = load_datasets(root=root).datasets[data]
-    command, environment_note = _command_environment(backend)
-    choices = "\n".join(
-        f"- `{size}` — {scale.hidden_dim}D, {scale.num_layers} layers, {scale.num_heads} heads, FFN {scale.ffn_dim}, {scale.max_steps} steps / {scale.max_tokens} target tokens"
-        for size, scale in sorted(load_profiles(root=root).scales.items())
-    )
-    coordinate_rows = "\n".join(
-        f"| `{json.dumps(item['coordinate'], sort_keys=True)}` | `configs/{item['config_sha256']}.yaml` |"
-        for item in coordinates
-    )
-    prep = "\n".join(
-        f"{command} klab data prepare configs/{item['config_sha256']}.yaml"
-        for item in coordinates
-    )
-    first = coordinates[0]
-    return f"""# {entry.title}
-
-**Question:** {entry.question}
-
-{entry.hypothesis}
-
-Run these commands from this scaffold directory. Set `WORK` to another disk if needed; all seeds and resumed children share its single store. Reusable tokenizer/data inputs retain their existing cache paths.
-
-{environment_note}
-
-```sh
-WORK="{workspace}"
-mkdir -p "$WORK"
-export KLAB_WORK_DIR="$WORK"
-```
-
-## Path map
-
-| Path | Purpose |
-|---|---|
-| `base.yaml`, `matrix.yaml`, `study.yaml`, `configs/` | Versioned study definition and resolved configurations |
-| `tokenizer.yaml`, `research.json`, `research_sources/` | Input and recipe identities |
-| `$WORK/staging/` | Disposable capability pilots |
-| `$WORK/runs/`, `$WORK/receipt.json` | Mutable runs, checkpoints, and submission receipt |
-| `$WORK/local-reports/` | Local collected reports before deliberate publication |
-
-For a standalone mechanism walkthrough, use the
-[lesson guide](https://github.com/supernovae/model-lab/blob/main/docs/research/lesson-paths.md).
-This study's preparation and matched-coordinate commands are below.
-
-## Fixed data, scale, and runtime
-
-- Dataset `{data}`: {" ".join(profile.notes)}
-- Source and rights: {profile.license} [{profile.source_url}]({profile.source_url})
-- Dataset seed `{profile.dataset_seed}` is independent of model seeds declared in `matrix.yaml`.
-- Scale `{scale}`; backend `{backend}`; design `{design}`. The recipe has {run_count} planned coordinates, {pair_count} declared pairs, and {factorial_count} versioned 2×2 factorial designs.
-- Other supported profiles (scale is independent of data and budget):
-{choices}
-- Tokenizer fitting uses only the declared training prefix. Held-out validation and capability-card examples are not tokenizer inputs. Remote acquisition is explicit; scaffolding never accesses dataset bodies. Snapshot profiles declare their acquisition and exclusion policies in `source.yaml`; strict whole-document budgets may differ from retired direct-loading selections.
-- Existing numeric budgets are retained. If strict whole-document preparation rejects a token cap, review the declared document selection and token limits in a new config; the scaffold does not silently resize them.
-- Capability cards: {", ".join(f"`{card}` ({profile.card_applicability.get(card, 'not applicable')})" for card in (item.reference for item in entry.cards))}. Cards are unchanged, unsealed development/stress evaluations; remote-corpus profiles use them only as out-of-domain stress, not corpus-quality tests. Held-out LM loss and each card stay separate. Generated stories are unscored examples.
-- Configured endpoint stops at the first existing step or target-token limit. Periodic validation is not a preregistered milestone; primary thresholds are absent. Actual steps and targets must be reported.
-
-## Prepare explicitly, then plan or train
-
-Acquisition precedes tokenizer fitting and preparation for snapshot profiles:
-
-```sh
-{_acquisition_commands(data, command, root=root)}\
-{command} klab tokenizer train tokenizer.yaml
-{prep}
-{command} klab study plan study.yaml
-```
-
-Exported standalone configurations:
-
-| Coordinate | Config |
-|---|---|
-{coordinate_rows}
-
-The config files use full scientific SHA-256 names; labels never become paths.
-After preparation, an independent arm and its explicit continuation use the
-native trainer. Choose a listed config; this example uses the first coordinate.
-Before training directly, run `inspect` and `workspace preflight` on that listed
-config, then `stage` it with `--through smoke` and a fresh output under
-`$WORK/staging/`; see the
-[iteration guide](https://github.com/supernovae/model-lab/blob/main/docs/iteration.md#check-the-actual-proposed-configuration)
-for syntax, runtime selection and what each check establishes. Staging performs
-a disposable pilot on the configured runtime.
-
-```sh
-{command} klab train configs/{first["config_sha256"]}.yaml --run-id one-arm --runs-dir "$WORK/runs" --stop-after-step 2
-{command} klab checkpoint verify "$WORK/runs/one-arm/checkpoints/latest.json" --json
-{command} klab train configs/{first["config_sha256"]}.yaml --run-id one-arm-resumed --runs-dir "$WORK/runs" --resume "$WORK/runs/one-arm/checkpoints/latest.json" --stop-after-step 3
-```
-
-To dispatch the complete study, use an explicit store and worker:
-
-```sh
-{command} klab worker register research-{backend} --backend {backend} --store "$WORK/runs"
-{command} klab study submit study.yaml --receipt "$WORK/receipt.json" --worker research-{backend} --store "$WORK/runs"
-{command} klab controller run --store "$WORK/runs"
-{command} klab study collect study.yaml "$WORK/receipt.json" --runs-dir "$WORK/runs"
-{command} klab study report study.yaml "$WORK/receipt.json" --evidence PATH_FROM_COLLECT --research research.json --runs-dir "$WORK/runs" --output "$WORK/local-reports"
-```
-
-Use `$WORK/staging/`, `$WORK/exercises/`, and `$WORK/captures/` for experiment-local staging and observations. Keep verified evidence and mutable runs in this external work directory. Maintain experiment definitions and small evidence references in Workshop. A resume uses the same `--runs-dir "$WORK/runs"` and a new run ID.
-
-The scaffold itself performs no tokenization, data preparation/download, training, worker registration, submission, controller execution, inference, or evaluation. Use the independent train command above or the explicit plan→worker→submit→controller→collect→report route.
-
-## Controls and interpretation
-
-**Failure interpretation:** {entry.failure_interpretation}
-
-**Fixed controls:** {"; ".join(entry.controls)}
-
-**Varied fields:** {", ".join(entry.independent_variables)}
-
-**Confounders:** {"; ".join(entry.confounders)}
-
-**Can establish:** {"; ".join(entry.can_establish)}
-
-**Cannot establish:** {"; ".join(entry.cannot_establish)}
-
-**Prerequisites / unavailable arms:** {"; ".join(entry.prerequisites) if entry.prerequisites else "None for the declared recipe."}
-
-The first displayed configuration is a `{scale}`/`{data}`/`{backend}` authoring example. Dataset choices in the selected resources are {", ".join(f"`{name}`" for name in _dataset_names(root=root))}. Runtime and input readiness still require the explicit checks above. Larger reference-small, medium-research, and large-local profiles are recommendations only here; no GQA/reference aliases are generated.
-
-"""
-
-
-def _entry_payload(entry: ResearchEntry) -> dict[str, object]:
-    return entry.model_dump(mode="json")
-
-
-def scaffold_research(
-    reference: str | Path,
-    output: Path,
-    *,
-    scale: str = "micro",
-    data: str = "offline",
-    backend: str = "cpu",
-    design: str = "default",
-    root: Path | None = None,
-) -> Path:
-    """Write a complete editable study scaffold; never prepare or execute it."""
-    entry = load_research(reference, root=root)
-    if entry.id == "learned-engram-portability-v1":
-        raise ValueError(
-            "learned-engram-portability-v1 uses research portability build "
-            "--experiment learned-engram-portability-v1, not research scaffold"
-        )
-    if entry.recipe is None:
-        raise ValueError(
-            f"research entry {entry.id!r} has no scaffold recipe; "
-            "provide a current recipe-backed entry with --resource-root"
-        )
-    if data not in _dataset_names(root=root):
-        raise ValueError(
-            f"unsupported dataset {data!r}; choose {', '.join(_dataset_names(root=root))}"
-        )
-    if backend not in _BACKENDS:
-        raise ValueError(
-            f"unsupported backend {backend!r}; choose {', '.join(sorted(_BACKENDS))}"
-        )
-    profiles = load_profiles(root=root)
-    if scale not in profiles.scales:
-        raise ValueError(
-            f"unsupported runnable scale {scale!r}; supported: {', '.join(profiles.scales)}; larger named classes are recommendation-only"
-        )
-    recipe, entry_path, recipe_path = _read_recipe(entry, reference, root=root)
-    if design not in recipe.designs:
-        raise ValueError(
-            f"unsupported design {design!r} for {entry.id}; choose {', '.join(sorted(recipe.designs))}"
-        )
-    try:
-        scale_recipe = recipe.designs[design][scale]
-    except KeyError as error:
-        raise ValueError(
-            f"recipe {entry.id} has no {scale!r} scale for design {design!r}"
-        ) from error
-    if "seed" not in scale_recipe.axes:
-        raise ValueError("recipe must explicitly declare its matched seed axis")
-    if any("seed" not in option.set for option in scale_recipe.axes["seed"]):
-        raise ValueError("every seed axis option must explicitly set seed")
-
-    destination, temporary = _destination(output)
-    workspace_name = (
-        destination.name
-        if destination.parent.name in {"samples", "research"}
-        and destination.parent.parent.name == "experiments"
-        else entry.id
-    )
-    workspace = study_workspace(workspace_name)
-    try:
-        base = _load_base(root=root)
-        base = _apply_overlay(base, _scale_patch(scale, data, backend, root=root))
-        base = _apply_overlay(base, scale_recipe.base_set)
-        base = _apply_overlay(
-            base,
-            {
-                "logging.root_dir": Path(
-                    os.path.relpath(workspace / "runs", temporary)
-                ).as_posix()
-            },
-        )
-        base["name"] = f"{entry.id}-{scale}-{data}"
-        _validate_run(base)
-        _write(temporary / "base.yaml", _yaml_bytes(base))
-        tokenizer_values = _tokenizer_values(data, root=root)
-        TokenizerTrainConfig.model_validate(tokenizer_values)
-        _write(temporary / "tokenizer.yaml", _yaml_bytes(tokenizer_values))
-
-        axes = {
-            name: [option.model_dump(mode="json") for option in options]
-            for name, options in scale_recipe.axes.items()
-        }
-        matrix = {
-            "matrix_version": 1,
-            "base_config": "base.yaml",
-            "scheduling": {"requirements": {"backend": [backend]}},
-            "axes": axes,
-        }
-        study = {
-            "study_version": 1,
-            "name": entry.id,
-            "matrix": "matrix.yaml",
-            "cards": [card.reference for card in entry.cards],
-            "comparisons": [item for item in scale_recipe.comparisons],
-        }
-        _write(temporary / "matrix.yaml", _yaml_bytes(matrix))
-        card_inputs = []
-        for card in entry.cards:
-            if Path(card.reference).suffix.lower() in {".yaml", ".yml", ".json"}:
-                card_path = resource_path(card.reference, root=root)
-                _write(temporary / card.reference, card_path.read_bytes())
-                card_inputs.append(card.reference)
-        _write(temporary / "study.yaml", _yaml_bytes(study))
-        # Existing expansion and study planning are the only matrix/pair engines.
-        expanded = expand(temporary / "matrix.yaml")
-        planned = plan_study(temporary / "study.yaml")
-        if len(expanded) != len(planned.expanded):
-            raise ValueError("study planner and matrix expansion disagree")
-
-        coordinates: list[dict[str, object]] = []
-        seen_hashes: set[str] = set()
-        config_payloads: dict[str, bytes] = {}
-        for item in expanded:
-            digest = _research_config_sha256(item.config)
-            if digest in seen_hashes:
-                raise ValueError(
-                    f"duplicate scientific configuration hash at {item.coordinate}"
-                )
-            seen_hashes.add(digest)
-            filename = f"configs/{digest}.yaml"
-            config_bytes = _write_resolved_config(
-                item.config, temporary, temporary / "configs"
-            )
-            # The file is published once after all matrix identities have been checked.
-            config_payloads[filename] = config_bytes
-            coordinates.append(
-                {
-                    "coordinate": item.coordinate,
-                    "config_sha256": digest,
-                    "path": filename,
-                }
-            )
-        for filename, content in config_payloads.items():
-            _write(temporary / filename, content)
-        for item in coordinates:
-            exported = load_config(temporary / str(item["path"]))
-            if _research_config_sha256(exported) != item["config_sha256"]:
-                raise ValueError(
-                    f"exported config identity mismatch at {item['coordinate']}"
-                )
-        # The planner was run against the exact published scientific inputs.
-        planned = plan_study(temporary / "study.yaml")
-        if [_research_config_sha256(item.config) for item in planned.expanded] != [
-            str(item["config_sha256"]) for item in coordinates
-        ]:
-            raise ValueError(
-                "exported config identities differ from matrix coordinates"
-            )
-
-        readme = _study_readme(
-            entry,
-            scale,
-            data,
-            backend,
-            design,
-            coordinates,
-            len(planned.expanded),
-            len(planned.pairs),
-            len(scale_recipe.factorial_designs),
-            Path(os.path.relpath(workspace, destination.resolve())).as_posix(),
-            root=root,
-        )
-        _write(temporary / "README.md", readme)
-        dataset_inputs = _write_dataset_source(temporary, data, root=root)
-        source_inputs = {
-            "research_sources/catalog-entry.json": (
-                entry_path
-                if entry_path is not None
-                else resource_path(f"catalog/{entry.id}.json", root=root)
-            ),
-            "research_sources/recipe.json": recipe_path,
-            "research_sources/base.yaml": resource_path("base.yaml", root=root),
-            "research_sources/profiles.json": resource_path("profiles.json", root=root),
-            "research_sources/datasets.json": resource_path("datasets.json", root=root),
-        }
-        for relative, source in source_inputs.items():
-            _write(temporary / relative, source.read_bytes())
-        input_names = [
-            "base.yaml",
-            "tokenizer.yaml",
-            "matrix.yaml",
-            "study.yaml",
-            *dataset_inputs,
-            *card_inputs,
-            *source_inputs,
-            *sorted(str(item["path"]) for item in coordinates),
-        ]
-        inputs = [
-            {"path": relative, "sha256": sha256_file(temporary / relative)}
-            for relative in input_names
-        ]
-        if entry_path is not None:
-            entry_digest = sha256_file(entry_path)
-            recipe_digest = sha256_file(recipe_path)
-        else:
-            entry_digest = resource_sha256(f"catalog/{entry.id}.json", root=root)
-            recipe_digest = resource_sha256(entry.recipe, root=root)
-        metadata: dict[str, object] = {
-            "format": "klab-research-scaffold",
-            "version": 1,
-            "entry": _entry_payload(entry),
-            "entry_sha256": entry_digest,
-            "recipe_sha256": recipe_digest,
-            "factorial_designs": [
-                item.model_dump(mode="json") for item in scale_recipe.factorial_designs
-            ],
-            "selection": {
-                "scale": scale,
-                "data": data,
-                "backend": backend,
-                "design": design,
-            },
-            "inputs": inputs,
-            "coordinates": coordinates,
-        }
-        metadata["research_sha256"] = hashlib.sha256(
-            canonical_json(metadata)
-        ).hexdigest()
-        _write(temporary / "research.json", _json_bytes(metadata))
-        return _publish(temporary, destination)
-    except BaseException:
-        _cleanup(temporary)
-        raise
 
 
 def _semantic_lesson_workspace(directory: Path) -> dict[str, object]:
@@ -1273,13 +828,7 @@ def scaffold_lesson(
         package = None
 
     destination, temporary = _destination(output)
-    workspace_name = (
-        destination.name
-        if destination.parent.name in {"samples", "research"}
-        and destination.parent.parent.name == "experiments"
-        else f"lesson-{identifier}"
-    )
-    workspace = study_workspace(workspace_name)
+    workspace = resolve_work_dir() / "experiments" / f"lesson-{identifier}"
     try:
         lesson_payload: dict[str, object] = {
             "format": "klab-lesson-scaffold",

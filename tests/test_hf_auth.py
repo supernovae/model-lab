@@ -6,7 +6,6 @@ import hashlib
 import io
 import json
 import sys
-import traceback
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -15,7 +14,7 @@ from pathlib import Path
 import huggingface_hub
 import pytest
 import yaml
-from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
+from huggingface_hub.errors import HfHubHTTPError
 from requests import Response
 
 from klab import hf_auth
@@ -29,7 +28,6 @@ from klab.corpus.acquisition import (
 )
 from klab.corpus.project import SourceDeclaration, load_project
 from klab.data import datasets
-from klab.research import pythia
 
 
 def test_hub_token_authorizes_without_changing_frozen_source_identity(
@@ -353,29 +351,3 @@ def test_streaming_denial_at_iteration_is_sanitized(
     with pytest.raises(RuntimeError, match="Hugging Face access denied") as error:
         list(datasets.iter_documents(config, "train"))
     assert token not in str(error.value)
-
-
-@pytest.mark.parametrize("status", [401, 403, "gated"])
-def test_pythia_gated_error_is_sanitized(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int | str
-) -> None:
-    token = "DO-NOT-LOG-model-token"
-    monkeypatch.setenv("HF_TOKEN", token)
-
-    def reject(**kwargs: object) -> str:
-        assert kwargs["token"] == token
-        if status == "gated":
-            raise GatedRepoError(token)
-        assert isinstance(status, int)
-        raise Denied(status, token)
-
-    monkeypatch.setattr(huggingface_hub, "snapshot_download", reject)
-    checkpoint = type("Checkpoint", (), {"commit": "a" * 40})()
-    with pytest.raises(RuntimeError, match="Hugging Face access denied") as error:
-        pythia._snapshot(checkpoint, tmp_path)
-    assert token not in str(error.value)
-    assert token not in "".join(
-        traceback.format_exception(
-            type(error.value), error.value, error.value.__traceback__
-        )
-    )

@@ -72,11 +72,6 @@ def load_config(path: Path) -> RunConfig:
         ) from error
     except yaml.YAMLError as error:
         raise ValueError(f"invalid YAML in {path}: {error}") from error
-    if isinstance(raw, dict) and raw.get("schema_version") == 1:
-        raise ValueError(
-            "schema_version: 1 run configs must be migrated before use; run "
-            f"`klab config migrate {path} --output OUTPUT`"
-        )
     if not isinstance(raw, dict):
         raise TypeError(f"config {path} must contain a YAML mapping")
     try:

@@ -1,21 +1,5 @@
-"""Declarative mechanism lessons and controlled research recipes."""
+"""Packaged mechanism lessons for `klab learn`."""
 
-from klab.research.catalog import (
-    MechanismLesson,
-    ResearchEntry,
-    ResearchRecipe,
-    list_lessons,
-    list_research,
-    load_lesson,
-    load_research,
-)
+from klab.research.catalog import MechanismLesson, list_lessons, load_lesson
 
-__all__ = [
-    "MechanismLesson",
-    "ResearchEntry",
-    "ResearchRecipe",
-    "list_lessons",
-    "list_research",
-    "load_lesson",
-    "load_research",
-]
+__all__ = ["MechanismLesson", "list_lessons", "load_lesson"]

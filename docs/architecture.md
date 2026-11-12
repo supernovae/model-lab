@@ -1,134 +1,167 @@
-# Decoder architecture
+# Architecture
 
-Model Lab is a causal decoder laboratory. Its dense baseline uses RMSNorm, RoPE causal attention, SwiGLU, residual connections, and a tied or untied language-model head. PyTorch configurations can independently select local Top-K MoE, token/byte/portable Engram memory, sliding-window/block-sparse attention, or latent attention. These are correctness/inspection reference paths. The separate MLX engine supports FP32 dense feed-forward models with dense or native block-sparse attention, not the full PyTorch architecture set.
+Lab builds causal decoders. The dense baseline uses RMSNorm, rotary position
+embeddings (RoPE), causal attention, a SwiGLU feed-forward, residual connections
+and a tied or untied output head. Each block's attention and feed-forward can be
+swapped independently, and a memory table can be added to the model. This page
+describes the mechanisms Lab ships; [model components](components.md) covers
+choosing them per layer, scaling a named preset to a parameter count and adding
+your own.
 
 ```mermaid
 flowchart LR
-  ids[Input IDs] --> emb[Token embedding]
-  emb --> attention[RMSNorm → RoPE causal attention → residual]
-  attention --> choice{FFN configuration}
-  choice -->|dense| dense[SwiGLU]
-  choice -->|moe| router[Router → normalized Top-K SwiGLU experts]
+  ids[Token IDs] --> emb[Embedding]
+  emb --> attention[RMSNorm, attention, residual]
+  attention --> ffn{Feed-forward}
+  ffn -->|dense| dense[SwiGLU]
+  ffn -->|moe| router[Router, top-k SwiGLU experts]
   dense --> residual[Residual]
   router --> residual
   residual --> norm[Final RMSNorm]
   norm --> logits[Vocabulary logits]
 ```
 
-RMSNorm rescales a vector by its reciprocal RMS without centering it. RoPE rotates adjacent query/key pairs by position; relative phase represents distance. The upper-triangular attention mask prevents future-token access. Dense SwiGLU computes `down(silu(gate(x)) * up(x))`. Tied embeddings reuse input-embedding storage for output logits.
+RMSNorm rescales a vector by its root mean square. RoPE rotates adjacent query
+and key pairs by position, so their dot product depends on relative distance. A
+causal mask keeps every position from seeing later ones. SwiGLU computes
+`down(silu(gate(x)) * up(x))`. With `model.tie_embeddings`, the output head
+reuses the input embedding.
 
-## Grouped-query attention
+## Attention
 
-PyTorch dense and sliding-window attention optionally set
-`model.num_kv_heads` to a positive divisor of `num_heads`. Queries and the
-output projection remain full hidden width, while key and value projections and
-the request-local KV cache use `num_kv_heads × head_dim`. Query-head groups
-share each KV head through a broadcast group axis; Model Lab does not
-materialize repeated K/V tensors. Scores remain query-head-wide, so this is a
-storage/projection-width change rather than a claim of a sparse score kernel or
-a measured speedup. Omitting the field preserves ordinary multi-head attention
-and legacy serialized identities. MLA, block-sparse attention, and MLX reject
-unequal KV/query head counts.
+`attention.kind` selects the attention for every block. All of them keep causal
+masking and RoPE, and none allocates a `[max_seq_len, max_seq_len]` buffer, so a
+large configured context costs nothing until a sequence that long runs.
 
+| Kind | What it does |
+| --- | --- |
+| `dense` | Full causal attention. `attention.implementation: sdpa` uses the backend's fused kernel. |
+| `sliding_window` | Each position sees the last `window_size` positions. Work and memory grow with `T × window_size`. |
+| `block_sparse` | Keys are grouped into blocks; each query scores block summaries and attends to the selected blocks. |
+| `local_selected` | Long-context attention: a local window plus earlier blocks selected per head. See [sparse attention](sparse-attention.md). |
+| `mla` | Multi-head latent attention: keys and values pass through a smaller latent width (`attention.latent_dim`). |
 
-## Local Top-K MoE
+### Grouped-query attention
 
-For each normalized token representation `x`, the router computes `softmax(W_router x)`, selects `experts_per_token` experts, renormalizes the selected weights, and sums their SwiGLU outputs. An optional shared expert runs for every token. The trainer records router entropy, maximum expert fraction, mean selected probability, and auxiliary load-balancing loss.
+For `dense` and `sliding_window`, `model.num_kv_heads` (a divisor of
+`num_heads`) shares each key/value head among a group of query heads. Queries and
+the output keep full width; keys, values and the generation cache use
+`num_kv_heads × head_dim`. Repeated keys and values are never materialized.
+`mla`, `block_sparse` and the MLX engine require equal head counts.
 
-This is **compute sparsity**, not sparse attention or external memory. The implementation is local: there is no capacity constraint, dropped-token fallback, expert parallelism, or distributed communication. It is a correctness/inspection reference, not a production MoE throughput claim.
+### Block-sparse attention
 
-## Sliding-window attention
+`block_sparse` scores compressed block keys, then gathers the original keys and
+values from the `selected_blocks` chosen per query, keeping the causal mask. On
+ROCm it uses native HIP kernels over the selected keys; MLX has equivalent Metal
+kernels; other devices use a reference implementation. Training logs how many
+keys were available and selected.
 
-`attention.kind: sliding_window` restricts query position $t$ to keys from
-`max(0, t - window_size + 1)` through $t$. It preserves causal masking and
-does not change the projections, RoPE, values, output width, or residual
-path. Sequences longer than the window are computed in window-sized query
-chunks that score only the keys they can see, so work and memory grow with
-`T * window_size` in both the `reference` and `sdpa` implementations, and the
-incremental cache reads only the last window of stored keys. Weights equal a
-full masked score matrix. No speedup over dense attention has been measured on
-an accelerator.
+### Latent attention
 
-## Local plus selected-block attention
+`mla` compresses each hidden state to `latent_dim`, expands keys from the latent
+for RoPE scoring and keeps head-partitioned latent values, then projects back to
+hidden width. `latent_dim` must divide evenly across heads. With
+`implementation: sdpa` it uses the fused kernel. `local_selected` also accepts
+`latent_dim`, combining latent keys and values with sparse selection.
 
-`attention.kind: local_selected` is the long-context sparse attention. The
-sequence is cut into blocks of `block_size` tokens, and every query attends to
-its own block causally, to the `window_size / block_size` blocks before it, and
-to `selected_blocks` earlier blocks chosen per head. A block's selection scores
-its first query against the mean key of each earlier block, so no position sees
-a later token. All queries of a block share one gather; there is no per-position
-loop and no `[T, T]` tensor. With `latent_dim`, keys and values use the MLA
-latent projections, combining sparse selection with latent K/V compression.
-`selector: learned` trains the block summaries through a gated coarse attention
-branch, and generation decodes from an incremental cache of keys, values, block
-summaries and block selections.
-See [sparse attention](sparse-attention.md#local-plus-selected-blocks).
+### Generation cache
 
-## Composing attention and feed-forward kinds
+Generation with dense, grouped-query, sliding-window, latent and
+`local_selected` attention uses an incremental key/value cache that lives for one
+request; with grouped-query attention it stores only the key/value heads.
+`generate(..., use_cache=False)` recomputes the full prefix instead, which is
+also what attention kinds without a cache do.
 
-A decoder block pairs one attention kind with one feed-forward kind, and the
-two are independent: `dense`, `sliding_window`, `mla`, `block_sparse` and
-`local_selected` each work with `model.ffn: dense` or `moe`.
-`klab.components` maps each kind to its builder, so an experimental attention is
-one module plus one registration, with no change to the block or the MoE path.
-Another package can register a kind through an entry point, and `model.layers`
-can vary both by block: see [model components](components.md). Attention keeps no `[max_seq_len, max_seq_len]` buffer: a large
-configured context costs nothing until a sequence that long runs.
+## Feed-forward
 
-## Block-sparse attention
+`model.ffn` selects the feed-forward for every block: `dense` (SwiGLU) or `moe`.
 
-`attention.kind: block_sparse` groups causal keys into fixed-size blocks and scores compressed block keys. The PyTorch reference gathers original K/V vectors from the selected blocks and retains the causal mask. Selection diagnostics distinguish available and selected keys, selection ratio, and an estimated attention-work count.
+### Mixture of experts
 
-The PyTorch path uses an inspectable reference loop on CPU and non-ROCm devices. ROCm additionally uses native HIP online-softmax forward/dQ/dK-dV kernels over the selected-key union, with direct K/V access and no token-square softmax intermediates. MLX implements equivalent native Metal kernels. These paths preserve selection semantics; matching dense attention when every causal block is selected does not establish equivalence at a restricted budget or a general end-to-end speedup. See [kernel measurements and limits](sparse-attention.md).
+`moe` replaces the SwiGLU with `model.num_experts` independent SwiGLU experts.
+The router computes `softmax(W x)`, keeps the `model.experts_per_token` largest
+probabilities, renormalizes them and sums the selected experts' outputs:
 
+$$y = \sum_{e \in \operatorname{TopK}(p)} \frac{p_e}{\sum_{j \in \operatorname{TopK}(p)} p_j} E_e(x)$$
 
-## Multi-head latent attention
+- **Shared expert.** `model.shared_expert: true` adds a dense SwiGLU that every
+  token uses.
+- **Load balancing.** `model.router_aux_loss_coefficient` adds the auxiliary
+  term $E\sum_e \bar p_e \bar l_e$, where $\bar p$ is the mean router
+  probability and $\bar l$ the selected-token load.
+- **Logged per update:** the auxiliary loss, router entropy, maximum expert
+  share and mean selected probability.
+- **Not implemented:** capacity limits, dropped tokens and expert parallelism.
+  Every token reaches its experts on one device.
 
-`attention.kind: mla` first compresses each hidden state to `latent_dim`, then
-expands latent keys for RoPE dot products while retaining head-partitioned
-latent values. Attention output is projected from latent width back to hidden
-width. `latent_dim` must divide evenly across heads. With
-`attention.implementation: sdpa` it uses fused scaled-dot-product attention and
-builds no `[T, T]` weight tensor where the backend provides a fused kernel. It
-does not provide a fused latent KV cache or a decode-memory bandwidth claim.
+## Memory tables
 
-## Inference cache versus training state
+`model.memory` adds a learned lookup table (Engram memory). `ngram` hashes the
+last few token IDs at each position into the table, `byte` hashes the last few
+UTF-8 bytes, and `portable` attaches a frozen table exported from another run.
+At position `t` the address uses inputs up to `t` only, so it never reads the
+target. See [Engram memory](engram.md).
 
-Supported PyTorch dense and sliding-window generation paths use a bounded,
-request-local KV cache with a full-prefix reference available through
-`generate(..., use_cache=False)`. With grouped-query attention, each cache
-stores only KV heads, while score tensors still use all query heads.
-Unsupported cache configurations and native MLX decoding use full-prefix
-evaluation. A decode cache is not an Engram table, a durable checkpoint, or a
-reduction in training-memory estimates; bounded parity checks are not a
-long-context serving benchmark.
+## Combining mechanisms
 
-## Combined reference configuration
+Attention, feed-forward and memory choices are independent: any attention kind
+works with `dense` or `moe`, with or without memory, and `model.layers` varies
+attention and feed-forward by block. `configs/smoke_combined_cpu.yaml` combines
+latent attention, mixture of experts and byte memory in one small model.
 
-`configs/smoke_combined_cpu.yaml` composes MLA attention, local Top-K MoE, and byte-address memory. This verifies that each mechanism receives the required inputs in the ordinary decoder/training path. It is a compatibility smoke, not a joint quality, scaling, or throughput result; compare ablations under matched data, tokenizer, budget, and device conditions.
+The MLX engine supports a subset: FP32 dense feed-forward models with `dense` or
+`block_sparse` attention. See [MLX on Apple Silicon](macos-mlx.md).
 
-## Token n-gram memory
+## Parameter accounting
 
-The optional adapter hashes each position's inclusive token-ID suffix into a learnable value table. Its value width is independent of the backbone width; an output projection and sigmoid gate add the value to the final hidden state. At position `t`, the address contains only input IDs through `t`, while the model predicts `t + 1`, so it does not read a future target. It is a local trainable parameter table, not external retrieval or a mutable cache.
+`klab inspect CONFIG` reports the parameter inventory and a memory estimate
+without allocating the model.
 
-The hashes are tokenizer-specific token-ID addresses. They are not byte hashes and do not establish byte-equivalent matching, cross-tokenizer knowledge transfer, or retrieval quality.
+- **`total`** counts every parameter tensor once. **`trainable`** is the subset
+  that receives updates.
+- **`active_per_token`** counts the weights one token uses. For a tied dense
+  model that is everything; untied models count one input-embedding row. For
+  mixture of experts it counts the router, the selected experts and any shared
+  expert. It is a convention, not a FLOPs count.
+- **Categories:** `embedding` holds tied output storage, so `output_head` is zero
+  when embeddings are tied. `expert` holds all routed experts. A memory table,
+  its projection and gate count as memory.
 
-Byte-addressed and portable variants are documented in [Engram](engram.md) and [portable Engram](portable-engram.md). A portable package preserves frozen source table values and trains only a target-side projection/gate adapter; it is an experiment mechanism, not evidence of knowledge transfer.
+The dense presets in `configs/` at an 8,192-token vocabulary:
 
-Each prediction target is the following packed token. Conversation supervision may mask context-only targets while retaining those tokens as causal inputs. Documents end in EOS; a fixed block can cross an EOS boundary, so EOS separates records but is not an attention barrier. There is no padding branch.
+| Config | Parameters |
+| --- | --- |
+| `micro_dense.yaml` | 3,344,064 |
+| `dense_7m.yaml` | 6,917,376 |
+| `dense_10m.yaml` | 10,244,160 |
+| `dense_25m.yaml` | 29,893,120 |
+| `dense_50m.yaml` | 50,274,752 |
 
-```mermaid
-flowchart TB
-  compute[Compute sparsity: local Top-K experts — implemented]
-  attention[Attention sparsity: block-selected causal K/V — implemented]
-  memory[Memory sparsity: token and byte/portable Engram tables — implemented]
+## Explore a mechanism before training
+
+`klab learn` walks through one mechanism at a time, with no run store:
+
+```sh
+klab learn list
+klab learn describe moe
+klab learn scaffold moe --scale smoke --data offline --backend cpu --output "$KLAB_WORK_DIR/learn-moe"
+klab learn probe "$KLAB_WORK_DIR/learn-moe/model.yaml" --prompt "Once upon a time"
 ```
 
+`describe` shows each step's tensor shapes and the source that implements it.
+`scaffold` writes a small runnable tokenizer and model config. `probe` runs a
+freshly initialized model on CPU and reports the mechanism's shapes and
+diagnostics; it says nothing about a trained model.
 
-## Standalone lessons and controlled studies
+## References
 
-The [lesson path](research/lesson-paths.md) scaffolds and probes any one supported mechanism without a campaign; a probe is fresh initialized CPU FP32 mechanism evidence, not training evidence. [Research recipes](research/README.md) declare matched controls before users explicitly prepare data and train. The placement recipe supports final and embedding token-memory injection only; it does not represent middle or multiple sites.
-
-## Extension boundary
-
-Each experiment remains one process, one host, and one selected device. An independent [worker controller](workers.md) may schedule several such experiments, without exchanging gradients or sharing optimizer state. New attention or Engram variants must remain explicit configuration choices with documented causal inputs, parameter accounting, checkpoint compatibility, and diagnostics; they must not silently reinterpret an existing mode or imply distributed execution. [ADR 0015](decisions/0015-single-host-extension-boundaries.md) retains the historical local-core decision with its later scheduling amendment noted.
+| Mechanism | Paper |
+| --- | --- |
+| RMSNorm, RoPE, SwiGLU in a decoder | [LLaMA](https://arxiv.org/abs/2302.13971), [RoFormer](https://arxiv.org/abs/2104.09864), [RMSNorm](https://arxiv.org/abs/1910.07467), [SwiGLU](https://arxiv.org/abs/2002.05202) |
+| Routed experts | [Switch Transformers](https://arxiv.org/abs/2101.03961) |
+| Latent attention | [DeepSeek-V2](https://arxiv.org/abs/2405.04434) |
+| Compressed, selected and local attention | [Native Sparse Attention](https://arxiv.org/abs/2502.11089) |
+| N-gram lookup memory | [Engram](https://arxiv.org/abs/2601.07372) |
+| Byte-addressed memory | [Tokenizer-Agnostic Engram](https://arxiv.org/abs/2607.29065) |
+| Factored optimizer state | [Adafactor](https://arxiv.org/abs/1804.04235) |

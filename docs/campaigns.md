@@ -1,8 +1,6 @@
-# Campaigns: declare and execute an experimental workflow
+# Campaigns
 
-Commands below use the [activated, provisioned environment](../README.md#first-run).
-
-A Campaign is a YAML/JSON DSL that connects the steps of an experiment: inputs,
+A campaign is a YAML or JSON declaration that connects the steps of an experiment: inputs,
 readiness checks, training plans, runtime selection, collection, evaluation and
 review. Use it when a question needs several dependent operations and you want
 their inputs, controls and completion conditions to remain explicit and reviewable.
@@ -15,7 +13,7 @@ inputs. The lab checks those bindings during execution and records the outputs
 that downstream stages actually consume. A missing dependency, incompatible
 input or incomplete ingestion blocks the dependent step.
 
-The linked [ExperimentPlan](experiments.md#authored-experiment-plans-and-resolved-locks)
+An [experiment plan](experiments.md#plans-and-locks)
 declares concrete parameter changes, fixed settings, comparison cells and
 checkpoint phases. A Campaign selects those locked cells and connects their
 collected checkpoints to the declared evaluations. Together they make it possible
@@ -36,18 +34,12 @@ and locks. Campaigns add dependencies, readiness policies, recoverable execution
 and explicit authorization. Individual native CLI operations remain usable for
 a simpler workflow.
 
-The DSL is under active development toward more complete campaign execution.
-Use the supported [stage forms](#stage-forms-and-binding) to compose a workflow;
-[current boundaries](#current-boundaries) describe operations that still need
-separate native preparation or additional implementation. Unsupported steps are
-not implicitly supplied by a hidden script.
+Compose a workflow from the [stage forms](#stage-forms-and-binding);
+[boundaries](#boundaries) lists what a campaign does not do.
 
 ## Declaration format
 
-The required `campaign_version: 1` field identifies the machine-readable schema.
-It is not the name of the Campaigns feature or a separate campaign product edition.
-
-The [Campaign JSON Schema](../schemas/campaign-plan-v1.schema.json) describes the
+`campaign_version: 1` identifies the schema. The [Campaign JSON Schema](../schemas/campaign-plan-v1.schema.json) describes the
 strict authoring format. YAML/JSON is data only: duplicate keys, executable tags,
 nonfinite numbers, unknown fields, duplicate stage/dependency IDs, unknown or
 self dependencies, cycles and incompatible producer kinds/scopes are rejected.
@@ -117,9 +109,9 @@ klab campaign resume examples/tiny-campaign.yaml --json
 
 `validate` performs static checks only. `plan`, `next` and `explain` verify requisite
 existing inputs and committed receipts without acquiring/building/training or
-creating a workspace. `status` preserves historical last-committed stage outcomes
-and separately reports fresh `recoverability` availability; the historical
-`verified_at` and `verification: last_committed` are not fresh rehashes. A linked
+creating a workspace. `status` shows each stage's last committed outcome
+and, separately, whether it can be recovered now; its `verified_at` and
+`verification: last_committed` are not fresh rehashes. A linked
 declaration-relative `recovery` manifest supplies classified reconstruction steps,
 while an unlinked campaign can only classify known receipt references. A missing
 checkpoint is nonreconstructable training state, never permission to retrain.
@@ -236,12 +228,8 @@ reduction. Existing results are read-only reuse only after validating release,
 tokenizer, policy, implementation and evidence bindings; conflicting results are
 never overwritten. Interrupted work is not a receipt and has no chunk resume.
 
-Normal measurement authenticates the complete release and tokenizer through
-their existing verifiers, sharing the release proof only within this operation.
-Historical evidence overrides are restricted compatibility paths, not a general
-way to skip verification. Their scope is preserved in the
-[development notes](research/development-evidence.md#retired-campaign-specific-measurement-shortcut).
-Use normal native measurement and authenticated receipts for new declarations.
+Measurement verifies the complete release and tokenizer, sharing the release
+proof only within that operation.
 
 A token-only Campaign readiness policy may consume a canonical receipt instead
 of encoding again. Declare both its operational `measurement_receipt` path and
@@ -249,7 +237,7 @@ the expected full-file `measurement_sha256` in the committed Campaign. The
 normalized inline policy must equal the receipt's policy, and the original policy
 file's exact SHA, release, streamed documents, tokenizer, implementation and
 evidence must still validate. Completed stages reopen these bindings rather than
-treating their historical stage result as fresh authentication. A mismatch fails;
+treating an earlier stage result as fresh verification. A mismatch fails;
 it does not authorize a new measurement or overwrite.
 
 Token-only readiness reports requested source-domain bytes and tokens.
@@ -314,7 +302,7 @@ bytes against those receipts. A changed corpus source, run config, suite or poli
 is `DECLARATION_IDENTITY_CHANGED` even after a new Git commit when the Campaign
 YAML text itself is unchanged; unrelated commits and dirty documents outside the
 closure do not rebind science. Publish changed intent under a new Campaign
-declaration identity rather than overwriting historical receipts.
+declaration identity rather than overwriting earlier receipts.
 
 `RUNNING` is durable before side effects. Immutable canonical stage receipts at
 `receipts/<stage>/<input-sha>.json` publish before the atomic fsynced state index.
@@ -367,19 +355,17 @@ An optional `model_readiness.review` names a separately issued
 `model-review-receipt-v1` location (absolute locations under the persistent root
 are allowed). It is **not** a Campaign execution approval. The declared review
 must identify the same evaluation index and checkpoint; a missing or different
-receipt cannot authorize readiness. If Campaign already committed an
-`INCONCLUSIVE` assessment because the review was not available, do not replace
-that receipt or silently redispatch the stage. Issue the named human review and
-assess it explicitly with `klab readiness model POLICY INDEX --review RECEIPT`;
-author a new Campaign declaration identity if a later Campaign assessment is
-needed.
+receipt cannot authorize readiness. If the campaign already committed an
+`INCONCLUSIVE` assessment because the review was missing, do not replace that
+receipt or redispatch the stage; author a new campaign identity for a later
+assessment.
 
-## Current boundaries
+## Boundaries
 
 No tokenizer bakeoff, architecture selection, auto-generated evaluation protocol
 or worker-farm scheduling stage is provided. Campaigns can prepare generic dataset
 snapshots, train tokenizers, prepare arrays or reference verified existing inputs.
-See [datasets](datasets.md) and the [optional external recipe example](tinystories-microlab.md).
+See [datasets](datasets.md).
 Accelerator acceptance requires
 a matching declared profile ID or named worker; pass `--runtime-profile PROFILE`
 to each apply/resume that needs it. Each runtime stage authorizes only its assigned
@@ -390,7 +376,7 @@ An accelerator checkpoint without that reference blocks; an explicit
 `backend: cpu` evaluation omits the reference and records its CPU override.
 Remote registered workers can train, but local suite evaluation has no SSH RPC:
 declare explicit CPU evaluation or report that unsupported boundary.
-See the [runtime contract acceptance workflow](runtime.md#runtime-contract-acceptance).
+See [accepting a provisioned host](runtime.md#accept-a-provisioned-host).
 Capacity/probe checks establish bounded execution readiness, not evidence of
 fit on other hardware, throughput superiority, useful model behavior, causality
 or portability.

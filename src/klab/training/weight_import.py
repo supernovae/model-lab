@@ -1,8 +1,8 @@
 """Offline, validated promotion artifacts for compatible external weights.
 
-This module deliberately recognizes two *closed* source formats only: Model Lab's
-historic v1 checkpoint and a local Hugging Face Llama-style safetensors export.
-It never downloads a model, imports source code, or guesses a tensor mapping.
+It reads one closed source format, a local Hugging Face Llama safetensors
+directory. It never downloads a model, imports source code, or guesses a tensor
+mapping.
 """
 
 from __future__ import annotations
@@ -20,13 +20,11 @@ from typing import Any, Literal
 
 import torch
 import yaml
-from pydantic import ValidationError
 from safetensors import SafetensorError
 from safetensors.torch import load_file
 from tokenizers import Tokenizer
 
 from klab.canonical import canonical_digest, canonical_json, reject_duplicate_keys
-from klab.config.migrate import migrate_v1
 from klab.config.models import RunConfig
 from klab.data.tokenizer import SPECIAL_TOKENS
 from klab.model.inspection import named_tensor_inventory
@@ -43,7 +41,7 @@ from klab.training.manifest import (
 )
 
 _IMPORT_FORMAT_VERSION = 1
-_SourceFormat = Literal["klab_legacy_v1", "hf_llama_safetensors"]
+_SourceFormat = Literal["hf_llama_safetensors"]
 
 
 @dataclass(frozen=True)
@@ -58,14 +56,6 @@ class WeightImportResult:
     source_tokenizer_sha256: str
     provenance: dict[str, str]
     resume_level: Literal["weights_only"] = "weights_only"
-
-
-@dataclass(frozen=True)
-class LegacyWeights:
-    tensors: dict[str, torch.Tensor]
-    config: RunConfig
-    source_config_sha256: str
-    metadata: dict[str, object]
 
 
 def _reject_nonfinite(value: str) -> None:
@@ -203,51 +193,6 @@ def _validate_destination_tensors(
         if spec.alias_of is not None:
             result[name] = result[spec.alias_of]
     return result
-
-
-def _source_config_from_legacy(raw: object) -> RunConfig:
-    try:
-        migrated = migrate_v1(raw)
-        return RunConfig.model_validate(migrated)
-    except (KeyError, TypeError, ValueError, ValidationError) as error:
-        raise ValueError(f"legacy v1 config migration failed: {error}") from error
-
-
-def load_legacy_weights(
-    source: Path, destination: RunConfig | None = None
-) -> LegacyWeights:
-    """Read shape/alias-validated v1 weights, optionally checking a destination."""
-    from klab.training.checkpoints import load_legacy_checkpoint
-
-    state = load_legacy_checkpoint(source)
-    source_config = _source_config_from_legacy(state.get("config"))
-    if destination is None:
-        destination = source_config
-    if architecture_sha256(
-        source_config.model_dump(mode="json")
-    ) != architecture_sha256(destination.model_dump(mode="json")):
-        raise ValueError(
-            "legacy source architecture differs from destination RunConfig"
-        )
-    model = state.get("model")
-    if not isinstance(model, dict) or not all(isinstance(name, str) for name in model):
-        raise ValueError("legacy checkpoint model state is not a string-keyed mapping")
-    tensors = _validate_destination_tensors(destination, model)
-    metadata = _json(source.with_suffix(".json"))
-    for name in ("step", "tokens_seen"):
-        value = state[name]
-        if type(value) is not int or value < 0:
-            raise ValueError(f"invalid legacy {name}")
-        if name in metadata and metadata[name] != value:
-            raise ValueError(f"legacy manifest {name} differs from payload")
-        metadata[name] = value
-    metadata["bytes"] = source.stat().st_size
-    return LegacyWeights(
-        tensors,
-        source_config,
-        canonical_digest(source_config.model_dump(mode="json")),
-        metadata,
-    )
 
 
 def _llama_config(source: Path) -> dict[str, Any]:
@@ -550,10 +495,7 @@ def import_weights(
         destination_config.tokenizer.path,
         destination_config.model.vocab_size,
     )
-    if source_format == "klab_legacy_v1":
-        legacy = load_legacy_weights(source, destination_config)
-        tensors, source_config_digest = legacy.tensors, legacy.source_config_sha256
-    elif source_format == "hf_llama_safetensors":
+    if source_format == "hf_llama_safetensors":
         tensors, _source_config, source_config_digest = _llama_weights(
             source, destination_config
         )

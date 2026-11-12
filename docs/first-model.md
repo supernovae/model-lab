@@ -1,6 +1,6 @@
 # First real model: a 17M dense decoder on FineWeb-Edu
 
-Commands below use the [activated, provisioned environment](../README.md#first-run).
+Commands below use the [activated, provisioned environment](../README.md#install).
 
 This is the shortest path from the lab-mode tools to one small real model,
 using only existing configs, loaders and commands:
@@ -21,7 +21,7 @@ using only existing configs, loaders and commands:
 | Paths | `klab-work/experiments/dense-scale/` (tokenizer, prepared data) and `.../first-model/runs` (gitignored) |
 
 49M tokens is about 3 tokens per parameter, far below compute-optimal
-(about 20). The aim tonight is a real model that exercises the whole workflow,
+(about 20). The aim is a real model that exercises the whole workflow,
 not a converged one.
 
 ## Runtime estimates
@@ -57,7 +57,7 @@ held-out losses are therefore comparable. Accelerator runs train in bf16, but
 scoring and probes run in fp32.
 
 **GPU.** Accelerators need a registered runtime
-([runtime](runtime.md#machine-local-runtime-environments)); a `--backend`
+([runtime](runtime.md#register-an-interpreter)); a `--backend`
 flag alone does not authorize one. Provision one once, then pass the same
 `GPU` flags to every training command below. Choose exactly one device block.
 
@@ -83,10 +83,8 @@ klab runtime env doctor rocm-7900xtx --precision bf16 --json
 GPU=(--backend rocm --runtime rocm-7900xtx)
 ```
 
-ROCm is a supported backend. The built-in `rocm-gfx1100-v1` recipe is pinned
-for the RX 7900 XTX, and the repo's [ROCm acceptance
-record](runtime.md#versioned-vendor-provisioning) shows bf16 training on one.
-The config says `backend: cuda`, and a CUDA request never silently selects a
+The built-in `rocm-gfx1100-v1` recipe is pinned for the RX 7900 XTX. The config
+says `backend: cuda`, and a CUDA request never silently selects a
 HIP build, so ROCm needs the explicit `--backend rocm` on both arms. Model Lab
 does not install GPU drivers: check AMD's WSL/ROCm prerequisites first.
 On a GPU without bf16, set `runtime.precision: fp16`.
@@ -118,7 +116,7 @@ The `±SE` printed next to Δ held-out loss is a window-clustered error over one
 pair of runs. It measures evaluation noise, not training noise. At tiny
 budgets the seed-to-seed spread was **5–10× larger** than that SE: roughly
 0.03–0.2 nats across seeds, against a per-try SE near 0.006. A single-seed "CANDIDATE_LOWER_LOSS" can be pure seed luck
-(see the [remaining across-seed uncertainty work](../ROADMAP.md#current-direction)).
+(see the [roadmap](../ROADMAP.md#now)).
 
 Run the same delta on paired seeds (both arms share each seed). A lab delta
 changes only the candidate, so first derive a short-budget **baseline** to make
@@ -183,7 +181,7 @@ so. Nothing is downloaded or re-scored, and no model is loaded, so `compare`
 
 ## 5. Look inside
 
-For a custom sentence, save `explore.yaml` (see [explorer declarations](explore-config.md)):
+For a custom sentence, save `explore.yaml` (see [looking inside](models.md#look-inside)):
 
 ```yaml
 explore_config_version: 1
@@ -218,54 +216,3 @@ klab dashboard
 - **Explorer**: the exploration from step 5.
 
 See the [dashboard tour](dashboard.md).
-
-## Re-baseline the hash-affected configs
-
-PR #64 fixed degenerate memory addressing at `memory_table_size: 257`. Every
-result and checkpoint from these configs before that fix is stale, and runs
-trained before it are refused at load. Retrain them under current code before
-comparing against them:
-
-```sh
-klab tokenizer train configs/tokenizer_smoke.yaml
-klab tokenizer train configs/tokenizer_withheld_bytes.yaml
-klab tokenizer train configs/tokenizer_withheld_bpe.yaml
-
-for cfg in capability_recall_ngram_cpu smoke_memory_cpu smoke_byte_memory_cpu \
-           smoke_combined_cpu withheld_bytes_cpu withheld_bpe_cpu; do
-  klab train "configs/$cfg.yaml" --run-id "$cfg-postfix"
-  klab probe "runs/$cfg-postfix" --backend cpu --config standard
-done
-```
-
-All six are tiny CPU configs (tens of seconds to a few minutes each). They
-save `backend: cpu`, so their probes would work without the flag; it is kept
-for uniformity. Runs go
-to `runs/` (gitignored), where the dashboard's Models page lists them.
-
-- **Try-able (four).** `capability_recall_ngram_cpu`, `smoke_memory_cpu`,
-  `smoke_byte_memory_cpu` and `smoke_combined_cpu` work as `try` baselines.
-  `try DELTA --vs configs/<cfg>.yaml` retrains its baseline automatically,
-  because the code identity changed. Use declaration `seed` with `--config`
-  for paired seeds, as in step 2.
-- **Not try baselines: `withheld_bytes_cpu` and `withheld_bpe_cpu`.** The
-  `withheld_facts` source trains and validates on the same documents, so a try
-  reports `NOT_COMPARABLE (validation_distinct_from_train)`. Use them through
-  `train` plus `probe --config standard`, which scores closed-book recall from
-  weights against its never-trained control. Their recall item counts are
-  small (SE about 0.26), so treat recall deltas as directional.
-
-## Notes from validating these configs
-
-- Both configs load. `inspect` reports 17,308,032 parameters and a
-  208 MB estimated checkpoint (weights plus AdamW state).
-- An 8-step CPU smoke run of the same model, on a 3k-document sample with
-  this tokenizer recipe, trained, validated, checkpointed and passed
-  post-train triage in 122 s end to end. On it, `probe --vs ... --backend cpu`
-  worked at the standard (29 s) and full (61 s) tiers, and `explore` worked (4 s). The rejection
-  of an accelerator backend saved without the flag was checked against the GPU config at the
-  authorization layer, with no GPU on the validation box.
-- In the sandbox, the very first `train` after a fresh FineWeb download
-  stalled idle after data preparation finished; a rerun reused the prepared
-  cache and completed. If a first run sits at 0% CPU once data preparation
-  has finished, stop it and rerun.

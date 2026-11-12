@@ -82,7 +82,7 @@ def checkpoint_summary(
     columns[0].metric(
         "Available saved checkpoints · store",
         len(choices),
-        help="Complete local file inventories in this run store. Archived, missing and incomplete saves are excluded; integrity is verified again before loading.",
+        help="Complete local file inventories in this run store. Missing and incomplete saves are excluded; integrity is verified again before loading.",
     )
     if selected_ids is not None:
         columns[1].metric(
@@ -212,7 +212,7 @@ def generation_page(
         return
     if not choices:
         st.info(
-            "No available saved checkpoints in this store. Archived or incomplete saves cannot be sampled."
+            "No available saved checkpoints in this store. Missing or incomplete saves cannot be sampled."
         )
         return
     requested_run, requested_checkpoint = (

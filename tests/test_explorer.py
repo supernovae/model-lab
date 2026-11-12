@@ -504,9 +504,9 @@ def test_compare_explorations_deltas_overlap_and_refusals() -> None:
     with pytest.raises(explorer.ExplorerUnavailable, match="different runtimes"):
         explorer.compare_explorations(left, diff_runtime)
 
-    v1_record = seal({**right, "format": "klab-explorer-v1"})
-    with pytest.raises(explorer.ExplorerUnavailable, match="klab-explorer-v1"):
-        explorer.compare_explorations(left, v1_record)
+    other_format = seal({**right, "format": "klab-explorer-other"})
+    with pytest.raises(explorer.ExplorerUnavailable, match="klab-explorer-other"):
+        explorer.compare_explorations(left, other_format)
 
     no_act = seal({k: v for k, v in right.items() if k != "activation"})
     with pytest.raises(explorer.ExplorerUnavailable, match="activation"):

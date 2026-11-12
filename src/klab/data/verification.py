@@ -242,10 +242,11 @@ def _relocate_proofs(
 def required_arrays(
     manifest: dict[str, object],
 ) -> dict[str, tuple[dict[str, object], str, int]]:
-    """Describe exact required files for historical v4/v5 and current v6."""
-    version = manifest.get("packing_version")
-    if version not in {"contiguous-eos-v4", "contiguous-eos-v5", "contiguous-eos-v6"}:
-        raise ValueError("unknown prepared packing version")
+    """Describe the exact files a prepared bundle must hold."""
+    if manifest.get("packing_version") != "contiguous-eos-v6":
+        raise ValueError(
+            "prepared data uses an unsupported packing version; prepare it again"
+        )
     result: dict[str, tuple[dict[str, object], str, int]] = {}
     for split in ("train", "validation"):
         entry = manifest.get(split)
@@ -253,10 +254,7 @@ def required_arrays(
             raise ValueError("missing prepared split metadata")  # noqa: TRY004 - invalid serialized schema
         result[f"{split}.npy"] = (entry, "int32", 1)
     supervision = manifest.get("supervision")
-    if version == "contiguous-eos-v4":
-        if supervision is not None:
-            raise ValueError("v4 cannot carry supervision metadata")
-    elif version == "contiguous-eos-v5" or (
+    if (
         isinstance(supervision, dict)
         and supervision.get("kind") == "token-loss-mask-v1"
     ):
@@ -273,7 +271,7 @@ def required_arrays(
             ):
                 raise ValueError("supervision shape differs from token IDs")
             result[f"{split}_supervision.npy"] = (entry, "bool", 1)
-    elif version == "contiguous-eos-v6" and supervision != {"kind": "all_tokens"}:
+    elif supervision != {"kind": "all_tokens"}:
         raise ValueError("invalid all-token supervision descriptor")
     byte = manifest.get("byte_addressing")
     if byte is not None:
@@ -371,17 +369,8 @@ def _receipt_from_proofs(
             or metadata["tokens"] != values.shape[0]
             or type(metadata.get("sha256")) is not str
             or metadata["sha256"] != proof.sha256
-            or (
-                "size_bytes" in metadata
-                and (
-                    type(metadata["size_bytes"]) is not int
-                    or metadata["size_bytes"] != proof.size_bytes
-                )
-            )
-            or (
-                manifest.get("packing_version") == "contiguous-eos-v6"
-                and "size_bytes" not in metadata
-            )
+            or type(metadata.get("size_bytes")) is not int
+            or metadata["size_bytes"] != proof.size_bytes
         ):
             raise ValueError(f"prepared array metadata mismatch: {path}")
         if proof.fingerprint != _fingerprint(path):

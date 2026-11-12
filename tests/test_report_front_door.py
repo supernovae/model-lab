@@ -23,46 +23,6 @@ def _snapshot(root):
     }
 
 
-def test_removed_wrappers_and_distinct_contracts(tmp_path):
-    parser = cli.build_parser(tmp_path)
-    for words in (
-        ["evidence", "run"],
-        ["triage", "run"],
-        ["research", "status"],
-        ["research", "next"],
-    ):
-        with pytest.raises(SystemExit):
-            parser.parse_args(words)
-    for words in (
-        ["campaign", "status", "campaign.yaml"],
-        ["campaign", "next", "campaign.yaml"],
-        ["campaign", "explain", "campaign.yaml"],
-        ["experiment", "explain", "locked"],
-        ["monitor-baseline", "root", "--output", "baseline.json"],
-        [
-            "study",
-            "report",
-            "study.yaml",
-            "receipt.json",
-            "--evidence",
-            "collected.json",
-            "--output",
-            "reports",
-        ],
-    ):
-        assert callable(parser.parse_args(words).handler)
-
-
-@pytest.mark.parametrize("kind", ["record", "run", "research"])
-def test_report_rejects_ignored_selectors(tmp_path, monkeypatch, kind):
-    config = tmp_path / "report.yaml"
-    config.write_text("report_config_version: 1\nlifecycle: registry.json\n")
-    extra = ["--config", str(config)] if kind != "research" else ["--runs-dir", "runs"]
-    with pytest.raises(SystemExit, match="selectors require"):
-        _report(monkeypatch, tmp_path / "work", "--kind", kind, *extra)
-    assert not (tmp_path / "work").exists()
-
-
 def test_missing_and_invalid_run_inputs_never_create_store(
     tmp_path, monkeypatch, capsys
 ):
@@ -94,7 +54,7 @@ def test_missing_and_invalid_run_inputs_never_create_store(
         assert _snapshot(tmp_path) == before
 
 
-def test_run_report_retains_negative_and_rejected_observations_with_overlay(
+def test_run_report_retains_negative_and_rejected_observations(
     tmp_path, monkeypatch, capsys
 ):
     evidence = {
@@ -106,20 +66,16 @@ def test_run_report_retains_negative_and_rejected_observations_with_overlay(
         "core": {"integrity": {"status": "PASS"}},
         "triggers": {"collapse": {"fired": True}},
     }
-    overlay = {"independent_subjective_quality": "UNKNOWN", "bundles": []}
     monkeypatch.setattr(cli, "experiment_evidence", lambda path: evidence)
     monkeypatch.setattr(cli, "read_triage", lambda *args: triage)
     monkeypatch.setattr(
         cli, "triage_summary", lambda report: "negative diagnostic retained"
     )
-    monkeypatch.setattr(cli, "surface_review_status", lambda *args: overlay)
     work = tmp_path / "absent-work"
     runs = tmp_path / "runs"
     (runs / "run").mkdir(parents=True)
     (runs / "run" / "manifest.json").write_text("{}")
-    config = tmp_path / "report.yaml"
-    config.write_text("report_config_version: 1\nsurface_dir: surface\n")
-    words = ["run", "--kind", "run", "--runs-dir", str(runs), "--config", str(config)]
+    words = ["run", "--kind", "run", "--runs-dir", str(runs)]
     _report(monkeypatch, work, *words, "--json")
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
@@ -127,7 +83,6 @@ def test_run_report_retains_negative_and_rejected_observations_with_overlay(
         "run_id": "run",
         "evidence": evidence,
         "triage": triage,
-        "surface_review": overlay,
     }
     _report(monkeypatch, work, *words)
     text = capsys.readouterr().out
@@ -137,59 +92,9 @@ def test_run_report_retains_negative_and_rejected_observations_with_overlay(
         "step_2",
         "negative diagnostic retained",
         "collapse",
-        "UNKNOWN",
     ):
         assert value in text
     assert not work.exists()
-
-
-def test_research_report_retains_native_availability_and_next_tests(
-    tmp_path, monkeypatch, capsys
-):
-    from test_research_lifecycle import _evidence, _finding, _root
-
-    from klab.research.lifecycle import (
-        LifecycleRegistry,
-        next_experiments,
-        research_status,
-    )
-
-    artifact = tmp_path / "history.md"
-    artifact.write_text("negative observation")
-    registry_data = _root(
-        evidence=[_evidence(artifact)],
-        findings=[_finding("history", disposition="rejected")],
-    )
-    registry = tmp_path / "lifecycle.json"
-    registry.write_text(json.dumps(registry_data))
-    config = tmp_path / "report.yaml"
-    config.write_text(
-        "report_config_version: 1\nlifecycle: lifecycle.json\nevidence_root: .\n"
-    )
-    model = LifecycleRegistry.model_validate(registry_data)
-    work = tmp_path / "absent-work"
-    for state in ("verified", "invalid", "unavailable"):
-        if state == "invalid":
-            artifact.write_text("changed digest")
-        elif state == "unavailable":
-            artifact.unlink()
-        before = _snapshot(tmp_path)
-        _report(
-            monkeypatch,
-            work,
-            "--kind",
-            "research",
-            "--config",
-            str(config),
-            "--json",
-        )
-        payload = json.loads(capsys.readouterr().out)
-        assert payload["status"] == research_status(model, evidence_root=tmp_path)
-        assert payload["next"] == next_experiments(model, evidence_root=tmp_path)
-        assert state in json.dumps(payload)
-        assert "rejected" in json.dumps(payload)
-        assert _snapshot(tmp_path) == before
-        assert not work.exists()
 
 
 def test_invalid_triage_shape_stays_visible(tmp_path, monkeypatch, capsys):
@@ -335,39 +240,6 @@ def test_attempt_grammar_uses_current_report_path():
     assert classify_attempt_command(command).effect == "inspection"
     with pytest.raises(ValueError, match="unreviewed native attempt operation"):
         classify_attempt_command(["klab", "evidence", "run"])
-    with pytest.raises(ValueError, match="missing native positional input"):
-        classify_attempt_command(
-            ["klab", "report", "--kind", "research", "--config", "/report.yaml"]
-        )
-
-
-@pytest.mark.parametrize(
-    "contents",
-    [
-        "report_config_version: true",
-        "report_config_version: 1\nunknown: x",
-        "report_config_version: 1\nstudy: a\nprotocol_sha256: " + "a" * 64,
-        "report_config_version: 1\nprotocol_sha256: invalid",
-        "[invalid YAML",
-    ],
-)
-def test_invalid_report_config_precedes_readers(tmp_path, monkeypatch, contents):
-    config = tmp_path / "report.yaml"
-    config.write_text(contents)
-    monkeypatch.setattr(
-        cli, "experiment_evidence", lambda *a: pytest.fail("reader reached")
-    )
-    with pytest.raises(SystemExit, match="invalid report config"):
-        _report(
-            monkeypatch,
-            tmp_path / "work",
-            "run",
-            "--kind",
-            "run",
-            "--config",
-            str(config),
-        )
-    assert not (tmp_path / "work").exists()
 
 
 @pytest.mark.slow
@@ -427,3 +299,14 @@ def test_tiny_cpu_run_report_uses_native_readers_without_retraining(
     assert invalid_triage["triage"]["status"] == "UNKNOWN"
     assert "invalid" in invalid_triage["triage"]["reason"]
     assert _snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    ("kind", "selector"), [("record", "--runs-dir"), ("run", "--lab-dir")]
+)
+def test_report_rejects_a_selector_for_the_other_kind(
+    tmp_path, monkeypatch, kind, selector
+):
+    with pytest.raises(SystemExit, match=f"{selector} requires --kind"):
+        _report(monkeypatch, tmp_path / "work", "x", "--kind", kind, selector, "y")
+    assert not (tmp_path / "work").exists()

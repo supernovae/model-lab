@@ -1,8 +1,8 @@
 # Corpus-layer teaching fixture
 
-This is an original MIT-licensed, tiny offline fixture, not a DevMind research campaign or model-training evidence. Three authored source families provide local Markdown, code and YAML; a fourth declaration names the deterministic `pathlib.PurePosixPath` suffix oracle. `technical_docs`, `code`, `configs`, and `systems_scenarios` are illustrative domains. The requested mixture is descriptive, not an optimized sampling policy. All generated text and snapshots live beneath the task-owned `$WORK/corpora/devmind-sample-v0/` directory and may be deleted when no run depends on them. No public corpus is downloaded.
+An original MIT-licensed, tiny offline fixture for the corpus commands. Three authored source families provide local Markdown, code and YAML; a fourth declaration names the deterministic `pathlib.PurePosixPath` suffix oracle. `technical_docs`, `code`, `configs`, and `systems_scenarios` are illustrative domains. The requested mixture is descriptive, not an optimized sampling policy. All generated text and snapshots live beneath the task-owned `$WORK/corpora/devmind-sample-v0/` directory and may be deleted when no run depends on them. No public corpus is downloaded.
 
-Run from the repository root in the [locked CPU environment](../../../README.md#first-run)
+Run from the repository root in the [locked CPU environment](../../../README.md#install)
 (no model training). The optional `jq` utility below selects a record ID from
 native JSON output; you can instead copy that ID from `corpus sample`. Choose a
 fresh persistent workspace for a new copy of the sample:
@@ -43,4 +43,4 @@ Inspect their parent IDs and evidence with `corpus sample` and `corpus lineage`.
 The default report counts each training view by origin, verification, and shape.
 `corpus describe RELEASE --tokenizer TOKENIZER_JSON` recounts exact tokens; no
 token count or capability improvement is inferred from the static bytes.
-See [provenance and controlled ablations](../../../docs/corpus-provenance.md).
+See [corpus preparation](../../../docs/corpus-preparation.md).

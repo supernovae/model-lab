@@ -939,7 +939,7 @@ def test_not_comparable_try_next_step_requires_repaired_new_try(
     assert path.read_bytes() == before
 
 
-def test_explorer_v1_historical_tab_contract_and_compare_generations(
+def test_explorer_cached_tabs_and_compare_generations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import torch
@@ -962,7 +962,7 @@ def test_explorer_v1_historical_tab_contract_and_compare_generations(
         json.dumps({"relative_path": "step_00000008_gen_bbbb"})
     )
 
-    # Write a historical v1 cached exploration (no activation key).
+    # Write a cached exploration for the first generation.
     loaded_a = _loaded(**MOE_NGRAM)
     loaded_a.identity.update(
         run_id="moe-run",
@@ -971,11 +971,9 @@ def test_explorer_v1_historical_tab_contract_and_compare_generations(
         step=4,
     )
     v2_a = jsonable(explorer.explore_loaded(loaded_a, TEXT))
-    v1_body = {k: v for k, v in v2_a.items() if k != "activation"}
-    v1_body["format"] = "klab-explorer-v1"
-    v1_path = explorer._v1_cache_path(lab_dir, "1" * 64, TEXT, v1_body["runtime"])
-    v1_path.parent.mkdir(parents=True, exist_ok=True)
-    write_json_atomic(v1_path, seal(v1_body))
+    cached_path = explorer.cache_path(lab_dir, "1" * 64, TEXT, v2_a["runtime"])
+    cached_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json_atomic(cached_path, seal(v2_a))
 
     loaded_b = _loaded(**MOE_NGRAM)
     loaded_b.identity.update(
@@ -1015,23 +1013,22 @@ def test_explorer_v1_historical_tab_contract_and_compare_generations(
 
         lab_pages.explorer_page(Path(lab_root), [Path(runs_root)])
 
-    # 1. Historical v1 cached record remains readable with old tab contract and v1 label.
+    # 1. The cached record is listed and opens with every diagnostic tab.
     test = AppTest.from_function(
         run_explorer, args=(str(lab_dir), str(runs_dir)), default_timeout=60
     )
     test.run()
     assert not test.exception
-    cached_opts = test.selectbox(key="explorer_cached").options
-    assert any("historical: re-explore for activations" in opt for opt in cached_opts)
+    assert len(test.selectbox(key="explorer_cached").options) == 1
     assert [t.label for t in test.tabs] == [
         "Architecture",
         "Tokens",
         "Attention",
         "Weights",
+        "Activations",
         "Expert routing",
         "Memory lookups",
     ]
-    assert "historical: re-explore for activations" in _text(test)
 
     # Verify selectors list both generations and never latest.json.
     snap = lab_data.snapshot(lab_dir)

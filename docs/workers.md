@@ -1,30 +1,21 @@
 # Independent workers
 
-One worker executes a whole experiment with its own optimizer, RNG, local database, checkpoints, and immutable inputs. The controller owns a separate local queue and read-only-result projection. Local and SSH workers use the same versioned, finite stdio endpoint; neither is a persistent GPU daemon. This is independent experiment scheduling, not distributed training.
+A worker runs a whole experiment with its own optimizer, random state, local
+database, checkpoints and immutable inputs. The controller owns a separate local
+queue and a read-only view of results. Local and SSH workers speak the same
+versioned stdio protocol; neither is a persistent GPU daemon. This is
+independent experiment scheduling, not distributed training.
 
-The global `--work-dir PATH` option (before the command) selects the persistent
-root ahead of `KLAB_WORK_DIR`; the implicit root is
-`${XDG_DATA_HOME}/klab` for an absolute, nonempty XDG setting, otherwise
-`~/.local/share/klab`. For substantial work use, for example,
-`export KLAB_WORK_DIR=/data/klab` on a sufficiently sized filesystem.
-Study submission and research scaffolding use that root for implicit
-`<work-dir>/experiments/<study-name>` workspaces, and generic controller commands
-use `<work-dir>/runs`. Local worker child processes inherit temporary-directory
-settings pointing to `<work-dir>/scratch`, not the durable root; RPC fallback
-scratch is disposable. SSH workers resolve their own root on the remote host,
-so configure their environment separately. Explicit `--store`, `--runs-dir`,
-`--output`, cache and configured logging paths keep their exact meaning; they
-are not relocated by the selected root. An in-checkout persistent root or
-explicit long-lived output/cache path warns `STORAGE_INSIDE_GIT_CHECKOUT` but
-continues. Legacy `klab-work/` is selectable explicitly and never migrated
-automatically; branches or worktrees do not create scientific or storage IDs.
+Controller commands default to `<work-dir>/runs` (see
+[workspaces](workspaces.md) for how the work directory is chosen). Local worker
+processes put temporary files under `<work-dir>/scratch`. SSH workers resolve
+their own work directory on the remote host, so configure that environment
+separately. Explicit `--store`, `--runs-dir`, `--output` and cache paths are
+used exactly as given.
 
-
-For bounded shared-host CPU work, [lab jobs](lab-jobs.md) adds immutable external
-job/attempt bindings and collection over the native host monitor. Its native
-tokenizer → `try` → `report` profile delegates model work to the existing lab
-lifecycle. Queue workers retain their PREPARED/claim/replay protocol; the adapter
-does not introduce another scheduler.
+For bounded CPU work handed in by an external scheduler, see
+[lab jobs](lab-jobs.md); it runs the ordinary tokenizer, `try` and `report`
+lifecycle and adds no second scheduler.
 
 ## Local operation
 
@@ -71,10 +62,8 @@ are not supported for matrices.
 Ctrl-C while waiting disconnects the observer without cancelling the worker.
 Use the printed `experiment collect` or `experiment cancel` command to reconcile
 or explicitly cancel it. Completion waits for artifact ingestion; a failed,
-cancelled, interrupted or unresolved Colab outcome exits nonzero. `train CONFIG`
-provides direct checkpoint transitions without silently running staging pilots.
-See [launch contracts](launch-contracts.md) for the distinct release and
-preparation interfaces.
+cancelled, interrupted or unresolved Colab outcome exits nonzero. For direct
+checkpoint transitions use `train`; see [choosing a path](experiments.md#choose-a-path).
 
 `controller run` and single-config `experiment submit` accept `--transfer-timeout SECONDS` (default 1800). It is a finite per-RPC deadline for bundle and artifact transfers, including hashing and transmission; increase it explicitly for a slow link or large input. Metadata requests have shorter bounded deadlines. Killing the controller never authorizes re-execution of an assigned optimizer attempt.
 
@@ -127,7 +116,7 @@ free inodes. This command installs into a new runtime-root path, not the checkou
 `.venv`; failure retains the partial environment unregistered. There is no automatic
 garbage collection. Do not sync a CPU extra into a vendor environment or treat
 installation success as confirmation that the selected workload will run. Details:
-[machine-local runtime environments](runtime.md#machine-local-runtime-environments).
+[machine-local runtime environments](runtime.md#register-an-interpreter).
 
 ## User-provisioned SSH workers
 
@@ -163,7 +152,7 @@ worker that can request CPU, CUDA, ROCm, or XPU when its installed stack and
 hardware support that backend. Registration does not infer a GPU vendor from
 WSL2 or from the worker's name. Apply the same protocol, staging, device leases,
 and task-owned store conventions on native Linux and WSL2. See
-[host environment and compute backend](runtime.md#host-environment-and-compute-backend)
+[host environment and compute backend](runtime.md#host-and-backend-are-separate)
 for filesystem, driver, telemetry, and acceptance boundaries.
 
 The optional [gfx1100 provisioning requirements](../requirements/rocm-gfx1100.txt)
@@ -225,7 +214,7 @@ Each configured worker has one logical slot. Host-wide OS leases additionally se
 - A controller disconnect does not stop worker updates. Reconnection resumes record/artifact ingestion, not optimizer execution.
 - A lost executor is finalized only after its attempt claim and inherited resource holders are gone. It remains `UNKNOWN`; verified finalized generations are available for an explicit child resume. Missing crash-window manifest/checkpoint projections can be reconstructed from those verified files without creating an echo outbox. Conflicting metadata is rejected, never overwritten.
 - Resume creates a new visible child with the selected full-state digest. It requires compatible same-engine/backend training state and a remaining scientific budget. Complete budgets cannot resume. Source/runtime drift requires explicit `--allow-runtime-drift` and remains best-effort, not an architecture/data compatibility bypass.
-- Supported dense PyTorch full-state resumes and recovery may separately opt into `--allow-runtime-optimization` for the narrow execution changes described in [explicit runtime optimization on resume](checkpointing.md#explicit-runtime-optimization-on-resume). Scientific settings, effective training batch and validation coverage remain bound; the child records a best-effort transition.
+- Supported dense PyTorch full-state resumes and recovery may separately opt into `--allow-runtime-optimization` for the narrow execution changes described in [resume](checkpointing.md#resume). Scientific settings, effective training batch and validation coverage remain bound; the child records a best-effort transition.
 
 Execution state and `ingestion_status` are separate durable facts. A remotely complete receipt does not mean its checkpoints are already locally available. `experiment submit CONFIG --wait` waits for `COMPLETE` or `NOT_REQUIRED` ingestion for every terminal outcome, including cancellation and failure. Queued cancellation and failures with no run artifacts require no transfer; they do not fabricate a checkpoint. Full resume is admitted only after verified local ingestion. Artifact-transfer errors remain visible and can be retried without rerunning the optimizer.
 
@@ -260,22 +249,9 @@ GPU dispatch or simultaneous work across hosts requires those provisioned
 environments. SSH framing and quoting tests check transport behavior; they do
 not measure remote driver or kernel performance.
 
-No worker shares optimizer state or exchanges gradients/expert tokens with another. There is no process group, all-reduce, expert all-to-all, tensor/model sharding, or heterogeneous distributed backward. Pending implementation and hardware-validation directions are summarized in [ROADMAP.md](../ROADMAP.md); proposed code work belongs in GitHub issues, with implementation, review and CI tracked in pull requests and their checks. Scientific questions stay in the research roadmap/lifecycle.
+No worker shares optimizer state or exchanges gradients/expert tokens with another. There is no process group, all-reduce, expert all-to-all, tensor/model sharding, or heterogeneous distributed backward.
 
-## Observed acceptance — 2026-09-23
-
-[Worker gate record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/independent_workers_2026_09_23.json) binds the execution wheel, source identity, commands, native checkpoints, counters, independent checks and retained evidence hashes. The acceptance-time suite passed 335 tests and Ruff lint/format checks; later regression results remain with their evidence records and commits.
-
-- Three genuine CPU workers overlapped with FP32 AdamW, FP32 Adafactor and BF16 AdamW. Their updates continued while the controller was stopped; reconnect imported contiguous, deduplicated records with no echo outbox.
-- Replaying launch retained the original process identity. Cancellation stopped at update 26,943; an explicit child reached 32,768 updates / 2,097,152 targets. Its model, optimizer, RNG, cursor, scaler, schedule and counters matched an uninterrupted baseline bitwise. Wall-clock checkpoint cadence was not compared bitwise.
-- A separate identity-checked executor SIGKILL left an immutable UNKNOWN attempt. Its verified step-256 checkpoint resumed only through a new child, reaching exactly 32,768 updates / 1,048,576 targets without changing parent files.
-- Installed CLI matrix submission executed all three coordinates at exactly 2 updates / 64 targets. Actual incompatible engine/capacity and a worker with genuinely different installed source remained queued without an executor.
-- Core-only installed execution after removing owned original inputs proved offline promotion, fresh optimizer/RNG/counters, evaluation, generation, unchanged parent files, and composed local `run` without prior registration. An actual MLX/Metal worker completed 4 updates / 128 targets; its full native checkpoint also verified from the core-only installation without MLX.
-- [Captured dashboard curves](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/workers_training_2026_09_23.svg) contain actual browser WebGL pixels and SVG overlays, not regenerated series. Standard screenshot capture and runtime-table rasterization stalled, including independent browser attempts. The real Runtime view was additionally exercised through Streamlit's app harness: all three CPU/worker/precision/optimizer rows were correct and the database data version was unchanged.
-
-These synthetic workloads establish orchestration and state-transition behavior, not model quality. Worker labels do not establish AMD/Intel hardware execution. No actual SSH target, CUDA/HIP kernel, ROCm/XPU acceptance, or overlapping real three-host result is claimed.
-
-### Manifest replication
+## Manifest replication
 
 Worker metrics envelopes remain bounded to 64 KiB. A run manifest is retained in
 full in the worker store and native `manifest.json`; its outbox record carries a
@@ -289,9 +265,6 @@ outbox record. Relay collection also checks that each reference has its matching
 immutable manifest artifact. Standalone store consolidation verifies the source
 manifest against the reference before copying its projection. Cleanup refuses an
 unresolved reference so continuation ancestry cannot silently disappear.
-
-Historical inline manifest records remain readable. This transport change does
-not alter manifest bytes, experiment identities or checkpoint verification.
 
 While a manifest reference awaits artifact collection, the controller dashboard
 labels unresolved worker/continuation/checkpoint fields as **pending artifact

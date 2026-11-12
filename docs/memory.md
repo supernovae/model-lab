@@ -1,142 +1,139 @@
-# Training memory accounting
+# Memory
 
-Training memory is not one number. Model Lab separates a conservative **estimate** from per-update **observations**, and keeps categories disjoint so a total is not inflated by counting the same tensor twice.
+`klab inspect CONFIG` estimates training memory before anything runs, and
+training measures it every update. This page covers both and the settings that
+trade memory for time.
 
-## What occupies memory
+## The estimate
 
-The `inspect` estimator currently reports these byte categories:
+`inspect` reports disjoint categories, so nothing is counted twice:
 
-- **Resident weights** — all model parameters, including stored but inactive MoE experts and frozen portable-memory tables. Tied embeddings/output weights are counted once.
-- **Runtime buffers** — RoPE caches and token-memory maps. Attention masks are built per call and are not registered. They are not parameter bytes merely because they are persistent runtime state.
-- **Gradients** — FP32 gradients for trainable parameters.
-- **Optimizer state** — AdamW moment state, or the modeled Adafactor factors. Optimizer state is separate from weights and gradients.
-- **Retained activations** — tensors held for backward, including logits/loss allowance and memory-adapter values.
-- **Attention working tensors** — projection and score/probability allowances, sized by how many keys each query scores: two windows for `sliding_window`; the local window plus selected blocks (and one gathered copy of those keys and values, plus one summary per block with the learned selector) for `local_selected`; none for `sdpa` dense or MLA attention on CUDA/XPU, which is an assumption to confirm with a measured warmup; and a full $T^2$ allowance otherwise (reference dense, MLA and block-sparse, and `sdpa` on CPU, MPS and ROCm). The estimate version is `reference-v2`.
-- **Temporary workspace** — a conservative allocator/kernel/logit allowance.
-- **Headroom** — 15% of the preceding subtotal, reserved for uncertainty rather than an allocation category available to the model.
+- **Resident weights:** every parameter, including inactive experts and frozen
+  memory tables. Tied embeddings count once.
+- **Runtime buffers:** RoPE caches and token-memory maps.
+- **Gradients:** FP32, for trainable parameters.
+- **Optimizer state:** AdamW's two moments, or Adafactor's factors (below).
+- **Retained activations:** tensors kept for backward, including logits and
+  memory values.
+- **Attention working tensors**, sized by how many keys each query scores: two
+  windows for `sliding_window`; the local window plus selected blocks for
+  `local_selected`; nothing for `sdpa` dense or latent attention on CUDA and XPU
+  (confirm with a warmup); a full $T^2$ allowance otherwise.
+- **Temporary workspace:** an allowance for allocator, kernels and logits.
+- **Headroom:** 15% of the subtotal, for uncertainty.
 
-The estimator uses FP32 master-parameter and gradient accounting. Autocast does not halve resident weights or optimizer state. Its activation assumptions are deliberately conservative. A calibration multiplier may only raise an estimate when a matching native peak is observed; sampled MPS observations cannot lower an estimate or certify a bound.
+Weights and gradients are counted in FP32 even with BF16 autocast. Activation
+assumptions are conservative. When a matching run has measured a higher peak,
+calibration raises the estimate; it never lowers it.
 
-A proposal retains any positive baseline calibration correction as an additive
-uncertainty margin. That is not calibration of the changed configuration: its
-matching-observation count is zero and it requires its own warmup. Reducing a
-microbatch must not manufacture a fit by silently dropping an observed underestimate.
+## The capacity it is compared with
 
-Engram and MoE are capacity subsets, not extra totals. A displayed expert or memory-table subtotal is already part of resident weights/gradients/optimizer state. “Active per token” is a static direct-use convention, not a claim that inactive expert optimizer state disappears.
+`runtime.memory.max_device_memory_fraction` sets one ceiling. CPU uses the
+lesser of that fraction of total RAM and the RAM available now. CUDA, ROCm and
+XPU use the lesser of the fraction of device memory and the free amount. MPS and
+Metal share memory with the host, so their ceiling comes from the recommended
+working set and available system RAM; host and device memory are never added
+together. If a reading is unavailable the fit is `UNKNOWN`.
 
-## Capacity is one physical budget
+`runtime.memory.budget_bytes` sets an artificial lower ceiling, useful for
+planning.
 
-`runtime.memory.max_device_memory_fraction` limits a single ceiling. CPU uses the lesser of the configured fraction of total RAM and currently available RAM. Discrete CUDA/ROCm/XPU uses the lesser of the fraction of device total and free memory. MPS/Metal uses the runtime's recommended working-set bound, available current-allocation readings, and available system RAM; absent counters are not an invented second pool.
+`runtime.memory.estimate_policy` is `enforce` by default: a config whose
+estimate exceeds the ceiling is refused. With `observe`, `train` and `stage`
+warn and continue unchanged, including above `budget_bytes`; real allocation
+failures still stop the run.
 
-Unified-memory MPS/Metal memory is shared with the host; do not add host RAM and device capacity. If a required reading is unavailable the fit result is `UNKNOWN`. `budget_bytes` is an additional artificial cap, useful to disprove a fit in planning or tests, but cannot prove that real hardware will fit.
+## Make it fit
 
-## Choose estimate admission per run
+`inspect` can propose a config that fits, written beside the original without
+changing it:
 
-`runtime.memory.estimate_policy` defaults to `enforce`, preserving the existing
-refusal when estimated training memory exceeds its planning ceiling. For an
-explicit observational run, select:
+```sh
+klab inspect configs/runtime_smoke_cpu.yaml --write-proposal "$WORK/runtime-proposal.yaml"
+```
+
+The decision report lists each candidate change and its estimated peak. Use the
+proposal only by passing it to a later command. Every option below is an
+explicit config change.
+
+### Gradient accumulation
+
+```yaml
+training:
+  micro_batch_size: 1
+  gradient_accumulation: 4
+```
+
+An update runs `gradient_accumulation` microbatches, summing their losses and
+dividing by the update's total valid targets, then clips, sets the learning rate
+and steps once. The effective batch is `micro_batch_size × gradient_accumulation`
+examples; a final window cut short by the budget uses its real target count.
+Smaller microbatches reduce activation memory at the cost of more passes per
+update. Accumulation does not reduce weights, gradients or optimizer state.
+
+With FP16, an overflow restores the window's state, lowers the loss scale and
+retries the same data; three overflows in a row fail the run.
+
+Mixture-of-experts load balancing is computed per microbatch, not over the whole
+update.
+
+### Activation recomputation
 
 ```yaml
 runtime:
   memory:
-    estimate_policy: observe
+    activation_checkpointing:
+      enabled: true
+      strategy: transformer_block
 ```
 
-Both `train` and staging retain the estimate and its assumptions, warn about an
-exceedance, and continue with the same requested configuration. Staging also
-records a pilot's measured peak above the planning ceiling without treating that
-comparison as an allocator failure. Resolved configurations record observation mode explicitly. No proposal is applied automatically, and model, batch, optimizer,
-precision and token budgets are unchanged.
+Each decoder block keeps only its input during forward and runs again during
+backward. This cuts retained activations for extra compute; it does not reduce
+weights, gradients or optimizer state. `recompute/block_call_ratio` counts the
+extra block calls. MLX supports it too.
 
-This also applies when `budget_bytes` lowers the planning ceiling: with
-`estimate_policy: observe`, an estimate above that ceiling produces a warning rather
-than a refusal. `budget_bytes` is not an enforced allocation cap in observation
-mode.
+### Activation offload
 
-Actual allocation failures, failed pilots, cancellation, input verification and
-explicit resource envelopes still apply. Observation mode does not certify a
-physical fit or implement a hard memory cap. This option addresses a potential
-policy mismatch; an estimate alone is not evidence that a particular model fails
-on a particular device.
-
-Full-state continuation can explicitly change `estimate_policy` from `enforce`
-to `observe` with `--allow-runtime-optimization`, including an appended-data
-budget extension. An omitted historical value means `enforce`; the child records
-the policy transition. This does not admit changes to memory budgets or fractions,
-model/data settings, optimizer or effective batch. It does not reduce the retained
-estimate, claim physical fit, or provide a hard GPU-memory cap.
-
-## Observe an update
-
-During PyTorch training, memory monitoring samples at begin, after forward, after backward, after optimizer work, and end of each update. Relevant metric families include:
-
-- `memory/process_rss_bytes` and `memory/process_peak_rss_bytes` for process memory;
-- `memory/device_allocated_bytes` and `memory/device_reserved_bytes` when the backend exposes them;
-- `memory/device_peak_allocated_bytes` and `memory/device_peak_reserved_bytes` only when the native counter was successfully reset/read for that update;
-- `memory/driver_allocated_bytes` for available MPS driver readings; and
-- `memory/device_sampled_peak_bytes` for MPS's observed sample maximum, explicitly a lower bound rather than a native peak.
-
-Unavailable metrics are omitted, not written as `0`. Optional background sampling is supported by `MemoryMonitor`, but normal trainer construction does not enable it. Sampling time is recorded so observation overhead is visible.
-
-MLX/Metal uses the same process-RSS monitor plus native active/peak/cache counters.
-Its forward/backward transform is sampled as one combined phase. Native peak
-values are emitted only after a successful per-update reset; cache bytes are
-reported separately, not mislabeled as driver or reserved memory. Update timing
-includes synchronization, finite checks, and monitoring.
-
-## Adafactor state accounting
-
-PyTorch AdamW retains two full-size moments plus step scalars. Adafactor retains
-one unfactored second moment for scalar/vector parameters. For a tensor shaped
-`(..., rows, columns)`, it retains row and column factors with shapes
-`(..., rows, 1)` and `(..., 1, columns)`, plus a step scalar. Tied parameters
-are counted once. Neither optimizer removes parameter or gradient storage.
-
-The estimator uses these actual factor shapes; it does not assume a fixed
-percentage saving. Adafactor's scheduled learning rate is a relative step-size
-cap with parameter-RMS scaling, not AdamW-equivalent update magnitude. Changing
-optimizer is an explicit new experiment or promotion.
-
-The acceptance record reports 86,444 optimizer-tensor bytes for AdamW and 3,436 for Adafactor
-on the same 10,800-parameter tied tiny decoder, including 11 step scalars.
-Both exactly match the estimator. This is persistent-state accounting, not a
-total-process memory reduction or quality comparison.
-[The record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/memory_optimizer_2026_09_22.json) includes
-factor shapes, aliases, CPU RSS, native MLX fields, and calibration limits.
-
-## Reduce memory without changing the science silently
-
-A smaller `training.micro_batch_size` reduces activation dimensions. Increasing `training.gradient_accumulation` can preserve the requested effective example batch, at the cost of more forward/backward passes per update. Transformer-block activation recomputation trades retained activation memory for repeated backward-time computation. Both are explicit config changes.
-
-`inspect` can write a separate proposal rather than editing its input:
-
-```sh
-klab inspect configs/runtime_smoke_cpu.yaml \
-  --write-proposal klab-work/runtime-proposal.yaml
+```yaml
+runtime:
+  memory:
+    activation_offload:
+      enabled: true
 ```
 
-The adjacent decision report describes each ordered candidate and before/after estimated peak. A proposed config is only effective if a user deliberately supplies it to a later command. The planner does not claim savings from unsupported activation offload, optimizer-state offload, selective checkpointing, or unvalidated precision.
+On a PyTorch accelerator, tensors saved for backward are copied to host memory
+after forward and back before backward. Parameters and buffers stay on the
+device. Copies are synchronous; their time is part of the update time and is
+reported as `offload/transfer_seconds` and `offload/transfer_fraction`, with
+`offload/bytes_to_cpu`, `bytes_to_device` and `peak_host_bytes`.
 
-Proposal publication never overwrites either destination. Both files are
-written and synced privately; the decision report is published durably before
-the YAML becomes visible. Report format 1 binds the exact YAML bytes with
-`yaml_sha256` and the loadable scientific configuration with `config_sha256`.
-An interrupted process can leave an uncommitted report without a YAML; it is
-not a usable proposal. Report or config conflicts fail rather than replacing
-user-owned artifacts. Storage failures during publication roll back files
-created by that invocation.
+Before training, Lab checks that available host RAM covers the offloaded
+activations plus checkpoint staging with a 15% margin. On MPS, host and device
+share memory, so offload saves no capacity. Offload does not move parameters or
+optimizer state.
 
-The [CLI acceptance record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/resource_policy_2026_09_22.json)
-covers low-memory and capacity-constrained balanced proposals, unchanged source
-files, preserved effective batch, loadable hash-bound YAML, and overwrite refusal.
-These are planner/publication checks, not measured training-capacity claims.
+### Adafactor
 
-## Do not conflate these mechanisms
+`optimizer.name: adafactor` keeps one second-moment factor per row and per
+column of each matrix (plus a full second moment for vectors) instead of AdamW's
+two full moments. The estimate uses the actual factor shapes. Its learning rate
+is a relative step-size cap, not an AdamW learning rate, so switching optimizer
+is a new experiment.
 
-- **Disk checkpoints** preserve durable model/training state for restart; see [checkpointing](checkpointing.md).
-- **Activation recomputation** drops selected forward intermediates and reruns blocks in backward; see [activation checkpointing](activation-checkpointing.md).
-- **Gradient accumulation** changes when a successful optimizer update is committed; see [gradient accumulation](gradient-accumulation.md).
-- **Activation offload** copies saved tensors to host storage. Discrete-device estimates are conditional; measured capacity claims need paired hardware evidence. Unified-memory savings remain zero; see [offload](offload.md).
-- **KV caches** are request-local inference/decode structures. Training does not reuse them and receives no cache-related memory discount.
+## Measured memory
 
-A lower estimate or an architecture-specific diagnostic is not a throughput, quality, or hardware-capacity result. Compare matched observed runs before making any of those claims.
+Each update samples memory at its start, after forward, after backward, after
+the optimizer step and at its end:
+
+- `memory/process_rss_bytes`, `memory/process_peak_rss_bytes`
+- `memory/device_allocated_bytes`, `memory/device_reserved_bytes`
+- `memory/device_peak_allocated_bytes`, `memory/device_peak_reserved_bytes`
+  (where the backend's peak counter can be reset each update)
+- `memory/driver_allocated_bytes` and `memory/device_sampled_peak_bytes` on MPS;
+  the sampled peak is a lower bound
+
+MLX reports active, peak and cache memory. Unavailable readings are omitted,
+never written as zero.
+
+A generation key/value cache belongs to inference only; it has no part in
+training memory.

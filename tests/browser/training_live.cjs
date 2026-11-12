@@ -1,4 +1,4 @@
-// Optional browser regression: see docs/validation/training-charts.md.
+// Optional browser regression: see docs/dashboard.md.
 const {chromium}=require('playwright');
 const {execFileSync, spawn}=require('child_process');
 const path=require('path');

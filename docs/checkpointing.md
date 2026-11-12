@@ -1,237 +1,181 @@
-# Disk checkpoints, recovery, and promotion
+# Checkpoints
 
-Commands below use the [activated, provisioned environment](../README.md#first-run).
+A checkpoint is an immutable, verified snapshot written at an update boundary.
+It holds the model weights and, for a full-state checkpoint, everything needed to
+continue exactly: optimizer state, learning rate schedule, data cursor, counters
+and random state.
 
-A checkpoint generation is a durable, immutable local snapshot shared by the PyTorch and MLX execution paths. It is not activation recomputation, gradient accumulation, or an inference KV cache. Checkpoints are written at successful update boundaries only; partial accumulation gradients are not a resumable state.
+## Layout and verification
 
-## Verify before reuse
-
-```sh
-klab train --runs-dir klab-work/runs configs/runtime_smoke_cpu.yaml --run-id runtime-part --stop-after-step 10
-klab checkpoint inspect klab-work/runs/runtime-part/checkpoints/latest.json --json
-klab checkpoint verify klab-work/runs/runtime-part/checkpoints/latest.json --json
-klab train --runs-dir klab-work/runs configs/runtime_smoke_cpu.yaml --run-id runtime-resumed \
-  --resume klab-work/runs/runtime-part/checkpoints/latest.json
-```
-
-Both engines store generations under `klab-work/runs/<run-id>/checkpoints/step_<step>_gen_<generation>/`. Each finalized generation has a manifest and canonical safetensor weight shards/index; its engine selects the native training-state codec. `latest.json` and `best.json` are atomic lookup indexes; verified generation manifests and file digests are the durable truth. `checkpoint inspect` reports inventory and lineage, not a standalone integrity claim. `checkpoint verify` validates the selected path and returns structured failures with a nonzero exit when invalid.
-
-The checkpoint manager writes a temporary sibling, verifies the completed generation, atomically publishes it, then updates lookup pointers. A writer lease prevents concurrent writers/recovery in the same run. Recovery scans finalized generations and can repair stale projections/pointers, but an explicit corrupt `--resume` selection fails rather than silently falling back.
-
-## Full resume
-
-`--resume` creates a new child run. It restores canonical model weights, named optimizer state, warmup/cosine schedule, optional scaler, committed counters, data cursor, cadence watermarks, cumulative timing, and the engine's safe RNG envelope. The child records `parent_run_id` and the exact parent `checkpoint_sha256`; it does not bind itself to a moving `latest` pointer.
-
-By default full resume requires the same engine/backend, architecture semantics, tokenizer/data/package identities, optimizer settings, schedule horizon, training budget, micro-batch/accumulation, sequence length, deterministic setting, and verified run-owned artifacts. The explicit runtime-optimization transition described below permits a narrow, recorded exception for supported execution settings. Source/runtime or device-identity drift requires `--allow-runtime-drift`; that produces an explicit best-effort record and never bypasses scientific compatibility. A completed budget cannot be resumed.
-
-Use `--recover RUN_DIR` only to seek the latest valid finalized generation after interruption/corruption. It creates a child after checking compatible state; it is not permission to overwrite the existing run. Old or incomplete historical artifacts that lack required continuation state are not full-resumable.
-
-## Explicit terminal budget extension
-
-`train --extend-budget CHECKPOINT` takes an immutable full-state generation
-directory, not `latest.json` or a weights-only promotion. It is mutually
-exclusive with `--resume`, `--recover`, and `--promote`. The parent must be
-terminal at both its configured update and target caps; both old and new target
-caps must equal `max_steps × seq_len × micro_batch_size × gradient_accumulation`.
-The new caps must both grow, and the new AdamW `optimizer.decay_steps` must equal
-the parent's `training.max_steps`. The parent may have an implicit horizon or
-an explicit horizon equal to that same original update cap. Only name, logging,
-checkpoint paths, the two caps, and explicit representation of that original
-horizon may differ. A relocated tokenizer pathname is accepted only after its
-bytes match the authenticated run-owned parent tokenizer. Engine/backend and
-artifact identity remain verified; source/runtime drift still needs explicit
-`--allow-runtime-drift` and appears in the child's `budget_extension` decision.
-ExperimentPlan budget extensions do not authorize that drift.
-
-The child restores weights, AdamW moments and learning rate, scaler, cursor,
-RNG, counters and lineage; it continues at the original cosine floor rather
-than restarting a longer cosine. A subsequent interrupted child uses ordinary
-strict `--resume` with its **unchanged** extended config. The source checkpoint
-and run store remain immutable. This mode is PyTorch-only; explicit AdamW decay
-horizons are not supported by MLX.
-
-## Promotion is weights-only continuation
-
-`--promote CHECKPOINT` creates a child with compatible canonical model weights but **fresh** optimizer, schedule, scaler, RNG, cursor, and zero committed counters. Its destination config supplies the new data/budget/runtime choices. Promotion still requires the same architecture semantics, tokenizer contents, and portable package identity when present; equal tensor shapes alone are insufficient. It does not resize a backbone or turn dense weights into MoE.
-
-A config can name its parent instead: `training.parent_checkpoint` is the same
-promotion, declared in the recipe so that [post-training stages](post-training.md)
-chain and `klab try` starts both arms from one parent.
-
-Use full resume for the same experiment and promotion for a compatible
-weights-only starting point. The public path is local; remote scheduling and
-controller-side artifact ingestion are separate contracts.
-
-## Import compatible external weights
-
-`weights import` accepts closed, validated source formats:
-`klab_legacy_v1` and `hf_llama_safetensors`. The latter is a narrow
-bias-free dense Llama mapping with compatible attention/RoPE/tokenizer semantics,
-including exact dense or grouped-query layouts when the destination's
-`num_kv_heads` exactly matches the source `num_key_value_heads`. It is not a
-general Hugging Face, quantization, or chat-template importer.
+Checkpoints live under `RUNS/<run-id>/checkpoints/step_<step>_gen_<generation>/`.
+Each holds a manifest, safetensors weight shards and the engine's training state.
+`latest.json` and `best.json` point at generations; the manifests and file
+digests are what count.
 
 ```sh
-klab weights import SOURCE OUTPUT_RUN \
-  --config COMPATIBLE_V2.yaml --format klab_legacy_v1 \
-  --source-tokenizer SOURCE_TOKENIZER.json --provenance PROVENANCE.json
+klab checkpoint inspect "$RUNS/run/checkpoints/latest.json" --json
+klab checkpoint verify "$RUNS/run/checkpoints/latest.json" --json
+klab checkpoint verify "$RUNS/run/checkpoints/latest.json" --weights-only --json
 ```
 
-The destination config must preserve architecture semantics and exact compatible
-tokenizer contents. Provenance format 1 requires explicit source and license
-statements; importing does not grant redistribution rights. The output is a
-verified, promotion-only generation with null native-state codec fields, not
-invented optimizer or RNG state. Use its checkpoint with `train --promote`.
+`inspect` lists contents and lineage. `verify` checks every file and digest, the
+config and the training state, and exits non-zero with structured errors when
+something is wrong. `--weights-only` checks only what generation or promotion
+needs.
 
-Historical `.pt` files remain inspectable/verifiable through the same checkpoint
-CLI. Their hash, migrated configuration, tensor shapes/values, and tied aliases
-are checked. Their reported scope is always `weights_only`; they cannot become
-full-resumable by supplying `--config`.
+A checkpoint is written to a temporary sibling, verified, then published
+atomically before the pointers move. A per-run lock keeps two writers out of the
+same run.
 
-## Training-state comparison API
+## Continue a run
 
-For offline diagnostics, `klab.training.state_digest` provides
-`canonical_training_state(snapshot, observation=observed_update)` and
-`compare_training_states(left, right)`. Load independently verified native
-`TrainingSnapshot` objects at matching committed update boundaries and supply
-the actual step, tokens seen, learning rate, loss, gradient norm, overflow flag,
-and retry state. The comparison reports differing components or
-`BITWISE_EQUIVALENT`; it uses exact tensor bytes and typed state, without a
-numerical tolerance. Missing loss or gradient observations may be `None`, so
-equal unavailable observations establish no equality of those measurements.
+All continuations create a new child run that records its parent run and the
+exact parent checkpoint digest. The parent is never modified.
 
-The versioned fingerprint covers weights and trainability, optimizer, schedule,
-RNG, scaler, cursor, counters, scientific configuration, validation/lineage
-values and checkpoint cadence. It excludes run/file/source identities,
-operational config paths and cumulative timings. A disabled time-based cadence's
-minutes watermark is excluded; enabled time-based cadence and unknown snapshot
-fields fail closed. Supported tensors are dense PyTorch tensors and compatible
-native-endian NumPy arrays; unsupported state types fail rather than being
-silently omitted.
+| Flag | Starts from | Keeps | Use for |
+| --- | --- | --- | --- |
+| `--resume CHECKPOINT` | a full-state checkpoint | everything | continuing the same run |
+| `--recover RUN_DIR` | the newest valid checkpoint in a run | everything | continuing after a crash or corruption |
+| `--extend-budget GENERATION` | a finished run's final checkpoint | everything, with larger limits | training longer |
+| `--promote CHECKPOINT` | any checkpoint's weights | weights only | a new stage on new data or settings |
 
-This API does not authenticate checkpoints or the contents of excluded paths,
-validate optimizer mathematics, grant source compatibility or authorize a run.
-Equal fingerprints describe only the supplied states and observations; they do
-not prove successful resume, future trajectory equivalence, or model quality.
+### Resume
 
-## Evaluation, best, and lineage
+`--resume` restores weights, optimizer state, schedule, scaler, counters, data
+cursor, checkpoint cadence, timing and random state. It refuses any change to
+architecture, tokenizer, data, optimizer, schedule, budget, batch shape,
+sequence length, determinism, engine or backend. A finished run cannot be
+resumed.
 
-Child lineage discovery ranks generation manifests before reading tensor payloads.
-It verifies the explicitly selected parent and any candidate that can contribute
-the best local or inherited loss, falling back when a candidate is corrupt.
-Unrelated retained generations do not require a payload scan during an ordinary
-continuation. Explicit recovery still verifies the full retained store; full-state
-resume verification and older-parent boundaries are unchanged.
+- **`--allow-runtime-drift`** accepts a different Lab version or runtime on
+  the same backend, recording the continuation as best effort.
+- **`--allow-runtime-optimization`** accepts changes to how the same training
+  runs: attention implementation, activation recomputation, block compilation,
+  the compiled output head, determinism, `runtime.memory.estimate_policy`, and
+  microbatch size and accumulation while keeping their product. When changing
+  the microbatch size without fixed validation panels, set
+  `evaluation.batch_size` to the old microbatch size so validation scores the
+  same sample. The child records old and new values; results are no longer
+  bitwise comparable.
 
-Validation runs at step 0, configured evaluation intervals, and final/interruption boundaries. A new best validation loss causes a checkpoint; a cadence-only checkpoint has `validation_loss: null` rather than inheriting stale attribution. `best.json` points only to a verified evaluated generation physically present in that run. A resumed child may carry an ancestor `lineage_best` record whose checkpoint is not local; it is lineage metadata, not a fabricated local best pointer.
+### Recover
 
-When selecting an older parent checkpoint, inherited best-state discovery stops
-at that selected generation and step. Later same-run evaluations cannot leak
-backward into the child's lineage. An ancestor best that is not copied locally
-remains explicitly unavailable as a local checkpoint.
+`--recover RUN_DIR` scans the run's finished generations, skips temporary or
+corrupt ones, repairs `latest.json` and `best.json`, and continues from the
+newest valid generation. An explicitly named `--resume` checkpoint that turns out
+corrupt fails rather than falling back.
 
-`checkpoint.keep_periodic: false` prunes only after successful publication and protects latest, best, and the immediately previous verified generation. Keeping fewer generations reduces recovery/history options; it never makes old state safer.
+### Extend a finished run
 
-In [actual signal/recovery acceptance](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/signal_recovery_2026_09_22.json),
-SIGTERM ended cleanly at a committed update; deliberate latest-generation
-corruption made explicit resume fail before child creation. Explicit recovery
-selected the previous verified generation and completed a new child update,
-leaving that selected parent's files unchanged.
+`--extend-budget` takes the final full-state generation directory of a run that
+reached both its step and token limits. Both limits must grow, and with AdamW
+`optimizer.decay_steps` must equal the parent's original `training.max_steps`,
+so the schedule continues at its floor rather than starting a new cosine. Only
+the name, logging paths, the two limits and that decay horizon may differ. An
+interrupted extension continues with ordinary `--resume` and the same config.
+PyTorch only.
 
-## Native MLX generations
+With `append_data`, the extension may also train on newly appended data; see
+[datasets](datasets.md#bounded-windows-and-appended-data).
 
-MLX uses the common format-2 generation, pointer, artifact, lineage, recovery,
-and evidence contract. Its native state is `training_state.json` plus
-`optimizer.safetensors`; both are hashed and fsynced before generation
-publication. The reader checks the exact optimizer array inventory, named
-groups, counters, schedule, primitive metadata, and Python/NumPy/MLX RNG.
-Malformed containers reject the generation rather than escaping recovery.
+### Promote
 
-Offline inspection and verification do not require MLX. Execution does require
-the pinned optional runtime. Same-engine continuation restores native state;
-cross-engine continuation is canonical-weight promotion with fresh training
-state, never an optimizer conversion.
+`--promote` copies weights into a fresh run: new optimizer, schedule, random
+state, cursor and counters, with the target config's data and budget. The
+architecture and tokenizer must match. `training.parent_checkpoint` in a config
+does the same thing declaratively, so [post-training](post-training.md) stages
+chain and both arms of a `klab try` start from one parent.
 
-## Optional spot-safety policy
+To add n-gram memory to a dense model while promoting, see
+[Engram memory](engram.md#add-memory-to-a-trained-dense-model).
 
-The canonical `klab train CONFIG --spot-policy POLICY.json` accepts a
-separate operational policy; Python callers pass `spot_policy=SpotSafetyPolicy(...)`
-to `train`. Read-only `klab checkpoint plan-spot POLICY.json --workspace RUNS_DIR`
-prints the decision and capacity without creating a run. Queued worker declarations
-do not implicitly inherit this host policy; this interface is explicit direct training.
-It adds checkpoint boundaries without editing RunConfig, evaluation
-intervals, scheduler, optimizer, data, precision or target budget. Each fresh or
-resumed child records its chosen policy, cadence and initial capacity readings
-in `spot_safety.json`; a child must explicitly supply its own current policy.
-Operational saves retain scientific cadence watermarks; separate child-local
-operational time starts at child initialization and resets on every save.
-Historical generations and their identities remain unchanged.
+## Import weights
 
-The strict JSON fields are `format: "klab-spot-safety-v1"`,
-`observation_reference` (retained measurement reference),
-`checkpoint_write_seconds`, `boundary_seconds`, `restart_seconds`,
-`interruption_notice_seconds`, `max_recovery_seconds`, `checkpoint_bytes`,
-`checkpoint_inodes`, `reserve_bytes` and `reserve_inodes`. Times must be finite;
-write, boundary and restart observations must be positive. Missing observations
-fail closed. Boundary latency must include the longest observed update plus
-any intervening evaluation before reaching a checkpoint boundary. Write time
-must include durable checkpoint commit, and restart cost must include restore
-and preparation needed to resume updates on the selected runtime.
+`klab weights import` brings a local Hugging Face Llama safetensors directory
+into a weights-only run you can promote from:
 
-Cadence in seconds is `max_recovery_seconds - restart_seconds -
-checkpoint_write_seconds - boundary_seconds`; a nonpositive result is rejected.
-Interruption notice must cover the observed boundary plus write time. This
-bounds the planned replay/restart envelope using supplied observations; it is
-not a provider SLA or a guarantee against longer future operations. Scientific
-checkpoint triggers remain enabled, and time cadence is checked at native
-completed-update boundaries, measured from the last checkpoint start watermark
-(conservative with respect to time spent writing). Native signal handling still owns shutdown; this
-policy does not add a provider polling service or authorize allocation.
+```sh
+klab weights import SOURCE_DIR OUTPUT_RUN --config target.yaml \
+  --format hf_llama_safetensors --source-tokenizer SOURCE_DIR/tokenizer.json \
+  --provenance provenance.json
+```
 
-Native storage checks run before engine creation and again before each save.
-Required free bytes/inodes are twice the measured generation footprint plus
-explicit reserves (staging and committed-generation headroom); existing retained
-generations already consume free space. Missing inode observations, unavailable
-storage or insufficient capacity reject the operation. Checkpoint growth and
-competing writers still require conservative observed bounds and reserves.
+The target config must have the same dense or grouped-query layout and the same
+tokenizer. `provenance.json` (`format_version: 1`) states the source and license.
+`klab weights export` writes the reverse; see
+[post-training](post-training.md#export-for-hugging-face).
 
-Offline tests establish strict loading, cadence, capacity failures and canonical
-CLI wiring with training mocked. Live qualification remains separately allocated:
-measure full-state durable write size/time, longest boundary latency, and cold
-child restart on the actual model/runtime/filesystem; verify notice delivery and
-signal-to-durable-commit under bounded interruption, then verify the exact
-committed generation and child resume. No fixture establishes these measurements
-or provider interruption safety.
+## Best checkpoint and pruning
 
-Opt-in [`checkpoint.retention`](checkpoint-milestones.md) additionally preserves
-scientific milestones and reserves its declared peak bytes plus free-space
-headroom. Its keep-set replaces the default latest/previous/best-only bound.
-This RunConfig policy differs from experiment-plan `retention.keep_periodic`,
-which describes plan storage expectations and does not configure the trainer.
+Validation at a new best loss writes a checkpoint (unless
+`checkpoint.save_on_new_best: false`); `best.json` points at the best evaluated
+generation in the run. A child keeps its ancestors' best as lineage metadata.
 
-## Explicit runtime optimization on resume
+`checkpoint.keep_periodic: false` deletes older generations after each
+successful save, keeping latest, best and the previous one.
 
-A full-state `train --resume` or `train --recover` may opt in to
-`--allow-runtime-optimization` to change dense attention implementation,
-activation checkpointing, block compilation, compiled output projection and loss,
-determinism, or microbatch and
-accumulation while preserving their product. Fixed validation panels retain their
-own batch sizes. Without fixed panels, set `evaluation.batch_size` to the prior
-microbatch size when changing microbatch so the validation sample is unchanged.
-All other training, data, model, optimizer, schedule and budget settings remain bound. The child manifest records
-the old and new values and parent checkpoint digest as a best-effort transition;
-results are not bitwise comparable when these settings change. Original
-checkpoints are not modified. Source/runtime identity changes separately require
-`--allow-runtime-drift`.
+### Keep milestones
 
-Set `runtime.compile_transformer_blocks: true` to compile PyTorch transformer
-blocks. This currently requires activation checkpointing and offload to be
-disabled; startup compilation cost and device compatibility depend on the
-installed PyTorch backend. Test the target workload before using it for a long
-run.
+`checkpoint.retention` keeps a declared set of checkpoints within a storage
+budget:
 
-Set `runtime.compile_output_head_loss: true` to compile the output projection
-and summed FP32 cross-entropy together on PyTorch XPU BF16. It defaults to off;
-changing it on full-state resume or recovery requires
-`--allow-runtime-optimization`. See [compiled output projection and loss](training.md#compiled-output-projection-and-loss)
-for its supported scope and exclusions.
+```yaml
+checkpoint:
+  every_steps: 500
+  keep_periodic: false
+  retention:
+    milestones:
+      - {name: early, step: 2000, committed_targets: 262144000}
+      - {name: final, step: 10000, committed_targets: 1310720000}
+    terminal_step: 10000
+    terminal_targets: 1310720000
+    max_generations: 7
+    max_generation_bytes: 5368709120
+    max_retained_bytes: 37580963840
+    max_peak_bytes: 42949672960
+    reserve_free_bytes: 107374182400
+```
+
+A milestone is the first checkpoint whose step and committed targets both reach
+its values. The kept set is the milestones plus latest, previous, best and
+terminal. Before each save Lab checks free space against the remaining peak
+budget and reserve; after it, it checks the actual size before publishing.
+`checkpoints/retention.json` records what was kept and why, before anything is
+deleted. Set `max_generation_bytes` from a real full-state checkpoint's size.
+The policy is fixed when a run starts; a resumed child keeps its parent's
+milestones and can add later ones.
+
+## Checkpoints on interruptible machines
+
+`klab train CONFIG --spot-policy POLICY.json` adds time-based checkpoints sized
+so that a preemption loses at most a declared amount of work. The policy
+(`format: klab-spot-safety-v1`) gives measured `checkpoint_write_seconds`,
+`boundary_seconds`, `restart_seconds`, `interruption_notice_seconds`,
+`max_recovery_seconds`, `checkpoint_bytes`, `checkpoint_inodes`, `reserve_bytes`
+and `reserve_inodes`. The cadence is `max_recovery_seconds − restart − write −
+boundary`; a non-positive result is refused. Free space for two checkpoints plus
+the reserves is checked before training and before every save.
+`klab checkpoint plan-spot POLICY.json --workspace RUNS` prints the decision
+without starting a run.
+
+## What a checkpoint records
+
+- **Identity.** A run manifest records requested and effective config digests
+  (machine-local paths excluded), an architecture digest, the Lab source
+  identity and the runtime. Each checkpoint records its config digest and parent.
+- **Exposure.** `klab report RUN_ID --kind run --json` lists, per checkpoint:
+  usable supervised targets per pass over the prepared data, committed targets,
+  effective passes, the loader cursor, and three timings (cumulative update time,
+  training-loop time, and time in this invocation). Promotion starts a new
+  exposure count; resume continues it.
+- **Run-owned inputs.** A run copies its tokenizer, prepared data and any memory
+  package into the run directory, so continuation does not depend on the
+  original paths. Keep the whole run directory, not only the weights, if you may
+  resume it.
+
+## MLX checkpoints
+
+MLX runs use the same generations, pointers and verification. Their training
+state is `training_state.json` plus `optimizer.safetensors`. Checkpoints can be
+inspected and verified without MLX installed. Continuing on the other engine is
+a promotion, with fresh training state.
