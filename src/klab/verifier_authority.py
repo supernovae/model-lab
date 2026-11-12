@@ -308,6 +308,9 @@ def _excluded_edges(kind: str) -> frozenset[tuple[str, str]]:
 # load_prepared_data, receipt validators and the exclusion edge set are
 # unchanged; no excluded edge gained a verifier use. Re-pin the existing
 # complete-owner signatures.
+# data.packing re-audited 2026-11-11 (one encoder pool): the streaming collector
+# no longer passes a scratch directory to PreparationEncoder; no verifier edge
+# changed.
 _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
@@ -364,7 +367,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.conversations",
-    ): "afbfd629d9069c78decd5ea392015933158428d8f12491da6629433437f2b97c",
+    ): "1c24323fc035bf93746d616ba6b15b4f6d6a1b047b5a5b8a6646c586d1f042bc",
     (
         "data.packing",
         "data.datasets",
@@ -372,7 +375,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.encoding",
-    ): "500fe995dcd021e19123a3b0507c99b52216859a7574e96f1b18bf9425ddfd95",
+    ): "ef7df43ddbe879c99fef112e95e544fa9ca3f83dcf05c3320ef08d71e3041b09",
     (
         "data.packing",
         "data.local_stories",
@@ -380,11 +383,11 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.preparation_chunks",
-    ): "33c6cb84f004e42a94b57ab7cd0a7213e0069f40960bcd134e39810c8bebee3f",
+    ): "c57621b7326fa1a2809b3f86f9b98058542cec3472f8ca36b92a3bc3483f0092",
     (
         "data.packing",
         "data.preparation_telemetry",
-    ): "1ced0202d731183b4ab69cfeb8c63131c4dbed27d2a4a6d549be9ad62f81dc38",
+    ): "93afb8dfb2cf1e02d95b61cd8eddf2ca764957355f127d369770b444ecf1fc9e",
     (
         "data.packing",
         "experiments.source_compatibility",
@@ -392,11 +395,11 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "progress",
-    ): "c83743ee3e97447a561edb816518ae69356b874f14998909bda65b1c905a50ff",
+    ): "1f397d259d722f7df914d363cdf775ac30cd5c9d2d1b7e2f4d775f02f0b177ab",
     (
         "data.packing",
         "resource_envelope",
-    ): "5c585875d710fb16beb2f326c181eab3992e543112093a753edd94db97bcf011",
+    ): "2d42ecd0164c4efd1474a5fcc33d049706c388921f1d1412f206a67600931e9d",
     (
         "data.packing",
         "workdir",

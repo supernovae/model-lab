@@ -217,9 +217,7 @@ def test_suite_ram_fixture_is_consistent_on_a_physical_host_above_480_gib(
     monkeypatch.setattr(encoding, "plan_host_workers", recording)
     monkeypatch.setattr(encoding.subprocess, "Popen", no_spawn)
     with pytest.raises(Spawned):
-        encoding.PreparationEncoder(
-            Tokenizer(models.BPE()), tmp_path / "workspace", max_workers=None
-        )
+        encoding.PreparationEncoder(Tokenizer(models.BPE()), max_workers=None)
     ((reserve, plan),) = plans
     assert reserve == 64 * gib // 10
     assert plan.workers >= 1

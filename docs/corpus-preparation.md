@@ -30,13 +30,17 @@ each source record, including on a warm token cache. A bounded LRU retains up
 to 64 source handles (also limited by the process descriptor budget). Each
 active read duplicates its handle and uses positional I/O, so concurrent reads
 and cache eviction cannot change another reader's position or close its file.
-A single tokenizer subprocess owns its Rayon pool; the measured CPU/RAM plan
-splits capacity between source readers and encoding instead of nesting pools.
+Encoding uses the shared [encoder pool](token-store.md#one-encoder): one
+single-threaded tokenizer process per planned worker, with text and token IDs
+crossing as binary frames. The measured CPU/RAM plan splits capacity between
+source readers and encoding instead of nesting pools. Reused encodings live in
+a binary [content token store](token-store.md#tokens-by-content) under the
+corpus work root, not in a database.
 `KLAB_MIXTURE_WORKERS=N` caps that operation's combined worker plan; omitted,
 it uses available physical cores, affinity and measured memory. Ordinary text
 preparation retains its existing default. These byte budgets bound queued
 payloads, not total RSS: decoded objects, the current record, tokenizer native
-memory, SQLite and final receipt storage are additional.
+memory, the token index and final receipt storage are additional.
 
 An interrupted materialization resumes automatically at the last authenticated
 assembly frontier for the same output. Immutable segments live beside it in
@@ -69,7 +73,7 @@ receipt. Selected counts nonempty deduplicated eligible candidates, including
 supply beyond the output quota; committed target tokens describe output.
 Source-worker utilization is busy wall time divided by available worker time,
 not a CPU-utilization measurement. Peak simultaneous source reads, encoder
-Rayon bounds, observed child thread counts and encoder CPU utilization make
+worker counts, observed child thread counts and encoder CPU utilization make
 small concurrency comparisons inspectable. A child that exits during sampling
 records an incomplete observation instead of aborting materialization; unknown
 encoder utilization is reported as null. Three workers allocate one reader and

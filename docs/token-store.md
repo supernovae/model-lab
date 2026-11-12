@@ -89,3 +89,41 @@ To discard a store, delete its `<key>` directory; it is rebuilt on demand.
 - Token IDs are stored as int32 whatever the vocabulary size.
 - The check that train and validation documents are disjoint still reads both
   source files once per preparation.
+
+## One encoder
+
+Every preparation path tokenizes through the same pool,
+`klab.data.encoding.EncoderPool`: single-threaded `klab.token_encode_worker`
+processes that receive text and return int32 token IDs as length-prefixed
+binary frames. No JSON and no Python integer list crosses a process boundary.
+The token store sends workers whole runs of JSONL lines; the streaming
+collector and corpus mixtures send batches of texts through
+`PreparationEncoder`, which spreads each batch over the workers and returns
+the results in input order. Documents are encoded independently, so the split
+does not change any token.
+
+## Tokens by content
+
+A corpus mixture selects documents by content, not by position in a file, so it
+keeps its reusable encodings in `ContentTokens`: the same raw int32 IDs, in two
+append-only files per tokenizer under the corpus work root
+(`cache/source-tokens/<key>/`):
+
+| File | Holds |
+| --- | --- |
+| `tokens.ids` | int32 token IDs of each document, without EOS |
+| `index.bin` | one 76-byte record per document: content SHA-256, token offset, token count, SHA-256 of its IDs |
+
+The index is read into memory once, so a lookup is one positioned read; there
+is no database. Appends are sequential, which is what a spinning disk does
+well. It is a cache: nothing is synced, IDs are written before their index
+record, and after a crash the index is cut back to the documents whose IDs are
+present. Every read checks the stored digest. One build holds a store at a
+time; a second build on the same tokenizer and corpus is refused with a clear
+message instead of waiting.
+
+On a 210M-token synthetic release (RAM-backed storage, 48 threads), a cold
+mixture build took 50.3 s with this encoder and store against 77.9 s with the
+previous single JSON-speaking tokenizer child and SQLite cache, with a
+byte-identical `train.tokens.jsonl`. The remaining time is mostly the mixture's
+JSON token output and its checkpoints, which this change does not touch.

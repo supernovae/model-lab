@@ -261,17 +261,16 @@ def pipeline_request(request, index):
             "mixture_index.py",
             "mixture_pipeline.py",
             "retained_mixture.py",
-            "token_cache.py",
         )
     }
     producer.update(
         {
             "data/" + name: sha256_file(Path(__file__).parents[1] / "data" / name)
-            for name in ("encoding.py", "tokenizer.py")
+            for name in ("encoding.py", "token_store.py", "tokenizer.py")
         }
     )
-    producer["preparation_encoder.py"] = sha256_file(
-        Path(__file__).parents[1] / "preparation_encoder.py"
+    producer["token_encode_worker.py"] = sha256_file(
+        Path(__file__).parents[1] / "token_encode_worker.py"
     )
     return {
         **request,

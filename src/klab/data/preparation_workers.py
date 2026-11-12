@@ -72,7 +72,7 @@ class PreparationWorkers:
                 self.models.append(model)
                 self.encoders.append(
                     self.stack.enter_context(
-                        PreparationEncoder(model, self.root, max_workers=threads)
+                        PreparationEncoder(model, max_workers=threads)
                     )
                 )
             self.executor = self.stack.enter_context(

@@ -38,6 +38,7 @@ from klab.result_publication import sync_directory
 from klab.training.manifest import sha256_file
 
 MIXTURE_BATCH_SOURCE_BYTES = 8 * 1024**2
+_TOKEN_STORE_SOURCE = Path(__file__).parents[1] / "data" / "token_store.py"
 MIXTURE_COMMIT_SEGMENT_BYTES = 64 * 1024**2
 MIXTURE_COMMIT_INTERVAL_SECONDS = 30
 
@@ -523,8 +524,8 @@ def _schedule(
         excluded.append(row)
 
     from klab.corpus.preparation_inputs import corpus_work_root
-    from klab.corpus.token_cache import TokenCache
     from klab.data.encoding import TOKENIZER_BATCH_DOCUMENTS, PreparationEncoder
+    from klab.data.token_store import ContentTokens
 
     try:
         token_root = corpus_work_root(release) / "cache" / "source-tokens"
@@ -533,7 +534,9 @@ def _schedule(
     with (
         ExitStack() as encoders,
         (
-            TokenCache(token_root, tokenizer_sha) if reuse_tokens else nullcontext(None)
+            ContentTokens(token_root, tokenizer_sha)
+            if reuse_tokens
+            else nullcontext(None)
         ) as tokens,
         (staging / "train.tokens.jsonl").open("wb+") as stream,
     ):
@@ -744,7 +747,7 @@ def _schedule(
                 ]
             if encoder is None:
                 encoder = encoders.enter_context(
-                    PreparationEncoder(tokenizer, staging, max_workers=encode_workers)
+                    PreparationEncoder(tokenizer, max_workers=encode_workers)
                 )
             encode_started = time.monotonic()
             try:
@@ -828,7 +831,9 @@ def _schedule(
                 encoders.callback(candidate_rows.close)
             for doc, family in candidate_rows:
                 if "cached_payload" in doc:
-                    doc["cached_ids"] = TokenCache.decode_ids(doc.pop("cached_payload"))
+                    doc["cached_ids"] = ContentTokens.decode_ids(
+                        doc.pop("cached_payload")
+                    )
                 marker = {"document_id": doc["document_id"]}
                 buffered_bytes = (
                     max(
@@ -976,9 +981,9 @@ def _completed_mixture_cache(spec):
                 "mixture.py",
                 "mixture_index.py",
                 "mixture_pipeline.py",
-                "token_cache.py",
             )
-        },
+        }
+        | {"data/token_store.py": sha256_file(_TOKEN_STORE_SOURCE)},
     }
     if spec.additional_releases:
         cache.authority["mixture"]["retained_mixture.py"] = sha256_file(
@@ -1075,10 +1080,10 @@ def _native_mixture_completion(spec, raw, output, manifest, tokenizer_sha):
                 "mixture.py",
                 "mixture_index.py",
                 "retained_mixture.py",
-                "token_cache.py",
                 "mixture_pipeline.py",
             )
-        },
+        }
+        | {"data/token_store.py": sha256_file(_TOKEN_STORE_SOURCE)},
     }
     request = {
         "declaration_sha256": hashlib.sha256(raw).hexdigest(),

@@ -1,27 +1,29 @@
-"""Operation-scoped tokenizer subprocess with bounded synchronous batches."""
+"""The one tokenizer pool behind every preparation path.
+
+``EncoderPool`` runs single-threaded ``klab.token_encode_worker`` processes and
+moves text in and token IDs out as binary frames. ``PreparationEncoder`` is the
+bounded, host-planned view of it that encodes one batch of texts at a time.
+"""
 
 from __future__ import annotations
 
-import json
-import os
-import selectors
+import pickle
+import queue
 import subprocess
 import sys
-import tempfile
 import time
-from pathlib import Path
-from typing import Any, Self
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Self
 
+import numpy as np
 import psutil
 from tokenizers import Tokenizer
 
-from klab import host_capacity
+from klab import host_capacity, token_encode_worker
 from klab.host_capacity import plan_host_workers
 
 TOKENIZER_BATCH_DOCUMENTS = 256
 TOKENIZER_BATCH_SOURCE_BYTES = 1_048_576
-_MAX_REPLY_BYTES = 128 * 1024 * 1024
-_REPLY_TIMEOUT_SECONDS = 180
 
 
 def validate_tokenizer_batch_limits(
@@ -55,75 +57,123 @@ def tokenizer_work_plan(max_workers: int | None, *, default_cap: int | None = 4)
     )
 
 
-class PreparationEncoder:
-    """One fresh Rayon pool per preparation, shared by train and validation."""
+class EncoderPool:
+    """Tokenizer worker processes; each request runs on whichever is free."""
 
-    def __init__(
-        self, tokenizer: Tokenizer, workspace: Path, *, max_workers: int | None
-    ):
-        self._path: Path | None = None
-        self._process: subprocess.Popen[bytes] | None = None
-        self._pending = bytearray()
+    def __init__(self, workers: int, tokenizer_json: str, eos: int = 0) -> None:
+        self.workers = workers
+        self._processes: list[subprocess.Popen[bytes]] = []
+        self._idle: queue.SimpleQueue[subprocess.Popen[bytes]] = queue.SimpleQueue()
+        self._threads = ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="token-encoder"
+        )
+        self._cpu_seconds = 0.0
+        setup = pickle.dumps((tokenizer_json, eos))
+        try:
+            for _ in range(workers):
+                process = subprocess.Popen(
+                    [sys.executable, "-m", "klab.token_encode_worker"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                self._processes.append(process)
+                assert process.stdin is not None
+                token_encode_worker.write_frame(process.stdin, setup)
+                process.stdin.flush()
+            # Workers load the tokenizer concurrently; collect readiness after.
+            for process in self._processes:
+                assert process.stdout is not None
+                if token_encode_worker.read_frame(process.stdout) != b"ready":
+                    raise RuntimeError("tokenizer worker did not load the tokenizer")
+                self._idle.put(process)
+        except BaseException:
+            self.close()
+            raise
+
+    def _round_trip(self, request: bytes) -> tuple[bytes, ...]:
+        process = self._idle.get()
+        try:
+            assert process.stdin is not None and process.stdout is not None
+            try:
+                token_encode_worker.write_frame(process.stdin, request)
+                process.stdin.flush()
+                status = token_encode_worker.read_frame(process.stdout)
+                if status is not None and status[:2] == b"ok":
+                    frames = tuple(
+                        token_encode_worker.read_frame(process.stdout)
+                        for _ in range(status[2])
+                    )
+                    if any(frame is None for frame in frames):
+                        status = None
+                    else:
+                        return frames
+                detail = (
+                    token_encode_worker.read_frame(process.stdout)
+                    if status in (b"line", b"error")
+                    else None
+                )
+            except (BrokenPipeError, EOFError, OSError) as error:
+                raise RuntimeError("tokenizer worker exited during a batch") from error
+            if status == b"line" and detail is not None:
+                raise token_encode_worker.LineError(*pickle.loads(detail))
+            if status == b"error" and detail is not None:
+                raise ValueError(
+                    f"tokenizer worker: {detail.decode('utf-8', 'replace')}"
+                )
+            raise RuntimeError("tokenizer worker exited without a reply")
+        finally:
+            self._idle.put(process)
+
+    def submit(self, request: bytes) -> Future[tuple[bytes, ...]]:
+        """Queue one worker request (operation byte first); frames come back."""
+        return self._threads.submit(self._round_trip, request)
+
+    def cpu_seconds(self) -> float:
+        total = 0.0
+        for process in self._processes:
+            try:
+                cpu = psutil.Process(process.pid).cpu_times()
+                total += cpu.user + cpu.system
+            except psutil.Error:
+                return self._cpu_seconds
+        self._cpu_seconds = max(self._cpu_seconds, total)
+        return self._cpu_seconds
+
+    def close(self) -> None:
+        self.cpu_seconds()
+        self._threads.shutdown(wait=True, cancel_futures=True)
+        for process in self._processes:
+            if process.stdin is not None:
+                process.stdin.close()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            if process.stdout is not None:
+                process.stdout.close()
+        self._processes = []
+
+
+class PreparationEncoder:
+    """One host-planned encoder pool per preparation, shared by its splits.
+
+    ``encode`` spreads a batch over the workers and returns results in input
+    order. ``rayon_threads`` is the number of workers; each is single-threaded.
+    """
+
+    def __init__(self, tokenizer: Tokenizer, *, max_workers: int | None):
         self.batch_count = 0
         self.request_bytes = 0
         self.reply_bytes = 0
         self.wait_seconds = 0.0
         self.child_cpu_seconds = 0.0
-        try:
-            self.host_work_plan = tokenizer_work_plan(max_workers)
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                prefix=".preparation-tokenizer-",
-                suffix=".json",
-                dir=workspace.parent,
-                delete=False,
-            ) as scratch:
-                self._path = Path(scratch.name)
-                scratch.write(tokenizer.to_str())
-                scratch.flush()
-            workers = self.host_work_plan.workers
-            self.rayon_threads = workers
-            env = os.environ.copy()
-            env["RAYON_NUM_THREADS"] = str(workers)
-            env["TOKENIZERS_PARALLELISM"] = "true"
-            self._process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "klab.preparation_encoder",
-                    str(self._path),
-                ],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                env=env,
-            )
-            assert self._process.stdout is not None
-            deadline = time.monotonic() + 15
-            with selectors.DefaultSelector() as selector:
-                selector.register(self._process.stdout, selectors.EVENT_READ)
-                while len(self._pending) < 6:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0 or not selector.select(remaining):
-                        raise RuntimeError(
-                            "preparation tokenizer child did not load tokenizer"
-                        )
-                    chunk = os.read(
-                        self._process.stdout.fileno(), 6 - len(self._pending)
-                    )
-                    if not chunk:
-                        raise RuntimeError(
-                            "preparation tokenizer child exited loading tokenizer"
-                        )
-                    self._pending.extend(chunk)
-            if self._pending != b"READY\n":
-                raise RuntimeError("preparation tokenizer child sent invalid readiness")
-            self._pending.clear()
-            self._path.unlink()
-        except BaseException:
-            self.close()
-            raise
+        self.host_work_plan = tokenizer_work_plan(max_workers)
+        self.rayon_threads = self.host_work_plan.workers
+        self._pool: EncoderPool | None = EncoderPool(
+            self.rayon_threads, tokenizer.to_str()
+        )
 
     def __enter__(self) -> Self:
         return self
@@ -132,85 +182,49 @@ class PreparationEncoder:
         self.close()
 
     def sample_cpu(self) -> float:
-        if self._process is not None:
-            try:
-                cpu = psutil.Process(self._process.pid).cpu_times()
-                self.child_cpu_seconds = cpu.user + cpu.system
-            except psutil.Error:
-                pass
+        if self._pool is not None:
+            self.child_cpu_seconds = self._pool.cpu_seconds()
         return self.child_cpu_seconds
 
     def close(self) -> None:
-        self.sample_cpu()
-        process = self._process
-        self._process = None
-        if process is not None:
-            if process.stdin is not None:
-                process.stdin.close()
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-            if process.stdout is not None:
-                process.stdout.close()
-        if self._path is not None:
-            self._path.unlink(missing_ok=True)
+        pool, self._pool = self._pool, None
+        if pool is not None:
+            pool.close()
+            self.child_cpu_seconds = pool.cpu_seconds()
 
     def encode(self, texts: list[str]) -> list[list[int]]:
         if not texts:
             return []
-        process = self._process
-        assert (
-            process is not None
-            and process.stdin is not None
-            and process.stdout is not None
-        )
-        payload = (
-            json.dumps(texts, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            + b"\n"
-        )
+        assert self._pool is not None
+        # Contiguous groups of similar size, one per worker.
+        sizes = [len(text) for text in texts]
+        share = max(1, -(-sum(sizes) // min(self.rayon_threads, len(texts))))
+        groups: list[list[str]] = [[]]
+        filled = 0
+        for text, size in zip(texts, sizes, strict=True):
+            if groups[-1] and filled + size > share:
+                groups.append([])
+                filled = 0
+            groups[-1].append(text)
+            filled += size
         started = time.monotonic()
-        self.request_bytes += len(payload)
-        try:
-            process.stdin.write(payload)
-            process.stdin.flush()
-        except (BrokenPipeError, OSError) as error:
-            raise RuntimeError(
-                "preparation tokenizer child exited before accepting a batch"
-            ) from error
-        deadline = time.monotonic() + _REPLY_TIMEOUT_SECONDS
-        with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ)
-            while b"\n" not in self._pending:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0 or not selector.select(remaining):
-                    raise TimeoutError(
-                        "preparation tokenizer child exceeded batch timeout"
-                    )
-                chunk = os.read(process.stdout.fileno(), 65536)
-                if not chunk:
-                    raise RuntimeError(
-                        "preparation tokenizer child exited without a batch result"
-                    )
-                self._pending.extend(chunk)
-                if len(self._pending) > _MAX_REPLY_BYTES:
-                    raise ValueError(
-                        "preparation tokenizer child batch reply exceeds 128 MiB"
-                    )
+        pending = []
+        for group in groups:
+            request = b"T" + token_encode_worker.pack_texts(group)
+            self.request_bytes += len(request)
+            pending.append(self._pool.submit(request))
+        result: list[list[int]] = []
+        for group, future in zip(groups, pending, strict=True):
+            raw_ids, raw_counts = future.result()
+            self.reply_bytes += len(raw_ids) + len(raw_counts)
+            counts = np.frombuffer(raw_counts, dtype=np.uint32).tolist()
+            if len(counts) != len(group):
+                raise RuntimeError("tokenizer worker returned incorrect batch length")
+            ids = np.frombuffer(raw_ids, dtype=np.int32).tolist()
+            position = 0
+            for count in counts:
+                result.append(ids[position : position + count])
+                position += count
         self.wait_seconds += time.monotonic() - started
         self.batch_count += 1
-        line, _, rest = self._pending.partition(b"\n")
-        self.reply_bytes += len(line) + 1
-        self._pending = bytearray(rest)
-        try:
-            response: Any = json.loads(line)
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise RuntimeError("invalid preparation tokenizer child reply") from error
-        if isinstance(response, dict) and "error" in response:
-            raise ValueError(f"preparation tokenizer child: {response['error']}")
-        if not isinstance(response, list) or len(response) != len(texts):
-            raise RuntimeError(
-                "preparation tokenizer child returned incorrect batch length"
-            )
-        return response
+        return result

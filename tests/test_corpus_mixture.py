@@ -875,16 +875,16 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
 
 
 def test_real_batch_cache_survives_interrupted_caller(tmp_path: Path) -> None:
-    from klab.corpus.token_cache import TokenCache
     from klab.data.encoding import PreparationEncoder
+    from klab.data.token_store import ContentTokens
 
     tokenizer = _byte_tokenizer()
     texts = ["plain", "café", "plain", "other"]
     expected = [tokenizer.encode(text, add_special_tokens=False).ids for text in texts]
     with (
         pytest.raises(RuntimeError, match="simulated interruption"),
-        PreparationEncoder(tokenizer, tmp_path, max_workers=4) as encoder,
-        TokenCache(tmp_path / "cache", "b" * 64) as cache,
+        PreparationEncoder(tokenizer, max_workers=4) as encoder,
+        ContentTokens(tmp_path / "cache", "b" * 64) as cache,
     ):
         assert cache.encode_many(texts, encoder.encode) == expected
         raise RuntimeError("simulated interruption")
@@ -892,19 +892,32 @@ def test_real_batch_cache_survives_interrupted_caller(tmp_path: Path) -> None:
     def unexpected(_texts):
         raise AssertionError("completed encodings must be reused")
 
-    with TokenCache(tmp_path / "cache", "b" * 64) as cache:
+    with ContentTokens(tmp_path / "cache", "b" * 64) as cache:
         assert cache.encode_many(texts, unexpected) == expected
         mixed = ["plain", "fresh", "other", "novel"]
-        with PreparationEncoder(tokenizer, tmp_path, max_workers=4) as encoder:
+        with PreparationEncoder(tokenizer, max_workers=4) as encoder:
             assert cache.encode_many(mixed, encoder.encode) == [
                 tokenizer.encode(text, add_special_tokens=False).ids for text in mixed
             ]
-        digest = hashlib.sha256(b"plain").hexdigest()
-        cache.db.execute(
-            "UPDATE tokens SET digest=? WHERE content=?", ("0" * 64, digest)
-        )
-        with pytest.raises(ValueError, match="cached token payload digest mismatch"):
-            cache.encode_many(["plain"], unexpected)
+        stored = cache.path / "tokens.ids"
+    damaged = bytearray(stored.read_bytes())
+    damaged[0] ^= 1
+    stored.write_bytes(damaged)
+    with (
+        ContentTokens(tmp_path / "cache", "b" * 64) as cache,
+        pytest.raises(ValueError, match="cached token payload digest mismatch"),
+    ):
+        cache.encode_many(["plain"], unexpected)
+    # An index record whose IDs never reached the disk is encoded again.
+    stored.write_bytes(bytes(damaged[:4]))
+    with (
+        ContentTokens(tmp_path / "cache", "b" * 64) as cache,
+        PreparationEncoder(tokenizer, max_workers=1) as encoder,
+    ):
+        assert len(cache) == 0
+        assert cache.encode_many(texts, encoder.encode) == expected
+        with pytest.raises(ValueError, match="in use by another build"):
+            ContentTokens(tmp_path / "cache", "b" * 64)
 
 
 @pytest.mark.parametrize("after_commit", [False, True])

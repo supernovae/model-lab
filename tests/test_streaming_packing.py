@@ -309,62 +309,39 @@ def test_batch_boundaries_preserve_output_using_real_child(
     assert not (root / "train_supervision.npy").exists()
 
 
-def test_real_child_uses_scalar_encode_for_single_document(
-    tmp_path: Path,
+def test_real_worker_uses_scalar_encode_for_single_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from klab import token_encode_worker
+
     run = config(tmp_path)
     tokenizer = load_tokenizer(run.tokenizer.path)
-    audit = tmp_path / "encode-calls.jsonl"
-    script = """
-import json, sys
-from pathlib import Path
-import klab.preparation_encoder as child
-from tokenizers import Tokenizer
-real_from_file = Tokenizer.from_file
-class Recording:
-    def __init__(self, real):
-        self.real = real
-    def encode(self, text, *, add_special_tokens):
-        with Path(sys.argv[2]).open("a") as out:
-            out.write(json.dumps(["scalar", text, add_special_tokens]) + "\\n")
-        return self.real.encode(text, add_special_tokens=add_special_tokens)
-    def encode_batch(self, texts, *, add_special_tokens):
-        with Path(sys.argv[2]).open("a") as out:
-            out.write(json.dumps(["batch", texts, add_special_tokens]) + "\\n")
-        return self.real.encode_batch(texts, add_special_tokens=add_special_tokens)
-class Loader:
-    from_file = staticmethod(lambda path: Recording(real_from_file(path)))
-child.Tokenizer = Loader
-child.main()
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", script, str(run.tokenizer.path), str(audit)],
-        input='["café"]\n["fox", "𝄞"]\n',
-        capture_output=True,
-        text=True,
-        env={
-            **os.environ,
-            "RAYON_NUM_THREADS": "2",
-            "TOKENIZERS_PARALLELISM": "true",
-            "HF_HUB_OFFLINE": "1",
-            "HF_DATASETS_OFFLINE": "1",
-            "UV_OFFLINE": "1",
-        },
-        check=True,
-    )
-    results = [
-        json.loads(line) for line in result.stdout.removeprefix("READY\n").splitlines()
+    batches = [["café"], ["fox", "𝄞"]]
+    expected = [
+        [tokenizer.encode(text, add_special_tokens=False).ids for text in batch]
+        for batch in batches
     ]
-    assert [result[0] for result in results] == [
-        tokenizer.encode("café", add_special_tokens=False).ids,
-        tokenizer.encode("fox", add_special_tokens=False).ids,
-    ]
-    assert json.loads(audit.read_text().splitlines()[0]) == ["scalar", "café", False]
-    assert json.loads(audit.read_text().splitlines()[1]) == [
-        "batch",
-        ["fox", "𝄞"],
-        False,
-    ]
+    # A real worker process: text and IDs cross the pipe as binary frames.
+    with PreparationEncoder(tokenizer, max_workers=1) as encoder:
+        assert [encoder.encode(batch) for batch in batches] == expected
+
+    calls = []
+
+    class Recording:
+        def encode(self, text, *, add_special_tokens):
+            calls.append(("scalar", text, add_special_tokens))
+            return tokenizer.encode(text, add_special_tokens=add_special_tokens)
+
+        def encode_batch(self, texts, *, add_special_tokens):
+            calls.append(("batch", texts, add_special_tokens))
+            return tokenizer.encode_batch(texts, add_special_tokens=add_special_tokens)
+
+    monkeypatch.setattr(token_encode_worker, "_tokenizer", Recording())
+    for batch in batches:
+        token_encode_worker.encode_texts(
+            token_encode_worker.unpack_texts(token_encode_worker.pack_texts(batch))
+        )
+    assert calls == [("scalar", "café", False), ("batch", ["fox", "𝄞"], False)]
 
 
 def test_streaming_rejects_partial_story_and_short_source(

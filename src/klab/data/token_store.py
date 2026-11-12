@@ -15,22 +15,23 @@ after they are complete; an interrupted build leaves at most ``*.tmp`` files,
 which the next build removes, and resumes from the last sealed shard.
 
 No database is involved: accounting is one small JSON document per store.
+
+``ContentTokens`` holds the same int32 IDs for callers that select documents
+by content instead of by position in a file, such as corpus mixtures.
 """
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import math
 import os
-import pickle
 import struct
-import subprocess
-import sys
-import threading
+import time
 from collections import deque
 from collections.abc import Callable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +40,7 @@ from tokenizers import Tokenizer
 from klab import token_encode_worker
 from klab.canonical import canonical_json
 from klab.data.datasets import local_text_error
+from klab.data.encoding import EncoderPool
 from klab.token_encode_worker import LineError
 
 STORE_VERSION = 1
@@ -340,18 +342,26 @@ def _encoded_batches(
                 raise refused(error) from error
             yield located(reply)
         return
-    pool = _WorkerPool(workers, tokenizer.to_str(), eos)
+    pool = EncoderPool(workers, tokenizer.to_str(), eos)
     try:
         pending: deque[Future] = deque()
 
         def finished() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
             try:
-                return located(pending.popleft().result())
+                ids, counts, text_bytes, line_bytes = pending.popleft().result()
+                return located(
+                    (
+                        np.frombuffer(ids, dtype=np.int32),
+                        np.frombuffer(counts, dtype=np.uint32),
+                        np.frombuffer(text_bytes, dtype=np.uint32),
+                        np.frombuffer(line_bytes, dtype=np.uint32),
+                    )
+                )
             except LineError as error:
                 raise refused(error) from error
 
         for chunk in chunks():
-            pending.append(pool.submit(header + chunk))
+            pending.append(pool.submit(b"L" + header + chunk))
             # Bounded look-ahead keeps memory flat however large the source.
             while len(pending) >= 3 * workers:
                 yield finished()
@@ -361,78 +371,190 @@ def _encoded_batches(
         pool.close()
 
 
-class _WorkerPool:
-    """One tokenizer subprocess per thread; frames carry text in and arrays out."""
+_CONTENT_RECORD = np.dtype(
+    [("content", "V32"), ("offset", "<u8"), ("count", "<u4"), ("digest", "V32")]
+)
+_CONTENT_FLUSH_DOCUMENTS = 4096
 
-    def __init__(self, workers: int, tokenizer_json: str, eos: int) -> None:
-        self._setup = pickle.dumps((tokenizer_json, eos))
-        self._local = threading.local()
-        self._processes: list[subprocess.Popen[bytes]] = []
-        self._lock = threading.Lock()
-        self._threads = ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="token-store"
+
+def _content_key(content: str) -> bytes:
+    """32 bytes for a content identity: a SHA-256 hex digest as it is."""
+    try:
+        key = bytes.fromhex(content)
+    except ValueError:
+        key = b""
+    return key if len(key) == 32 else hashlib.sha256(content.encode("utf-8")).digest()
+
+
+class ContentTokens:
+    """Token IDs of documents, found by the SHA-256 of their text.
+
+    Two append-only files per tokenizer: ``tokens.ids`` (raw int32, no EOS) and
+    ``index.bin`` (one fixed-width record per document: content digest, token
+    offset, token count and the digest of its IDs). The index is read once into
+    memory, so a lookup is one positioned read and never a database query.
+
+    This is a cache and favors throughput over durability: nothing is synced.
+    IDs are written before their index record, so after a crash the index is
+    cut back to the records whose IDs are present and the rest are encoded
+    again. Every read checks the stored digest of the IDs.
+    """
+
+    def __init__(self, root: Path, tokenizer_sha: str):
+        name = hashlib.sha256(
+            canonical_json(["content-tokens-v1", tokenizer_sha])
+        ).hexdigest()
+        self.path = root / name
+        self.path.mkdir(parents=True, exist_ok=True)
+        if self.path.is_symlink():
+            raise ValueError("content token store must not be a symlink")
+        self._lock = (self.path / "lock").open("ab")
+        try:
+            fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            self._lock.close()
+            raise ValueError(
+                f"content token store is in use by another build: {self.path}"
+            ) from error
+        ids_path, index_path = self.path / "tokens.ids", self.path / "index.bin"
+        records = (
+            np.fromfile(index_path, dtype=_CONTENT_RECORD)
+            if index_path.exists()
+            else np.empty(0, dtype=_CONTENT_RECORD)
         )
+        stored = ids_path.stat().st_size // 4 if ids_path.exists() else 0
+        ends = records["offset"] + records["count"]
+        complete = int(np.searchsorted(ends, stored, side="right"))
+        records = records[:complete]
+        self._tokens = int(ends[complete - 1]) if complete else 0
+        self._ids = ids_path.open("ab+")
+        self._ids.truncate(4 * self._tokens)
+        self._index = index_path.open("ab")
+        self._index.truncate(complete * _CONTENT_RECORD.itemsize)
+        self._flushed = self._tokens
+        contents = records["content"].tobytes()
+        self._rows = {
+            contents[position : position + 32]: row
+            for row, position in enumerate(range(0, len(contents), 32))
+        }
+        self._offsets = records["offset"].tolist()
+        self._counts = records["count"].tolist()
+        self._digests = records["digest"].tobytes()
+        self._new_digests: list[bytes] = []
+        self._loaded = complete
+        self.pending = 0
+        self.hits = self.misses = 0
+        self.lookup_seconds = self.write_seconds = self.encode_seconds = 0.0
 
-    def _process(self) -> subprocess.Popen[bytes]:
-        process = getattr(self._local, "process", None)
-        if process is None:
-            process = subprocess.Popen(
-                [sys.executable, "-m", "klab.token_encode_worker"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-            )
-            with self._lock:
-                self._processes.append(process)
-            assert process.stdin is not None and process.stdout is not None
-            token_encode_worker.write_frame(process.stdin, self._setup)
-            process.stdin.flush()
-            if token_encode_worker.read_frame(process.stdout) != b"ready":
-                raise RuntimeError("token worker did not start")
-            self._local.process = process
-        return process
+    def __len__(self) -> int:
+        return len(self._rows)
 
-    def _encode(
-        self, request: bytes
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        process = self._process()
-        assert process.stdin is not None and process.stdout is not None
-        token_encode_worker.write_frame(process.stdin, request)
-        process.stdin.flush()
-        status = token_encode_worker.read_frame(process.stdout)
-        if status == b"ok":
-            frames = [token_encode_worker.read_frame(process.stdout) for _ in range(4)]
-            assert all(frame is not None for frame in frames)
-            return (
-                np.frombuffer(frames[0], dtype=np.int32),
-                np.frombuffer(frames[1], dtype=np.uint32),
-                np.frombuffer(frames[2], dtype=np.uint32),
-                np.frombuffer(frames[3], dtype=np.uint32),
-            )
-        if status == b"line":
-            detail = token_encode_worker.read_frame(process.stdout)
-            assert detail is not None
-            raise LineError(*pickle.loads(detail))
-        if status == b"error":
-            reason = token_encode_worker.read_frame(process.stdout) or b""
-            raise ValueError(f"token worker: {reason.decode('utf-8', 'replace')}")
-        raise RuntimeError("token worker exited without a reply")
+    def _digest(self, row: int) -> bytes:
+        if row < self._loaded:
+            return self._digests[32 * row : 32 * row + 32]
+        return self._new_digests[row - self._loaded]
 
-    def submit(self, request: bytes) -> Future:
-        return self._threads.submit(self._encode, request)
+    def lookup(self, content: str, *, count_miss: bool = True, decode: bool = True):
+        """The document's IDs (or their raw int32 bytes), or None if absent."""
+        started = time.monotonic()
+        row = self._rows.get(_content_key(content))
+        if row is None:
+            self.lookup_seconds += time.monotonic() - started
+            if count_miss:
+                self.misses += 1
+            return None
+        offset, count = self._offsets[row], self._counts[row]
+        if offset + count > self._flushed:
+            self._ids.flush()
+            self._flushed = self._tokens
+        payload = os.pread(self._ids.fileno(), 4 * count, 4 * offset)
+        if hashlib.sha256(payload).digest() != self._digest(row):
+            raise ValueError("cached token payload digest mismatch")
+        self.lookup_seconds += time.monotonic() - started
+        self.hits += 1
+        return self.decode_ids(payload) if decode else payload
 
-    def close(self) -> None:
-        self._threads.shutdown(wait=True, cancel_futures=True)
-        for process in self._processes:
-            if process.stdin is not None:
-                process.stdin.close()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-            if process.stdout is not None:
-                process.stdout.close()
+    @staticmethod
+    def decode_ids(payload: bytes) -> list[int]:
+        if len(payload) % 4:
+            raise ValueError("invalid cached token IDs")
+        ids = np.frombuffer(payload, dtype="<i4")
+        if len(ids) and int(ids.min()) < 0:
+            raise ValueError("invalid cached token IDs")
+        return ids.tolist()
+
+    def payload_bytes(self, content: str) -> int:
+        row = self._rows.get(_content_key(content))
+        return 0 if row is None else 4 * self._counts[row]
+
+    def _append(self, content: bytes, ids: list[int]) -> None:
+        payload = np.asarray(ids, dtype="<i4").tobytes()
+        digest = hashlib.sha256(payload).digest()
+        record = np.empty(1, dtype=_CONTENT_RECORD)
+        record["content"], record["digest"] = np.void(content), np.void(digest)
+        record["offset"], record["count"] = self._tokens, len(ids)
+        self._ids.write(payload)
+        self._index.write(record.tobytes())
+        self._rows[content] = len(self._offsets)
+        self._offsets.append(self._tokens)
+        self._counts.append(len(ids))
+        self._new_digests.append(digest)
+        self._tokens += len(ids)
+        self.pending += 1
+        if self.pending >= _CONTENT_FLUSH_DOCUMENTS:
+            self.flush()
+
+    def flush(self) -> None:
+        self._ids.flush()
+        self._index.flush()
+        self._flushed = self._tokens
+        self.pending = 0
+
+    def encode_many(self, texts, encode_missing):
+        """Return encodings in input order; only absent content is encoded."""
+        keys, known, missing = [], {}, {}
+        for text in texts:
+            content = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            keys.append(content)
+            if content in known or content in missing:
+                continue
+            ids = self.lookup(content)
+            if ids is None:
+                missing[content] = text
+            else:
+                known[content] = ids
+        if missing:
+            started = time.monotonic()
+            results = encode_missing(list(missing.values()))
+            self.encode_seconds += time.monotonic() - started
+            if len(results) != len(missing):
+                raise ValueError("tokenizer returned incorrect batch length")
+            started = time.monotonic()
+            for content, ids in zip(missing, results, strict=True):
+                self._append(_content_key(content), ids)
+                known[content] = ids
+            self.write_seconds += time.monotonic() - started
+        return [known[content] for content in keys]
+
+    def encode(self, tokenizer, text):
+        return self.encode_many(
+            [text],
+            lambda texts: [
+                tokenizer.encode(value, add_special_tokens=False).ids for value in texts
+            ],
+        )[0]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        # Valid encodings survive quota failure or cooperative interruption.
+        try:
+            self.flush()
+        finally:
+            self._ids.close()
+            self._index.close()
+            self._lock.close()
 
 
 def list_stores(base: Path) -> list[dict[str, object]]:

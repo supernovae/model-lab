@@ -974,7 +974,6 @@ def _collect_streaming(
     if encoder is None:
         with PreparationEncoder(
             tokenizer,
-            root,
             max_workers=None
             if resource_envelope is None
             else resource_envelope.max_workers,
