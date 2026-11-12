@@ -162,9 +162,20 @@ goes in GitHub issues; keep `ROADMAP.md` short and directional.
 - **One builder per fixture.** Shared test inputs live in `tests/*_fixtures.py`
   (`lab_fixtures.write_smoke_inputs` for lab-loop configs). Parameterize them
   rather than copying, and keep derived settings valid when shrinking a budget.
-- **Test outcomes.** A test proves that a path works or that a check refuses
-  bad input. Do not test wording, help text or private helper shapes, and do not
-  bundle unrelated assertions into one test.
+- **A test earns its place.** Keep a test only if its failure would mean that
+  something a user relies on broke, a measured performance property regressed,
+  a trust guarantee (identity, verification, refusal of bad input) stopped
+  holding, or a bug that happened came back. Do not test wording, help text,
+  private helpers or shapes that ordinary edits change.
+- **Few tests per change.** A feature usually gets one test that runs its
+  public path end to end and one for its most important refusal. Extend an
+  existing outcome test before adding a new one. A bug fix gets the test that
+  would have caught it.
+- **Parametrize over code paths, not values.** Each case must take a different
+  branch. Inputs that all take the same path are one case.
+- **Delete as well as add.** Remove tests that duplicate another test's
+  coverage or cover removed code in the same pull request. A rising test count
+  is not progress; CI time and maintenance are the cost.
 - **Laptop-sized tests.** Use the smallest budget that proves the behavior.
   Never depend on CI's umask, user, disk or `HOME`; always isolate
   `KLAB_WORK_DIR`.
