@@ -110,54 +110,57 @@ def _shown_commands(text: str) -> list[str]:
     return commands
 
 
-def test_commands_shown_in_current_pages_exist() -> None:
+def command_problems(page: object, text: str) -> list[str]:
+    """Each ``klab`` command ``text`` shows that does not exist, or its unknown options."""
     from klab.cli.main import build_parser
     from klab.runtime_env_cli import parser as runtime_env_parser
 
     root = build_parser()
     global_options = _options(root)
     problems = []
-    for page in _pages():
-        for shown in _shown_commands((ROOT / page).read_text(encoding="utf-8")):
-            invocation = re.search(r"(?:^|[\s\"'/])klab[\"']?\s+(.*)", shown)
-            if invocation is None or "-m klab." in shown:
+    for shown in _shown_commands(text):
+        invocation = re.search(r"(?:^|[\s\"'/])klab[\"']?\s+(.*)", shown)
+        if invocation is None or "-m klab." in shown:
+            continue
+        words = re.split(r"\s(?:\||>|>>|&&|;|2>|<)\s?|\s#\s", invocation.group(1))[0]
+        try:
+            tokens = shlex.split(words)
+        except ValueError:
+            tokens = words.split()
+        parser, chain = root, []
+        if tokens[:2] == ["runtime", "env"]:
+            parser, chain, tokens = runtime_env_parser(), tokens[:2], tokens[2:]
+        # Global options come before the subcommand and may take a value.
+        while tokens and tokens[0].split("=")[0] in global_options:
+            takes_value = "=" not in tokens[0] and tokens[0] != "--version"
+            tokens = tokens[2 if takes_value else 1 :]
+        while tokens and _subcommands(parser):
+            word = tokens[0]
+            if word in _subcommands(parser):
+                parser, chain, tokens = (
+                    _subcommands(parser)[word],
+                    [*chain, word],
+                    tokens[1:],
+                )
                 continue
-            words = re.split(r"\s(?:\||>|>>|&&|;|2>|<)\s?|\s#\s", invocation.group(1))[
-                0
-            ]
-            try:
-                tokens = shlex.split(words)
-            except ValueError:
-                tokens = words.split()
-            parser, chain = root, []
-            if tokens[:2] == ["runtime", "env"]:
-                parser, chain, tokens = runtime_env_parser(), tokens[:2], tokens[2:]
-            # Global options come before the subcommand and may take a value.
-            while tokens and tokens[0].split("=")[0] in global_options:
-                takes_value = "=" not in tokens[0] and tokens[0] != "--version"
-                tokens = tokens[2 if takes_value else 1 :]
-            while tokens and _subcommands(parser):
-                word = tokens[0]
-                if word in _subcommands(parser):
-                    parser, chain, tokens = (
-                        _subcommands(parser)[word],
-                        [*chain, word],
-                        tokens[1:],
-                    )
-                    continue
-                if re.fullmatch(r"[a-z][a-z0-9\-]*", word):
-                    problems.append(
-                        f"{page}: no command `klab {' '.join(chain)} {word}`"
-                    )
-                break
-            else:
-                known = _options(parser) | global_options
-                for token in tokens:
-                    option = token.split("=")[0]
-                    if re.fullmatch(r"--[a-z][a-z0-9\-]*", option) and (
-                        option not in known
-                    ):
-                        problems.append(
-                            f"{page}: `klab {' '.join(chain)}` has no {option}"
-                        )
+            if re.fullmatch(r"[a-z][a-z0-9\-]*", word):
+                problems.append(f"{page}: no command `klab {' '.join(chain)} {word}`")
+            break
+        else:
+            known = _options(parser) | global_options
+            for token in tokens:
+                option = token.split("=")[0]
+                if re.fullmatch(r"--[a-z][a-z0-9\-]*", option) and (
+                    option not in known
+                ):
+                    problems.append(f"{page}: `klab {' '.join(chain)}` has no {option}")
+    return problems
+
+
+def test_commands_shown_in_current_pages_exist() -> None:
+    problems = [
+        problem
+        for page in _pages()
+        for problem in command_problems(page, (ROOT / page).read_text(encoding="utf-8"))
+    ]
     assert not problems, problems

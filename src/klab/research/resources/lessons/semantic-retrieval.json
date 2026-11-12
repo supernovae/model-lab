@@ -84,28 +84,13 @@
       ],
       "source_path": "src/klab/model/transformer.py",
       "source_symbol": "DenseLM.add_semantic_memory"
-    },
-    {
-      "explanation": "Toy worlds use deterministic structured-key and value encoders with declared identities. Producer facts are distinct from query/answer artifacts; each world has an isolated pack, and worlds share a canonical start key while intermediate and terminal assignments change. Held-out queries are also evaluated against another held-out world's pack to verify each task follows the attached assignment. Wording templates are partitioned, and multi-hop questions traverse one-edge records with no direct start-to-final shortcut. Correct, disabled, random, conflicting, and incomplete packs are frozen no-gradient attachment controls.",
-      "shapes": [
-        "canonical structured query vectors [B,K] or [B,T,K]",
-        "one-edge retrieved value vectors [B,T,V] per hop",
-        "per-task knowledge-swap ratio numerator and denominator are counts of changed-assignment queries"
-      ],
-      "observe": [
-        "world, wording, producer, and evaluation partition identities",
-        "per-hop trace record IDs, scores, statuses, and control-pack identity",
-        "knowledge-swap ratio or null with a zero-eligible-query reason"
-      ],
-      "source_path": "src/klab/data/toy_worlds.py",
-      "source_symbol": "knowledge_swap_ratio"
     }
   ],
   "patches_by_scale": {},
   "prerequisites": [
     "Use a semantic EngramPack whose records, semantic metadata, keys, and values have verified together; a records-only pack is not retrievable semantic memory.",
     "Provide externally encoded canonical query vectors with the exact declared key encoder identity and width; this lesson does not encode natural-language prompts.",
-    "Use the Phase D semantic lesson scaffold, which prepares the required verified pack and canonical query artifacts rather than inventing vectors or encoder identities."
+    "Use this lesson's scaffold (`klab learn scaffold semantic-retrieval`), which prepares the required verified pack and canonical query artifacts rather than inventing vectors or encoder identities."
   ],
   "try_changes": [
     "Predict whether [B,K] or [B,T,K] queries produce broadcast or per-position retrieval, then inspect the trace.",
@@ -117,8 +102,7 @@
   "limits": [
     "Externally encoded canonical vectors are not a natural-language encoder, parser, or evidence of natural-language understanding. Held-out prompt wording is a split check only.",
     "Exact bounded retrieval establishes only the declared score, tie, threshold, temporal, and trace behavior for a verified pack; it does not certify pack truth, encoder semantics, source rights, answer quality, or speed.",
-    "Toy-world retrieval and frozen-pack comparisons do not establish open-world factual knowledge, language understanding, learned transfer, or production retrieval quality.",
-    "Knowledge-swap ratio is per task: changed-assignment queries whose retrieval follows the attached pack divided by eligible changed-assignment queries. It is null with an explicit reason when the denominator is zero."
+    "Retrieval on this small structured fixture and frozen-pack comparisons do not establish open-world factual knowledge, language understanding, learned transfer, or production retrieval quality."
   ],
   "papers": [
     {
@@ -129,7 +113,7 @@
     {
       "title": "Memory Networks",
       "url": "https://arxiv.org/abs/1410.3916",
-      "claim_boundary": "This work motivates explicit memory interfaces. Model Lab only demonstrates verified bounded retrieval and an adapter under its declared toy-world protocol; it does not reproduce Memory Networks results."
+      "claim_boundary": "This work motivates explicit memory interfaces. Model Lab only demonstrates verified bounded retrieval and an adapter on a small structured fixture; it does not reproduce Memory Networks results."
     }
   ],
   "docs": [
