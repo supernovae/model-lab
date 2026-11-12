@@ -17,7 +17,8 @@ dataset is a value in your recipe, so a new one needs no Lab change.
 | `dataset.source` | Reads | Required fields |
 | --- | --- | --- |
 | `local_text` | your JSONL files, one `{"text": ...}` document per line | `train_path`, `validation_path`, `license` |
-| `local_chat` | your JSONL conversations | `train_path`, `validation_path`, `license` |
+| `local_chat` | your JSONL conversations, rendered by `chat_template` | `train_path`, `validation_path`, `license` |
+| `local_preference` | your JSONL [chosen/rejected reply pairs](post-training.md#preference-optimization) | `train_path`, `validation_path`, `license` |
 | `local_token_mixture` | a verified [token mixture](token-store.md#mixture-output) | mixture declaration and output paths |
 | `snapshot` | a pinned, retained [snapshot](#source-declaration-and-lock) | `revision`, `license`, split and manifest paths |
 | `huggingface` | a Hugging Face dataset, streamed at a pinned revision | `dataset_id`, `revision`, `license` |

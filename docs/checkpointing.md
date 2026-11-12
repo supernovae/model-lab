@@ -54,6 +54,10 @@ horizons are not supported by MLX.
 
 `--promote CHECKPOINT` creates a child with compatible canonical model weights but **fresh** optimizer, schedule, scaler, RNG, cursor, and zero committed counters. Its destination config supplies the new data/budget/runtime choices. Promotion still requires the same architecture semantics, tokenizer contents, and portable package identity when present; equal tensor shapes alone are insufficient. It does not resize a backbone or turn dense weights into MoE.
 
+A config can name its parent instead: `training.parent_checkpoint` is the same
+promotion, declared in the recipe so that [post-training stages](post-training.md)
+chain and `klab try` starts both arms from one parent.
+
 Use full resume for the same experiment and promotion for a compatible
 weights-only starting point. The public path is local; remote scheduling and
 controller-side artifact ingestion are separate contracts.

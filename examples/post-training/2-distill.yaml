@@ -1,0 +1,55 @@
+# Stage 2: distillation. A model with a fifth of the parameters learns the instruct run's
+# whole next-token distribution, not only the reply that was written down.
+schema_version: 2
+name: post-training-distill
+seed: 42
+model:
+  vocab_size: 512
+  hidden_dim: 48
+  num_layers: 2
+  num_heads: 4
+  ffn_dim: 144
+  max_seq_len: 96
+tokenizer:
+  path: work/tokenizer/tokenizer.json
+dataset:
+  source: local_chat
+  chat_template: chatml
+  license: CC0-1.0 (example conversations written for this repository)
+  train_path: data/chat-train.jsonl
+  validation_path: data/chat-validation.jsonl
+  cache_dir: work/data
+  train_max_documents: 200
+  validation_max_documents: 40
+  train_max_tokens: 65536
+  validation_max_tokens: 8192
+training:
+  seq_len: 96
+  max_steps: 300
+  max_tokens: 200000
+  micro_batch_size: 8
+  gradient_accumulation: 1
+  objective:
+    kind: distill
+    teacher_checkpoint: work/runs/instruct
+    params:
+      weight: 0.7
+      temperature: 2.0
+optimizer:
+  name: adamw
+  peak: 0.003
+  floor: 0.0003
+  warmup_steps: 10
+  weight_decay: 0.1
+evaluation:
+  every_steps: 100
+  max_batches: 4
+checkpoint:
+  every_steps: 300
+logging:
+  root_dir: work/runs
+  every_steps: 10
+runtime:
+  engine: pytorch
+  backend: cpu
+  precision: fp32

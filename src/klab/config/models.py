@@ -14,6 +14,9 @@ from pydantic import (
     model_validator,
 )
 
+from klab.chat_template import ChatTemplate
+from klab.chat_template import resolve as resolve_chat_template
+
 # Shared run/try bounds reject out-of-range seeds rather than wrapping them.
 RunSeed = Annotated[int, Field(ge=0, le=2**32 - 1)]
 
@@ -592,11 +595,17 @@ class DatasetConfig(StrictModel):
     source: Literal[
         "local_text",
         "local_chat",
+        # Chosen/rejected reply pairs; see docs/post-training.md.
+        "local_preference",
         "local_token_mixture",
         "snapshot",
         "huggingface",
         "synthetic",
     ]
+    # How conversations are rendered: a built-in name or a declared template.
+    chat_template: str | ChatTemplate = Field(
+        default="plain", exclude_if=lambda value: value == "plain"
+    )
     # Hugging Face dataset repository, for source=huggingface.
     dataset_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
     text_field: str = Field(
@@ -645,8 +654,27 @@ class DatasetConfig(StrictModel):
         default=None, exclude_if=lambda value: value is None
     )
 
+    @property
+    def template(self) -> ChatTemplate:
+        return resolve_chat_template(self.chat_template)
+
     @model_validator(mode="after")
     def validate_source(self) -> DatasetConfig:
+        if self.template.name != "plain" and self.source not in {
+            "local_chat",
+            "local_preference",
+        }:
+            raise ValueError(
+                "dataset.chat_template requires source=local_chat or local_preference"
+            )
+        if self.template.name != "plain" and (
+            self.corpus_release_path is not None
+            or self.allocation_manifest_path is not None
+        ):
+            raise ValueError(
+                "corpus exports and allocation manifests are rendered with the "
+                "plain chat template"
+            )
         if self.source == "local_token_mixture":
             if (
                 self.mixture_declaration_path is None
@@ -750,7 +778,12 @@ class DatasetConfig(StrictModel):
             if self.train_path is not None or self.validation_path is not None:
                 raise ValueError("huggingface reads splits, not local paths")
             return self
-        if self.source in {"local_chat", "local_text", "local_token_mixture"}:
+        if self.source in {
+            "local_chat",
+            "local_preference",
+            "local_text",
+            "local_token_mixture",
+        }:
             if self.train_path is None or self.validation_path is None:
                 raise ValueError(
                     f"{self.source} requires train_path and validation_path"
@@ -924,6 +957,42 @@ class MatchedStoryConfig(StrictModel):
         return self
 
 
+class ObjectiveConfig(StrictModel):
+    """What an update minimizes; kinds are looked up in ``klab.objectives``."""
+
+    kind: str = "next_token"
+    # A frozen checkpoint the objective learns from, for kinds that need one.
+    teacher_checkpoint: Path | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    params: dict[str, Any] = Field(default_factory=dict, exclude_if=lambda v: not v)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_params(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        from klab.objectives import DEFAULT_KIND, normalized_params
+
+        kind = data.get("kind", DEFAULT_KIND)
+        if not isinstance(kind, str):
+            return data
+        return {**data, "params": normalized_params(kind, data.get("params"))}
+
+    @model_validator(mode="after")
+    def validate_kind(self) -> ObjectiveConfig:
+        from klab.objectives import objective
+
+        found = objective(self.kind)
+        if found.teacher and self.teacher_checkpoint is None:
+            raise ValueError(
+                f"objective {self.kind!r} requires training.objective.teacher_checkpoint"
+            )
+        if not found.teacher and self.teacher_checkpoint is not None:
+            raise ValueError(f"objective {self.kind!r} does not use a teacher")
+        return self
+
+
 class TrainingConfig(StrictModel):
     stable_steps: int = Field(
         default=0, strict=True, ge=0, exclude_if=lambda value: value == 0
@@ -941,6 +1010,16 @@ class TrainingConfig(StrictModel):
     )
     trainable_parameters: tuple[str, ...] | None = None
     portability_manifest_path: Path | None = None
+    # Start from this checkpoint's weights with a fresh optimizer and schedule,
+    # as `train --promote` does: a run directory, a checkpoint generation or a
+    # `latest.json` pointer.
+    parent_checkpoint: Path | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    objective: ObjectiveConfig = Field(
+        default_factory=lambda: ObjectiveConfig(),
+        exclude_if=lambda value: value == ObjectiveConfig(),
+    )
 
     @model_serializer(mode="wrap")
     def _serialize_optional_experiment_fields(
@@ -1234,6 +1313,42 @@ class RunConfig(StrictModel):
             raise ValueError(
                 "padded document batching requires dense attention/FFN, no sidecars and accumulation one"
             )
+        from klab.objectives import DEFAULT_KIND
+        from klab.objectives import objective as registered_objective
+
+        objective = registered_objective(self.training.objective.kind)
+        paired_data = self.dataset.source == "local_preference"
+        if objective.pairs != paired_data and (
+            objective.pairs or objective.kind != DEFAULT_KIND
+        ):
+            raise ValueError(
+                f"objective {objective.kind!r} "
+                + (
+                    "trains on reply pairs and requires dataset.source=local_preference"
+                    if objective.pairs
+                    else "does not train on reply pairs; local_preference data needs "
+                    "a pair objective, or next_token to tune on the chosen replies"
+                )
+            )
+        if objective.reference and self.training.parent_checkpoint is None:
+            raise ValueError(
+                f"objective {objective.kind!r} measures against the parent "
+                "checkpoint and requires training.parent_checkpoint"
+            )
+        if (objective.kind != DEFAULT_KIND or paired_data) and (
+            self.runtime.engine != "pytorch"
+            or self.model.memory in {"byte", "portable"}
+            or self.dataset.allocation_manifest_path is not None
+            or self.training.portability_manifest_path is not None
+            or matched is not None
+            or self.runtime.compile_output_head_loss
+            or self.runtime.secondary_device_indices
+        ):
+            raise ValueError(
+                "objectives other than next_token and local_preference data require "
+                "the PyTorch engine on one device, without byte memory, allocation "
+                "or portability sidecars, matched stories or the compiled output head"
+            )
         if self.runtime.compile_output_head_loss and (
             self.dataset.allocation_manifest_path is not None
             or self.training.portability_manifest_path is not None
@@ -1442,12 +1557,28 @@ class TokenizerTrainConfig(StrictModel):
     max_documents: int = Field(gt=0)
     output_dir: Path
     dataset: DatasetConfig
+    # Adds this template's special tokens to the vocabulary, so a model
+    # pretrained on plain text can later be tuned on conversations that use it.
+    # Defaults to the dataset's own template.
+    chat_template: str | ChatTemplate | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @property
+    def template(self) -> ChatTemplate:
+        return (
+            self.dataset.template
+            if self.chat_template is None
+            else resolve_chat_template(self.chat_template)
+        )
+
     sampling: TokenizerSampling | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
 
     @model_validator(mode="after")
     def authenticated_sampling(self):
+        _ = self.template
         if self.sampling is not None and (
             self.dataset.source != "local_text"
             or self.dataset.corpus_release_path is None

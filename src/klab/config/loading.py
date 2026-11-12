@@ -26,6 +26,8 @@ _PATH_KEYS = {
     "corpus_export_path",
     "mixture_declaration_path",
     "mixture_output_path",
+    "parent_checkpoint",
+    "teacher_checkpoint",
 }
 
 

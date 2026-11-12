@@ -42,6 +42,7 @@ from klab.data.encoding import (
 )
 from klab.data.packing import (
     BatchCursor,
+    PairedBlockDataset,
     PreparedData,
     TokenBlockDataset,
     epoch_order,
@@ -66,6 +67,7 @@ from klab.memory import (
     parameter_inventory,
     validate_offload_headroom,
 )
+from klab.objectives import objective as registered_objective
 from klab.progress import ProgressReporter
 from klab.resource_envelope import (
     ResourceEnvelope,
@@ -96,6 +98,7 @@ from klab.training.manifest import (
     RunManifest,
     _is_sha256,
     architecture_sha256,
+    checkpoint_selection,
     config_sha256,
     sha256_file,
     source_identity,
@@ -931,6 +934,17 @@ def _train_impl(
                     "requested execution override changes scientific configuration"
                 )
             requested_config = original.model_dump(mode="json")
+        if config.training.parent_checkpoint is not None and not any(
+            path is not None for path in (resume, recover, extend_budget)
+        ):
+            # A config that names its parent starts from it, exactly as
+            # --promote does; continuing this run later resumes its own state.
+            declared = checkpoint_selection(config.training.parent_checkpoint)
+            if promote is not None and promote.resolve() != declared.resolve():
+                raise ValueError(
+                    "--promote differs from the config's training.parent_checkpoint"
+                )
+            promote = declared
         choices = [
             path
             for path in (resume, promote, recover, extend_budget)
@@ -1219,6 +1233,21 @@ def _train_impl(
                 layout="story",
                 targets_per_update=1,
                 unpadded_documents=True,
+            )
+        if registered_objective(config.training.objective.kind).pairs:
+            pad = load_tokenizer(
+                artifact_source / "tokenizer.json"
+                if artifact_source
+                else config.tokenizer.path
+            ).token_to_id("<pad>")
+            dataset = PairedBlockDataset(
+                data.train, config.training.seq_len, data.train_supervision, pad
+            )
+            validation_dataset = PairedBlockDataset(
+                data.validation,
+                config.training.seq_len,
+                data.validation_supervision,
+                pad,
             )
         if not len(dataset):
             raise ValueError("training data contains no supervised next-token targets")
@@ -1531,6 +1560,17 @@ def _train_impl(
                 cumulative_wall,
                 "external_components",
                 config.external_components,
+            )
+        objective_identity = getattr(engine, "objective_identity", None)
+        if objective_identity is not None:
+            # Which objective code ran and which frozen checkpoints it used.
+            store.log_event(
+                run_id,
+                step,
+                tokens,
+                cumulative_wall,
+                "training_objective",
+                objective_identity,
             )
         started = time.perf_counter()
         interrupted = False
@@ -2517,7 +2557,8 @@ def _train_impl(
                         available = int(np.count_nonzero(labels != -100))
                         allowed = min(remaining - valid_targets, available)
                         if allowed < available:
-                            labels[np.flatnonzero(labels != -100)[allowed:]] = -100
+                            flat = labels.reshape(-1)
+                            flat[np.flatnonzero(flat != -100)[allowed:]] = -100
                         records.append(
                             (inputs, labels, addresses, owners, queries, query_mask)
                         )

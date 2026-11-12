@@ -184,9 +184,10 @@ class LocalInference:
                 "stop must be null, a nonempty string, or up to four nonempty strings (256 characters each)"
             )
         stops = [_text(stop) for stop in stops]
+        template = self.loaded.config.dataset.template
         if chat:
             prompt = self._chat_prompt(payload.get("messages"), max_tokens)
-            stops = [*stops, "\nUser:", "\nSystem:", "\nAssistant:"]
+            stops = [*stops, *template.stop]
         else:
             prompt = payload.get("prompt")
             if not isinstance(prompt, str):
@@ -222,6 +223,9 @@ class LocalInference:
                 top_k=top_k,
                 seed=seed,
                 stop_sequences=stops,
+                stop_token_ids=template.stop_token_ids(self.loaded.tokenizer)
+                if chat
+                else (),
                 strict_context=True,
                 engine=self.loaded.engine,
                 cancellation=cancelled,
@@ -298,6 +302,7 @@ class LocalInference:
                 self.loaded.config.model.max_seq_len,
                 max_tokens,
                 system=system,
+                template=self.loaded.config.dataset.template,
             )
         except ValueError as error:
             raise APIError(str(error)) from error

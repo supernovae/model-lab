@@ -9,7 +9,7 @@ import json
 import random
 import re
 import time
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -69,6 +69,8 @@ from klab.runtime import (
 )
 from klab.runtime_profile import RuntimeAuthorization, require_authorization
 from klab.training.manifest import source_identity
+from klab.training.objectives import Batch as ObjectiveBatch
+from klab.training.objectives import Frozen, TrainingObjective, load_frozen_model
 from klab.training.offload import ActivationOffload
 from klab.training.optimizer import (
     learning_rate_for_step,
@@ -465,6 +467,9 @@ class PyTorchEngine:
         self.monitor: MemoryMonitor | None = None
         self.offload: ActivationOffload | None = None
         self.semantic_encoder = None
+        self.objective: TrainingObjective | None = None
+        self.frozen = Frozen()
+        self.objective_identity: dict[str, object] | None = None
         self.portability_run: PortabilityRun | None = None
         self._portability_parameters: tuple[tuple[str, torch.nn.Parameter], ...] = ()
         self._last_gradient_parameter_names: tuple[str, ...] = ()
@@ -615,6 +620,7 @@ class PyTorchEngine:
             )
         self.config, self.runtime, self.device = config, runtime, device
         self.model, self.optimizer = model, optimizer
+        self._initialize_objective(config, device, runtime.backend)
         if config.runtime.compile_output_head_loss:
             self._compiled_output_head_loss = torch.compile(
                 output_projection_cross_entropy,
@@ -713,6 +719,62 @@ class PyTorchEngine:
                 )
             finally:
                 _restore_rng(saved_replica_rng, device)
+
+    def _initialize_objective(
+        self, config: RunConfig, device: torch.device, backend: str
+    ) -> None:
+        """Build the run's objective and load the frozen models it compares against.
+
+        Plain next-token training keeps the engine's own loss path, so
+        ``self.objective`` stays ``None`` for it.
+        """
+        from klab.objectives import DEFAULT_KIND, build, objective
+
+        self.objective = None
+        self.frozen = Frozen()
+        self.objective_identity = None
+        settings = config.training.objective
+        registered = objective(settings.kind)
+        if registered.kind == DEFAULT_KIND:
+            return
+        identity: dict[str, object] = {
+            "kind": registered.kind,
+            "source": registered.source,
+            "params": dict(settings.params),
+        }
+        # Constructing a model draws from the RNG; the run's own stream must
+        # not depend on whether an objective loads one.
+        rng = _rng_state(device, backend)
+        try:
+            frozen: dict[str, Callable[[torch.Tensor], torch.Tensor]] = {}
+            for role, path in (
+                (
+                    "teacher",
+                    settings.teacher_checkpoint if registered.teacher else None,
+                ),
+                (
+                    "reference",
+                    config.training.parent_checkpoint if registered.reference else None,
+                ),
+            ):
+                if path is None:
+                    continue
+                module, identity[role] = load_frozen_model(
+                    path, config, device, role=role
+                )
+
+                def run(
+                    ids: torch.Tensor, module: torch.nn.Module = module
+                ) -> torch.Tensor:
+                    with torch.no_grad(), precision_context(config, device):
+                        return module(ids)
+
+                frozen[role] = run
+        finally:
+            _restore_rng(rng, device)
+        self.frozen = Frozen(**frozen)
+        self.objective = build(registered.kind, settings.params)
+        self.objective_identity = identity
 
     def _initialize_learned_fact_audit(
         self,
@@ -1265,6 +1327,8 @@ class PyTorchEngine:
         ]
         devices_used = 1
         replica_timings: dict[str, float] = {}
+        objective_sums: dict[str, torch.Tensor | float] = {}
+        update_rows = sum(batch.inputs.shape[0] for batch, _ in active_pairs)
         if (
             self._secondary_replicas
             and len(microbatches) >= 2
@@ -1556,34 +1620,82 @@ class PyTorchEngine:
                         )
                         valid_target_mask = valid_target_mask & neural_target_mask
                     neural_aux_targets = int(valid_target_mask.sum())
-                with (
-                    self.offload.hooks() if self.offload is not None else nullcontext(),
-                    precision_context(config, device),
-                ):
-                    logits, auxiliary = model.forward_with_aux(
-                        x,
-                        byte_addresses=addresses,
-                        semantic_queries=semantic_queries,
-                        memory_mask=memory_mask,
-                        valid_target_mask=valid_target_mask,
-                        activation_checkpointing=config.runtime.memory.activation_checkpointing.enabled,
-                        diagnostics=config.logging.architecture_diagnostics,
-                        return_hidden=config.runtime.compile_output_head_loss,
-                        position_mask=position_mask,
+                if self.objective is not None:
+                    # The objective owns the forward: it may reshape the batch
+                    # or compare against a frozen model.
+                    auxiliary_terms: list[torch.Tensor] = []
+
+                    def objective_forward(
+                        ids: torch.Tensor,
+                        targets: torch.Tensor = y,
+                        terms: list[torch.Tensor] = auxiliary_terms,
+                    ) -> torch.Tensor:
+                        with (
+                            self.offload.hooks()
+                            if self.offload is not None
+                            else nullcontext(),
+                            precision_context(config, device),
+                        ):
+                            output, term = model.forward_with_aux(
+                                ids,
+                                valid_target_mask=(targets != -100).view(ids.shape)
+                                if targets.numel() == ids.numel()
+                                else None,
+                                activation_checkpointing=config.runtime.memory.activation_checkpointing.enabled,
+                                diagnostics=config.logging.architecture_diagnostics,
+                            )
+                        terms.append(term.float())
+                        return output
+
+                    objective_loss = self.objective.loss(
+                        objective_forward,
+                        ObjectiveBatch(x, y, valid_targets, update_rows),
+                        self.frozen,
                     )
-                diagnostics = architecture_metrics(model)
-                monitor.sample("forward")
-                if config.runtime.compile_output_head_loss:
-                    ce_sum = self._compiled_output_head_loss(
-                        logits, y, model.output.weight
-                    )
+                    if not auxiliary_terms:
+                        raise RuntimeError(
+                            "training objective never ran the model being trained"
+                        )
+                    ce_sum = objective_loss.total.float()
+                    auxiliary = torch.stack(auxiliary_terms).sum()
+                    for name, value in objective_loss.metrics.items():
+                        objective_sums[name] = (
+                            objective_sums.get(name, 0.0)
+                            + value.detach().float() * chunk_valid
+                        )
+                    diagnostics = architecture_metrics(model)
+                    monitor.sample("forward")
                 else:
-                    ce_sum = functional.cross_entropy(
-                        logits.float().flatten(0, 1),
-                        y.flatten(),
-                        ignore_index=-100,
-                        reduction="sum",
-                    )
+                    with (
+                        self.offload.hooks()
+                        if self.offload is not None
+                        else nullcontext(),
+                        precision_context(config, device),
+                    ):
+                        logits, auxiliary = model.forward_with_aux(
+                            x,
+                            byte_addresses=addresses,
+                            semantic_queries=semantic_queries,
+                            memory_mask=memory_mask,
+                            valid_target_mask=valid_target_mask,
+                            activation_checkpointing=config.runtime.memory.activation_checkpointing.enabled,
+                            diagnostics=config.logging.architecture_diagnostics,
+                            return_hidden=config.runtime.compile_output_head_loss,
+                            position_mask=position_mask,
+                        )
+                    diagnostics = architecture_metrics(model)
+                    monitor.sample("forward")
+                    if config.runtime.compile_output_head_loss:
+                        ce_sum = self._compiled_output_head_loss(
+                            logits, y, model.output.weight
+                        )
+                    else:
+                        ce_sum = functional.cross_entropy(
+                            logits.float().flatten(0, 1),
+                            y.flatten(),
+                            ignore_index=-100,
+                            reduction="sum",
+                        )
                 auxiliary = auxiliary.float()
                 losses_finite = (
                     losses_finite & torch.isfinite(ce_sum) & torch.isfinite(auxiliary)
@@ -1874,6 +1986,10 @@ class PyTorchEngine:
                 name: float(value) / diagnostic_weights[name]
                 for name, value in diagnostic_sums.items()
             },
+            **{
+                f"objective/{name}": float(value) / valid_targets
+                for name, value in objective_sums.items()
+            },
             **memory_metrics,
         }
         if allocation_enabled:
@@ -2016,6 +2132,18 @@ class PyTorchEngine:
                             torch.from_numpy(batch.semantic_queries).to(device),
                             torch.from_numpy(batch.semantic_mask).to(device),
                         )
+                    if self.objective is not None:
+                        targets_in_batch = int(np.count_nonzero(batch.targets != -100))
+                        total_loss += float(
+                            self.objective.evaluation_loss(
+                                model,
+                                ObjectiveBatch(x, y, targets_in_batch, x.shape[0]),
+                                self.frozen,
+                            )
+                        )
+                        total_targets += targets_in_batch
+                        count += 1
+                        continue
                     logits = model(
                         x,
                         byte_addresses=addresses,

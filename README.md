@@ -172,7 +172,8 @@ When you move beyond single-change `try` comparisons, Model Lab includes tools f
   [local API](docs/local-api.md), and the retained [MODEL-0](docs/model-0.md) evidence.
 - **Control training and continuation:** [training](docs/training.md),
   [checkpointing](docs/checkpointing.md), [datasets](docs/datasets.md), and
-  [instruction objectives](docs/instruction-training.md).
+  [instruction objectives](docs/instruction-training.md), and
+  [post-training](docs/post-training.md) (distillation, preference, export).
 - **Schedule independent runs:** [workers](docs/workers.md) and
   [hosted environments](docs/hosted-environments.md); one host/device per run.
 - **Declare release evidence:** [training programs](docs/experiment-programs.md),
@@ -197,6 +198,7 @@ experimental findings see the [experiment ledger](docs/research/experiment-ledge
 | **Corpus provenance** | Acquire, filter, freeze, export, and verify raw text corpora | [Corpus Forge sample](tests/fixtures/corpus-sample/README.md) |
 | **Declarative datasets** | Pin Hugging Face Hub sources, snapshot, resume, and track token budgets | [Dataset interfaces](docs/datasets.md) |
 | **Instruction tuning** | Full-transcript or assistant-only loss over local multi-turn conversations | [Instruction training](docs/instruction-training.md) |
+| **Post-training** | Stages from a parent checkpoint: teacher distillation, preference optimization (DPO), objectives from other packages, chat templates (plain, ChatML, Llama 3) and Hugging Face Llama export | [Post-training](docs/post-training.md) |
 | **Evaluation & review** | Held-out loss, capability cards, checkpoint-bound probe suites, and blind review | [Evidence guide](docs/evidence.md) |
 | **Model diagnostics** | Semantic vector probes, continuation overlap, prep benchmarks, and checkpoint explorer | [CLI diagnostics](docs/using-klab.md#native-diagnostic-interfaces) |
 | **Remote & queued runs** | Local worker queues, SSH staging, and relay-backed hosted notebooks (e.g. Colab) | [Hosted environments](docs/hosted-environments.md) |

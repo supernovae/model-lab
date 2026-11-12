@@ -73,6 +73,7 @@ def generate_result(
     top_k: int = 0,
     seed: int = 0,
     stop_sequences: Sequence[str] = (),
+    stop_token_ids: Sequence[int] = (),
     strict_context: bool = False,
     use_cache: bool = True,
     cancellation: Event | Callable[[], bool] | None = None,
@@ -262,7 +263,7 @@ def generate_result(
                         generator=generator,
                     )
                 completion_tokens += 1
-                if token == eos:
+                if token == eos or token in stop_token_ids:
                     finish_reason = "stop"
                     break
                 generated.append(token)

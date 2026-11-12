@@ -23,6 +23,7 @@ from klab.data.packing import (
     _local_chat_identity,
     canonical_tokenizer_sha256,
     load_prepared_data,
+    packing_identity,
 )
 from klab.data.tokenizer import load_tokenizer
 from klab.training.manifest import source_identity
@@ -54,10 +55,7 @@ def _bind_config(manifest: dict, config: RunConfig) -> dict | None:
             for k, v in config.dataset.model_dump(mode="json").items()
             if k not in _LOCATION_KEYS
         },
-        "packing": {
-            k: getattr(config.model, k)
-            for k in ("memory", "memory_table_size", "memory_ngram_size")
-        },
+        "packing": packing_identity(config),
         "tokenizer_sha256": canonical_tokenizer_sha256(tokenizer),
         "local_chat_source": _local_chat_identity(config.dataset),
     }

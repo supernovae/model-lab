@@ -177,6 +177,7 @@ def training_storage_checks(
     else:
         from klab.data.packing import (
             canonical_tokenizer_sha256,
+            packing_identity,
             prepared_dataset_identity,
         )
         from klab.data.tokenizer import load_tokenizer
@@ -197,11 +198,7 @@ def training_storage_checks(
             raise ValueError("prepared receipt manifest changed")
         identity = manifest.get("cache_identity")
         expected_dataset = prepared_dataset_identity(config.dataset)
-        expected_packing = {
-            "memory": config.model.memory,
-            "memory_table_size": config.model.memory_table_size,
-            "memory_ngram_size": config.model.memory_ngram_size,
-        }
+        expected_packing = packing_identity(config)
         if (
             not isinstance(identity, dict)
             or identity.get("dataset") != expected_dataset

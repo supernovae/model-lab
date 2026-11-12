@@ -1,0 +1,48 @@
+# Stage 1: instruction tuning. Next-token loss on the assistant's replies.
+schema_version: 2
+name: post-training-instruct
+seed: 42
+model:
+  vocab_size: 512
+  hidden_dim: 96
+  num_layers: 3
+  num_heads: 4
+  ffn_dim: 288
+  max_seq_len: 96
+tokenizer:
+  path: work/tokenizer/tokenizer.json
+dataset:
+  source: local_chat
+  chat_template: chatml
+  license: CC0-1.0 (example conversations written for this repository)
+  train_path: data/chat-train.jsonl
+  validation_path: data/chat-validation.jsonl
+  cache_dir: work/data
+  train_max_documents: 200
+  validation_max_documents: 40
+  train_max_tokens: 65536
+  validation_max_tokens: 8192
+training:
+  seq_len: 96
+  max_steps: 300
+  max_tokens: 200000
+  micro_batch_size: 8
+  gradient_accumulation: 1
+optimizer:
+  name: adamw
+  peak: 0.003
+  floor: 0.0003
+  warmup_steps: 10
+  weight_decay: 0.1
+evaluation:
+  every_steps: 100
+  max_batches: 4
+checkpoint:
+  every_steps: 300
+logging:
+  root_dir: work/runs
+  every_steps: 10
+runtime:
+  engine: pytorch
+  backend: cpu
+  precision: fp32
