@@ -42,6 +42,9 @@ and sharing community experiments:
 Earlier completed and archived studies remain browsable in the Workshop's
 [historical catalog](https://github.com/supernovae/kybern-workshop/tree/fd259e2cad4e9856d6d659e8df34728a98b32502/catalog).
 
+A model project can live in any Git repository, not only Workshop:
+[keep the model in its own repository](docs/build.md#4-keep-the-model-in-its-own-repository).
+
 Runtime corpora, prepared inputs and model outputs stay outside this checkout in the
 configured work directory. See [source and storage boundaries](docs/repository-storage.md).
 Tiny maintained interface examples remain in `examples/`; synthetic corpus fixtures
