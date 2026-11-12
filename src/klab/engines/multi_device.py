@@ -14,6 +14,7 @@ from torch.nn import functional
 
 from klab.config.models import RunConfig
 from klab.engines.base import Microbatch
+from klab.engines.output_head import chunked_output_head_cross_entropy
 from klab.model.inspection import architecture_metrics
 from klab.model.transformer import DenseLM
 from klab.runtime import precision_context, synchronize
@@ -182,6 +183,7 @@ def execute_replica_microbatches(
     recomputed = 0.0
     executed_microbatches = 0
     trainable_inputs = list(replica.trainable_params)
+    head_chunk = config.runtime.output_head_chunk_tokens
 
     for batch, chunk_valid in pairs:
         if not chunk_valid and batch.position_mask is None:
@@ -205,13 +207,22 @@ def execute_replica_microbatches(
                 valid_target_mask=valid_target_mask,
                 activation_checkpointing=config.runtime.memory.activation_checkpointing.enabled,
                 diagnostics=config.logging.architecture_diagnostics,
-                return_hidden=config.runtime.compile_output_head_loss,
+                return_hidden=config.runtime.compile_output_head_loss
+                or head_chunk is not None,
                 position_mask=position_mask,
             )
         diagnostics = architecture_metrics(model)
         if config.runtime.compile_output_head_loss:
             loss_fn = replica.compiled_output_head_loss or output_head_loss_fn
             ce_sum = loss_fn(logits, y, model.output.weight)
+        elif head_chunk is not None:
+            ce_sum = chunked_output_head_cross_entropy(
+                logits,
+                y,
+                model.output.weight,
+                head_chunk,
+                lambda: precision_context(config, device),
+            )
         else:
             ce_sum = functional.cross_entropy(
                 logits.float().flatten(0, 1),

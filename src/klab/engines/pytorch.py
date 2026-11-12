@@ -32,6 +32,7 @@ from klab.engines.multi_device import (
     dispatch_replicas_and_primary,
     microbatch_position_mask,
 )
+from klab.engines.output_head import chunked_output_head_cross_entropy
 from klab.memory import MemoryMonitor
 from klab.model.inspection import architecture_metrics
 from klab.model.transformer import DenseLM
@@ -585,6 +586,7 @@ class PyTorchEngine:
         self, microbatches: list[Microbatch], update_index: int, valid_targets: int
     ) -> UpdateResult:
         config, device, model, optimizer, monitor = self._ready()
+        head_chunk = config.runtime.output_head_chunk_tokens
         chunk_counts = [
             int(np.count_nonzero(batch.targets != -100)) for batch in microbatches
         ]
@@ -685,7 +687,8 @@ class PyTorchEngine:
                             valid_target_mask=valid_target_mask,
                             activation_checkpointing=config.runtime.memory.activation_checkpointing.enabled,
                             diagnostics=config.logging.architecture_diagnostics,
-                            return_hidden=config.runtime.compile_output_head_loss,
+                            return_hidden=config.runtime.compile_output_head_loss
+                            or head_chunk is not None,
                             position_mask=position_mask,
                         )
                     diagnostics = architecture_metrics(model)
@@ -693,6 +696,14 @@ class PyTorchEngine:
                     if config.runtime.compile_output_head_loss:
                         ce_sum = self._compiled_output_head_loss(
                             logits, y, model.output.weight
+                        )
+                    elif head_chunk is not None:
+                        ce_sum = chunked_output_head_cross_entropy(
+                            logits,
+                            y,
+                            model.output.weight,
+                            head_chunk,
+                            lambda: precision_context(config, device),
                         )
                     else:
                         ce_sum = functional.cross_entropy(
@@ -853,7 +864,8 @@ class PyTorchEngine:
                             valid_target_mask=valid_target_mask,
                             activation_checkpointing=config.runtime.memory.activation_checkpointing.enabled,
                             diagnostics=config.logging.architecture_diagnostics,
-                            return_hidden=config.runtime.compile_output_head_loss,
+                            return_hidden=config.runtime.compile_output_head_loss
+                            or head_chunk is not None,
                             position_mask=position_mask,
                         )
                     diagnostics = architecture_metrics(model)
@@ -861,6 +873,14 @@ class PyTorchEngine:
                     if config.runtime.compile_output_head_loss:
                         ce_sum = self._compiled_output_head_loss(
                             logits, y, model.output.weight
+                        )
+                    elif head_chunk is not None:
+                        ce_sum = chunked_output_head_cross_entropy(
+                            logits,
+                            y,
+                            model.output.weight,
+                            head_chunk,
+                            lambda: precision_context(config, device),
                         )
                     else:
                         ce_sum = functional.cross_entropy(
@@ -1056,15 +1076,29 @@ class PyTorchEngine:
                         total_targets += targets_in_batch
                         count += 1
                         continue
-                    logits = model(x, byte_addresses=addresses)
-                    total_loss += float(
-                        functional.cross_entropy(
-                            logits.float().flatten(0, 1),
-                            y.flatten(),
-                            ignore_index=-100,
-                            reduction="sum",
+                    if config.runtime.output_head_chunk_tokens is not None:
+                        hidden, _ = model.forward_with_aux(
+                            x, byte_addresses=addresses, return_hidden=True
                         )
-                    )
+                        total_loss += float(
+                            chunked_output_head_cross_entropy(
+                                hidden,
+                                y,
+                                model.output.weight,
+                                config.runtime.output_head_chunk_tokens,
+                                lambda: precision_context(config, device),
+                            )
+                        )
+                    else:
+                        logits = model(x, byte_addresses=addresses)
+                        total_loss += float(
+                            functional.cross_entropy(
+                                logits.float().flatten(0, 1),
+                                y.flatten(),
+                                ignore_index=-100,
+                                reduction="sum",
+                            )
+                        )
                     total_targets += int(np.count_nonzero(batch.targets != -100))
                     count += 1
         finally:

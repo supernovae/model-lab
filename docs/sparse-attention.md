@@ -68,6 +68,8 @@ Limits today:
 - With training retained for backward, each layer holds its gathered keys and
   values: about twice dense fused attention's memory per token on XPU. Enable
   activation checkpointing for deep models or very long context.
+- At long context the output head, not attention, can be the largest tensor:
+  set [`runtime.output_head_chunk_tokens`](memory.md#chunked-output-head).
 - Measured on one accelerator type (Intel Arc Pro B70, XPU). CUDA is unmeasured.
 
 `configs/smoke_local_selected_cpu.yaml` and

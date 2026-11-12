@@ -77,6 +77,29 @@ retries the same data; three overflows in a row fail the run.
 Mixture-of-experts load balancing is computed per microbatch, not over the whole
 update.
 
+### Chunked output head
+
+```yaml
+runtime:
+  output_head_chunk_tokens: 2048
+```
+
+The output head turns every position's hidden state into one logit per
+vocabulary entry, so a microbatch of `T` tokens holds `T × vocab_size` logits,
+their FP32 copy and their gradient: several GiB once `T` reaches tens of
+thousands. With this setting the head projects and scores that many positions
+at a time, drops each chunk's logits after its loss and rebuilds them during
+backward. The loss and gradients are the same up to summation order; the head
+is computed twice. Validation uses the same chunks. It applies to the default
+next-token objective on the PyTorch engine, on one device or several, and
+cannot be combined with `compile_output_head_loss`.
+
+On one Arc Pro B70 (bf16, activation recomputation on), a 730M-parameter model
+with a 32,768-entry vocabulary and one 32,768-token row ran out of device memory
+while building its logits; with 2,048-token chunks the first update completed at
+a 26.9 GiB peak. That is one update of one run and still too close to the card's
+32 GiB to train on: the run then slowed as allocations spilled into host memory.
+
 ### Activation recomputation
 
 ```yaml
