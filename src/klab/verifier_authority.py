@@ -21,7 +21,6 @@ _ARTIFACT = ("experiments.artifacts", "experiments.plan")
 _CORPUS = (
     "campaign.state",
     "config.models",
-    "corpus.identity",
     "corpus.project",
     "corpus.provenance",
     "corpus.rights",

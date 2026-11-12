@@ -40,14 +40,6 @@ def register_monitor_parser(subparsers: argparse._SubParsersAction) -> None:
     baseline.add_argument("--seconds", type=float, default=4.0)
     baseline.add_argument("--json", action="store_true")
     baseline.set_defaults(handler=_capture_baseline)
-    status = subparsers.add_parser(
-        "runner-status", help="Inspect existing Linux runner state without modifying it"
-    )
-    status.add_argument("--runner-lock", type=Path, required=True)
-    status.add_argument("--runner-state", type=Path, required=True)
-    status.add_argument("--runner-blocked", type=Path, required=True)
-    status.add_argument("--json", action="store_true")
-    status.set_defaults(handler=_runner_status)
 
 
 def execute_monitor(args: argparse.Namespace) -> int:
@@ -111,18 +103,3 @@ def _capture_baseline(args: argparse.Namespace) -> None:
             indent=None if args.json else 2,
         )
     )
-
-
-def _runner_status(args: argparse.Namespace) -> None:
-    import sys
-
-    if sys.platform != "linux":
-        raise SystemExit("runner-status requires Linux")
-    from klab.runner_control import runner_status
-
-    result = runner_status(
-        lock_path=args.runner_lock,
-        state_dir=args.runner_state,
-        blocked_path=args.runner_blocked,
-    )
-    print(json.dumps(result, sort_keys=True, indent=None if args.json else 2))

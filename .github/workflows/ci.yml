@@ -69,7 +69,6 @@ jobs:
             --basetemp "$RUNNER_TEMP/pr-safe-pytest" \
             tests/test_verifier_authority_current.py \
             tests/test_slow_list.py \
-            tests/test_research_lint.py \
             tests/test_config.py \
             tests/test_first_model_config.py \
             tests/test_instruction_config.py
@@ -151,7 +150,6 @@ jobs:
           --dist loadfile --durations=25
           --ignore=tests/test_verifier_authority_current.py
           --ignore=tests/test_slow_list.py
-          --ignore=tests/test_research_lint.py
           --ignore=tests/test_config.py
           --ignore=tests/test_first_model_config.py
           --ignore=tests/test_instruction_config.py

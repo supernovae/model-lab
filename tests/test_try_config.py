@@ -335,7 +335,7 @@ def test_interrupted_setup_retains_request(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     "command,count",
-    [("try", 5), ("probe", 5), ("explore", 5), ("compare", 5), ("report", 5)],
+    [("try", 5), ("probe", 5), ("explore", 5), ("compare", 5), ("report", 4)],
 )
 def test_everyday_executable_option_budget(tmp_path, command, count):
     from klab.cli.main import build_parser

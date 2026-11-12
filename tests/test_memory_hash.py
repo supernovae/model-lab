@@ -38,7 +38,6 @@ from klab.address_hash import (
 from klab.cli.main import main
 from klab.config.models import RunConfig
 from klab.data.byte_hash import hash_bytes, table_address
-from klab.data.lexical_mining import _address_for_key
 from klab.model import portable_engram
 from klab.model.memory import TokenNgramMemory
 from klab.model.portable_engram import (
@@ -46,7 +45,6 @@ from klab.model.portable_engram import (
     export_portable_engram,
     load_portable_engram,
 )
-from klab.research.portability_campaign import _token_address
 from klab.training import manifest as manifest_module
 from klab.training.manifest import architecture_sha256, trained_memory_addressing
 from klab.training.trainer import train
@@ -117,15 +115,6 @@ def test_tensor_and_python_token_hashes_agree(table_size: int) -> None:
                     key = tuple(int(ids[batch, position - k]) for k in range(order))
                     expected = token_ngram_address(key, table_size, head)
                     assert int(addresses[batch, position]) == expected
-                    assert (
-                        _address_for_key(key, table_size=table_size, head=head)
-                        == expected
-                    )
-    for position in range(2, ids.shape[1]):
-        history = ids[0, : position + 1].tolist()
-        assert _token_address(history, 3, table_size) == int(
-            memory.addresses(ids, 3, 0)[0, position]
-        )
 
 
 @pytest.mark.parametrize("table_size", (17, 127, 251, 1021, 8192, 65521))

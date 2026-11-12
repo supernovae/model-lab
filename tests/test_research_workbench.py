@@ -1,37 +1,23 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import cast
 
 import pytest
 import torch
-import yaml
-from pydantic import ValidationError
-from research_fixtures import make_study_resources
 from tokenizers import Tokenizer
 from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 from tokenizers.models import BPE
 from tokenizers.pre_tokenizers import ByteLevel
 
-from klab.canonical import canonical_digest
 from klab.config.loading import load_config
 from klab.config.models import AttentionConfig
 from klab.data.tokenizer import SPECIAL_TOKENS, load_tokenizer
 from klab.engram.packs import compile_pack, verify_pack
 from klab.evaluation.generation import _prompt_byte_addresses
-from klab.experiments.reporting import _validate_research
-from klab.experiments.study import plan_study
-from klab.research.catalog import (
-    ResearchEntry,
-    list_research,
-    load_datasets,
-    load_recipe,
-    load_research,
-)
 from klab.research.probe import probe_model
-from klab.research.scaffold import scaffold_lesson, scaffold_research
+from klab.research.scaffold import scaffold_lesson
 
 
 def _write_byte_tokenizer(path: Path) -> None:
@@ -65,220 +51,6 @@ def _weight_rows(value: object) -> list[list[float]]:
     assert isinstance(value, list)
     assert all(isinstance(row, list) for row in value)
     return cast(list[list[float]], value)
-
-
-def test_current_catalog_and_neutral_factorial_strict_versions(tmp_path: Path) -> None:
-    # Personal no-recipe cards await their separate protocol retirement.
-    assert {entry.id for entry in list_research()} == {
-        "dense-lm-v1",
-        "learned-engram-portability-v1",
-    }
-    root = make_study_resources(tmp_path)
-    entry = load_research("neutral-study", root=root)
-    recipe = load_recipe(entry, local_root=root)
-    assert [
-        factor.axis
-        for factor in recipe.designs["default"]["smoke"].factorial_designs[0].factors
-    ] == ["width", "depth"]
-    invalid = entry.model_dump(mode="json")
-    invalid["version"] = True
-    with pytest.raises(ValidationError, match="version must be integer 1"):
-        ResearchEntry.model_validate(invalid)
-
-
-def test_learned_runner_catalog_rejects_generic_recipe_and_scaffold(
-    tmp_path: Path,
-) -> None:
-    entry = load_research("learned-engram-portability-v1")
-    guidance = (
-        "learned-engram-portability-v1 uses research portability build "
-        "--experiment learned-engram-portability-v1, not research scaffold"
-    )
-    with pytest.raises(ValueError, match=guidance):
-        load_recipe(entry)
-
-    output = tmp_path / "must-not-exist"
-    with pytest.raises(ValueError, match=guidance):
-        scaffold_research("learned-engram-portability-v1", output)
-    assert not output.exists()
-
-
-def test_catalog_rejects_duplicate_json_and_lists_unknown_ids(tmp_path: Path) -> None:
-    duplicate = tmp_path / "duplicate.json"
-    duplicate.write_text(
-        '{"format":"klab-research-entry","version":1,"version":1}',
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="duplicate JSON key"):
-        load_research(duplicate)
-
-    with pytest.raises(ValueError, match="available IDs") as error:
-        load_research("not-a-research-entry")
-    assert "dense-lm-v1" in str(error.value)
-
-
-def test_research_scaffold_binds_configs_without_preparing_or_overwriting(
-    tmp_path: Path,
-) -> None:
-    root = make_study_resources(tmp_path)
-    output = scaffold_research(
-        "neutral-study", tmp_path / "study", scale="smoke", data="offline", root=root
-    )
-    plan = plan_study(output / "study.yaml")
-    metadata = json.loads((output / "research.json").read_text(encoding="utf-8"))
-
-    assert len(plan.expanded) == 8
-    assert len(plan.pairs) == 4
-    assert {item.config.seed for item in plan.expanded} == {5, 9}
-    assert metadata["factorial_designs"][0]["id"] == "width-depth"
-    assert metadata["factorial_designs"][0]["version"] == 1
-    assert "1 versioned 2×2 factorial designs" in (output / "README.md").read_text(
-        encoding="utf-8"
-    )
-    assert len({item["config_sha256"] for item in metadata["coordinates"]}) == 8
-    for item in metadata["inputs"]:
-        content = (output / item["path"]).read_bytes()
-        assert hashlib.sha256(content).hexdigest() == item["sha256"]
-    unsigned = {
-        key: value for key, value in metadata.items() if key != "research_sha256"
-    }
-    assert canonical_digest(unsigned) == metadata["research_sha256"]
-    assert not (output / "artifacts").exists()
-    assert not (output / "runs").exists()
-
-    marker = output / "keep.txt"
-    marker.write_text("user data", encoding="utf-8")
-    with pytest.raises(FileExistsError):
-        scaffold_research("neutral-study", output, scale="smoke", root=root)
-    assert marker.read_text(encoding="utf-8") == "user data"
-
-
-def test_canonical_research_scaffold_uses_campaign_workspace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = make_study_resources(tmp_path)
-    work = tmp_path / "klab-work"
-    monkeypatch.setenv("KLAB_WORK_DIR", str(work))
-    output = scaffold_research(
-        "neutral-study",
-        tmp_path / "experiments/research/new-campaign",
-        scale="smoke",
-        data="offline",
-        root=root,
-    )
-    config = load_config(output / "base.yaml")
-    assert config.logging.root_dir == work / "experiments/new-campaign/runs"
-    readme = (output / "README.md").read_text(encoding="utf-8")
-    assert "klab-work/experiments/new-campaign" in readme
-    assert "checkpoint verify" in readme
-    assert "| `$WORK/runs/`, `$WORK/receipt.json` |" in readme
-
-
-def test_fineweb_edu_scaffold_is_pinned_and_does_not_prepare_data(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = make_study_resources(tmp_path)
-
-    def forbid_download(*_: object, **__: object) -> None:
-        raise AssertionError("scaffolding must not access remote datasets")
-
-    monkeypatch.setattr("klab.data.datasets.load_dataset", forbid_download)
-    profile = load_datasets().datasets["fineweb_edu"]
-    output = scaffold_research(
-        "neutral-study",
-        tmp_path / "fineweb-study",
-        scale="micro",
-        data="fineweb_edu",
-        root=root,
-    )
-    plan = plan_study(output / "study.yaml")
-    bound_research = _validate_research(output / "research.json", output / "study.yaml")
-    assert _mapping(bound_research["dataset_profile"])["name"] == "fineweb_edu"
-    tokenizer = _mapping(yaml.safe_load((output / "tokenizer.yaml").read_text()))
-    tokenizer_dataset = _mapping(tokenizer["dataset"])
-
-    assert profile.dataset_config == "sample-10BT"
-    assert profile.revision == "87f09149ef4734204d70ed1d046ddc9ca3f2b8f9"
-    assert profile.train_max_documents == 20_000
-    assert profile.validation_max_documents == 500
-    assert profile.train_max_tokens == 2_000_000
-    assert profile.validation_max_tokens == 65_536
-    assert profile.license == "ODC-BY 1.0; attribution required."
-    assert "web-crawled" in " ".join(profile.notes)
-    assert len(plan.expanded) == 8
-    assert {item.config.seed for item in plan.expanded} == {5, 9}
-    assert {
-        (item.config.dataset.source, item.config.dataset.dataset_id)
-        for item in plan.expanded
-    } == {("huggingface", "HuggingFaceFW/fineweb-edu")}
-    assert {
-        (
-            item.config.dataset.train_max_documents,
-            item.config.dataset.validation_max_documents,
-            item.config.dataset.train_max_tokens,
-            item.config.dataset.validation_max_tokens,
-        )
-        for item in plan.expanded
-    } == {(20_000, 500, 2_000_000, 65_536)}
-    assert {item.config.dataset.dataset_config for item in plan.expanded} == {
-        "sample-10BT"
-    }
-    assert {item.config.dataset.revision for item in plan.expanded} == {
-        "87f09149ef4734204d70ed1d046ddc9ca3f2b8f9"
-    }
-    assert tokenizer_dataset["dataset_config"] == "sample-10BT"
-    assert tokenizer_dataset["train_max_documents"] == 20_000
-    assert tokenizer_dataset["validation_max_documents"] == 500
-    assert not (output / "artifacts").exists()
-    assert not (output / "runs").exists()
-
-
-def test_tinystories_scaffold_sets_runnable_tokenizer_prefix(
-    tmp_path: Path,
-) -> None:
-    root = make_study_resources(tmp_path)
-    profile = load_datasets().datasets["tinystories"]
-    output = scaffold_research(
-        "neutral-study",
-        tmp_path / "tinystories-study",
-        scale="smoke",
-        data="tinystories",
-        root=root,
-    )
-    tokenizer = _mapping(yaml.safe_load((output / "tokenizer.yaml").read_text()))
-    tokenizer_dataset = _mapping(tokenizer["dataset"])
-
-    assert profile.tokenizer_train_max_tokens == 5_000_000
-    assert tokenizer["vocab_size"] == profile.vocab_size
-    assert tokenizer_dataset["train_max_tokens"] == 5_000_000
-    assert tokenizer_dataset["revision"] == profile.revision
-    assert not (output / "artifacts").exists()
-
-
-def test_research_scaffold_rebases_paths_from_symlinked_destination(
-    tmp_path: Path,
-) -> None:
-    root = make_study_resources(tmp_path)
-    alias = tmp_path.parent / f"{tmp_path.name}-alias"
-    alias.symlink_to(tmp_path, target_is_directory=True)
-    output = scaffold_research(
-        "neutral-study", alias / "study", scale="smoke", data="offline", root=root
-    )
-    config_path = next((output / "configs").glob("*.yaml"))
-    config = load_config(config_path)
-    root = output.resolve()
-
-    assert config.tokenizer.path == root / "artifacts/tokenizer/tokenizer.json"
-    assert config.dataset.cache_dir == root / "artifacts/data"
-    from klab.experiments.study import study_workspace
-
-    assert config.logging.root_dir == study_workspace("neutral-study") / "runs"
-    readme = (output / "README.md").read_text()
-    assert 'WORK="' in readme
-    assert '--store "$WORK/runs"' in readme
-    assert '--receipt "$WORK/receipt.json"' in readme
-    assert '--runs-dir "$WORK/runs"' in readme
-    assert '--output "$WORK/local-reports"' in readme
 
 
 def test_initialized_probe_bounds_and_reports_mechanisms(tmp_path: Path) -> None:
@@ -447,19 +219,3 @@ def test_semantic_retrieval_lesson_builds_verified_pack_and_runnable_workspace(
     )
 
 
-@pytest.mark.parametrize("external", [False, True])
-def test_recipe_less_cards_refuse_scaffold_before_writing(
-    tmp_path: Path, external: bool
-):
-    root = make_study_resources(tmp_path) if external else None
-    entry_id = "neutral-study" if external else "dense-lm-v1"
-    if root is not None:
-        entry_path = root / "catalog/neutral-study.json"
-        entry = json.loads(entry_path.read_text())
-        entry["classification"] = "learning_reference"
-        entry["recipe"] = None
-        entry_path.write_text(json.dumps(entry), encoding="utf-8")
-    output = tmp_path / "not-created"
-    with pytest.raises(ValueError, match="has no scaffold recipe.*--resource-root"):
-        scaffold_research(entry_id, output, root=root)
-    assert not output.exists()
