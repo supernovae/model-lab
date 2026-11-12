@@ -186,10 +186,6 @@ def execute_replica_microbatches(
     for batch, chunk_valid in pairs:
         if not chunk_valid and batch.position_mask is None:
             continue
-        if batch.semantic_queries is not None or batch.semantic_mask is not None:
-            raise ValueError(
-                "secondary_device_indices cannot be combined with semantic query sidecars"
-            )
         executed_microbatches += 1
         x = torch.from_numpy(batch.inputs).to(device)
         y = torch.from_numpy(batch.targets).to(device)
@@ -206,8 +202,6 @@ def execute_replica_microbatches(
             logits, auxiliary = model.forward_with_aux(
                 x,
                 byte_addresses=addresses,
-                semantic_queries=None,
-                memory_mask=None,
                 valid_target_mask=valid_target_mask,
                 activation_checkpointing=config.runtime.memory.activation_checkpointing.enabled,
                 diagnostics=config.logging.architecture_diagnostics,

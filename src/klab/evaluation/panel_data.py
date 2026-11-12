@@ -28,8 +28,6 @@ def select_panel(
         raise ValueError("panel prepared manifest identity mismatch")
     if manifest["tokenizer_sha256"] != panel.tokenizer_canonical_sha256:
         raise ValueError("panel prepared tokenizer identity mismatch")
-    if manifest.get("allocation") is not None:
-        raise ValueError("named panels do not support allocation sidecars")
     dataset = TokenBlockDataset(
         prepared.validation,
         panel.sequence_length,

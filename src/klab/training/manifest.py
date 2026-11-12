@@ -33,7 +33,6 @@ _MACHINE_LOCAL_PATH_KEYS = frozenset(
         "train_path",
         "validation_path",
         "prepared_path",
-        "allocation_manifest_path",
         "corpus_release_path",
         "corpus_export_path",
     }

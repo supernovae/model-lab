@@ -212,7 +212,6 @@ def export_release(
             "corpus_release_path": release_dir,
             "corpus_export_path": destination,
             "source_manifest_path": None,
-            "allocation_manifest_path": None,
             "dataset_config": None,
             "cache_dir": destination / "prepared",
             "train_max_documents": counts[0][0],

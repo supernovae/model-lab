@@ -15,10 +15,8 @@ from tokenizers import Tokenizer
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.models import RunConfig
-from klab.data.allocation import load_allocation_manifest, load_semantic_retriever
 from klab.data.packing import (
     TokenBlockDataset,
-    canonical_tokenizer_sha256,
     load_prepared_data,
     supervision_requires_mask,
 )
@@ -50,9 +48,6 @@ class InferenceRun:
         root = self.run / "data"
         addresses = root / "validation_byte_addresses.npy"
         supervision = root / "validation_supervision.npy"
-        owners = root / "validation_owner_ids.npy"
-        queries = root / "validation_semantic_queries.npy"
-        mask = root / "validation_semantic_mask.npy"
         needs_mask = supervision_requires_mask(
             json.loads((root / "manifest.json").read_text(encoding="utf-8"))
         )
@@ -68,15 +63,6 @@ class InferenceRun:
             else None,
             np.load(supervision, mmap_mode="r", allow_pickle=False)
             if needs_mask
-            else None,
-            np.load(owners, mmap_mode="r", allow_pickle=False)
-            if self.config.dataset.allocation_manifest_path is not None
-            else None,
-            np.load(queries, mmap_mode="r", allow_pickle=False)
-            if queries.is_file()
-            else None,
-            np.load(mask, mmap_mode="r", allow_pickle=False)
-            if mask.is_file()
             else None,
         )
 
@@ -242,26 +228,12 @@ def load_run(
         required.update(
             {"data/train_byte_addresses.npy", "data/validation_byte_addresses.npy"}
         )
-    allocation_metadata = data_manifest.get("allocation")
-    if config.dataset.allocation_manifest_path is not None:
-        if not isinstance(allocation_metadata, dict):
-            raise ValueError("allocation run lacks prepared allocation metadata")
-        required.update({"data/train_owner_ids.npy", "data/validation_owner_ids.npy"})
-        if allocation_metadata.get("semantic") is not None:
-            required.update(
-                {
-                    "data/train_semantic_queries.npy",
-                    "data/validation_semantic_queries.npy",
-                    "data/train_semantic_mask.npy",
-                    "data/validation_semantic_mask.npy",
-                }
-            )
     if not required <= artifacts.keys():
         raise ValueError(
             f"run lacks verified artifacts: {sorted(required - artifacts.keys())}"
         )
     receipt = _receipt_from_proofs(run / "data", data_manifest, array_proofs)
-    prepared = load_prepared_data(
+    load_prepared_data(
         run / "data",
         byte_enabled=config.model.memory in {"byte", "portable"},
         verification="structural",
@@ -269,10 +241,6 @@ def load_run(
     )
 
     # The checkpoint and training runtime were verified before authorization.
-    if config.dataset.allocation_manifest_path is not None:
-        allocation_name = config.dataset.allocation_manifest_path.name
-        if f"allocation/{allocation_name}" not in artifacts:
-            raise ValueError("run lacks a verified allocation manifest artifact")
     if config.model.memory_token_mapping is not None:
         from klab.memory_tokenizer import validate_memory_token_map
 
@@ -284,48 +252,6 @@ def load_run(
     if tokenizer.get_vocab_size() != config.model.vocab_size:
         raise ValueError("run tokenizer vocabulary differs from model configuration")
 
-    learned_portability = None
-    portability_manifest = run / "portability_manifest.json"
-    if portability_manifest.is_file():
-        portability_payload = json.loads(portability_manifest.read_text())
-        if portability_payload.get("version") == 2:
-            from klab.research.portability import load_portability_manifest
-
-            config = config.model_copy(
-                update={
-                    "training": config.training.model_copy(
-                        update={"portability_manifest_path": portability_manifest}
-                    )
-                }
-            )
-            learned_portability = load_portability_manifest(config)
-    if learned_portability is not None and config.runtime.engine != "pytorch":
-        raise ValueError("learned portability inference requires the PyTorch runtime")
-    allocation_manifest = None
-    allocation_retriever = None
-    if config.dataset.allocation_manifest_path is not None:
-        allocation_name = config.dataset.allocation_manifest_path.name
-        allocation_manifest = load_allocation_manifest(
-            run / "allocation" / allocation_name,
-            source_identity_sha256=manifest["source_identity"]["sha256"],
-            tokenizer_sha256=canonical_tokenizer_sha256(tokenizer),
-        )
-        if not isinstance(
-            allocation_metadata, dict
-        ) or allocation_manifest.sha256 != allocation_metadata.get("manifest_sha256"):
-            raise ValueError("prepared data and run allocation manifests differ")
-        allocation_retriever = load_semantic_retriever(allocation_manifest)
-        if (allocation_retriever is None) != (config.model.semantic_memory_dim is None):
-            raise ValueError(
-                "model.semantic_memory_dim must match the verified allocation pack"
-            )
-        if (
-            allocation_retriever is not None
-            and allocation_retriever.memory_dim != config.model.semantic_memory_dim
-        ):
-            raise ValueError(
-                "model.semantic_memory_dim differs from semantic pack value width"
-            )
     weights = manager.load(
         selected,
         "promote",
@@ -356,63 +282,6 @@ def load_run(
             )
         },
     }
-    if allocation_manifest is not None:
-        owner_names = {0: "neural", 1: "lexical", 2: "semantic", 3: "hybrid"}
-        allocation_identity: dict[str, Any] = {
-            "manifest_sha256": allocation_manifest.sha256,
-            "resource_regime": allocation_manifest.payload.get("resource_regime"),
-            "ownership_profile": allocation_manifest.payload.get("ownership_profile"),
-            "corpus": allocation_manifest.payload["corpus"],
-            "neural_loss_weight": config.training.neural_loss_weight,
-            "splits": {},
-        }
-        for split in ("train", "validation"):
-            token_ids = prepared.train if split == "train" else prepared.validation
-            sidecars = allocation_manifest.split(split, token_count=len(token_ids))
-            supervision = (
-                prepared.train_supervision
-                if split == "train"
-                else prepared.validation_supervision
-            )
-            raw_counts = np.bincount(sidecars.owner, minlength=4)
-            target_counts = (
-                raw_counts
-                if supervision is None
-                else np.bincount(sidecars.owner[supervision], minlength=4)
-            )
-            split_identity: dict[str, Any] = {
-                "raw_tokens": len(token_ids),
-                "valid_supervised_targets": (
-                    len(token_ids) if supervision is None else int(supervision.sum())
-                ),
-                "owner_raw_tokens": {
-                    owner_names[owner]: int(raw_counts[owner]) for owner in range(4)
-                },
-                "owner_supervised_targets": {
-                    owner_names[owner]: int(target_counts[owner]) for owner in range(4)
-                },
-                "semantic_query_positions": (
-                    0
-                    if sidecars.semantic_mask is None
-                    else int(sidecars.semantic_mask.sum())
-                ),
-            }
-            split_identity["weighted_neural_supervision_mass"] = (
-                config.training.neural_loss_weight
-                * (
-                    split_identity["owner_supervised_targets"]["neural"]
-                    + split_identity["owner_supervised_targets"]["hybrid"]
-                )
-            )
-            allocation_identity["splits"][split] = split_identity
-        semantic_identity = allocation_manifest.semantic
-        if semantic_identity is not None:
-            allocation_identity["semantic_pack"] = {
-                "pack_id": semantic_identity["pack_id"],
-                "manifest_sha256": semantic_identity["pack_sha256"],
-                "key_encoder": semantic_identity["key_encoder"],
-            }
-        identity["allocation"] = allocation_identity
     if config.runtime.engine == "mlx":
         # Native construction changes MLX/Python/NumPy state.  Weight loading
         # does not need caller RNG, and no Torch model is constructed here.
@@ -450,7 +319,7 @@ def load_run(
     )
     device = torch_device_for(actual_backend, runtime_config.runtime.device_index)
     model_config = config.model
-    if model_config.memory_package_path is not None and learned_portability is None:
+    if model_config.memory_package_path is not None:
         if "portable_package" not in artifacts:
             raise ValueError("run lacks a verified portable memory package")
         model_config = model_config.model_copy(
@@ -458,18 +327,8 @@ def load_run(
         )
     with torch.random.fork_rng(devices=[]):
         model = DenseLM(model_config, config.attention)
-        if allocation_retriever is not None:
-            model.add_semantic_memory("allocation", allocation_retriever, site="final")
         model.load_state_dict(weights)
     del weights
-    if learned_portability is not None:
-        from klab.research.portability import (
-            initialize_memory_artifact,
-            verify_portability_assets_unchanged,
-        )
-
-        initialize_memory_artifact(model, config, learned_portability)
-        verify_portability_assets_unchanged(learned_portability)
     model.to(device).eval()
     runtime = next(
         info

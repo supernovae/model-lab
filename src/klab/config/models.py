@@ -321,7 +321,6 @@ class ModelConfig(StrictModel):
     memory_package_path: Path | None = None
     memory_ngram_orders: tuple[int, ...] = ()
     memory_hash_heads: int = Field(default=1, gt=0)
-    semantic_memory_dim: int | None = Field(default=None, gt=0)
 
     @property
     def memory_block_sites(self) -> tuple[int, ...]:
@@ -640,7 +639,6 @@ class DatasetConfig(StrictModel):
         default=None, exclude_if=lambda value: value is None
     )
     license: str | None = None
-    allocation_manifest_path: Path | None = None
     corpus_release_path: Path | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -667,14 +665,8 @@ class DatasetConfig(StrictModel):
             raise ValueError(
                 "dataset.chat_template requires source=local_chat or local_preference"
             )
-        if self.template.name != "plain" and (
-            self.corpus_release_path is not None
-            or self.allocation_manifest_path is not None
-        ):
-            raise ValueError(
-                "corpus exports and allocation manifests are rendered with the "
-                "plain chat template"
-            )
+        if self.template.name != "plain" and self.corpus_release_path is not None:
+            raise ValueError("corpus exports are rendered with the plain chat template")
         if self.source == "local_token_mixture":
             if (
                 self.mixture_declaration_path is None
@@ -695,10 +687,6 @@ class DatasetConfig(StrictModel):
             or self.mixture_output_path is not None
         ):
             raise ValueError("mixture paths require source=local_token_mixture")
-        if self.allocation_manifest_path is not None and self.source != "local_chat":
-            raise ValueError(
-                "dataset.allocation_manifest_path requires source=local_chat"
-            )
         if self.source_manifest_path is not None and self.source != "snapshot":
             raise ValueError("dataset.source_manifest_path requires source=snapshot")
         if self.source != "synthetic" and self.synthetic_task != "stories":
@@ -1003,13 +991,11 @@ class TrainingConfig(StrictModel):
     max_steps: int = Field(gt=0)
     max_tokens: int = Field(gt=0)
     grad_clip_norm: float = Field(default=1.0, gt=0)
-    neural_loss_weight: float = Field(default=1.0, ge=0, le=1)
     deterministic: bool = True
     matched_stories: MatchedStoryConfig | None = Field(
         default=None, exclude_if=lambda v: v is None
     )
     trainable_parameters: tuple[str, ...] | None = None
-    portability_manifest_path: Path | None = None
     # Start from this checkpoint's weights with a fresh optimizer and schedule,
     # as `train --promote` does: a run directory, a checkpoint generation or a
     # `latest.json` pointer.
@@ -1028,8 +1014,6 @@ class TrainingConfig(StrictModel):
         result = handler(self)
         if self.trainable_parameters is None:
             result.pop("trainable_parameters", None)
-        if self.portability_manifest_path is None:
-            result.pop("portability_manifest_path", None)
         return result
 
     @model_validator(mode="after")
@@ -1043,11 +1027,6 @@ class TrainingConfig(StrictModel):
             raise ValueError(
                 "training.trainable_parameters must be a nonempty tuple of unique canonical names"
             )
-        if (
-            self.portability_manifest_path is not None
-            and not str(self.portability_manifest_path).strip()
-        ):
-            raise ValueError("training.portability_manifest_path must not be blank")
         return self
 
 
@@ -1306,8 +1285,6 @@ class RunConfig(StrictModel):
                 self.attention_kinds != {"dense"}
                 or self.ffn_kinds != {"dense"}
                 or self.training.gradient_accumulation != 1
-                or self.dataset.allocation_manifest_path is not None
-                or self.training.portability_manifest_path is not None
             )
         ):
             raise ValueError(
@@ -1338,24 +1315,14 @@ class RunConfig(StrictModel):
         if (objective.kind != DEFAULT_KIND or paired_data) and (
             self.runtime.engine != "pytorch"
             or self.model.memory in {"byte", "portable"}
-            or self.dataset.allocation_manifest_path is not None
-            or self.training.portability_manifest_path is not None
             or matched is not None
             or self.runtime.compile_output_head_loss
             or self.runtime.secondary_device_indices
         ):
             raise ValueError(
                 "objectives other than next_token and local_preference data require "
-                "the PyTorch engine on one device, without byte memory, allocation "
-                "or portability sidecars, matched stories or the compiled output head"
-            )
-        if self.runtime.compile_output_head_loss and (
-            self.dataset.allocation_manifest_path is not None
-            or self.training.portability_manifest_path is not None
-        ):
-            raise ValueError(
-                "compiled output head and loss do not support allocation "
-                "or portability runs"
+                "the PyTorch engine on one device, without byte memory, matched "
+                "stories or the compiled output head"
             )
         if self.tokenizer.origin is not None and self.dataset.source not in {
             "snapshot",
@@ -1365,18 +1332,11 @@ class RunConfig(StrictModel):
             raise ValueError(
                 "explicit tokenizer origin requires a content-bound consumer"
             )
-        if (
-            self.model.memory_conv_kernel_size
-            and self.dataset.allocation_manifest_path is not None
-        ):
-            raise ValueError("convolved token memory does not support allocation masks")
         if self.evaluation.panels:
             if (
                 self.runtime.engine != "pytorch"
                 or self.model.memory not in {"none", "ngram"}
                 or self.ffn_kinds != {"dense"}
-                or self.dataset.allocation_manifest_path is not None
-                or self.model.semantic_memory_dim is not None
             ):
                 raise ValueError(
                     "fixed panels require dense-FFN PyTorch with no memory or token ngram memory"
@@ -1390,15 +1350,6 @@ class RunConfig(StrictModel):
                 )
         if self.training.seq_len > self.model.max_seq_len:
             raise ValueError("training.seq_len cannot exceed model.max_seq_len")
-        if self.training.portability_manifest_path is not None:
-            if self.runtime.engine != "pytorch":
-                raise ValueError(
-                    "portability runs require the PyTorch engine in this implementation"
-                )
-            if self.training.trainable_parameters is None:
-                raise ValueError(
-                    "portability runs require an explicit trainable_parameters list"
-                )
         grouped_query = (
             self.model.num_kv_heads is not None
             and self.model.num_kv_heads != self.model.num_heads
@@ -1497,29 +1448,6 @@ class RunConfig(StrictModel):
             and self.model.num_kv_heads != self.model.num_heads
         ):
             raise ValueError("MLX engine does not support grouped-query attention")
-        if (
-            self.model.semantic_memory_dim is not None
-            and self.dataset.allocation_manifest_path is None
-        ):
-            raise ValueError(
-                "model.semantic_memory_dim requires dataset.allocation_manifest_path"
-            )
-        if (
-            self.dataset.allocation_manifest_path is not None
-            and self.runtime.engine != "pytorch"
-        ):
-            raise ValueError(
-                "allocation ownership currently requires the PyTorch engine"
-            )
-        if self.runtime.secondary_device_indices and (
-            self.model.semantic_memory_dim is not None
-            or self.dataset.allocation_manifest_path is not None
-            or self.training.portability_manifest_path is not None
-        ):
-            raise ValueError(
-                "runtime.secondary_device_indices cannot be combined with semantic memory, "
-                "allocation sidecars, or portability runs"
-            )
         return self
 
 

@@ -10,9 +10,7 @@ import numpy as np
 import torch
 from torch.nn import functional
 
-from klab.data.allocation import OWNER_HYBRID, OWNER_LEXICAL
 from klab.data.packing import TokenBlockDataset
-from klab.engram.semantic import SemanticQueryBatch
 
 
 class NonFiniteLoss(ValueError, FloatingPointError):
@@ -87,50 +85,14 @@ def evaluate(
                 ]
                 if not records:
                     continue
-                inputs, targets, addresses, owners, queries, masks = zip(
-                    *records, strict=True
-                )
+                inputs, targets, addresses = zip(*records, strict=True)
                 x = torch.from_numpy(np.stack(inputs)).to(device)
                 y = torch.from_numpy(np.stack(targets)).to(device)
-                byte_addresses = (
-                    None
-                    if addresses[0] is None
-                    else torch.from_numpy(np.stack(addresses)).to(device)
-                )
-                memory_mask = None
-                if owners[0] is not None:
-                    owner_batch = np.stack(owners)
-                    if np.any(owner_batch > OWNER_HYBRID):
-                        raise ValueError(
-                            "evaluation owner sidecar contains unknown codes"
-                        )
-                    memory_mask = torch.from_numpy(
-                        (owner_batch == OWNER_LEXICAL) | (owner_batch == OWNER_HYBRID)
-                    ).to(device)
-                semantic_queries = None
-                if queries[0] is not None or masks[0] is not None:
-                    memories = getattr(model, "semantic_memories", None)
-                    if (
-                        not memories
-                        or len(memories) != 1
-                        or queries[0] is None
-                        or masks[0] is None
-                    ):
-                        raise ValueError(
-                            "evaluation semantic queries require one verified attached pack"
-                        )
-                    semantic_queries = SemanticQueryBatch(
-                        next(iter(memories.values())).retriever.key_encoder,
-                        torch.from_numpy(np.stack(queries)).to(device),
-                        torch.from_numpy(np.stack(masks)).to(device),
-                    )
                 model_inputs: dict[str, object] = {}
-                if byte_addresses is not None:
-                    model_inputs["byte_addresses"] = byte_addresses
-                if semantic_queries is not None:
-                    model_inputs["semantic_queries"] = semantic_queries
-                if memory_mask is not None:
-                    model_inputs["memory_mask"] = memory_mask
+                if addresses[0] is not None:
+                    model_inputs["byte_addresses"] = torch.from_numpy(
+                        np.stack(addresses)
+                    ).to(device)
                 if before_batch is not None:
                     before_batch(x.numel())
                 logits = model(x, **model_inputs)

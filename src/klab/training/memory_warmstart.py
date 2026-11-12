@@ -74,8 +74,6 @@ def migrate_dense_to_ngram(
         raise ValueError("memory migration requires PyTorch weights")
     if source.model.memory != "none" or target.model.memory != "ngram":
         raise ValueError("memory migration requires dense no-memory to token ngram")
-    if source.model.semantic_memory_dim or target.model.semantic_memory_dim:
-        raise ValueError("memory migration does not support semantic attachments")
     source_model = source.model.model_dump(mode="json")
     target_model = target.model.model_dump(mode="json")
     for field in _TOKEN_MEMORY_FIELDS:

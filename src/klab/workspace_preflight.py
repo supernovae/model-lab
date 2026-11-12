@@ -98,16 +98,13 @@ def projected_data_bytes(config: RunConfig) -> int:
 
     Token IDs are int32 and always present. A loss mask is one byte per token
     and is allowed for every source, byte addresses are int32 with byte-addressed
-    memory, and owner and semantic sidecars exist only with an allocation
-    manifest. The sum is doubled because staging and the published arrays
+    memory. The sum is doubled because staging and the published arrays
     coexist during finalization, then given a quarter of headroom.
     """
     targets = config.dataset.train_max_tokens + config.dataset.validation_max_tokens
     per_token = 4 + 1
     if config.model.memory in {"byte", "portable"}:
         per_token += 4
-    if config.dataset.allocation_manifest_path is not None:
-        per_token += 1 + 1 + 4 * (config.model.semantic_memory_dim or 0)
     return math.ceil(1.25 * 2 * targets * per_token) + 32 * 1024 * 1024
 
 

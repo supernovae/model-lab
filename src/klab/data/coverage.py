@@ -244,13 +244,6 @@ def derive_budget(
         raise FileExistsError(f"budget output already exists: {output}")
     config_path = Path(config_path).absolute()
     config = load_config(config_path)
-    if (
-        config.dataset.allocation_manifest_path is not None
-        or config.training.neural_loss_weight != 1
-    ):
-        raise ValueError(
-            "budget derivation does not support allocation or weighted objectives"
-        )
     report = coverage(prepared_root, config)
     if require_full and not all(
         row["source_coverage"]["full"] for row in report["splits"].values()

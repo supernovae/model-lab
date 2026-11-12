@@ -222,5 +222,5 @@ class MatchedStoryDataset:
                 inputs[0] = self.eos if start == 0 else self.ids[start - 1]
                 inputs[1:count] = self.ids[start : stop - 1]
                 labels[:count] = self.ids[start:stop]
-                yield inputs, labels, None, None, None, None
+                yield inputs, labels, None
                 start = stop

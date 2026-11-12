@@ -108,11 +108,6 @@ def test_tiny_profile_effective_evaluation_limit(
             "dense-FFN PyTorch",
         ),
         ("runtime", {"engine": "mlx", "backend": "metal"}, "dense-FFN PyTorch"),
-        (
-            "dataset",
-            {"source": "local_chat", "allocation_manifest_path": "allocation.json"},
-            "dense-FFN PyTorch",
-        ),
         ("training", {"seq_len": 8}, "sequence length must match"),
     ],
 )

@@ -28,10 +28,7 @@ def source_config(tmp_path: Path) -> Path:
     raw["tokenizer"] = {"path": "assets/tokenizer.json"}
     raw["dataset"]["cache_dir"] = "cache"
     raw["logging"]["root_dir"] = "runs"
-    raw["training"].update(
-        trainable_parameters=["blocks.0.attention.q_proj.weight"],
-        portability_manifest_path="manifests/portable.json",
-    )
+    raw["training"].update(trainable_parameters=["blocks.0.attention.q_proj.weight"])
     source.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     return source
 
@@ -71,10 +68,6 @@ def test_config_derivation_relocates_paths_and_records_exact_bytes(
     )
     assert loaded.dataset.cache_dir == (source_config.parent / "cache").resolve()
     assert loaded.logging.root_dir == (source_config.parent / "runs").resolve()
-    assert (
-        loaded.training.portability_manifest_path
-        == (source_config.parent / "manifests/portable.json").resolve()
-    )
     assert receipt["format"] == "klab-derivation-v1"
     assert receipt["kind"] == "run_config"
     assert receipt["origin"]["path"] == str(source_config.resolve())
@@ -329,7 +322,6 @@ def test_config_derive_cli_emits_receipt_and_expected_errors(
             "license": "test",
             "train_path": "data/train.jsonl",
             "validation_path": "data/validation.jsonl",
-            "allocation_manifest_path": "data/allocation.json",
             "corpus_release_path": "forge/release",
             "corpus_export_path": "forge/export",
         },

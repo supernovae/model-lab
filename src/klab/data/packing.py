@@ -27,7 +27,6 @@ from tokenizers import Tokenizer
 from klab.canonical import canonical_json
 from klab.config.models import DatasetConfig, RunConfig
 from klab.corpus.export import verify_release_export
-from klab.data.allocation import AllocationManifest, load_allocation_manifest
 from klab.data.byte_hash import table_address, token_bytes
 from klab.data.conversations import (
     RenderedConversation,
@@ -89,13 +88,6 @@ class PreparedData:
     validation_supervision: np.ndarray | None
     train_byte_addresses: np.ndarray | None
     validation_byte_addresses: np.ndarray | None
-    train_owner_ids: np.ndarray | None
-    validation_owner_ids: np.ndarray | None
-    train_semantic_queries: np.ndarray | None
-    validation_semantic_queries: np.ndarray | None
-    train_semantic_mask: np.ndarray | None
-    validation_semantic_mask: np.ndarray | None
-    allocation: AllocationManifest | None
     manifest: dict[str, object]
     receipt: VerifiedPreparedData
 
@@ -183,12 +175,7 @@ def preparation_source_identity(inventory: dict[str, str] | None = None) -> str:
 def prepared_source_matches(identity: dict, package_sha256: str) -> bool:
     """Match preparation semantics, retaining explicit package-bound artifacts."""
     recorded = identity["source_identity_sha256"]
-    if (
-        identity.get("allocation_manifest_sha256") is None
-        and recorded == preparation_source_identity()
-    ):
-        return True
-    return recorded == package_sha256
+    return recorded in {preparation_source_identity(), package_sha256}
 
 
 def _sha256(path: Path) -> str:
@@ -326,96 +313,6 @@ def load_prepared_data(
         verification_mode=verification_mode,
     )
     has_supervision = supervision_requires_mask(manifest)
-    allocation_enabled = isinstance(manifest.get("allocation"), dict)
-    paths = [
-        root / name
-        for name in (
-            "train_owner_ids.npy",
-            "validation_owner_ids.npy",
-            "train_semantic_queries.npy",
-            "validation_semantic_queries.npy",
-            "train_semantic_mask.npy",
-            "validation_semantic_mask.npy",
-        )
-    ]
-    allocation_arrays: tuple[
-        np.ndarray | None,
-        np.ndarray | None,
-        np.ndarray | None,
-        np.ndarray | None,
-        np.ndarray | None,
-        np.ndarray | None,
-    ] = (None, None, None, None, None, None)
-    if allocation_enabled:
-        allocation_metadata = manifest["allocation"]
-        assert isinstance(allocation_metadata, dict)
-        semantic = allocation_metadata.get("semantic")
-        if allocation_metadata.get("format") != "klab-prepared-allocation-v1":
-            raise ValueError("prepared allocation metadata is malformed")
-        expected_paths = paths[:2] if semantic is None else paths
-        if not all(path.is_file() for path in expected_paths) or (
-            semantic is None and any(path.exists() for path in paths[2:])
-        ):
-            raise ValueError("prepared allocation sidecars are missing or unexpected")
-        loaded: list[np.ndarray] = []
-        for split, owner_path, query_path, mask_path in (
-            ("train", paths[0], paths[2], paths[4]),
-            ("validation", paths[1], paths[3], paths[5]),
-        ):
-            split_metadata = allocation_metadata.get(split)
-            if not isinstance(split_metadata, dict) or not isinstance(
-                split_metadata.get("owner"), dict
-            ):
-                raise TypeError("prepared allocation metadata is malformed")
-            packed_ids = np.load(
-                train if split == "train" else validation,
-                mmap_mode="r",
-                allow_pickle=False,
-            )
-            owner = np.load(owner_path, mmap_mode="r", allow_pickle=False)
-            if (
-                owner.ndim != 1
-                or owner.shape != packed_ids.shape
-                or owner.dtype != np.dtype(np.uint8)
-                or np.any(owner > 3)
-            ):
-                raise ValueError("prepared allocation owner sidecar integrity failed")
-            loaded.append(owner)
-            if semantic is None:
-                continue
-            query_metadata = split_metadata.get("semantic_queries")
-            mask_metadata = split_metadata.get("semantic_mask")
-            if not isinstance(query_metadata, dict) or not isinstance(
-                mask_metadata, dict
-            ):
-                raise TypeError("prepared semantic allocation metadata is malformed")
-            query = np.load(query_path, mmap_mode="r", allow_pickle=False)
-            mask = np.load(mask_path, mmap_mode="r", allow_pickle=False)
-            if (
-                query.ndim != 2
-                or query.dtype != np.dtype(np.float32)
-                or query.shape[0] != len(owner)
-                or query.shape[1] <= 0
-                or mask.dtype != np.dtype(bool)
-                or mask.shape != owner.shape
-                or mask[-1]
-                or np.any(mask[:-1] & ~np.isin(owner[1:], (2, 3)))
-            ):
-                raise ValueError(
-                    "prepared semantic allocation sidecar integrity failed"
-                )
-            loaded.extend((query, mask))
-        if semantic is None:
-            allocation_arrays = (loaded[0], loaded[1], None, None, None, None)
-        else:
-            allocation_arrays = (
-                loaded[0],
-                loaded[3],
-                loaded[1],
-                loaded[4],
-                loaded[2],
-                loaded[5],
-            )
     return PreparedData(
         root,
         np.load(train, mmap_mode="r", allow_pickle=False),
@@ -432,8 +329,6 @@ def load_prepared_data(
         np.load(validation_byte, mmap_mode="r", allow_pickle=False)
         if byte_enabled
         else None,
-        *allocation_arrays,
-        None,
         manifest,
         verified,
     )
@@ -1651,7 +1546,6 @@ def _prepare_verified_prefix(
     if (
         config.dataset.source != "local_text"
         or config.dataset.corpus_release_path is not None
-        or config.dataset.allocation_manifest_path is not None
         or config.model.memory in {"byte", "portable"}
     ):
         raise ValueError("prepared prefix requires plain all-token local_text")
@@ -1664,11 +1558,9 @@ def _prepare_verified_prefix(
         raise ValueError(
             "prepared prefix parent manifest pin changed during verification"
         )
-    if (
-        manifest["packing_version"] != PACKING_VERSION
-        or manifest.get("supervision") != {"kind": "all_tokens"}
-        or manifest.get("allocation") is not None
-    ):
+    if manifest["packing_version"] != PACKING_VERSION or manifest.get(
+        "supervision"
+    ) != {"kind": "all_tokens"}:
         raise ValueError(
             "prepared prefix requires current all-token arrays without sidecars"
         )
@@ -1851,7 +1743,6 @@ def _prepare_verified_append(
     if (
         config.dataset.source != "local_text"
         or config.dataset.corpus_release_path is not None
-        or config.dataset.allocation_manifest_path is not None
         or config.model.memory in {"byte", "portable"}
     ):
         raise ValueError("prepared append requires plain all-token local_text")
@@ -1859,11 +1750,9 @@ def _prepare_verified_append(
     manifest = parent.manifest
     if manifest["manifest_sha256"] != request.manifest_sha256:
         raise ValueError("prepared append parent manifest pin mismatch")
-    if (
-        manifest["packing_version"] != PACKING_VERSION
-        or manifest.get("supervision") != {"kind": "all_tokens"}
-        or manifest.get("allocation") is not None
-    ):
+    if manifest["packing_version"] != PACKING_VERSION or manifest.get(
+        "supervision"
+    ) != {"kind": "all_tokens"}:
         raise ValueError(
             "prepared append requires current all-token arrays without sidecars"
         )
@@ -2134,7 +2023,7 @@ def _prepare_data(
     append_from: PreparedAppend | None = None,
     require_prepared: bool = False,
 ) -> PreparedData:
-    """Prepare immutable IDs and causal sidecars with an optional allocation."""
+    """Prepare immutable IDs and causal sidecars."""
     tokenizer_batch_documents, tokenizer_batch_source_bytes = (
         validate_tokenizer_batch_limits(
             tokenizer_batch_documents, tokenizer_batch_source_bytes
@@ -2210,31 +2099,9 @@ def _prepare_data(
             f"the tokenizer lacks: {', '.join(missing_tokens)}; train the "
             "tokenizer with the same chat_template"
         )
-    # Allocation attestations retain their declared package identity. Ordinary
-    # data caches depend on preparation implementation, not training/report/docs.
-    source_digest = (
-        source_identity()["sha256"]
-        if config.dataset.allocation_manifest_path is not None
-        else preparation_source_identity()
-    )
-    allocation = None
-    if config.dataset.allocation_manifest_path is not None:
-        if config.dataset.source != "local_chat" or local_chat is None:
-            raise ValueError("allocation manifests require a local_chat dataset")
-        allocation = load_allocation_manifest(
-            config.dataset.allocation_manifest_path,
-            source_identity_sha256=source_digest,
-            tokenizer_sha256=canonical_tokenizer_sha256(tokenizer),
-        )
-        corpus = allocation.payload["corpus"]
-        assert isinstance(corpus, dict)
-        if (
-            corpus["train_jsonl_sha256"] != local_chat["train_sha256"]
-            or corpus["validation_jsonl_sha256"] != local_chat["validation_sha256"]
-        ):
-            raise ValueError(
-                "allocation manifest corpus digests do not match local_chat"
-            )
+    # Data caches depend on the preparation implementation, not training,
+    # reporting or docs.
+    source_digest = preparation_source_identity()
     cache_identity = {
         "dataset": prepared_dataset_identity(config.dataset),
         "local_chat_source": local_chat,
@@ -2257,7 +2124,6 @@ def _prepare_data(
             if generic_snapshot is not None
             else {}
         ),
-        "allocation_manifest_sha256": None if allocation is None else allocation.sha256,
         "packing": packing_identity(config),
         "packing_version": PACKING_VERSION,
         "source_identity_sha256": source_digest,
@@ -2437,7 +2303,6 @@ def _prepare_data(
         TOKEN_STORE_ENABLED
         and config.dataset.source == "local_text"
         and not byte_enabled
-        and allocation is None
         and _documents_encode_independently(tokenizer)
     ):
         assert local_chat is not None
@@ -2677,21 +2542,6 @@ def _prepare_data(
             or not bool(np.all(validation_supervision))
         )
     )
-    allocation_sides = None
-    if allocation is not None:
-        train_sides = allocation.split("train", token_count=len(train))
-        validation_sides = allocation.split("validation", token_count=len(validation))
-        allocation_sides = (train_sides, validation_sides)
-        for name, values in (
-            ("train_owner_ids.npy", train_sides.owner),
-            ("validation_owner_ids.npy", validation_sides.owner),
-            ("train_semantic_queries.npy", train_sides.semantic_queries),
-            ("validation_semantic_queries.npy", validation_sides.semantic_queries),
-            ("train_semantic_mask.npy", train_sides.semantic_mask),
-            ("validation_semantic_mask.npy", validation_sides.semantic_mask),
-        ):
-            if values is not None:
-                proofs[name] = _atomic_array(temporary_root / name, values)
     if config.dataset.source not in {
         "local_text",
         "snapshot",
@@ -2807,59 +2657,6 @@ def _prepare_data(
             "ngram_size": config.model.memory_ngram_size,
             "train": metadata(temporary_root / "train_byte_addresses.npy"),
             "validation": metadata(temporary_root / "validation_byte_addresses.npy"),
-        },
-        "allocation": None
-        if allocation is None
-        else {
-            "format": "klab-prepared-allocation-v1",
-            "manifest_sha256": allocation.sha256,
-            "owner_codes": {"neural": 0, "lexical": 1, "semantic": 2, "hybrid": 3},
-            "resource_regime": allocation.payload.get("resource_regime"),
-            "ownership_profile": allocation.payload.get("ownership_profile"),
-            "semantic": allocation.semantic,
-            "train": {
-                "owner": metadata(
-                    temporary_root / "train_owner_ids.npy", dtype=np.dtype(np.uint8)
-                ),
-                **(
-                    {}
-                    if allocation_sides is None
-                    or allocation_sides[0].semantic_queries is None
-                    else {
-                        "semantic_queries": metadata(
-                            temporary_root / "train_semantic_queries.npy",
-                            dtype=np.dtype(np.float32),
-                            dimensions=2,
-                        ),
-                        "semantic_mask": metadata(
-                            temporary_root / "train_semantic_mask.npy",
-                            dtype=np.dtype(bool),
-                        ),
-                    }
-                ),
-            },
-            "validation": {
-                "owner": metadata(
-                    temporary_root / "validation_owner_ids.npy",
-                    dtype=np.dtype(np.uint8),
-                ),
-                **(
-                    {}
-                    if allocation_sides is None
-                    or allocation_sides[1].semantic_queries is None
-                    else {
-                        "semantic_queries": metadata(
-                            temporary_root / "validation_semantic_queries.npy",
-                            dtype=np.dtype(np.float32),
-                            dimensions=2,
-                        ),
-                        "semantic_mask": metadata(
-                            temporary_root / "validation_semantic_mask.npy",
-                            dtype=np.dtype(bool),
-                        ),
-                    }
-                ),
-            },
         },
     }
     manifest["manifest_sha256"] = hashlib.sha256(canonical_json(manifest)).hexdigest()
@@ -3076,9 +2873,6 @@ class TokenBlockDataset:
         seq_len: int,
         byte_addresses: np.ndarray | None = None,
         supervision: np.ndarray | None = None,
-        owner_ids: np.ndarray | None = None,
-        semantic_queries: np.ndarray | None = None,
-        semantic_mask: np.ndarray | None = None,
     ) -> None:
         if ids.ndim != 1 or ids.dtype != np.dtype(np.int32):
             raise ValueError("packed IDs must be one-dimensional int32")
@@ -3092,31 +2886,8 @@ class TokenBlockDataset:
             )
         if byte_addresses is not None and len(byte_addresses) != len(ids):
             raise ValueError("byte address array must align with packed IDs")
-        if owner_ids is not None and (
-            owner_ids.ndim != 1
-            or owner_ids.dtype != np.dtype(np.uint8)
-            or len(owner_ids) != len(ids)
-        ):
-            raise ValueError("owner IDs must be one-dimensional uint8 aligned with IDs")
-        if semantic_queries is not None and (
-            semantic_queries.ndim != 2
-            or semantic_queries.dtype != np.dtype(np.float32)
-            or semantic_queries.shape[0] != len(ids)
-            or semantic_mask is None
-        ):
-            raise ValueError(
-                "semantic queries must be float32 [tokens,key_dim] with mask"
-            )
-        if semantic_mask is not None and (
-            semantic_mask.ndim != 1
-            or semantic_mask.dtype != np.dtype(bool)
-            or len(semantic_mask) != len(ids)
-        ):
-            raise ValueError("semantic query mask must be bool aligned with IDs")
         self.ids, self.seq_len = ids, seq_len
         self.byte_addresses, self.supervision = byte_addresses, supervision
-        self.owner_ids = owner_ids
-        self.semantic_queries, self.semantic_mask = semantic_queries, semantic_mask
         candidates = (len(ids) - 1) // seq_len
         self.block_indices = (
             np.arange(candidates, dtype=np.int64)
@@ -3193,38 +2964,8 @@ class TokenBlockDataset:
 
     def numpy_microblock(
         self, index: int
-    ) -> tuple[
-        np.ndarray,
-        np.ndarray,
-        np.ndarray | None,
-        np.ndarray | None,
-        np.ndarray | None,
-        np.ndarray | None,
-    ]:
-        inputs, targets, addresses = self.numpy_block(index)
-        start = int(self.block_indices[index]) * self.seq_len
-        owners = (
-            None
-            if self.owner_ids is None
-            else np.asarray(
-                self.owner_ids[start + 1 : start + self.seq_len + 1], dtype=np.uint8
-            )
-        )
-        queries = (
-            None
-            if self.semantic_queries is None
-            else np.asarray(
-                self.semantic_queries[start : start + self.seq_len], dtype=np.float32
-            )
-        )
-        mask = (
-            None
-            if self.semantic_mask is None
-            else np.asarray(
-                self.semantic_mask[start : start + self.seq_len], dtype=bool
-            )
-        )
-        return inputs, targets, addresses, owners, queries, mask
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+        return self.numpy_block(index)
 
     def __getitem__(
         self, index: int
@@ -3288,9 +3029,7 @@ class PairedBlockDataset:
     def advise(self, indices: Sequence[int]) -> None:
         """Preference sets are small; nothing is read ahead."""
 
-    def numpy_microblock(
-        self, index: int
-    ) -> tuple[np.ndarray, np.ndarray, None, None, None, None]:
+    def numpy_microblock(self, index: int) -> tuple[np.ndarray, np.ndarray, None]:
         width = self.seq_len
         start = index * 2 * width
         tokens = np.asarray(self.ids[start : start + 2 * width + 1], dtype=np.int64)
@@ -3306,9 +3045,6 @@ class PairedBlockDataset:
         return (
             tokens[:-1].reshape(2, width),
             targets.reshape(2, width),
-            None,
-            None,
-            None,
             None,
         )
 
