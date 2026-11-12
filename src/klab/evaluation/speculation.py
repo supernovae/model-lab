@@ -18,7 +18,8 @@ class PromptLookupSpeculation:
     """Draft the tokens that followed the latest earlier copy of the last n-gram.
 
     Counters accumulate over every generation that uses this object:
-    ``model_calls`` cached forwards, ``drafted_tokens`` proposed and
+    ``model_calls`` cached forwards that verified a draft (prompt encoding and
+    full-window re-encoding are not counted), ``drafted_tokens`` proposed and
     ``accepted_tokens`` confirmed by the model.
     """
 
