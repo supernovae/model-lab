@@ -336,7 +336,9 @@ def pilot_config(
     matched_dataset: MatchedStoryDataset | None = None,
     proof_store: ProofStore | None = None,
     verification_mode: Literal["cold", "verified_reuse"] = "cold",
+    _proofs: dict[str, VerifiedFile] | None = None,
 ) -> RunConfig:
+    """The pilot's config; ``_proofs`` receives any staged inputs it verified."""
     if purpose not in {"smoke", "warmup"}:
         raise ValueError("invalid pilot purpose")
     steps = getattr(config.staging, f"{purpose}_steps")
@@ -351,7 +353,7 @@ def pilot_config(
             # Derive from authenticated staged bytes, never the mutable source
             # cache. Bundle verification can supply its already verified dataset.
             with pilot_phase("stage_bundle_verification"):
-                proofs: dict[str, VerifiedFile] = {}
+                proofs: dict[str, VerifiedFile] = {} if _proofs is None else _proofs
                 verify_prepared_inputs(
                     root,
                     config,
@@ -397,8 +399,13 @@ def verify_stage_bundle(
     proof_store: ProofStore | None = None,
     verification_mode: Literal["cold", "verified_reuse"] = "cold",
     _proofs: dict[str, VerifiedFile] | None = None,
+    _seals: dict[str, VerifiedFile] | None = None,
 ) -> dict[str, Any]:
-    """Verify frozen inputs; a pilot may read only the sealed pre-pilot input manifest."""
+    """Verify frozen inputs; a pilot may read only the sealed pre-pilot input manifest.
+
+    ``_seals`` are proofs this process already made; a file whose fingerprint
+    still matches its proof is not hashed again.
+    """
     root = root.resolve(strict=True)
     inputs = _read_sealed(root / "inputs.json")
     base = RunConfig.model_validate(inputs["requested_config"])
@@ -421,7 +428,9 @@ def verify_stage_bundle(
         raise ValueError(
             "stage bundle executable source identity differs; restage explicitly"
         )
-    proof_memo: dict[object, VerifiedFile] = {}
+    proof_memo: dict[object, VerifiedFile] = {
+        (proof.path, proof.fingerprint): proof for proof in (_seals or {}).values()
+    }
     assets = root / "assets"
     proofs = _verify_inventory(
         assets,
