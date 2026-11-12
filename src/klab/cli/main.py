@@ -1436,6 +1436,34 @@ def _try(args: argparse.Namespace) -> None:
         raise SystemExit(record["exit_status"])
 
 
+def _sweep(args: argparse.Namespace) -> None:
+    """Run a sweep declaration as a series of tries and summarize it."""
+    from klab.sweep import run_sweep, summarize_sweep
+
+    try:
+        record, path = run_sweep(
+            Path(args.sweep),
+            work_dir=resolve_work_dir(args.work_dir),
+            lab_dir=args.lab_dir,
+            backend=args.backend,
+            authorization=args.runtime_authorization,
+            resource_envelope=args.resource_envelope_value,
+            request={
+                "sweep": args.sweep,
+                "backend_override": args.backend,
+                "runtime_id": args.runtime,
+            },
+        )
+    except (ValueError, OSError) as error:
+        raise SystemExit(f"klab sweep: {error}") from None
+    if args.json:
+        print(json.dumps({**record, "record": str(path)}, indent=2, sort_keys=True))
+    else:
+        print(summarize_sweep(record, path))
+    if record["exit_status"]:
+        raise SystemExit(record["exit_status"])
+
+
 def _report_run(args: argparse.Namespace) -> None:
     """Keep verified observations and advisory triage separate in one run view."""
     run_id = args.record
@@ -1504,6 +1532,10 @@ def _report(args: argparse.Namespace) -> None:
     elif kind == "probe":
         print(render(record, color=use_color()))
         print(f"  record: {target}")
+    elif kind == "sweep":
+        from klab.sweep import summarize_sweep
+
+        print(summarize_sweep(record, target))
     else:
         print(summarize(record, target, color=use_color()))
 
@@ -1680,6 +1712,7 @@ BUILD_COMMANDS = (
 )
 FAST_PATH_COMMANDS = (
     "try",
+    "sweep",
     "probe",
     "report",
     "compare",
@@ -1821,6 +1854,22 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     lab_try.add_argument("--runtime", metavar="ID")
     lab_try.add_argument("--json", action="store_true")
     lab_try.set_defaults(handler=_try)
+    lab_sweep = commands.add_parser(
+        "sweep",
+        help="Run a series of tries: one baseline, several values of a setting",
+        description=(
+            "Run every combination of the declared values as a try against one "
+            "baseline, at each seed. The baseline trains once per seed and is "
+            "reused. Writes one sealed sweep record and a series.csv."
+        ),
+    )
+    lab_sweep.add_argument("sweep", help="Sweep declaration YAML")
+    lab_sweep.add_argument(
+        "--backend", choices=("auto", "mps", "cuda", "rocm", "xpu", "cpu")
+    )
+    lab_sweep.add_argument("--runtime", metavar="ID")
+    lab_sweep.add_argument("--json", action="store_true")
+    lab_sweep.set_defaults(handler=_sweep)
     lab_report = commands.add_parser(
         "report",
         help="Read a try or probe result, or a run's evidence (no compute)",
@@ -2600,6 +2649,10 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
         from klab.try_config import prepare_try_config
 
         prepare_try_config(args)
+    if args.command == "sweep":
+        from klab.sweep import prepare_sweep
+
+        prepare_sweep(args)
     if args.command == "explore":
         from klab.explore_config import prepare_explore_config
 
@@ -2613,6 +2666,7 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
     is_submission = _is_config_submission(args)
     is_legacy = args.command in {
         "try",
+        "sweep",
         "probe",
         "explore",
         "train",
@@ -2662,7 +2716,7 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
 
     if args.command in {"train", "stage"} or is_submission:
         config = load_config(Path(args.config))
-    elif args.command == "try":
+    elif args.command in {"try", "sweep"}:
         config = load_config(Path(args.vs))
     elif args.command in {"probe", "explore"}:
         from klab.config.models import RunConfig
@@ -2694,7 +2748,17 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
     backend_override = (
         args.backend
         if args.command
-        in {"try", "probe", "explore", "train", "eval", "generate", "chat", "serve"}
+        in {
+            "try",
+            "sweep",
+            "probe",
+            "explore",
+            "train",
+            "eval",
+            "generate",
+            "chat",
+            "serve",
+        }
         else None
     )
     if backend_override is not None:
@@ -2822,6 +2886,13 @@ def main() -> None:
             prepare_try_config(args)
         except (ValueError, OSError) as error:
             raise SystemExit(f"klab try: {error}") from None
+    if args.command == "sweep":
+        from klab.sweep import prepare_sweep
+
+        try:
+            prepare_sweep(args)
+        except (ValueError, OSError) as error:
+            raise SystemExit(f"klab sweep: {error}") from None
     if args.command == "probe":
         from klab.probes.config import prepare_probe_config
 
@@ -2867,7 +2938,7 @@ def main() -> None:
                 if args.data_command == "prepared-inputs"
                 else load_config(Path(args.config)).dataset.cache_dir
             )
-        elif args.command in {"try", "explore", "probe"}:
+        elif args.command in {"try", "sweep", "explore", "probe"}:
             from klab.lab_mode import lab_root
 
             workspace = lab_root(resolve_work_dir(args.work_dir), args.lab_dir)
@@ -2878,7 +2949,7 @@ def main() -> None:
                 # Try resolves scoped limits at its controller boundary; this
                 # preflight only measures the common host/storage constraints.
                 args.resource_envelope_value.model_copy(update={"lab_try": None})
-                if args.command == "try"
+                if args.command in {"try", "sweep"}
                 else args.resource_envelope_value,
                 workspace=workspace,
                 rss_bytes=current_process_rss_bytes(),

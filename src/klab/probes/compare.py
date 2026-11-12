@@ -91,6 +91,11 @@ def resolve_point(
     else:
         path = resolve_record(spec, lab_dir)
         kind, record = read_lab_record(path)
+        if kind == "sweep":
+            raise ValueError(
+                f"{spec} is a sweep of several tries: `klab report {spec}` shows "
+                "the series; compare one of its try IDs"
+            )
         points = points_from_record(kind, record, path)
         candidate = [p for p in points if p["role"] == "candidate"]
         if candidate and all(bool(p.get("final")) != final for p in candidate):

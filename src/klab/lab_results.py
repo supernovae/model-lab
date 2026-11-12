@@ -162,6 +162,13 @@ def checkpoint_from_result(spec: str, result: LabResult) -> CheckpointTarget:
             result.run, None if result.path == result.run else str(result.path)
         )
     assert result.record is not None
+    if result.kind == "sweep":
+        raise ResultLookupError(
+            spec,
+            "ambiguous_result",
+            "a sweep holds several tries, each with its own checkpoint",
+            "pass one of the sweep's try IDs (klab report SWEEP_ID lists them)",
+        )
     row = (
         (result.record.get("arms") or {}).get("candidate")
         if result.kind == "try"
