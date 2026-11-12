@@ -34,7 +34,7 @@ acceptance. New integrations need their own source and runtime checks.
   longest-suffix lookup, projections and gates feed a recipient, with hashed
   Engram fallback for misses. The paper reports gains over matched pretraining
   baselines.
-- **Proposed lab test:** use the [compiled-initialization bridge](../../docs/research/compiled-engram-initialization-v1.md)
+- **Proposed lab test:** use the [compiled-initialization bridge](compiled-engram-initialization-v1.md)
   as a design reference for random, compiled-frozen and compiled-refined arms.
   A donor-vector compiler and exact suffix path would be new work. Include
   shuffled-value controls and charge donor compilation separately.
@@ -50,12 +50,12 @@ acceptance. New integrations need their own source and runtime checks.
   despite different tokenizations; experiments train recipients using pretrained
   Engram embeddings.
 - **Proposed lab test:** build a separate cross-tokenizer study from the
-  [byte/portable interfaces](../../docs/portable-engram.md), comparing transferred,
+  [byte/portable interfaces](../portable-engram.md), comparing transferred,
   random and permuted tables with matched recipient training. Check byte-key
   agreement separately from held-out transfer accuracy.
 - **Limit:** address equivalence is not universal vector alignment. Recipient
   training remains necessary in the reported transfer setup; the existing
-  [learned portability protocol](../../docs/research/learned-engram-portability.md)
+  [learned portability protocol](learned-engram-portability.md)
   tests widths within one model family, not this entire claim.
 
 ### Scaling Embedding Layers in Language Models
@@ -80,7 +80,7 @@ acceptance. New integrations need their own source and runtime checks.
 - **Contribution:** Engram combines hashed n-gram memory with context-dependent
   gating, reallocating sparse capacity between stored patterns and MoE compute.
   Matched large-model experiments report quality improvements.
-- **Proposed lab test:** use the [Engram/MoE capacity study](../../docs/research/engram-moe-capacity.md)
+- **Proposed lab test:** use the [Engram/MoE capacity study](engram-moe-capacity.md)
   to motivate separately budgeted memory-versus-expert ablations; report total
   parameters, active work, table utilization, held-out loss and generation quality.
 - **Limit:** the under-3% host-offload throughput penalty uses host DRAM, an NVIDIA
@@ -188,7 +188,7 @@ acceptance. New integrations need their own source and runtime checks.
 
 - **Contribution:** combines compressed context, selected token blocks and a
   local window in end-to-end trainable, hardware-aware sparse attention.
-- **Proposed lab test:** use [block-sparse attention](../../docs/sparse-attention.md) as
+- **Proposed lab test:** use [block-sparse attention](../sparse-attention.md) as
   a reference starting point, then add explicit three-path ablations against
   dense attention. Sweep context length and selection budget; report quality,
   selected-key counts, end-to-end time and peak memory.
@@ -233,7 +233,7 @@ acceptance. New integrations need their own source and runtime checks.
 - **Contribution:** learns output embeddings for tool tokens while freezing the
   language model; selecting a token invokes argument generation and tool use.
 - **Proposed lab test:** extend the tokenizer/output head and add a bounded mock
-  executor around [instruction training](../../docs/instruction-training.md). Compare
+  executor around [instruction training](../instruction-training.md). Compare
   learned tool tokens with textual descriptions under identical demonstrations;
   score selection, arguments and execution separately.
 - **Limit:** experiments use LLaMA-13B/33B, not proof for 1–2B models. Embeddings
@@ -336,10 +336,10 @@ integration. AdamW separates matrix and vector decay groups and deduplicates tie
 parameters. Adafactor uses one decay group and its own parameter-scaling
 semantics. The
 [configuration](../../src/klab/config/models.py) rejects optimizer-state offload;
-runs use one process/device, and the existing [activation offload](../../docs/offload.md)
+runs use one process/device, and the existing [activation offload](../offload.md)
 does not move optimizer state.
 
-[Memory accounting](../../docs/memory.md) keeps FP32 parameters and gradients under
+[Memory accounting](../memory.md) keeps FP32 parameters and gradients under
 autocast. Two FP32 AdamW moments alone cost about 8 bytes per trainable parameter:
 552 MB at 69M, 8 GB at 1B and 16 GB at 2B (decimal units). These exclude weights,
 gradients, activations, temporary workspaces and allocator headroom. Count actual
@@ -354,7 +354,7 @@ and task quality alongside measured peak allocated/reserved memory, host RSS,
 steady-state update time, end-to-end time and checkpoint cost. Sparse model
 routing does not imply sparse-layout gradients or eliminate resident states.
 
-[Full resume](../../docs/checkpointing.md#full-resume) binds optimizer configuration.
+[Full resume](../checkpointing.md#full-resume) binds optimizer configuration.
 The [native verifier](../../src/klab/training/checkpoints.py) currently validates
 AdamW/Adafactor moment inventories, shapes and FP32 dtypes. A new optimizer needs
 configuration, accounting and safe state-codec/verification work, including
@@ -389,7 +389,7 @@ experiment or compatible weights-only promotion, not ordinary resume.
 - **Limits/fit:** vectors retain unfactored variance, and tensor shape determines
   savings. Relative step-size caps and parameter-RMS scaling are not AdamW's
   learning-rate semantics; library defaults differ. The existing tiny-model
-  [state accounting check](../../docs/memory.md#adafactor-state-accounting) is not a
+  [state accounting check](../memory.md#adafactor-state-accounting) is not a
   quality result or a total-memory benchmark.
 
 ### Adam-mini: Use Fewer Learning Rates To Gain More

@@ -1,6 +1,6 @@
 # Repository review: from mechanism demos to measured small models
 
-This page preserves the original review and exploratory results; they are not an untouched-test claim. The completed follow-up section below records newer runtime, worker, context/Engram, and domain-adaptation work. Use the [README](../README.md) and [research roadmap](research/roadmap.md) for current capabilities and remaining scientific questions; the [feature roadmap](../ROADMAP.md) summarizes pending implementation directions.
+This page preserves the original review and exploratory results; they are not an untouched-test claim. The completed follow-up section below records newer runtime, worker, context/Engram, and domain-adaptation work. Use the [README](../../README.md) and [research roadmap](../research/roadmap.md) for current capabilities and remaining scientific questions; the [feature roadmap](../../ROADMAP.md) summarizes pending implementation directions.
 
 ## Project contract
 
@@ -82,8 +82,8 @@ The local suite includes available MPS/MLX coverage; it is not CUDA, ROCm or XPU
 
 The [scientific acceptance record](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/scientific_studies_2026_09_22.json) independently verifies preserved inputs, native endpoints, responses and comparisons. The [single-host](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/single_host_gate_2026_09_22.json) and [worker](https://github.com/supernovae/model-lab/blob/9d4c840ef1f102becf27532c2548c505c2ed35a6/artifacts/acceptance/independent_workers_2026_09_23.json) gates cover actual execution/recovery/installation scenarios; the suite at that acceptance revision passed 335 tests. A passing engineering gate does not make a negative learning result positive.
 
-Further curriculum or scale experiments need a new explicit hypothesis and frozen evaluation; inspected cases must not become “untouched” again. Generic statistically justified model selection and open-ended response grading are not established by these studies. Current hardware boundaries are maintained in the [runtime guide](runtime.md);
+Further curriculum or scale experiments need a new explicit hypothesis and frozen evaluation; inspected cases must not become “untouched” again. Generic statistically justified model selection and open-ended response grading are not established by these studies. Current hardware boundaries are maintained in the [runtime guide](../runtime.md);
 the historical review is not an up-to-date support matrix. Distributed training
 remains outside the current scope.
 
-See [capability workflow](capabilities.md), [chat-oriented data](instruction-training.md), [evidence](evidence.md), the [research roadmap](research/roadmap.md), and the [feature roadmap](../ROADMAP.md).
+See [capability workflow](../capabilities.md), [chat-oriented data](../instruction-training.md), [evidence](../evidence.md), the [research roadmap](../research/roadmap.md), and the [feature roadmap](../../ROADMAP.md).

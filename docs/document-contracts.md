@@ -1,11 +1,8 @@
 # Document loading and portable experiment boundaries
 
-LAB-72 foundation, audited against main
-`e58ca181221c330f3c1d59c89c84628f5853e11a` (post-PR118).
-This is the first implementation slice of
-[LAB-72](https://app.notion.com/p/3f83b68cca22815bb508c75be4c158c1),
-not completion of the portable experiment milestone. No open PRs overlapped at
-branch creation. The owner assignment supersedes the cards' planning-only status.
+This page describes the strict document loader and the explicit recipe
+context that portable recipes are built on. It was first audited against main
+`e58ca181221c330f3c1d59c89c84628f5853e11a`.
 
 ## Shipped boundary
 
@@ -76,7 +73,7 @@ workflow chains is replaced or advertised as portable by this extraction.
 
 ## Compatibility decisions
 
-[LAB-67](https://app.notion.com/p/3f73b68cca228175b73dfa9772daa79e): RunConfig v2
+**Seed coercion.** RunConfig v2
 continues to coerce `true` → `1`, string `"7"` → `7`, and integral float `7.0` → `7`.
 Characterization covers programmatic validation, YAML/JSON loading, derivation
 and resulting config identity. `TryConfig.seed` and direct try overrides remain
@@ -93,7 +90,7 @@ portable schema must reject unsupported versions explicitly. Tightening existing
 RunConfig v2 or removing merge acceptance needs an owner compatibility decision
 with external-caller impact; no such decision is needed for this extraction.
 
-[LAB-66](https://app.notion.com/p/3f73b68cca2281c98f0bdbe641816503): mixture paths
+**Mixture paths.** Mixture paths
 still contribute to historical config identity as before. Same bytes in different
 roots are not newly declared identical. No exclusions, hash algorithms, receipt
 bytes, fixtures or historical records change. Content-versus-location identity

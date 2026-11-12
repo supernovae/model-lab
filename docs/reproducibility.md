@@ -1,5 +1,7 @@
 # Reproducibility and artifact identity
 
+Commands below use the [activated, provisioned environment](../README.md#first-run).
+
 Reproducibility in Model Lab is an artifact contract, not a promise that every accelerator produces bitwise-identical floating-point results. A local run records requested/effective config, runtime identity, source identity, model architecture identity, tokenizer/data/package identities, and verified checkpoint lineage so later readers can determine what was actually run.
 
 ## Start from explicit inputs
@@ -7,7 +9,7 @@ Reproducibility in Model Lab is an artifact contract, not a promise that every a
 Use schema-v2 configs. Old run configs are not silently reinterpreted by `train`; migrate them to a new path and inspect the printed field changes:
 
 ```sh
-uv run --locked --extra cpu klab config migrate old-run.yaml --output migrated-run.yaml
+klab config migrate old-run.yaml --output migrated-run.yaml
 ```
 
 Migration converts the historical device/batch/checkpoint cadence fields to explicit runtime, micro-batch/accumulation, and checkpoint sections. It refuses to overwrite its output. Tokenizer-training configs remain their own v1 schema.
@@ -26,7 +28,7 @@ Use `--resume` for the same compatible PyTorch experiment. It restores model, op
 
 For supported dense PyTorch full-state resume or recovery, `--allow-runtime-optimization` separately admits the supported execution changes while preserving scientific settings, effective training batch and validation coverage. It records a best-effort transition, not bitwise equivalence; see [explicit runtime optimization on resume](checkpointing.md#explicit-runtime-optimization-on-resume).
 
-Use `--promote` for compatible **weights-only** reuse with fresh optimizer/schedule/scaler/RNG/cursor/counters. Promotion does not allow an architecture semantic or tokenizer/package mismatch, does not resize the model, and is not a general external checkpoint importer. Historical/incomplete state without required optimizer/RNG/provenance is promotion-only rather than pretending to be full-resumable.
+Use `--promote`, or `training.parent_checkpoint` in the config, for compatible **weights-only** reuse with fresh optimizer/schedule/scaler/RNG/cursor/counters. Promotion does not allow an architecture semantic or tokenizer/package mismatch and does not resize the model. External weights enter through `klab weights import`, and [post-training stages](post-training.md) chain by naming their parent. Historical/incomplete state without required optimizer/RNG/provenance is promotion-only rather than pretending to be full-resumable.
 
 `--recover RUN_DIR` is the explicit recovery path for finalized verified generations. It never turns a corrupt explicitly selected `--resume` pointer into a silent fallback.
 

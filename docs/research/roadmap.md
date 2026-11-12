@@ -44,7 +44,7 @@ cross-host evidence.
 - The [MLA analysis smoke](sample-report.md#research-analysis-pipeline-smoke) completed 12 CPU/offline runs and exercised factorial, nondominance, allocation, and boundary-sweep reporting. Its 36 card outcomes were measured zeros; the run verifies analysis paths, not an MLA/memory benefit.
 - The [byte-Engram smoke](../byte-addressing.md#verified-smoke-execution) verified nontrivial UTF-8 addresses and two training updates. It does not establish learned byte-memory value.
 - The [portable Engram comparison](../portable-engram.md) tested two held-out cases; baseline, random-table, and trained-adapter systems all had zero exact matches, and the trained adapter did not outperform the random control. General transfer remains unverified.
-- The [ownership-allocation smoke](../path-domain-corpus.md#partial-cpu-allocation-smoke-observation) executed one of 75 configured coordinates. It produced zero card passes at every recorded checkpoint; no allocation optimum or full curve is established.
+- The [ownership-allocation smoke](../history/path-domain-corpus.md#partial-cpu-allocation-smoke-observation) executed one of 75 configured coordinates. It produced zero card passes at every recorded checkpoint; no allocation optimum or full curve is established.
 - The [instruction starter](../from-toy-to-useful.md#measured-starter-example-what-improved-what-did-not) lowered synthetic validation loss, but its actual replies still failed ordinary arithmetic, color, and unrelated questions. This is not a useful assistant.
 
 ## Open research questions

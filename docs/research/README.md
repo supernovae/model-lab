@@ -82,7 +82,7 @@ in a base config resolve from that YAML file.
 ## Ownership-aware memory allocation
 
 The personal allocation recipe is historical and no longer available as a
-packaged scaffold. Its [archived corpus and allocation guide](../path-domain-corpus.md)
+packaged scaffold. Its [archived corpus and allocation guide](../history/path-domain-corpus.md)
 preserves the original declarations and limitations. A new allocation experiment
 needs a current external resource closure, explicit seed options, actual input
 bindings and a separately reviewed plan. No standard seed set is supplied by Lab.

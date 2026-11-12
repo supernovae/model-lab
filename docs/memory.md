@@ -111,7 +111,7 @@ A smaller `training.micro_batch_size` reduces activation dimensions. Increasing 
 `inspect` can write a separate proposal rather than editing its input:
 
 ```sh
-uv run --locked --extra cpu klab inspect configs/runtime_smoke_cpu.yaml \
+klab inspect configs/runtime_smoke_cpu.yaml \
   --write-proposal klab-work/runtime-proposal.yaml
 ```
 

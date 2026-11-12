@@ -9,19 +9,19 @@ This is not a training source, benchmark score, or evidence of byte-memory trans
 Before running a diagnostic, write and retain a manifest:
 
 ```sh
-klab facts manifest --seed 0 --output artifacts/withheld-facts-seed-0.json
+klab facts manifest --seed 0 --output "$KLAB_WORK_DIR/withheld-facts-seed-0.json"
 ```
 
 Verify a retained artifact before using or citing it:
 
 ```sh
-klab facts verify artifacts/withheld-facts-seed-0.json
+klab facts verify "$KLAB_WORK_DIR/withheld-facts-seed-0.json"
 ```
 
 For automation, emit a compact verified audit:
 
 ```sh
-klab facts audit artifacts/withheld-facts-seed-0.json
+klab facts audit "$KLAB_WORK_DIR/withheld-facts-seed-0.json"
 ```
 
 The JSON report states the fixture seed, manifest digest, statement/case counts, and whether held-out values occur in the training statements. It is fixture evidence only; it contains neither model outputs nor an experimental score.
@@ -29,7 +29,7 @@ The JSON report states the fixture seed, manifest digest, statement/case counts,
 To measure a byte-memory adapter transfer between two compatible saved runs:
 
 ```sh
-klab facts transfer-evaluate SOURCE_RUN TARGET_RUN artifacts/withheld-facts-seed-0.json
+klab facts transfer-evaluate SOURCE_RUN TARGET_RUN "$KLAB_WORK_DIR/withheld-facts-seed-0.json"
 ```
 
 Only `memory.table`, `memory.output`, and `memory.gate` transfer. The target keeps its own tokenizer, embedding, attention, output head, and decoder blocks. The result is retained under the target run's `evaluations/` directory with both run IDs and the verified manifest digest. An exact-match count remains an observation, not proof of general cross-tokenizer transfer.

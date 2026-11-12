@@ -3,7 +3,7 @@
 The CPU microlab recipe is maintained in the optional
 [Workshop TinyStories microlab](https://github.com/supernovae/kybern-workshop/tree/main/examples/tinystories-microlab).
 Its source declarations and recipe-specific instructions are no longer owned by
-Lab. The [disposition record](tinystories-retirement.json) preserves the original
+Lab. The [disposition record](history/tinystories-retirement.json) preserves the original
 file identities and exact destination commit.
 
 Lab supplies the reusable commands. Use [dataset declarations](datasets.md) to

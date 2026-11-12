@@ -33,7 +33,7 @@ These configurations deliberately train small models on a bounded task rather th
 
 New cards contain frozen prompts, exact normalization/scoring, generation settings, limitations, and a digest. New chat cards use full normalized-answer equality: a correct first word followed by junk does not pass. Prompt plus completion budget must fit; evaluation refuses overflow instead of silently deleting evidence from the context. Balanced fixed-answer controls are reported beside model scores.
 
-The bundled pair trains for up to 1,536 steps/393,216 targets. Epoch-end short batches can make the actual token count smaller when the step limit is reached; comparisons use checkpoint counters. The [recorded review experiment](project-review.md) reached 24/24 retained associations for both models but found no Engram advantage on the held-out or override cards. This is a useful negative architecture result, not a failed framework.
+The bundled pair trains for up to 1,536 steps/393,216 targets. Epoch-end short batches can make the actual token count smaller when the step limit is reached; comparisons use checkpoint counters. The [recorded review experiment](history/project-review.md) reached 24/24 retained associations for both models but found no Engram advantage on the held-out or override cards. This is a useful negative architecture result, not a failed framework.
 
 ## Evidence and controlled comparisons
 

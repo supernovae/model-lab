@@ -107,4 +107,4 @@ Fresh invocations create new probe IDs without overwriting old receipts.
 
 Actual protocol review, cache acquisition and model evaluation remain separately
 approved work. No reference model, benchmark data or GPU was exercised by the
-implementation tests. Training exposure accounting remains LAB-43's measured gap.
+implementation tests. Training exposure accounting remains a measured gap.

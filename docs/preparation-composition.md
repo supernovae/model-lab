@@ -1,6 +1,6 @@
 # Compiled native preparation bindings
 
-The first LAB-74 slice compiles `tokenizer_train` and `data_prepare` bindings from
+Lab compiles `tokenizer_train` and `data_prepare` bindings from
 the existing `CampaignPlan`. `compile_preparation(plan)` is a pure projection,
 not a scheduler: `CampaignPlan` still validates producer kinds, dependencies and
 cycles and supplies the stable topological order. Other stage kinds retain their
@@ -80,9 +80,9 @@ and prepared-output location guards in isolation. The new tests detect every
 removal (two, two and one failing cases respectively); source is restored before
 normal validation. These checks exercise refusal boundaries without model work.
 
-LAB-74 is not complete: typed bindings for other operations, full compiled-plan
+This compilation is partial: typed bindings for other operations, full compiled-plan
 coverage, broader dependency-direction gates and recorded runtime-capability
-preflight remain. The first [LAB-73/PR B workflow slice](workflow-recipes.md) adds explicit external
+preflight remain. The [prepared-input workflow profile](workflow-recipes.md) adds explicit external
 prepared-input bindings and native lock publication. Preparation-graph context,
 evaluation closures, admission and evidence linkage remain open. Actual external CPU/GPU portability proof remains separately
 admitted later work. Historical seed and mixture identity decisions are unchanged.

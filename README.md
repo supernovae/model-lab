@@ -163,7 +163,7 @@ engine for Apple Silicon.
 | **Apple Silicon GPU (MLX)** | MLX / `metal` | Optional native Apple Silicon engine supporting FP32 dense and block-sparse training with AdamW. |
 
 See [runtime support](docs/runtime.md) for precision and backend details, and
-[lab status](docs/lab-status.md) for tested environment configurations.
+[lab status](docs/history/lab-status.md) for tested environment configurations.
 Ready to scale past toy runs? Follow the [first-model guide](docs/first-model.md)
 to train and evaluate 17.3M-parameter models on FineWeb-Edu.
 
@@ -171,8 +171,10 @@ to train and evaluate 17.3M-parameter models on FineWeb-Edu.
 
 When you move beyond single-change `try` comparisons, Model Lab includes tools for larger studies:
 
+The [documentation index](docs/README.md) lists every guide once.
+
 - **Inspect saved models:** [checkpoint exploration](docs/tinytext-model-guide.md),
-  [local API](docs/local-api.md), and the retained [MODEL-0](docs/model-0.md) evidence.
+  [local API](docs/local-api.md), and the retained [MODEL-0](docs/history/model-0.md) evidence.
 - **Control training and continuation:** [training](docs/training.md),
   [checkpointing](docs/checkpointing.md), [datasets](docs/datasets.md), and
   [instruction objectives](docs/instruction-training.md), and
@@ -194,7 +196,7 @@ experimental findings see the [experiment ledger](docs/research/experiment-ledge
 | Area | Capabilities | Guide & notes |
 | --- | --- | --- |
 | **End-to-end training** | Tokenizers, data preparation, training, and text generation via CLI & YAML `RunConfig` | [TinyStories microlab](docs/tinystories-microlab.md) |
-| **Attention mechanisms** | Dense, sliding-window, block-sparse, and reference MLA | [Architecture guide](docs/architecture.md) |
+| **Attention mechanisms** | Dense, sliding-window, block-sparse, local-plus-selected-blocks for long context, and reference MLA; other kinds from a [component package](docs/components.md) | [Architecture guide](docs/architecture.md), [sparse attention](docs/sparse-attention.md) |
 | **Conditional capacity** | Local Top-K MoE; token, byte, and portable Engram memory tables | [Capability experiments](docs/capabilities.md) |
 | **Training programs** | Parameter matrices, locked `ExperimentPlan` definitions, and multi-phase training | [Experiment programs DSL](docs/experiment-programs.md) |
 | **Campaign orchestration** | Multi-run dependency graphs, readiness checks, and result reconciliation | [Campaigns guide](docs/campaigns.md) |

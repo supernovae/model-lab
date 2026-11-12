@@ -82,7 +82,7 @@ The following retained neutral fixture teaches corpus-shape and exact-fraction
 semantics. It is not a model-quality experiment. For another plan, replace the
 sample path with your explicit current declaration and its bound inputs.
 Preparation can train tokenizers and materialize data; use separately authorized
-resources. The [disposition map](sample-disposition.json) identifies the fixture
+resources. The [disposition map](history/sample-disposition.json) identifies the fixture
 and its unchanged historical preservation.
 
 ```sh

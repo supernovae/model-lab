@@ -10,5 +10,5 @@ paths, inventories and command transcripts are provenance, not instructions for
 a current machine or proof that referenced payloads are available. This redirect
 does not repeat the migration, change historical identities or authorize a run.
 
-For current generic workspace selection, see [workspaces](workspaces.md) and
-[location and runtime controls](location-runtime-controls.md).
+For current generic workspace selection, see [workspaces](../workspaces.md) and
+[location and runtime controls](../location-runtime-controls.md).
