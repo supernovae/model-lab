@@ -38,12 +38,6 @@ def local_dependencies(manifest, *, work_root):
     scope = local_scope(manifest)
     if scope is None:
         return None
-    if "release_id" in manifest:
-        from klab.corpus.release_migration import migrated_dependencies
-
-        migrated = migrated_dependencies(manifest, work_root)
-        if migrated is not None:
-            return migrated
     result = tuple(
         Path(value)
         for value in {*scope["request"]["inputs"], *scope["source_bindings"]}

@@ -13,10 +13,10 @@ from pathlib import Path
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.admission_inspection_cache import capture, unchanged
 from klab.corpus.preparation_inputs import corpus_work_root, local_scope
-from klab.corpus.retained_render_adoption import _small
 from klab.corpus.split_runs import SplitStages, _stamp, write_rows
 from klab.result_publication import sync_directory
 from klab.training.manifest import sha256_file
+from klab.verification_proofs import read_trusted_small as _small
 
 _NOTE = "release-publication.json"
 
@@ -215,11 +215,6 @@ def verify_retained_release(path, manifest=None, *, expected_id=None):
     path = Path(path).resolve(strict=True)
     root = corpus_work_root(path)
     manifest = manifest or json.loads(_small(path / "manifest.json", root))
-    migration = root / "release-migrations" / (manifest["release_id"] + ".target.json")
-    if migration.exists() or migration.is_symlink():
-        from klab.corpus.release_migration import verify_migrated_release
-
-        return verify_migrated_release(path, manifest, expected_id=expected_id)
     build, evidence = retained_payload(path)
     payload = _manifest_payload(build)
     release_id = canonical_digest(payload)
