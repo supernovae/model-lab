@@ -53,7 +53,6 @@ resumed children are run IDs within one store.
 | `eval`, `generate`, `chat`, `serve` | `WORK_DIR/runs`, or `--runs-dir` | `--runtime ID` or `--runtime-profile FILE` |
 | `train`, `stage` | The config's `logging.root_dir`, or `train --runs-dir`; `stage --output` | `--runtime ID` or `--runtime-profile FILE` |
 | `experiment`, `worker`, `controller` | `--store`: the same store for registration, submission and control | A named worker, or a local runtime for single-config submissions |
-| `campaign` | Declared workspace and bindings | Declared runtime or worker bindings |
 | `runtime env` | Host-local registry and runtime root, independent of the work directory | Manages interpreters; never launches an experiment |
 
 - **`--lab-dir`** selects lab records; **`--runs-dir`** selects runs and
@@ -80,13 +79,11 @@ proofs of what it has verified:
 | A new or changed input | Full byte and content verification. |
 | An unchanged input in an owner-only registered store | Signed host-local proofs are reused. |
 | Transfer to another worker or store | Bytes and contents verified before publishing. |
-| Campaign recovery | Always full verification. |
 
 Changed fingerprints, dependencies, code identity, unsafe paths, or missing or
 foreign proofs fall back to full verification. Another process running as the
-same user is outside what local proofs protect against. `stage`, experiment plan
-commands and campaign commands accept `--cold-verify` to turn reuse off; use it
-at a new host or trust boundary.
+same user is outside what local proofs protect against. `stage --cold-verify`
+turns reuse off; use it at a new host or trust boundary.
 
 Preparation work is bounded by the [resource envelope](runtime.md#resource-envelopes):
 worker counts follow available CPU, memory and explicit limits, and results are
@@ -94,12 +91,10 @@ reduced in input order so concurrency never changes the prepared data.
 
 ### Phase observations
 
-`data prepare`, `stage` and campaign `plan`, `status`, `next`, `explain`,
-`apply` and `resume` accept `--observations-output PATH.json`, a new file under
-an existing directory outside the prepared cache, stage output and campaign
-state. It records each phase's timings, host coverage and verification
+`data prepare` and `stage` accept `--observations-output PATH.json`, a new
+file under an existing directory outside the prepared cache and stage output. It records each phase's timings, host coverage and verification
 counters. Observations are operational evidence only and never enter a model,
-data or plan identity. Unavailable counters are `null` with a reason, and a
+data or run identity. Unavailable counters are `null` with a reason, and a
 failure to write observations only warns.
 
 ## Guard a command
@@ -256,7 +251,7 @@ klab workspace cleanup apply \
 ```
 
 The plan is read-only and defaults to retaining two additional eligible periodic
-checkpoint generations per run and two campaign-owned prepared-data cache entries.
+checkpoint generations per run and two workspace-owned prepared-data cache entries.
 Change those limits with `--max-extra-periodic` and `--max-cache-entries` when
 creating the plan. Latest, best, and the previous verified generation are always
 protected. Every generation registered in the run database or bound by a child
@@ -265,7 +260,7 @@ even when this exceeds the count limit; most ordinary training checkpoints are
 registered, so checkpoint proposals can be empty. Only verified, unregistered
 generations in terminal runs can be proposed. Cache candidates require the
 workspace ownership marker, a matching prepared-data manifest, and no active
-campaign run or worker attempt. Applying a plan rechecks the database, candidate
+run or worker attempt. Applying a plan rechecks the database, candidate
 inventory, and writer leases; changed plans must be created again. The command
 never scans arbitrary sibling workspaces or deletes unmarked directories.
 

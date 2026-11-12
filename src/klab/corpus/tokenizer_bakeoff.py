@@ -21,6 +21,7 @@ from klab.data.tokenizer import (
     verify_tokenizer_artifact,
 )
 from klab.training.manifest import sha256_file
+from klab.verification_proofs import ProofStore, VerificationMode
 
 GROUPS = ("prose", "python", "go", "rust", "shell", "yaml", "json", "toml", "logs")
 VOCABS = (16384, 24576, 32768)
@@ -609,3 +610,62 @@ def bakeoff(declaration: Path, output: Path, *, work_root: Path | None = None) -
     }
     (output / "report.json").write_bytes(canonical_json(report) + b"\n")
     return output / "report.json"
+
+
+def verify_selection(
+    path: Path,
+    *,
+    proof_store: ProofStore | None = None,
+    verification_mode: VerificationMode = "cold",
+) -> tuple[str, str]:
+    """Verify a bakeoff selection report; return the tokenizer digest and its label."""
+    if path.name != "report.json" or path.is_symlink():
+        raise ValueError(
+            "tokenizer selection requires the verified bakeoff report.json"
+        )
+    report = json.loads(path.read_text(encoding="utf-8"))
+    identity = report["identity"]
+    release = Path(identity["release_path"])
+    if (
+        verify_release(
+            release, proof_store=proof_store, verification_mode=verification_mode
+        )["release_id"]
+        != identity["release_id"]
+    ):
+        raise ValueError("selection release binding changed")
+    spec = Declaration.model_validate(identity["declaration"])
+    selected_docs, heldout_docs, train_docs = _selection(release, spec)
+    receipt = _receipt(selected_docs, heldout_docs, train_docs, spec)
+    _verify_existing(
+        path.parent, identity, receipt, selected_docs, heldout_docs, release
+    )
+    if not isinstance(report["candidates"], list) or not report["candidates"]:
+        raise ValueError("selection has no verified candidates")
+    chosen = choose_candidate(report["candidates"], spec.near_best_ratio)
+    if report.get("selected_vocab_size") != chosen:
+        raise ValueError("selection vocabulary changed")
+    candidate = next(
+        item for item in report["candidates"] if item["vocab_size"] == chosen
+    )
+    selected = (
+        path.parent / "candidates" / str(candidate["vocab_size"]) / "tokenizer.json"
+    )
+    if (
+        selected.is_symlink()
+        or selected.parent.is_symlink()
+        or selected.with_name("tokenizer_manifest.json").is_symlink()
+        or report["selected_tokenizer"] != str(selected)
+        or sha256_file(selected) != candidate["tokenizer_sha256"]
+    ):
+        raise ValueError("selection receipt does not bind the chosen tokenizer")
+    manifest = json.loads(
+        selected.with_name("tokenizer_manifest.json").read_text(encoding="utf-8")
+    )
+    if (
+        manifest != candidate["manifest"]
+        or manifest.get("corpus_forge_bakeoff") != report["release_binding"]
+    ):
+        raise ValueError("chosen tokenizer is not bound to bakeoff")
+    return candidate[
+        "tokenizer_sha256"
+    ], f"{identity['release_id']}:{candidate['vocab_size']}"

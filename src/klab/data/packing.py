@@ -69,7 +69,7 @@ from klab.training import manifest as manifest_module
 from klab.training.manifest import source_identity
 from klab.verification_proofs import ProofStore, VerificationMode, file_binding
 from klab.workdir import ensure_work_dir
-from klab.workspace_cleanup import campaign_lock, mark_prepared_cache
+from klab.workspace_cleanup import mark_prepared_cache, workspace_lock
 
 if TYPE_CHECKING:
     from klab.bottleneck_observations import BottleneckObserver
@@ -182,15 +182,13 @@ def preparation_source_identity(inventory: dict[str, str] | None = None) -> str:
 
 def prepared_source_matches(identity: dict, package_sha256: str) -> bool:
     """Match preparation semantics, retaining explicit package-bound artifacts."""
-    from klab.experiments.source_compatibility import source_identities_compatible
-
     recorded = identity["source_identity_sha256"]
     if (
         identity.get("allocation_manifest_sha256") is None
         and recorded == preparation_source_identity()
     ):
         return True
-    return source_identities_compatible(recorded, package_sha256)
+    return recorded == package_sha256
 
 
 def _sha256(path: Path) -> str:
@@ -2265,53 +2263,6 @@ def _prepare_data(
         "source_identity_sha256": source_digest,
         "tokenizer_sha256": canonical_tokenizer_sha256(tokenizer),
     }
-    from klab.experiments.source_compatibility import active_source_compatibility
-
-    compatibility = active_source_compatibility()
-    if compatibility is not None and (
-        prefix_from is not None or append_from is not None
-    ):
-        raise ValueError("prepared prefix cannot use source compatibility override")
-    if compatibility is not None:
-        baseline = compatibility["baseline_source_identity"]
-        historical_source = (
-            baseline["sha256"]
-            if config.dataset.allocation_manifest_path is not None
-            else preparation_source_identity(dict(baseline["files"]))
-        )
-        if (
-            historical_source != source_digest
-            or config.dataset.allocation_manifest_path is None
-        ):
-            historical_identity = {
-                **cache_identity,
-                "source_identity_sha256": historical_source,
-            }
-            historical_root = (
-                config.dataset.cache_dir
-                / hashlib.sha256(canonical_json(historical_identity)).hexdigest()[:16]
-            )
-            if not (historical_root / "manifest.json").is_file():
-                raise ValueError(
-                    "authenticated source compatibility requires an existing "
-                    "historical prepared cache; new preparation is not authorized"
-                )
-            cached = load_prepared_data(
-                historical_root,
-                byte_enabled=config.model.memory in {"byte", "portable"},
-                expected_identity=historical_identity,
-                telemetry=telemetry,
-                verification="deep",
-                proof_store=proof_store,
-                verification_mode=verification_mode,
-            )
-            if resource_envelope is not None:
-                check_envelope(
-                    resource_envelope,
-                    workspace=historical_root,
-                    rss_bytes=telemetry.snapshot()["current_rss_bytes"],
-                )
-            return cached
     binding = (
         {
             "dataset": {
@@ -3010,7 +2961,7 @@ def prepare_data(
     ``prefix_from`` explicitly derives a smaller, whole-document local_text
     selection from a pinned parent cache. Sources and parent bytes are verified;
     validation is unchanged and no document is re-encoded. Other dataset kinds,
-    masks, sidecars and source-compatibility overrides are deliberately rejected.
+    masks and sidecars are deliberately rejected.
 
     ``append_from`` authenticates a same-producer complete raw JSONL prefix,
     copies historical IDs unchanged and encodes only the fresh complete tail.
@@ -3063,7 +3014,7 @@ def prepare_data(
         or base.resolve() == workspace
     ):
         with (
-            campaign_lock(base),
+            workspace_lock(base),
             observer.phase("data_prepare") if observer is not None else nullcontext(),
         ):
             return _prepare_data(
@@ -3080,8 +3031,8 @@ def prepare_data(
                 require_prepared=require_prepared,
             )
     with (
-        campaign_lock(base),
-        campaign_lock(workspace),
+        workspace_lock(base),
+        workspace_lock(workspace),
         observer.phase("data_prepare") if observer is not None else nullcontext(),
     ):
         existing = {child.name for child in base.iterdir()} if base.is_dir() else set()

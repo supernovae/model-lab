@@ -392,7 +392,7 @@ def test_storage_observation_replay_keeps_original_bytes_and_detects_tamper(
 ) -> None:
     import json
 
-    from klab.campaign.state import read_canonical
+    from klab.result_publication import read_canonical
 
     root = tmp_path / "persistent-state"
     checks = [

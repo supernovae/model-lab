@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 _OBSERVER = """def _klab_install_kernel_observer(payload):
@@ -36,15 +35,6 @@ _OBSERVER = """def _klab_install_kernel_observer(payload):
   hooks[key]=(before,after);shell._klab_kernel_observers=hooks
  publish("BUSY")
 """
-
-
-def observer_program(worker_root: str, instance_id: str) -> str:
-    """Install private callbacks isolated from later notebook cell globals."""
-    payload = json.dumps({"worker_root": worker_root, "instance_id": instance_id})
-    return (
-        _OBSERVER
-        + f"_klab_install_kernel_observer({payload!r})\ndel _klab_install_kernel_observer\n"
-    )
 
 
 def notebook_cell_program(root: Path) -> str:

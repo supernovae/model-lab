@@ -24,7 +24,7 @@ from pydantic import Field, field_validator
 from klab.canonical import canonical_json
 from klab.config.models import StrictModel
 from klab.documents import read_document
-from klab.experiments.lock import _exclusive_bytes
+from klab.result_publication import write_bytes_exclusive
 from klab.training.manifest import sha256_file, source_identity
 from klab.workspace_preflight import check_storage, require_storage
 
@@ -131,7 +131,7 @@ def _safe_workspace(source: Path, workspace: Path) -> Path:
 
 
 def _write_json(path: Path, payload: object) -> None:
-    _exclusive_bytes(path, canonical_json(payload) + b"\n")
+    write_bytes_exclusive(path, canonical_json(payload) + b"\n")
 
 
 def _corpus(path: Path, target_bytes: int, seed: int) -> dict[str, int]:
@@ -703,7 +703,7 @@ def run_preparation_benchmark(source: Path) -> dict[str, Any]:
         )
     )
     published = canonical_json(report)
-    _exclusive_bytes(report_path, published + b"\n")
+    write_bytes_exclusive(report_path, published + b"\n")
     return json.loads(published)
 
 

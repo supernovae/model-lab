@@ -1,7 +1,0 @@
-assignments:
-  tiny_developer_family: train
-  tiny_docs_family: train
-  tiny_test_family: test
-family_key: source_family
-schema_version: 1
-unit: source_document_family

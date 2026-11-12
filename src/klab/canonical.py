@@ -31,3 +31,12 @@ def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise ValueError(f"duplicate JSON key: {key}")
         result[key] = value
     return result
+
+
+def domain_digest(domain: str, value: object) -> str:
+    """Hash canonical JSON in an explicit, disjoint domain."""
+    if not domain or "\x00" in domain:
+        raise ValueError("invalid digest domain")
+    return hashlib.sha256(
+        domain.encode("utf-8") + b"\x00" + canonical_json(value)
+    ).hexdigest()

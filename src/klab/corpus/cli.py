@@ -450,24 +450,6 @@ def _handle(args: argparse.Namespace) -> None:
         result = publication.lineage(release, args.record_id)
     elif command == "describe":
         result = publication.describe(release, tokenizer=args.tokenizer)
-    elif command == "compare":
-        from klab.corpus.measurement import (
-            capability_matrix,
-            compare_capability_matrix,
-        )
-
-        if args.with_cases:
-            pairs = [(release, args.run_dir)] + [
-                (_release_path(reference, root), Path(run_dir))
-                for reference, run_dir in args.with_cases
-            ]
-            result = compare_capability_matrix(pairs)
-        else:
-            result = capability_matrix(release, args.run_dir)
-            if result is None:
-                raise ValueError(
-                    "verified checkpoint-bound capability results are required"
-                )
     elif command == "publication":
         from klab.corpus.publication import publication_manifest
 
@@ -764,7 +746,6 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "review",
         "lineage",
         "consumers",
-        "compare",
         "export",
         "publication",
     ):
@@ -781,15 +762,6 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
             command.add_argument("--tokenizer", type=Path)
         if name == "consumers":
             command.add_argument("--runs-dir", required=True, type=Path)
-        if name == "compare":
-            command.add_argument("--run-dir", required=True, type=Path)
-            command.add_argument(
-                "--with",
-                dest="with_cases",
-                nargs=2,
-                action="append",
-                metavar=("RELEASE", "RUN_DIR"),
-            )
         if name == "export":
             command.add_argument("--view", choices=("lm", "chat"), required=True)
             command.add_argument("--base-run-config", required=True)

@@ -1,4 +1,4 @@
-"""Reviewable, campaign-scoped cleanup of explicitly owned mutable artifacts."""
+"""Reviewable, workspace-scoped cleanup of explicitly owned mutable artifacts."""
 
 from __future__ import annotations
 
@@ -48,8 +48,8 @@ def _inside(path: Path, root: Path) -> bool:
 
 
 @contextmanager
-def campaign_lock(workspace: Path) -> Iterator[None]:
-    """Serialize campaign cache publication with explicit cleanup."""
+def workspace_lock(workspace: Path) -> Iterator[None]:
+    """Serialize workspace cache publication with explicit cleanup."""
     workspace = workspace.resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
@@ -59,7 +59,7 @@ def campaign_lock(workspace: Path) -> Iterator[None]:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             _LOGGER.warning(
-                "Waiting for campaign lock %s; preserve the lock and retained "
+                "Waiting for workspace lock %s; preserve the lock and retained "
                 "state. Owner identity is unknown; normal blocking wait continues.",
                 workspace / ".cleanup.lock",
             )
@@ -71,7 +71,7 @@ def campaign_lock(workspace: Path) -> Iterator[None]:
 
 
 def mark_prepared_cache(workspace: Path, cache: Path) -> None:
-    """Mark only a newly published cache while its campaign lock is held."""
+    """Mark only a newly published cache while its workspace lock is held."""
     workspace, cache = workspace.resolve(), cache.resolve()
     if not _inside(cache, workspace) or cache.is_symlink():
         raise ValueError("cache is outside its owning workspace")
@@ -124,7 +124,7 @@ def _store_rows(
         raise ValueError("run store must be a real directory")
     database = workspace / "runs" / "experiments.sqlite3"
     if not database.is_file() or database.is_symlink():
-        raise ValueError("campaign workspace needs an existing run database")
+        raise ValueError("experiment workspace needs an existing run database")
     with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as con:
         con.execute("PRAGMA query_only=ON")
         runs = [
@@ -359,7 +359,7 @@ def apply_cleanup(plan_path: Path) -> dict[str, int]:
     body = {key: value for key, value in saved.items() if key != "plan_sha256"}
     if hashlib.sha256(_canonical(body)).hexdigest() != saved.get("plan_sha256"):
         raise ValueError("cleanup plan digest mismatch")
-    with campaign_lock(workspace), ExitStack() as locks:
+    with workspace_lock(workspace), ExitStack() as locks:
         first = plan_cleanup(
             workspace,
             max_extra_periodic=saved["max_extra_periodic"],

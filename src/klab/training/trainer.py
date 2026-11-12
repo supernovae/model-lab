@@ -821,8 +821,7 @@ def _train_impl(
                 verify_portable_corpus_binding(config, portable)
             else:
                 from klab.config.loading import load_config
-                from klab.experiments.artifacts import verify_artifact
-                from klab.experiments.plan import Artifact
+                from klab.experiments.artifacts import Artifact, verify_artifact
 
                 export_path = config.dataset.corpus_export_path
                 if export_path is None:

@@ -344,8 +344,8 @@ def test_append_signed_reuse_then_tamper_refusal(append_fixture, tmp_path):
         )
 
 
-@pytest.mark.parametrize("mode", ["byte", "compatibility", "both"])
-def test_append_rejects_unsupported_producer_paths(append_fixture, monkeypatch, mode):
+@pytest.mark.parametrize("mode", ["byte", "both"])
+def test_append_rejects_unsupported_producer_paths(append_fixture, mode):
     from klab.data.packing import PreparedPrefix
 
     target, tokenizer, parent, _ = append_fixture
@@ -353,11 +353,6 @@ def test_append_rejects_unsupported_producer_paths(append_fixture, monkeypatch, 
     if mode == "byte":
         target = target.model_copy(
             update={"model": target.model.model_copy(update={"memory": "byte"})}
-        )
-    elif mode == "compatibility":
-        monkeypatch.setattr(
-            "klab.experiments.source_compatibility.active_source_compatibility",
-            dict,
         )
     else:
         options["prefix_from"] = PreparedPrefix(

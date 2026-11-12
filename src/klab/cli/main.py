@@ -1111,30 +1111,6 @@ def _generate(args: argparse.Namespace) -> None:
             print(json.dumps({"speculation": speculation_report}), file=sys.stderr)
 
 
-def _write_json_exclusive(path: Path, value: object) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = (
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            indent=2,
-            allow_nan=False,
-        )
-        + "\n"
-    )
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-    except BaseException:
-        path.unlink(missing_ok=True)
-        raise
-    return path
-
-
 def _learn_list(args: argparse.Namespace) -> None:
     from klab.research.catalog import list_lessons
 
@@ -1714,10 +1690,8 @@ FAST_PATH_COMMANDS = (
     "readiness",
 )
 RELEASE_COMMANDS = (
-    "campaign",
     "experiment",
     "attempt",
-    "iteration",
     "corpus",
     "controller",
     "worker",
@@ -1789,7 +1763,7 @@ def _group_command_help(
             ),
             section("Models and diagnostics:", tools),
             section(
-                "Advanced / release (full provenance, approvals, campaigns):",
+                "Queues, remote workers and corpora:",
                 RELEASE_COMMANDS,
             ),
             "Build a model: klab train CONFIG.yaml (docs/build.md)",
@@ -1827,9 +1801,8 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         description=(
             "Derive the candidate from a lab delta (or take a full config), train "
             "both arms locally, score both on the same held-out split and write one "
-            "compact record. Skips plan locks, approvals, admission reviews and "
-            "campaign reconciliation; keeps storage/resource limits, data identity, "
-            "safe cancellation and held-out checks."
+            "sealed record, with storage and resource limits, data identity, safe "
+            "cancellation and held-out checks."
         ),
     )
     lab_try.add_argument(
@@ -2388,9 +2361,7 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     eval_runtime.add_argument("--runtime-profile", type=Path)
     eval_runtime.add_argument("--runtime", metavar="ID")
     evaluation.set_defaults(handler=_eval)
-    learn = commands.add_parser(
-        "learn", help="Learn and probe one mechanism without a campaign."
-    )
+    learn = commands.add_parser("learn", help="Learn and probe one mechanism")
     learn_commands = learn.add_subparsers(dest="learn_command", required=True)
     learn_list = learn_commands.add_parser("list")
     learn_list.add_argument("--json", action="store_true")
@@ -2568,15 +2539,9 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         help="Lab root for the Probes page (default: WORK_DIR/lab)",
     )
     dashboard.set_defaults(handler=_dashboard)
-    from klab.iteration_cli import register_parser as register_iteration_parser
-
-    register_iteration_parser(commands)
     from klab.corpus.cli import add_commands as add_corpus_commands
 
     add_corpus_commands(commands)
-    from klab.campaign.cli import add_commands as add_campaign_commands
-
-    add_campaign_commands(commands)
     from klab.workers.cli import add_commands
 
     add_commands(commands, default_store=Path(runs_dir_default))
@@ -2621,89 +2586,6 @@ def _ensure_runtime_interpreter(python: Path, digest: str, probe: Any) -> None:
     probe()
 
 
-def _registered_local_worker(
-    store: Path, name: str, *, optional: bool = False
-) -> Any | None:
-    from klab.workers.controller import Controller
-    from klab.workers.models import WorkerDefinition
-
-    if optional and not (store / "experiments.sqlite3").is_file():
-        return None
-    controller = Controller(store, read_only=True)
-    definitions = [
-        WorkerDefinition.model_validate(record["definition"])
-        for record in controller.store.worker_records()
-        if record["definition"]["name"] == name
-    ]
-    if len(definitions) != 1:
-        if optional and not definitions:
-            return None
-        raise ValueError(f"registered local worker {name} is unavailable or ambiguous")
-    definition = definitions[0]
-    if definition.transport != "local":
-        if optional:
-            return None
-        raise ValueError("remote worker cannot run checkpoint-bound local evaluation")
-    return definition
-
-
-def _prepare_local_worker(args: argparse.Namespace, definition: Any) -> None:
-    from klab.runtime_profile import RuntimeProfile
-
-    profile = RuntimeProfile.model_validate(
-        {
-            "runtime_profile_version": 1,
-            "id": definition.worker_id,
-            "python": definition.python,
-            "engine": definition.engine,
-            "backend": definition.backend,
-            "device_index": definition.device_index,
-        }
-    )
-    digest = hashlib.sha256(
-        json.dumps(definition.model_dump(mode="json"), sort_keys=True).encode("utf-8")
-    ).hexdigest()
-    _ensure_runtime_interpreter(
-        definition.python, digest, lambda: probe_runtime_profile(profile)
-    )
-    args.runtime_worker_definition = definition
-
-
-def _campaign_evaluation_workers(args: argparse.Namespace) -> list[Any]:
-    from klab.campaign.engine import CampaignEngine
-    from klab.campaign.plan import (
-        Evaluation,
-        RuntimeAcceptance,
-        safe_path,
-    )
-    from klab.experiments.plan import load_plan
-
-    source = Path(args.source).absolute()
-    engine = CampaignEngine(source, resolve_work_dir(args.work_dir))
-    stages = {stage.id: stage for stage in engine.plan.stages}
-    actionable = engine.inspect("next")["next_action"].get("stage")
-    stage = stages.get(actionable)
-    if (
-        not isinstance(stage, Evaluation)
-        or stage.runtime is None
-        or stage.backend == "cpu"
-    ):
-        return []
-    runtime_stage = stages[stage.runtime]
-    if not isinstance(runtime_stage, RuntimeAcceptance) or runtime_stage.worker is None:
-        return []
-    plan_stage = stages[runtime_stage.plan]
-    locked_plan = load_plan(safe_path(source.parent, plan_stage.source))
-    store = (
-        engine.store.root
-        / "experiments"
-        / f"{plan_stage.id}-{locked_plan.id}"
-        / "controller"
-    )
-    definition = _registered_local_worker(store, runtime_stage.worker, optional=True)
-    return [definition] if definition is not None else []
-
-
 def _is_config_submission(args: argparse.Namespace) -> bool:
     return (
         args.command == "experiment"
@@ -2740,34 +2622,7 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
         "chat",
         "serve",
     }
-    is_experiment = args.command == "experiment" and args.experiment_command in {
-        "bind",
-        "run",
-    }
-    is_campaign = args.command == "campaign" and args.campaign_command in {
-        "apply",
-        "resume",
-    }
-    is_snapshot = args.command == "research" and args.research_command == "snapshot"
-    is_suite = (
-        args.command == "evaluation"
-        and args.evaluation_command == "suite"
-        and args.suite_command == "run"
-    )
-    is_fixed_slices = (
-        args.command == "evaluation"
-        and args.evaluation_command == "fixed-slices"
-        and args.fixed_command in {"score", "continuations"}
-    )
-    if not (
-        is_legacy
-        or is_submission
-        or is_experiment
-        or is_campaign
-        or is_snapshot
-        or is_suite
-        or is_fixed_slices
-    ):
+    if not (is_legacy or is_submission):
         return
     from klab.runtime_environments import profile_for_id
 
@@ -2797,33 +2652,6 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
         args.backend = profile.backend if profile is not None else "cpu"
     if args.command == "stage" and args.through == "inspect":
         return
-    if is_experiment and args.experiment_command == "run" and args.binding is not None:
-        from klab.experiments.binding import inspect_runtime_binding
-        from klab.experiments.cli import _run_cells
-        from klab.experiments.lock import open_lock
-        from klab.runtime_profile import RuntimeProfile
-
-        locked = open_lock(Path(args.lock))
-        cell = _run_cells(locked, args)[0]
-        binding = inspect_runtime_binding(Path(args.binding), locked, cell)
-        if binding["source_kind"] == "profile":
-            profile = RuntimeProfile.model_validate(binding["descriptor"])
-    workers = _campaign_evaluation_workers(args) if is_campaign else []
-    if is_suite and getattr(args, "worker", None) is not None:
-        if args.store is None:
-            raise ValueError("--worker evaluation requires --store CONTROLLER_STORE")
-        workers.append(_registered_local_worker(Path(args.store), args.worker))
-    if workers and (
-        len({str(worker.python) for worker in workers}) != 1
-        or (
-            profile is not None
-            and any(
-                worker.python.resolve() != profile.python.resolve()
-                for worker in workers
-            )
-        )
-    ):
-        raise ValueError("one command cannot select different runtime interpreters")
     if profile is not None:
         digest = hashlib.sha256(profile.model_dump_json().encode("utf-8")).hexdigest()
         _ensure_runtime_interpreter(
@@ -2831,22 +2659,6 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
         )
         args.runtime_profile_python = Path(os.path.abspath(profile.python))
         args.runtime_profile_loaded = profile
-    elif workers:
-        _prepare_local_worker(args, workers[0])
-    if is_suite or is_fixed_slices:
-        from klab.evaluation.inference import evaluation_config
-        from klab.runtime_profile import authorize_worker
-
-        config = evaluation_config(
-            args.run_id, Path(args.runs_dir), args.checkpoint, args.backend
-        )
-        if profile is not None:
-            args.runtime_authorization = authorize_profile(profile, config)
-        elif workers:
-            args.runtime_authorization = authorize_worker(workers[0], config)
-        return
-    if is_experiment or is_campaign or is_snapshot:
-        return
 
     if args.command in {"train", "stage"} or is_submission:
         config = load_config(Path(args.config))
@@ -2861,7 +2673,7 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
         if args.command == "probe" and is_reference(args.target):
             # Pinned public checkpoints load in-process through transformers
             # on the CPU; there is no Model Lab run config to authorize.
-            if profile is not None or workers:
+            if profile is not None:
                 raise ValueError("runtime profiles do not apply to ref: models")
             return
         target = resolve_checkpoint(
@@ -2914,42 +2726,12 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
 
 
 def _read_only_command(args: argparse.Namespace) -> bool:
-    from klab.campaign.cli import READ_ONLY_COMMANDS
-
     if args.command == "tokenizer" and args.tokenizer_command == "verify":
-        return True
-    if args.command == "iteration":
-        return True
-    if args.command in {"semantic", "memorization"}:
         return True
     if args.command == "data" and args.data_command == "coverage":
         return True
     if args.command == "data" and args.data_command == "prepared-inputs":
         return args.inputs_command == "verify"
-    if (
-        args.command == "evaluation"
-        and args.evaluation_command == "fixed-slices"
-        and args.fixed_command == "verify-selection"
-    ):
-        return True
-    if args.command == "campaign":
-        return args.campaign_command in READ_ONLY_COMMANDS
-    if args.command == "recovery":
-        return args.recovery_command in {"inspect", "plan"}
-    if args.command == "family":
-        return args.family_command in {"show", "graph", "compare", "verify"}
-    if args.command == "archive":
-        return args.archive_command == "verify"
-    if args.command == "experiment":
-        return args.experiment_command in {"validate", "inspect", "diff", "explain"}
-    if args.command == "research":
-        return args.research_command in {
-            "snapshot",
-            "list",
-            "describe",
-            "validate",
-            "baseline",
-        }
     if args.command == "runtime":
         return args.runtime_command in {"probe", "status"}
     if args.command == "attempt":
@@ -2963,7 +2745,6 @@ def _read_only_command(args: argparse.Namespace) -> bool:
             "tokenizer-bakeoff",
         }
     return args.command in {
-        "runner-status",
         "inspect",
         "checkpoint",
         "report",
@@ -3008,16 +2789,7 @@ def main() -> None:
     parser = build_parser(global_args.work_dir)
     args, extras = parser.parse_known_args()
     if extras:
-        if args.command == "campaign" and args.json:
-            from klab.campaign.cli import argument_error
-
-            argument_error(
-                args.campaign_command, f"unrecognized arguments: {' '.join(extras)}"
-            )
         parser.error(f"unrecognized arguments: {' '.join(extras)}")
-    if args.command == "experiment" and args.experiment_command == "recipe":
-        args.handler(args)
-        return
     if args.command == "experiment" and args.experiment_command == "submit":
         from klab.workers.cli import validate_submit_args
 
@@ -3034,7 +2806,6 @@ def main() -> None:
             and args.data_command == "prepared-inputs"
             and args.inputs_command == "publish"
         )
-        or (args.command == "experiment" and args.experiment_command == "prepare")
     ):
         validate_tokenizer_batch_limits(
             args.tokenizer_batch_documents
@@ -3073,14 +2844,7 @@ def main() -> None:
     try:
         from klab.phase_observations import validate_observations_destination
 
-        try:
-            validate_observations_destination(args)
-        except (ValueError, OSError) as error:
-            if args.command == "campaign" and args.json:
-                from klab.campaign.cli import argument_error
-
-                argument_error(args.campaign_command, str(error))
-            raise
+        validate_observations_destination(args)
         _prepare_runtime_command(args)
     except (ValueError, OSError) as error:
         _lab_lookup_failure(args, error)
@@ -3107,11 +2871,6 @@ def main() -> None:
             from klab.lab_mode import lab_root
 
             workspace = lab_root(resolve_work_dir(args.work_dir), args.lab_dir)
-        elif args.command == "experiment" and args.experiment_command == "prepare":
-            from klab.experiments.plan import load_plan
-
-            plan = load_plan(Path(args.source).absolute())
-            workspace = resolve_work_dir(args.work_dir) / "experiments" / plan.id
         else:
             workspace = args.work_dir or Path.cwd()
         try:
@@ -3131,17 +2890,11 @@ def main() -> None:
     os.environ["KLAB_WORK_DIR"] = str(args.work_dir)
     args.storage_checks = _command_storage_checks(args)
     read_only = _read_only_command(args)
-    deferred = (
-        args.command in {"campaign", "recovery", "archive", "attempt", "lab-job"}
-        or (
-            args.command == "experiment"
-            and args.experiment_command in {"prepare", "run"}
-        )
-        or (args.command == "data" and args.data_command == "benchmark-preparation")
+    deferred = args.command in {"attempt", "lab-job"} or (
+        args.command == "data" and args.data_command == "benchmark-preparation"
     )
     if not read_only:
-        if args.command not in {"campaign", "recovery"}:
-            warn_storage_checks(args.storage_checks)
+        warn_storage_checks(args.storage_checks)
         if not deferred:
             ensure_work_dir(args.work_dir)
             if (
@@ -3175,14 +2928,8 @@ def main() -> None:
         from klab.data.sources import snapshot_verification_operation
         from klab.phase_observations import observation_session
 
-        reuse = (
-            args.command == "stage"
-            or (args.command == "data" and args.data_command == "prepare")
-            or (
-                args.command == "campaign"
-                and args.campaign_command
-                in {"plan", "status", "next", "explain", "apply", "resume", "approve"}
-            )
+        reuse = args.command == "stage" or (
+            args.command == "data" and args.data_command == "prepare"
         )
         with (
             snapshot_verification_operation(

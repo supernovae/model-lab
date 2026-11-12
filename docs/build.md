@@ -109,6 +109,4 @@ klab train model.yaml --run-id first
   registers it; see [model components](components.md) and
   [post-training](post-training.md#write-your-own-objective).
 
-For a release that must be reproduced byte for byte, a project can also carry a
-[portable recipe](recipes.md): an inventory of its declarations with
-their digests, which Lab inspects and relocates without executing anything.
+To validate, compose and derive declarations, see [configs](configs.md).

@@ -142,16 +142,6 @@ def _experiment_collect(args: argparse.Namespace) -> None:
     _json(result)
 
 
-def _collect_dispatch(args: argparse.Namespace) -> None:
-    if Path(args.lock).is_file() and args.relay_profile is None and not args.recover:
-        from klab.experiments.cli import _handle
-
-        _handle(args)
-        return
-    args.run_id = args.lock
-    _experiment_collect(args)
-
-
 def _worker_definition(args: argparse.Namespace):
     from klab.workers.models import WorkerDefinition
 
@@ -627,15 +617,16 @@ def add_commands(
     resume.add_argument("--allow-runtime-drift", action="store_true")
     _store_argument(resume, default_store)
     resume.set_defaults(handler=_experiment_resume)
-    from klab.experiments.cli import add_commands as add_plan_commands
-
-    add_plan_commands(experiment_commands)
-    collect = experiment_commands.choices["collect"]
+    collect = experiment_commands.add_parser(
+        "collect", help="Collect a finished run's artifacts from its worker"
+    )
+    collect.add_argument("run_id")
+    collect.add_argument("--json", action="store_true")
     collect.add_argument("--relay-profile", type=Path)
     collect.add_argument("--recover", action="store_true")
     collect.add_argument("--confirm-worker-lost", action="store_true")
     _store_argument(collect, default_store)
-    collect.set_defaults(handler=_collect_dispatch)
+    collect.set_defaults(handler=_experiment_collect)
 
     controller = subparsers.add_parser(
         "controller", help="Run the local experiment controller"

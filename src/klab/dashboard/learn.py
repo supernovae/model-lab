@@ -56,7 +56,7 @@ def learn_page() -> None:
     """Render packaged lessons without requiring a run database."""
     st.header("Learn")
     st.write(
-        "Choose one mechanism, inspect its shapes, then copy the standalone commands. No campaign or run store is required to browse these lessons."
+        "Choose one mechanism, inspect its shapes, then copy the standalone commands. No run store is required to browse these lessons."
     )
     controls = st.columns(2)
     scale = controls[0].selectbox(

@@ -1616,8 +1616,7 @@ def verify_build(
             and proof_store is not None
             and verification_mode == "verified_reuse"
         ):
-            from klab.experiments.artifacts import verify_artifact
-            from klab.experiments.plan import Artifact
+            from klab.experiments.artifacts import Artifact, verify_artifact
 
             manifest = _load(path / "build.json")
             verify_artifact(
@@ -1816,8 +1815,7 @@ def verify_release(
             and proof_store is not None
             and verification_mode == "verified_reuse"
         ):
-            from klab.experiments.artifacts import verify_artifact
-            from klab.experiments.plan import Artifact
+            from klab.experiments.artifacts import Artifact, verify_artifact
 
             manifest = _load(path / "manifest.json")
             if manifest["release_id"] != _release_location_id(
@@ -1848,8 +1846,7 @@ def verify_release(
 
 def _release_closure_key(path: Path, manifest: dict[str, Any]) -> tuple[object, ...]:
     """Use the artifact verifier's typed inventory and external snapshot binding."""
-    from klab.experiments.artifacts import _artifact_key
-    from klab.experiments.plan import Artifact
+    from klab.experiments.artifacts import Artifact, _artifact_key
 
     release_id = manifest["release_id"]
     return _artifact_key(

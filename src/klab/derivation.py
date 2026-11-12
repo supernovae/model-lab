@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -21,7 +20,7 @@ from klab.experiments.compiler import (
     is_dotted_path,
     patchable_config,
 )
-from klab.experiments.lock import _exclusive_bytes
+from klab.result_publication import write_bytes_exclusive
 from klab.training.manifest import config_sha256, sha256_file
 
 
@@ -172,9 +171,9 @@ def _publish(
     _unchanged(origins)
     _destination(output)
     sidecar = receipt_path(output)
-    _exclusive_bytes(sidecar, binding)
+    write_bytes_exclusive(sidecar, binding)
     try:
-        _exclusive_bytes(output, body)
+        write_bytes_exclusive(output, body)
     except BaseException:
         sidecar.unlink(missing_ok=True)
         raise
@@ -293,225 +292,4 @@ def compose_config(
         for origin in origins
     ]
     _publish(output, body, receipt, snapshots)
-    return receipt
-
-
-def _materialized_base(value: Any, source: Path) -> RunConfig:
-    from klab.recovery.provenance import declaration_reference
-
-    if isinstance(value, str):
-        target = declaration_reference(source, value)
-        read_document(target)
-        return _config(patchable_config(load_config(target)), target.parent)
-    return _config(patchable_config(value), source.parent)
-
-
-def _reference(
-    value: str, source: Path, output: Path, field: str, *, artifact: bool = False
-) -> tuple[str, Path]:
-    from klab.experiments.artifacts import _safe_path
-    from klab.recovery.provenance import declaration_reference, repository_root
-
-    target = declaration_reference(source, value)
-    _snapshot(target)
-    if artifact and _safe_path(value, source) != target:
-        raise ValueError(f"{field}: artifact and declaration targets disagree")
-    candidates: list[str] = []
-    if target.is_relative_to(output.parent):
-        candidates.append(target.relative_to(output.parent).as_posix())
-    root = repository_root(output)
-    if root is not None and target.is_relative_to(root):
-        candidates.append(target.relative_to(root).as_posix())
-    for reference in candidates:
-        if declaration_reference(output, reference) != target:
-            continue
-        if artifact:
-            try:
-                if _safe_path(reference, output) != target:
-                    continue
-            except ValueError:
-                continue
-        return reference, target
-    raise ValueError(
-        f"{field}: cannot relocate declaration reference preserving {target}"
-    )
-
-
-def _normalize_plan(
-    view: Mapping[str, Any],
-    source: Path,
-    output: Path,
-    rebindings: list[dict[str, Any]],
-) -> Any:
-    from klab.experiments.artifacts import _safe_path
-    from klab.experiments.plan import ExperimentPlan
-
-    value = _json_projection(patchable_config(view))
-    base_before = value["base_run"]
-    materialized = _materialized_base(base_before, source)
-    value["base_run"] = _json_projection(patchable_config(materialized))
-    value = _json_projection(patchable_config(ExperimentPlan.model_validate(value)))
-
-    def remember(field: str, old: Any, new: Any, target: Path) -> None:
-        if old != new:
-            rebindings.append(
-                {
-                    "path": field,
-                    "source_value": old,
-                    "output_value": new,
-                    "resolved_target": str(target),
-                }
-            )
-
-    if isinstance(base_before, Mapping):
-        before = flatten_config(base_before)
-        for field, target in flatten_config(patchable_config(materialized)).items():
-            if isinstance(target, Path):
-                remember(f"base_run.{field}", before.get(field), str(target), target)
-
-    def reference(
-        container: dict[str, Any], key: str, field: str, *, artifact: bool = False
-    ) -> None:
-        old = container.get(key)
-        if old is not None:
-            new, target = _reference(old, source, output, field, artifact=artifact)
-            container[key] = new
-            remember(field, old, new, target)
-
-    reference(value, "evaluation_suite", "evaluation_suite")
-    for index, variant in enumerate(value["corpus_variants"]):
-        reference(variant, "project", f"corpus_variants.{index}.project")
-    for index, evaluation in enumerate(value["evaluations"]):
-        reference(evaluation, "cases", f"evaluations.{index}.cases")
-    for name, artifact in value["artifacts"].items():
-        if artifact["from_phase"] is not None:
-            continue
-        field = f"artifacts.{name}.path"
-        if artifact["kind"] in {"capability_card", "prompt_set"}:
-            reference(artifact, "path", field, artifact=True)
-        else:
-            old = artifact["path"]
-            target = _safe_path(old, source)
-            artifact["path"] = str(target)
-            remember(field, old, str(target), target)
-
-    def normalize_set(patch: dict[str, Any], prefix: str) -> None:
-        for field, old in list(patch.items()):
-            if field.startswith("inputs."):
-                continue
-            new = _json_projection(
-                _resolve_paths(old, source.parent, field.split(".")[-1])
-            )
-            patch[field] = new
-            before = flatten_config({field: old})
-            after = flatten_config({field: new})
-            for leaf, target in after.items():
-                if before.get(leaf) != target:
-                    remember(f"{prefix}.{leaf}", before.get(leaf), target, Path(target))
-
-    for index, phase in enumerate(value["phases"]):
-        normalize_set(phase["set"], f"phases.{index}.set")
-    for index, axis in enumerate(value["axes"]):
-        for choice_index, choice in enumerate(axis["choices"]):
-            normalize_set(choice["set"], f"axes.{index}.choices.{choice_index}.set")
-    return ExperimentPlan.model_validate(value)
-
-
-def derive_experiment(
-    source: Path,
-    output: Path,
-    settings: Mapping[str, Any],
-    *,
-    prepared: Path | None = None,
-    max_runs: int = 1000,
-) -> dict[str, Any]:
-    """Cold-resolve a bound authored plan without locking or executing it."""
-    from klab.experiments.lock import resolve_plan
-    from klab.experiments.plan import load_plan
-    from klab.recovery.provenance import declaration_paths, declaration_reference
-
-    _settings(settings)
-    output = _destination(output)
-    source = Path(source).absolute()
-    origin = _snapshot(source)
-    declarations = [_snapshot(path) for path in declaration_paths(source, "experiment")]
-    plan = load_plan(source)
-    view = patchable_config(plan)
-    original_base = view["base_run"]
-    view["base_run"] = patchable_config(_materialized_base(original_base, source))
-    patched = apply_patch(view, settings, source="experiment")
-    rebindings: list[dict[str, Any]] = []
-    baseline = _normalize_plan(view, source, output, [])
-    candidate = _normalize_plan(patched, source, output, rebindings)
-    if isinstance(original_base, Mapping):
-        before = flatten_config(_json_projection(original_base))
-        normalized = flatten_config(view["base_run"])
-        after = flatten_config(_json_projection(patchable_config(candidate.base_run)))
-        recorded = {row["path"] for row in rebindings}
-        for field, target in normalized.items():
-            name = f"base_run.{field}"
-            if (
-                isinstance(target, Path)
-                and before.get(field) != str(target)
-                and after.get(field) == str(target)
-                and name not in recorded
-            ):
-                rebindings.append(
-                    {
-                        "path": name,
-                        "source_value": before.get(field),
-                        "output_value": str(target),
-                        "resolved_target": str(target),
-                    }
-                )
-    if isinstance(original_base, str):
-        target = declaration_reference(source, original_base)
-        rebindings.append(
-            {
-                "path": "base_run",
-                "source_value": original_base,
-                "output_value": _json_projection(patchable_config(candidate.base_run)),
-                "resolved_target": str(target),
-            }
-        )
-    preparation = None
-    preparation_origin = None
-    if prepared is not None:
-        preparation_origin = _snapshot(Path(prepared))
-        preparation = read_document(Path(prepared))
-        if preparation.get("format") != "experiment-preparation-v1":
-            raise ValueError("expected experiment-preparation-v1")
-    body = _body(candidate)
-    staging = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            dir=output.parent,
-            prefix=".derivation-validation-",
-            suffix=".yaml",
-            delete=False,
-        ) as stream:
-            staging = Path(stream.name)
-            stream.write(body)
-        resolve_plan(
-            load_plan(staging), staging, prepared=preparation, max_runs=max_runs
-        )
-    finally:
-        if staging is not None:
-            staging.unlink(missing_ok=True)
-    receipt = _receipt(
-        "experiment_plan",
-        origin,
-        output,
-        body,
-        settings,
-        baseline,
-        candidate,
-        rebindings,
-    )
-    receipt["origin_declarations"] = declarations
-    origins = [origin, *declarations]
-    if preparation_origin is not None:
-        receipt["preparation"] = preparation_origin
-        origins.append(preparation_origin)
-    _publish(output, body, receipt, origins)
     return receipt

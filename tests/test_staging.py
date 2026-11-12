@@ -13,8 +13,7 @@ import klab.staging as staging_module
 from klab.config.models import RunConfig
 from klab.data.packing import prepare_data
 from klab.data.tokenizer import load_tokenizer
-from klab.experiments.artifacts import verify_artifact
-from klab.experiments.plan import Artifact
+from klab.experiments.artifacts import Artifact, verify_artifact
 from klab.model.portable_engram import export_portable_engram
 from klab.resource_envelope import ResourceEnvelope
 from klab.staging import _read_sealed, stage

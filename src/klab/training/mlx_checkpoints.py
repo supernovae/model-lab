@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from safetensors import SafetensorError
 from safetensors.numpy import load_file, save_file
 
 from klab.canonical import canonical_json, reject_duplicate_keys
@@ -513,41 +512,6 @@ def write_native_state(
         }
         for name in (_STATE_FILE, _OPTIMIZER_FILE)
     ]
-
-
-def verify_native_state(directory: Path, files: Mapping[str, Path]) -> list[str]:
-    """Validate the MLX native state without importing MLX."""
-    errors: list[str] = []
-    state_path, optimizer_path = files.get(_STATE_FILE), files.get(_OPTIMIZER_FILE)
-    if state_path is None or optimizer_path is None:
-        return ["MLX native state files are missing"]
-    try:
-        state = strict_json(state_path)
-        if (
-            set(state) != _STATE_FIELDS
-            or state.get("state_codec") != CODEC
-            or type(state.get("state_codec_version")) is not int
-            or state["state_codec_version"] != CODEC_VERSION
-        ):
-            raise ValueError("invalid or unsupported MLX native state")
-        arrays = load_file(optimizer_path)
-        references = _array_keys(state["optimizer"])
-        if _array_keys(state["scaler"]) or _array_keys(
-            state["optimizer_parameter_names"]
-        ):
-            raise ValueError("only MLX optimizer arrays may be stored in safetensors")
-        if set(arrays) != references:
-            raise ValueError("native optimizer safetensors inventory differs from tree")
-        optimizer = _unflatten(state["optimizer"], arrays)
-        rng = _decode_rng(state["rng"])
-        _unflatten(state["scaler"], arrays)
-        _unflatten(state["optimizer_parameter_names"], arrays)
-        if not isinstance(optimizer, dict):
-            raise TypeError("MLX optimizer state must be a dictionary")
-        validate_rng(rng)
-    except (OSError, ValueError, TypeError, SafetensorError) as error:
-        errors.append(str(error))
-    return errors
 
 
 def load_native_state(directory: Path) -> dict[str, object]:

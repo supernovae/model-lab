@@ -4,7 +4,7 @@
   "id": "dense",
   "title": "Dense decoder baseline",
   "mechanism_kind": "model",
-  "summary": "Build and probe the ordinary tied-embedding dense decoder directly; no campaign is required to inspect its forward shapes or initialized behavior.",
+  "summary": "Build and probe the ordinary tied-embedding dense decoder directly to inspect its forward shapes and initialized behavior.",
   "benefit_scope": ["training", "inference", "capacity"],
   "steps": [
     {"explanation": "Token IDs are embedded, processed by pre-norm causal decoder blocks, normalized, and projected through the tied vocabulary head.", "shapes": ["[B,T] token IDs → [B,T,D] embeddings", "[B,T,D] decoder output → [B,T,V] logits"], "observe": ["layer hook input/output shapes", "input/logit shapes", "No dense-attention-specific architecture metric is emitted."], "source_path": "src/klab/model/transformer.py", "source_symbol": "DenseLM"},

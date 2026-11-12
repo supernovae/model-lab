@@ -25,11 +25,38 @@ from klab.data.packing import TokenBlockDataset, supervision_requires_mask
 from klab.evaluation.evidence import validate_held_out_report
 from klab.evaluation.generation import generate_with_token_ids
 from klab.evaluation.inference import load_run
-from klab.evaluation.reference_exercise import PROMPTS
 from klab.model.inspection import parameter_inventory
 from klab.runtime_profile import RuntimeAuthorization
 from klab.training.checkpoints import CheckpointManager
 from klab.training.manifest import IDENTITY_VERSION, read_manifest, sha256_file
+
+# Short continuation prompts for the post-training generation check.
+PROMPTS: tuple[tuple[str, str], ...] = (
+    (
+        "simple-continuation",
+        "Once upon a time, a little rabbit found a shiny red apple.",
+    ),
+    (
+        "named-character-continuity",
+        "Mia and her brother Leo built a small boat together. Mia carried the boat to the pond, and Leo",
+    ),
+    (
+        "color-object-continuity",
+        "A blue kite flew over the green meadow. The kite was blue, and the meadow was",
+    ),
+    (
+        "temporal-causal-continuation",
+        "After the rain stopped, Sam opened the door. The path was wet, so Sam",
+    ),
+    (
+        "ordinary-sentence-completion",
+        "The baker put warm bread on the table, and everyone",
+    ),
+    (
+        "odd-out-of-domain",
+        "A tiny moon made of brass hummed quietly beside the library clock.",
+    ),
+)
 
 FORMAT = "klab_post_train_triage_v1"
 MAX_BYTES = 256 * 1024

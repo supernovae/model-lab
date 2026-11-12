@@ -112,10 +112,6 @@ def load_history(
     return entries, rejected
 
 
-def load_entries(lab_dir: Path, limit: int = 500) -> list[ProbeEntry]:
-    return load_history(lab_dir, limit)[0]
-
-
 def live_batteries(lab_dir: Path, now: datetime | None = None) -> list[dict[str, Any]]:
     """Batteries whose progress file says running and was updated recently."""
     now = now or datetime.now(UTC)

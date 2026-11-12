@@ -117,7 +117,7 @@ A run uses one host. Several GPUs on that host can share one run, and the
 | Post-training | Instruction tuning, distillation, preference optimization, chat templates and Hugging Face export | [Post-training](docs/post-training.md) |
 | Evaluation | Held-out loss, probe tiers with verdicts, standard benchmarks, comparison with public reference models | [Probes](docs/probes.md) |
 | Inspection | Per-token loss, attention maps, expert routing, memory lookups, chat, a local HTTP API and a dashboard | [Models](docs/models.md) |
-| Scheduling | Independent runs, worker queues, hosted notebooks and multi-stage campaigns | [Experiments](docs/experiments.md) |
+| Scheduling | Independent runs, matrices and worker queues on local machines, Colab or rented GPUs | [Experiments](docs/experiments.md) |
 
 ## Where models live
 

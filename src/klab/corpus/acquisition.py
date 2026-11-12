@@ -1604,8 +1604,7 @@ def verify_snapshot(
         and proof_store is not None
         and verification_mode == "verified_reuse"
     ):
-        from klab.experiments.artifacts import verify_artifact
-        from klab.experiments.plan import Artifact
+        from klab.experiments.artifacts import Artifact, verify_artifact
 
         manifest = read_metadata(path / "manifest.json")
         verify_artifact(
@@ -2070,7 +2069,7 @@ def acquire(
                     continue
         except OSError, ValueError, TypeError, KeyError, json.JSONDecodeError:
             pass
-        # An interrupted campaign can publish verified source snapshots before
+        # An interrupted run can publish verified source snapshots before
         # writing its final lock. Only immutable upstream revisions are reusable.
         parent = snapshot_root / source.id
         if (

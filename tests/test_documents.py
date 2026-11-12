@@ -10,7 +10,6 @@ import pytest
 import yaml
 
 from klab.documents import read_document
-from klab.experiments.plan import read_document as plan_read_document
 
 
 @pytest.mark.parametrize("suffix", ["yaml", "json", "JSON"])
@@ -19,7 +18,6 @@ def test_data_parity_and_no_path_interpretation(tmp_path, suffix):
     path = tmp_path / f"input.{suffix}"
     path.write_text(yaml.safe_dump(raw) if suffix == "yaml" else json.dumps(raw))
     assert read_document(path) == raw
-    assert plan_read_document is read_document
     assert list(tmp_path.iterdir()) == [path]
 
 
@@ -133,21 +131,6 @@ def test_missing_and_invalid_utf8_have_source(tmp_path):
         read_document(path)
 
 
-def test_plan_schema_is_separate_and_does_not_open_artifacts(tmp_path):
-    from klab.experiments.plan import load_plan
-
-    path = tmp_path / "plan.yaml"
-    path.write_text("plan_version: 1\nid: parsed\nbase_run: absent.yaml\n")
-    plan = load_plan(path)
-    assert plan.base_run == "absent.yaml"
-    assert list(tmp_path.iterdir()) == [path]
-    path.write_text(path.read_text() + "unknown: true\n")
-    assert read_document(path)["unknown"] is True
-    with pytest.raises(ValueError, match="extra_forbidden"):
-        load_plan(path)
-    assert list(tmp_path.iterdir()) == [path]
-
-
 def test_model_components_do_not_import_workflow_consumers():
     """Fence the computational package, not adapters with known coupling debt."""
     import ast
@@ -157,7 +140,6 @@ def test_model_components_do_not_import_workflow_consumers():
     root = Path(klab.__file__).parent / "model"
     forbidden = (
         "klab.experiments",
-        "klab.campaign",
         "klab.lab_mode",
         "klab.research",
         "klab.cli",

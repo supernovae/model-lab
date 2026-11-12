@@ -16,7 +16,7 @@ from pathlib import Path
 class AttemptCommand:
     args: tuple[str, ...]
     operation: str
-    effect: str  # preparation, inspection, stage, train, fixed_score, continuation
+    effect: str  # preparation, inspection, stage or train
     work_dir: Path | None
     options: dict[str, str | bool]
     monitor: dict[str, str] | None = None
@@ -188,54 +188,6 @@ _SHAPES: dict[str, tuple[int, set[str], set[str], str]] = {
         {"--allow-runtime-drift"},
         "train",
     ),
-    "evaluation fixed-slices verify": (
-        1,
-        {
-            "--release",
-            "--tokenizer-config",
-            "--family-inventory",
-            "--expected-profile-sha256",
-            "--expected-family-sha256",
-        },
-        {"--json"},
-        "inspection",
-    ),
-    "evaluation fixed-slices score": (
-        2,
-        {
-            "--release",
-            "--tokenizer-config",
-            "--family-inventory",
-            "--expected-profile-sha256",
-            "--expected-family-sha256",
-            "--checkpoint",
-            "--runs-dir",
-            "--backend",
-            "--runtime",
-            "--mode",
-            "--max-forward-positions",
-        },
-        {"--json"},
-        "fixed_score",
-    ),
-    "evaluation fixed-slices continuations": (
-        2,
-        {
-            "--release",
-            "--tokenizer-config",
-            "--family-inventory",
-            "--expected-profile-sha256",
-            "--expected-family-sha256",
-            "--checkpoint",
-            "--runs-dir",
-            "--backend",
-            "--runtime",
-        },
-        {"--json"},
-        "continuation",
-    ),
-    "evaluation fixed-slices select": (1, {"--output"}, {"--json"}, "preparation"),
-    "evaluation fixed-slices verify-selection": (2, set(), {"--json"}, "inspection"),
     "monitor-baseline": (1, {"--output", "--seconds"}, {"--json"}, "preparation"),
     "report": (
         1,
@@ -245,12 +197,6 @@ _SHAPES: dict[str, tuple[int, set[str], set[str], str]] = {
     ),
     "checkpoint verify": (1, {"--config"}, {"--json"}, "inspection"),
     "attempt status": (0, {"--ledger"}, set(), "inspection"),
-    "campaign apply": (
-        1,
-        {"--only-stage", "--max-wait-seconds", "--runtime"},
-        {"--execute-runs", "--cold-verify", "--json"},
-        "campaign",
-    ),
 }
 
 _REQUIRED: dict[str, set[str]] = {
@@ -297,34 +243,8 @@ _REQUIRED: dict[str, set[str]] = {
     },
     "stage": {"--through", "--output"},
     "train": {"--run-id", "--runs-dir"},
-    "evaluation fixed-slices score": {
-        "--release",
-        "--tokenizer-config",
-        "--family-inventory",
-        "--expected-profile-sha256",
-        "--expected-family-sha256",
-        "--checkpoint",
-        "--runs-dir",
-        "--backend",
-        "--runtime",
-        "--mode",
-        "--max-forward-positions",
-    },
-    "evaluation fixed-slices continuations": {
-        "--release",
-        "--tokenizer-config",
-        "--family-inventory",
-        "--expected-profile-sha256",
-        "--expected-family-sha256",
-        "--checkpoint",
-        "--runs-dir",
-        "--backend",
-        "--runtime",
-    },
-    "evaluation fixed-slices select": {"--output"},
     "monitor-baseline": {"--output", "--seconds"},
     "attempt status": {"--ledger"},
-    "campaign apply": {"--only-stage"},
 }
 
 
@@ -447,12 +367,5 @@ def classify_attempt_command(command: list[str], *, depth: int = 0) -> AttemptCo
                         raise ValueError(
                             "acquisition step limits are outside their bounds"
                         )
-            if name == "evaluation fixed-slices score":
-                mode = options.get("--mode")
-                if mode not in {"validation", "test", "utility"}:
-                    raise ValueError("invalid fixed score mode")
-                expected = "4608" if mode == "utility" else "3084"
-                if options.get("--max-forward-positions") != expected:
-                    raise ValueError("fixed score must use the exact declared cap")
             return AttemptCommand(tuple(words), name, effect, work_dir, options)
     raise ValueError("unreviewed native attempt operation")

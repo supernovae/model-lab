@@ -10,9 +10,7 @@ from typing import Literal
 from klab.canonical import canonical_digest, canonical_json
 from klab.training.manifest import read_manifest
 
-NativeReceiptKind = Literal[
-    "train", "panel", "campaign_run", "campaign_panel", "campaign_evaluation", "none"
-]
+NativeReceiptKind = Literal["train", "none"]
 
 
 def _training(
@@ -109,98 +107,19 @@ def _training(
     return terminal["step"] - prior_step, terminal["tokens_seen"] - prior_tokens, 0, 0
 
 
-def _panel(path: Path) -> tuple[int, int, int, int]:
-    from klab.evaluation.panel import verify_panel_result
-
-    panel = verify_panel_result(path, verification_mode="cold")
-    rows = panel["rows"]
-    if not rows or any(row["status"] != "COMPLETED" for row in rows):
-        # A failed row can have unrecorded partial output. The full reservation
-        # stays charged, with actual counters deliberately unestablished.
-        raise ValueError("panel has incomplete or failed generation attempts")
-    return 0, 0, len(rows), sum(len(row["token_ids"]) for row in rows)
-
-
-def _campaign(
-    source: Path, work_dir: Path, stage_id: str, *, expected_content_sha256: str
-) -> tuple[str, Path]:
-    from klab.campaign.engine import CampaignEngine
-
-    engine = CampaignEngine(source, work_dir, cold_verify=True)
-    status = engine.inspect("status")
-    rows = {row["id"]: row for row in status["stages"]}
-    if stage_id not in rows or rows[stage_id]["state"] != "COMPLETE":
-        raise ValueError("contracted Campaign stage is not complete")
-    stage = engine.stages[stage_id]
-    if stage.kind not in {"experiment_run", "generation_panel", "evaluation"}:
-        raise ValueError("contracted Campaign stage cannot provide native counters")
-    run_stage = (
-        stage
-        if stage.kind == "experiment_run"
-        else engine.stages[engine.stages[stage.collect].run]
-    )
-    lock = engine._lock(rows, run_stage.plan)
-    if lock.scientific_sha256 != expected_content_sha256:
-        raise ValueError("Campaign scientific lock differs from attempt contract")
-    location = rows[stage_id].get("availability", {}).get("path")
-    if not isinstance(location, str):
-        raise TypeError("completed Campaign stage lacks native receipt path")
-    return stage.kind, Path(location)
-
-
 def verify_native_phase_counters(
     kind: NativeReceiptKind,
     receipt_path: Path | None,
     *,
-    campaign_stage: str | None = None,
-    campaign_work_dir: Path | None = None,
     parent_checkpoint_path: Path | None = None,
-    expected_content_sha256: str,
 ) -> tuple[int, int, int, int]:
     """Return (updates, nonmasked targets, calls, completion IDs), or fail closed."""
     if kind == "none":
-        if (
-            receipt_path is not None
-            or campaign_stage is not None
-            or parent_checkpoint_path is not None
-        ):
+        if receipt_path is not None or parent_checkpoint_path is not None:
             raise ValueError("counter-free phase must not claim a native receipt")
         return 0, 0, 0, 0
     if receipt_path is None or not receipt_path.is_absolute():
         raise ValueError("absolute native receipt path required")
-    if (
-        kind in {"panel", "campaign_panel", "campaign_evaluation"}
-        and parent_checkpoint_path is not None
-    ):
-        raise ValueError("panel receipt cannot claim a training parent")
-    if kind in {"campaign_run", "campaign_panel", "campaign_evaluation"}:
-        if campaign_stage is None or campaign_work_dir is None:
-            raise ValueError("Campaign receipt requires stage and work directory")
-        actual_kind, path = _campaign(
-            receipt_path,
-            campaign_work_dir,
-            campaign_stage,
-            expected_content_sha256=expected_content_sha256,
-        )
-        expected_kind = {
-            "campaign_run": "experiment_run",
-            "campaign_panel": "generation_panel",
-            "campaign_evaluation": "evaluation",
-        }[kind]
-        if actual_kind != expected_kind:
-            raise ValueError("Campaign receipt stage kind changed")
-        if kind == "campaign_run":
-            return _training(path, parent_checkpoint_path)
-        if kind == "campaign_panel":
-            return _panel(path)
-        from klab.evaluation.suite import verify_evaluation_index
-
-        verify_evaluation_index(path, verification_mode="cold")
-        return 0, 0, 0, 0
-    if campaign_stage is not None or campaign_work_dir is not None:
-        raise ValueError("direct native receipt cannot specify Campaign binding")
     if kind == "train":
         return _training(receipt_path, parent_checkpoint_path)
-    if kind == "panel":
-        return _panel(receipt_path)
     raise ValueError("unknown native receipt kind")

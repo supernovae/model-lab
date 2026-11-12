@@ -78,7 +78,7 @@ uv run --locked --extra cpu pytest -q -m slow
 `tests/conftest.py` applies the `slow` marker to the base node ids listed in
 [`tests/slow_tests.txt`](../tests/slow_tests.txt), so every parametrized case
 of a listed test follows. The slow tests are fewer than a tenth of the suite
-but take more than 90% of its test time: end-to-end campaign, corpus and
+but take more than 90% of its test time: end-to-end worker, corpus and
 lifecycle runs, tiny training, and native subprocess monitors.
 `tests/test_slow_list.py` fails when an entry no longer names a real test.
 
@@ -164,17 +164,12 @@ conftest, the conftest also caps Torch's intra-op pool without importing Torch
 for Torch-free tests. Like CI, it leaves the inter-op pool unchanged. These limits
 apply only to test processes; they do not change lab runtime defaults.
 
-Campaign status projection verifies each completed dependency-DAG stage once
-per traversal, including shared upstream nodes. Later projections and checks
-before dispatch verify again; no completed-stage cache survives the traversal.
-This is not generic snapshot proof reuse across projections or commands.
-
 Verifier authority walks deduplicate module scheduling and file discovery only
 within one closure walk. Each later authority lookup still reads and hashes the
 verifier source bytes. Proof lookup diagnostics use the same authority that was
 compared with the receipt, rather than walking the closure again for telemetry.
 
-The CPU gate includes native Campaign integrations with real worker startup,
+The CPU gate includes worker integrations with real worker startup,
 staging, training, checkpoint transfer, continuation, and evaluation. These can
 take several minutes. A whole-command deadline must allow all separately
 bounded runs and the subsequent verification; a faulthandler stack report is

@@ -74,7 +74,6 @@ def test_try_writes_one_sealed_record_with_identity_and_heldout_scores(
     assert record["delta"] == {"model.ffn_dim": {"base": 96, "variant": 128}}
     assert record["declared_delta"] == {"model.ffn_dim": 128}
     assert record["code"]["source_identity_sha256"]
-    assert "campaign_approval_and_reconciliation" in record["skipped_release_gates"]
     for arm in ("baseline", "candidate"):
         row = record["arms"][arm]
         assert row["status"] == "completed"
@@ -327,7 +326,7 @@ def test_help_lists_build_first_and_every_command_once() -> None:
     epilog = parser.epilog or ""
     (commands,) = [action for action in parser._actions if action.dest == "command"]
     names = set(commands.choices)
-    assert {"try", "report", "campaign", "experiment", "attempt"} <= names
+    assert {"try", "report", "experiment", "attempt"} <= names
     listed = [
         line.split()[0]
         for line in epilog.splitlines()

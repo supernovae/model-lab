@@ -18,7 +18,7 @@ from typing import Any
 from klab.bottleneck_observations import BottleneckObserver
 from klab.canonical import canonical_json
 from klab.config.models import RunConfig
-from klab.experiments.lock import _exclusive_bytes
+from klab.result_publication import write_bytes_exclusive
 from klab.training.manifest import sha256_file
 
 
@@ -74,22 +74,6 @@ def _config_inventory(config_path: Path) -> tuple[set[Path], set[Path]]:
     return roots, files
 
 
-def _tokenizer_config_inventory(config_path: Path) -> tuple[set[Path], set[Path]]:
-    from klab.config import load_tokenizer_config
-
-    config = load_tokenizer_config(config_path)
-    roots = {_path(config.dataset.cache_dir), _path(config.output_dir)}
-    files = {config_path}
-    for field in ("train_path", "validation_path", "source_manifest_path"):
-        value = getattr(config.dataset, field)
-        if value is not None:
-            path = _path(value)
-            files.add(path)
-            if field == "source_manifest_path":
-                roots.add(path if path.is_dir() else path.parent)
-    return roots, files
-
-
 def _config_paths(args: Any) -> tuple[set[Path], set[Path]]:
     """Return protected roots and exact files for direct native commands."""
     config_value = getattr(args, "config", None)
@@ -105,94 +89,6 @@ def _config_paths(args: Any) -> tuple[set[Path], set[Path]]:
     return roots, files
 
 
-def _campaign_paths(args: Any) -> tuple[set[Path], set[Path]]:
-    """Resolve Campaign paths through its typed declaration helpers."""
-    from klab.campaign.plan import (
-        ArtifactReference,
-        CorpusRelease,
-        DataPrepare,
-        DatasetSnapshot,
-        ExperimentPlanStage,
-        TokenizerReference,
-        TokenizerTrain,
-        load_campaign,
-        operational_path,
-        safe_path,
-    )
-    from klab.campaign.state import CampaignStore
-    from klab.workdir import resolve_work_dir
-
-    source = _path(args.source)
-    plan = load_campaign(source)
-    base = source.parent
-    roots = {CampaignStore(plan, resolve_work_dir(args.work_dir)).root.absolute()}
-    files = {source}
-    for stage in plan.stages:
-        if isinstance(stage, DatasetSnapshot):
-            roots.update(
-                {
-                    operational_path(base, stage.output).absolute(),
-                    operational_path(base, stage.cache_dir).absolute(),
-                }
-            )
-            files.add(operational_path(base, stage.lock).absolute())
-        elif isinstance(stage, (ArtifactReference, TokenizerReference)):
-            assert stage.artifact.path is not None
-            artifact = operational_path(base, stage.artifact.path).absolute()
-            files.add(artifact)
-            roots.add(artifact if artifact.is_dir() else artifact.parent)
-        elif isinstance(stage, CorpusRelease):
-            project = safe_path(base, stage.project).absolute()
-            files.add(project)
-            roots.add(resolve_work_dir(args.work_dir) / "corpora")
-        elif isinstance(stage, (TokenizerTrain, DataPrepare)):
-            config = safe_path(base, stage.config).absolute()
-            config_roots, config_files = (
-                _tokenizer_config_inventory(config)
-                if isinstance(stage, TokenizerTrain)
-                else _config_inventory(config)
-            )
-            roots.update(config_roots)
-            files.update(config_files)
-        elif isinstance(stage, ExperimentPlanStage):
-            from klab.experiments.plan import base_run_config, load_plan
-            from klab.recovery.provenance import declaration_reference
-
-            source_plan = safe_path(base, stage.source).absolute()
-            files.add(source_plan)
-            experiment = load_plan(source_plan)
-            config_roots, config_files = _run_config_inventory(
-                base_run_config(experiment, source_plan)
-            )
-            roots.update(config_roots)
-            files.update(config_files)
-            if isinstance(experiment.base_run, str):
-                files.add(declaration_reference(source_plan, experiment.base_run))
-            for artifact in experiment.artifacts.values():
-                if artifact.path is not None:
-                    path = operational_path(
-                        source_plan.parent, artifact.path
-                    ).absolute()
-                    files.add(path)
-                    roots.add(path if path.is_dir() else path.parent)
-            if stage.lock is not None:
-                lock = operational_path(base, stage.lock).absolute()
-                files.add(lock)
-                roots.add(lock if lock.is_dir() else lock.parent)
-        else:
-            for field in ("project", "suite", "panel", "policy"):
-                value = getattr(stage, field, None)
-                if value is not None:
-                    files.add(safe_path(base, value).absolute())
-            for field in ("measurement_receipt", "review"):
-                value = getattr(stage, field, None)
-                if value is not None:
-                    path = operational_path(base, value).absolute()
-                    files.add(path)
-                    roots.add(path if path.is_dir() else path.parent)
-    return roots, files
-
-
 def _operation(args: Any) -> str | None:
     if (
         getattr(args, "command", None) == "data"
@@ -201,10 +97,6 @@ def _operation(args: Any) -> str | None:
         return "data.prepare"
     if getattr(args, "command", None) == "stage":
         return "stage"
-    if getattr(args, "command", None) == "campaign" and getattr(
-        args, "campaign_command", None
-    ) in {"plan", "status", "next", "explain", "apply", "resume"}:
-        return f"campaign.{args.campaign_command}"
     return None
 
 
@@ -228,21 +120,13 @@ def validate_observations_destination(args: Any) -> None:
         raise FileExistsError(f"observations output already exists: {destination}")
     if not destination.parent.is_dir():
         raise ValueError("observations output parent must already exist")
-    roots, files = (
-        _campaign_paths(args)
-        if getattr(args, "command", None) == "campaign"
-        else _config_paths(args)
-    )
+    roots, files = _config_paths(args)
     _reject_protected(destination, roots)
     if destination in files:
         raise ValueError("observations output must not replace an input file")
     args.observations_output = destination
     args._phase_observation_operation = operation
-    args._phase_observation_input = (
-        _path(args.source)
-        if getattr(args, "command", None) == "campaign"
-        else _path(args.config)
-    )
+    args._phase_observation_input = _path(args.config)
 
 
 def set_observation_runtime(
@@ -299,22 +183,14 @@ def _runtime(args: Any) -> dict[str, object]:
             "requested": profile.model_dump(mode="json"),
             "resolved": None,
             "reason": "execution_runtime_not_resolved",
-            "observation_scope": (
-                "controller_host_process_tree"
-                if command == "campaign"
-                else "host_process_tree"
-            ),
+            "observation_scope": "host_process_tree",
         }
     requested = getattr(args, "runtime", None)
     return {
         "requested": {"id": requested} if requested is not None else None,
         "resolved": None,
         "reason": "runtime_not_resolved",
-        "observation_scope": (
-            "controller_host_process_tree"
-            if command == "campaign"
-            else "host_process_tree"
-        ),
+        "observation_scope": "host_process_tree",
     }
 
 
@@ -414,7 +290,7 @@ def observation_session(args: Any) -> Iterator[BottleneckObserver | None]:
                     else {"records": "counter_unavailable_or_incomplete"}
                 ),
             }
-            _exclusive_bytes(destination, canonical_json(report) + b"\n")
+            write_bytes_exclusive(destination, canonical_json(report) + b"\n")
         except BaseException as error:  # noqa: BLE001 -- diagnostic publication cannot replace the workflow result
             print(
                 f"klab: warning: could not publish phase observations: {error}",

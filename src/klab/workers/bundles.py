@@ -434,8 +434,7 @@ def verify_portable_corpus_binding(
 
 def _copy_portable_corpus(config: RunConfig, assets: Path) -> None:
     from klab.corpus.export import verify_release_export
-    from klab.experiments.artifacts import verify_artifact
-    from klab.experiments.plan import Artifact
+    from klab.experiments.artifacts import Artifact, verify_artifact
 
     binding = verify_release_export(config.dataset)
     tokenizer = config.tokenizer.path

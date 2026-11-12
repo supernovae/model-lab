@@ -1,2 +1,0 @@
-Local Campaign example tiny_developer document 1.
-A developer records explicit inputs before a bounded CPU experiment begins.

@@ -28,6 +28,11 @@ summary, not a task list or a release promise.
   export. Next: low-rank adapters, rollout-based methods, quantization, and
   speculative decoding with corpus and draft-model drafters
   ([#358](https://github.com/supernovae/model-lab/issues/358)).
+- **Studies built from tries.** Run a series of tries against one baseline
+  and compare them in one report, with paired seeds.
+- **Compute anywhere.** Strengthen the worker queue so the same runs go to a
+  local machine, Colab or GPUs rented by the hour on Vast.ai and similar
+  providers, with relay recovery and cost tracking.
 - **A reliable loop.** Fix the nightly full suite
   ([#79](https://github.com/supernovae/model-lab/issues/79)) and keep the
   command set small.

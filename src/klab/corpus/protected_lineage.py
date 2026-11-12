@@ -6,9 +6,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from klab.campaign.state import publish_immutable
 from klab.corpus.jsonl_records import records_from_path
 from klab.corpus.release import verify_release
+from klab.result_publication import publish_immutable
 from klab.training.manifest import sha256_file
 
 

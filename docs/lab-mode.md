@@ -153,6 +153,3 @@ One seed per arm and one held-out loss make a lab verdict a direction to
 follow up, not a significance test. Confirm a gain with paired seeds before
 claiming it. Each try runs in one process on one device; spread larger sweeps
 over [workers](workers.md).
-
-Lab mode deliberately skips plan locks, approvals and campaign reconciliation.
-Results you will publish or build a model family on use [campaigns](campaigns.md).

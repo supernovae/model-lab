@@ -199,23 +199,6 @@ def _ephemeral_config(config: RunConfig, backend: str | None) -> RunConfig:
     )
 
 
-def evaluation_config(
-    run_id: str,
-    runs_dir: Path,
-    checkpoint: str | None = None,
-    backend: str | None = None,
-    *,
-    proof_store: ProofStore | None = None,
-    verification_mode: VerificationMode = "cold",
-) -> RunConfig:
-    """Verify the training checkpoint, then select an ephemeral inference runtime."""
-    run = (runs_dir / run_id).resolve()
-    config, _, _, _, _ = _verified_checkpoint(
-        run, checkpoint, proof_store=proof_store, verification_mode=verification_mode
-    )
-    return _ephemeral_config(config, backend)
-
-
 def load_run(
     run_id: str,
     runs_dir: Path,
