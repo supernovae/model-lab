@@ -719,10 +719,10 @@ rejected with `--matrix`, including explicitly supplied default values.
 Oversized documents fail before encoding; token limits never truncate a selected
 story. Batch 1 uses scalar `Tokenizer.encode`; larger batches use Rust
 `encode_batch` in source order, preserving EOS and byte-address semantics.
-Preparation uses a fresh, Torch-free tokenizer child with
-`TOKENIZERS_PARALLELISM=true` and a Rayon cap installed before its first encode:
-four threads for one child, or the explicit envelope's `max_workers`, always
-bounded by measured CPU and RAM capacity.
+Preparation uses fresh, Torch-free, single-threaded tokenizer workers from the
+shared [encoder pool](token-store.md#one-encoder): four by default, or the
+explicit envelope's `max_workers`, always bounded by measured CPU and RAM
+capacity. A batch is spread over the workers and returned in source order.
 Tokenizer training remains scalar with its existing parallelism policy.
 Document and byte caps, resource policies, timings, and profiles do not enter
 the scientific manifest or cache identity.

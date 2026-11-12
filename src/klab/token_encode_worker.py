@@ -1,12 +1,19 @@
-"""Tokenizer worker for the token store; imports no torch and no data package.
+"""The tokenizer worker behind every preparation path; imports no torch.
 
 Run as ``python -m klab.token_encode_worker``. Each worker owns one
 single-threaded tokenizer and speaks length-prefixed binary frames on its
-standard streams. A request is a run of raw JSONL lines; the worker parses and validates
-them itself, so the parent only reads bytes. A reply is the documents' token
-IDs, each document followed by EOS, as raw int32, plus raw uint32 arrays of
-per-document token counts, text sizes and line sizes. No JSON or Python integer
-list crosses the process boundary. The parent and the worker are the same trusted program.
+standard streams; ``klab.data.encoding.EncoderPool`` runs many of them. A
+request starts with one operation byte:
+
+``L``  a run of raw JSONL lines. The worker parses and validates them itself,
+       so the parent only reads bytes. The reply is the documents' token IDs,
+       each document followed by EOS, as raw int32, plus raw uint32 arrays of
+       per-document token counts, text sizes and line sizes.
+``T``  texts packed by ``pack_texts``. The reply is their token IDs as raw
+       int32, without EOS, and a raw uint32 array of per-text token counts.
+
+No JSON or Python integer list crosses the process boundary. The parent and
+the worker are the same trusted program.
 """
 
 from __future__ import annotations
@@ -105,6 +112,42 @@ def encode_lines(
     return ids, counts, text_bytes, line_bytes
 
 
+def pack_texts(texts: list[str]) -> bytes:
+    encoded = [text.encode("utf-8") for text in texts]
+    sizes = np.fromiter(map(len, encoded), dtype=np.uint32, count=len(encoded))
+    return struct.pack("<I", len(encoded)) + sizes.tobytes() + b"".join(encoded)
+
+
+def unpack_texts(payload: bytes) -> list[str]:
+    (count,) = struct.unpack_from("<I", payload)
+    sizes = np.frombuffer(payload, dtype=np.uint32, count=count, offset=4).tolist()
+    texts, position = [], 4 + 4 * count
+    for size in sizes:
+        texts.append(payload[position : position + size].decode("utf-8"))
+        position += size
+    return texts
+
+
+def encode_texts(texts: list[str]) -> tuple[np.ndarray, np.ndarray]:
+    """Tokenize texts as they are; returns ``(ids, token_counts)`` without EOS."""
+    assert _tokenizer is not None
+    if len(texts) == 1:
+        encodings = [_tokenizer.encode(texts[0], add_special_tokens=False)]
+    else:
+        encodings = _tokenizer.encode_batch(texts, add_special_tokens=False)
+    counts = np.fromiter(
+        (len(encoding.ids) for encoding in encodings),
+        dtype=np.uint32,
+        count=len(encodings),
+    )
+    ids = np.empty(int(counts.sum()), dtype=np.int32)
+    position = 0
+    for encoding, count in zip(encodings, counts.tolist(), strict=True):
+        ids[position : position + count] = encoding.ids
+        position += count
+    return ids, counts
+
+
 def write_frame(stream: BinaryIO, payload: bytes) -> None:
     stream.write(struct.pack("<Q", len(payload)))
     stream.write(payload)
@@ -129,11 +172,16 @@ def main() -> None:
     write_frame(sink, b"ready")
     sink.flush()
     while (request := read_frame(source)) is not None:
-        line_limit, source_bytes = struct.unpack("<qq", request[:16])
         try:
-            arrays = encode_lines(
-                request[16:], line_limit, None if source_bytes < 0 else source_bytes
-            )
+            if request[:1] == b"T":
+                arrays = encode_texts(unpack_texts(request[1:]))
+            else:
+                line_limit, source_bytes = struct.unpack("<qq", request[1:17])
+                arrays = encode_lines(
+                    request[17:],
+                    line_limit,
+                    None if source_bytes < 0 else source_bytes,
+                )
         except LineError as error:
             write_frame(sink, b"line")
             write_frame(sink, pickle.dumps((error.index, error.kind, error.detail)))
@@ -141,7 +189,7 @@ def main() -> None:
             write_frame(sink, b"error")
             write_frame(sink, str(error)[:512].encode("utf-8"))
         else:
-            write_frame(sink, b"ok")
+            write_frame(sink, b"ok" + bytes([len(arrays)]))
             for array in arrays:
                 write_frame(sink, array.tobytes())
         sink.flush()
