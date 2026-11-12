@@ -185,7 +185,9 @@ an immutable release with a content-derived ID.
 preparation: `build` renders admitted shards without replaying the acquisition
 audit, and `freeze` publishes the release in place without copying the payload.
 Both record what was deferred. Keep the work root and its completion records
-with the release.
+with the release. Completed phases are keyed by their inputs, configuration
+and every corpus module they can run, so a change to the corpus code renders
+them again rather than reusing old shards.
 
 `release.normalizer: normalizer-structure-v3` records retained line spans,
 removed spans with reasons and document structure, and drops metadata-only front

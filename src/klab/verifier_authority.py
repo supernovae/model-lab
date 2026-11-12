@@ -608,3 +608,31 @@ def verifier_authority(kind: str, version: int) -> dict[str, object]:
         sha256=canonical_digest(modules),
     )
     return asdict(authority)
+
+
+def local_import_closure(
+    roots: tuple[str, ...], *, within: str, exclude: frozenset[str] = frozenset()
+) -> dict[str, str]:
+    """SHA-256 of every module reachable from ROOTS by static imports inside WITHIN.
+
+    Names are relative to the ``klab`` package (``corpus.pipeline``). Imports
+    leaving the WITHIN package, or naming an EXCLUDE module, are not followed.
+    """
+    package = Path(__file__).parent
+    files: dict[str, str] = {}
+    pending = list(roots)
+    while pending:
+        name = pending.pop()
+        if name in files or name in exclude:
+            continue
+        path = package / (name.replace(".", "/") + ".py")
+        source = path.read_bytes()  # a missing root fails rather than hashing nothing
+        files[name] = hashlib.sha256(source).hexdigest()
+        imports, _, _ = _imports(source, name, package=False)
+        pending.extend(
+            imported
+            for imported in imports
+            if imported.startswith(within + ".")
+            and (package / (imported.replace(".", "/") + ".py")).is_file()
+        )
+    return dict(sorted(files.items()))
