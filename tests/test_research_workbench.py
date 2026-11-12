@@ -217,3 +217,35 @@ def test_semantic_retrieval_lesson_builds_verified_pack_and_runnable_workspace(
         "lesson-fork-left",
         "lesson-fork-right",
     )
+
+
+def _scaffolded_lessons() -> list[str]:
+    from klab.research.catalog import list_lessons
+
+    # portable-engram needs a trained memory package, which its refusal names.
+    return [lesson.id for lesson in list_lessons() if lesson.id != "portable-engram"]
+
+
+@pytest.mark.parametrize("identifier", _scaffolded_lessons())
+def test_scaffolded_readme_shows_only_existing_commands(
+    identifier: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_docs import command_problems
+
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
+    lesson = scaffold_lesson(identifier, tmp_path / identifier)
+    readme = (lesson / "README.md").read_text(encoding="utf-8")
+    assert command_problems(identifier, readme) == []
+
+
+def test_every_lesson_cites_existing_source() -> None:
+    from klab.research.catalog import list_lessons
+
+    root = Path(__file__).resolve().parents[1]
+    missing = [
+        (lesson.id, step.source_path)
+        for lesson in list_lessons()
+        for step in lesson.steps
+        if not (root / step.source_path).is_file()
+    ]
+    assert missing == []
