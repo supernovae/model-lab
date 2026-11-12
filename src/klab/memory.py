@@ -608,6 +608,16 @@ def plan_memory(
                 }
             )
             return
+        if enabled and candidate.runtime.compile_transformer_blocks:
+            decisions.append(
+                {
+                    "requested": "activation_checkpointing",
+                    "effective": False,
+                    "reason": "compiled transformer blocks exclude activation "
+                    "checkpointing; no saving was assumed",
+                }
+            )
+            return
         memory = candidate.runtime.memory.model_copy(
             update={
                 "activation_checkpointing": candidate.runtime.memory.activation_checkpointing.model_copy(

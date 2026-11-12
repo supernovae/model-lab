@@ -20,7 +20,8 @@ from typing import Any, Literal
 import numpy as np
 import torch
 from safetensors import SafetensorError
-from safetensors.torch import load_file, save_file
+from safetensors.torch import load_file
+from safetensors.torch import save as serialize_tensors
 
 from klab.canonical import canonical_json
 from klab.config.models import AdamWConfig, CheckpointRetention, RunConfig
@@ -906,14 +907,17 @@ class CheckpointManager:
                 return
             filename = f"weights-{shard_number:05d}.safetensors"
             path = destination / filename
-            save_file(current, path)
-            with path.open("rb") as handle:
+            # Hash the serialized shard as it is written, not by reading it back.
+            payload = serialize_tensors(current)
+            with path.open("xb") as handle:
+                handle.write(payload)
+                handle.flush()
                 os.fsync(handle.fileno())
             shards.append(
                 {
                     "name": filename,
-                    "sha256": _sha256(path),
-                    "bytes": path.stat().st_size,
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "bytes": len(payload),
                     "tensors": sorted(current),
                 }
             )

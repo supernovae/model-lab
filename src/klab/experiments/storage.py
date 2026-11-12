@@ -43,14 +43,27 @@ def checkpoint_generation_bounds(
     milestone_events = (
         len(checkpoints.retention.milestones) if checkpoints.retention else 0
     )
-    validation_steps = (steps - 1) // config.evaluation.every_steps
+    # Validation passes that can each save a new best checkpoint.
+    evaluation = config.evaluation
+    validation_steps = (
+        0
+        if not checkpoints.save_on_new_best
+        else ((steps - 1) // evaluation.every_steps if evaluation.every_steps else 0)
+        + (
+            training.max_tokens // evaluation.every_tokens + 1
+            if evaluation.every_tokens
+            else 0
+        )
+    )
     minute_steps = steps - 1 if checkpoints.every_minutes is not None else 0
     # With no other trigger to shift the watermark, a step cadence divisible
     # by validation cadence fires only at validation boundaries.
     disjoint_step_events = scheduled_steps
     if (
         checkpoints.every_steps is not None
-        and checkpoints.every_steps % config.evaluation.every_steps == 0
+        and evaluation.every_tokens is None
+        and evaluation.every_steps is not None
+        and checkpoints.every_steps % evaluation.every_steps == 0
         and not explicit
         and not milestone_events
         and checkpoints.every_tokens is None
@@ -97,8 +110,19 @@ def checkpoint_generation_bounds(
             else 0
         )
         validation_steps = (
-            (training.max_steps - 1) // config.evaluation.every_steps
-            - completed_steps // config.evaluation.every_steps
+            0
+            if not checkpoints.save_on_new_best
+            else (
+                (training.max_steps - 1) // evaluation.every_steps
+                - completed_steps // evaluation.every_steps
+                if evaluation.every_steps
+                else 0
+            )
+            + (
+                remaining_tokens // evaluation.every_tokens + 1
+                if evaluation.every_tokens
+                else 0
+            )
         )
         minute_steps = steps - 1 if checkpoints.every_minutes is not None else 0
         upper = 2 + min(

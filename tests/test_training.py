@@ -1288,3 +1288,185 @@ def test_require_prepared_refuses_to_tokenize_then_reuses_published_cache(
 
     prepare_data(short, load_tokenizer(short.tokenizer.path))
     assert train(short, run_id="prepared", require_prepared=True) == "prepared"
+
+
+def _checkpoint_steps(run: Path) -> list[int]:
+    return [
+        json.loads(path.read_text())["step"]
+        for path in sorted((run / "checkpoints").glob("step_*_gen_*/manifest.json"))
+    ]
+
+
+def _final_observation(root: Path, run_id: str) -> dict:
+    return next(
+        record["payload"]
+        for record in ExperimentStore(root).get_runtime_progress_records(root, run_id)
+        if record["kind"] == "runtime_final_observation"
+    )
+
+
+def test_background_checkpoint_is_written_while_training_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A checkpoint written off the training thread holds the state at its step."""
+    import threading
+
+    updates = 0
+    two_more_updates = threading.Event()
+    waited: list[bool] = []
+    original_update = PyTorchEngine.train_update
+    original_save = CheckpointManager.save
+
+    def counted_update(self, *args, **kwargs):
+        nonlocal updates
+        result = original_update(self, *args, **kwargs)
+        updates += 1
+        if updates >= 2:
+            two_more_updates.set()
+        return result
+
+    def held_save(self, snapshot, validation_loss=None):
+        writer = threading.current_thread().name.startswith("klab-checkpoint")
+        if writer and not waited:
+            # The step-0 write stays open until training has moved on.
+            waited.append(two_more_updates.wait(timeout=60))
+        return original_save(self, snapshot, validation_loss)
+
+    background = config(tmp_path / "background")
+    monkeypatch.setattr(PyTorchEngine, "train_update", counted_update)
+    monkeypatch.setattr(CheckpointManager, "save", held_save)
+    train(background, run_id="run")
+    monkeypatch.undo()
+    assert waited == [True]
+
+    inline = config(tmp_path / "inline")
+    inline = inline.model_copy(
+        update={
+            "checkpoint": inline.checkpoint.model_copy(update={"background": False})
+        }
+    )
+    train(inline, run_id="run")
+
+    runs = [item.logging.root_dir / "run" for item in (background, inline)]
+    assert _checkpoint_steps(runs[0]) == _checkpoint_steps(runs[1])
+    generations = [sorted((run / "checkpoints").glob("step_*_gen_*")) for run in runs]
+    for left_path, right_path in zip(*generations, strict=True):
+        left_manager, right_manager = (CheckpointManager(run) for run in runs)
+        assert left_manager.verify(left_path).valid
+        left, right = left_manager.load(left_path), right_manager.load(right_path)
+        assert left.step == right.step
+        equal(left.model, right.model)
+        equal(left.optimizer, right.optimizer)
+        equal(left.rng, right.rng)
+    phases = [
+        _final_observation(item.logging.root_dir, "run")["phases"]
+        for item in (background, inline)
+    ]
+    assert phases[0]["checkpoint_background"]["observation_count"] > 0
+    assert phases[1]["checkpoint_background"]["availability"] == "unavailable"
+
+
+def test_failed_background_checkpoint_fails_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    original_save = CheckpointManager.save
+
+    def failing_save(self, snapshot, validation_loss=None):
+        if threading.current_thread().name.startswith("klab-checkpoint"):
+            raise OSError("disk full")
+        return original_save(self, snapshot, validation_loss)
+
+    monkeypatch.setattr(CheckpointManager, "save", failing_save)
+    run_config = config(tmp_path)
+    with pytest.raises(OSError, match="disk full"):
+        train(run_config, run_id="run")
+    progress = json.loads(
+        (run_config.logging.root_dir / "run/progress.json").read_text()
+    )
+    assert progress["status"] == "failed"
+    assert not list(
+        (run_config.logging.root_dir / "run/checkpoints").glob("step_*_gen_*")
+    )
+
+
+def test_token_cadences_and_optional_best_saves_bound_dead_time(
+    tmp_path: Path,
+) -> None:
+    payload = config(tmp_path).model_dump(mode="json")
+    # 32 targets per update: validate every third update, by tokens.
+    payload["evaluation"].update(
+        {"every_steps": None, "every_tokens": 96, "max_batches": 1}
+    )
+    payload["checkpoint"].update(
+        {"every_steps": None, "every_tokens": 192, "save_on_new_best": False}
+    )
+    payload["logging"]["every_steps"] = 5
+    measured = RunConfig.model_validate(payload)
+    train(measured, run_id="run")
+    root = measured.logging.root_dir
+    run = root / "run"
+
+    # Improving validation alone no longer writes a checkpoint.
+    assert _checkpoint_steps(run) == [0, 6, 12]
+    import sqlite3
+
+    with sqlite3.connect(root / "experiments.sqlite3") as database:
+        validated = sorted(
+            row[0]
+            for row in database.execute(
+                "SELECT DISTINCT step FROM metrics "
+                "WHERE run_id = 'run' AND name = 'validation/loss'"
+            )
+        )
+        logged = sorted(
+            row[0]
+            for row in database.execute(
+                "SELECT DISTINCT step FROM metrics "
+                "WHERE run_id = 'run' AND name = 'performance/step_seconds'"
+            )
+        )
+    assert validated == [0, 3, 6, 9, 12]
+    # Update metrics follow logging.every_steps, plus the first and last update.
+    assert logged == [1, 5, 10, 12]
+    progress = json.loads((run / "progress.json").read_text())
+    assert (progress["status"], progress["step"]) == ("completed", 12)
+
+    with pytest.raises(ValueError, match="evaluation cadence"):
+        RunConfig.model_validate(
+            {**payload, "evaluation": {"every_steps": None, "max_batches": 1}}
+        )
+
+
+def test_background_checkpoint_without_host_memory_is_written_inline_and_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+    import threading
+    from types import SimpleNamespace
+
+    from klab.training import trainer
+
+    monkeypatch.setattr(
+        trainer.psutil, "virtual_memory", lambda: SimpleNamespace(available=0)
+    )
+    writers: set[str] = set()
+    original_save = CheckpointManager.save
+
+    def observed_save(self, snapshot, validation_loss=None):
+        writers.add(threading.current_thread().name)
+        return original_save(self, snapshot, validation_loss)
+
+    monkeypatch.setattr(CheckpointManager, "save", observed_save)
+    run_config = config(tmp_path)
+    train(run_config, run_id="run")
+    root = run_config.logging.root_dir
+    assert not any(name.startswith("klab-checkpoint") for name in writers)
+    assert _checkpoint_steps(root / "run")[-1] == 12
+    with sqlite3.connect(root / "experiments.sqlite3") as database:
+        skipped = database.execute(
+            "SELECT count(*) FROM events WHERE run_id = 'run' "
+            "AND kind = 'checkpoint_background_skipped'"
+        ).fetchone()[0]
+    assert skipped > 0

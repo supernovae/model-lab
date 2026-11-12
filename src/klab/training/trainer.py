@@ -15,14 +15,18 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import asdict
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from statistics import median
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
+import psutil
+import torch
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.models import RunConfig
@@ -459,7 +463,33 @@ def _checkpoint_watermarks(
     return {"step": float(step), "tokens": float(tokens), "minutes": elapsed}
 
 
-def _save(
+# Per-step progress.json rewrites are limited to this interval; checkpoints,
+# stage changes and the final state are always written.
+PROGRESS_INTERVAL_SECONDS = 1.0
+
+
+def _host_copy(value: object) -> object:
+    """Copy every tensor in a nested state to host memory."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().to("cpu", copy=True)
+    if isinstance(value, dict):
+        return {key: _host_copy(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_host_copy(item) for item in value)
+    return value
+
+
+def _tensor_bytes(value: object) -> int:
+    if isinstance(value, torch.Tensor):
+        return value.numel() * value.element_size()
+    if isinstance(value, dict):
+        return sum(_tensor_bytes(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(_tensor_bytes(item) for item in value)
+    return 0
+
+
+def _snapshot(
     manager: CheckpointManager,
     engine: object,
     config: RunConfig,
@@ -476,13 +506,31 @@ def _save(
     update_seconds: float,
     lineage_best: LineageBest | None = None,
     exposure: dict[str, object] | None = None,
-) -> CheckpointRecord:
+    detach: bool = False,
+) -> TrainingSnapshot | None:
+    """Capture the training state; ``detach`` copies it to host memory.
+
+    A detached snapshot shares nothing with the live engine, so it can be
+    written while training continues. Returns None when the host lacks the
+    memory for that copy.
+    """
     state = engine.export_training_state()
+    weights = engine.export_weights()
+    optimizer = state.optimizer
+    if detach:
+        needed = _tensor_bytes(optimizer) + sum(
+            parameter.numel() * parameter.element_size()
+            for parameter in engine.model.state_dict().values()
+        )
+        if psutil.virtual_memory().available < 1.5 * needed:
+            return None
+        weights = weights.detached()
+        optimizer = _host_copy(optimizer)
     config_payload = config.model_dump(mode="json")
-    snapshot = TrainingSnapshot(
+    return TrainingSnapshot(
         model={},
-        weight_source=engine.export_weights(),
-        optimizer=state.optimizer,
+        weight_source=weights,
+        optimizer=optimizer,
         schedule=schedule_payload(config, step),
         step=step,
         tokens_seen=tokens,
@@ -506,7 +554,6 @@ def _save(
         lineage_best=lineage_best,
         exposure=exposure,
     )
-    return manager.save(snapshot, validation_loss)
 
 
 def _write_validation_report(
@@ -1575,7 +1622,45 @@ def _train_impl(
         def elapsed_seconds() -> float:
             return cumulative_wall + time.perf_counter() - started
 
-        def progress(status: str = "running") -> None:
+        # A checkpoint being written off the training thread, with what its
+        # bookkeeping needs once the write is verified. At most one is pending.
+        pending_checkpoint: (
+            tuple[Future[tuple[CheckpointRecord, float]], dict[str, object]] | None
+        ) = None
+        progress_written = float("-inf")
+        # Update metrics waiting for one batched, synced store write.
+        buffered_metrics: list[tuple[int, int, float, dict[str, float]]] = []
+        metrics_flushed = time.perf_counter()
+
+        def flush_metrics() -> None:
+            nonlocal metrics_flushed
+            metrics_flushed = time.perf_counter()
+            if not buffered_metrics:
+                return
+            rows = buffered_metrics.copy()
+            buffered_metrics.clear()
+            try:
+                store.log_metrics_batch(run_id, rows)
+            finally:
+                add_phase_time("reporting", metrics_flushed)
+
+        def progress(status: str = "running", *, force: bool = False) -> None:
+            """Publish progress.json; routine per-step updates are rate limited."""
+            nonlocal progress_written
+            now = time.perf_counter()
+            # A small synced write waits behind a checkpoint's disk writeback,
+            # so routine updates also hold back while one is being written.
+            if (
+                status == "running"
+                and not force
+                and (
+                    now - progress_written < PROGRESS_INTERVAL_SECONDS
+                    or pending_checkpoint is not None
+                )
+            ):
+                return
+            progress_written = now
+            flush_metrics()
             live = live_summary()
             runtime_forecast["live"] = live
             reporter_state = (
@@ -1648,6 +1733,7 @@ def _train_impl(
         def enter_stage(
             stage: ExperimentStage, payload: dict[str, object] | None = None
         ) -> None:
+            flush_metrics()
             if history.current is not None:
                 finish_stage()
             current = history.start(
@@ -1665,12 +1751,132 @@ def _train_impl(
 
         spot_watermark = elapsed_seconds()
 
+        checkpoint_writer = ThreadPoolExecutor(1, thread_name_prefix="klab-checkpoint")
+        resources.callback(checkpoint_writer.shutdown, wait=True)
+        background_checkpoints = (
+            config.checkpoint.background
+            and isinstance(engine, PyTorchEngine)
+            and config.checkpoint.retention is None
+        )
+        # The best validation loss handed to a checkpoint, which leads
+        # ``local_best`` while that checkpoint is still being written.
+        best_validation_loss: float | None = None
+
+        def commit_checkpoint(
+            record: CheckpointRecord, context: dict[str, object]
+        ) -> None:
+            """Record a verified checkpoint in the run's books."""
+            nonlocal latest_record, local_best, lineage_best
+            at_step, at_tokens = context["step"], context["tokens"]
+            validation, loss = context["validation"], context["loss"]
+            latest_record = record
+            if loss is not None:
+                if (
+                    local_best is None
+                    or local_best.validation_loss is None
+                    or loss < local_best.validation_loss
+                ):
+                    local_best = record
+                lineage_best = choose_lineage_best(
+                    lineage_best,
+                    LineageBest(run_id, record.manifest_sha256, at_step, loss),
+                )
+                assert validation is not None
+                reporting_started = time.perf_counter()
+                try:
+                    _write_validation_report(
+                        run,
+                        record,
+                        validation,
+                        config,
+                        str(context["source_digest"]),
+                        supervision_requires_mask(data.manifest),
+                    )
+                finally:
+                    add_phase_time("reporting", reporting_started)
+            reporting_started = time.perf_counter()
+            try:
+                store.record_checkpoint(run_id, record)
+                if config.checkpoint.retention is not None:
+                    store.log_event(
+                        run_id,
+                        at_step,
+                        at_tokens,
+                        elapsed_seconds(),
+                        "checkpoint_retention",
+                        json.loads((run / "checkpoints/retention.json").read_text()),
+                    )
+                store.log_event(
+                    run_id,
+                    at_step,
+                    at_tokens,
+                    elapsed_seconds(),
+                    "checkpoint_saved",
+                    asdict(record),
+                )
+            finally:
+                add_phase_time("reporting", reporting_started)
+            progress(force=True)
+            if checkpoint_committed is not None:
+                relay_started = time.perf_counter()
+                try:
+                    checkpoint_committed(run, record)
+                finally:
+                    add_phase_time("relay_transfer", relay_started)
+
+        def drain_checkpoint(*, wait: bool = True, tolerate: bool = False) -> None:
+            """Commit the pending checkpoint; ``wait`` blocks until it is written."""
+            nonlocal pending_checkpoint
+            if pending_checkpoint is None:
+                return
+            future, context = pending_checkpoint
+            if not wait and not future.done():
+                return
+            waiting_started = time.perf_counter()
+            pending_checkpoint = None
+            try:
+                record, write_seconds = future.result()
+            except BaseException:
+                if tolerate:
+                    return
+                raise
+            finally:
+                # Only the time training actually waited counts as checkpoint time.
+                phase_seconds["checkpoint"] = phase_seconds.get("checkpoint", 0.0) + (
+                    time.perf_counter() - waiting_started
+                )
+            phase_seconds["checkpoint_background"] = (
+                phase_seconds.get("checkpoint_background", 0.0) + write_seconds
+            )
+            phase_counts["checkpoint_background"] = (
+                phase_counts.get("checkpoint_background", 0) + 1
+            )
+            commit_checkpoint(record, context)
+
+        def write_checkpoint(
+            snapshot: TrainingSnapshot, loss: float | None
+        ) -> tuple[CheckpointRecord, float]:
+            write_started = time.perf_counter()
+            record = manager.save(snapshot, loss)
+            return record, time.perf_counter() - write_started
+
         def save_boundary(
             validation: dict[str, object] | None,
             *,
             operational_only: bool = False,
-        ) -> CheckpointRecord:
-            nonlocal latest_record, local_best, lineage_best, watermarks, spot_watermark
+            wait: bool = True,
+        ) -> None:
+            """Checkpoint the current state.
+
+            With ``wait`` false the state is copied to host memory and written
+            off the training thread; its record is committed by a later
+            ``drain_checkpoint``.
+            """
+            nonlocal watermarks, spot_watermark, pending_checkpoint
+            nonlocal best_validation_loss
+            # One write at a time: the previous checkpoint is the parent of
+            # this one's lineage.
+            drain_checkpoint()
             if spot_policy is not None:
                 check_spot_capacity(spot_policy, run)
             enter_stage(ExperimentStage.CHECKPOINTED)
@@ -1687,6 +1893,10 @@ def _train_impl(
             if validation is not None and not isinstance(loss_value, (int, float)):
                 raise TypeError("validation report loss must be numeric")
             loss = float(loss_value) if isinstance(loss_value, (int, float)) else None
+            if loss is not None and (
+                best_validation_loss is None or loss < best_validation_loss
+            ):
+                best_validation_loss = loss
             phase_reporter = ProgressReporter(
                 "checkpoint",
                 operation_id=run_id,
@@ -1696,12 +1906,21 @@ def _train_impl(
                 unit="checkpoint_writes",
                 raw_counters={"optimizer_step": step, "completed_targets": tokens},
             )
+            context: dict[str, object] = {
+                "step": step,
+                "tokens": tokens,
+                "validation": validation,
+                "loss": loss,
+                "source_digest": current_source["sha256"],
+            }
             checkpoint_started = time.perf_counter()
+            record: CheckpointRecord | None = None
             try:
                 with pilot_phase(
                     "checkpoint", completed_steps=step, completed_targets=tokens
                 ):
-                    record = _save(
+                    capture = partial(
+                        _snapshot,
                         manager,
                         engine,
                         config,
@@ -1727,6 +1946,29 @@ def _train_impl(
                             updates_complete=updates_complete,
                         ),
                     )
+                    snapshot = (
+                        capture(detach=True)
+                        if background_checkpoints and not wait
+                        else None
+                    )
+                    if snapshot is not None:
+                        pending_checkpoint = (
+                            checkpoint_writer.submit(write_checkpoint, snapshot, loss),
+                            context,
+                        )
+                    else:
+                        if background_checkpoints and not wait:
+                            store.log_event(
+                                run_id,
+                                step,
+                                tokens,
+                                elapsed,
+                                "checkpoint_background_skipped",
+                                {"reason": "insufficient host memory for a copy"},
+                            )
+                        snapshot = capture()
+                        assert snapshot is not None
+                        record = manager.save(snapshot, loss)
             except BaseException:
                 add_phase_time("checkpoint_attempt", checkpoint_started)
                 phase_reporter.close(failed=True)
@@ -1738,63 +1980,13 @@ def _train_impl(
                 raw_counters={"optimizer_step": step, "completed_targets": tokens},
             )
             phase_reporter.close(state="COMPLETE")
-            latest_record = record
-            if loss is not None:
-                if (
-                    local_best is None
-                    or local_best.validation_loss is None
-                    or loss < local_best.validation_loss
-                ):
-                    local_best = record
-                lineage_best = choose_lineage_best(
-                    lineage_best,
-                    LineageBest(run_id, record.manifest_sha256, step, loss),
-                )
-                assert validation is not None
-                reporting_started = time.perf_counter()
-                try:
-                    _write_validation_report(
-                        run,
-                        record,
-                        validation,
-                        config,
-                        str(current_source["sha256"]),
-                        supervision_requires_mask(data.manifest),
-                    )
-                finally:
-                    add_phase_time("reporting", reporting_started)
-            reporting_started = time.perf_counter()
-            try:
-                store.record_checkpoint(run_id, record)
-                if config.checkpoint.retention is not None:
-                    store.log_event(
-                        run_id,
-                        step,
-                        tokens,
-                        elapsed_seconds(),
-                        "checkpoint_retention",
-                        json.loads((run / "checkpoints/retention.json").read_text()),
-                    )
-                store.log_event(
-                    run_id,
-                    step,
-                    tokens,
-                    elapsed_seconds(),
-                    "checkpoint_saved",
-                    asdict(record),
-                )
-            finally:
-                add_phase_time("reporting", reporting_started)
-            progress()
-            if checkpoint_committed is not None:
-                relay_started = time.perf_counter()
-                try:
-                    checkpoint_committed(run, record)
-                finally:
-                    add_phase_time("relay_transfer", relay_started)
-            return record
+            if record is not None:
+                commit_checkpoint(record, context)
 
         def finish_run(status: str, reason: str | None = None) -> None:
+            # A failing run still waits for its writer, but keeps its own error.
+            drain_checkpoint(tolerate=status == "failed")
+            flush_metrics()
             final_reporting_started = time.perf_counter()
             reporting_before = phase_seconds.get("reporting", 0.0)
             if isinstance(engine, PyTorchEngine) and engine.portability_run is not None:
@@ -1984,6 +2176,9 @@ def _train_impl(
                     **{name: phase_observation(name) for name in observed_components},
                     "validation_attempt": phase_observation("validation_attempt"),
                     "checkpoint_attempt": phase_observation("checkpoint_attempt"),
+                    # Written off the training thread: overlaps optimizer updates
+                    # and is not part of the measured wall-time sum.
+                    "checkpoint_background": phase_observation("checkpoint_background"),
                     "evaluation": {
                         "seconds": None,
                         "availability": "not_observed",
@@ -2017,6 +2212,8 @@ def _train_impl(
             )
 
         validation_pass_index = 0
+        # Targets trained at the last validation pass, for a token cadence.
+        evaluated_tokens = tokens
 
         def evaluation_batches(
             selected=validation_dataset,
@@ -2213,7 +2410,7 @@ def _train_impl(
                 finish_run("interrupted", reason)
                 return run_id
             initial_validation = evaluate_and_record()
-            save_boundary(initial_validation)
+            save_boundary(initial_validation, wait=False)
             if wall_expired():
                 finish_run("interrupted", "wall_time_limit")
                 return run_id
@@ -2229,6 +2426,7 @@ def _train_impl(
                 if wall_expired():
                     interrupted = True
                 if interrupted:
+                    drain_checkpoint()
                     if latest_record is None or latest_record.step != step:
                         validation = evaluate_and_record()
                         if (
@@ -2445,7 +2643,13 @@ def _train_impl(
                 unavailable = getattr(engine, "unavailable_memory_reasons", {})
                 reporting_started = time.perf_counter()
                 try:
-                    store.log_metrics(run_id, step, tokens, elapsed, metric_values)
+                    if (
+                        step % config.logging.every_steps == 0
+                        or step == first_update_step
+                        or step >= config.training.max_steps
+                        or tokens >= config.training.max_tokens
+                    ):
+                        buffered_metrics.append((step, tokens, elapsed, metric_values))
                     if isinstance(engine, PyTorchEngine):
                         row_evidence = engine.portability_update_evidence()
                         if row_evidence is not None:
@@ -2469,6 +2673,7 @@ def _train_impl(
                 finally:
                     add_phase_time("reporting", reporting_started)
                 progress()
+                drain_checkpoint(wait=False)
                 if cancel_path is not None and cancel_path.exists():
                     interrupted = True
                 terminal = (
@@ -2479,20 +2684,30 @@ def _train_impl(
                 )
                 deadline_stopping = wall_expired()
                 evaluation_due = not deadline_stopping and (
-                    terminal or step % config.evaluation.every_steps == 0
+                    terminal
+                    or (
+                        config.evaluation.every_steps is not None
+                        and step % config.evaluation.every_steps == 0
+                    )
+                    or (
+                        config.evaluation.every_tokens is not None
+                        and tokens - evaluated_tokens >= config.evaluation.every_tokens
+                    )
                 )
                 validation = evaluate_and_record() if evaluation_due else None
+                if validation is not None:
+                    evaluated_tokens = tokens
                 terminal = terminal or wall_expired()
                 validation_loss = (
                     validation.get("loss") if validation is not None else None
                 )
                 new_best = (
-                    validation is not None
+                    config.checkpoint.save_on_new_best
+                    and validation is not None
                     and isinstance(validation_loss, (int, float))
                     and (
-                        local_best is None
-                        or local_best.validation_loss is None
-                        or float(validation_loss) < local_best.validation_loss
+                        best_validation_loss is None
+                        or float(validation_loss) < best_validation_loss
                     )
                 )
                 scientific_checkpoint = (
@@ -2505,7 +2720,9 @@ def _train_impl(
                 )
                 if scientific_checkpoint or operational_checkpoint:
                     save_boundary(
-                        validation, operational_only=not scientific_checkpoint
+                        validation,
+                        operational_only=not scientific_checkpoint,
+                        wait=terminal,
                     )
                 if terminal:
                     status = (

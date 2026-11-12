@@ -317,6 +317,40 @@ class _PyTorchWeights(WeightSource):
             array = tensor.detach().cpu().contiguous().numpy()
             yield CanonicalTensor(name, array, self._trainable.get(name, False))
 
+    def detached(self) -> WeightSource:
+        """Copy every tensor to host memory now, so training can continue."""
+        return _DetachedWeights(
+            self._aliases,
+            [
+                CanonicalTensor(
+                    name,
+                    tensor.detach().to("cpu", copy=True).contiguous().numpy(),
+                    self._trainable.get(name, False),
+                )
+                for name, tensor in self._model.state_dict().items()
+                if name not in self._aliases
+            ],
+        )
+
+
+class _DetachedWeights(WeightSource):
+    """A host-memory copy of the weights, independent of the live model."""
+
+    def __init__(
+        self, aliases: Mapping[str, str], tensors: list[CanonicalTensor]
+    ) -> None:
+        self._aliases = aliases
+        self._tensors = tensors
+
+    @property
+    def aliases(self) -> Mapping[str, str]:
+        return self._aliases
+
+    def tensors(self) -> Iterator[CanonicalTensor]:
+        # Release each copy once it is written.
+        while self._tensors:
+            yield self._tensors.pop(0)
+
 
 def _parameter_sha256(parameter: torch.nn.Parameter) -> str:
     raw = parameter.detach().to(device="cpu").contiguous().view(torch.uint8).numpy()
