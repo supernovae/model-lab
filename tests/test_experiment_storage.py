@@ -209,6 +209,8 @@ def test_cold_cache_refuses_before_packing_when_the_run_cannot_fit(
     from klab.training.trainer import train
     from klab.workspace_preflight import projected_data_bytes
 
+    # Keep the work root on the same device as the run, whatever HOME is.
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
     cfg = configured(tmp_path, every_steps=5)
     (combined,) = training_storage_checks(cfg)
     cache_only = projected_data_bytes(cfg) + combined.reserve_bytes
