@@ -7,16 +7,17 @@ import json
 from pathlib import Path
 
 from klab.config.loading import load_config
-from klab.data.tokenizer import (
-    SPECIAL_TOKENS,
-    load_tokenizer,
-    verify_run_tokenizer,
-)
 from klab.training.manifest import sha256_file
 
 
 def verify_configured_tokenizer(config_path: Path) -> dict[str, object]:
     """Authenticate configured artifact bytes, immutable origin, and vocabulary."""
+    from klab.data.tokenizer import (
+        SPECIAL_TOKENS,
+        load_tokenizer,
+        verify_run_tokenizer,
+    )
+
     config = load_config(config_path)
     mixture_origin = (
         config.tokenizer.origin is not None

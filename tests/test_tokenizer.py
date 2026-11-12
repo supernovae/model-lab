@@ -26,8 +26,7 @@ def test_data_prepare_rejects_missing_tokenizer_before_packing(
     )
     monkeypatch.setattr(cli, "load_config", lambda _path: config)
     monkeypatch.setattr(
-        cli,
-        "prepare_data",
+        "klab.data.packing.prepare_data",
         lambda *_args, **_kwargs: pytest.fail("packing started without a tokenizer"),
     )
     args = cli.build_parser().parse_args(

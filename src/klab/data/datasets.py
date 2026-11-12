@@ -14,7 +14,7 @@ from klab.data.engram_recall import iter_engram_recall
 from klab.data.instruction_reference import iter_instruction_reference
 from klab.data.synthetic import iter_synthetic
 from klab.data.withheld_facts import training_documents
-from klab.hf_auth import HUB_ACCESS_ERRORS, hub_auth_kwargs, raise_for_hub_auth
+from klab.hf_auth import hub_access_errors, hub_auth_kwargs, raise_for_hub_auth
 from klab.progress import progress_phase
 from klab.token_encode_worker import LineError, local_text_record
 
@@ -150,7 +150,7 @@ def iter_documents(
                 cache_dir=str(config.cache_dir),
                 **auth,
             )
-        except HUB_ACCESS_ERRORS as error:
+        except hub_access_errors() as error:
             raise_for_hub_auth(error, credential_supplied=bool(auth))
         if split == "validation" and config.validation_split is None:
             dataset = dataset.skip(config.train_max_documents)
@@ -173,5 +173,5 @@ def iter_documents(
                     f"non-string {config.text_field}"
                 )
             yield text
-    except HUB_ACCESS_ERRORS as error:
+    except hub_access_errors() as error:
         raise_for_hub_auth(error, credential_supplied=bool(auth))

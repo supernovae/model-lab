@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from klab.hf_auth import HUB_ACCESS_ERRORS, hub_auth_kwargs, raise_for_hub_auth
+from klab.hf_auth import hub_access_errors, hub_auth_kwargs, raise_for_hub_auth
 
 REFERENCE_PREFIX = "ref:"
 # lm-eval prompts are short; cap the scoring window so CPU memory stays bounded.
@@ -232,7 +232,7 @@ def safe_snapshot(
         kwargs["cache_dir"] = str(cache_dir)
     try:
         snapshot = Path(snapshot_download(**kwargs))
-    except HUB_ACCESS_ERRORS as error:
+    except hub_access_errors() as error:
         raise_for_hub_auth(error, credential_supplied="token" in kwargs)
     files = validate_snapshot(snapshot, label)
     validate_model_metadata(

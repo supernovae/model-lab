@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from klab.config.models import RunConfig, TokenizerTrainConfig
-from klab.model.inspection import inspection_report
 from klab.workdir import resolve_work_dir
 
 if TYPE_CHECKING:
@@ -161,6 +160,8 @@ def training_storage_checks(
         )["peak_generations"]
     if checkpoint_generations_upper < 1:
         raise ValueError("checkpoint generation count must be positive")
+    from klab.model.inspection import inspection_report
+
     checkpoint = int(inspection_report(config)["estimated_checkpoint_bytes"])
     checkpoint_growth = checkpoint_generations_upper * math.ceil(1.25 * checkpoint)
     policy = config.checkpoint.retention

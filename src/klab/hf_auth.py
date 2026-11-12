@@ -6,7 +6,6 @@ import os
 from contextvars import ContextVar
 from pathlib import Path
 
-from datasets.exceptions import DatasetNotFoundError
 from huggingface_hub import get_token
 from huggingface_hub.errors import HfHubHTTPError
 
@@ -19,7 +18,12 @@ class HuggingFaceAccessError(RuntimeError):
     """The Hub rejected a request or the repository is inaccessible."""
 
 
-HUB_ACCESS_ERRORS = (HfHubHTTPError, DatasetNotFoundError)
+def hub_access_errors() -> tuple[type[Exception], ...]:
+    """Hub errors that may mean denied access; `datasets` loads only when asked."""
+    from datasets.exceptions import DatasetNotFoundError
+
+    return (HfHubHTTPError, DatasetNotFoundError)
+
 
 _token_file: ContextVar[Path | None] = ContextVar("hf_token_file", default=None)
 

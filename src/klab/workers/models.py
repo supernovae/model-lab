@@ -19,7 +19,6 @@ from klab.data.encoding import (
     validate_tokenizer_batch_limits,
 )
 from klab.resource_envelope import ResourceEnvelope
-from klab.runtime import RuntimeInfo
 from klab.workers.relay_models import RelayBinding
 
 PROTOCOL_VERSION = 1
@@ -434,6 +433,8 @@ class WorkerCapabilities(WorkerDefinition):
     @field_validator("runtime")
     @classmethod
     def runtime_json(cls, value: dict[str, Any]) -> dict[str, Any]:
+        from klab.runtime import RuntimeInfo
+
         RuntimeInfo.from_dict(value)
         return value
 
@@ -980,6 +981,8 @@ def validate_operation_result(op: str, result: Mapping[str, Any]) -> dict[str, A
             "runtime_authorization",
         }:
             raise ValueError("invalid validate result fields")
+        from klab.runtime import RuntimeInfo
+
         RuntimeInfo.from_dict(value["runtime"])
         if value["validation_status"] not in {"passed", "failed"} or (
             value["reason"] is not None and not isinstance(value["reason"], str)
