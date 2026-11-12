@@ -53,20 +53,31 @@ _POLICY = "completed_local_preparation"
 
 
 def _producer():
-    return {
-        name: sha256_file(Path(__file__).with_name(name))
-        for name in (
-            "completed_preparation.py",
-            "preparation_inputs.py",
-            "streaming_build_rows.py",
-            "split_runs.py",
-            "large_build.py",
-            "pipeline.py",
-            "rights.py",
-            "project.py",
-            "jsonl_records.py",
-        )
-    }
+    """Digests of every corpus module a completed build can run.
+
+    Rendering reaches cleaning, qualification, provenance and admission code
+    through these entry modules, so all of them key the completed phases.
+    """
+    from klab.verifier_authority import local_import_closure
+
+    return local_import_closure(
+        tuple(
+            "corpus." + name
+            for name in (
+                "completed_preparation",
+                "preparation_inputs",
+                "streaming_build_rows",
+                "split_runs",
+                "large_build",
+                "pipeline",
+                "rights",
+                "project",
+                "jsonl_records",
+            )
+        ),
+        within="corpus",
+        exclude=frozenset({"corpus.cli"}),
+    )
 
 
 def _small(path):
