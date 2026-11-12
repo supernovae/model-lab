@@ -124,6 +124,35 @@ They do not allocate a model, train, download or evaluate anything. Unlike
 `klab inspect CONFIG`, which inspects a full run configuration through its
 runtime-aware path, `config validate` only checks the selected native schema.
 
+Check a whole project at once by naming its directory:
+
+```sh
+klab config validate path/to/project
+```
+
+Every complete run, tokenizer, model and optimizer declaration under it is
+validated against its schema, and the command exits non-zero if any fails.
+Partial sections, plans and other documents are counted as skipped. This is
+the check a recipe repository runs, by hand or in CI, to learn whether its
+declarations still load with the installed Lab; it replaces per-project test
+scripts.
+
+Assemble one run config from several files with `config compose`:
+
+```sh
+klab config compose run.yaml model=model.json optimizer=optimizer.json \
+  local-paths.yaml --output "$WORK/run.yaml"
+```
+
+Parts are YAML/JSON mappings merged in order, with later parts winning.
+`FIELD=PATH` places a file at that dotted field, so a model section, an
+optimizer section and a file of local paths (tokenizer, cache, run store) kept
+outside Git compose without a script. Relative paths resolve from the part
+that declares them. The result must be a complete valid run config; it is
+written beside a `.derivation.json` receipt with each part's digest. Nothing
+is read from the named paths or executed. To change single fields of a
+complete config, use `config derive --set`.
+
 For an existing inventoried matrix, preparation or workflow descriptor:
 
 ```sh
