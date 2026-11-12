@@ -284,28 +284,6 @@ def required_arrays(
             ):
                 raise ValueError("byte address shape differs from token IDs")
             result[f"{split}_byte_addresses.npy"] = (entry, "int32", 1)
-    allocation = manifest.get("allocation")
-    if allocation is not None:
-        if (
-            not isinstance(allocation, dict)
-            or allocation.get("format") != "klab-prepared-allocation-v1"
-        ):
-            raise ValueError("invalid allocation descriptor")
-        for split in ("train", "validation"):
-            section = allocation.get(split)
-            if not isinstance(section, dict):
-                raise ValueError("invalid allocation split")  # noqa: TRY004 - invalid serialized schema
-            for suffix, key, dtype, ndim in (
-                ("owner_ids", "owner", "uint8", 1),
-                ("semantic_queries", "semantic_queries", "float32", 2),
-                ("semantic_mask", "semantic_mask", "bool", 1),
-            ):
-                if key != "owner" and allocation.get("semantic") is None:
-                    continue
-                entry = section.get(key)
-                if not isinstance(entry, dict):
-                    raise ValueError("missing allocation metadata")  # noqa: TRY004 - invalid serialized schema
-                result[f"{split}_{suffix}.npy"] = (entry, dtype, ndim)
     return result
 
 

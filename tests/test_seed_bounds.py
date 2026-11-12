@@ -57,11 +57,11 @@ def test_boundary_loading_derivation_and_override_preserve_seed(tmp_path, engine
 @pytest.mark.parametrize(
     "seed,expected",
     [
-        (0, "a8f9c6751cbfdc257d8fa1d58b484c681cdae8002b69c9990a78251fc2eee16f"),
-        (2**32 - 1, "46428116b9c174c4239802f76ae45d9405d0f701326f9d07c8b6f9427d39fe61"),
+        (0, "0d71bf62e5dc5d5e4afc66ce483f90489e8e5d3ed7a369739f4562fd37e3075b"),
+        (2**32 - 1, "0ee671d84c173327acd3d39e6367609e5dde3e2b02ad5c84646f0f4c0ae46692"),
     ],
 )
-def test_valid_seed_identity_matches_pre_fix(seed, expected):
+def test_valid_seed_identity_is_stable(seed, expected):
     config = RunConfig.model_validate(_raw(seed))
     assert config_sha256(config.model_dump(mode="json")) == expected
 

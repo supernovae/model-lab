@@ -44,7 +44,6 @@ _PATH_KEYS = frozenset(
         "memory_package_path",
         "train_path",
         "validation_path",
-        "allocation_manifest_path",
         "source_manifest_path",
     }
 )
@@ -91,7 +90,6 @@ def _dataset_mapping(name: str, *, root: Path | None = None) -> dict[str, object
         "train_path": None,
         "validation_path": None,
         "license": None,
-        "allocation_manifest_path": None,
     }
     if profile.synthetic_task is not None:
         result["synthetic_task"] = profile.synthetic_task
@@ -118,7 +116,6 @@ def _tokenizer_values(name: str, *, root: Path | None = None) -> dict[str, objec
         "train_max_tokens": profile.tokenizer_train_max_tokens,
         "validation_max_tokens": profile.tokenizer_validation_max_tokens,
     }
-    dataset.pop("allocation_manifest_path", None)
     return {
         "schema_version": 1,
         "vocab_size": profile.vocab_size,

@@ -173,7 +173,6 @@ def declarations(workload: TryWorkload, root: Path) -> tuple:
         if any(
             getattr(data, key) is not None
             for key in (
-                "allocation_manifest_path",
                 "source_manifest_path",
                 "corpus_release_path",
                 "corpus_export_path",

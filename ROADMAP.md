@@ -10,8 +10,8 @@ summary, not a task list or a release promise.
   comparable models at any size. Model projects live in their own repositories,
   such as [Kybern Workshop](https://github.com/supernovae/kybern-workshop), and
   check their declarations with `klab config validate DIR`. Next: move the
-  remaining project-specific code out of the package, including the portability
-  and allocation hooks in the trainer and the story-specific batching options.
+  remaining project-specific code out of the package, such as the
+  story-specific batching options.
 - **Scale without idle accelerators.** Data is prepared on CPU with the whole
   host, and training keeps devices busy across checkpoints, evaluation and
   several GPUs on one host. Next: faster mixture reads and token-cache hits

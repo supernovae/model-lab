@@ -17,7 +17,6 @@ dataset:
   train_path: ${VERIFIED_MIXTURE_DIR}/train.tokens.ids
   validation_path: ${VERIFIED_NEW_RELEASE_DIR}/lm/validation.jsonl
   license: Synthetic fixture
-  allocation_manifest_path: null
   mixture_declaration_path: ${SEALED_MIXTURE_DECLARATION}
   mixture_output_path: ${VERIFIED_MIXTURE_DIR}
 training: {}

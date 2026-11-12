@@ -19,18 +19,6 @@
 | `attention/layer_*/estimated_flops` | Attention score-product estimate for selected sparse keys. | Relative implementation estimate, not a device benchmark. |
 | `attention/layer_*/dense_teacher_mass` | Dense-attention probability mass over the sparse layer's selected keys; requires full diagnostics. | Higher means the selected set retains more of the frozen forward's dense attention distribution. |
 | `attention/layer_*/dense_teacher_topk_recall` | Recall of dense score Top-K keys using the sparse selected-key count; requires full diagnostics. | Retrieval-overlap diagnostic, not output equivalence or language-model quality. |
-| `allocation/raw_tokens` | Packed input-token positions consumed by an optimizer update, including prompt/context positions without a valid next-token label. | Runtime input count; separate from supervised targets and weighted neural mass. |
-| `allocation/valid_targets` | Count of targets whose label is not `-100` in the update. | Counts all valid owner types once; not raw input tokens. |
-| `allocation/weighted_neural_supervision_mass` | `neural_loss_weight × (neural-owned + hybrid-owned valid targets)`. | Weighted target mass, not optimizer updates, compute, or FLOPs. |
-| `allocation/owner/*_raw_tokens` | Raw positions by owner sidecar code. | Context positions without a target use the neural code; this is not neural supervised mass. |
-| `allocation/owner/*_targets` | Valid target count by owner sidecar code. | The owner-specific partition of `allocation/valid_targets`. |
-
-The memory-allocation report adds static parameter counts and a rough
-`estimated_parameter_proxy_flops` estimate, computed as
-`6 * active_parameters_per_token * raw_input_tokens`. This proxy is not an
-executed-operation count: exact attention work, memory lookup/retrieval,
-optimizer work, and device effects are excluded. It is not measured latency
-or a FLOP-saving claim.
 
 ## Runtime, memory, and update measurements
 

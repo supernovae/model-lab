@@ -27,12 +27,6 @@ _CACHE_MEMBERS = frozenset(
         "validation_supervision.npy",
         "train_byte_addresses.npy",
         "validation_byte_addresses.npy",
-        "train_owner_ids.npy",
-        "validation_owner_ids.npy",
-        "train_semantic_queries.npy",
-        "validation_semantic_queries.npy",
-        "train_semantic_mask.npy",
-        "validation_semantic_mask.npy",
     }
 )
 _TERMINAL_RUNS = frozenset({"completed", "failed", "interrupted", "cancelled"})

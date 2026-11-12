@@ -226,11 +226,9 @@ def load_frozen_model(
             f"{role} context ({source.model.max_seq_len}) is shorter than "
             f"training.seq_len ({config.training.seq_len})"
         )
-    if source.model.memory in {"byte", "portable"} or (
-        source.dataset.allocation_manifest_path is not None
-    ):
+    if source.model.memory in {"byte", "portable"}:
         raise ValueError(
-            f"{role} checkpoint needs byte addresses or allocation sidecars, "
+            f"{role} checkpoint needs byte addresses, "
             "which an objective's frozen model does not receive"
         )
     model = DenseLM(source.model, source.attention)

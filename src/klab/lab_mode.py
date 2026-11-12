@@ -150,7 +150,6 @@ _INPUT_PATH_FIELDS = (
     "train_path",
     "validation_path",
     "source_manifest_path",
-    "allocation_manifest_path",
     "corpus_release_path",
     "corpus_export_path",
     "mixture_declaration_path",
@@ -174,13 +173,9 @@ def _path_digest(path: Path) -> str | dict[str, str]:
 
 
 # External memory artifacts a run loads by path: the portable Engram package
-# (``model.memory_package_path``, a file or folder) and the learned-portability
-# manifest (``training.portability_manifest_path``), which pins its world data by
-# digest. Their *contents* are part of what a run trained with.
-MEMORY_PACKAGE_FIELDS = (
-    ("model", "memory_package_path"),
-    ("training", "portability_manifest_path"),
-)
+# (``model.memory_package_path``, a file or folder). Its *contents* are part of
+# what a run trained with.
+MEMORY_PACKAGE_FIELDS = (("model", "memory_package_path"),)
 
 
 def memory_packages(config: Any) -> dict[str, Any]:

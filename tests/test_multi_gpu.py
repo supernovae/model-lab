@@ -234,44 +234,6 @@ def test_runtime_config_secondary_device_indices_validation(tmp_path: Path) -> N
                 activation_offload=ActivationOffloadConfig(enabled=True)
             ),
         )
-    base_cfg = _make_run_config(tmp_path, secondary_device_indices=(0,))
-    with pytest.raises(
-        (ValidationError, ValueError),
-        match="cannot be combined with semantic memory, allocation sidecars, or portability runs",
-    ):
-        base_cfg.model_copy(
-            update={
-                "dataset": base_cfg.dataset.model_copy(
-                    update={"allocation_manifest_path": tmp_path / "alloc.json"}
-                )
-            }
-        ).validate_cross_section()
-    with pytest.raises(
-        (ValidationError, ValueError),
-        match="cannot be combined with semantic memory, allocation sidecars, or portability runs",
-    ):
-        base_cfg.model_copy(
-            update={
-                "model": base_cfg.model.model_copy(update={"semantic_memory_dim": 16}),
-                "dataset": base_cfg.dataset.model_copy(
-                    update={"allocation_manifest_path": tmp_path / "alloc.json"}
-                ),
-            }
-        ).validate_cross_section()
-    with pytest.raises(
-        (ValidationError, ValueError),
-        match="cannot be combined with semantic memory, allocation sidecars, or portability runs",
-    ):
-        base_cfg.model_copy(
-            update={
-                "training": base_cfg.training.model_copy(
-                    update={
-                        "portability_manifest_path": tmp_path / "portability.json",
-                        "trainable_parameters": ("embedding.weight",),
-                    }
-                )
-            }
-        ).validate_cross_section()
 
 
 def test_acquire_multi_device_leases_and_contention_rollback(tmp_path: Path) -> None:

@@ -1033,11 +1033,6 @@ def execute_attempt(definition: Any, attempt_id: str) -> dict[str, Any]:
                 from klab.training.trainer import train
 
                 train_payload = effective.model_dump(mode="json")
-                allocation_path = effective.dataset.allocation_manifest_path
-                if allocation_path is not None:
-                    train_payload["dataset"]["allocation_manifest_path"] = str(
-                        stage_dir / "assets" / "allocation" / allocation_path.name
-                    )
                 train_payload["logging"]["root_dir"] = str(
                     Path(_definition_value(definition, "root")) / "runs"
                 )

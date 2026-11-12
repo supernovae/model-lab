@@ -393,124 +393,6 @@ def _check_common_native_state(
     return config, expected, learning_rate
 
 
-def _learned_audit_contract(config: RunConfig) -> dict[str, object] | None:
-    """Return the one v2 local-table audit contract allowed in optimizer state."""
-    manifest_path = config.training.portability_manifest_path
-    if manifest_path is None:
-        return None
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError("learned audit portability manifest is unreadable") from error
-    coordinate = manifest.get("coordinate") if isinstance(manifest, dict) else None
-    if not (
-        manifest.get("version") == 2
-        and isinstance(coordinate, dict)
-        and coordinate.get("role") in {"source", "native"}
-        and coordinate.get("condition") in {"source-real", "native"}
-    ):
-        return None
-    descriptor = manifest.get("world_manifest")
-    training_ids = manifest.get("training_fact_ids")
-    if (
-        not isinstance(descriptor, dict)
-        or not isinstance(descriptor.get("path"), str)
-        or not isinstance(descriptor.get("sha256"), str)
-        or type(manifest.get("seed")) is not int
-        or not isinstance(training_ids, list)
-        or not all(isinstance(item, str) for item in training_ids)
-    ):
-        raise ValueError("learned audit portability manifest is malformed")
-    data_path = manifest_path.parent / descriptor["path"]
-    try:
-        data = json.loads(data_path.read_text(encoding="utf-8"))
-        facts_path = data_path.parent / data["facts"]["path"]
-        facts = [
-            json.loads(line)
-            for line in facts_path.read_text(encoding="utf-8").splitlines()
-        ]
-    except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
-        raise ValueError("learned audit fact inventory is unreadable") from error
-    from klab.data.tokenizer import load_tokenizer
-
-    tokenizer = load_tokenizer(config.tokenizer.path)
-    targets: list[tuple[int, int]] = []
-    wanted = set(training_ids)
-    for fact in facts:
-        if not isinstance(fact, dict) or fact.get("fact_id") not in wanted:
-            continue
-        row, symbol = fact.get("target_row"), fact.get("assigned_symbol")
-        token = tokenizer.token_to_id(symbol) if isinstance(symbol, str) else None
-        if type(row) is not int or token is None:
-            raise ValueError("learned audit fact target is malformed")
-        targets.append((row, token))
-    if len(targets) != len(wanted) or len({row for row, _ in targets}) != len(targets):
-        raise ValueError("learned audit fact inventory differs from run manifest")
-    targets.sort()
-    coordinate_with_seed = {**coordinate, "seed": manifest["seed"]}
-    return {
-        "coordinate_sha256": hashlib.sha256(
-            canonical_json(coordinate_with_seed)
-        ).hexdigest(),
-        "data_manifest_sha256": descriptor["sha256"],
-        "max_steps": config.training.max_steps,
-        "rows": [row for row, _ in targets],
-        "tokens": [token for _, token in targets],
-    }
-
-
-def _check_learned_audit_slot(
-    value: object, contract: dict[str, object], table_shape: tuple[int, ...]
-) -> None:
-    if not isinstance(value, dict) or set(value) != {
-        "coordinate_sha256",
-        "data_manifest_sha256",
-        "max_steps",
-        "rows",
-        "tokens",
-        "initial_rows",
-        "exposures",
-        "gradient_seen",
-        "applied_steps",
-        "invalid_targets",
-    }:
-        raise ValueError("learned audit optimizer slot is malformed")
-    if any(
-        value[key] != contract[key]
-        for key in ("coordinate_sha256", "data_manifest_sha256", "max_steps")
-    ):
-        raise ValueError("learned audit optimizer slot is bound to another run")
-    rows, tokens = value["rows"], value["tokens"]
-    count = len(contract["rows"])
-    if (
-        not isinstance(rows, torch.Tensor)
-        or rows.dtype != torch.int64
-        or rows.ndim != 1
-        or rows.cpu().tolist() != contract["rows"]
-        or not isinstance(tokens, torch.Tensor)
-        or tokens.dtype != torch.int64
-        or tokens.ndim != 1
-        or tokens.cpu().tolist() != contract["tokens"]
-    ):
-        raise ValueError("learned audit optimizer factual rows differ")
-    expected_bytes = int(np.prod(table_shape[1:])) * 4
-    shapes = {
-        "initial_rows": ((count, expected_bytes), torch.uint8),
-        "exposures": ((count,), torch.int64),
-        "gradient_seen": ((count,), torch.bool),
-        "applied_steps": ((int(contract["max_steps"]),), torch.bool),
-        "invalid_targets": ((), torch.int64),
-    }
-    for name, (shape, dtype) in shapes.items():
-        tensor = value[name]
-        if (
-            not isinstance(tensor, torch.Tensor)
-            or tuple(tensor.shape) != shape
-            or tensor.dtype != dtype
-        ):
-            raise ValueError(f"learned audit optimizer slot has invalid {name}")
-
-
 def _check_native_state(
     native: dict[str, Any],
     raw: dict[str, Any],
@@ -520,7 +402,6 @@ def _check_native_state(
     config, expected, learning_rate = _check_common_native_state(
         native, raw, tensors, aliases
     )
-    learned_audit = _learned_audit_contract(config)
     step = native["step"]
     optimizer = native["optimizer"]
     names = native["optimizer_parameter_names"]
@@ -554,20 +435,8 @@ def _check_native_state(
     for parameter_id, values in state.items():
         if not isinstance(values, dict):
             raise TypeError("optimizer parameter state is malformed")
-        audit = values.get("klab_learned_audit_v1")
-        if audit is not None:
-            if learned_audit is None or names[parameter_id] != "memory.table.weight":
-                raise ValueError("unexpected learned audit optimizer slot")
-            _check_learned_audit_slot(
-                audit, learned_audit, expected[names[parameter_id]].shape
-            )
-        ordinary = {
-            key: value
-            for key, value in values.items()
-            if key != "klab_learned_audit_v1"
-        }
-        if ordinary:
-            ordinary_state[parameter_id] = ordinary
+        if values:
+            ordinary_state[parameter_id] = values
     updated = native["optimizer_updated_parameter_names"]
     if (
         not isinstance(updated, list)

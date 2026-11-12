@@ -53,7 +53,7 @@ def _reject_protected(destination: Path, protected: set[Path]) -> None:
 def _run_config_inventory(config: RunConfig) -> tuple[set[Path], set[Path]]:
     roots = {_path(config.dataset.cache_dir), _path(config.logging.root_dir)}
     files = {_path(config.tokenizer.path)}
-    for field in ("train_path", "validation_path", "allocation_manifest_path"):
+    for field in ("train_path", "validation_path"):
         value = getattr(config.dataset, field)
         if value is not None:
             files.add(_path(value))

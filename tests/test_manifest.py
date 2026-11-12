@@ -96,12 +96,12 @@ def test_identity_ignores_machine_paths_but_binds_architecture() -> None:
     assert config_sha256(left) != config_sha256(changed)
 
 
-def test_legacy_final_memory_injection_preserves_hashes_and_embedding_binds() -> None:
+def test_final_memory_injection_preserves_hashes_and_embedding_binds() -> None:
     root = Path(__file__).resolve().parents[1]
     expected = {
         "runtime_smoke_cpu.yaml": (
-            "2843e32cd3b64ec6049a20881ada0512e561b9fa4c1b05dcc8910dde01390c4f",
-            "094e562b3dddcca70c53ad9bd66d7e8f82807f2998b51696e2773510621fa598",
+            "0a2c6cff8756684c12f1ce2743eb392e40a161ce64caa14dbd039aeaa56a4787",
+            "4f14421750a237f8fbc9bfd4081931525c9185d9cf657cd92fbdc2a46b608ca4",
         ),
     }
     for filename, digests in expected.items():

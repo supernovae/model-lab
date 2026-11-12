@@ -1,5 +1,3 @@
-# Malformed persisted portability identity is reported as ValueError.
-# ruff: noqa: TRY004
 """Engine-neutral single-host training lifecycle with explicit update boundaries."""
 
 from __future__ import annotations
@@ -31,10 +29,6 @@ import torch
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.models import RunConfig
 from klab.corpus.export import verify_release_export
-from klab.data.allocation import (
-    copy_allocation_bundle,
-    load_allocation_manifest,
-)
 from klab.data.encoding import (
     TOKENIZER_BATCH_DOCUMENTS,
     TOKENIZER_BATCH_SOURCE_BYTES,
@@ -195,81 +189,6 @@ def _stack_optional(
     return np.stack([value for value in values if value is not None])
 
 
-def _portability_manifest_v2(path: Path | None) -> dict[str, object] | None:
-    if path is None or path.is_symlink() or not path.is_file():
-        return None
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if (
-        isinstance(payload, dict)
-        and payload.get("format") == "klab-portability-run"
-        and type(payload.get("version")) is int
-        and payload["version"] == 2
-    ):
-        return payload
-    return None
-
-
-def _bind_learned_inputs(config: RunConfig, manifest_path: Path) -> RunConfig:
-    payload = _portability_manifest_v2(manifest_path)
-    if payload is None:
-        raise ValueError("learned portability run manifest is not v2")
-    memory = payload.get("memory")
-    if not isinstance(memory, dict):
-        raise ValueError("learned portability manifest lacks memory identity")
-    artifact = memory.get("artifact")
-    package_path: Path | None = None
-    if artifact is not None:
-        if not isinstance(artifact, dict) or not isinstance(artifact.get("path"), str):
-            raise ValueError("learned portable memory descriptor is invalid")
-        package_path = manifest_path.parent / artifact["path"]
-    role = payload["coordinate"]["role"]
-    condition = payload["coordinate"]["condition"]
-    default_train = {
-        "source": "source_train.jsonl",
-        "preparation": "preparation_train.jsonl",
-        "recipient": "adapter_calibration.jsonl",
-        "native": "source_train.jsonl",
-        "calibration": (
-            "preparation_train.jsonl"
-            if condition.startswith("preparation-")
-            else "adapter_calibration.jsonl"
-            if condition.startswith("adapter-")
-            else "source_train.jsonl"
-        ),
-    }[role]
-    train_name = (
-        config.dataset.train_path.name
-        if config.dataset.train_path is not None
-        else default_train
-    )
-    default_validation = "preparation_validation.jsonl"
-    validation_name = (
-        config.dataset.validation_path.name
-        if config.dataset.validation_path is not None
-        else default_validation
-    )
-    data_root = manifest_path.parent / "portability" / "data"
-    return config.model_copy(
-        update={
-            "tokenizer": config.tokenizer.model_copy(
-                update={"path": manifest_path.parent / "tokenizer.json"}
-            ),
-            "model": config.model.model_copy(
-                update={"memory_package_path": package_path}
-            ),
-            "dataset": config.dataset.model_copy(
-                update={
-                    "train_path": data_root / train_name,
-                    "validation_path": data_root / validation_name,
-                }
-            ),
-            "training": config.training.model_copy(
-                update={"portability_manifest_path": manifest_path}
-            ),
-        }
-    )
-
-
 def _copy_artifacts(
     run: Path, config: RunConfig, data: PreparedData, source_run: Path | None = None
 ) -> tuple[ArtifactIdentity, ...]:
@@ -340,59 +259,17 @@ def _copy_artifacts(
             raise ValueError(
                 f"prepared {split} supervision inventory does not match descriptor"
             )
-    manifest_source = (
-        source_run / "portability_manifest.json"
-        if source_run is not None
-        and (source_run / "portability_manifest.json").is_file()
-        else config.training.portability_manifest_path
-    )
-    learned_manifest = _portability_manifest_v2(manifest_source)
-    if learned_manifest is not None:
-        assert manifest_source is not None
-        bundle_source = manifest_source.parent / "portability"
-        if bundle_source.is_symlink() or not bundle_source.is_dir():
-            raise ValueError("learned portability owned bundle is missing")
-        shutil.copytree(bundle_source, run / "portability")
-        shutil.copy2(manifest_source, run / "portability_manifest.json")
     package_source = (
         source_run / "portable_package"
         if source_run is not None
         else config.model.memory_package_path
     )
-    if (
-        learned_manifest is None
-        and package_source is not None
-        and package_source.exists()
-    ):
+    if package_source is not None and package_source.exists():
         destination = run / "portable_package"
         if package_source.is_dir():
             shutil.copytree(package_source, destination)
         else:
             shutil.copy2(package_source, destination)
-    allocation_source = config.dataset.allocation_manifest_path
-    if allocation_source is not None:
-        cache_identity = data.manifest.get("cache_identity")
-        allocation_metadata = data.manifest.get("allocation")
-        if not isinstance(cache_identity, dict) or not isinstance(
-            allocation_metadata, dict
-        ):
-            raise ValueError("prepared data lacks allocation identity")
-        source_identity_sha256 = cache_identity.get("source_identity_sha256")
-        tokenizer_sha256 = cache_identity.get("tokenizer_sha256")
-        if not isinstance(source_identity_sha256, str) or not isinstance(
-            tokenizer_sha256, str
-        ):
-            raise ValueError("prepared data allocation identity is malformed")
-        if source_run is not None:
-            allocation_source = source_run / "allocation" / allocation_source.name
-        allocation = load_allocation_manifest(
-            allocation_source,
-            source_identity_sha256=source_identity_sha256,
-            tokenizer_sha256=tokenizer_sha256,
-        )
-        if allocation.sha256 != allocation_metadata.get("manifest_sha256"):
-            raise ValueError("prepared data and allocation manifests differ")
-        copy_allocation_bundle(allocation, run / "allocation")
     for path in sorted(
         item
         for item in run.rglob("*")
@@ -1018,17 +895,6 @@ def _train_impl(
             }
         )
         current_source = source_identity()
-        if promote is None and (
-            resume is not None or recover is not None or extend_budget is not None
-        ):
-            continuation_root = (
-                recover.resolve()
-                if recover is not None
-                else (resume or extend_budget).parent.parent.resolve()  # type: ignore[union-attr]
-            )
-            owned_manifest = continuation_root / "portability_manifest.json"
-            if _portability_manifest_v2(owned_manifest) is not None:
-                config = _bind_learned_inputs(config, owned_manifest)
         continuation_state = load_continuation(
             config,
             runtime,
@@ -1147,9 +1013,6 @@ def _train_impl(
             config.training.seq_len,
             data.train_byte_addresses,
             data.train_supervision,
-            data.train_owner_ids,
-            data.train_semantic_queries,
-            data.train_semantic_mask,
         )
         matched = config.training.matched_stories
         if matched is not None:
@@ -1161,9 +1024,6 @@ def _train_impl(
                 for value in (
                     data.train_supervision,
                     data.train_byte_addresses,
-                    data.train_owner_ids,
-                    data.train_semantic_queries,
-                    data.train_semantic_mask,
                 )
             ):
                 raise ValueError(
@@ -1207,9 +1067,6 @@ def _train_impl(
             config.training.seq_len,
             data.validation_byte_addresses,
             data.validation_supervision,
-            data.validation_owner_ids,
-            data.validation_semantic_queries,
-            data.validation_semantic_mask,
         )
         if matched is not None and matched.unpadded_documents:
             if any(
@@ -1217,9 +1074,6 @@ def _train_impl(
                 for value in (
                     data.validation_supervision,
                     data.validation_byte_addresses,
-                    data.validation_owner_ids,
-                    data.validation_semantic_queries,
-                    data.validation_semantic_mask,
                 )
             ):
                 raise ValueError(
@@ -1308,15 +1162,7 @@ def _train_impl(
             "live": None,
             "final_observed": None,
         }
-        if (
-            continuation == "RESUMED"
-            and config.model.memory_package_path is not None
-            and (
-                config.training.portability_manifest_path is None
-                or _portability_manifest_v2(config.training.portability_manifest_path)
-                is None
-            )
-        ):
+        if continuation == "RESUMED" and config.model.memory_package_path is not None:
             assert source_run is not None
             owned_package = source_run / "portable_package"
             if not owned_package.exists():
@@ -1336,20 +1182,7 @@ def _train_impl(
         )
         _check_startup_cancel(cancel_path)
         with pilot_phase("engine_initialization"):
-            if isinstance(engine, PyTorchEngine):
-                engine.initialize(
-                    config,
-                    initial_weights=initial_weights,
-                    resume_portability=(
-                        continuation == "RESUMED"
-                        and _portability_manifest_v2(
-                            config.training.portability_manifest_path
-                        )
-                        is not None
-                    ),
-                )
-            else:
-                engine.initialize(config, initial_weights=initial_weights)
+            engine.initialize(config, initial_weights=initial_weights)
         resources.callback(engine.close)
         step = tokens = 0
         cursor = BatchCursor()
@@ -1440,14 +1273,6 @@ def _train_impl(
             continuation=continuation,
             prior=prior_exposure,
         )
-        owned_manifest = run / "portability_manifest.json"
-        if _portability_manifest_v2(owned_manifest) is not None:
-            config = _bind_learned_inputs(config, owned_manifest)
-            from klab.research.portability import load_portability_manifest
-
-            assert isinstance(engine, PyTorchEngine)
-            engine.portability_run = load_portability_manifest(config)
-            engine.config = config
         pilot_reports = tuple(staged["pilot_reports"]) if staged else ()
         stage_digest = str(staged["sha256"]) if staged else None
         if staged is not None:
@@ -2039,45 +1864,6 @@ def _train_impl(
             flush_metrics()
             final_reporting_started = time.perf_counter()
             reporting_before = phase_seconds.get("reporting", 0.0)
-            if isinstance(engine, PyTorchEngine) and engine.portability_run is not None:
-                audit_path = run / "portability_audit.json"
-                audit_version = (
-                    2 if engine.portability_run.payload.get("version") == 2 else 1
-                )
-                try:
-                    audit: dict[str, object] = {
-                        "format": "klab-portability-audit",
-                        "version": audit_version,
-                        "valid": True,
-                        "run_status": status,
-                        **engine.portability_audit(completed=status == "completed"),
-                    }
-                except Exception as error:  # noqa: BLE001
-                    audit = {
-                        "format": "klab-portability-audit",
-                        "version": 1,
-                        "valid": False,
-                        "error_type": type(error).__name__,
-                        "error": str(error),
-                    }
-                    status = "failed"
-                    reason = f"portability integrity audit failed: {error}"
-                report_started = time.perf_counter()
-                try:
-                    _atomic_json(audit_path, audit)
-                    store.log_event(
-                        run_id,
-                        step,
-                        tokens,
-                        elapsed_seconds(),
-                        "portability_audit_recorded",
-                        {
-                            "valid": audit["valid"],
-                            "sha256": sha256_file(audit_path),
-                        },
-                    )
-                finally:
-                    add_phase_time("reporting", report_started)
             if status == "failed" and history.current is not None:
                 finish_stage("failed", reason)
             enter_stage(
@@ -2309,9 +2095,6 @@ def _train_impl(
                     inputs,
                     np.stack([record[1] for record in records]),
                     _stack_optional(records, 2),
-                    _stack_optional(records, 3),
-                    _stack_optional(records, 4),
-                    _stack_optional(records, 5),
                 )
                 if progress_total:
                     emit_pilot_progress(
@@ -2549,18 +2332,14 @@ def _train_impl(
                     valid_targets = 0
                     committed_cursor = cursor
                     for index, candidate_cursor in candidates:
-                        inputs, targets, addresses, owners, queries, query_mask = (
-                            dataset.numpy_microblock(index)
-                        )
+                        inputs, targets, addresses = dataset.numpy_microblock(index)
                         labels = targets.copy()
                         available = int(np.count_nonzero(labels != -100))
                         allowed = min(remaining - valid_targets, available)
                         if allowed < available:
                             flat = labels.reshape(-1)
                             flat[np.flatnonzero(flat != -100)[allowed:]] = -100
-                        records.append(
-                            (inputs, labels, addresses, owners, queries, query_mask)
-                        )
+                        records.append((inputs, labels, addresses))
                         committed_cursor = candidate_cursor
                         valid_targets += allowed
                         if valid_targets == remaining:
@@ -2601,24 +2380,6 @@ def _train_impl(
                                     offset : offset + config.training.micro_batch_size
                                 ],
                                 2,
-                            ),
-                            _stack_optional(
-                                records[
-                                    offset : offset + config.training.micro_batch_size
-                                ],
-                                3,
-                            ),
-                            _stack_optional(
-                                records[
-                                    offset : offset + config.training.micro_batch_size
-                                ],
-                                4,
-                            ),
-                            _stack_optional(
-                                records[
-                                    offset : offset + config.training.micro_batch_size
-                                ],
-                                5,
                             ),
                         )
                         for offset in range(
@@ -2701,17 +2462,6 @@ def _train_impl(
                         or tokens >= config.training.max_tokens
                     ):
                         buffered_metrics.append((step, tokens, elapsed, metric_values))
-                    if isinstance(engine, PyTorchEngine):
-                        row_evidence = engine.portability_update_evidence()
-                        if row_evidence is not None:
-                            store.log_event(
-                                run_id,
-                                step,
-                                tokens,
-                                elapsed,
-                                "learned_engram_gradient_rows",
-                                row_evidence,
-                            )
                     if unavailable and step == first_update_step:
                         store.log_event(
                             run_id,
