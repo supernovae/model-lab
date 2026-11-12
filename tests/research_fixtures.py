@@ -28,7 +28,8 @@ def make_resources(tmp_path: Path) -> Path:
         },
         "tokenizer": {"path": "artifacts/tokenizer/tokenizer.json"},
         "dataset": {
-            "source": "chat_recall",
+            "source": "synthetic",
+            "synthetic_task": "chat_recall",
             "cache_dir": "artifacts/data",
             "train_max_documents": 2,
             "validation_max_documents": 2,
@@ -75,7 +76,8 @@ def make_resources(tmp_path: Path) -> Path:
         },
     )
     dataset = {
-        "source": "chat_recall",
+        "source": "synthetic",
+        "synthetic_task": "chat_recall",
         "revision": None,
         "dataset_seed": 3,
         "train_max_documents": 2,

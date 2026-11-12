@@ -4,7 +4,7 @@ Commands below use the [activated, provisioned environment](../README.md#first-r
 
 Start with [From flashcards to a useful local assistant](from-toy-to-useful.md) for the beginner explanation, the runnable 3.3M `instruction_starter.yaml` recipe, and the distinction between a familiar chat prompt and trained conversational ability.
 
-The optional `instruction_reference` source is a deterministic, offline synthetic curriculum for exercising the local chat transcript path. Each document uses the same plain-text form consumed by `klab chat`:
+The optional `instruction_reference` generator (`dataset.source: synthetic`, `synthetic_task: instruction_reference`) is a deterministic, offline synthetic curriculum for exercising the local chat transcript path. Each document uses the same plain-text form consumed by `klab chat`:
 
 ```text
 System: You are a concise local assistant.

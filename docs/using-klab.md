@@ -43,6 +43,7 @@ summarizes the direction for a smaller CLI. There is no `advanced` or `release` 
 
 | Need | Guide |
 | --- | --- |
+| Build a model from your own text | [Build guide](build.md) |
 | Train a larger first model with repeated seeds | [17.3M FineWeb-Edu walkthrough](first-model.md) |
 | Understand verdicts, tiers and references | [Probe battery](probe-battery.md) |
 | Browse experiments, model comparisons and internals | [Dashboard](dashboard.md) |

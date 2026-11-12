@@ -3,7 +3,8 @@
   "version": 1,
   "datasets": {
     "offline": {
-      "source": "chat_recall",
+      "source": "synthetic",
+      "synthetic_task": "chat_recall",
       "revision": null,
       "dataset_config": null,
       "dataset_seed": 42,
@@ -52,7 +53,8 @@
       }
     },
     "fineweb_edu": {
-      "source": "fineweb_edu",
+      "source": "huggingface",
+      "dataset_id": "HuggingFaceFW/fineweb-edu",
       "revision": "87f09149ef4734204d70ed1d046ddc9ca3f2b8f9",
       "dataset_config": "sample-10BT",
       "dataset_seed": 42,

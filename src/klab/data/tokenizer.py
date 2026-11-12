@@ -18,7 +18,7 @@ from tokenizers.trainers import BpeTrainer
 from klab.config.models import DatasetConfig, RunConfig, TokenizerTrainConfig
 from klab.corpus.export import verify_release_export
 from klab.data.datasets import iter_documents
-from klab.data.local_stories import verify_snapshot as verify_legacy_snapshot
+from klab.data.sources import verify_snapshot
 from klab.progress import progress_phase
 
 if TYPE_CHECKING:
@@ -122,10 +122,10 @@ def _verify_tokenizer_manifest(
         or manifest.get("vocab_size") != vocab_size
     ):
         raise ValueError(f"tokenizer artifact provenance or digest mismatch: {path}")
-    if source in {"local_stories", "snapshot"}:
+    if source == "snapshot":
         if dataset is None:
             raise ValueError(
-                "local_stories tokenizer verification requires dataset configuration"
+                "snapshot tokenizer verification requires dataset configuration"
             )
         assert dataset.source_manifest_path is not None
         verify_snapshot(dataset)
@@ -380,16 +380,8 @@ def _bounded_documents(
     )
 
 
-def verify_snapshot(dataset: DatasetConfig) -> dict:
-    if dataset.source == "snapshot":
-        from klab.data.sources import verify_snapshot as verify_generic_snapshot
-
-        return verify_generic_snapshot(dataset)
-    return verify_legacy_snapshot(dataset)
-
-
 def _snapshot_digest(config: TokenizerTrainConfig) -> str | None:
-    if config.dataset.source not in {"local_stories", "snapshot"}:
+    if config.dataset.source != "snapshot":
         return None
     assert config.dataset.source_manifest_path is not None
     verify_snapshot(config.dataset)
@@ -430,11 +422,7 @@ def train_tokenizer(
             "corpus export vocabulary size does not match tokenizer request"
         )
     source_manifest_sha256 = _snapshot_digest(config)
-    whole_documents = config.dataset.source in {
-        "local_stories",
-        "local_text",
-        "snapshot",
-    }
+    whole_documents = config.dataset.source in {"local_text", "snapshot"}
     stats: dict[str, object] = {}
     source_started = time.monotonic()
     with progress_phase(
@@ -627,14 +615,9 @@ def train_tokenizer(
                 ),
                 "license": config.dataset.license
                 if config.dataset.source
-                in {"local_chat", "local_text", "local_stories", "snapshot"}
+                in {"local_chat", "local_text", "snapshot", "huggingface"}
                 else None,
                 "requested_vocab_size": config.vocab_size,
-                **(
-                    {"bpe_fit_seconds": bpe_elapsed}
-                    if config.dataset.source == "local_stories"
-                    else {}
-                ),
                 "vocab_size": actual,
                 "special_ids": {
                     token: tokenizer.token_to_id(token) for token in SPECIAL_TOKENS

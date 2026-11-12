@@ -329,13 +329,9 @@ def locked_workflow_context(lock, source: Path) -> LoadedWorkflow:
 
 def resolve_workflow(path: Path, bindings: Path, *, max_runs: int = 1000):
     """Cold native verification and resolution; no publication or runtime probing."""
-    from klab.data.legacy import require_current_dataset
     from klab.experiments.lock import ResolvedExperimentPlan, resolve_plan
 
     loaded = load_workflow(path, bindings)
-    require_current_dataset(
-        recipe_run_config(loaded.plan, loaded.source, context=loaded.context).dataset
-    )
     lock = resolve_plan(
         loaded.plan, loaded.source, context=loaded.context, max_runs=max_runs
     )

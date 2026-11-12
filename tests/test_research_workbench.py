@@ -207,7 +207,10 @@ def test_fineweb_edu_scaffold_is_pinned_and_does_not_prepare_data(
     assert "web-crawled" in " ".join(profile.notes)
     assert len(plan.expanded) == 8
     assert {item.config.seed for item in plan.expanded} == {5, 9}
-    assert {item.config.dataset.source for item in plan.expanded} == {"fineweb_edu"}
+    assert {
+        (item.config.dataset.source, item.config.dataset.dataset_id)
+        for item in plan.expanded
+    } == {("huggingface", "HuggingFaceFW/fineweb-edu")}
     assert {
         (
             item.config.dataset.train_max_documents,

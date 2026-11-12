@@ -53,7 +53,15 @@ class _Loaded:
     ) -> None:
         self.tokenizer = tokenizer
         dataset = (
-            type("Dataset", (), {"source": source, "synthetic_seed": seed})()
+            type(
+                "Dataset",
+                (),
+                {
+                    "source": "synthetic" if source == "withheld_facts" else source,
+                    "synthetic_task": source if source == "withheld_facts" else None,
+                    "synthetic_seed": seed,
+                },
+            )()
             if source is not None
             else None
         )
@@ -175,9 +183,9 @@ def test_parametric_recall_is_inapplicable_or_missing_without_provenance(
         return runner._measure_safely(spec, loaded, arm, {})
 
     # Not trained on withheld_facts (or a public reference): does not apply.
-    other = measured(_Loaded(_Words(), source="tinystories"))
+    other = measured(_Loaded(_Words(), source="local_text"))
     assert other["status"] == "skipped" and "inapplicable" in other["note"]
-    assert "tinystories" in other["note"]
+    assert "local_text" in other["note"]
     ref = measured(_Loaded(_Words()), reference=True)
     assert ref["status"] == "skipped" and "inapplicable" in ref["note"]
     # No dataset provenance: missing evidence, never a guessed manifest.
@@ -195,7 +203,11 @@ def test_parametric_recall_is_inapplicable_or_missing_without_provenance(
         json.dumps(
             {
                 "cache_identity": {
-                    "dataset": {"source": "withheld_facts", "synthetic_seed": 7}
+                    "dataset": {
+                        "source": "synthetic",
+                        "synthetic_task": "withheld_facts",
+                        "synthetic_seed": 7,
+                    }
                 }
             }
         )

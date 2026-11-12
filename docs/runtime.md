@@ -710,7 +710,7 @@ scientific manifest and cache identity; they are not model-quality metrics.
 
 ## Prepared data: bounded encoding and verification
 
-For `local_text` and `local_stories`, `data prepare`, `stage`, `train`,
+For `local_text`, `data prepare`, `stage`, `train`,
 single-config `experiment submit`, and `experiment prepare` accept
 `--tokenizer-batch-documents` (1–256, default 256) and
 `--tokenizer-batch-source-bytes` (1–8388608, default 1048576). Both bounds apply.
@@ -797,7 +797,7 @@ source/tokenizer/owner identity, unexpected entries, and replacement publication
 
 ### Concurrent preparation chunks
 
-Streaming `local_text`, `local_stories` and generic `snapshot` preparation can
+Streaming `local_text` and `snapshot` preparation can
 use independent chunk workers **within each split**. Train and validation share
 one operation-scoped pool; validation does not reserve capacity while train runs.
 Opt in through `data prepare --resource-envelope envelope.yaml`:

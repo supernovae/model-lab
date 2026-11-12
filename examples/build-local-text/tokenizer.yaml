@@ -1,0 +1,15 @@
+schema_version: 1
+vocab_size: 384
+min_frequency: 1
+max_documents: 600
+output_dir: work/tokenizer
+dataset:
+  source: local_text
+  license: CC0-1.0 (example sentences written for this repository)
+  train_path: corpus/train.jsonl
+  validation_path: corpus/validation.jsonl
+  cache_dir: work/data
+  train_max_documents: 600
+  validation_max_documents: 80
+  train_max_tokens: 65536
+  validation_max_tokens: 8192

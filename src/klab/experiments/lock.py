@@ -495,8 +495,7 @@ def _check_cell_inputs(
     }
     required = (
         {"tokenizer", "prepared_data"}
-        if config.dataset.source
-        in {"synthetic", "tinystories", "local_stories", "snapshot"}
+        if config.dataset.source in {"synthetic", "snapshot"}
         else {"corpus_release", "corpus_export", "tokenizer", "prepared_data"}
     )
     if not required.issubset(by_kind):
@@ -548,21 +547,11 @@ def _check_cell_inputs(
         raise ValueError(
             "prepared cache does not bind the locked dataset/tokenizer/packing/source"
         )
-    if config.dataset.source in {"tinystories", "local_stories", "snapshot"}:
+    if config.dataset.source == "snapshot":
+        from klab.data.sources import verify_snapshot
         from klab.data.tokenizer import verify_tokenizer_artifact
+        from klab.experiments.artifacts import _safe_path
 
-        if config.dataset.source == "tinystories":
-            revision = config.dataset.revision or ""
-            if len(revision) != 40 or any(
-                char not in "0123456789abcdef" for char in revision
-            ):
-                raise ValueError(
-                    "direct TinyStories requires a pinned full Hub commit revision"
-                )
-            if config.dataset.dataset_config not in {None, "default"}:
-                raise ValueError(
-                    "direct TinyStories requires the default dataset configuration"
-                )
         manifest = verify_tokenizer_artifact(
             Path(tokenizer_path),
             source=config.dataset.source,
@@ -585,35 +574,23 @@ def _check_cell_inputs(
             raise ValueError(
                 "direct source tokenizer training provenance differs from dataset"
             )
-        if config.dataset.source in {"local_stories", "snapshot"}:
-            if config.dataset.source == "snapshot":
-                from klab.data.sources import verify_snapshot
-            else:
-                from klab.data.local_stories import verify_snapshot
-            from klab.experiments.artifacts import _safe_path
-
-            assert config.dataset.source_manifest_path is not None
-            snapshot = verify_snapshot(config.dataset)
-            for member in (
-                config.dataset.source_manifest_path,
-                config.dataset.train_path,
-                config.dataset.validation_path,
-                config.dataset.source_manifest_path.parent
-                / snapshot["excluded"]["path"],
-            ):
-                _safe_path(str(member), Path(tokenizer_path))
-            if contract.get("source_manifest_sha256") != sha256_file(
-                config.dataset.source_manifest_path
-            ) or prepared_identity.get(
-                "snapshot_source_sha256"
-                if config.dataset.source == "snapshot"
-                else "local_stories_source_sha256"
-            ) != canonical_digest(snapshot):
-                raise ValueError(
-                    "prepared cache/tokenizer does not bind the pinned "
-                    + ("source" if config.dataset.source == "snapshot" else "story")
-                    + " snapshot"
-                )
+        assert config.dataset.source_manifest_path is not None
+        snapshot = verify_snapshot(config.dataset)
+        for member in (
+            config.dataset.source_manifest_path,
+            config.dataset.train_path,
+            config.dataset.validation_path,
+            config.dataset.source_manifest_path.parent / snapshot["excluded"]["path"],
+        ):
+            _safe_path(str(member), Path(tokenizer_path))
+        if contract.get("source_manifest_sha256") != sha256_file(
+            config.dataset.source_manifest_path
+        ) or prepared_identity.get("snapshot_source_sha256") != canonical_digest(
+            snapshot
+        ):
+            raise ValueError(
+                "prepared cache/tokenizer does not bind the pinned source snapshot"
+            )
         return
     if config.dataset.source == "synthetic":
         if (
@@ -778,9 +755,15 @@ def resolve_plan(
             "state": artifact.state,
         }
         availability["artifacts"][name] = verified["path"]
-        if artifact.kind == "tokenizer" and json.loads(
-            Path(str(verified["path"])).with_name("tokenizer_manifest.json").read_text()
-        ).get("source") in {"local_stories", "snapshot"}:
+        if (
+            artifact.kind == "tokenizer"
+            and json.loads(
+                Path(str(verified["path"]))
+                .with_name("tokenizer_manifest.json")
+                .read_text()
+            ).get("source")
+            == "snapshot"
+        ):
             availability.setdefault("artifact_datasets", {})[name] = (
                 base.dataset.model_dump(mode="json")
             )
@@ -1274,8 +1257,8 @@ def _artifact_dataset(lock: ResolvedExperimentPlan, name: str) -> DatasetConfig 
     if name not in contexts:
         return None
     dataset = DatasetConfig.model_validate(contexts[name])
-    if dataset.source not in {"local_stories", "snapshot"}:
-        raise ValueError("artifact dataset context requires local_stories or snapshot")
+    if dataset.source != "snapshot":
+        raise ValueError("artifact dataset context requires a snapshot")
     return dataset
 
 

@@ -96,11 +96,9 @@ def dispatch(
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
 ) -> PreparationResult:
-    from klab.data.legacy import require_current_dataset
     from klab.data.tokenizer import load_tokenizer, train_tokenizer
 
     config = request.config
-    require_current_dataset(config.dataset)
     if request.operation.kind == "tokenizer_train":
         path = train_tokenizer(config)
     else:

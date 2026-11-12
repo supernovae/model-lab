@@ -33,15 +33,39 @@
     "AdafactorConfig": {
       "additionalProperties": false,
       "properties": {
+        "name": {
+          "const": "adafactor",
+          "default": "adafactor",
+          "title": "Name",
+          "type": "string"
+        },
+        "peak": {
+          "default": 0.0003,
+          "exclusiveMinimum": 0,
+          "title": "Peak",
+          "type": "number"
+        },
+        "floor": {
+          "default": 3e-05,
+          "minimum": 0,
+          "title": "Floor",
+          "type": "number"
+        },
+        "warmup_steps": {
+          "default": 10,
+          "minimum": 0,
+          "title": "Warmup Steps",
+          "type": "integer"
+        },
+        "weight_decay": {
+          "default": 0.1,
+          "minimum": 0,
+          "title": "Weight Decay",
+          "type": "number"
+        },
         "beta2_decay": {
           "default": -0.8,
           "title": "Beta2 Decay",
-          "type": "number"
-        },
-        "d": {
-          "default": 1.0,
-          "exclusiveMinimum": 0,
-          "title": "D",
           "type": "number"
         },
         "eps": {
@@ -69,40 +93,16 @@
           "title": "Eps",
           "type": "array"
         },
-        "floor": {
-          "default": 3e-05,
-          "minimum": 0,
-          "title": "Floor",
-          "type": "number"
-        },
-        "name": {
-          "const": "adafactor",
-          "default": "adafactor",
-          "title": "Name",
-          "type": "string"
-        },
-        "peak": {
-          "default": 0.0003,
+        "d": {
+          "default": 1.0,
           "exclusiveMinimum": 0,
-          "title": "Peak",
+          "title": "D",
           "type": "number"
         },
         "state_offload": {
           "default": false,
           "title": "State Offload",
           "type": "boolean"
-        },
-        "warmup_steps": {
-          "default": 10,
-          "minimum": 0,
-          "title": "Warmup Steps",
-          "type": "integer"
-        },
-        "weight_decay": {
-          "default": 0.1,
-          "minimum": 0,
-          "title": "Weight Decay",
-          "type": "number"
         }
       },
       "title": "AdafactorConfig",
@@ -111,49 +111,6 @@
     "AdamWConfig": {
       "additionalProperties": false,
       "properties": {
-        "betas": {
-          "default": [
-            0.9,
-            0.95
-          ],
-          "maxItems": 2,
-          "minItems": 2,
-          "prefixItems": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "number"
-            }
-          ],
-          "title": "Betas",
-          "type": "array"
-        },
-        "decay_steps": {
-          "anyOf": [
-            {
-              "exclusiveMinimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Decay Steps"
-        },
-        "eps": {
-          "default": 1e-08,
-          "exclusiveMinimum": 0,
-          "title": "Eps",
-          "type": "number"
-        },
-        "floor": {
-          "default": 3e-05,
-          "minimum": 0,
-          "title": "Floor",
-          "type": "number"
-        },
         "memory_table_lr_multiplier": {
           "default": 1.0,
           "exclusiveMinimum": 0,
@@ -185,10 +142,11 @@
           "title": "Peak",
           "type": "number"
         },
-        "state_offload": {
-          "default": false,
-          "title": "State Offload",
-          "type": "boolean"
+        "floor": {
+          "default": 3e-05,
+          "minimum": 0,
+          "title": "Floor",
+          "type": "number"
         },
         "warmup_steps": {
           "default": 10,
@@ -196,11 +154,53 @@
           "title": "Warmup Steps",
           "type": "integer"
         },
+        "decay_steps": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Decay Steps"
+        },
         "weight_decay": {
           "default": 0.1,
           "minimum": 0,
           "title": "Weight Decay",
           "type": "number"
+        },
+        "betas": {
+          "default": [
+            0.9,
+            0.95
+          ],
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Betas",
+          "type": "array"
+        },
+        "eps": {
+          "default": 1e-08,
+          "exclusiveMinimum": 0,
+          "title": "Eps",
+          "type": "number"
+        },
+        "state_offload": {
+          "default": false,
+          "title": "State Offload",
+          "type": "boolean"
         }
       },
       "title": "AdamWConfig",
@@ -210,22 +210,6 @@
       "additionalProperties": false,
       "description": "An external immutable identity, or a named future producer (not both).",
       "properties": {
-        "from_phase": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "From Phase"
-        },
-        "identifier": {
-          "title": "Identifier",
-          "type": "string"
-        },
         "kind": {
           "enum": [
             "source_snapshot",
@@ -244,6 +228,31 @@
           "title": "Kind",
           "type": "string"
         },
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        },
+        "producer": {
+          "title": "Producer",
+          "type": "string"
+        },
+        "identifier": {
+          "title": "Identifier",
+          "type": "string"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        },
         "path": {
           "anyOf": [
             {
@@ -256,9 +265,17 @@
           "default": null,
           "title": "Path"
         },
-        "producer": {
-          "title": "Producer",
-          "type": "string"
+        "from_phase": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "From Phase"
         },
         "selector": {
           "anyOf": [
@@ -276,18 +293,6 @@
           "default": null,
           "title": "Selector"
         },
-        "sha256": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Sha256"
-        },
         "state": {
           "anyOf": [
             {
@@ -303,11 +308,6 @@
           ],
           "default": null,
           "title": "State"
-        },
-        "version": {
-          "minimum": 1,
-          "title": "Version",
-          "type": "integer"
         }
       },
       "required": [
@@ -342,28 +342,6 @@
     "AttentionConfig": {
       "additionalProperties": false,
       "properties": {
-        "block_size": {
-          "anyOf": [
-            {
-              "exclusiveMinimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Block Size"
-        },
-        "implementation": {
-          "default": "reference",
-          "enum": [
-            "reference",
-            "sdpa"
-          ],
-          "title": "Implementation",
-          "type": "string"
-        },
         "kind": {
           "default": "dense",
           "enum": [
@@ -375,6 +353,34 @@
           ],
           "title": "Kind",
           "type": "string"
+        },
+        "implementation": {
+          "default": "reference",
+          "enum": [
+            "reference",
+            "sdpa"
+          ],
+          "title": "Implementation",
+          "type": "string"
+        },
+        "rope_base": {
+          "default": 10000.0,
+          "exclusiveMinimum": 0,
+          "title": "Rope Base",
+          "type": "number"
+        },
+        "window_size": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Window Size"
         },
         "latent_dim": {
           "anyOf": [
@@ -389,11 +395,18 @@
           "default": null,
           "title": "Latent Dim"
         },
-        "rope_base": {
-          "default": 10000.0,
-          "exclusiveMinimum": 0,
-          "title": "Rope Base",
-          "type": "number"
+        "block_size": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Block Size"
         },
         "selected_blocks": {
           "anyOf": [
@@ -416,19 +429,6 @@
           ],
           "title": "Selector",
           "type": "string"
-        },
-        "window_size": {
-          "anyOf": [
-            {
-              "exclusiveMinimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Window Size"
         }
       },
       "title": "AttentionConfig",
@@ -437,16 +437,16 @@
     "Axis": {
       "additionalProperties": false,
       "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
         "choices": {
           "items": {
             "$ref": "#/$defs/Choice"
           },
           "title": "Choices",
           "type": "array"
-        },
-        "name": {
-          "title": "Name",
-          "type": "string"
         }
       },
       "required": [
@@ -459,19 +459,6 @@
     "CheckpointConfig": {
       "additionalProperties": false,
       "properties": {
-        "every_minutes": {
-          "anyOf": [
-            {
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Every Minutes"
-        },
         "every_steps": {
           "anyOf": [
             {
@@ -497,6 +484,19 @@
           ],
           "default": null,
           "title": "Every Tokens"
+        },
+        "every_minutes": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Every Minutes"
         },
         "keep_periodic": {
           "default": true,
@@ -530,11 +530,6 @@
     "CheckpointMilestone": {
       "additionalProperties": false,
       "properties": {
-        "committed_targets": {
-          "minimum": 0,
-          "title": "Committed Targets",
-          "type": "integer"
-        },
         "name": {
           "pattern": "^[a-z][a-z0-9_-]{0,63}$",
           "title": "Name",
@@ -543,6 +538,11 @@
         "step": {
           "minimum": 0,
           "title": "Step",
+          "type": "integer"
+        },
+        "committed_targets": {
+          "minimum": 0,
+          "title": "Committed Targets",
           "type": "integer"
         }
       },
@@ -557,27 +557,6 @@
     "CheckpointRetention": {
       "additionalProperties": false,
       "properties": {
-        "max_generation_bytes": {
-          "exclusiveMinimum": 0,
-          "title": "Max Generation Bytes",
-          "type": "integer"
-        },
-        "max_generations": {
-          "exclusiveMinimum": 0,
-          "maximum": 1024,
-          "title": "Max Generations",
-          "type": "integer"
-        },
-        "max_peak_bytes": {
-          "exclusiveMinimum": 0,
-          "title": "Max Peak Bytes",
-          "type": "integer"
-        },
-        "max_retained_bytes": {
-          "exclusiveMinimum": 0,
-          "title": "Max Retained Bytes",
-          "type": "integer"
-        },
         "milestones": {
           "items": {
             "$ref": "#/$defs/CheckpointMilestone"
@@ -585,11 +564,6 @@
           "maxItems": 128,
           "title": "Milestones",
           "type": "array"
-        },
-        "reserve_free_bytes": {
-          "minimum": 0,
-          "title": "Reserve Free Bytes",
-          "type": "integer"
         },
         "terminal_step": {
           "exclusiveMinimum": 0,
@@ -599,6 +573,32 @@
         "terminal_targets": {
           "exclusiveMinimum": 0,
           "title": "Terminal Targets",
+          "type": "integer"
+        },
+        "max_generations": {
+          "exclusiveMinimum": 0,
+          "maximum": 1024,
+          "title": "Max Generations",
+          "type": "integer"
+        },
+        "max_generation_bytes": {
+          "exclusiveMinimum": 0,
+          "title": "Max Generation Bytes",
+          "type": "integer"
+        },
+        "max_retained_bytes": {
+          "exclusiveMinimum": 0,
+          "title": "Max Retained Bytes",
+          "type": "integer"
+        },
+        "max_peak_bytes": {
+          "exclusiveMinimum": 0,
+          "title": "Max Peak Bytes",
+          "type": "integer"
+        },
+        "reserve_free_bytes": {
+          "minimum": 0,
+          "title": "Reserve Free Bytes",
           "type": "integer"
         }
       },
@@ -638,6 +638,10 @@
     "Comparison": {
       "additionalProperties": false,
       "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
         "baseline": {
           "additionalProperties": {
             "type": "string"
@@ -645,17 +649,12 @@
           "title": "Baseline",
           "type": "object"
         },
-        "confounders": {
-          "default": [],
-          "items": {
+        "variant": {
+          "additionalProperties": {
             "type": "string"
           },
-          "title": "Confounders",
-          "type": "array"
-        },
-        "id": {
-          "title": "Id",
-          "type": "string"
+          "title": "Variant",
+          "type": "object"
         },
         "interventions": {
           "items": {
@@ -683,6 +682,14 @@
           "title": "Mode",
           "type": "string"
         },
+        "confounders": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Confounders",
+          "type": "array"
+        },
         "phases": {
           "default": [],
           "items": {
@@ -690,13 +697,6 @@
           },
           "title": "Phases",
           "type": "array"
-        },
-        "variant": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "title": "Variant",
-          "type": "object"
         }
       },
       "required": [
@@ -712,18 +712,6 @@
       "additionalProperties": false,
       "description": "One release recipe derived from a pinned Corpus Forge project.",
       "properties": {
-        "fraction_tokenizer": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Fraction Tokenizer"
-        },
         "id": {
           "title": "Id",
           "type": "string"
@@ -736,18 +724,6 @@
           "additionalProperties": true,
           "title": "Release Set",
           "type": "object"
-        },
-        "tokenizer_artifact": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Tokenizer Artifact"
         },
         "view": {
           "default": "lm",
@@ -770,6 +746,30 @@
           ],
           "default": null,
           "title": "Vocab Size"
+        },
+        "tokenizer_artifact": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tokenizer Artifact"
+        },
+        "fraction_tokenizer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fraction Tokenizer"
         }
       },
       "required": [
@@ -782,6 +782,171 @@
     "DatasetConfig": {
       "additionalProperties": false,
       "properties": {
+        "source": {
+          "enum": [
+            "local_text",
+            "local_chat",
+            "local_token_mixture",
+            "snapshot",
+            "huggingface",
+            "synthetic"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "dataset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataset Id"
+        },
+        "text_field": {
+          "default": "text",
+          "minLength": 1,
+          "title": "Text Field",
+          "type": "string"
+        },
+        "train_split": {
+          "default": "train",
+          "minLength": 1,
+          "title": "Train Split",
+          "type": "string"
+        },
+        "validation_split": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Validation Split"
+        },
+        "synthetic_task": {
+          "default": "stories",
+          "enum": [
+            "stories",
+            "instruction_reference",
+            "chat_recall",
+            "engram_recall",
+            "withheld_facts"
+          ],
+          "title": "Synthetic Task",
+          "type": "string"
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Revision"
+        },
+        "dataset_config": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataset Config"
+        },
+        "cache_dir": {
+          "format": "path",
+          "title": "Cache Dir",
+          "type": "string"
+        },
+        "train_max_documents": {
+          "exclusiveMinimum": 0,
+          "title": "Train Max Documents",
+          "type": "integer"
+        },
+        "validation_max_documents": {
+          "exclusiveMinimum": 0,
+          "title": "Validation Max Documents",
+          "type": "integer"
+        },
+        "train_max_tokens": {
+          "exclusiveMinimum": 0,
+          "title": "Train Max Tokens",
+          "type": "integer"
+        },
+        "validation_max_tokens": {
+          "exclusiveMinimum": 0,
+          "title": "Validation Max Tokens",
+          "type": "integer"
+        },
+        "synthetic_seed": {
+          "default": 42,
+          "title": "Synthetic Seed",
+          "type": "integer"
+        },
+        "train_path": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Train Path"
+        },
+        "validation_path": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Validation Path"
+        },
+        "source_manifest_path": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Manifest Path"
+        },
+        "license": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "License"
+        },
         "allocation_manifest_path": {
           "anyOf": [
             {
@@ -794,24 +959,6 @@
           ],
           "default": null,
           "title": "Allocation Manifest Path"
-        },
-        "cache_dir": {
-          "format": "path",
-          "title": "Cache Dir",
-          "type": "string"
-        },
-        "corpus_export_path": {
-          "anyOf": [
-            {
-              "format": "path",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Corpus Export Path"
         },
         "corpus_release_path": {
           "anyOf": [
@@ -826,9 +973,10 @@
           "default": null,
           "title": "Corpus Release Path"
         },
-        "dataset_config": {
+        "corpus_export_path": {
           "anyOf": [
             {
+              "format": "path",
               "type": "string"
             },
             {
@@ -836,19 +984,7 @@
             }
           ],
           "default": null,
-          "title": "Dataset Config"
-        },
-        "license": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "License"
+          "title": "Corpus Export Path"
         },
         "mixture_declaration_path": {
           "anyOf": [
@@ -875,101 +1011,6 @@
           ],
           "default": null,
           "title": "Mixture Output Path"
-        },
-        "revision": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Revision"
-        },
-        "source": {
-          "enum": [
-            "tinystories",
-            "synthetic",
-            "instruction_reference",
-            "chat_recall",
-            "local_chat",
-            "local_text",
-            "local_token_mixture",
-            "local_stories",
-            "snapshot",
-            "withheld_facts",
-            "engram_recall",
-            "fineweb_edu",
-            "cosmopedia"
-          ],
-          "title": "Source",
-          "type": "string"
-        },
-        "source_manifest_path": {
-          "anyOf": [
-            {
-              "format": "path",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Source Manifest Path"
-        },
-        "synthetic_seed": {
-          "default": 42,
-          "title": "Synthetic Seed",
-          "type": "integer"
-        },
-        "train_max_documents": {
-          "exclusiveMinimum": 0,
-          "title": "Train Max Documents",
-          "type": "integer"
-        },
-        "train_max_tokens": {
-          "exclusiveMinimum": 0,
-          "title": "Train Max Tokens",
-          "type": "integer"
-        },
-        "train_path": {
-          "anyOf": [
-            {
-              "format": "path",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Train Path"
-        },
-        "validation_max_documents": {
-          "exclusiveMinimum": 0,
-          "title": "Validation Max Documents",
-          "type": "integer"
-        },
-        "validation_max_tokens": {
-          "exclusiveMinimum": 0,
-          "title": "Validation Max Tokens",
-          "type": "integer"
-        },
-        "validation_path": {
-          "anyOf": [
-            {
-              "format": "path",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Validation Path"
         }
       },
       "required": [
@@ -986,17 +1027,9 @@
     "Evaluation": {
       "additionalProperties": false,
       "properties": {
-        "cases": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Cases"
+        "id": {
+          "title": "Id",
+          "type": "string"
         },
         "checkpoint": {
           "title": "Checkpoint",
@@ -1004,6 +1037,10 @@
         },
         "data": {
           "title": "Data",
+          "type": "string"
+        },
+        "metric": {
+          "title": "Metric",
           "type": "string"
         },
         "denominator": {
@@ -1014,25 +1051,6 @@
           "exclusiveMinimum": 0,
           "title": "Endpoint",
           "type": "integer"
-        },
-        "id": {
-          "title": "Id",
-          "type": "string"
-        },
-        "metric": {
-          "title": "Metric",
-          "type": "string"
-        },
-        "role": {
-          "enum": [
-            "gate",
-            "descriptive",
-            "diagnostic",
-            "exploratory",
-            "blinded_surface"
-          ],
-          "title": "Role",
-          "type": "string"
         },
         "threshold": {
           "anyOf": [
@@ -1045,6 +1063,29 @@
           ],
           "default": null,
           "title": "Threshold"
+        },
+        "role": {
+          "enum": [
+            "gate",
+            "descriptive",
+            "diagnostic",
+            "exploratory",
+            "blinded_surface"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "cases": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cases"
         }
       },
       "required": [
@@ -1062,6 +1103,18 @@
     "EvaluationConfig": {
       "additionalProperties": false,
       "properties": {
+        "every_steps": {
+          "default": 25,
+          "exclusiveMinimum": 0,
+          "title": "Every Steps",
+          "type": "integer"
+        },
+        "max_batches": {
+          "default": 16,
+          "exclusiveMinimum": 0,
+          "title": "Max Batches",
+          "type": "integer"
+        },
         "batch_size": {
           "anyOf": [
             {
@@ -1074,18 +1127,6 @@
           ],
           "default": null,
           "title": "Batch Size"
-        },
-        "every_steps": {
-          "default": 25,
-          "exclusiveMinimum": 0,
-          "title": "Every Steps",
-          "type": "integer"
-        },
-        "max_batches": {
-          "default": 16,
-          "exclusiveMinimum": 0,
-          "title": "Max Batches",
-          "type": "integer"
         },
         "panels": {
           "default": [],
@@ -1102,16 +1143,17 @@
     "Execution": {
       "additionalProperties": false,
       "properties": {
-        "attempt_contract": {
+        "worker": {
           "anyOf": [
             {
-              "$ref": "#/$defs/AttemptContractReference"
+              "type": "string"
             },
             {
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "title": "Worker"
         },
         "backend": {
           "anyOf": [
@@ -1133,6 +1175,18 @@
           "default": null,
           "title": "Backend"
         },
+        "workspace": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Workspace"
+        },
         "min_free_bytes": {
           "default": 0,
           "minimum": 0,
@@ -1145,29 +1199,16 @@
           "title": "Min Free Inodes",
           "type": "integer"
         },
-        "worker": {
+        "attempt_contract": {
           "anyOf": [
             {
-              "type": "string"
+              "$ref": "#/$defs/AttemptContractReference"
             },
             {
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Worker"
-        },
-        "workspace": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Workspace"
+          "default": null
         }
       },
       "title": "Execution",
@@ -1177,24 +1218,14 @@
       "additionalProperties": false,
       "description": "Immutable prepared selection, independent of any particular checkpoint.",
       "properties": {
-        "batch_size": {
-          "exclusiveMinimum": 0,
-          "title": "Batch Size",
-          "type": "integer"
-        },
-        "blocks": {
-          "exclusiveMinimum": 0,
-          "title": "Blocks",
-          "type": "integer"
-        },
-        "max_forward_positions": {
-          "exclusiveMinimum": 0,
-          "title": "Max Forward Positions",
-          "type": "integer"
-        },
         "name": {
           "pattern": "^[a-z][a-z0-9_-]{0,63}$",
           "title": "Name",
+          "type": "string"
+        },
+        "prepared_path": {
+          "format": "path",
+          "title": "Prepared Path",
           "type": "string"
         },
         "prepared_manifest_sha256": {
@@ -1202,9 +1233,19 @@
           "title": "Prepared Manifest Sha256",
           "type": "string"
         },
-        "prepared_path": {
-          "format": "path",
-          "title": "Prepared Path",
+        "tokenizer_file_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Tokenizer File Sha256",
+          "type": "string"
+        },
+        "tokenizer_canonical_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Tokenizer Canonical Sha256",
+          "type": "string"
+        },
+        "split": {
+          "const": "validation",
+          "title": "Split",
           "type": "string"
         },
         "sampling": {
@@ -1217,25 +1258,25 @@
           "title": "Sequence Length",
           "type": "integer"
         },
-        "split": {
-          "const": "validation",
-          "title": "Split",
-          "type": "string"
+        "blocks": {
+          "exclusiveMinimum": 0,
+          "title": "Blocks",
+          "type": "integer"
         },
         "supervised_targets": {
           "exclusiveMinimum": 0,
           "title": "Supervised Targets",
           "type": "integer"
         },
-        "tokenizer_canonical_sha256": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Tokenizer Canonical Sha256",
-          "type": "string"
+        "batch_size": {
+          "exclusiveMinimum": 0,
+          "title": "Batch Size",
+          "type": "integer"
         },
-        "tokenizer_file_sha256": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Tokenizer File Sha256",
-          "type": "string"
+        "max_forward_positions": {
+          "exclusiveMinimum": 0,
+          "title": "Max Forward Positions",
+          "type": "integer"
         }
       },
       "required": [
@@ -1258,13 +1299,9 @@
     "LoggingConfig": {
       "additionalProperties": false,
       "properties": {
-        "architecture_diagnostics": {
-          "default": "scalar",
-          "enum": [
-            "scalar",
-            "full"
-          ],
-          "title": "Architecture Diagnostics",
+        "root_dir": {
+          "format": "path",
+          "title": "Root Dir",
           "type": "string"
         },
         "every_steps": {
@@ -1273,9 +1310,13 @@
           "title": "Every Steps",
           "type": "integer"
         },
-        "root_dir": {
-          "format": "path",
-          "title": "Root Dir",
+        "architecture_diagnostics": {
+          "default": "scalar",
+          "enum": [
+            "scalar",
+            "full"
+          ],
+          "title": "Architecture Diagnostics",
           "type": "string"
         }
       },
@@ -1289,24 +1330,6 @@
       "additionalProperties": false,
       "description": "Shared document grouping; layout is the sole arm-specific setting.",
       "properties": {
-        "document_batching": {
-          "default": "separate",
-          "enum": [
-            "separate",
-            "padded"
-          ],
-          "title": "Document Batching",
-          "type": "string"
-        },
-        "frozen_update_ends": {
-          "default": [],
-          "items": {
-            "exclusiveMinimum": 0,
-            "type": "integer"
-          },
-          "title": "Frozen Update Ends",
-          "type": "array"
-        },
         "layout": {
           "enum": [
             "contiguous",
@@ -1315,31 +1338,25 @@
           "title": "Layout",
           "type": "string"
         },
-        "max_attention_cells": {
-          "anyOf": [
-            {
-              "exclusiveMinimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Max Attention Cells"
+        "targets_per_update": {
+          "default": 4096,
+          "exclusiveMinimum": 0,
+          "title": "Targets Per Update",
+          "type": "integer"
         },
-        "max_padded_slots": {
-          "anyOf": [
-            {
-              "exclusiveMinimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
+        "unpadded_documents": {
+          "default": false,
+          "title": "Unpadded Documents",
+          "type": "boolean"
+        },
+        "document_batching": {
+          "default": "separate",
+          "enum": [
+            "separate",
+            "padded"
           ],
-          "default": null,
-          "title": "Max Padded Slots"
+          "title": "Document Batching",
+          "type": "string"
         },
         "padding_multiple": {
           "default": 128,
@@ -1358,16 +1375,40 @@
           ],
           "default": null
         },
-        "targets_per_update": {
-          "default": 4096,
-          "exclusiveMinimum": 0,
-          "title": "Targets Per Update",
-          "type": "integer"
+        "max_padded_slots": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Padded Slots"
         },
-        "unpadded_documents": {
-          "default": false,
-          "title": "Unpadded Documents",
-          "type": "boolean"
+        "max_attention_cells": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Attention Cells"
+        },
+        "frozen_update_ends": {
+          "default": [],
+          "items": {
+            "exclusiveMinimum": 0,
+            "type": "integer"
+          },
+          "title": "Frozen Update Ends",
+          "type": "array"
         }
       },
       "required": [
@@ -1379,38 +1420,32 @@
     "MemoryConfig": {
       "additionalProperties": false,
       "properties": {
-        "activation_checkpointing": {
-          "$ref": "#/$defs/ActivationCheckpointingConfig",
-          "default": {
-            "enabled": false,
-            "strategy": "transformer_block"
-          }
+        "estimate_policy": {
+          "default": "enforce",
+          "enum": [
+            "enforce",
+            "observe"
+          ],
+          "title": "Estimate Policy",
+          "type": "string"
         },
-        "activation_offload": {
-          "$ref": "#/$defs/ActivationOffloadConfig",
-          "default": {
-            "enabled": false
-          }
+        "policy": {
+          "default": "balanced",
+          "enum": [
+            "fast",
+            "balanced",
+            "low_memory",
+            "max_fit"
+          ],
+          "title": "Policy",
+          "type": "string"
         },
-        "allowed_optimizers": {
-          "default": [],
-          "items": {
-            "enum": [
-              "adamw",
-              "adafactor"
-            ],
-            "type": "string"
-          },
-          "title": "Allowed Optimizers",
-          "type": "array"
-        },
-        "allowed_sequence_lengths": {
-          "default": [],
-          "items": {
-            "type": "integer"
-          },
-          "title": "Allowed Sequence Lengths",
-          "type": "array"
+        "max_device_memory_fraction": {
+          "default": 0.9,
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Max Device Memory Fraction",
+          "type": "number"
         },
         "budget_bytes": {
           "anyOf": [
@@ -1425,32 +1460,38 @@
           "default": null,
           "title": "Budget Bytes"
         },
-        "estimate_policy": {
-          "default": "enforce",
-          "enum": [
-            "enforce",
-            "observe"
-          ],
-          "title": "Estimate Policy",
-          "type": "string"
+        "activation_checkpointing": {
+          "$ref": "#/$defs/ActivationCheckpointingConfig",
+          "default": {
+            "enabled": false,
+            "strategy": "transformer_block"
+          }
         },
-        "max_device_memory_fraction": {
-          "default": 0.9,
-          "exclusiveMinimum": 0,
-          "maximum": 1,
-          "title": "Max Device Memory Fraction",
-          "type": "number"
+        "activation_offload": {
+          "$ref": "#/$defs/ActivationOffloadConfig",
+          "default": {
+            "enabled": false
+          }
         },
-        "policy": {
-          "default": "balanced",
-          "enum": [
-            "fast",
-            "balanced",
-            "low_memory",
-            "max_fit"
-          ],
-          "title": "Policy",
-          "type": "string"
+        "allowed_sequence_lengths": {
+          "default": [],
+          "items": {
+            "type": "integer"
+          },
+          "title": "Allowed Sequence Lengths",
+          "type": "array"
+        },
+        "allowed_optimizers": {
+          "default": [],
+          "items": {
+            "enum": [
+              "adamw",
+              "adafactor"
+            ],
+            "type": "string"
+          },
+          "title": "Allowed Optimizers",
+          "type": "array"
         }
       },
       "title": "MemoryConfig",
@@ -1468,15 +1509,6 @@
           "title": "Algorithm",
           "type": "string"
         },
-        "mapping_sha256": {
-          "title": "Mapping Sha256",
-          "type": "string"
-        },
-        "memory_vocab_size": {
-          "exclusiveMinimum": 0,
-          "title": "Memory Vocab Size",
-          "type": "integer"
-        },
         "token_ids": {
           "items": {
             "minimum": 0,
@@ -1485,14 +1517,23 @@
           "title": "Token Ids",
           "type": "array"
         },
-        "tokenizer_sha256": {
-          "title": "Tokenizer Sha256",
-          "type": "string"
-        },
         "vocab_size": {
           "exclusiveMinimum": 0,
           "title": "Vocab Size",
           "type": "integer"
+        },
+        "memory_vocab_size": {
+          "exclusiveMinimum": 0,
+          "title": "Memory Vocab Size",
+          "type": "integer"
+        },
+        "tokenizer_sha256": {
+          "title": "Tokenizer Sha256",
+          "type": "string"
+        },
+        "mapping_sha256": {
+          "title": "Mapping Sha256",
+          "type": "string"
         }
       },
       "required": [
@@ -1509,10 +1550,51 @@
     "ModelConfig": {
       "additionalProperties": false,
       "properties": {
-        "experts_per_token": {
-          "default": 1,
-          "title": "Experts Per Token",
+        "vocab_size": {
+          "title": "Vocab Size",
           "type": "integer"
+        },
+        "hidden_dim": {
+          "title": "Hidden Dim",
+          "type": "integer"
+        },
+        "num_layers": {
+          "title": "Num Layers",
+          "type": "integer"
+        },
+        "num_heads": {
+          "title": "Num Heads",
+          "type": "integer"
+        },
+        "num_kv_heads": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Num Kv Heads"
+        },
+        "ffn_dim": {
+          "title": "Ffn Dim",
+          "type": "integer"
+        },
+        "max_seq_len": {
+          "title": "Max Seq Len",
+          "type": "integer"
+        },
+        "rms_norm_eps": {
+          "default": 1e-06,
+          "title": "Rms Norm Eps",
+          "type": "number"
+        },
+        "tie_embeddings": {
+          "default": true,
+          "title": "Tie Embeddings",
+          "type": "boolean"
         },
         "ffn": {
           "default": "dense",
@@ -1523,17 +1605,26 @@
           "title": "Ffn",
           "type": "string"
         },
-        "ffn_dim": {
-          "title": "Ffn Dim",
+        "num_experts": {
+          "default": 1,
+          "title": "Num Experts",
           "type": "integer"
         },
-        "hidden_dim": {
-          "title": "Hidden Dim",
+        "experts_per_token": {
+          "default": 1,
+          "title": "Experts Per Token",
           "type": "integer"
         },
-        "max_seq_len": {
-          "title": "Max Seq Len",
-          "type": "integer"
+        "shared_expert": {
+          "default": false,
+          "title": "Shared Expert",
+          "type": "boolean"
+        },
+        "router_aux_loss_coefficient": {
+          "default": 0.0,
+          "minimum": 0,
+          "title": "Router Aux Loss Coefficient",
+          "type": "number"
         },
         "memory": {
           "default": "none",
@@ -1546,13 +1637,14 @@
           "title": "Memory",
           "type": "string"
         },
-        "memory_addressing": {
-          "default": "legacy",
+        "memory_injection": {
+          "default": "final",
           "enum": [
-            "legacy",
-            "prime_xor_v1"
+            "final",
+            "embedding",
+            "after_block"
           ],
-          "title": "Memory Addressing",
+          "title": "Memory Injection",
           "type": "string"
         },
         "memory_block_index": {
@@ -1577,16 +1669,20 @@
           "title": "Memory Block Indices",
           "type": "array"
         },
+        "memory_variant": {
+          "default": "hidden_gate",
+          "enum": [
+            "hidden_gate",
+            "context_key"
+          ],
+          "title": "Memory Variant",
+          "type": "string"
+        },
         "memory_conv_kernel_size": {
           "default": 0,
           "maximum": 16,
           "minimum": 0,
           "title": "Memory Conv Kernel Size",
-          "type": "integer"
-        },
-        "memory_dim": {
-          "default": 0,
-          "title": "Memory Dim",
           "type": "integer"
         },
         "memory_gate_transform": {
@@ -1598,11 +1694,23 @@
           "title": "Memory Gate Transform",
           "type": "string"
         },
-        "memory_hash_heads": {
-          "default": 1,
-          "exclusiveMinimum": 0,
-          "title": "Memory Hash Heads",
-          "type": "integer"
+        "memory_addressing": {
+          "default": "legacy",
+          "enum": [
+            "legacy",
+            "prime_xor_v1"
+          ],
+          "title": "Memory Addressing",
+          "type": "string"
+        },
+        "memory_table_sizes": {
+          "default": [],
+          "items": {
+            "exclusiveMinimum": 0,
+            "type": "integer"
+          },
+          "title": "Memory Table Sizes",
+          "type": "array"
         },
         "memory_hash_seed": {
           "default": 0,
@@ -1611,32 +1719,41 @@
           "title": "Memory Hash Seed",
           "type": "integer"
         },
+        "memory_token_mapping": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryTokenMapping"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "memory_padding_token_id": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Memory Padding Token Id",
+          "type": "integer"
+        },
         "memory_independent_init": {
           "default": false,
           "title": "Memory Independent Init",
           "type": "boolean"
         },
-        "memory_injection": {
-          "default": "final",
-          "enum": [
-            "final",
-            "embedding",
-            "after_block"
-          ],
-          "title": "Memory Injection",
-          "type": "string"
-        },
-        "memory_ngram_orders": {
-          "default": [],
-          "items": {
-            "type": "integer"
-          },
-          "title": "Memory Ngram Orders",
-          "type": "array"
+        "memory_table_size": {
+          "default": 0,
+          "title": "Memory Table Size",
+          "type": "integer"
         },
         "memory_ngram_size": {
           "default": 0,
           "title": "Memory Ngram Size",
+          "type": "integer"
+        },
+        "memory_dim": {
+          "default": 0,
+          "title": "Memory Dim",
           "type": "integer"
         },
         "memory_package_path": {
@@ -1652,81 +1769,19 @@
           "default": null,
           "title": "Memory Package Path"
         },
-        "memory_padding_token_id": {
-          "default": 0,
-          "minimum": 0,
-          "title": "Memory Padding Token Id",
-          "type": "integer"
-        },
-        "memory_table_size": {
-          "default": 0,
-          "title": "Memory Table Size",
-          "type": "integer"
-        },
-        "memory_table_sizes": {
+        "memory_ngram_orders": {
           "default": [],
           "items": {
-            "exclusiveMinimum": 0,
             "type": "integer"
           },
-          "title": "Memory Table Sizes",
+          "title": "Memory Ngram Orders",
           "type": "array"
         },
-        "memory_token_mapping": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/MemoryTokenMapping"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "memory_variant": {
-          "default": "hidden_gate",
-          "enum": [
-            "hidden_gate",
-            "context_key"
-          ],
-          "title": "Memory Variant",
-          "type": "string"
-        },
-        "num_experts": {
+        "memory_hash_heads": {
           "default": 1,
-          "title": "Num Experts",
+          "exclusiveMinimum": 0,
+          "title": "Memory Hash Heads",
           "type": "integer"
-        },
-        "num_heads": {
-          "title": "Num Heads",
-          "type": "integer"
-        },
-        "num_kv_heads": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Num Kv Heads"
-        },
-        "num_layers": {
-          "title": "Num Layers",
-          "type": "integer"
-        },
-        "rms_norm_eps": {
-          "default": 1e-06,
-          "title": "Rms Norm Eps",
-          "type": "number"
-        },
-        "router_aux_loss_coefficient": {
-          "default": 0.0,
-          "minimum": 0,
-          "title": "Router Aux Loss Coefficient",
-          "type": "number"
         },
         "semantic_memory_dim": {
           "anyOf": [
@@ -1740,20 +1795,6 @@
           ],
           "default": null,
           "title": "Semantic Memory Dim"
-        },
-        "shared_expert": {
-          "default": false,
-          "title": "Shared Expert",
-          "type": "boolean"
-        },
-        "tie_embeddings": {
-          "default": true,
-          "title": "Tie Embeddings",
-          "type": "boolean"
-        },
-        "vocab_size": {
-          "title": "Vocab Size",
-          "type": "integer"
         }
       },
       "required": [
@@ -1770,33 +1811,19 @@
     "Phase": {
       "additionalProperties": false,
       "properties": {
-        "at_step": {
-          "anyOf": [
-            {
-              "exclusiveMinimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "At Step"
-        },
-        "checkpoint": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Checkpoint"
-        },
         "id": {
           "title": "Id",
+          "type": "string"
+        },
+        "transition": {
+          "default": "fresh",
+          "enum": [
+            "fresh",
+            "resume",
+            "extend_budget",
+            "promote"
+          ],
+          "title": "Transition",
           "type": "string"
         },
         "parent": {
@@ -1810,6 +1837,18 @@
           ],
           "default": null,
           "title": "Parent"
+        },
+        "checkpoint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint"
         },
         "selector": {
           "anyOf": [
@@ -1827,21 +1866,23 @@
           "default": null,
           "title": "Selector"
         },
+        "at_step": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "At Step"
+        },
         "set": {
           "additionalProperties": true,
           "title": "Set",
           "type": "object"
-        },
-        "transition": {
-          "default": "fresh",
-          "enum": [
-            "fresh",
-            "resume",
-            "extend_budget",
-            "promote"
-          ],
-          "title": "Transition",
-          "type": "string"
         }
       },
       "required": [
@@ -1853,14 +1894,14 @@
     "Retention": {
       "additionalProperties": false,
       "properties": {
-        "keep_best": {
-          "default": true,
-          "title": "Keep Best",
-          "type": "boolean"
-        },
         "keep_periodic": {
           "default": true,
           "title": "Keep Periodic",
+          "type": "boolean"
+        },
+        "keep_best": {
+          "default": true,
+          "title": "Keep Best",
           "type": "boolean"
         },
         "keep_previous": {
@@ -1880,60 +1921,70 @@
     "RunConfig": {
       "additionalProperties": false,
       "properties": {
-        "attention": {
-          "$ref": "#/$defs/AttentionConfig",
-          "default": {
-            "block_size": null,
-            "kind": "dense",
-            "latent_dim": null,
-            "rope_base": 10000.0,
-            "selected_blocks": null,
-            "window_size": null
-          }
-        },
-        "checkpoint": {
-          "$ref": "#/$defs/CheckpointConfig",
-          "default": {
-            "every_minutes": null,
-            "every_steps": 50,
-            "every_tokens": null,
-            "keep_periodic": true
-          }
-        },
-        "dataset": {
-          "$ref": "#/$defs/DatasetConfig"
-        },
-        "evaluation": {
-          "$ref": "#/$defs/EvaluationConfig",
-          "default": {
-            "every_steps": 25,
-            "max_batches": 16
-          }
-        },
-        "logging": {
-          "$ref": "#/$defs/LoggingConfig"
-        },
-        "model": {
-          "$ref": "#/$defs/ModelConfig"
+        "schema_version": {
+          "const": 2,
+          "title": "Schema Version",
+          "type": "integer"
         },
         "name": {
           "minLength": 1,
           "title": "Name",
           "type": "string"
         },
+        "seed": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "runtime": {
+          "$ref": "#/$defs/RuntimeConfig",
+          "default": {
+            "engine": "pytorch",
+            "backend": "auto",
+            "device_index": 0,
+            "precision": "fp32",
+            "memory": {
+              "activation_checkpointing": {
+                "enabled": false,
+                "strategy": "transformer_block"
+              },
+              "activation_offload": {
+                "enabled": false
+              },
+              "allowed_optimizers": [],
+              "allowed_sequence_lengths": [],
+              "budget_bytes": null,
+              "max_device_memory_fraction": 0.9,
+              "policy": "balanced"
+            }
+          }
+        },
+        "model": {
+          "$ref": "#/$defs/ModelConfig"
+        },
+        "tokenizer": {
+          "$ref": "#/$defs/TokenizerConfig"
+        },
+        "dataset": {
+          "$ref": "#/$defs/DatasetConfig"
+        },
+        "training": {
+          "$ref": "#/$defs/TrainingConfig"
+        },
         "optimizer": {
           "default": {
+            "name": "adamw",
+            "peak": 0.0003,
+            "floor": 3e-05,
+            "warmup_steps": 10,
+            "weight_decay": 0.1,
             "betas": [
               0.9,
               0.95
             ],
             "eps": 1e-08,
-            "floor": 3e-05,
-            "name": "adamw",
-            "peak": 0.0003,
-            "state_offload": false,
-            "warmup_steps": 10,
-            "weight_decay": 0.1
+            "state_offload": false
           },
           "discriminator": {
             "mapping": {
@@ -1952,39 +2003,32 @@
           ],
           "title": "Optimizer"
         },
-        "runtime": {
-          "$ref": "#/$defs/RuntimeConfig",
+        "attention": {
+          "$ref": "#/$defs/AttentionConfig",
           "default": {
-            "backend": "auto",
-            "device_index": 0,
-            "engine": "pytorch",
-            "memory": {
-              "activation_checkpointing": {
-                "enabled": false,
-                "strategy": "transformer_block"
-              },
-              "activation_offload": {
-                "enabled": false
-              },
-              "allowed_optimizers": [],
-              "allowed_sequence_lengths": [],
-              "budget_bytes": null,
-              "max_device_memory_fraction": 0.9,
-              "policy": "balanced"
-            },
-            "precision": "fp32"
+            "kind": "dense",
+            "rope_base": 10000.0,
+            "window_size": null,
+            "latent_dim": null,
+            "block_size": null,
+            "selected_blocks": null
           }
         },
-        "schema_version": {
-          "const": 2,
-          "title": "Schema Version",
-          "type": "integer"
+        "evaluation": {
+          "$ref": "#/$defs/EvaluationConfig",
+          "default": {
+            "every_steps": 25,
+            "max_batches": 16
+          }
         },
-        "seed": {
-          "maximum": 4294967295,
-          "minimum": 0,
-          "title": "Seed",
-          "type": "integer"
+        "checkpoint": {
+          "$ref": "#/$defs/CheckpointConfig",
+          "default": {
+            "every_steps": 50,
+            "every_tokens": null,
+            "every_minutes": null,
+            "keep_periodic": true
+          }
         },
         "staging": {
           "$ref": "#/$defs/StagingConfig",
@@ -1993,11 +2037,8 @@
             "warmup_steps": 5
           }
         },
-        "tokenizer": {
-          "$ref": "#/$defs/TokenizerConfig"
-        },
-        "training": {
-          "$ref": "#/$defs/TrainingConfig"
+        "logging": {
+          "$ref": "#/$defs/LoggingConfig"
         }
       },
       "required": [
@@ -2016,6 +2057,15 @@
     "RuntimeConfig": {
       "additionalProperties": false,
       "properties": {
+        "engine": {
+          "default": "pytorch",
+          "enum": [
+            "pytorch",
+            "mlx"
+          ],
+          "title": "Engine",
+          "type": "string"
+        },
         "backend": {
           "default": "auto",
           "enum": [
@@ -2030,52 +2080,19 @@
           "title": "Backend",
           "type": "string"
         },
-        "compile_dynamic_shapes": {
-          "default": false,
-          "title": "Compile Dynamic Shapes",
-          "type": "boolean"
-        },
-        "compile_output_head_loss": {
-          "default": false,
-          "title": "Compile Output Head Loss",
-          "type": "boolean"
-        },
-        "compile_transformer_blocks": {
-          "default": false,
-          "title": "Compile Transformer Blocks",
-          "type": "boolean"
-        },
         "device_index": {
           "default": 0,
           "minimum": 0,
           "title": "Device Index",
           "type": "integer"
         },
-        "engine": {
-          "default": "pytorch",
-          "enum": [
-            "pytorch",
-            "mlx"
-          ],
-          "title": "Engine",
-          "type": "string"
-        },
-        "memory": {
-          "$ref": "#/$defs/MemoryConfig",
-          "default": {
-            "activation_checkpointing": {
-              "enabled": false,
-              "strategy": "transformer_block"
-            },
-            "activation_offload": {
-              "enabled": false
-            },
-            "allowed_optimizers": [],
-            "allowed_sequence_lengths": [],
-            "budget_bytes": null,
-            "max_device_memory_fraction": 0.9,
-            "policy": "balanced"
-          }
+        "secondary_device_indices": {
+          "default": [],
+          "items": {
+            "type": "integer"
+          },
+          "title": "Secondary Device Indices",
+          "type": "array"
         },
         "precision": {
           "default": "fp32",
@@ -2088,13 +2105,37 @@
           "title": "Precision",
           "type": "string"
         },
-        "secondary_device_indices": {
-          "default": [],
-          "items": {
-            "type": "integer"
-          },
-          "title": "Secondary Device Indices",
-          "type": "array"
+        "memory": {
+          "$ref": "#/$defs/MemoryConfig",
+          "default": {
+            "policy": "balanced",
+            "max_device_memory_fraction": 0.9,
+            "budget_bytes": null,
+            "activation_checkpointing": {
+              "enabled": false,
+              "strategy": "transformer_block"
+            },
+            "activation_offload": {
+              "enabled": false
+            },
+            "allowed_sequence_lengths": [],
+            "allowed_optimizers": []
+          }
+        },
+        "compile_dynamic_shapes": {
+          "default": false,
+          "title": "Compile Dynamic Shapes",
+          "type": "boolean"
+        },
+        "compile_transformer_blocks": {
+          "default": false,
+          "title": "Compile Transformer Blocks",
+          "type": "boolean"
+        },
+        "compile_output_head_loss": {
+          "default": false,
+          "title": "Compile Output Head Loss",
+          "type": "boolean"
         }
       },
       "title": "RuntimeConfig",
@@ -2128,15 +2169,15 @@
           "title": "After Tokens",
           "type": "integer"
         },
-        "parent_checkpoint_sha256": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Parent Checkpoint Sha256",
-          "type": "string"
-        },
         "previous_targets_per_update": {
           "exclusiveMinimum": 0,
           "title": "Previous Targets Per Update",
           "type": "integer"
+        },
+        "parent_checkpoint_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Parent Checkpoint Sha256",
+          "type": "string"
         }
       },
       "required": [
@@ -2150,6 +2191,11 @@
     "TokenizerConfig": {
       "additionalProperties": false,
       "properties": {
+        "path": {
+          "format": "path",
+          "title": "Path",
+          "type": "string"
+        },
         "origin": {
           "anyOf": [
             {
@@ -2160,11 +2206,6 @@
             }
           ],
           "default": null
-        },
-        "path": {
-          "format": "path",
-          "title": "Path",
-          "type": "string"
         }
       },
       "required": [
@@ -2187,11 +2228,6 @@
             }
           ],
           "default": null
-        },
-        "manifest_sha256": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Manifest Sha256",
-          "type": "string"
         },
         "mixture_declaration_path": {
           "anyOf": [
@@ -2223,6 +2259,11 @@
           "pattern": "^[0-9a-f]{64}$",
           "title": "Sha256",
           "type": "string"
+        },
+        "manifest_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Manifest Sha256",
+          "type": "string"
         }
       },
       "required": [
@@ -2235,16 +2276,16 @@
     "TrainingConfig": {
       "additionalProperties": false,
       "properties": {
-        "deterministic": {
-          "default": true,
-          "title": "Deterministic",
-          "type": "boolean"
+        "stable_steps": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Stable Steps",
+          "type": "integer"
         },
-        "grad_clip_norm": {
-          "default": 1.0,
+        "micro_batch_size": {
           "exclusiveMinimum": 0,
-          "title": "Grad Clip Norm",
-          "type": "number"
+          "title": "Micro Batch Size",
+          "type": "integer"
         },
         "gradient_accumulation": {
           "default": 1,
@@ -2252,16 +2293,10 @@
           "title": "Gradient Accumulation",
           "type": "integer"
         },
-        "matched_stories": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/MatchedStoryConfig"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "seq_len": {
+          "exclusiveMinimum": 0,
+          "title": "Seq Len",
+          "type": "integer"
         },
         "max_steps": {
           "exclusiveMinimum": 0,
@@ -2273,10 +2308,11 @@
           "title": "Max Tokens",
           "type": "integer"
         },
-        "micro_batch_size": {
+        "grad_clip_norm": {
+          "default": 1.0,
           "exclusiveMinimum": 0,
-          "title": "Micro Batch Size",
-          "type": "integer"
+          "title": "Grad Clip Norm",
+          "type": "number"
         },
         "neural_loss_weight": {
           "default": 1.0,
@@ -2285,29 +2321,21 @@
           "title": "Neural Loss Weight",
           "type": "number"
         },
-        "portability_manifest_path": {
+        "deterministic": {
+          "default": true,
+          "title": "Deterministic",
+          "type": "boolean"
+        },
+        "matched_stories": {
           "anyOf": [
             {
-              "format": "path",
-              "type": "string"
+              "$ref": "#/$defs/MatchedStoryConfig"
             },
             {
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Portability Manifest Path"
-        },
-        "seq_len": {
-          "exclusiveMinimum": 0,
-          "title": "Seq Len",
-          "type": "integer"
-        },
-        "stable_steps": {
-          "default": 0,
-          "minimum": 0,
-          "title": "Stable Steps",
-          "type": "integer"
+          "default": null
         },
         "trainable_parameters": {
           "anyOf": [
@@ -2323,6 +2351,19 @@
           ],
           "default": null,
           "title": "Trainable Parameters"
+        },
+        "portability_manifest_path": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Portability Manifest Path"
         }
       },
       "required": [
@@ -2337,20 +2378,14 @@
   },
   "additionalProperties": false,
   "properties": {
-    "artifacts": {
-      "additionalProperties": {
-        "$ref": "#/$defs/Artifact"
-      },
-      "title": "Artifacts",
-      "type": "object"
+    "plan_version": {
+      "const": 1,
+      "title": "Plan Version",
+      "type": "integer"
     },
-    "axes": {
-      "default": [],
-      "items": {
-        "$ref": "#/$defs/Axis"
-      },
-      "title": "Axes",
-      "type": "array"
+    "id": {
+      "title": "Id",
+      "type": "string"
     },
     "base_run": {
       "anyOf": [
@@ -2363,6 +2398,36 @@
       ],
       "title": "Base Run"
     },
+    "artifacts": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Artifact"
+      },
+      "title": "Artifacts",
+      "type": "object"
+    },
+    "inputs": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Inputs",
+      "type": "object"
+    },
+    "corpus_variants": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/CorpusVariant"
+      },
+      "title": "Corpus Variants",
+      "type": "array"
+    },
+    "axes": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Axis"
+      },
+      "title": "Axes",
+      "type": "array"
+    },
     "comparisons": {
       "default": [],
       "items": {
@@ -2371,12 +2436,20 @@
       "title": "Comparisons",
       "type": "array"
     },
-    "corpus_variants": {
+    "phases": {
       "default": [],
       "items": {
-        "$ref": "#/$defs/CorpusVariant"
+        "$ref": "#/$defs/Phase"
       },
-      "title": "Corpus Variants",
+      "title": "Phases",
+      "type": "array"
+    },
+    "evaluations": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Evaluation"
+      },
+      "title": "Evaluations",
       "type": "array"
     },
     "evaluation_suite": {
@@ -2391,53 +2464,21 @@
       "default": null,
       "title": "Evaluation Suite"
     },
-    "evaluations": {
-      "default": [],
-      "items": {
-        "$ref": "#/$defs/Evaluation"
-      },
-      "title": "Evaluations",
-      "type": "array"
-    },
     "execution": {
       "$ref": "#/$defs/Execution",
       "default": {
-        "backend": null,
-        "min_free_bytes": 0,
-        "min_free_inodes": 0,
         "worker": null,
-        "workspace": null
+        "backend": null,
+        "workspace": null,
+        "min_free_bytes": 0,
+        "min_free_inodes": 0
       }
-    },
-    "id": {
-      "title": "Id",
-      "type": "string"
-    },
-    "inputs": {
-      "additionalProperties": {
-        "type": "string"
-      },
-      "title": "Inputs",
-      "type": "object"
-    },
-    "phases": {
-      "default": [],
-      "items": {
-        "$ref": "#/$defs/Phase"
-      },
-      "title": "Phases",
-      "type": "array"
-    },
-    "plan_version": {
-      "const": 1,
-      "title": "Plan Version",
-      "type": "integer"
     },
     "retention": {
       "$ref": "#/$defs/Retention",
       "default": {
-        "keep_best": true,
         "keep_periodic": true,
+        "keep_best": true,
         "keep_previous": true,
         "keep_terminal": true
       }

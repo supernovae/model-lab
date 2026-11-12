@@ -9,6 +9,45 @@ RunConfig references that immutable snapshot through `dataset.source: snapshot`.
 The [TinyStories walkthrough](tinystories-microlab.md) is one reference declaration
 of this general pattern.
 
+## Source kinds
+
+`dataset.source` names how data is read, never which dataset it is. A named
+dataset is a value in your recipe, so a new one needs no Lab change.
+
+| `dataset.source` | Reads | Required fields |
+| --- | --- | --- |
+| `local_text` | your JSONL files, one `{"text": ...}` document per line | `train_path`, `validation_path`, `license` |
+| `local_chat` | your JSONL conversations | `train_path`, `validation_path`, `license` |
+| `local_token_mixture` | a verified [token mixture](token-store.md#mixture-output) | mixture declaration and output paths |
+| `snapshot` | a pinned, retained [snapshot](#source-declaration-and-lock) | `revision`, `license`, split and manifest paths |
+| `huggingface` | a Hugging Face dataset, streamed at a pinned revision | `dataset_id`, `revision`, `license` |
+| `synthetic` | a built-in offline generator | none (`synthetic_task` picks one) |
+
+A `huggingface` source also accepts `dataset_config`, `text_field` (default
+`text`), `train_split` (default `train`) and `validation_split`. Without a
+validation split, validation is the documents that follow the first
+`train_max_documents` documents of the training split. Streaming reads records
+in source order and can cut the final document at the token budget; use a
+`snapshot` when you need whole documents, deduplication and retained bytes.
+
+```yaml
+dataset:
+  source: huggingface
+  dataset_id: HuggingFaceFW/fineweb-edu
+  dataset_config: sample-10BT
+  revision: 87f09149ef4734204d70ed1d046ddc9ca3f2b8f9
+  license: ODC-By-1.0; Common Crawl Terms of Use
+```
+
+`synthetic_task` selects `stories` (the default smoke text),
+`instruction_reference`, `chat_recall`, `engram_recall` or `withheld_facts`.
+These are fixtures for wiring checks and the probe battery, not corpora.
+
+The earlier named sources (`tinystories`, `fineweb_edu`, `cosmopedia`,
+`local_stories`, and the four generators as source names) are no longer
+accepted. Rewrite such a config with the kinds above; its prepared data and
+run identities are new.
+
 ## Source declaration and lock
 
 Author a source declaration in your own recipe directory. The optional
@@ -186,8 +225,8 @@ The origin binding participates in run configuration identity; moving its files
 does not change that identity. An omitted origin preserves the existing binding
 to the run's own dataset and serialization.
 
-This opt-in currently supports lab runs consuming `snapshot` or `local_stories`
-with tokenizer origins of those same frozen source types. It does not change
+This opt-in currently supports lab runs consuming a `snapshot`
+with a tokenizer origin that is also a frozen snapshot. It does not change
 Forge release/export, token-mixture, or release ExperimentPlan artifact binding
 contracts. ExperimentPlan resolution rejects `tokenizer.origin` in the base run,
 axis choices, or phase patches before verifying input artifacts; use a tokenizer
@@ -255,35 +294,6 @@ exception-safe scope. `snapshot_verification_statistics()` exposes actual calls,
 cold verifications, reuse hits, invalidations and monotonic verifier durations
 while the operation is active, and returns `None` afterward. These are operational
 observations, not changed dataset identities or model-quality evidence.
-
-## Legacy input migration
-
-The old `tinystories` / `local_stories` authoring forms and implicit TinyStories
-snapshot command are retired for new execution. Historical configurations,
-snapshots, locks and receipts remain available to read and verify. Migration
-always writes new artifacts; it never changes a historical identity in place.
-
-For a direct-prefix migration, save an explicit resource policy as
-`migration-resources.yaml` (adjust these bounds after admission):
-
-```yaml
-max_source_records: 20000
-max_text_bytes: 16777216
-max_record_bytes: 1048576
-max_work_bytes: 268435456
-min_free_bytes: 1073741824
-```
-
-```sh
-klab data migrate old-run.yaml \
-  --output migrated --resources migration-resources.yaml --accept-policy-change --json
-```
-
-Review the migration receipt and emitted instructions before acquisition. The
-acknowledgement is explicit because old direct prefixes could truncate records,
-while new snapshot selection/deduplication and whole-document packing differ.
-Do not pool old/new results as if the inputs were unchanged. Snapshot imports
-retain the original evidence and produce a separately identified generic input.
 
 ## Prepared content identity and replicas
 

@@ -15,7 +15,8 @@ model:
 tokenizer:
   path: ../artifacts/tokenizer_chat_recall/tokenizer.json
 dataset:
-  source: chat_recall
+  source: synthetic
+  synthetic_task: chat_recall
   cache_dir: ../artifacts/data
   train_max_documents: 768
   validation_max_documents: 12

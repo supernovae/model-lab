@@ -4,7 +4,8 @@ min_frequency: 1
 max_documents: 100000
 output_dir: ../artifacts/tokenizer_instruction_8k
 dataset:
-  source: instruction_reference
+  source: synthetic
+  synthetic_task: instruction_reference
   cache_dir: ../artifacts/data
   train_max_documents: 100000
   validation_max_documents: 1000

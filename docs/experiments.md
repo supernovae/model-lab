@@ -33,10 +33,9 @@ klab inspect configs/smoke_combined_cpu.yaml --json
 
 
 The retained dense scale presets inspect at 3,344,064, 6,917,376, 10,244,160,
-29,893,120, and 50,274,752 parameters. Their historical dataset-specific inputs
-remain readable for evidence verification; new execution requires a
-[snapshot declaration or explicit migration](datasets.md). Use the microlab's
-snapshot-based matrix for a runnable width comparison. Parameter count alone is
+29,893,120, and 50,274,752 parameters. They stream TinyStories as a generic
+[`huggingface` source](datasets.md#source-kinds). Use the microlab's
+snapshot-based matrix for a runnable width comparison on whole documents. Parameter count alone is
 not a comparison result: report observed validation loss, perplexity, throughput,
 device, and metric coordinates for each completed run.
 

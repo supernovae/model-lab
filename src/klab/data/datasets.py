@@ -12,17 +12,25 @@ from klab.data.chat_recall import iter_chat_recall
 from klab.data.conversations import iter_conversations
 from klab.data.engram_recall import iter_engram_recall
 from klab.data.instruction_reference import iter_instruction_reference
-from klab.data.local_stories import iter_local_stories
 from klab.data.synthetic import iter_synthetic
 from klab.data.withheld_facts import training_documents
 from klab.hf_auth import HUB_ACCESS_ERRORS, hub_auth_kwargs, raise_for_hub_auth
 from klab.progress import progress_phase
 from klab.token_encode_worker import LineError, local_text_record
 
-TINYSTORIES_DATASET = "roneneldan/TinyStories"
-TINYSTORIES_REVISION = "f54c09fd23315a6f9c86f9dc80f725de7d8f9c64"
-FINEWEB_EDU_DATASET = "HuggingFaceFW/fineweb-edu"
-COSMOPEDIA_DATASET = "HuggingFaceTB/cosmopedia"
+
+def _withheld_facts(seed: int, split: str) -> Iterator[str]:
+    return training_documents(seed)
+
+
+# Built-in offline generators, selected by dataset.synthetic_task.
+_SYNTHETIC = {
+    "stories": iter_synthetic,
+    "instruction_reference": iter_instruction_reference,
+    "chat_recall": iter_chat_recall,
+    "engram_recall": iter_engram_recall,
+    "withheld_facts": _withheld_facts,
+}
 
 
 def local_text_error(
@@ -88,13 +96,7 @@ def iter_documents(
     if split not in {"train", "validation"}:
         raise ValueError(f"unknown split {split!r}")
     if config.source == "synthetic":
-        yield from iter_synthetic(config.synthetic_seed, split)
-        return
-    if config.source == "instruction_reference":
-        yield from iter_instruction_reference(config.synthetic_seed, split)
-        return
-    if config.source == "chat_recall":
-        yield from iter_chat_recall(config.synthetic_seed, split)
+        yield from _SYNTHETIC[config.synthetic_task](config.synthetic_seed, split)
         return
     if config.source == "local_chat":
         path = config.train_path if split == "train" else config.validation_path
@@ -111,27 +113,18 @@ def iter_documents(
         for text, _ in iter_local_text(path, source_bytes=local_text_source_bytes):
             yield text
         return
-    if config.source == "local_stories":
-        yield from iter_local_stories(config, split)
-        return
     if config.source == "snapshot":
         from klab.data.sources import iter_snapshot
 
         yield from iter_snapshot(config, split)
         return
-    if config.source == "engram_recall":
-        yield from iter_engram_recall(config.synthetic_seed, split)
-        return
-    if config.source == "withheld_facts":
-        yield from training_documents(config.synthetic_seed)
-        return
-    dataset_name = {
-        "tinystories": TINYSTORIES_DATASET,
-        "fineweb_edu": FINEWEB_EDU_DATASET,
-        "cosmopedia": COSMOPEDIA_DATASET,
-    }[config.source]
-    subset = "default" if config.source == "tinystories" else config.dataset_config
-    source_split = split if config.source == "tinystories" else "train"
+    # Without a validation split, validation is the documents that follow
+    # the training documents in the training split.
+    source_split = (
+        config.train_split
+        if split == "train" or config.validation_split is None
+        else config.validation_split
+    )
     with progress_phase(
         f"dataset_initialization_{config.source}_{split}",
         completed_work=0,
@@ -142,8 +135,8 @@ def iter_documents(
         auth = hub_auth_kwargs()
         try:
             dataset = load_dataset(
-                dataset_name,
-                name=subset,
+                config.dataset_id,
+                name=config.dataset_config,
                 split=source_split,
                 revision=config.revision,
                 streaming=True,
@@ -152,7 +145,7 @@ def iter_documents(
             )
         except HUB_ACCESS_ERRORS as error:
             raise_for_hub_auth(error, credential_supplied=bool(auth))
-        if split == "validation" and source_split == "train":
+        if split == "validation" and config.validation_split is None:
             dataset = dataset.skip(config.train_max_documents)
         progress.update(
             completed_work=1,
@@ -166,10 +159,12 @@ def iter_documents(
         )
     try:
         for record in dataset:
-            if "text" not in record or not isinstance(record["text"], str):
+            text = record.get(config.text_field)
+            if config.text_field not in record or not isinstance(text, str):
                 raise ValueError(
-                    f"{config.source} stream record has missing or non-string text"
+                    f"{config.dataset_id} stream record has missing or "
+                    f"non-string {config.text_field}"
                 )
-            yield record["text"]
+            yield text
     except HUB_ACCESS_ERRORS as error:
         raise_for_hub_auth(error, credential_supplied=bool(auth))

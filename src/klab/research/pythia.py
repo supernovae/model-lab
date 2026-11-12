@@ -73,13 +73,15 @@ def validate_reference_config(config: RunConfig) -> None:
     """Require the separately pinned FineWeb-Edu pathway for this observation."""
     dataset = config.dataset
     if (
-        dataset.source != "fineweb_edu"
+        dataset.source != "huggingface"
+        or dataset.dataset_id != "HuggingFaceFW/fineweb-edu"
         or not dataset.revision
         or not dataset.dataset_config
     ):
         raise ValueError(
             "Pythia reference trajectory requires FineWeb-Edu "
-            "dataset.source=fineweb_edu with non-null dataset.revision and "
+            "dataset.source=huggingface, dataset_id=HuggingFaceFW/fineweb-edu "
+            "with non-null dataset.revision and "
             "dataset.dataset_config"
         )
 

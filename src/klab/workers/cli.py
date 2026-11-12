@@ -335,20 +335,15 @@ def validate_submit_args(args: argparse.Namespace) -> None:
 
 
 def _experiment_submit(args: argparse.Namespace) -> None:
-    from klab.data.legacy import require_current_dataset
-
     validate_submit_args(args)
     if args.matrix:
         requests = _matrix_requests(args)
         if args.dry_run:
             return
-        for request in requests:
-            require_current_dataset(request["config"].dataset)
         submissions = _controller(Path(args.store)).submit_many(requests)
         _json([submission.model_dump(mode="json") for submission in submissions])
         return
     config = load_config(Path(args.config))
-    require_current_dataset(config.dataset)
     controller, submission = _submit_config(args, config)
     if args.wait:
         _wait_for_submission(controller, submission)

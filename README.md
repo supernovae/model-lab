@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="docs/build.md">Build a model</a> ·
   <a href="docs/tinystories-microlab.md">Start with TinyStories</a> ·
   <a href="docs/lab-mode.md">Try an idea</a> ·
   <a href="docs/using-klab.md">Find a guide</a>
@@ -82,10 +83,30 @@ Prefer containers? See the [CPU container guide](docs/containers.md) to run the 
 web UI without a host Python install. On a Mac with Apple Silicon, see the
 [MLX setup guide](docs/macos-mlx.md).
 
+## Build a model
+
+Five commands turn a text corpus into a model you can sample from. Start from
+the maintained example, then swap in your own files:
+
+```sh
+cp -r examples/build-local-text "$KLAB_WORK_DIR/my-model"
+cd "$KLAB_WORK_DIR/my-model"
+klab tokenizer train tokenizer.yaml
+klab inspect model.yaml
+klab data prepare model.yaml
+klab train model.yaml --run-id first
+klab generate first --runs-dir work/runs --prompt "The baker counts"
+```
+
+The [build guide](docs/build.md) explains each step and which fields to change
+for your corpus, model size and hardware.
+
+## Test a change
+
 If you want a guided walkthrough from scratch, start with the
 **[Workshop TinyStories microlab](docs/tinystories-microlab.md)**.
-If you already have a `RunConfig` and tokenizer ready, jump straight into
-**[lab mode](docs/lab-mode.md)**:
+Once you have a run config and tokenizer, **[lab mode](docs/lab-mode.md)**
+compares one change against a baseline:
 
 ```sh
 cat > wider-ffn.yaml <<'YAML'
