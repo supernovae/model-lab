@@ -15,7 +15,7 @@ The `inspect` estimator currently reports these byte categories:
 - **Temporary workspace** — a conservative allocator/kernel/logit allowance.
 - **Headroom** — 15% of the preceding subtotal, reserved for uncertainty rather than an allocation category available to the model.
 
-The estimator uses FP32 master-parameter and gradient accounting. Autocast does not halve resident weights or optimizer state. Its `reference-v1` activation assumptions are deliberately conservative. A calibration multiplier may only raise an estimate when a matching native peak is observed; sampled MPS observations cannot lower an estimate or certify a bound.
+The estimator uses FP32 master-parameter and gradient accounting. Autocast does not halve resident weights or optimizer state. Its activation assumptions are deliberately conservative. A calibration multiplier may only raise an estimate when a matching native peak is observed; sampled MPS observations cannot lower an estimate or certify a bound.
 
 A proposal retains any positive baseline calibration correction as an additive
 uncertainty margin. That is not calibration of the changed configuration: its
