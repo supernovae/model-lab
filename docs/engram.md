@@ -54,7 +54,8 @@ depthwise causal convolution whose dilation is the longest n-gram order; `0`
 
 `memory_injection` places the memory:
 
-- `final` (default): after the last block, before the final norm.
+- `final` (default): after the last block and the final norm, just before the
+  output head. Memory added here reaches the logits without normalization.
 - `embedding`: on the token embeddings.
 - `after_block`: after the block named by `memory_block_index`, or after each of
   several blocks with `memory_block_indices` (for example `[1, 14]`). Each site
