@@ -644,9 +644,11 @@ def test_parallel_shards_join_on_failure_and_resume_verified_chunks(
     from dataclasses import replace
     from threading import Barrier
 
-    from klab.data import encoding, preparation_chunks
+    from klab.data import encoding, packing, preparation_chunks
     from klab.resource_envelope import ResourceEnvelope
 
+    # This exercises the chunked path's own failure and resume handling.
+    monkeypatch.setattr(packing, "TOKEN_STORE_ENABLED", False)
     monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
 
     run = config(tmp_path)

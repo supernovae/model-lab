@@ -771,6 +771,27 @@ def _data_prepare(args: argparse.Namespace) -> None:
     )
 
 
+def _data_tokens(args: argparse.Namespace) -> None:
+    from klab.data.packing import token_store_root
+    from klab.data.token_store import list_stores
+
+    root = token_store_root(load_config(Path(args.config)).dataset.cache_dir)
+    stores = list_stores(root)
+    if args.json:
+        print(json.dumps({"root": str(root), "stores": stores}, sort_keys=True))
+        return
+    print(f"Token stores under {root}: {len(stores)}")
+    for store in stores:
+        print(
+            f"  {Path(str(store['path'])).name}  "
+            f"{store['documents']:,} documents  {store['tokens']:,} tokens  "
+            f"{store['size_bytes'] / 2**30:.2f} GiB  "
+            f"{'whole source' if store['complete'] else 'partial source'}  "
+            f"source {str(store['source_sha256'])[:12]}  "
+            f"tokenizer {str(store['tokenizer_sha256'])[:12]}"
+        )
+
+
 def _prepared_input_summary(
     root: Path, config: Any, verified: dict[str, Any]
 ) -> dict[str, Any]:
@@ -3386,6 +3407,13 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     transfer_evaluate.add_argument("--output")
     transfer_evaluate.set_defaults(handler=_facts_transfer_evaluate)
     data_prepare.set_defaults(handler=_data_prepare)
+    data_tokens = data_commands.add_parser(
+        "tokens",
+        help="List the reusable token stores beside a config's data cache",
+    )
+    data_tokens.add_argument("config")
+    data_tokens.add_argument("--json", action="store_true")
+    data_tokens.set_defaults(handler=_data_tokens)
     engram = commands.add_parser("engram")
     engram_commands = engram.add_subparsers(dest="engram_command", required=True)
     engram_export = engram_commands.add_parser("export")

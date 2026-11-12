@@ -26,6 +26,10 @@ klab data prepare RUN.yaml                 # CPU only; uses host cores, resumabl
 klab train RUN.yaml --run-id RUN --require-prepared
 ```
 
+For `local_text` sources, tokens are kept in a [reusable token store](token-store.md),
+so preparing the same data for another model or a larger budget copies them
+instead of tokenizing again.
+
 With `--require-prepared`, a published cache for this config is verified and
 used; a missing cache fails immediately with the `data prepare` command to run,
 and nothing is tokenized. Use it in any launch script that starts on a GPU host.

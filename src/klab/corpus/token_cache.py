@@ -2,6 +2,11 @@
 
 Only encoding is reused. Current release rights, split isolation, deduplication
 and scheduling are still checked by the mixture producer on every invocation.
+
+This is a cache, so it favors throughput over durability: it uses a write-ahead
+log with normal synchronization and commits in large batches. A crash can lose
+the most recent rows, which are then encoded again; every row carries its own
+digest, so a damaged row is detected when it is read.
 """
 
 from __future__ import annotations
@@ -27,8 +32,9 @@ class TokenCache:
             raise ValueError("token cache must not be a symlink")
         self.db = sqlite3.connect(path)
         self.db.executescript("""
-            PRAGMA cache_size=-4096;
-            PRAGMA synchronous=FULL;
+            PRAGMA journal_mode=WAL;
+            PRAGMA cache_size=-262144;
+            PRAGMA synchronous=NORMAL;
             CREATE TABLE IF NOT EXISTS tokens (
                 content TEXT PRIMARY KEY, payload BLOB NOT NULL, digest TEXT NOT NULL
             );
@@ -96,7 +102,7 @@ class TokenCache:
                     (content, payload, hashlib.sha256(payload).hexdigest()),
                 )
                 self.pending += 1
-                if self.pending >= 256:
+                if self.pending >= 4096:
                     self.db.commit()
                     self.pending = 0
                 cached[content] = ids

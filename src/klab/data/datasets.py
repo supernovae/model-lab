@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
+from pathlib import Path
 
 from datasets import load_dataset
 
@@ -17,11 +17,65 @@ from klab.data.synthetic import iter_synthetic
 from klab.data.withheld_facts import training_documents
 from klab.hf_auth import HUB_ACCESS_ERRORS, hub_auth_kwargs, raise_for_hub_auth
 from klab.progress import progress_phase
+from klab.token_encode_worker import LineError, local_text_record
 
 TINYSTORIES_DATASET = "roneneldan/TinyStories"
 TINYSTORIES_REVISION = "f54c09fd23315a6f9c86f9dc80f725de7d8f9c64"
 FINEWEB_EDU_DATASET = "HuggingFaceFW/fineweb-edu"
 COSMOPEDIA_DATASET = "HuggingFaceTB/cosmopedia"
+
+
+def local_text_error(
+    path: Path, number: int, error: LineError, split: str = "train"
+) -> ValueError:
+    """The message for a refused local_text line, wherever it was parsed."""
+    if error.kind == "json":
+        return ValueError(f"invalid local_text JSON at {path}:{number}")
+    if error.kind == "record":
+        return ValueError(f"invalid local_text record at {path}:{number}")
+    if error.kind == "line_cap":
+        return ValueError(
+            f"local_text raw JSON record at {path}:{number} exceeds "
+            f"operational raw-line cap ({error.detail[0]} bytes)"
+        )
+    size, limit = error.detail
+    return ValueError(
+        f"{split} source document {number} exceeds "
+        f"tokenizer_batch_source_bytes ({size} > {limit})"
+    )
+
+
+def iter_local_text(
+    path: Path,
+    *,
+    source_bytes: int | None = None,
+    offset: int = 0,
+    number: int = 1,
+) -> Iterator[tuple[str, int]]:
+    """Yield ``(text, end_offset)`` for each ``{"text": ...}`` line of a JSONL file.
+
+    ``offset`` and ``number`` resume after an earlier record: the byte offset
+    that record ended at and the line number of the next one.
+    """
+    # Escaped JSON may need six raw bytes per decoded UTF-8 byte.
+    limit = 6 * source_bytes + 1024 if source_bytes is not None else -1
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        for line_number in range(number, 2**63):
+            line = handle.readline(limit + 1) if limit >= 0 else handle.readline()
+            if not line:
+                break
+            if limit >= 0 and len(line) > limit:
+                raise ValueError(
+                    f"local_text raw JSON record at {path}:{line_number} exceeds "
+                    f"operational raw-line cap ({limit} bytes)"
+                )
+            try:
+                text = local_text_record(line)
+            except LineError as error:
+                raise local_text_error(path, line_number, error) from error
+            offset += len(line)
+            yield text, offset
 
 
 def iter_documents(
@@ -54,36 +108,8 @@ def iter_documents(
             )
         path = config.train_path if split == "train" else config.validation_path
         assert path is not None
-        with path.open("rb") as handle:
-            for number in range(1, 2**63):
-                # Escaped JSON may need six raw bytes per decoded UTF-8 byte.
-                limit = (
-                    6 * local_text_source_bytes + 1024
-                    if local_text_source_bytes is not None
-                    else -1
-                )
-                line = handle.readline(limit + 1) if limit >= 0 else handle.readline()
-                if not line:
-                    break
-                if limit >= 0 and len(line) > limit:
-                    raise ValueError(
-                        f"local_text raw JSON record at {path}:{number} exceeds "
-                        f"operational raw-line cap ({limit} bytes)"
-                    )
-                try:
-                    row = json.loads(line)
-                except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                    raise ValueError(
-                        f"invalid local_text JSON at {path}:{number}"
-                    ) from error
-                if (
-                    not isinstance(row, dict)
-                    or set(row) != {"text"}
-                    or not isinstance(row["text"], str)
-                    or not row["text"].strip()
-                ):
-                    raise ValueError(f"invalid local_text record at {path}:{number}")
-                yield row["text"]
+        for text, _ in iter_local_text(path, source_bytes=local_text_source_bytes):
+            yield text
         return
     if config.source == "local_stories":
         yield from iter_local_stories(config, split)
