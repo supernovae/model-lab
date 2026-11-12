@@ -35,26 +35,15 @@ READ_FILTERS = {"compare", "collect_points", "resolve_point"}
 # --- Held-back final split -----------------------------------------------------
 
 
+# Every split reader goes through suite.require_split: one case for the shared
+# _pick path and one for the reader that calls require_split directly.
 @pytest.mark.parametrize(
     "read",
     [
         lambda: fact_items("final"),
         lambda: parametric_items("final", seed=0),
-        lambda: needle_split("final"),
-        lambda: prompts("final"),
-        lambda: suite_mod.split_payload("final"),
-        lambda: runner.recall_items("final"),
-        lambda: runner.needle_items("final", [192]),
     ],
-    ids=[
-        "facts",
-        "parametric",
-        "needle",
-        "prompts",
-        "payload",
-        "recall",
-        "needle-items",
-    ],
+    ids=["facts", "parametric"],
 )
 def test_final_split_is_locked_outside_a_final_verdict(read: Any) -> None:
     with pytest.raises(FinalSplitLocked):

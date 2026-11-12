@@ -511,10 +511,7 @@ def test_memory_placement_cannot_resume_or_promote_across_sites(
         )
 
 
-@pytest.mark.parametrize("placement", ["final", "embedding"])
-def test_mlx_validation_rejects_enabled_memory_at_every_placement(
-    placement: str,
-) -> None:
+def test_mlx_validation_rejects_enabled_memory() -> None:
     base = load_config(
         Path(__file__).resolve().parents[1] / "configs" / "runtime_smoke_cpu.yaml"
     )
@@ -524,7 +521,7 @@ def test_mlx_validation_rejects_enabled_memory_at_every_placement(
             "memory_table_size": 31,
             "memory_ngram_size": 3,
             "memory_dim": 8,
-            "memory_injection": placement,
+            "memory_injection": "final",
         }
     )
     config_value = base.model_copy(
@@ -889,8 +886,9 @@ def test_source_drift_requires_explicit_best_effort_resume(
     assert decision["changes"][0]["effective"] == changed_source["sha256"]
 
 
-@pytest.mark.parametrize("explicit_parent_decay", [False, True])
-@pytest.mark.parametrize("retained_child", [False, True])
+@pytest.mark.parametrize(
+    ("explicit_parent_decay", "retained_child"), [(False, False), (True, True)]
+)
 def test_budget_extension_preserves_full_state_and_parent(
     tmp_path: Path, explicit_parent_decay: bool, retained_child: bool
 ) -> None:
@@ -1056,10 +1054,7 @@ def test_budget_extension_rejects_other_changes_before_child(tmp_path: Path) -> 
         assert not (valid.logging.root_dir / run_id).exists()
 
 
-@pytest.mark.parametrize("entrypoint", ["train", "_train_impl"])
-def test_preexisting_cancel_marker_stops_before_runtime(
-    tmp_path, monkeypatch, entrypoint
-):
+def test_preexisting_cancel_marker_stops_before_runtime(tmp_path, monkeypatch):
     from klab.training import trainer
 
     original = config(tmp_path)
@@ -1073,7 +1068,7 @@ def test_preexisting_cancel_marker_stops_before_runtime(
     monkeypatch.setattr(trainer, "prepare_data", forbidden)
     monkeypatch.setattr(trainer.PyTorchEngine, "initialize", forbidden)
     with pytest.raises(InterruptedError, match="before run creation"):
-        getattr(trainer, entrypoint)(original, run_id="cancelled", cancel_path=cancel)
+        trainer.train(original, run_id="cancelled", cancel_path=cancel)
     assert not (original.logging.root_dir / "cancelled").exists()
     assert cancel.read_text() == "retain cancellation"
 

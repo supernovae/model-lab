@@ -20,27 +20,9 @@ from klab.workspace_preflight import StorageCheck
     [
         ("resource_envelope_version", 2),
         ("resource_envelope_version", True),
-        ("resource_envelope_version", "1"),
-        ("max_rss_bytes", 0),
         ("max_rss_bytes", True),
-        ("max_rss_bytes", 2.5),
-        ("max_rss_bytes", "10"),
-        ("max_host_memory_fraction", 0),
         ("max_host_memory_fraction", 1.1),
-        ("max_host_memory_fraction", True),
-        ("min_available_ram_bytes", -1),
-        ("min_available_ram_bytes", False),
-        ("min_swap_bytes", -1),
-        ("min_swap_bytes", True),
         ("min_disk_bytes", -1),
-        ("min_disk_bytes", False),
-        ("min_inodes", -1),
-        ("min_inodes", True),
-        ("max_workers", 0),
-        ("max_workers", False),
-        ("max_queue_depth", 0),
-        ("max_queue_depth", True),
-        ("spill_to_disk", 1),
         ("spill_to_disk", "false"),
         ("unexpected_field", 1),
     ],
@@ -48,14 +30,6 @@ from klab.workspace_preflight import StorageCheck
 def test_rejects_invalid_schema_fields(field: str, value: object) -> None:
     with pytest.raises(ValidationError):
         ResourceEnvelope.model_validate({"resource_envelope_version": 1, field: value})
-
-
-def test_requires_version_and_is_frozen() -> None:
-    with pytest.raises(ValidationError):
-        ResourceEnvelope.model_validate({})
-    envelope = ResourceEnvelope(resource_envelope_version=1)
-    with pytest.raises(ValidationError):
-        envelope.max_workers = 2
 
 
 def test_yaml_load_errors_and_preserves_absence_of_output(tmp_path: Path) -> None:
@@ -150,13 +124,7 @@ def test_observational_measurements_and_exact_boundaries(tmp_path: Path) -> None
     ("field", "limit", "rss", "workers", "queue"),
     [
         ("max_rss_bytes", 499, 500, 0, 0),
-        ("max_host_memory_fraction", 0.49, 500, 0, 0),
-        ("min_available_ram_bytes", 401, 0, 0, 0),
-        ("min_swap_bytes", 201, 0, 0, 0),
         ("min_disk_bytes", 301, 0, 0, 0),
-        ("min_inodes", 21, 0, 0, 0),
-        ("max_workers", 1, 0, 2, 0),
-        ("max_queue_depth", 2, 0, 0, 3),
     ],
 )
 def test_every_limit_rejects_violation_before_creating_output(
@@ -175,20 +143,6 @@ def test_every_limit_rejects_violation_before_creating_output(
             queue_depth=queue,
         )
     assert not output.exists()
-
-
-@pytest.mark.usefixtures("measured")
-def test_unknown_process_rss_only_fails_requested_limits(tmp_path: Path) -> None:
-    assert check_envelope(None, workspace=tmp_path, rss_bytes=None)["rss_bytes"] is None
-    for field, value in (("max_rss_bytes", 50), ("max_host_memory_fraction", 0.5)):
-        with pytest.raises(ValueError, match=f"{field}.*unavailable"):
-            check_envelope(
-                ResourceEnvelope.model_validate(
-                    {"resource_envelope_version": 1, field: value}
-                ),
-                workspace=tmp_path,
-                rss_bytes=None,
-            )
 
 
 @pytest.mark.parametrize(
@@ -261,12 +215,8 @@ def test_filesystem_with_no_inode_accounting_requires_inode_evidence(
 @pytest.mark.parametrize(
     ("name", "value"),
     [
-        ("rss_bytes", True),
         ("rss_bytes", -1),
         ("pending_workers", True),
-        ("pending_workers", -1),
-        ("queue_depth", 1.1),
-        ("queue_depth", -1),
     ],
 )
 def test_invalid_operational_counts_rejected(

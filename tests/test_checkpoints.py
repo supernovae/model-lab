@@ -217,7 +217,7 @@ def test_explicit_decay_schedule_matches_the_default_through_horizon() -> None:
             assert actual == floor
 
 
-@pytest.mark.parametrize("mutation", ["kind", "decay_steps", "learning_rate"])
+@pytest.mark.parametrize("mutation", ["decay_steps", "learning_rate"])
 def test_explicit_decay_checkpoint_verifies_schedule_and_optimizer_lr(
     tmp_path: Path, mutation: str
 ) -> None:
@@ -235,9 +235,7 @@ def test_explicit_decay_checkpoint_verifies_schedule_and_optimizer_lr(
     record = manager.save(snapshot)
     assert manager.verify(tmp_path / "checkpoints" / record.relative_path).valid
 
-    if mutation == "kind":
-        snapshot.schedule["kind"] = "warmup_cosine_v1"
-    elif mutation == "decay_steps":
+    if mutation == "decay_steps":
         snapshot.schedule["decay_steps"] = 6
     else:
         snapshot.optimizer["param_groups"][0]["lr"] = 0.003

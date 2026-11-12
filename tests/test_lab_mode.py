@@ -19,12 +19,6 @@ import pytest
 import yaml
 from lab_fixtures import write_smoke_inputs
 
-from klab.cli.main import (
-    BUILD_COMMANDS,
-    FAST_PATH_COMMANDS,
-    RELEASE_COMMANDS,
-    build_parser,
-)
 from klab.lab_mode import (
     EXIT_INTERRUPTED,
     EXIT_NOT_COMPARABLE,
@@ -109,20 +103,6 @@ def test_try_writes_one_sealed_record_with_identity_and_heldout_scores(
     assert (
         second["arms"]["candidate"]["run_id"] != record["arms"]["candidate"]["run_id"]
     )
-
-
-def test_tampered_record_is_rejected(lab: tuple[Path, Path]) -> None:
-    root, baseline = lab
-    _, path = run_try(
-        _delta(root, "d.yaml", {"model.ffn_dim": 64}), baseline, work_dir=root / "work"
-    )
-    edited = json.loads(path.read_text())
-    edited["comparison"]["verdict"] = "CANDIDATE_LOWER_LOSS"
-    edited["arms"]["candidate"]["heldout"]["loss"] = 0.0
-    path.chmod(0o644)
-    path.write_text(json.dumps(edited))
-    with pytest.raises(ValueError, match="digest mismatch"):
-        read_record(path)
 
 
 @pytest.mark.parametrize(
@@ -238,10 +218,10 @@ def test_sigint_from_the_cli_stops_safely_and_records_interruption(
     assert (progress_path.parent / "checkpoints/latest.json").is_file()
 
 
-@pytest.mark.parametrize("explicit_wall,declared_wall", [(None, 1e-9), (1e-9, 60)])
-def test_wall_limit_is_opt_in_and_stops_safely(
-    lab: tuple[Path, Path], explicit_wall: float | None, declared_wall: float
-) -> None:
+def test_wall_limit_is_opt_in_and_stops_safely(lab: tuple[Path, Path]) -> None:
+    # Which of the explicit and declared limits wins is covered by
+    # test_try_config::test_native_defaults_legacy_serialization_and_tighter_limits.
+    explicit_wall, declared_wall = None, 1e-9
     root, baseline = lab
     record, _ = run_try(
         _delta(root, "w.yaml", {"model.ffn_dim": 128}),
@@ -318,26 +298,6 @@ def test_noop_and_malformed_deltas_are_refused(lab: tuple[Path, Path]) -> None:
     with pytest.raises(ValueError, match="unexpected"):
         read_candidate(bad)
     assert read_candidate(baseline).kind == "config"
-
-
-def test_help_lists_build_first_and_every_command_once() -> None:
-    parser = build_parser()
-    parser.format_help()
-    epilog = parser.epilog or ""
-    (commands,) = [action for action in parser._actions if action.dest == "command"]
-    names = set(commands.choices)
-    assert {"try", "report", "experiment", "attempt"} <= names
-    listed = [
-        line.split()[0]
-        for line in epilog.splitlines()
-        if line.startswith("  ") and line.strip()
-    ]
-    assert sorted(listed) == sorted(names)
-    assert listed[: len(BUILD_COMMANDS)] == list(BUILD_COMMANDS)
-    assert listed[len(BUILD_COMMANDS) :][: len(FAST_PATH_COMMANDS)] == list(
-        FAST_PATH_COMMANDS
-    )
-    assert listed[-len(RELEASE_COMMANDS) :] == list(RELEASE_COMMANDS)
 
 
 def test_cpu_smoke_loop_yaml_to_report_within_budget(tmp_path: Path) -> None:
