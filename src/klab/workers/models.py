@@ -317,6 +317,21 @@ class ColabEndpoint(WorkerModel):
         return value
 
 
+class WorkerPricing(WorkerModel):
+    """What a worker costs to keep, and how much it may spend in this store."""
+
+    hourly_rate: float = Field(gt=0, allow_inf_nan=False)
+    currency: str = "USD"
+    max_spend: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+    @field_validator("currency")
+    @classmethod
+    def currency_code(cls, value: str) -> str:
+        if len(value) != 3 or not value.isalpha() or not value.isupper():
+            raise ValueError("currency must be a three-letter code such as USD")
+        return value
+
+
 class WorkerDefinition(WorkerModel):
     schema_version: int = SCHEMA_VERSION
     worker_id: str
@@ -330,6 +345,9 @@ class WorkerDefinition(WorkerModel):
         default=None, exclude_if=lambda value: value is None
     )
     instance_id: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    pricing: WorkerPricing | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
     python: Path

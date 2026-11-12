@@ -167,6 +167,30 @@ from the checkout). Keep the vendor package constraints when resolving other
 dependencies. On Apple arm64, MLX remains opt-in; the full CLI currently needs
 both `--extra mlx` and `--extra cpu` in a managed project environment.
 
+## Cost and spend caps
+
+Give a rented worker its hourly price when you register it, and optionally a
+cap on what it may spend in this store:
+
+```sh
+klab worker register vast-4090 --backend cuda --ssh vast-4090 \
+  --python /opt/klab/bin/python --root /srv/klab/worker \
+  --hourly-cost 0.42 --currency USD --max-spend 25 --store "$WORK/runs"
+```
+
+Every attempt on a priced worker then carries a `cost` in
+`klab experiment list`: the attempt's wall time from its receipt, the hourly
+rate and the amount. `klab worker status NAME` shows the worker's attributed
+spend beside its cap. Once the attributed spend reaches `--max-spend`, the
+controller stops assigning that worker new work and says why in the queued
+reason; work already running finishes. Register the worker again with a higher
+cap to continue.
+
+This is attributed cost: run time at the hourly rate. A rented machine bills
+for every hour it exists, including setup, idle time and storage, so the
+provider's bill is at least this much. Lab never starts, stops or pays for
+an instance; turn machines off yourself when the queue is empty.
+
 ## Supplied Colab workers and relay-backed recovery
 
 Colab is a user-supplied, single foreground notebook kernel, not an SSH host,

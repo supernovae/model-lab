@@ -324,6 +324,9 @@ root as durable solely because the VM remains running.
 
 ## Selecting a provider
 
+Register rented hosts with `--hourly-cost` (and optionally `--max-spend`) so
+every attempt records what it cost; see [cost and spend caps](workers.md#cost-and-spend-caps).
+
 - [Google Colab](https://research.google.com/colaboratory/faq.html) is for an
   interactive, opportunistic session explicitly supplied by the user.
 - [Runpod's SSH guide](https://docs.runpod.io/pods/configuration/use-ssh)
