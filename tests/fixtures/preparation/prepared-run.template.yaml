@@ -14,7 +14,7 @@ dataset:
   train_max_tokens: 100
   validation_max_tokens: ${VERIFIED_RELEASE_VALIDATION_TOKENS}
   synthetic_seed: 17
-  train_path: ${VERIFIED_MIXTURE_DIR}/train.tokens.jsonl
+  train_path: ${VERIFIED_MIXTURE_DIR}/train.tokens.ids
   validation_path: ${VERIFIED_NEW_RELEASE_DIR}/lm/validation.jsonl
   license: Synthetic fixture
   allocation_manifest_path: null

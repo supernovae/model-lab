@@ -84,7 +84,8 @@ To discard a store, delete its `<key>` directory; it is rebuilt on demand.
 
 ## Limits
 
-- Only `local_text` JSONL is covered. Token mixtures, snapshots, chat data and
+- The positional store covers `local_text` JSONL only (mixtures use the content
+  store below). Snapshots, chat data and
   byte-addressed memory still use their existing paths.
 - Token IDs are stored as int32 whatever the vocabulary size.
 - The check that train and validation documents are disjoint still reads both
@@ -122,8 +123,37 @@ present. Every read checks the stored digest. One build holds a store at a
 time; a second build on the same tokenizer and corpus is refused with a clear
 message instead of waiting.
 
-On a 210M-token synthetic release (RAM-backed storage, 48 threads), a cold
-mixture build took 50.3 s with this encoder and store against 77.9 s with the
-previous single JSON-speaking tokenizer child and SQLite cache, with a
-byte-identical `train.tokens.jsonl`. The remaining time is mostly the mixture's
-JSON token output and its checkpoints, which this change does not touch.
+## Mixture output
+
+A materialized mixture is binary too. Its output directory holds:
+
+| File | Holds |
+| --- | --- |
+| `train.tokens.ids` | every scheduled target, in order, as raw little-endian int32 (each record ends with EOS) |
+| `train.records.jsonl` | one small row per scheduled record: document, family, source, stratum, exposure and its token count |
+| `receipt.json` | schema version 2; binds both files by SHA-256 and size |
+
+`dataset.train_path` of a `local_token_mixture` run names `train.tokens.ids`.
+Preparing it for training is a checked copy: the packer reads the record rows
+for counts and strata, then copies the IDs in 64 MiB blocks while checking the
+digest, the vocabulary range and the EOS that closes every record. No token is
+ever parsed from text.
+
+A mixture with `max_exposures: 1` writes each document as soon as it is
+encoded. Only repeated exposures make the scratch index retain encoded
+documents, and that retained copy is still JSON.
+
+## Mixture speed
+
+Synthetic release of 40,000 documents, 210M scheduled tokens, RAM-backed
+storage, 48 threads, same output tokens in every row:
+
+| Step | Before | Now |
+| --- | --- | --- |
+| Cold mixture build | 77.9 s (2.7M tokens/s) | 24.2 s (8.7M tokens/s) |
+| Rebuild with a warm content token store | not measured | 12.9 s (16M tokens/s) |
+| Packing the mixture for training | 9.8M tokens/s | 126M tokens/s |
+
+"Before" is the single JSON-speaking tokenizer child, the SQLite token cache
+and the JSONL token export. About 6 s of each build is fixed verification
+work that does not grow with the corpus.

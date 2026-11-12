@@ -548,14 +548,6 @@ class RetainedMixtureIndex(MixtureIndex):
     def candidate_bytes(self, source_bytes, content):
         return source_bytes
 
-    def record_family(self, stratum, family):
-        """Count an eligible family without retaining a second token copy."""
-        self.record_event(["family", [stratum, family]])
-        self.db.execute(
-            "INSERT INTO encoded(offset,family,stratum) VALUES(NULL,?,?)",
-            (family, stratum),
-        )
-
     def __init__(self, scratch, work_root, cohorts, seed, strata, order_policy=None):
         if not 1 <= len(cohorts) <= 2:
             raise ValueError("at most one additional release is supported")

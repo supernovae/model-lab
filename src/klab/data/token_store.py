@@ -475,20 +475,20 @@ class ContentTokens:
         return self.decode_ids(payload) if decode else payload
 
     @staticmethod
-    def decode_ids(payload: bytes) -> list[int]:
+    def decode_ids(payload: bytes) -> np.ndarray:
         if len(payload) % 4:
             raise ValueError("invalid cached token IDs")
         ids = np.frombuffer(payload, dtype="<i4")
         if len(ids) and int(ids.min()) < 0:
             raise ValueError("invalid cached token IDs")
-        return ids.tolist()
+        return ids
 
     def payload_bytes(self, content: str) -> int:
         row = self._rows.get(_content_key(content))
         return 0 if row is None else 4 * self._counts[row]
 
-    def _append(self, content: bytes, ids: list[int]) -> None:
-        payload = np.asarray(ids, dtype="<i4").tobytes()
+    def _append(self, content: bytes, ids: np.ndarray) -> None:
+        payload = ids.tobytes()
         digest = hashlib.sha256(payload).digest()
         record = np.empty(1, dtype=_CONTENT_RECORD)
         record["content"], record["digest"] = np.void(content), np.void(digest)
@@ -511,7 +511,7 @@ class ContentTokens:
         self.pending = 0
 
     def encode_many(self, texts, encode_missing):
-        """Return encodings in input order; only absent content is encoded."""
+        """Return int32 arrays in input order; only absent content is encoded."""
         keys, known, missing = [], {}, {}
         for text in texts:
             content = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -531,6 +531,7 @@ class ContentTokens:
                 raise ValueError("tokenizer returned incorrect batch length")
             started = time.monotonic()
             for content, ids in zip(missing, results, strict=True):
+                ids = np.asarray(ids, dtype="<i4")
                 self._append(_content_key(content), ids)
                 known[content] = ids
             self.write_seconds += time.monotonic() - started

@@ -78,7 +78,8 @@ if TYPE_CHECKING:
 PACKING_VERSION = "contiguous-eos-v6"
 PREVIOUS_PACKING_VERSION = "contiguous-eos-v5"
 HISTORICAL_PACKING_VERSION = "contiguous-eos-v4"
-_MAX_MIXTURE_ROW_BYTES = 64 * 1024**2
+_MAX_MIXTURE_ROW_BYTES = 1024**2  # one metadata row; token IDs are binary
+_MIXTURE_COPY_BYTES = 64 * 1024**2
 
 
 @dataclass(frozen=True)
@@ -726,9 +727,12 @@ def _collect_token_mixture(
     root: Path,
     *,
     proofs: dict[str, VerifiedFile] | None = None,
-    chunks: SplitChunks | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
-    """Pack exact scheduled targets with BOS and masked block-end padding."""
+    """Pack exact scheduled targets with BOS and masked block-end padding.
+
+    The mixture stores its targets as raw int32 beside one small JSON row per
+    record, so packing is a checked copy: no token is parsed from text.
+    """
     dataset = config.dataset
     assert dataset.train_path is not None
     target_count = sum(receipt["actual_target_tokens"].values())
@@ -739,84 +743,69 @@ def _collect_token_mixture(
     pad = tokenizer.token_to_id("<pad>")
     if any(value is None for value in (bos, eos, pad)):
         raise ValueError("token mixture tokenizer requires BOS, EOS and PAD")
-    ids = (
-        _ArraySpool(root / "train.npy", np.dtype(np.int32)) if chunks is None else None
-    )
-    mask = (
-        _ArraySpool(root / "train_supervision.npy", np.dtype(bool))
-        if chunks is None
-        else None
-    )
-    if chunks is None:
-        ids.append([bos])
-        mask.append([False])
-    cursor = 1
-    records = 0
-    stream_digest = hashlib.sha256()
+    record_digest = hashlib.sha256()
     by_stratum: Counter[str] = Counter()
-    with dataset.train_path.open("rb") as stream:
+    lengths: list[int] = []
+    with dataset.train_path.with_name("train.records.jsonl").open("rb") as stream:
         while line := stream.readline(_MAX_MIXTURE_ROW_BYTES + 1):
             if len(line) > _MAX_MIXTURE_ROW_BYTES:
                 raise ValueError("mixture record-byte cap exceeded")
             if not line.strip():
-                raise ValueError("empty token mixture JSONL row")
-            stream_digest.update(line)
+                raise ValueError("empty token mixture record row")
+            record_digest.update(line)
             row = json.loads(line)
-            tokens = row["token_ids"]
+            count = row.get("tokens") if isinstance(row, dict) else None
+            if type(count) is not int or count < 1:
+                raise ValueError("invalid token mixture target row")
+            lengths.append(count)
+            by_stratum[row["stratum"]] += count
+    records = len(lengths)
+    ends = np.cumsum(np.asarray(lengths, dtype=np.int64))
+    if (
+        records != receipt["records"]
+        or (int(ends[-1]) if records else 0) != target_count
+        or dict(by_stratum) != receipt["actual_target_tokens"]
+        or record_digest.hexdigest() != receipt["train_records_sha256"]
+        or dataset.train_path.stat().st_size != 4 * target_count
+    ):
+        raise ValueError("token mixture target count differs from verified receipt")
+    ids = _ArraySpool(root / "train.npy", np.dtype(np.int32))
+    mask = _ArraySpool(root / "train_supervision.npy", np.dtype(bool))
+    ids.append([bos])
+    mask.append([False])
+    token_digest = hashlib.sha256()
+    position = record = 0
+    with dataset.train_path.open("rb") as stream:
+        while block := stream.read(_MIXTURE_COPY_BYTES):
+            token_digest.update(block)
+            values = np.frombuffer(block, dtype="<i4")
+            # Every record ends inside exactly one block, at its EOS.
+            last = int(np.searchsorted(ends, position + len(values), side="right"))
             if (
-                not isinstance(tokens, list)
-                or not tokens
-                or tokens[-1] != eos
-                or any(
-                    type(value) is not int or not 0 <= value < config.model.vocab_size
-                    for value in tokens
-                )
-                or cursor + len(tokens) > target_count + 1
+                int(values.min()) < 0
+                or int(values.max()) >= config.model.vocab_size
+                or np.any(values[ends[record:last] - 1 - position] != eos)
             ):
                 raise ValueError("invalid token mixture target row")
-            if chunks is None:
-                ids.append(tokens)
-                mask.append([True] * len(tokens))
-            elif records >= chunks.state["acquired_documents"]:
-                selected = ([bos] if records == 0 else []) + tokens
-                supervision = ([False] if records == 0 else []) + [True] * len(tokens)
-                if records + 1 == receipt["records"]:
-                    padding = padded_targets - target_count
-                    selected += [pad] * padding
-                    supervision += [False] * padding
-                chunks.append_record(
-                    records + 1, {"ids": selected, "supervision": supervision}
-                )
-            cursor += len(tokens)
-            records += 1
-            by_stratum[row["stratum"]] += len(tokens)
+            ids.append_array(np.ascontiguousarray(values, dtype=np.int32))
+            mask.append_array(np.ones(len(values), dtype=bool))
+            position += len(values)
+            record = last
     if (
-        cursor != target_count + 1
-        or records != receipt["records"]
-        or dict(by_stratum) != receipt["actual_target_tokens"]
-        or stream_digest.hexdigest() != receipt["train_tokens_sha256"]
+        position != target_count
+        or token_digest.hexdigest() != receipt["train_tokens_sha256"]
     ):
         raise ValueError("token mixture target count differs from verified receipt")
     remaining_padding = padded_targets - target_count
-    while chunks is None and remaining_padding:
+    while remaining_padding:
         count = min(remaining_padding, 65_536)
         ids.append([pad] * count)
         mask.append([False] * count)
         remaining_padding -= count
-    if chunks is None:
-        for spool in (ids, mask):
-            proof = spool.finish()
-            if proofs is not None:
-                proofs[spool.path.name] = proof
-    else:
-        chunk_proofs, _ = chunks.finish()
-        for name, proof in chunk_proofs.items():
-            destination = root / name
-            proof.path.replace(destination)
-            if proofs is not None:
-                proofs[name] = _written_file(
-                    destination, proof.sha256, proof.size_bytes
-                )
+    for spool in (ids, mask):
+        proof = spool.finish()
+        if proofs is not None:
+            proofs[spool.path.name] = proof
     stats = {
         "acquired_documents": records,
         "retained_documents": records,
@@ -2563,23 +2552,9 @@ def _prepare_data(
             temporary_root / "validation.npy", mmap_mode="r", allow_pickle=False
         )
     elif token_mixture is not None:
-        mixture_chunks = PreparationChunks(
-            root.with_name(root.name + ".mixture.tmp"),
-            cache_identity=cache_identity,
-            binding={"stage": "mixture-target-packing", "identity": cache_identity},
-            arrays={"ids": np.dtype(np.int32), "supervision": np.dtype(bool)},
-            raw_byte_limit=128 * 1024**2,
-            telemetry=telemetry,
+        train, train_supervision, train_stats = _collect_token_mixture(
+            config, tokenizer, token_mixture, temporary_root, proofs=proofs
         )
-        with mixture_chunks:
-            train, train_supervision, train_stats = _collect_token_mixture(
-                config,
-                tokenizer,
-                token_mixture,
-                temporary_root,
-                proofs=proofs,
-                chunks=mixture_chunks.open_split("train"),
-            )
         train_byte = None
         validation, validation_supervision, validation_byte, validation_stats = (
             _collect(
@@ -2877,10 +2852,6 @@ def _prepare_data(
     telemetry.add("finalize_fsync_seconds", time.monotonic() - finalize_started)
     if chunks_owner is not None:
         chunks_owner.cleanup_published(root)
-    if token_mixture is not None:
-        # Published arrays are independently owned and verified; raw chunks are
-        # only retained until the complete prepared bundle commits.
-        shutil.rmtree(mixture_chunks.root)
     with (
         progress_phase(
             "data_cache_validation",
