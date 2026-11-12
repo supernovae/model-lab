@@ -173,11 +173,13 @@ class MixtureFrontier:
             self.sequence += 1
         if sum(1 for _ in self.root.glob("commit-*.json")) != self.sequence:
             raise ValueError("mixture checkpoint sequence gap")
-        self.output_offset = 0
+        self.output_offsets: dict[str, int] = {}
         self.excluded_offset = 0
         self.event_file = None
 
-    def restore(self, index, stream, digest, excluded):
+    def restore(self, index, outputs, excluded):
+        """Replay committed segments; ``outputs`` maps a segment file name to
+        the ``(stream, digest)`` it continues."""
         for sequence in range(self.sequence):
             segment = json.loads(
                 (self.root / f"commit-{sequence:012d}.json").read_bytes()
@@ -185,13 +187,22 @@ class MixtureFrontier:
             directory = Path(segment["directory"])
             for event in rows(directory / "index.jsonl"):
                 index.restore_event(event)
-            with (directory / "output.jsonl").open("rb") as source:
-                while chunk := source.read(1024**2):
-                    stream.write(chunk)
-                    digest.update(chunk)
+            for name, (stream, digest) in outputs.items():
+                with (directory / name).open("rb") as source:
+                    while chunk := source.read(1024**2):
+                        stream.write(chunk)
+                        digest.update(chunk)
             excluded.extend(rows(directory / "excluded.jsonl"))
-        self.output_offset = stream.tell()
+        self.output_offsets = {
+            name: stream.tell() for name, (stream, _) in outputs.items()
+        }
         self.excluded_offset = len(excluded)
+
+    def pending_bytes(self, outputs):
+        return sum(
+            stream.tell() - self.output_offsets.get(name, 0)
+            for name, (stream, _) in outputs.items()
+        )
 
     def begin(self, index):
         from uuid import uuid4
@@ -203,21 +214,24 @@ class MixtureFrontier:
             canonical_json(event) + b"\n"
         )
 
-    def commit(self, state, stream, excluded, index):
-        stream.flush()
-        end = stream.tell()
-        with (self.directory / "output.jsonl").open("xb") as target:
-            stream.seek(self.output_offset)
-            remaining = end - self.output_offset
-            while remaining:
-                raw = stream.read(min(1024**2, remaining))
-                if not raw:
-                    raise ValueError("mixture checkpoint output truncated")
-                target.write(raw)
-                remaining -= len(raw)
-            target.flush()
-            os.fsync(target.fileno())
-        stream.seek(end)
+    def commit(self, state, outputs, excluded, index):
+        ends = {}
+        for name, (stream, _) in outputs.items():
+            stream.flush()
+            ends[name] = end = stream.tell()
+            start = self.output_offsets.get(name, 0)
+            with (self.directory / name).open("xb") as target:
+                stream.seek(start)
+                remaining = end - start
+                while remaining:
+                    raw = stream.read(min(1024**2, remaining))
+                    if not raw:
+                        raise ValueError("mixture checkpoint output truncated")
+                    target.write(raw)
+                    remaining -= len(raw)
+                target.flush()
+                os.fsync(target.fileno())
+            stream.seek(end)
         write_rows(self.directory / "excluded.jsonl", excluded[self.excluded_offset :])
         self.event_file.flush()
         os.fsync(self.event_file.fileno())
@@ -243,7 +257,7 @@ class MixtureFrontier:
         write_rows(self.root / f"commit-{self.sequence:012d}.json", [entry])
         self.state = entry
         self.sequence += 1
-        self.output_offset = end
+        self.output_offsets = ends
         self.excluded_offset = len(excluded)
         self.begin(index)
 

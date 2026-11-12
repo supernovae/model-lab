@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
+import numpy as np
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -38,6 +39,10 @@ from klab.result_publication import sync_directory
 from klab.training.manifest import sha256_file
 
 MIXTURE_BATCH_SOURCE_BYTES = 8 * 1024**2
+# A mixture output is the scheduled targets as raw little-endian int32 plus one
+# small JSON row per scheduled record; token IDs are never written as JSON.
+TRAIN_TOKENS = "train.tokens.ids"
+TRAIN_RECORDS = "train.records.jsonl"
 _TOKEN_STORE_SOURCE = Path(__file__).parents[1] / "data" / "token_store.py"
 MIXTURE_COMMIT_SEGMENT_BYTES = 64 * 1024**2
 MIXTURE_COMMIT_INTERVAL_SECONDS = 30
@@ -514,6 +519,7 @@ def _schedule(
     excluded: list[dict] = []
     excluded_bytes = 0
     token_digest = hashlib.sha256()
+    record_digest = hashlib.sha256()
 
     def exclude(doc, reason):
         nonlocal excluded_bytes
@@ -538,8 +544,13 @@ def _schedule(
             if reuse_tokens
             else nullcontext(None)
         ) as tokens,
-        (staging / "train.tokens.jsonl").open("wb+") as stream,
+        (staging / TRAIN_TOKENS).open("wb+") as stream,
+        (staging / TRAIN_RECORDS).open("wb+") as record_stream,
     ):
+        outputs = {
+            "output.ids": (stream, token_digest),
+            "output.records.jsonl": (record_stream, record_digest),
+        }
         from klab.host_capacity import plan_host_workers
 
         cap = os.environ.get("KLAB_MIXTURE_WORKERS")
@@ -568,7 +579,7 @@ def _schedule(
         candidates = Counter()
         if frontier is not None:
             encoders.callback(frontier.close, index)
-            frontier.restore(index, stream, token_digest, excluded)
+            frontier.restore(index, outputs, excluded)
             if frontier.state is not None:
                 resumed = frontier.state["state"]
                 for counter, name in (
@@ -603,7 +614,7 @@ def _schedule(
                 else {}
             )
             pending_bytes = (
-                frontier.event_file.tell() + stream.tell() - frontier.output_offset
+                frontier.event_file.tell() + frontier.pending_bytes(outputs)
                 if frontier is not None
                 else 0
             )
@@ -636,7 +647,7 @@ def _schedule(
                         "records": records,
                         "excluded_bytes": excluded_bytes,
                     },
-                    stream,
+                    outputs,
                     excluded,
                     index,
                 )
@@ -700,9 +711,9 @@ def _schedule(
             temporary.write_bytes(canonical_json(metrics) + b"\n")
             os.replace(temporary, progress)
 
-        direct = spec.max_exposures == 1 and callable(
-            getattr(index, "record_family", None)
-        )
+        # A single exposure is emitted as it is encoded; only repeats need the
+        # index to retain encoded documents.
+        direct = spec.max_exposures == 1
 
         def emit(doc, stratum, quota, exposure):
             nonlocal records
@@ -711,7 +722,10 @@ def _schedule(
             if remaining <= 0:
                 return
             take = min(len(ids), remaining)
-            targets = ids[:take] if take == len(ids) else ids[: take - 1] + [eos]
+            targets = np.asarray(ids[:take], dtype="<i4")
+            if take != len(ids):
+                targets = targets.copy()
+                targets[-1] = eos
             row = {
                 "document_id": doc["document_id"],
                 "family_id": doc["family_id"],
@@ -720,11 +734,14 @@ def _schedule(
                 "exposure": exposure,
                 "content_token_start": 0,
                 "content_token_end": take - 1,
-                "token_ids": targets,
+                "tokens": take,
             }
+            payload = targets.tobytes()
+            stream.write(payload)
+            token_digest.update(payload)
             encoded_row = canonical_json(row) + b"\n"
-            stream.write(encoded_row)
-            token_digest.update(encoded_row)
+            record_stream.write(encoded_row)
+            record_digest.update(encoded_row)
             totals[stratum] += take
             source_totals[doc["source_id"]] += take
             if exposure == 1:
@@ -751,7 +768,7 @@ def _schedule(
                 )
             encode_started = time.monotonic()
             try:
-                return encoder.encode(texts)
+                return encoder.encode_arrays(texts)
             finally:
                 metrics["encode_seconds"] = (
                     metrics.get("encode_seconds", 0) + time.monotonic() - encode_started
@@ -774,19 +791,22 @@ def _schedule(
 
             def process(doc, family, ids, *, stratum=stratum, quota=quota):
                 nonlocal available
-                if not ids:
+                if not len(ids):
                     exclude(doc, "zero_encoded_targets")
                     return
                 selected[stratum] += 1
+                targets = np.empty(len(ids) + 1, dtype="<i4")
+                targets[:-1] = ids
+                targets[-1] = eos
                 encoded_doc = {
                     "document_id": doc["document_id"],
                     "source_id": doc["source_id"],
                     "family_id": family,
-                    "token_ids": ids + [eos],
+                    "token_ids": targets if direct else targets.tolist(),
                     "stratum": stratum,
                 }
                 if direct:
-                    if len(canonical_json(encoded_doc)) + 1 > MAX_ROW_BYTES:
+                    if 4 * (len(ids) + 1) > MAX_ROW_BYTES:
                         raise ValueError("mixture encoded record-byte cap exceeded")
                     index.record_family(stratum, family)
                     emit(encoded_doc, stratum, quota, 1)
@@ -927,10 +947,11 @@ def _schedule(
                 raise ValueError(f"unfilled quota for {stratum}")
             done.append(stratum)
             checkpoint(stratum, available, force=True)
-        stream.flush()
-        os.fsync(stream.fileno())
+        for output_stream, _ in outputs.values():
+            output_stream.flush()
+            os.fsync(output_stream.fileno())
     receipt = {
-        "schema_version": 1,
+        "schema_version": 2,
         "release_id": manifest["release_id"],
         "release_manifest_sha256": sha256_file(release / "manifest.json"),
         "tokenizer_sha256": tokenizer_sha,
@@ -957,8 +978,11 @@ def _schedule(
             stratum: spec.target_quotas[stratum] - totals[stratum]
             for stratum in spec.target_quotas
         },
+        "train_tokens_format": "int32-le",
         "train_tokens_sha256": token_digest.hexdigest(),
-        "train_tokens_bytes": (staging / "train.tokens.jsonl").stat().st_size,
+        "train_tokens_bytes": (staging / TRAIN_TOKENS).stat().st_size,
+        "train_records_sha256": record_digest.hexdigest(),
+        "train_records_bytes": (staging / TRAIN_RECORDS).stat().st_size,
     }
     if spec.unique_train_content_floors is not None:
         receipt["available_unique_content_tokens"] = dict(available_content)
@@ -1111,7 +1135,11 @@ def verify_mixture(declaration: Path, output: Path, *, audit: bool = False) -> d
         and not audit
     ):
         return _verify_completed_mixture(declaration, output, receipt)
-    if sha256_file(output / "train.tokens.jsonl") != receipt["train_tokens_sha256"]:
+    if (
+        receipt.get("schema_version") != 2
+        or sha256_file(output / TRAIN_TOKENS) != receipt["train_tokens_sha256"]
+        or sha256_file(output / TRAIN_RECORDS) != receipt["train_records_sha256"]
+    ):
         raise ValueError("mixture token export digest mismatch")
     if not audit:
         raw = declaration.read_bytes()
@@ -1215,7 +1243,7 @@ def verify_mixture_dataset(
     release = spec.release_path.resolve()
     if (
         dataset.train_path.resolve()
-        != (dataset.mixture_output_path / "train.tokens.jsonl").resolve()
+        != (dataset.mixture_output_path / TRAIN_TOKENS).resolve()
         or dataset.validation_path.resolve()
         != (release / "lm/validation.jsonl").resolve()
         or dataset.revision != receipt["release_id"]

@@ -247,7 +247,7 @@ def _handle(args: argparse.Namespace) -> None:
                     "release_id": result["release_id"],
                     "receipt_path": str(Path(args.output).resolve() / "receipt.json"),
                     "train_tokens_path": str(
-                        Path(args.output).resolve() / "train.tokens.jsonl"
+                        Path(args.output).resolve() / "train.tokens.ids"
                     ),
                     "records": result["records"],
                     "actual_target_tokens": result["actual_target_tokens"],

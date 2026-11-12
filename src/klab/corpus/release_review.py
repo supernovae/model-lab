@@ -24,7 +24,7 @@ def verify_accepted_prepared_config(path: Path, review: dict[str, object]) -> No
         or dataset.train_path is None
         or dataset.validation_path is None
         or dataset.train_path.resolve()
-        != (dataset.mixture_output_path / "train.tokens.jsonl").resolve()
+        != (dataset.mixture_output_path / "train.tokens.ids").resolve()
         or dataset.validation_path.resolve()
         != (Path(str(review["release_path"])) / "lm" / "validation.jsonl").resolve()
     ):

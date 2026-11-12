@@ -154,7 +154,7 @@ def test_mixture_paths_preserve_source_targets(
     raw["dataset"].update(
         source="local_token_mixture",
         license="local synthetic fixture",
-        train_path="assets/mixture/train.tokens.jsonl",
+        train_path="assets/mixture/train.tokens.ids",
         validation_path="assets/validation.jsonl",
         mixture_declaration_path=str(declaration)
         if absolute

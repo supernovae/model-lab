@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import yaml
 
@@ -149,6 +150,19 @@ def _fixture(
     return declaration, inventory, release
 
 
+def _scheduled(output: Path) -> list[dict]:
+    """Record rows joined with their target IDs from the binary export."""
+    ids = np.fromfile(output / "train.tokens.ids", dtype="<i4").tolist()
+    rows, position = [], 0
+    for line in (output / "train.records.jsonl").read_text().splitlines():
+        row = json.loads(line)
+        row["token_ids"] = ids[position : position + row["tokens"]]
+        position += row["tokens"]
+        rows.append(row)
+    assert position == len(ids)
+    return rows
+
+
 def test_card03_order_policy_uses_contract_document_hash() -> None:
     expected = hashlib.sha256(b"kml-card03-v1 | incident | document-1").hexdigest()
     assert (
@@ -182,14 +196,12 @@ def test_exact_quotas_repeats_and_cold_replay(
         "explanatory": 0,
         "incident": 0,
     }
-    rows = [
-        json.loads(line)
-        for line in (output / "train.tokens.jsonl").read_text().splitlines()
-    ]
+    rows = _scheduled(output)
     assert {row["document_id"] for row in rows} == {"g1", "w1", "p1"}
     assert max(row["exposure"] for row in rows) == 2
     assert all(row["token_ids"][-1] == 3 for row in rows)
     assert all(len(row["token_ids"]) > row["content_token_end"] for row in rows)
+    assert "token_ids" not in (output / "train.records.jsonl").read_text()
     assert mixture.verify_mixture(declaration, output) == receipt
 
 
@@ -272,10 +284,15 @@ def test_changed_export_and_inventory_rejected(
     declaration, inventory, _ = _fixture(tmp_path, monkeypatch)
     output = tmp_path / "output"
     mixture.materialize_mixture(declaration, output)
-    with (output / "train.tokens.jsonl").open("ab") as stream:
-        stream.write(b"\n")
-    with pytest.raises(ValueError, match="digest mismatch"):
-        mixture.verify_mixture(declaration, output)
+    for name, extra in (
+        ("train.tokens.ids", b"\0\0\0\0"),
+        ("train.records.jsonl", b"\n"),
+    ):
+        original = (output / name).read_bytes()
+        (output / name).write_bytes(original + extra)
+        with pytest.raises(ValueError, match="digest mismatch"):
+            mixture.verify_mixture(declaration, output)
+        (output / name).write_bytes(original)
     rows = [json.loads(line) for line in inventory.read_text().splitlines()]
     rows[0]["content_sha256"] = "z" * 64
     inventory.write_bytes(b"".join(canonical_json(row) + b"\n" for row in rows))
@@ -312,7 +329,7 @@ def test_native_packing_supervises_exact_exported_quota(
     output = tmp_path / "output"
     receipt = mixture.materialize_mixture(declaration, output)
     config = SimpleNamespace(
-        dataset=SimpleNamespace(train_path=output / "train.tokens.jsonl"),
+        dataset=SimpleNamespace(train_path=output / "train.tokens.ids"),
         training=SimpleNamespace(seq_len=8),
         model=SimpleNamespace(vocab_size=260),
     )
@@ -332,9 +349,7 @@ def test_native_packing_supervises_exact_exported_quota(
     assert sum(int((block != -100).sum()) for block in targets) == 20
     assert sum(int((block == -100).sum()) for block in targets) == 4
     assert [value for block in targets for value in block if value != -100] == [
-        value
-        for row in mixture._rows(output / "train.tokens.jsonl")
-        for value in row["token_ids"]
+        value for row in _scheduled(output) for value in row["token_ids"]
     ]
 
 
@@ -374,7 +389,7 @@ def test_yaml_mixture_consumer_and_storage_identity_are_independent_of_cwd(
         "source": "local_token_mixture",
         "revision": release.name,
         "cache_dir": "cache",
-        "train_path": "output/train.tokens.jsonl",
+        "train_path": "output/train.tokens.ids",
         "validation_path": f"{release.name}/lm/validation.jsonl",
         "train_max_documents": receipt["records"],
         "validation_max_documents": 1,
@@ -435,28 +450,37 @@ def test_yaml_mixture_consumer_and_storage_identity_are_independent_of_cwd(
             )
 
 
-def test_native_packing_rejects_malformed_target_row(tmp_path: Path) -> None:
-    path = tmp_path / "train.tokens.jsonl"
-    path.write_text(json.dumps({"token_ids": [5, 5]}) + "\n")
+@pytest.mark.parametrize("damage", ["missing_eos", "out_of_vocabulary", "record"])
+def test_native_packing_rejects_malformed_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    declaration, _, _ = _fixture(tmp_path, monkeypatch)
+    output = tmp_path / "output"
+    receipt = dict(mixture.materialize_mixture(declaration, output))
+    tokens, records = output / "train.tokens.ids", output / "train.records.jsonl"
+    ids = np.fromfile(tokens, dtype="<i4")
+    if damage == "record":
+        rows = [json.loads(line) for line in records.read_text().splitlines()]
+        rows[0]["tokens"] -= 1
+        records.write_bytes(b"".join(canonical_json(row) + b"\n" for row in rows))
+        receipt["train_records_sha256"] = hashlib.sha256(
+            records.read_bytes()
+        ).hexdigest()
+    else:
+        ids[-1] = 5 if damage == "missing_eos" else 260
+        ids.tofile(tokens)
+        receipt["train_tokens_sha256"] = hashlib.sha256(tokens.read_bytes()).hexdigest()
     config = SimpleNamespace(
-        dataset=SimpleNamespace(train_path=path),
-        training=SimpleNamespace(seq_len=4),
+        dataset=SimpleNamespace(train_path=tokens),
+        training=SimpleNamespace(seq_len=8),
         model=SimpleNamespace(vocab_size=260),
     )
     tokenizer = SimpleNamespace(
         token_to_id=lambda value: {"<bos>": 2, "<eos>": 3, "<pad>": 0}[value]
     )
-    with pytest.raises(ValueError, match="invalid token mixture"):
-        _collect_token_mixture(
-            config,
-            tokenizer,
-            {
-                "actual_target_tokens": {"x": 2},
-                "records": 1,
-                "train_tokens_sha256": "0" * 64,
-            },
-            tmp_path,
-        )
+    (tmp_path / "pack").mkdir()
+    with pytest.raises(ValueError, match="token mixture"):
+        _collect_token_mixture(config, tokenizer, receipt, tmp_path / "pack")
 
 
 def test_tokenizer_accepts_retained_release_path_but_not_a_different_origin(
@@ -566,8 +590,8 @@ def test_mixture_dataset_binds_train_validation_and_tokenizer(
     declaration, _, release = _fixture(tmp_path, monkeypatch)
     output = tmp_path / "output"
     output.mkdir()
-    train = output / "train.tokens.jsonl"
-    train.write_text("{}\n")
+    train = output / "train.tokens.ids"
+    train.write_bytes(b"")
     validation = release / "lm/validation.jsonl"
     validation.write_text('{"text":"heldout"}\n')
     fit_dir = tmp_path / "fit"
@@ -732,13 +756,13 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
     )
     tokenizer = _byte_tokenizer()
     calls = []
-    original_encode = PreparationEncoder.encode
+    original_encode = PreparationEncoder.encode_arrays
 
     def observe_batch(self, texts):
         calls.append((len(texts), sum(len(text.encode("utf-8")) for text in texts)))
         return original_encode(self, texts)
 
-    monkeypatch.setattr(PreparationEncoder, "encode", observe_batch)
+    monkeypatch.setattr(PreparationEncoder, "encode_arrays", observe_batch)
 
     def run(name, *, reuse_tokens=True, checkpoint=False):
         import tempfile
@@ -774,7 +798,10 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
                 reuse_tokens=reuse_tokens,
                 frontier=frontier,
             )
-        return result, (staging / "train.tokens.jsonl").read_bytes()
+        return result, (
+            (staging / "train.tokens.ids").read_bytes(),
+            (staging / "train.records.jsonl").read_bytes(),
+        )
 
     result, output = run("batched")
     assert any(size > 1 for size, _ in calls)
@@ -881,22 +908,26 @@ def test_real_batch_cache_survives_interrupted_caller(tmp_path: Path) -> None:
     tokenizer = _byte_tokenizer()
     texts = ["plain", "café", "plain", "other"]
     expected = [tokenizer.encode(text, add_special_tokens=False).ids for text in texts]
+
+    def listed(arrays):
+        return [ids.tolist() for ids in arrays]
+
     with (
         pytest.raises(RuntimeError, match="simulated interruption"),
         PreparationEncoder(tokenizer, max_workers=4) as encoder,
         ContentTokens(tmp_path / "cache", "b" * 64) as cache,
     ):
-        assert cache.encode_many(texts, encoder.encode) == expected
+        assert listed(cache.encode_many(texts, encoder.encode)) == expected
         raise RuntimeError("simulated interruption")
 
     def unexpected(_texts):
         raise AssertionError("completed encodings must be reused")
 
     with ContentTokens(tmp_path / "cache", "b" * 64) as cache:
-        assert cache.encode_many(texts, unexpected) == expected
+        assert listed(cache.encode_many(texts, unexpected)) == expected
         mixed = ["plain", "fresh", "other", "novel"]
         with PreparationEncoder(tokenizer, max_workers=4) as encoder:
-            assert cache.encode_many(mixed, encoder.encode) == [
+            assert listed(cache.encode_many(mixed, encoder.encode)) == [
                 tokenizer.encode(text, add_special_tokens=False).ids for text in mixed
             ]
         stored = cache.path / "tokens.ids"
@@ -915,7 +946,7 @@ def test_real_batch_cache_survives_interrupted_caller(tmp_path: Path) -> None:
         PreparationEncoder(tokenizer, max_workers=1) as encoder,
     ):
         assert len(cache) == 0
-        assert cache.encode_many(texts, encoder.encode) == expected
+        assert listed(cache.encode_many(texts, encoder.encode)) == expected
         with pytest.raises(ValueError, match="in use by another build"):
             ContentTokens(tmp_path / "cache", "b" * 64)
 
@@ -969,13 +1000,14 @@ def test_mixture_frontier_resumes_without_committed_candidate_replay(
     monkeypatch.setenv("KLAB_MIXTURE_WORKERS", "8")
     actual = mixture.materialize_mixture(declaration, output)
     assert actual == expected
-    assert (output / "train.tokens.jsonl").read_bytes() == (
-        baseline / "train.tokens.jsonl"
-    ).read_bytes()
+    for name in ("train.tokens.ids", "train.records.jsonl"):
+        assert (output / name).read_bytes() == (baseline / name).read_bytes()
     assert len(visited) == 3 - committed
 
 
-@pytest.mark.parametrize("damage", ["output", "index", "identity", "marker"])
+@pytest.mark.parametrize(
+    "damage", ["output.ids", "output.records", "index", "identity", "marker"]
+)
 def test_mixture_frontier_rejects_changed_checkpoint(tmp_path, monkeypatch, damage):
     from klab.corpus.mixture_pipeline import MixtureFrontier
 
@@ -994,8 +1026,9 @@ def test_mixture_frontier_rejects_changed_checkpoint(tmp_path, monkeypatch, dama
     checkpoints = tmp_path / ".interrupted.assembly"
     marker = next(checkpoints.glob("commit-*.json"))
     entry = json.loads(marker.read_bytes())
-    if damage in {"output", "index"}:
-        path = Path(entry["directory"]) / f"{damage}.jsonl"
+    if damage in {"output.ids", "output.records", "index"}:
+        name = damage if damage == "output.ids" else f"{damage}.jsonl"
+        path = Path(entry["directory"]) / name
         path.write_bytes(path.read_bytes() + b"{}\n")
     elif damage == "identity":
         declaration.write_bytes(declaration.read_bytes() + b"\n# changed declaration\n")

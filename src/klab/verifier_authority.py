@@ -311,11 +311,15 @@ def _excluded_edges(kind: str) -> frozenset[tuple[str, str]]:
 # data.packing re-audited 2026-11-11 (one encoder pool): the streaming collector
 # no longer passes a scratch directory to PreparationEncoder; no verifier edge
 # changed.
+# data.packing re-audited 2026-11-11 (binary mixture output):
+# _collect_token_mixture copies raw int32 targets instead of parsing JSON rows
+# and _prepare_data no longer stages mixture chunks; producer-only, no
+# verifier edge changed.
 _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.preparation_workers",
-    ): "3c7eb1e339397a87015a0afa2697a0ba156902293f9f8b2a5d88ebdca8dcc46e",
+    ): "f4157bc33d14f606890dbc737b98f539a3572183e035b6deb035aa3f22794991",
     (
         "experiments.artifacts",
         "data.sources",
@@ -323,7 +327,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "corpus.mixture",
-    ): "76e3f352e2ce57c3404359573e400202193745eb81d9caca3ee9c96cf4282387",
+    ): "d7aacd812549883bdd796df89748c5f2a64f12ab7ecae6892e383c4d1b2cf08a",
     (
         "workers",
         "workers.transport",
@@ -331,11 +335,11 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.tokenizer",
-    ): "51cffe91b45fc9e66da78581ffb55f8cd12b005a594fc6de68320b08a4da1cb2",
+    ): "7ccf7187f7cfb498f68a79bb487989eeac33ab4777457cb8c7f0951d7c636bc9",
     (
         "data.packing",
         "data.sources",
-    ): "fd5a0d190420627bafa0e01e58b9b830850d9e047418032c5d8d0d270734c599",
+    ): "1ec5d3454e81f5662fb1dedcf9bd52b11feb6d22e4c48576036799fb0c8692ff",
     (
         "data",
         "data.tokenizer",
@@ -355,11 +359,11 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "corpus.export",
-    ): "a3eda5c1f7fd34f686e58a7f6eb0c3bff595cafce38e604a42a6a88259fcb271",
+    ): "3c4e1726e07fbfdaa9f9c7649d6c3c638a7590cebc4880554e52e4818ca5ab8a",
     (
         "data.packing",
         "data.allocation",
-    ): "9cb26a84b609b2fa6a2a9e443731dacbf697c59f11517e2db1686b9b43a2656d",
+    ): "b47b7b29e2eb3ed660ac149f4bb52eb07a505dda3d671a1f6b5a85f7dd5a642a",
     (
         "data.packing",
         "data.byte_hash",
@@ -375,31 +379,31 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.encoding",
-    ): "ef7df43ddbe879c99fef112e95e544fa9ca3f83dcf05c3320ef08d71e3041b09",
+    ): "bcf4d45797292f44a9fa0d0bfa90a84dcab8d7b260f7870922b3c0cea5fcebed",
     (
         "data.packing",
         "data.local_stories",
-    ): "e7de8aea0e705228c9e11b98b3170c22cd7467f0ce6307c910fe2a76ede6a82b",
+    ): "8958d6e8c362d75746f7521310d24b2036ac290330bcc453a499a1f62da53e12",
     (
         "data.packing",
         "data.preparation_chunks",
-    ): "c57621b7326fa1a2809b3f86f9b98058542cec3472f8ca36b92a3bc3483f0092",
+    ): "204b55175d6a57b78d79595cf1f4ae348778575a0098ebe4ffad6921ea773532",
     (
         "data.packing",
         "data.preparation_telemetry",
-    ): "93afb8dfb2cf1e02d95b61cd8eddf2ca764957355f127d369770b444ecf1fc9e",
+    ): "d87fd5ce7eaf028798ba078fec867f208bd7da7b3958820aa33359558a3941b9",
     (
         "data.packing",
         "experiments.source_compatibility",
-    ): "a56199bffa7bd940d2737754aa8023fa6213c956ce7d7d7879eea05d0e96b74d",
+    ): "d4bfde04da0614e296a374ac7cddf76e2a0e5faeab468f27b034e49d2b2aefa5",
     (
         "data.packing",
         "progress",
-    ): "1f397d259d722f7df914d363cdf775ac30cd5c9d2d1b7e2f4d775f02f0b177ab",
+    ): "d2f40399667c081a60bd4a77117e98c895d6cf8b369e548f06b9f63cd5c59d12",
     (
         "data.packing",
         "resource_envelope",
-    ): "2d42ecd0164c4efd1474a5fcc33d049706c388921f1d1412f206a67600931e9d",
+    ): "84d5c58bcbe500afc79b27f6fc737552ce450530fa633d54eb9235bee1a1cbbe",
     (
         "data.packing",
         "workdir",
@@ -411,7 +415,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "workspace_preflight",
-    ): "e89a5f97c66953c6d0e144da85df92fd2a73f24c2e967bb31844dcb32865d083",
+    ): "cb88c007d4780daef2c03cdb3ca97fb83eb3133928a537a4ec9e1d4fa704888f",
     (
         "corpus.tokenizer_bakeoff",
         "corpus.cli",

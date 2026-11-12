@@ -206,7 +206,10 @@ def main():
                 "index_seconds": indexed - started,
                 "schedule_seconds": time.monotonic() - indexed,
                 "receipt": receipt,
-                "output_sha256": sha256_file(staging / "train.tokens.jsonl"),
+                "output_sha256": [
+                    sha256_file(staging / "train.tokens.ids"),
+                    sha256_file(staging / "train.records.jsonl"),
+                ],
                 "rss_bytes": psutil.Process().memory_info().rss,
                 "progress": json.loads(progress_path.read_bytes())
                 if progress_path.exists()

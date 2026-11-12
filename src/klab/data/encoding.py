@@ -193,6 +193,10 @@ class PreparationEncoder:
             self.child_cpu_seconds = pool.cpu_seconds()
 
     def encode(self, texts: list[str]) -> list[list[int]]:
+        return [ids.tolist() for ids in self.encode_arrays(texts)]
+
+    def encode_arrays(self, texts: list[str]) -> list[np.ndarray]:
+        """Token IDs of each text as an int32 array, never as Python integers."""
         if not texts:
             return []
         assert self._pool is not None
@@ -213,14 +217,14 @@ class PreparationEncoder:
             request = b"T" + token_encode_worker.pack_texts(group)
             self.request_bytes += len(request)
             pending.append(self._pool.submit(request))
-        result: list[list[int]] = []
+        result: list[np.ndarray] = []
         for group, future in zip(groups, pending, strict=True):
             raw_ids, raw_counts = future.result()
             self.reply_bytes += len(raw_ids) + len(raw_counts)
             counts = np.frombuffer(raw_counts, dtype=np.uint32).tolist()
             if len(counts) != len(group):
                 raise RuntimeError("tokenizer worker returned incorrect batch length")
-            ids = np.frombuffer(raw_ids, dtype=np.int32).tolist()
+            ids = np.frombuffer(raw_ids, dtype=np.int32)
             position = 0
             for count in counts:
                 result.append(ids[position : position + count])

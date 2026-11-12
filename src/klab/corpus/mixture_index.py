@@ -274,6 +274,14 @@ class MixtureIndex:
         else:
             raise ValueError("invalid mixture checkpoint index event")
 
+    def record_family(self, stratum, family):
+        """Count an eligible family without retaining a second token copy."""
+        self.record_event(["family", [stratum, family]])
+        self.db.execute(
+            "INSERT INTO encoded(offset,family,stratum) VALUES(NULL,?,?)",
+            (family, stratum),
+        )
+
     def append(self, row):
         self.record_event(["append", row])
         encoded = canonical_json(row) + b"\n"
