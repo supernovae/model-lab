@@ -484,7 +484,9 @@ declared set within a byte budget; see
 [checkpointing](checkpointing.md#keep-milestones). Preflight checks future
 checkpoints, the run's copy of prepared arrays and any unverified cache growth
 against each destination's free bytes and inodes. A worker's copy needs its own
-headroom.
+headroom. When training finds no prepared cache, it checks the new cache,
+the run's copy and the checkpoints together before packing anything, so a
+run that cannot fit is refused before any tokenization.
 
 ## Memory proposals and optimizers
 

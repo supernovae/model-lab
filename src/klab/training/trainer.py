@@ -168,17 +168,15 @@ def _check_training_storage(
     )
 
 
+def _check_cold_storage(config: RunConfig) -> None:
+    """Reserve the new cache, its run copy and the checkpoints together."""
+    from klab.workspace_preflight import require_storage, training_storage_checks
+
+    require_storage(training_storage_checks(config))
+
+
 def _stack_optional(
-    records: list[
-        tuple[
-            np.ndarray,
-            np.ndarray,
-            np.ndarray | None,
-            np.ndarray | None,
-            np.ndarray | None,
-            np.ndarray | None,
-        ]
-    ],
+    records: list[tuple[np.ndarray, np.ndarray, np.ndarray | None]],
     field: int,
 ) -> np.ndarray | None:
     values = [record[field] for record in records]
@@ -973,6 +971,11 @@ def _train_impl(
                     proof_store=proof_store,
                     verification_mode=verification_mode,
                     require_prepared=require_prepared,
+                    # A cold cache: refuse before packing when the new cache,
+                    # its run copy and the checkpoints cannot all fit.
+                    before_packing=(lambda: _check_cold_storage(config))
+                    if purpose == "training"
+                    else None,
                 )
         if config.model.memory_token_mapping is not None:
             from klab.memory_tokenizer import validate_memory_token_map
