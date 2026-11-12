@@ -66,7 +66,7 @@ only read records. A run ID names weights; a try or probe ID names a result. Use
 | [Evaluation](evaluation.md) | Held-out loss and fixed evaluation panels |
 | [Inspecting models](models.md) | Generate, chat and explore a checkpoint |
 | [Local API](local-api.md) | Serving a checkpoint over HTTP |
-| [Speculative decoding](speculative-decoding.md) | Prompt-lookup speculative decoding |
+| [Speculative decoding](speculative-decoding.md) | Prompt-lookup and draft-model speculative decoding |
 | [Dashboard](dashboard.md) | The dashboard pages |
 
 ## Runtime and hardware

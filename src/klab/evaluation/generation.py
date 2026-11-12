@@ -10,7 +10,7 @@ from tokenizers import Tokenizer
 from klab.data.byte_hash import table_address, token_bytes
 from klab.engines.mlx import MLXEngine, preserve_rng_state
 from klab.engram.semantic import SemanticQueryBatch
-from klab.evaluation.speculation import PromptLookupSpeculation
+from klab.evaluation.speculation import Drafter
 
 
 def _addresses_from_ids(
@@ -240,7 +240,7 @@ def generate(
     semantic_queries: SemanticQueryBatch
     | Mapping[str, SemanticQueryBatch]
     | None = None,
-    speculation: PromptLookupSpeculation | None = None,
+    speculation: Drafter | None = None,
 ) -> str:
     """Continue ``prompt`` using locally seeded sampled decoding."""
     text, _ = generate_with_token_ids(
@@ -283,7 +283,7 @@ def generate_with_token_ids(
     semantic_queries: SemanticQueryBatch
     | Mapping[str, SemanticQueryBatch]
     | None = None,
-    speculation: PromptLookupSpeculation | None = None,
+    speculation: Drafter | None = None,
 ) -> tuple[str, list[int]]:
     """Continue ``prompt`` using locally seeded sampled decoding.
 

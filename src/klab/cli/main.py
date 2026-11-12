@@ -8,6 +8,7 @@ import json
 import os
 import secrets
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -1042,14 +1043,41 @@ def _generate(args: argparse.Namespace) -> None:
         "strict_context": args.strict_context,
     }
     speculation = None
+    if args.prompt_lookup is not None and args.draft_run is not None:
+        raise ValueError("choose one drafter: --prompt-lookup or --draft-run")
     if args.prompt_lookup is not None:
         from klab.evaluation.speculation import PromptLookupSpeculation
 
         speculation = PromptLookupSpeculation(
             ngram=args.prompt_lookup, max_draft_tokens=args.draft_tokens
         )
+    elif args.draft_run is not None:
+        from klab.evaluation.speculation import DraftModelSpeculation
+
+        drafting = load_run(
+            args.draft_run,
+            Path(args.runs_dir),
+            args.draft_checkpoint,
+            args.backend,
+            authorization=args.runtime_authorization,
+        )
+        if drafting.identity["tokenizer_sha256"] != loaded.identity["tokenizer_sha256"]:
+            raise ValueError("the draft run must use the target run's tokenizer")
+        if drafting.engine is not None:
+            raise ValueError("a draft model needs the PyTorch engine")
+        speculation = DraftModelSpeculation(
+            drafting.model,
+            drafting.device,
+            max_draft_tokens=args.draft_tokens,
+            blocked_ids=[
+                token_id
+                for name in ("<pad>", "<bos>", "<unk>")
+                if (token_id := loaded.tokenizer.token_to_id(name)) is not None
+            ],
+        )
     if args.show_prompt:
         print(json.dumps({"format": "raw", "prompt": args.prompt}), file=sys.stderr)
+    started = time.perf_counter()
     text = generate(
         loaded.model,
         loaded.tokenizer,
@@ -1066,18 +1094,24 @@ def _generate(args: argparse.Namespace) -> None:
         engine=loaded.engine,
         speculation=speculation,
     )
-    speculation_report = (
-        None
-        if speculation is None
-        else {
-            "drafter": "prompt_lookup",
-            "ngram": speculation.ngram,
+    wall_seconds = time.perf_counter() - started
+    speculation_report: dict[str, object] | None = None
+    if speculation is not None:
+        speculation_report = {
             "max_draft_tokens": speculation.max_draft_tokens,
             "model_calls": speculation.model_calls,
             "drafted_tokens": speculation.drafted_tokens,
             "accepted_tokens": speculation.accepted_tokens,
+            "wall_seconds": wall_seconds,
         }
-    )
+        if args.draft_run is not None:
+            speculation_report.update(
+                drafter="draft_model",
+                draft_identity=drafting.identity,
+                draft_model_calls=speculation.draft_model_calls,
+            )
+        else:
+            speculation_report.update(drafter="prompt_lookup", ngram=speculation.ngram)
     if args.json:
         print(
             json.dumps(
@@ -1096,6 +1130,7 @@ def _generate(args: argparse.Namespace) -> None:
                     ),
                     "response": text[len(args.prompt) :],
                     "text": text,
+                    "wall_seconds": wall_seconds,
                     **(
                         {"speculation": speculation_report}
                         if speculation_report is not None
@@ -2487,7 +2522,16 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         "--draft-tokens",
         type=int,
         default=8,
-        help="Most tokens drafted per model call with --prompt-lookup",
+        help="Most tokens drafted per model call with --prompt-lookup or --draft-run",
+    )
+    generation.add_argument(
+        "--draft-run",
+        metavar="RUN_ID",
+        help="Draft with this smaller run's greedy tokens (same tokenizer) and "
+        "verify them in one model call; greedy output is unchanged",
+    )
+    generation.add_argument(
+        "--draft-checkpoint", help="Checkpoint of --draft-run (default: its latest)"
     )
     generation.add_argument(
         "--show-prompt",

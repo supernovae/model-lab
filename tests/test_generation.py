@@ -864,3 +864,91 @@ def test_speculation_refuses_sampling() -> None:
             temperature=0.8,
             speculation=PromptLookupSpeculation(),
         )
+
+
+def _speculation_model(tokenizer, seed: int, **options: object) -> DenseLM:
+    torch.manual_seed(seed)
+    return DenseLM(
+        ModelConfig(
+            vocab_size=tokenizer.get_vocab_size(),
+            **{
+                "hidden_dim": 16,
+                "num_layers": 2,
+                "num_heads": 2,
+                "ffn_dim": 32,
+                "max_seq_len": 64,
+                **options,
+            },
+        ),
+        AttentionConfig(),
+    ).eval()
+
+
+@pytest.mark.parametrize(
+    "draft_options",
+    [
+        {"num_layers": 1},
+        {
+            "num_layers": 1,
+            "memory": "ngram",
+            "memory_table_size": 97,
+            "memory_ngram_size": 3,
+            "memory_dim": 8,
+            "memory_injection": "after_block",
+            "memory_block_index": 0,
+            "memory_variant": "context_key",
+            "memory_conv_kernel_size": 4,
+        },
+    ],
+)
+def test_draft_model_keeps_the_target_greedy_tokens(
+    draft_options: dict[str, object],
+) -> None:
+    from klab.evaluation.speculation import DraftModelSpeculation
+
+    tokenizer = _tokenizer()
+    target = _speculation_model(tokenizer, 0)
+    draft = _speculation_model(tokenizer, 1, **draft_options)
+    _, reference = generate_with_token_ids(
+        target, tokenizer, "hello world", 64, 40, torch.device("cpu")
+    )
+    speculation = DraftModelSpeculation(draft, torch.device("cpu"), max_draft_tokens=4)
+    _, speculative = generate_with_token_ids(
+        target,
+        tokenizer,
+        "hello world",
+        64,
+        40,
+        torch.device("cpu"),
+        speculation=speculation,
+    )
+    assert speculative == reference
+    assert speculation.drafted_tokens > 0
+    assert speculation.draft_model_calls >= speculation.model_calls
+
+
+def test_a_draft_model_equal_to_the_target_is_always_accepted() -> None:
+    from klab.evaluation.speculation import DraftModelSpeculation
+
+    tokenizer = _tokenizer()
+    target = _speculation_model(tokenizer, 0)
+    _, reference = generate_with_token_ids(
+        target, tokenizer, "hello world", 64, 40, torch.device("cpu")
+    )
+    speculation = DraftModelSpeculation(
+        _speculation_model(tokenizer, 0), torch.device("cpu"), max_draft_tokens=4
+    )
+    for _ in range(2):  # a second request starts from a fresh draft cache
+        _, speculative = generate_with_token_ids(
+            target,
+            tokenizer,
+            "hello world",
+            64,
+            40,
+            torch.device("cpu"),
+            speculation=speculation,
+        )
+        assert speculative == reference
+    assert speculation.accepted_tokens == speculation.drafted_tokens > 0
+    # Two requests together use fewer target calls than one plain request.
+    assert speculation.model_calls < len(reference)

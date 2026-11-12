@@ -47,8 +47,12 @@ klab generate "$RUN_ID" --runs-dir "$RUNS" --checkpoint "$CHECKPOINT" \
   using the generation cache.
 - **Context.** `--context-length N` caps the context. `--strict-context`
   refuses a prompt that would not fit with its completion, instead of sliding.
-- **Output.** `--json` returns `text` (prompt and continuation) and `response`
-  (continuation only). `--show-prompt` prints the exact prompt to stderr.
+- **Output.** `--json` returns `text` (prompt and continuation), `response`
+  (continuation only) and `wall_seconds` for the decoding call. `--show-prompt`
+  prints the exact prompt to stderr.
+- **Fewer model calls.** `--prompt-lookup N` or `--draft-run RUN_ID` drafts
+  tokens for greedy decoding to verify; see
+  [speculative decoding](speculative-decoding.md).
 
 ## Chat
 
