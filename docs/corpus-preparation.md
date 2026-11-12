@@ -189,6 +189,17 @@ with the release. Completed phases are keyed by their inputs, configuration
 and every corpus module they can run, so a change to the corpus code renders
 them again rather than reusing old shards.
 
+Each transform file in the project names one `kind`:
+
+- `lm_text`: source documents as language-model text.
+- `lexical_candidates`, `semantic_candidates`: candidate terms and key/value
+  facts drawn from sources.
+- `source_qa`: question-answer pairs over literal key/value spans.
+- `manual_semantic`: hand-written records from a snapshotted file.
+- `inference_qa`: recorded model responses, replayed, never generated live.
+- `deterministic_scenarios`: worlds from a registered generator and its oracle.
+- `chat_sft`, `tool_episode`: chat and tool-trace views of the records above.
+
 `release.normalizer: normalizer-structure-v3` records retained line spans,
 removed spans with reasons and document structure, and drops metadata-only front
 matter from language-model views.
@@ -256,9 +267,47 @@ None of them is a quality score.
 | `klab corpus sources RELEASE` | Sources and their rights |
 | `klab corpus audit RELEASE` | The build audit |
 | `klab corpus sample RELEASE --limit N` | Sample records, filterable by domain, kind and status |
+| `klab corpus review RELEASE --kind chat` | Records to read before accepting a release; same filters as `sample` |
 | `klab corpus lineage RELEASE RECORD_ID` | One record's lineage |
 | `klab corpus near-duplicates RELEASE` | MinHash near-duplicate pairs across splits |
 | `klab corpus consumers RELEASE --runs-dir RUNS` | Runs that trained on it |
+
+`near-duplicates` compares every document, including dropped ones, against the
+other splits by three-word shingles and reports pairs at Jaccard 0.65 or more,
+plus identical text. It is a lexical screen: it can miss pairs and does not
+catch paraphrases. `--max-documents`, `--max-input-text-bytes`,
+`--max-total-shingles`, `--max-comparisons` and `--max-candidates` bound the
+work; exceeding one stops the command with no partial report.
+
+## Guard held-out data across releases
+
+When a new release replaces one whose validation or test documents back a
+fixed evaluation, check that none of those documents, their families or their
+exact text moved into training:
+
+```sh
+klab corpus finalize-family-inventory RELEASE --splits splits.yaml --output family-inventory.jsonl
+klab corpus audit-protected-lineage --prior-release PRIOR --candidate-release RELEASE \
+  --prior-inventory prior-family-inventory.jsonl --candidate-inventory family-inventory.jsonl \
+  --profile profile.json --suite suite.json --output lineage.json
+```
+
+- **`finalize-family-inventory`** writes one row per kept document of a
+  verified release (`document_id`, `family_id`, `split`, `stratum`,
+  `content_sha256`) from the frozen splits it was built with. It refuses a split
+  file that differs from the release's and never overwrites an output.
+- **`audit-protected-lineage`** verifies both releases and both inventories.
+  The profile (`loss_slices`) and suite (`items`, `chunks`) name the protected
+  validation and test documents and must be bound to the prior release and
+  inventory. The receipt lists protected families or content now in the
+  candidate's training split, and protected documents whose family, split or
+  stratum changed. Any of these makes it `BLOCKED` and the command fails;
+  otherwise `PASS`.
+- **Acceptance.** A `klab-release-review-v1` record (decision `ACCEPTED`, the
+  reviewer, the release, its family inventory and its lineage receipt, each
+  with its SHA-256) is what an [attempt](#run-it-as-phases) binds as its
+  `release_acceptance` artifact. It is refused unless the lineage receipt is
+  `PASS` for this exact release and inventory.
 
 ## Export and tokenize
 
