@@ -125,6 +125,18 @@ runs forward once more, about 30% more attention time. Other attention kinds
 recompute per block only. The estimate charges such a layer one chunk of scores
 and gathered keys.
 
+Measured on one Arc Pro B70 (31.89 GiB), bf16, a 730M-parameter `local_selected`
+model, one row per microbatch, peak reserved device memory and the median
+targets/s from the fourth update on:
+
+| Row | Settings | Peak | Targets/s |
+| --- | --- | --- | --- |
+| 8,192 | `transformer_block` | 15.7 GiB | 1,679 |
+| 8,192 | `transformer_block_and_attention` | 14.0 GiB | 1,387 |
+| 32,768 | `transformer_block`, `state_offload` | 28.5 GiB, then the spill guard stopped update 2 | |
+| 32,768 | `transformer_block_and_attention` | 25.9 GiB | 1,295 |
+| 32,768 | `transformer_block_and_attention`, `state_offload` | 18.7 GiB | 1,286 (20 updates) |
+
 ### Activation offload
 
 ```yaml
