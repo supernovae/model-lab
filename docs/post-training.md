@@ -43,7 +43,8 @@ stage's own state; the parent is not loaded again as the model.
 `dataset.source: local_chat` reads JSONL conversations, one per line. Paths are
 relative to the config; train and validation must be separate files, and a
 conversation that appears in both is refused. Use the same `dataset` section in
-the tokenizer config and the run config.
+the tokenizer config and the run config. To build these files from a public chat
+or instruction dataset, see [converting rows](datasets.md#convert-chat-instruction-and-multi-field-rows).
 
 ```yaml
 dataset:

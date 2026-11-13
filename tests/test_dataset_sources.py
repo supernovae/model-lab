@@ -58,7 +58,7 @@ def offline(monkeypatch):
         "train": [{"text": "train one"}, {"text": "train two"}],
         "validation": [{"text": "validation one"}],
     }
-    monkeypatch.setattr(sources, "_hub_identity", inventory)
+    monkeypatch.setattr(sources, "hub_identity", inventory)
     monkeypatch.setattr(
         sources, "stream_source", lambda source, split, cache, **kw: iter(rows[split])
     )
@@ -330,7 +330,7 @@ def test_hub_lock_resolves_file_inventory_and_stream_uses_only_it(
             config=SimpleNamespace(data_files=files),
         ),
     )
-    identity = sources._hub_identity(source)
+    identity = sources.hub_identity(source)
     assert identity["files"]["train"][0]["path"] == "data/training.parquet"
     assert identity["files"]["train"][0]["lfs_sha256"] == "c" * 64
 

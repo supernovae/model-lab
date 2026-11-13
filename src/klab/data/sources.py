@@ -1,7 +1,8 @@
 """Dataset-neutral pinned declarations and immutable, replayable text snapshots.
 
 Public API: load_source -> DatasetSource, lock_source -> lock Path,
-snapshot_source -> manifest Path, verify_snapshot -> dict, iter_snapshot -> text.
+snapshot_source -> manifest Path, verify_snapshot -> dict, iter_snapshot -> text,
+hub_identity -> pinned Hub file inventory, stream_source -> rows from that inventory.
 Locking checks Hub metadata only. Snapshotting streams standard datasets (datasets
 4 never executes repository Python), or explicitly named verified Forge files.
 Resume replays and authenticates the committed prefix; it does not assume upstream
@@ -213,7 +214,7 @@ def _hub_file(source: DatasetSource, url: str) -> str:
     return safe_name(path[len(prefix) :])
 
 
-def _hub_identity(source: DatasetSource, *, cache_dir: Path | None = None) -> dict:
+def hub_identity(source: DatasetSource, *, cache_dir: Path | None = None) -> dict:
     from datasets import load_dataset_builder
     from huggingface_hub import HfApi
 
@@ -399,7 +400,7 @@ def lock_source(
     provenance = (
         forge_bindings(source)
         if source.kind == "forge_files"
-        else _hub_identity(source, cache_dir=Path(cache_dir))
+        else hub_identity(source, cache_dir=Path(cache_dir))
     )
     value = seal_snapshot_payload(
         {
