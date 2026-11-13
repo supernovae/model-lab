@@ -382,41 +382,6 @@ def _hash_split(splits: HashSplits, row: object) -> str:
 # --- Sources ---------------------------------------------------------------
 
 
-def _hub_source(declaration: ConversionDeclaration):
-    """The pinned-source view that Lab's Hub inventory and streaming code read.
-
-    Only repository, revision, configuration and split names are consumed; the
-    remaining fields satisfy that model and are not used to read rows.
-    """
-    from klab.data.sources import DatasetSource, DedupPolicy, ResourceBounds, Selection
-
-    source = declaration.source
-    logical = (
-        {"train": declaration.splits.train, "validation": declaration.splits.validation}
-        if isinstance(declaration.splits, SourceSplits)
-        else {"source": declaration.splits.split}
-    )
-    unbounded = 2**62
-    return DatasetSource(
-        repo_id=source.repo_id,
-        revision=source.revision,
-        config=source.config,
-        splits=logical,
-        text_field="conversion",
-        attribution=declaration.attribution,
-        license=declaration.license,
-        selection=Selection(mode="exhaustion"),
-        resources=ResourceBounds(
-            max_source_records=declaration.limits.max_rows,
-            max_text_bytes=unbounded,
-            max_record_bytes=unbounded,
-            max_work_bytes=unbounded,
-            min_free_bytes=0,
-        ),
-        dedup=DedupPolicy(priority=tuple(logical)),
-    )
-
-
 def _local_rows(path: Path) -> Iterator[object]:
     if path.suffix == ".parquet":
         import pyarrow.parquet as pq
@@ -459,13 +424,20 @@ def _open_source(
         return identity, {
             split: _local_rows(Path(locations[split])) for split in locations
         }
-    from klab.data.sources import hub_identity, stream_source
+    from klab.data.sources import hub_identity, stream_hub
 
-    source = _hub_source(declaration)
-    provenance = hub_identity(source, cache_dir=cache_dir)
+    source = declaration.source
+    upstream = declaration.upstream_splits()
+    provenance = hub_identity(
+        source.repo_id,
+        source.revision,
+        source.config,
+        {split: split for split in upstream},
+        cache_dir=cache_dir,
+    )
     streams = {
-        upstream: stream_source(source, logical, cache_dir, inventory=provenance)
-        for logical, upstream in source.splits.items()
+        split: stream_hub(source.repo_id, source.revision, provenance, split, cache_dir)
+        for split in upstream
     }
     return {"kind": "huggingface", "provenance": provenance}, streams
 
