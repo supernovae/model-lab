@@ -72,7 +72,44 @@ def _llama_refusal(config: RunConfig) -> str | None:
         )
     if (model.hidden_dim // model.num_heads) % 2:
         return "Llama export requires an even attention head width"
+    if any(
+        (layer.rope_base, layer.rope_scaling)
+        != (attention.rope_base, attention.rope_scaling)
+        for _, layer in config.layer_specs
+    ):
+        return "Llama export requires the same RoPE settings in every layer"
     return None
+
+
+def llama_rope(config: RunConfig) -> dict[str, Any]:
+    """``rope_theta`` and ``rope_scaling`` in Hugging Face's terms.
+
+    Static NTK scaling is a larger base, so it exports as that base.
+    """
+    from klab.model.rope import ntk_base, resolve_rope_scaling
+
+    model, attention = config.model, config.attention
+    scaling = resolve_rope_scaling(attention.rope_scaling, model.max_seq_len)
+    base = float(attention.rope_base)
+    if scaling is None:
+        return {"rope_theta": base}
+    if scaling.type == "ntk":
+        head_dim = model.hidden_dim // model.num_heads
+        return {"rope_theta": ntk_base(head_dim, base, scaling.factor)}
+    hf: dict[str, Any] = {"rope_type": scaling.type, "factor": scaling.factor}
+    if scaling.type == "yarn":
+        hf |= {
+            "original_max_position_embeddings": scaling.original_max_seq_len,
+            "beta_fast": scaling.beta_fast,
+            "beta_slow": scaling.beta_slow,
+        }
+    elif scaling.type == "llama3":
+        hf |= {
+            "original_max_position_embeddings": scaling.original_max_seq_len,
+            "low_freq_factor": scaling.low_freq_factor,
+            "high_freq_factor": scaling.high_freq_factor,
+        }
+    return {"rope_theta": base, "rope_scaling": hf}
 
 
 def llama_config(config: RunConfig, stop_ids: tuple[int, ...]) -> dict[str, Any]:
@@ -89,7 +126,7 @@ def llama_config(config: RunConfig, stop_ids: tuple[int, ...]) -> dict[str, Any]
         "vocab_size": model.vocab_size,
         "max_position_embeddings": model.max_seq_len,
         "rms_norm_eps": model.rms_norm_eps,
-        "rope_theta": float(config.attention.rope_base),
+        **llama_rope(config),
         "hidden_act": "silu",
         "tie_word_embeddings": model.tie_embeddings,
         "attention_bias": False,

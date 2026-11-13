@@ -10,7 +10,7 @@ from torch import Tensor, nn
 from torch.nn import functional
 
 from klab.model.cache import AttentionKVCache
-from klab.model.rope import RoPE
+from klab.model.rope import RoPE, RopeScaling
 
 
 class DenseAttention(nn.Module):
@@ -23,6 +23,7 @@ class DenseAttention(nn.Module):
         window_size: int | None = None,
         num_kv_heads: int | None = None,
         *,
+        rope_scaling: RopeScaling | None = None,
         implementation: Literal["reference", "sdpa"] = "reference",
     ) -> None:
         super().__init__()
@@ -49,7 +50,7 @@ class DenseAttention(nn.Module):
         self.k_proj = nn.Linear(hidden_dim, kv_dim, bias=False)
         self.v_proj = nn.Linear(hidden_dim, kv_dim, bias=False)
         self.out_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.rope = RoPE(self.head_dim, rope_base)
+        self.rope = RoPE(self.head_dim, rope_base, rope_scaling)
 
     def _heads(self, projection: nn.Linear, x: Tensor, heads: int) -> Tensor:
         batch, length, _ = x.shape

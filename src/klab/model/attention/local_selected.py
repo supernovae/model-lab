@@ -41,7 +41,7 @@ from torch.nn import functional
 from torch.utils.checkpoint import checkpoint
 
 from klab.model.cache import AttentionKVCache
-from klab.model.rope import RoPE
+from klab.model.rope import RoPE, RopeScaling
 
 # Upper bound on masked score cells evaluated per chunk of query blocks.
 CHUNK_CELLS = 1 << 26
@@ -59,6 +59,7 @@ class LocalSelectedAttention(nn.Module):
         selected_blocks: int,
         latent_dim: int | None = None,
         *,
+        rope_scaling: RopeScaling | None = None,
         selector: Literal["mean_key", "learned"] = "mean_key",
     ) -> None:
         super().__init__()
@@ -94,7 +95,7 @@ class LocalSelectedAttention(nn.Module):
             # Uniform weighting and a closed gate reproduce ``mean_key`` exactly.
             self.pool_logits = nn.Parameter(torch.zeros(num_heads, block_size))
             self.coarse_gate = nn.Parameter(torch.zeros(num_heads))
-        self.rope = RoPE(self.head_dim, rope_base)
+        self.rope = RoPE(self.head_dim, rope_base, rope_scaling)
         # Set by training (activation_checkpointing.strategy); not a weight.
         self.recompute_chunks = False
 

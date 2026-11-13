@@ -12,6 +12,14 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 
+def _rope_scaling(model, attention):
+    from klab.model.rope import resolve_rope_scaling
+
+    return resolve_rope_scaling(
+        getattr(attention, "rope_scaling", None), model.max_seq_len
+    )
+
+
 def _dense_attention(model, attention, params):
     from klab.model.attention.dense import DenseAttention
 
@@ -22,6 +30,7 @@ def _dense_attention(model, attention, params):
         attention.rope_base,
         attention.window_size,
         model.num_kv_heads,
+        rope_scaling=_rope_scaling(model, attention),
         implementation=attention.implementation,
     )
 
@@ -35,6 +44,7 @@ def _latent_attention(model, attention, params):
         attention.latent_dim,
         model.max_seq_len,
         attention.rope_base,
+        rope_scaling=_rope_scaling(model, attention),
         implementation=attention.implementation,
     )
 
@@ -49,6 +59,7 @@ def _block_sparse_attention(model, attention, params):
         attention.rope_base,
         attention.block_size,
         attention.selected_blocks,
+        rope_scaling=_rope_scaling(model, attention),
     )
 
 
@@ -64,6 +75,7 @@ def _local_selected_attention(model, attention, params):
         attention.window_size,
         attention.selected_blocks,
         attention.latent_dim,
+        rope_scaling=_rope_scaling(model, attention),
         selector=attention.selector,
     )
 

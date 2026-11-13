@@ -571,6 +571,48 @@ def test_memory_placement_cannot_resume_or_promote_across_sites(
         )
 
 
+def test_a_promoted_child_extends_rope_context_from_its_parent(tmp_path: Path) -> None:
+    parent = config(tmp_path)
+    train(parent, run_id="parent", stop_after_step=2)
+    checkpoint = parent.logging.root_dir / "parent/checkpoints/latest.json"
+
+    def child(max_seq_len: int, **attention: object) -> RunConfig:
+        settings = parent.model_dump(mode="python")
+        settings["model"]["max_seq_len"] = max_seq_len
+        settings["training"]["seq_len"] = min(max_seq_len, 32)
+        settings["attention"].update(attention)
+        return RunConfig.model_validate(settings)
+
+    extended = child(
+        64,
+        rope_base=50000.0,
+        rope_scaling={"type": "yarn", "original_max_seq_len": 32},
+    )
+    train(extended, run_id="extended", promote=checkpoint, stop_after_step=1)
+    manifest = read_manifest(parent.logging.root_dir / "extended/manifest.json")
+    (decision,) = [
+        item
+        for item in manifest["resource_decisions"]
+        if item["kind"] == "rope_extension"
+    ]
+    assert decision["source"] == {
+        "max_seq_len": 32,
+        "attention": {"rope_base": 10000.0, "rope_scaling": None},
+    }
+    assert decision["target"] == {
+        "max_seq_len": 64,
+        "attention": {
+            "rope_base": 50000.0,
+            "rope_scaling": {"type": "yarn", "original_max_seq_len": 32},
+        },
+    }
+    # A context cannot shrink, and a full-state resume keeps its architecture.
+    with pytest.raises(ValueError, match="cannot lower model.max_seq_len"):
+        train(child(16, rope_base=50000.0), run_id="shorter", promote=checkpoint)
+    with pytest.raises(ValueError, match="architecture semantics"):
+        train(extended, run_id="resumed", resume=checkpoint, allow_runtime_drift=True)
+
+
 def test_mlx_validation_rejects_enabled_memory() -> None:
     base = load_config(
         Path(__file__).resolve().parents[1] / "configs" / "runtime_smoke_cpu.yaml"

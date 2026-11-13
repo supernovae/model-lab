@@ -84,6 +84,48 @@ def _validate_feed_forward(
         raise ValueError("invalid MoE expert configuration")
 
 
+class RopeScalingConfig(StrictModel):
+    """Rescale RoPE frequencies for a context longer than the one trained.
+
+    The scaling factor is ``model.max_seq_len / original_max_seq_len``.
+    ``beta_fast``/``beta_slow`` apply to ``yarn`` and
+    ``low_freq_factor``/``high_freq_factor`` to ``llama3``.
+    """
+
+    type: Literal["linear", "ntk", "yarn", "llama3"]
+    original_max_seq_len: int = Field(gt=0)
+    beta_fast: float | None = Field(
+        default=None, gt=0, exclude_if=lambda value: value is None
+    )
+    beta_slow: float | None = Field(
+        default=None, gt=0, exclude_if=lambda value: value is None
+    )
+    low_freq_factor: float | None = Field(
+        default=None, gt=0, exclude_if=lambda value: value is None
+    )
+    high_freq_factor: float | None = Field(
+        default=None, gt=0, exclude_if=lambda value: value is None
+    )
+
+    @model_validator(mode="after")
+    def validate_type_settings(self) -> RopeScalingConfig:
+        yarn = (self.beta_fast, self.beta_slow)
+        llama3 = (self.low_freq_factor, self.high_freq_factor)
+        if self.type != "yarn" and any(value is not None for value in yarn):
+            raise ValueError("beta_fast and beta_slow apply only to yarn")
+        if self.type != "llama3" and any(value is not None for value in llama3):
+            raise ValueError(
+                "low_freq_factor and high_freq_factor apply only to llama3"
+            )
+        if self.type == "yarn" and (self.beta_fast or 32.0) <= (self.beta_slow or 1.0):
+            raise ValueError("yarn beta_fast must exceed beta_slow")
+        if self.type == "llama3" and (self.high_freq_factor or 4.0) <= (
+            self.low_freq_factor or 1.0
+        ):
+            raise ValueError("llama3 high_freq_factor must exceed low_freq_factor")
+        return self
+
+
 class AttentionConfig(StrictModel):
     kind: str = "dense"
     params: dict[str, Any] = Field(
@@ -93,6 +135,9 @@ class AttentionConfig(StrictModel):
         default="reference", exclude_if=lambda value: value == "reference"
     )
     rope_base: float = Field(default=10000.0, gt=0)
+    rope_scaling: RopeScalingConfig | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     window_size: int | None = Field(default=None, gt=0)
     latent_dim: int | None = Field(default=None, gt=0)
     block_size: int | None = Field(default=None, gt=0)
@@ -121,6 +166,7 @@ class AttentionConfig(StrictModel):
                 any(value is not None for value in sparse)
                 or self.selector != "mean_key"
                 or self.implementation != "reference"
+                or self.rope_scaling is not None
             ):
                 raise ValueError(
                     f"attention kind {self.kind!r} comes from another package and "
@@ -1399,6 +1445,17 @@ class RunConfig(StrictModel):
                 raise ValueError(
                     "grouped-query attention is supported only for PyTorch dense or sliding_window attention"
                 )
+            scaling = attention.rope_scaling
+            if scaling is not None:
+                if self.runtime.engine != "pytorch":
+                    raise ValueError(
+                        "attention.rope_scaling requires the PyTorch engine"
+                    )
+                if scaling.original_max_seq_len >= self.model.max_seq_len:
+                    raise ValueError(
+                        "attention.rope_scaling.original_max_seq_len must be below "
+                        "model.max_seq_len"
+                    )
             if attention.implementation == "sdpa" and (
                 self.runtime.engine != "pytorch" or grouped_query
             ):

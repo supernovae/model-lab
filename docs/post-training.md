@@ -242,9 +242,12 @@ remote code.
 
 **`hf_llama_safetensors`** is for dense attention (grouped key/value heads
 included), dense SwiGLU feed-forward and no memory. The directory loads with
-`transformers.LlamaForCausalLM` and needs no Lab code. It is the inverse of
-`klab weights import --format hf_llama_safetensors`, and a test imports an
-exported directory back to bit-identical weights.
+`transformers.LlamaForCausalLM` and needs no Lab code. A run with
+[`attention.rope_scaling`](architecture.md#rotary-positions) writes the same
+schedule as `rope_scaling` (`ntk` as the larger `rope_theta`). It is the
+inverse of `klab weights import --format hf_llama_safetensors`, and a test
+imports an exported directory back to bit-identical weights. Import reads
+unscaled models only: import the base and extend it in a child stage.
 
 **`hf_remote_code`** is for every other built-in architecture: `local_selected`
 (with `latent_dim` and `selector: learned`), `block_sparse`, `mla`,

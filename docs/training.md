@@ -156,6 +156,51 @@ After a run completes, `train` writes a bounded post-training triage (loss
 trend, a short generation probe and integrity checks); `klab report RUN_ID --kind
 run` shows it beside the run's evidence.
 
+## Context length
+
+Pretrain on short rows and lengthen the context afterwards. A model learns
+most of what it knows from 2,048 to 4,096-token rows, and longer rows cost
+much more per token. Measured on one Arc Pro B70 with a 730M dense model:
+
+| Rows | Settings | Targets/s | Device peak |
+| --- | --- | --- | --- |
+| 4,096 | compiled blocks and loss | 8,076 | 23.1 GiB |
+| 8,192 | compiled blocks and loss | 5,493 | 28.6 GiB |
+| 16,384 | activation recomputation | 2,348 | 21.2 GiB |
+| 32,768 | recomputation and optimizer state offload | 1,285 | 22.1 GiB |
+
+To extend a pretrained model, train a short child stage on long documents
+(`document_start` packing; see [datasets](datasets.md)), a few percent of the
+pretraining tokens, with a longer `training.seq_len`. Name the pretrained run
+as `training.parent_checkpoint`, raise `model.max_seq_len`, and change RoPE
+for the longer context (see [rotary positions](architecture.md#rotary-positions)):
+
+```yaml
+model:
+  max_seq_len: 16384
+attention:
+  rope_base: 500000.0           # ABF, or:
+  rope_scaling:
+    type: yarn
+    original_max_seq_len: 4096
+training:
+  seq_len: 16384
+  parent_checkpoint: /runs/pretrain
+```
+
+A promoted child may change only `attention.rope_base`,
+`attention.rope_scaling` and `model.max_seq_len`, which may not shrink, from
+its parent's architecture; RoPE has no weights, so every tensor loads
+unchanged. The run's manifest records the change as a `rope_extension`
+decision under `resource_decisions`. A full-state resume still requires the
+same architecture.
+
+Which schedule works best for a model is an experiment. Run each as a `klab
+try` arm from the same parent, on the same long held-out data, and compare
+them on held-out loss at long positions and on retrieval from far back in the
+context (see [evaluation](evaluation.md) and [probes](probes.md)). Check the
+short-context probes too: extension usually costs a little there.
+
 ## Continue, branch and recover
 
 Checkpoints, resume, promotion, budget extension and recovery are described in

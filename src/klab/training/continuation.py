@@ -41,6 +41,81 @@ def _resume_settings(config: RunConfig) -> str:
     return config_sha256(settings)
 
 
+_ROPE_FIELDS = ("rope_base", "rope_scaling")
+
+
+def _without_rope(settings: dict[str, Any]) -> dict[str, Any]:
+    """Architecture settings with the RoPE fields and context length removed."""
+    model = dict(settings["model"])
+    model.pop("max_seq_len", None)
+    if model.get("layers"):
+        model["layers"] = [
+            {
+                **layer,
+                "attention": {
+                    key: value
+                    for key, value in (layer.get("attention") or {}).items()
+                    if key not in _ROPE_FIELDS
+                },
+            }
+            for layer in model["layers"]
+        ]
+    attention = {
+        key: value
+        for key, value in settings.get("attention", {}).items()
+        if key not in _ROPE_FIELDS
+    }
+    return {"model": model, "attention": attention}
+
+
+def _rope_settings(config: RunConfig) -> dict[str, Any]:
+    def one(attention: Any) -> dict[str, Any]:
+        scaling = attention.rope_scaling
+        return {
+            "rope_base": attention.rope_base,
+            "rope_scaling": None
+            if scaling is None
+            else scaling.model_dump(mode="json", exclude_none=True),
+        }
+
+    settings: dict[str, Any] = {
+        "max_seq_len": config.model.max_seq_len,
+        "attention": one(config.attention),
+    }
+    if config.model.layers:
+        settings["layers"] = [one(attention) for _, attention in config.layer_specs]
+    return settings
+
+
+def rope_extension_transition(
+    source: RunConfig, target: RunConfig
+) -> dict[str, object] | None:
+    """The declared context extension from ``source`` to ``target``, if any.
+
+    A promoted child may change RoPE (``attention.rope_base`` and
+    ``attention.rope_scaling``) and raise ``model.max_seq_len``; every other
+    architecture setting must match. RoPE has no weights, so the parent's
+    tensors load unchanged. Returns ``None`` when the architectures differ in
+    anything else.
+    """
+    source_settings = source.model_dump(mode="json")
+    target_settings = target.model_dump(mode="json")
+    if architecture_sha256(_without_rope(source_settings)) != architecture_sha256(
+        _without_rope(target_settings)
+    ):
+        return None
+    if target.model.max_seq_len < source.model.max_seq_len:
+        raise ValueError(
+            "context extension cannot lower model.max_seq_len "
+            f"({source.model.max_seq_len} -> {target.model.max_seq_len})"
+        )
+    return {
+        "kind": "rope_extension",
+        "source": _rope_settings(source),
+        "target": _rope_settings(target),
+    }
+
+
 def runtime_optimization_transition(
     source: RunConfig, target: RunConfig, checkpoint_sha256: str
 ) -> dict[str, object]:
@@ -558,9 +633,22 @@ def load_continuation(
         if not (allow_runtime_optimization or add_ngram_memory) and architecture_sha256(
             source_config.model_dump(mode="json")
         ) != architecture_sha256(config.model_dump(mode="json")):
-            raise ValueError(
-                "continuation configuration differs in architecture semantics"
+            extension = (
+                rope_extension_transition(source_config, config)
+                if promote is not None
+                else None
             )
+            if extension is None:
+                raise ValueError(
+                    "continuation configuration differs in architecture semantics"
+                    + (
+                        ""
+                        if promote is None
+                        else "; a promoted child may change only attention.rope_base, "
+                        "attention.rope_scaling and model.max_seq_len"
+                    )
+                )
+            decisions.append(extension)
         if promote is not None:
             if sha256_file(root / "tokenizer.json") != sha256_file(
                 config.tokenizer.path

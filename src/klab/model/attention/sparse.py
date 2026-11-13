@@ -10,7 +10,7 @@ import torch
 from torch import Tensor, nn
 
 from klab.model.moe import diagnostic_writes_enabled
-from klab.model.rope import RoPE
+from klab.model.rope import RoPE, RopeScaling
 
 
 @dataclass(frozen=True)
@@ -54,6 +54,8 @@ class BlockSparseAttention(nn.Module):
         rope_base: float,
         block_size: int,
         selected_blocks: int,
+        *,
+        rope_scaling: RopeScaling | None = None,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -64,7 +66,7 @@ class BlockSparseAttention(nn.Module):
         self.k_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.v_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.out_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.rope = RoPE(self.head_dim, rope_base)
+        self.rope = RoPE(self.head_dim, rope_base, rope_scaling)
         self.max_seq_len = max_seq_len
         self.last_diagnostics: SparseAttentionDiagnostics | None = None
         self.last_backend: SparseBackend | None = None
