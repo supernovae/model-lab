@@ -151,9 +151,9 @@ def export_weights(
 
     if (Path(checkpoint) / MANIFEST).is_file():
         raise ValueError(
-            "a quantized artifact does not export: the Hugging Face Llama "
-            "directory written here holds float weights only (no "
-            "quantization_config); export its source checkpoint instead"
+            "a quantized artifact does not export: both export formats hold "
+            "float weights only (no quantization_config); export its source "
+            "checkpoint instead"
         )
     output = Path(output).resolve()
     if output.exists():
