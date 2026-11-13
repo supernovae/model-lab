@@ -285,7 +285,7 @@ def test_prepare_data_unicode_addresses_match_generation_helper(
     )
     monkeypatch.setattr(
         "klab.data.packing.iter_documents",
-        lambda _config, _split: iter([document]),
+        lambda _config, _split, **_: iter([document]),
     )
 
     prepared = prepare_data(config, tokenizer)

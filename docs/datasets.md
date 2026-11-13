@@ -51,8 +51,41 @@ whole documents, deduplication and a local copy.
 ### Synthetic fixtures
 
 `synthetic_task` picks `stories` (the default), `instruction_reference`,
-`chat_recall`, `engram_recall` or `withheld_facts`. They exist for smoke tests
-and the probe battery, not for training useful models.
+`chat_recall`, `engram_recall`, `withheld_facts` or `repeat_token`. The first
+five exist for smoke tests and the probe battery, not for training useful
+models.
+
+### Repeated symbols
+
+`repeat_token` is SpamLang from [Lost in
+Backpropagation](https://arxiv.org/abs/2603.10145) (section 3.2): every document
+is one uniformly drawn symbol repeated. Any model can learn it, so a model that
+does not is failing to optimize, not failing to represent it.
+
+```yaml
+dataset:
+  source: synthetic
+  synthetic_task: repeat_token
+  synthetic_repeat_length: 64    # tokens per document
+  synthetic_seed: 42
+```
+
+The symbols are the run's tokenizer's whole-word tokens: a space followed by
+letters, which the tokenizer encodes back to exactly that one token. The
+pre-tokenizer splits repeated words apart, so a document tokenizes to its symbol
+token repeated `synthetic_repeat_length` times, then `<eos>`. To vary the
+vocabulary, give runs tokenizers of different sizes; the prepared data manifest
+records the symbol count as `repeat_token_symbols`. It is below
+`model.vocab_size`, because bytes, special tokens and word pieces are not
+symbols; report it next to the vocabulary size. The first token of each
+document cannot be predicted, so the loss cannot fall below about
+`ln(symbols) / (synthetic_repeat_length + 1)` per token. The task needs an
+existing tokenizer and cannot train one.
+
+A tokenizer whose vocabulary is exactly the symbols, with no bytes or word
+pieces, would make the symbol count equal the vocabulary size as in the paper.
+Lab does not build one yet; it would be a new tokenizer kind beside ByteLevel
+BPE, worth adding if an experiment needs that exactness.
 
 ## Pin a dataset
 
