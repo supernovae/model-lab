@@ -409,11 +409,14 @@ def _train_and_score(
     measurements: dict[str, Any] | None = None,
     continuation: Any = None,
     continuation_identity: Mapping[str, Any] | None = None,
+    text_documents: int | None = None,
 ) -> dict[str, Any]:
     """Train (or reuse) and score one arm under CONTEXT.
 
     With MEASUREMENTS, the scoring pass also records the probe battery's
-    validation statistics for this arm (one forward pass serves both).
+    validation statistics for this arm (one forward pass serves both). With
+    TEXT_DOCUMENTS (the baseline's ``evaluation.text_documents``), it also
+    scores that many held-out documents for bits per byte.
     """
     from klab.evaluation.inference import load_run, write_inference_result
 
@@ -516,6 +519,9 @@ def _train_and_score(
 
         stats = ValidationStats()
     result = scored.evaluate(observer=stats)
+    text = loaded.text_bits(text_documents) if text_documents else None
+    if text is not None:
+        result["text"] = text
     validation = stats.result(result) if stats is not None else None
     if validation is not None and measurements is not None and shareable:
         measurements[arm] = {
@@ -565,6 +571,7 @@ def _train_and_score(
                 "perplexity": result["perplexity"],
                 "valid_targets": result["valid_targets"],
                 "batches": result["batches"],
+                **({"text": text} if text is not None else {}),
                 "observation": str(observation),
                 **(
                     {
@@ -657,17 +664,76 @@ def heldout_checks(
     }
 
 
+# Token-level checks a tokenizer change fails by construction; bits per byte on
+# the same held-out text stands in for them.
+_TOKEN_LEVEL_CHECKS = frozenset(
+    {
+        "same_tokenizer",
+        "same_validation_data",
+        "same_eval_protocol",
+        "same_scored_targets",
+    }
+)
+
+
+def text_checks(baseline: Mapping[str, Any], candidate: Mapping[str, Any]) -> dict:
+    """Both arms scored the same held-out text for bits per byte."""
+    texts = [row["heldout"].get("text") for row in (baseline, candidate)]
+    present = all(isinstance(text, Mapping) for text in texts)
+    base, cand = texts if present else ({}, {})
+    return {
+        "text_scored": present,
+        "same_text": present
+        and base.get("protocol") == cand.get("protocol")
+        and base.get("text_sha256") == cand.get("text_sha256")
+        and base.get("bytes") == cand.get("bytes")
+        and bool(base.get("bytes")),
+        "finite_bits_per_byte": present
+        and all(
+            isinstance(text.get("bits_per_byte"), (int, float))
+            and math.isfinite(text["bits_per_byte"])
+            for text in (base, cand)
+        ),
+    }
+
+
 def compare(
     baseline: Mapping[str, Any],
     candidate: Mapping[str, Any],
     changed_variables: Iterable[str] = (),
 ) -> dict:
+    """Candidate against baseline on held-out loss, or on bits per byte.
+
+    Arms with the same tokenizer compare held-out loss per token (``metric:
+    loss``). Arms whose tokenizers differ cannot; they compare bits per byte on
+    the same held-out documents (``metric: bits_per_byte``) when the baseline's
+    ``evaluation.text_documents`` scored them, and are refused otherwise.
+    """
     checks = heldout_checks(baseline, candidate, changed_variables)
+    texts = text_checks(baseline, candidate)
+    metric = "loss"
+    if not checks["checks"]["same_tokenizer"]:
+        metric = "bits_per_byte"
+        kept = {
+            name: passed
+            for name, passed in checks["checks"].items()
+            if name not in _TOKEN_LEVEL_CHECKS
+        }
+        merged = {**kept, **texts}
+        checks = {
+            "comparable": all(merged.values()),
+            "checks": merged,
+            "failed": sorted(name for name, passed in merged.items() if not passed),
+        }
     if not checks["comparable"]:
-        return {"verdict": "NOT_COMPARABLE", **checks}
-    base_loss = float(baseline["heldout"]["loss"])
-    cand_loss = float(candidate["heldout"]["loss"])
-    delta = cand_loss - base_loss
+        return {"verdict": "NOT_COMPARABLE", "metric": metric, **checks}
+    if metric == "loss":
+        base_value = float(baseline["heldout"]["loss"])
+        cand_value = float(candidate["heldout"]["loss"])
+    else:
+        base_value = float(baseline["heldout"]["text"]["bits_per_byte"])
+        cand_value = float(candidate["heldout"]["text"]["bits_per_byte"])
+    delta = cand_value - base_value
     verdict = (
         "CANDIDATE_LOWER_LOSS"
         if delta < 0
@@ -675,12 +741,18 @@ def compare(
         if delta > 0
         else "TIE"
     )
-    return {
+    result = {
         "verdict": verdict,
-        "heldout_loss_delta": delta,
-        "heldout_loss_relative": delta / base_loss if base_loss else None,
+        "metric": metric,
+        "heldout_delta": delta,
+        "heldout_relative": delta / base_value if base_value else None,
         **checks,
     }
+    if metric == "loss" and texts["same_text"] and texts["finite_bits_per_byte"]:
+        result["bits_per_byte_delta"] = float(
+            candidate["heldout"]["text"]["bits_per_byte"]
+        ) - float(baseline["heldout"]["text"]["bits_per_byte"])
+    return result
 
 
 def write_record(
@@ -1009,6 +1081,7 @@ def run_try(
             "context": context,
             "continuation": continuation,
             "continuation_identity": record.get("continuation"),
+            "text_documents": base_config.evaluation.text_documents,
         }
         protocol = eval_protocol(base_config)
         record["arms"]["baseline"] = _train_and_score(
@@ -1252,10 +1325,12 @@ def summarize(
             continue
         heldout = row.get("heldout", {})
         reused = " (reused)" if row.get("reused") else ""
+        text = heldout.get("text")
+        bits = f"  bits/byte {_fmt(text['bits_per_byte'])}" if text else ""
         lines.append(
             f"  {arm:<9} {row['run_id']}{reused}  held-out loss "
             f"{_fmt(heldout.get('loss'))}  ppl {_fmt(heldout.get('perplexity'), 2)}"
-            f"  targets {_fmt(heldout.get('valid_targets'))}"
+            f"  targets {_fmt(heldout.get('valid_targets'))}{bits}"
         )
     comparison = record.get("comparison")
     if comparison:
@@ -1266,9 +1341,14 @@ def summarize(
                 + ")"
             )
         else:
+            measure = (
+                "held-out loss"
+                if comparison.get("metric") == "loss"
+                else "bits per byte"
+            )
             lines.append(
-                f"  verdict: {comparison['verdict']}  Δ held-out loss "
-                f"{comparison['heldout_loss_delta']:+.4f}"
+                f"  verdict: {comparison['verdict']}  Δ {measure} "
+                f"{comparison['heldout_delta']:+.4f}"
             )
     leakage = record.get("leakage")
     if leakage:

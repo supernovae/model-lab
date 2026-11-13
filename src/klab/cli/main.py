@@ -1025,6 +1025,9 @@ def _eval(args: argparse.Namespace) -> None:
         authorization=args.runtime_authorization,
     )
     result = loaded.evaluate()
+    text = loaded.text_bits()
+    if text is not None:
+        result["text"] = text
     result.update({"source": "standalone_eval", "identity": loaded.identity})
     path = write_inference_result(loaded.run, "eval", result)
     print(json.dumps({**result, "output": str(path)}, indent=2))

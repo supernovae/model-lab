@@ -14,6 +14,30 @@ klab eval RUN_ID [--runs-dir RUNS] [--checkpoint GENERATION]
 held-out loss and perplexity on its validation split, using the run's
 evaluation settings. Scoring runs in FP32 even for a model trained in BF16.
 
+### Bits per byte
+
+Loss per token depends on the tokenizer: a larger vocabulary makes tokens
+longer and the loss per token higher, without the model being any worse. Bits
+per byte does not, so it compares models with different tokenizers. Set
+`evaluation.text_documents` to score that many held-out documents this way:
+
+```yaml
+evaluation:
+  text_documents: 1000
+```
+
+`eval` then also reports `text`: the documents, their UTF-8 bytes, the targets
+scored, the total loss in nats, `bits_per_byte` (nats ÷ (ln 2 × bytes)) and
+`text_sha256`. The documents are the first ones of the run's prepared
+validation split, cut at each `<eos>` and decoded; Lab's ByteLevel BPE has no
+normalizer, so decoding gives back the source text exactly, and two runs with
+different tokenizers that report the same `text_sha256` scored the same text.
+Each document is scored on its own after one `<eos>`, every token once, longer
+documents in windows of the model's `max_seq_len`; the end of the document is
+not a target. Chat and preference data, whose targets are masked, are refused.
+Prepare enough validation documents for every tokenizer you compare: a token
+cap that cuts the split at a different document changes the digest.
+
 ## Panels
 
 A panel is a fixed, named slice of prepared held-out data: for example one panel

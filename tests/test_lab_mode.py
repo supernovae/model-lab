@@ -87,7 +87,8 @@ def test_try_writes_one_sealed_record_with_identity_and_heldout_scores(
         "CANDIDATE_HIGHER_LOSS",
         "TIE",
     }
-    assert comparison["heldout_loss_delta"] == pytest.approx(
+    assert comparison["metric"] == "loss"
+    assert comparison["heldout_delta"] == pytest.approx(
         record["arms"]["candidate"]["heldout"]["loss"]
         - record["arms"]["baseline"]["heldout"]["loss"]
     )
@@ -124,8 +125,59 @@ def test_heldout_changes_are_not_comparable(
     assert record["status"] == "completed"
     assert record["comparison"]["verdict"] == "NOT_COMPARABLE"
     assert failed in record["comparison"]["failed"]
-    assert "heldout_loss_delta" not in record["comparison"]
+    assert "heldout_delta" not in record["comparison"]
     assert record["exit_status"] == EXIT_NOT_COMPARABLE
+
+
+def test_a_tokenizer_change_compares_bits_per_byte_on_the_same_text(
+    lab: tuple[Path, Path],
+) -> None:
+    from klab.config.loading import load_tokenizer_config
+    from klab.data.tokenizer import train_tokenizer
+    from klab.evaluation.inference import load_run
+    from klab.evaluation.text_bits import heldout_documents
+    from klab.probes.scoring import rolling_score
+
+    root, baseline = lab
+    tokenizer = yaml.safe_load((root / "tokenizer.yaml").read_text())
+    tokenizer.update(vocab_size=384, output_dir=str(root / "tokenizer-384"))
+    (root / "tokenizer-384.yaml").write_text(yaml.safe_dump(tokenizer))
+    smaller = train_tokenizer(load_tokenizer_config(root / "tokenizer-384.yaml"))
+    change = {"tokenizer.path": str(smaller), "model.vocab_size": 384}
+
+    # Without held-out text scored, different tokenizers cannot be compared.
+    record, _ = run_try(
+        _delta(root, "tok.yaml", change), baseline, work_dir=root / "work"
+    )
+    assert record["comparison"]["verdict"] == "NOT_COMPARABLE"
+    assert record["comparison"]["metric"] == "bits_per_byte"
+    assert "text_scored" in record["comparison"]["failed"]
+
+    config = yaml.safe_load(baseline.read_text())
+    config["evaluation"]["text_documents"] = 20
+    scored = root / "scored.yaml"
+    scored.write_text(yaml.safe_dump(config))
+    record, _ = run_try(
+        _delta(root, "tok.yaml", change), scored, work_dir=root / "work"
+    )
+    comparison = record["comparison"]
+    assert comparison["comparable"] is True, comparison["failed"]
+    assert comparison["metric"] == "bits_per_byte"
+    texts = [
+        record["arms"][arm]["heldout"]["text"] for arm in ("baseline", "candidate")
+    ]
+    assert texts[0]["text_sha256"] == texts[1]["text_sha256"]
+    assert texts[0]["targets"] != texts[1]["targets"]  # same bytes, other tokens
+    assert comparison["heldout_delta"] == pytest.approx(
+        texts[1]["bits_per_byte"] - texts[0]["bits_per_byte"]
+    )
+    # The batched score equals scoring each document alone.
+    candidate = record["arms"]["candidate"]
+    loaded = load_run(candidate["run_id"], root / "work/lab/runs")
+    documents = heldout_documents(loaded.run, loaded.tokenizer, 20)
+    assert -sum(rolling_score(loaded, text) for text in documents) == pytest.approx(
+        texts[1]["nats"], rel=1e-5
+    )
 
 
 def test_startup_cancellation_is_recorded_without_fabricated_checkpoint(

@@ -109,6 +109,25 @@ class InferenceRun:
 
         return self.engine.evaluate(batches()).to_report()
 
+    def text_bits(self, count: int | None = None) -> dict[str, Any] | None:
+        """Bits per byte on the first COUNT held-out documents.
+
+        COUNT defaults to ``evaluation.text_documents``; None when neither is set.
+        """
+        count = count or self.config.evaluation.text_documents
+        if count is None:
+            return None
+        if self.engine is not None:
+            raise ValueError("bits per byte needs the PyTorch engine")
+        from klab.evaluation.text_bits import heldout_documents, score_documents
+
+        return score_documents(
+            self,
+            heldout_documents(self.run, self.tokenizer, count),
+            batch_size=self.config.evaluation.batch_size
+            or self.config.training.micro_batch_size,
+        )
+
 
 def _verified_checkpoint(
     run: Path,
