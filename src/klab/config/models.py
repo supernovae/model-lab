@@ -1198,6 +1198,11 @@ class EvaluationConfig(StrictModel):
     text_documents: int | None = Field(
         default=None, strict=True, gt=0, exclude_if=lambda value: value is None
     )
+    # Also measure how much of the logit gradient the output head passes back
+    # to the network, on the same held-out targets.
+    gradient_bottleneck: bool = Field(
+        default=False, strict=True, exclude_if=lambda value: not value
+    )
     panels: tuple[FixedValidationPanel, ...] = Field(
         default=(), exclude_if=lambda value: not value
     )

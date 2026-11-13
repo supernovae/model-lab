@@ -202,6 +202,8 @@ def _entry(
         "candidate_loss": (candidate.get("heldout") or {}).get("loss"),
         "baseline_bits_per_byte": _bits(baseline),
         "candidate_bits_per_byte": _bits(candidate),
+        "baseline_kernel_norm_fraction": _kernel(baseline),
+        "candidate_kernel_norm_fraction": _kernel(candidate),
         "baseline_reused": bool(baseline.get("reused")),
         "parameters": candidate.get("parameters"),
         "baseline_parameters": baseline.get("parameters"),
@@ -217,6 +219,13 @@ def _entry(
 def _bits(row: Mapping[str, Any]) -> float | None:
     text = (row.get("heldout") or {}).get("text")
     return text.get("bits_per_byte") if isinstance(text, Mapping) else None
+
+
+def _kernel(row: Mapping[str, Any]) -> float | None:
+    measured = (row.get("heldout") or {}).get("gradient_bottleneck")
+    return (
+        measured.get("kernel_norm_fraction") if isinstance(measured, Mapping) else None
+    )
 
 
 def summarize_point(
@@ -264,6 +273,11 @@ def summarize_point(
     else:
         verdict = "WITHIN_SEED_NOISE"
     walls = [e["wall_seconds"] for e in entries if e.get("wall_seconds") is not None]
+    kernels = [
+        e["candidate_kernel_norm_fraction"]
+        for e in entries
+        if isinstance(e.get("candidate_kernel_norm_fraction"), (int, float))
+    ]
     candidate = next((e for e in entries if e.get("parameters") is not None), {})
     return {
         "point": index,
@@ -280,6 +294,8 @@ def summarize_point(
         "parameters": candidate.get("parameters"),
         "tokens_seen": candidate.get("tokens_seen"),
         "wall_seconds_mean": statistics.fmean(walls) if walls else None,
+        # Measured only when the baseline sets evaluation.gradient_bottleneck.
+        "kernel_norm_fraction_mean": statistics.fmean(kernels) if kernels else None,
         "not_comparable": sum(e.get("verdict") == "NOT_COMPARABLE" for e in entries),
         "failed": sum(e.get("status") == "failed" for e in entries),
     }
@@ -297,6 +313,7 @@ def _write_series(path: Path, summary: list[Mapping[str, Any]]) -> None:
         "parameters",
         "tokens_seen",
         "wall_seconds_mean",
+        "kernel_norm_fraction_mean",
     ]
     with path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")

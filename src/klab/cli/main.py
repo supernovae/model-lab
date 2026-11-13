@@ -1024,7 +1024,16 @@ def _eval(args: argparse.Namespace) -> None:
         args.backend,
         authorization=args.runtime_authorization,
     )
-    result = loaded.evaluate()
+    bottleneck = None
+    if loaded.config.evaluation.gradient_bottleneck:
+        from klab.evaluation.gradient_bottleneck import GradientBottleneck
+
+        if loaded.engine is not None:
+            raise ValueError("the gradient bottleneck needs the PyTorch engine")
+        bottleneck = GradientBottleneck(loaded.model)
+    result = loaded.evaluate(observer=bottleneck)
+    if bottleneck is not None:
+        result["gradient_bottleneck"] = bottleneck.result()
     text = loaded.text_bits()
     if text is not None:
         result["text"] = text

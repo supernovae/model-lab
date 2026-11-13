@@ -410,13 +410,16 @@ def _train_and_score(
     continuation: Any = None,
     continuation_identity: Mapping[str, Any] | None = None,
     text_documents: int | None = None,
+    gradient_bottleneck: bool = False,
 ) -> dict[str, Any]:
     """Train (or reuse) and score one arm under CONTEXT.
 
     With MEASUREMENTS, the scoring pass also records the probe battery's
     validation statistics for this arm (one forward pass serves both). With
     TEXT_DOCUMENTS (the baseline's ``evaluation.text_documents``), it also
-    scores that many held-out documents for bits per byte.
+    scores that many held-out documents for bits per byte; with
+    GRADIENT_BOTTLENECK, it measures the output head's gradient bottleneck on
+    the same held-out targets.
     """
     from klab.evaluation.inference import load_run, write_inference_result
 
@@ -518,7 +521,16 @@ def _train_and_score(
         from klab.probes.scoring import ValidationStats
 
         stats = ValidationStats()
-    result = scored.evaluate(observer=stats)
+    bottleneck = None
+    if gradient_bottleneck and loaded.engine is None:
+        from klab.evaluation.gradient_bottleneck import GradientBottleneck
+
+        bottleneck = GradientBottleneck(loaded.model)
+    from klab.evaluation.gradient_bottleneck import observers
+
+    result = scored.evaluate(observer=observers(stats, bottleneck))
+    if bottleneck is not None:
+        result["gradient_bottleneck"] = bottleneck.result()
     text = loaded.text_bits(text_documents) if text_documents else None
     if text is not None:
         result["text"] = text
@@ -572,6 +584,11 @@ def _train_and_score(
                 "valid_targets": result["valid_targets"],
                 "batches": result["batches"],
                 **({"text": text} if text is not None else {}),
+                **(
+                    {"gradient_bottleneck": result["gradient_bottleneck"]}
+                    if bottleneck is not None
+                    else {}
+                ),
                 "observation": str(observation),
                 **(
                     {
@@ -1082,6 +1099,7 @@ def run_try(
             "continuation": continuation,
             "continuation_identity": record.get("continuation"),
             "text_documents": base_config.evaluation.text_documents,
+            "gradient_bottleneck": base_config.evaluation.gradient_bottleneck,
         }
         protocol = eval_protocol(base_config)
         record["arms"]["baseline"] = _train_and_score(

@@ -180,6 +180,50 @@ def test_a_tokenizer_change_compares_bits_per_byte_on_the_same_text(
     )
 
 
+def test_each_arm_measures_how_much_logit_gradient_its_head_passes_back(
+    lab: tuple[Path, Path],
+) -> None:
+    import torch
+
+    from klab.evaluation.gradient_bottleneck import GradientBottleneck
+    from klab.evaluation.inference import load_run
+
+    root, baseline = lab
+    config = yaml.safe_load(baseline.read_text())
+    config["evaluation"]["gradient_bottleneck"] = True
+    measured = root / "measured.yaml"
+    measured.write_text(yaml.safe_dump(config))
+    narrow = {"model.tie_embeddings": False, "model.output_head_rank": 4}
+    record, _ = run_try(
+        _delta(root, "narrow.yaml", narrow), measured, work_dir=root / "work"
+    )
+    base, cand = (
+        record["arms"][arm]["heldout"]["gradient_bottleneck"]
+        for arm in ("baseline", "candidate")
+    )
+    assert (base["head_rank"], cand["head_rank"]) == (32, 4)
+    assert base["targets"] == record["arms"]["baseline"]["heldout"]["valid_targets"]
+    # A rank-4 head passes back far less of the gradient than a rank-32 one.
+    assert cand["kept_squared_fraction"] < base["kept_squared_fraction"] / 2
+    assert cand["kernel_norm_fraction"] ** 2 + cand["kept_cosine"] ** 2 == (
+        pytest.approx(1.0)
+    )
+    # The observer's share equals projecting the gradient onto ker(W^T) directly.
+    loaded = load_run(record["arms"]["candidate"]["run_id"], root / "work/lab/runs")
+    torch.manual_seed(0)
+    logits = torch.randn(3, 5, 512)
+    targets = torch.randint(0, 512, (3, 5))
+    observer = GradientBottleneck(loaded.model)
+    observer(logits, targets)
+    gradient = torch.softmax(logits.double(), -1).reshape(15, 512)
+    gradient[torch.arange(15), targets.reshape(-1)] -= 1
+    basis, _ = torch.linalg.qr(loaded.model.output.weight.detach().double())
+    lost = gradient - gradient @ basis @ basis.T
+    assert observer.result()["kernel_norm_fraction"] == pytest.approx(
+        float(lost.norm() / gradient.norm()), rel=1e-5
+    )
+
+
 def test_startup_cancellation_is_recorded_without_fabricated_checkpoint(
     lab: tuple[Path, Path],
 ) -> None:
