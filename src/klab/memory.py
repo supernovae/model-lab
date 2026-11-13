@@ -293,7 +293,9 @@ def estimate_memory(
         if model.memory == "ngram"
         else int(model.memory != "none")
     )
-    logits_and_memory = 2 * 4 * b * t * v + 2 * 4 * b * t * streams * d
+    # A chunked output head holds the logits of one chunk, not the microbatch.
+    head_tokens = min(b * t, config.runtime.output_head_chunk_tokens or b * t)
+    logits_and_memory = 2 * 4 * head_tokens * v + 2 * 4 * b * t * streams * d
     if config.runtime.memory.activation_checkpointing.enabled:
         activations = (l + 1) * 4 * b * t * d + max(nonattention) + logits_and_memory
         attention_working = max(attention_working_per_block)
@@ -301,7 +303,7 @@ def estimate_memory(
         activations = sum(nonattention) + logits_and_memory
         attention_working = sum(attention_working_per_block)
     workspace = max(
-        64 * _MIB, int(0.1 * (weights + gradients + optimizer)) + 8 * b * t * v
+        64 * _MIB, int(0.1 * (weights + gradients + optimizer)) + 8 * head_tokens * v
     )
     subtotal = (
         weights

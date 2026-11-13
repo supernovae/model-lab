@@ -842,6 +842,9 @@ class RuntimeConfig(StrictModel):
     compile_output_head_loss: bool = Field(
         default=False, exclude_if=lambda value: not value
     )
+    output_head_chunk_tokens: int | None = Field(
+        default=None, ge=1, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def validate_block_compilation(self) -> RuntimeConfig:
@@ -866,6 +869,13 @@ class RuntimeConfig(StrictModel):
             raise ValueError(
                 "compiled output head and loss require PyTorch XPU BF16 "
                 "without activation offload"
+            )
+        if self.output_head_chunk_tokens is not None and (
+            self.engine != "pytorch" or self.compile_output_head_loss
+        ):
+            raise ValueError(
+                "output_head_chunk_tokens requires PyTorch without the compiled "
+                "output head"
             )
         if self.secondary_device_indices:
             if self.engine != "pytorch" or self.backend in {"mps", "metal"}:
