@@ -41,7 +41,8 @@ def _fake_try(calls: list[dict[str, object]], deltas: dict[int, float]):
                 },
                 "comparison": {
                     "verdict": "CANDIDATE_LOWER_LOSS",
-                    "heldout_loss_delta": loss - 3.0,
+                    "metric": "loss",
+                    "heldout_delta": loss - 3.0,
                 },
                 "resources": {"wall_seconds": 1.5},
             },
@@ -61,6 +62,10 @@ def test_grid_is_every_combination_in_declaration_order(tmp_path: Path) -> None:
         {"a.x": 2, "b.y": "q"},
     ]
     assert config.baseline == (tmp_path / "baseline.yaml").resolve()
+    # Explicit points set several fields together, in declaration order.
+    paired = [{"tokenizer.path": "a.json", "model.vocab_size": 512}, {"a.x": 2}]
+    config = load_sweep(_declaration(tmp_path, vary=None, points=paired))
+    assert points(config) == paired
 
 
 @pytest.mark.parametrize(
@@ -70,6 +75,8 @@ def test_grid_is_every_combination_in_declaration_order(tmp_path: Path) -> None:
         {"vary": {"model.ffn_dim": []}},
         {"vary": {"model.ffn_dim": [48, 48]}},
         {"seeds": [1, 1]},
+        {"points": [{"model.ffn_dim": 48}]},  # with vary: one of the two
+        {"vary": None, "points": [{"a.x": 1}, {"a.x": 1}]},
         {"seeds": [-1]},
         {"unknown": True},
     ],
@@ -101,7 +108,7 @@ def test_each_point_and_seed_runs_a_try_and_is_summarized(tmp_path: Path) -> Non
     first, second = record["summary"]
     assert first["comparable"] == 3
     assert first["verdict"] == "LOWER_LOSS"
-    assert first["heldout_loss_delta_mean"] == pytest.approx(-0.198)
+    assert first["heldout_delta_mean"] == pytest.approx(-0.198)
     assert second["verdict"] == "HIGHER_LOSS"
     with (path.parent / "series.csv").open() as stream:
         rows = list(csv.DictReader(stream))
@@ -109,9 +116,9 @@ def test_each_point_and_seed_runs_a_try_and_is_summarized(tmp_path: Path) -> Non
 
 
 def test_one_seed_never_claims_a_direction() -> None:
-    entry = {"heldout_loss_delta": -0.5, "wall_seconds": 1.0}
+    entry = {"heldout_delta": -0.5, "wall_seconds": 1.0}
     assert summarize_point(0, {"x": 1}, [entry])["verdict"] == "SINGLE_SEED_LOWER"
-    spread = [{"heldout_loss_delta": d} for d in (-0.5, 0.4, -0.1)]
+    spread = [{"heldout_delta": d} for d in (-0.5, 0.4, -0.1)]
     assert summarize_point(0, {"x": 1}, spread)["verdict"] == "WITHIN_SEED_NOISE"
     assert summarize_point(0, {"x": 1}, [])["verdict"] == "NO_EVIDENCE"
 

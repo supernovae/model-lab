@@ -1,8 +1,10 @@
 """Sweeps: one baseline, several values of a setting, each run as an ordinary try.
 
-A sweep declaration names a baseline config, one or more dotted fields with
-lists of values, and optionally seeds. Every combination of values runs as a
-``klab try`` against the baseline at every seed. The baseline trains once per
+A sweep declaration names a baseline config, then either one or more dotted
+fields with lists of values (``vary``: every combination is a point) or an
+explicit list of points (``points``: each sets several fields together, such as
+a tokenizer and its vocabulary size), and optionally seeds. Every point runs as
+a ``klab try`` against the baseline at every seed. The baseline trains once per
 seed and is reused for every point, because ``try`` reuses a verified baseline
 with the same inputs. The sweep writes one sealed record listing each try and
 summarizing each point across its seeds.
@@ -37,15 +39,20 @@ class SweepConfig(StrictModel):
     sweep_version: Literal[1] = 1
     baseline: Path
     question: str | None = None
-    vary: dict[str, list[Any]]
+    vary: dict[str, list[Any]] | None = None
+    points: list[dict[str, Any]] | None = None
     seeds: list[RunSeed] | None = None
     config: str = Field(default="fast", min_length=1)
 
     @field_validator("vary")
     @classmethod
-    def valid_vary(cls, vary: dict[str, list[Any]]) -> dict[str, list[Any]]:
+    def valid_vary(
+        cls, vary: dict[str, list[Any]] | None
+    ) -> dict[str, list[Any]] | None:
         from klab.derivation import _settings
 
+        if vary is None:
+            return None
         if not vary:
             raise ValueError("vary needs at least one field")
         _settings({field: values for field, values in vary.items()})
@@ -57,6 +64,26 @@ class SweepConfig(StrictModel):
                 raise ValueError(f"vary.{field} repeats a value")
         return vary
 
+    @field_validator("points")
+    @classmethod
+    def valid_points(
+        cls, points: list[dict[str, Any]] | None
+    ) -> list[dict[str, Any]] | None:
+        from klab.derivation import _settings
+
+        if points is None:
+            return None
+        if not points:
+            raise ValueError("points needs at least one point")
+        for point in points:
+            if not point:
+                raise ValueError("every point sets at least one field")
+            _settings(point)
+        encoded = [canonical_json(point) for point in points]
+        if len(set(encoded)) != len(encoded):
+            raise ValueError("points repeats a point")
+        return points
+
     @field_validator("seeds")
     @classmethod
     def unique_seeds(cls, seeds: list[int] | None) -> list[int] | None:
@@ -66,6 +93,8 @@ class SweepConfig(StrictModel):
 
     @model_validator(mode="after")
     def bounded(self) -> SweepConfig:
+        if (self.vary is None) == (self.points is None):
+            raise ValueError("a sweep sets exactly one of vary and points")
         if len(points(self)) * len(self.seeds or [None]) > MAX_POINTS:
             raise ValueError(f"a sweep runs at most {MAX_POINTS} tries")
         return self
@@ -102,7 +131,10 @@ def load_sweep(path: Path) -> SweepConfig:
 
 
 def points(config: SweepConfig) -> list[dict[str, Any]]:
-    """Every combination of the varied values, in declaration order."""
+    """The declared points, or every combination of the varied values."""
+    if config.points is not None:
+        return [dict(point) for point in config.points]
+    assert config.vary is not None
     fields = list(config.vary)
     return [
         dict(zip(fields, values, strict=True))
@@ -164,9 +196,12 @@ def _entry(
         "status": record.get("status"),
         "exit_status": record.get("exit_status"),
         "verdict": comparison.get("verdict"),
-        "heldout_loss_delta": comparison.get("heldout_loss_delta"),
+        "metric": comparison.get("metric"),
+        "heldout_delta": comparison.get("heldout_delta"),
         "baseline_loss": (baseline.get("heldout") or {}).get("loss"),
         "candidate_loss": (candidate.get("heldout") or {}).get("loss"),
+        "baseline_bits_per_byte": _bits(baseline),
+        "candidate_bits_per_byte": _bits(candidate),
         "baseline_reused": bool(baseline.get("reused")),
         "parameters": candidate.get("parameters"),
         "baseline_parameters": baseline.get("parameters"),
@@ -179,14 +214,32 @@ def _entry(
     }
 
 
+def _bits(row: Mapping[str, Any]) -> float | None:
+    text = (row.get("heldout") or {}).get("text")
+    return text.get("bits_per_byte") if isinstance(text, Mapping) else None
+
+
 def summarize_point(
     index: int, settings: Mapping[str, Any], entries: list[Mapping[str, Any]]
 ) -> dict[str, Any]:
-    """One point across seeds: paired loss differences and their spread."""
-    deltas = [
-        float(entry["heldout_loss_delta"])
+    """One point across seeds: paired differences and their spread.
+
+    A point's seeds compare on one metric: held-out loss, or bits per byte
+    when the point changes the tokenizer. Seeds that compared on another
+    metric than the point's first are left out and counted.
+    """
+    metrics = [
+        entry.get("metric")
         for entry in entries
-        if isinstance(entry.get("heldout_loss_delta"), (int, float))
+        if isinstance(entry.get("heldout_delta"), (int, float))
+        and entry.get("status") != "baseline"
+    ]
+    metric = metrics[0] if metrics else "loss"
+    deltas = [
+        float(entry["heldout_delta"])
+        for entry in entries
+        if isinstance(entry.get("heldout_delta"), (int, float))
+        and (entry.get("status") == "baseline" or entry.get("metric") == metric)
     ]
     n = len(deltas)
     mean = statistics.fmean(deltas) if deltas else None
@@ -218,9 +271,11 @@ def summarize_point(
         "set": dict(settings),
         "tries": len(entries),
         "comparable": n,
-        "heldout_loss_delta_mean": mean,
-        "heldout_loss_delta_sd": sd,
-        "heldout_loss_delta_se": se,
+        "metric": metric,
+        "mixed_metric": sum(m != metric for m in metrics),
+        "heldout_delta_mean": mean,
+        "heldout_delta_sd": sd,
+        "heldout_delta_se": se,
         "verdict": verdict,
         "parameters": candidate.get("parameters"),
         "tokens_seen": candidate.get("tokens_seen"),
@@ -235,8 +290,9 @@ def _write_series(path: Path, summary: list[Mapping[str, Any]]) -> None:
         "point",
         "label",
         "comparable",
-        "heldout_loss_delta_mean",
-        "heldout_loss_delta_se",
+        "metric",
+        "heldout_delta_mean",
+        "heldout_delta_se",
         "verdict",
         "parameters",
         "tokens_seen",
@@ -318,7 +374,9 @@ def run_sweep(
     write_sealed(record_path, record)
     interrupted = False
     try:
-        own = _baseline_values(config.baseline, list(config.vary))
+        own = _baseline_values(
+            config.baseline, sorted({field for point in grid for field in point})
+        )
     except ValueError, OSError:
         own = {}
     for seed in seeds:
@@ -333,7 +391,7 @@ def run_sweep(
                         "seed": seed,
                         "status": "baseline",
                         "verdict": "BASELINE",
-                        "heldout_loss_delta": 0.0,
+                        "heldout_delta": 0.0,
                     }
                 )
                 continue
@@ -432,15 +490,16 @@ def summarize_sweep(record: Mapping[str, Any], path: Path | None = None) -> str:
     if question:
         lines.append(f"  question: {question}")
     lines.append("")
-    header = ("point", "n", "Δ held-out loss", "± se", "verdict", "params", "wall s")
+    header = ("point", "n", "metric", "Δ", "± se", "verdict", "params", "wall s")
     rows = [header]
     for point in record.get("summary") or []:
         rows.append(
             (
                 point["label"],
                 str(point["comparable"]),
-                _number(point["heldout_loss_delta_mean"]),
-                _number(point["heldout_loss_delta_se"]),
+                "bits/byte" if point.get("metric") == "bits_per_byte" else "loss",
+                _number(point["heldout_delta_mean"]),
+                _number(point["heldout_delta_se"]),
                 point["verdict"],
                 _number(point["parameters"]),
                 _number(point["wall_seconds_mean"], 1),
@@ -455,9 +514,10 @@ def summarize_sweep(record: Mapping[str, Any], path: Path | None = None) -> str:
         )
     lines.append("")
     lines.append(
-        "  Δ is candidate minus baseline at the same seed; negative is better. A "
-        "verdict needs two or more seeds: LOWER_LOSS or HIGHER_LOSS when the mean "
-        "is more than two standard errors from zero."
+        "  Δ is candidate minus baseline at the same seed, in held-out loss, or "
+        "in bits per byte where the point changes the tokenizer; negative is "
+        "better. A verdict needs two or more seeds: LOWER_LOSS or HIGHER_LOSS "
+        "when the mean is more than two standard errors from zero."
     )
     lines.append("")
     for entry in record.get("tries") or []:

@@ -148,7 +148,8 @@ def lab(tmp_path_factory: pytest.TempPathFactory) -> Path:
             },
             "comparison": {
                 "verdict": "CANDIDATE_LOWER_LOSS",
-                "heldout_loss_delta": -0.031,
+                "metric": "loss",
+                "heldout_delta": -0.031,
             },
         },
     )

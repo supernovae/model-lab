@@ -1177,6 +1177,11 @@ class EvaluationConfig(StrictModel):
     batch_size: int | None = Field(
         default=None, gt=0, exclude_if=lambda value: value is None
     )
+    # Score the first this many held-out documents one by one for bits per
+    # byte, which compares models with different tokenizers.
+    text_documents: int | None = Field(
+        default=None, strict=True, gt=0, exclude_if=lambda value: value is None
+    )
     panels: tuple[FixedValidationPanel, ...] = Field(
         default=(), exclude_if=lambda value: not value
     )

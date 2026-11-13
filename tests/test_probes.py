@@ -1279,7 +1279,7 @@ def test_try_stopped_during_probing_keeps_partial_battery_and_comparison(
     sealed = read_record(path)
     _assert_partial(sealed["probe"], "interrupted" if how == "signal" else "cancelled")
     # The completed training comparison survives the stopped battery.
-    assert sealed["comparison"]["heldout_loss_delta"] is not None
+    assert sealed["comparison"]["heldout_delta"] is not None
     assert sealed["arms"]["candidate"]["heldout"]["loss"] is not None
     progress = json.loads((path.parent / "probe-progress.json").read_text())
     assert progress["state"] == "stopped"

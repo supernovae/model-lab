@@ -56,6 +56,16 @@ validation split distinct from training. Anything else makes the verdict
 `NOT_COMPARABLE` (exit 3) with no delta. So does a candidate that cannot read the
 baseline's evaluation context.
 
+A delta that changes the tokenizer cannot keep the tokenized validation data,
+so it is compared on [bits per byte](evaluation.md#bits-per-byte) instead
+(`comparison.metric: bits_per_byte`). Set `evaluation.text_documents` in the
+baseline; both arms then score that many held-out documents, and the comparison
+requires the same text (`text_sha256` and byte count) in place of the same
+tokens. Without it, a tokenizer change is `NOT_COMPARABLE`. Arms with the same
+tokenizer still compare held-out loss (`metric: loss`) and, when text was
+scored, also report `bits_per_byte_delta`. `comparison.heldout_delta` is
+candidate minus baseline in the comparison's metric.
+
 ## Reusing a baseline
 
 A baseline is reused only from an earlier completed try with the same effective
@@ -173,6 +183,15 @@ klab report SWEEP_ID
 
 - **Grid.** Several fields under `vary` run every combination, in the order
   written. A sweep runs at most 256 tries.
+- **Points.** To change several fields together, list the points instead of
+  `vary` (a sweep has one or the other). For example, a tokenizer and its
+  vocabulary size, compared on bits per byte:
+
+  ```yaml
+  points:
+    - {tokenizer.path: tok-8k/tokenizer.json, model.vocab_size: 8192}
+    - {tokenizer.path: tok-32k/tokenizer.json, model.vocab_size: 32768}
+  ```
 - **Baseline once per seed.** The first try at each seed trains the baseline;
   the others reuse it. A value equal to the baseline's own is reported as the
   baseline point, not trained again.
@@ -181,7 +200,8 @@ klab report SWEEP_ID
 - **Paths.** `baseline` and a `config` file resolve from the sweep file.
 
 `report` shows one row per point: the mean change in held-out loss across seeds
-with its standard error, a verdict, parameters and wall time, then every try ID.
+(in bits per byte for a point that changes the tokenizer) with its standard
+error, a verdict, parameters and wall time, then every try ID.
 A verdict needs two or more seeds: `LOWER_LOSS` or `HIGHER_LOSS` when the mean is
 more than two standard errors from zero, otherwise `WITHIN_SEED_NOISE`. With one
 seed the verdict says `SINGLE_SEED_*`, a direction to follow up rather than a

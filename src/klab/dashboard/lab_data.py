@@ -101,7 +101,7 @@ def activity(snap: LabSnapshot, limit: int = 12) -> list[dict[str, Any]]:
                     str(comparison.get("verdict")),
                     comparison.get("verdict") or record.get("status"),
                 ),
-                "loss_delta": comparison.get("heldout_loss_delta"),
+                "loss_delta": comparison.get("heldout_delta"),
                 "verdict": verdict.get("status"),
                 "action": verdict.get("action"),
             }
