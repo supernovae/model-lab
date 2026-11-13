@@ -683,8 +683,6 @@ def validate_runtime(
         )
     if backend in {"cpu", "mps"} and runtime.device_index != 0:
         raise ValueError(f"{backend} supports only device_index=0")
-    if getattr(getattr(config, "optimizer", None), "state_offload", False):
-        raise ValueError("optimizer state_offload is deferred and unsupported")
     precision = _resolved_precision(runtime.precision)
     if precision == "fp16" and backend == "cpu":
         raise ValueError("fp16 is unsupported on CPU; use fp32 or bf16")

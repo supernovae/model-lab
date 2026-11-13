@@ -38,12 +38,13 @@ from typing import Literal
 import torch
 from torch import Tensor, nn
 from torch.nn import functional
+from torch.utils.checkpoint import checkpoint
 
 from klab.model.cache import AttentionKVCache
 from klab.model.rope import RoPE
 
 # Upper bound on masked score cells evaluated per chunk of query blocks.
-_CHUNK_CELLS = 1 << 26
+CHUNK_CELLS = 1 << 26
 
 
 class LocalSelectedAttention(nn.Module):
@@ -94,6 +95,8 @@ class LocalSelectedAttention(nn.Module):
             self.pool_logits = nn.Parameter(torch.zeros(num_heads, block_size))
             self.coarse_gate = nn.Parameter(torch.zeros(num_heads))
         self.rope = RoPE(self.head_dim, rope_base)
+        # Set by training (activation_checkpointing.strategy); not a weight.
+        self.recompute_chunks = False
 
     def _project(
         self, x: Tensor, position_offset: int = 0
@@ -158,7 +161,7 @@ class LocalSelectedAttention(nn.Module):
         nearby = own[:, None] - local + torch.arange(local + 1, device=query.device)
         nearby = nearby.clamp_min(-1).expand(batch, heads, -1, -1)
         candidates = summary[:, :, : max(blocks - local - 1, 0)]
-        step = max(1, _CHUNK_CELLS // max(1, batch * heads * blocks))
+        step = max(1, CHUNK_CELLS // max(1, batch * heads * blocks))
         selected = [
             self._select(
                 query[:, :, start : start + step, 0],
@@ -193,40 +196,84 @@ class LocalSelectedAttention(nn.Module):
         causal = torch.ones(size, slots, size, dtype=torch.bool, device=x.device)
         causal[:, self.local_blocks] = torch.ones_like(causal[:, 0]).tril()
         causal = causal.reshape(size, slots * size)
-        batch_index = torch.arange(batch, device=x.device)[:, None, None, None]
-        head_index = torch.arange(heads, device=x.device)[None, :, None, None]
+        # One row per (batch, head, block): a selected block is a row index, so
+        # the gather is one index_select instead of broadcast advanced indexing.
+        rows = (
+            torch.arange(batch * heads, device=x.device).view(batch, heads, 1, 1)
+            * blocks
+            + indices
+        )
+        key_rows, value_rows = key.flatten(0, 2), value.flatten(0, 2)
         coarse = self.selector == "learned"
-        if coarse:
-            summary_value = self._summarize(value)
-            own = torch.arange(blocks, device=x.device)
-        step = max(1, _CHUNK_CELLS // (batch * heads * size * slots * size))
+        summary_value = self._summarize(value) if coarse else None
+        step = max(1, CHUNK_CELLS // (batch * heads * size * slots * size))
+        # With ``recompute_chunks`` each chunk keeps only its inputs and
+        # recomputes its gathered keys, mask and scores in backward, so a block
+        # holds one chunk of attention work instead of all of them.
+        recompute = (
+            self.recompute_chunks and torch.is_grad_enabled() and query.requires_grad
+        )
         outputs = []
         for start in range(0, blocks, step):
             stop = min(start + step, blocks)
-            chosen = indices[:, :, start:stop]
-            allowed = (
-                real[:, :, start:stop].repeat_interleave(size, dim=-1)[..., None, :]
-                & causal
-            )
-            output = functional.scaled_dot_product_attention(
+            arguments = (
                 query[:, :, start:stop],
-                key[batch_index, head_index, chosen].flatten(3, 4),
-                value[batch_index, head_index, chosen].flatten(3, 4),
-                attn_mask=allowed,
-                dropout_p=0.0,
+                key_rows,
+                value_rows,
+                rows[:, :, start:stop],
+                real[:, :, start:stop],
+                causal,
+                summary[:, :, :stop] if coarse else None,
+                summary_value[:, :, :stop] if coarse else None,
+                start,
             )
-            if coarse:
-                output = output + self._coarse(
-                    query[:, :, start:stop].flatten(2, 3),
-                    summary[:, :, :stop],
-                    summary_value[:, :, :stop],
-                    own[None, :stop] < own[start:stop].repeat_interleave(size)[:, None],
-                ).unflatten(2, (stop - start, size))
-            outputs.append(output)
+            outputs.append(
+                checkpoint(self._attend, *arguments, use_reentrant=False)
+                if recompute
+                else self._attend(*arguments)
+            )
         output = torch.cat(outputs, dim=2).reshape(
             batch, heads, blocks * size, self.value_dim
         )[:, :, :length]
         return self.out_proj(output.transpose(1, 2).reshape(batch, length, -1))
+
+    def _attend(
+        self,
+        query: Tensor,
+        key_rows: Tensor,
+        value_rows: Tensor,
+        rows: Tensor,
+        real: Tensor,
+        causal: Tensor,
+        summary: Tensor | None,
+        summary_value: Tensor | None,
+        start: int,
+    ) -> Tensor:
+        """Attention of one chunk of query blocks ``[batch, heads, n, size, dim]``."""
+        batch, heads, count, size = query.shape[:4]
+
+        def gather(source: Tensor) -> Tensor:
+            picked = source.index_select(0, rows.flatten())
+            return picked.view(batch, heads, count, -1, source.shape[-1])
+
+        allowed = real.repeat_interleave(size, dim=-1)[..., None, :] & causal
+        output = functional.scaled_dot_product_attention(
+            query,
+            gather(key_rows),
+            gather(value_rows),
+            attn_mask=allowed,
+            dropout_p=0.0,
+        )
+        if summary is None or summary_value is None:
+            return output
+        stop = start + count
+        own = torch.arange(stop, device=query.device)
+        return output + self._coarse(
+            query.flatten(2, 3),
+            summary,
+            summary_value,
+            own[None, :] < own[start:].repeat_interleave(size)[:, None],
+        ).unflatten(2, (count, size))
 
     def _coarse(
         self, query: Tensor, summary_key: Tensor, summary_value: Tensor, allowed: Tensor

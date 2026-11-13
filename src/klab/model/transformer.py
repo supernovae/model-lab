@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from typing import Literal
 
@@ -175,6 +175,9 @@ class DenseLM(nn.Module):
         self._forward_block_calls = 0
         self._cache_owner = object()
         self._recomputed_block_calls = 0
+        # Called before every block runs, including its recomputation during
+        # backward. Training uses it to stop an update that outgrows the device.
+        self.before_block: Callable[[], None] | None = None
 
     _initialize = staticmethod(initialize_module)
 
@@ -378,6 +381,8 @@ class DenseLM(nn.Module):
         x = self._apply_semantic_site(x, semantic_query_map, site="embedding")
         auxiliary_loss = x.new_zeros(())
         for block_index, block in enumerate(self.blocks):
+            if self.before_block is not None:
+                self.before_block()
             if activation_checkpointing and self.training and torch.is_grad_enabled():
 
                 def run_block(
@@ -387,6 +392,8 @@ class DenseLM(nn.Module):
                         self._forward_block_calls += 1
                     else:
                         self._recomputed_block_calls += 1
+                        if self.before_block is not None:
+                            self.before_block()
                     return current.forward_with_aux(
                         hidden,
                         valid_target_mask=valid_target_mask,

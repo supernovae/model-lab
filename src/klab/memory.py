@@ -20,6 +20,8 @@ import yaml
 from klab import host_capacity
 from klab.canonical import canonical_json
 from klab.config.models import AttentionConfig, RunConfig
+from klab.engines.base import EngineOutOfMemory
+from klab.model.attention.local_selected import CHUNK_CELLS
 from klab.model.inspection import (
     ParameterInventory,
     named_tensor_inventory,
@@ -27,6 +29,7 @@ from klab.model.inspection import (
 )
 from klab.runtime import RuntimeInfo, allocated_memory_bytes, process_rss_bytes
 from klab.training.manifest import config_sha256
+from klab.training.optimizer import offloaded_state_device_bytes
 
 _MIB = 1024 * 1024
 
@@ -49,6 +52,9 @@ class MemoryEstimate:
     headroom_bytes: int
     assumptions: tuple[str, ...]
     calibration_sample_count: int = 0
+    # Optimizer state kept in host memory by ``optimizer.state_offload``; it is
+    # not part of ``peak_bytes``.
+    host_optimizer_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -261,6 +267,23 @@ def estimate_memory(
     buffers = registered_runtime_buffers_bytes(config)
     gradients = inventory.trainable * 4
     optimizer = optimizer_state_bytes(config, inventory)
+    offloaded_optimizer = 0
+    if config.optimizer.state_offload:
+        largest = max(
+            (
+                4 * spec.numel
+                for spec in named_tensor_inventory(
+                    config.model,
+                    config.attention,
+                    trainable_parameters=config.training.trainable_parameters,
+                ).values()
+                if spec.trainable and spec.alias_of is None
+            ),
+            default=0,
+        )
+        # The full state waits in host memory; one bucket is on the device.
+        offloaded_optimizer = optimizer
+        optimizer = offloaded_state_device_bytes(optimizer, largest)
     # Each block is charged for its own feed-forward and attention kind. A
     # feed-forward kind from another package is charged as one dense SwiGLU.
     nonattention: list[int] = []
@@ -283,10 +306,33 @@ def estimate_memory(
         keys_per_query, gathered_width, note = _attention_reach(config, layer_attention)
         if note not in attention_notes:
             attention_notes.append(note)
+        scored_tokens = b * t
+        if (
+            layer_attention.kind == "local_selected"
+            and config.runtime.memory.activation_checkpointing.enabled
+            and config.runtime.memory.activation_checkpointing.strategy
+            == "transformer_block_and_attention"
+        ):
+            # Only one chunk of query blocks holds scores and gathered keys.
+            size = layer_attention.block_size
+            assert size is not None and layer_attention.window_size is not None
+            slots = (
+                layer_attention.window_size // size
+                + 1
+                + (layer_attention.selected_blocks or 0)
+            )
+            chunk_blocks = max(1, CHUNK_CELLS // (b * h * size * slots * size))
+            scored_tokens = b * min(t, chunk_blocks * size)
+            note = (
+                "local_selected attention recomputed per chunk holds the scores "
+                "and gathered keys of one chunk of query blocks"
+            )
+            if note not in attention_notes:
+                attention_notes.append(note)
         attention_working_per_block.append(
             4 * b * t * projected_width
-            + 2 * 4 * b * h * t * keys_per_query
-            + 4 * b * t * gathered_width
+            + 2 * 4 * h * scored_tokens * keys_per_query
+            + 4 * scored_tokens * gathered_width
         )
     streams = (
         (len(model.memory_ngram_orders) or 1) * model.memory_hash_heads
@@ -348,6 +394,11 @@ def estimate_memory(
         assumptions.append(
             "activation offload is unsupported here and receives no estimated saving"
         )
+    if offloaded_optimizer:
+        assumptions.append(
+            "optimizer state offload keeps the full state in host memory and "
+            "charges the device one streamed bucket of it"
+        )
     if missing:
         assumptions.append(missing)
     if budget is not None and physical_ceiling is None:
@@ -368,6 +419,7 @@ def estimate_memory(
         workspace,
         headroom,
         tuple(assumptions),
+        host_optimizer_bytes=offloaded_optimizer,
     )
 
 
@@ -375,22 +427,25 @@ def validate_offload_headroom(
     config: RunConfig, runtime: RuntimeInfo, estimate: MemoryEstimate
 ) -> dict[str, object] | None:
     """Check incremental host allocations before creating a run or a large model."""
-    if not config.runtime.memory.activation_offload.enabled:
+    activations = config.runtime.memory.activation_offload.enabled
+    if not activations and not estimate.host_optimizer_bytes:
         return None
     try:
         memory = host_capacity.measure_memory()
         rss = process_rss_bytes()
     except (OSError, psutil.Error) as error:
-        raise MemoryError(
-            "activation offload requires readable host memory counters"
-        ) from error
-    staged = estimate.activations_bytes + estimate.attention_working_bytes
+        raise MemoryError("offload requires readable host memory counters") from error
+    staged = (
+        estimate.activations_bytes + estimate.attention_working_bytes
+        if activations
+        else 0
+    ) + estimate.host_optimizer_bytes
     # Allow both CPU snapshots and serialization buffers, without claiming that
     # all checkpoint implementations materialize this upper bound simultaneously.
     checkpoint = 2 * (
         estimate.resident_weights_bytes
         + estimate.runtime_buffers_bytes
-        + estimate.optimizer_bytes
+        + max(estimate.optimizer_bytes, estimate.host_optimizer_bytes)
     )
     host_increment = math.ceil(1.15 * (staged + checkpoint))
     unified = runtime.backend in {"mps", "metal"}
@@ -400,15 +455,15 @@ def validate_offload_headroom(
         ceiling = min(ceiling, estimate.capacity_ceiling_bytes)
     if required > ceiling:
         raise MemoryError(
-            "activation offload host headroom is insufficient: "
+            "offload host headroom is insufficient: "
             f"estimated incremental {required} bytes exceeds {ceiling} bytes; "
-            f"current process RSS {rss}, staged activations {staged}, "
+            f"current process RSS {rss}, offloaded state {staged}, "
             f"checkpoint staging {checkpoint}"
         )
     return {
         "process_rss_bytes": rss,
         "available_host_bytes": memory.available,
-        "staged_activation_bytes": staged,
+        "staged_host_bytes": staged,
         "checkpoint_staging_bytes": checkpoint,
         "incremental_peak_bytes": required,
         "ceiling_bytes": ceiling,
@@ -442,7 +497,11 @@ def calibration_key(
         "micro_batch_size": config.training.micro_batch_size,
         "gradient_accumulation": config.training.gradient_accumulation,
         "optimizer": config.optimizer.name,
+        "optimizer_state_offload": config.optimizer.state_offload,
         "checkpointing": config.runtime.memory.activation_checkpointing.enabled,
+        "checkpointing_strategy": (
+            config.runtime.memory.activation_checkpointing.strategy
+        ),
         "offload": config.runtime.memory.activation_offload.enabled,
     }
     canonical = json.dumps(
@@ -778,6 +837,26 @@ def plan_memory(
                 }
             )
 
+        if (
+            policy == "max_fit"
+            and current.result != "LIKELY_TO_FIT"
+            and runtime_info.engine == "pytorch"
+            and runtime_info.backend != "cpu"
+            and not candidate.optimizer.state_offload
+        ):
+            consider(
+                "optimizer_state_offload",
+                candidate.model_copy(
+                    update={
+                        "optimizer": candidate.optimizer.model_copy(
+                            update={"state_offload": True}
+                        )
+                    }
+                ),
+                "keep optimizer state in host memory and stream it per bucket; "
+                "the update is unchanged",
+                effective=True,
+            )
         if policy == "max_fit" and current.result != "LIKELY_TO_FIT":
             for optimizer in config.runtime.memory.allowed_optimizers:
                 if optimizer == candidate.optimizer.name:
@@ -821,7 +900,6 @@ def plan_memory(
                     break
             if current.result != "LIKELY_TO_FIT":
                 for name in (
-                    "optimizer_state_offload",
                     "expert_offload",
                     "parameter_offload",
                 ):
@@ -901,6 +979,33 @@ def write_resource_proposal(
     return path, report_path
 
 
+class DeviceMemorySpill(EngineOutOfMemory):
+    """A running update outgrew device memory and would spill into host memory."""
+
+
+@dataclass(frozen=True)
+class SpillLimits:
+    """When a training update is stopped instead of spilling.
+
+    ``device_fraction`` of the device total (CUDA, ROCm, XPU) or of the
+    recommended working set (MPS) bounds device memory in use;
+    ``host_drop_fraction`` bounds how far host available memory may fall below
+    its value after the first update.
+    """
+
+    device_fraction: float
+    host_drop_fraction: float
+
+    @classmethod
+    def from_config(cls, config: RunConfig) -> SpillLimits | None:
+        memory = config.runtime.memory
+        if not memory.spill_guard.enabled:
+            return None
+        return cls(
+            memory.max_device_memory_fraction, memory.spill_guard.host_drop_fraction
+        )
+
+
 class MemoryMonitor:
     """Bounded per-update aggregates; sampled peaks are not native high-water marks."""
 
@@ -910,11 +1015,14 @@ class MemoryMonitor:
         *,
         runtime_info: RuntimeInfo | None = None,
         sample_interval_seconds: float | None = None,
+        spill_limits: SpillLimits | None = None,
     ) -> None:
         if sample_interval_seconds is not None and sample_interval_seconds < 0.01:
             raise ValueError("sample_interval_seconds must be at least 0.01 seconds")
         self.device = device
         self.runtime_info = runtime_info
+        self.spill_limits = spill_limits
+        self._host_baseline: int | None = None
         self.sample_interval_seconds = sample_interval_seconds
         self.unavailable_reasons: dict[str, str] = {}
         self._latest: dict[str, int | float | str] = {}
@@ -1063,7 +1171,89 @@ class MemoryMonitor:
                         self._peaks.get(metric, 0.0), float(value)
                     )
             self._sampling_seconds += monotonic() - started
+        if phase != "observer":
+            # The observer thread cannot stop training; the next phase sample can.
+            self._check_spill(sample)
         return sample
+
+    def check_spill(self) -> None:
+        """Cheap spill check between blocks: counters only, no sync, no record."""
+        if self.spill_limits is None:
+            return
+        reading: dict[str, int | float | str] = {}
+        try:
+            allocated = (
+                self._native("allocated")
+                if self._device_type == "metal"
+                else allocated_memory_bytes(self.device)  # type: ignore[arg-type]
+            )
+        except RuntimeError, AttributeError:
+            allocated = None
+        if allocated is not None:
+            reading["memory/device_allocated_bytes"] = allocated
+        for metric, native in (
+            ("memory/device_reserved_bytes", "reserved"),
+            ("memory/driver_allocated_bytes", "driver_allocated"),
+        ):
+            value = self._native(native)
+            if value is not None:
+                reading[metric] = value
+        if self._host_baseline is not None:
+            try:
+                reading["memory/system_available_bytes"] = int(
+                    host_capacity.measure_memory().available
+                )
+            except OSError, RuntimeError, psutil.Error:
+                pass
+        self._check_spill(reading)
+
+    def _check_spill(self, sample: dict[str, int | float | str]) -> None:
+        limits, runtime = self.spill_limits, self.runtime_info
+        if limits is None:
+            return
+        gib = 1024**3
+        total = None
+        if runtime is not None:
+            total = (
+                runtime.device_recommended_bytes
+                if self._device_type in {"mps", "metal"}
+                else runtime.device_total_bytes
+            )
+        in_use = max(
+            (
+                float(sample[name])
+                for name in (
+                    "memory/device_allocated_bytes",
+                    "memory/device_reserved_bytes",
+                    "memory/device_peak_allocated_bytes",
+                    "memory/device_peak_reserved_bytes",
+                    "memory/driver_allocated_bytes",
+                )
+                if name in sample
+            ),
+            default=None,
+        )
+        if total and in_use is not None and in_use > limits.device_fraction * total:
+            raise DeviceMemorySpill(
+                f"device memory spill: {in_use / gib:.2f} GiB in use exceeds "
+                f"{limits.device_fraction:g} of the device's {total / gib:.2f} GiB "
+                "(runtime.memory.max_device_memory_fraction); stopped before "
+                "allocations spill into host memory"
+            )
+        available = sample.get("memory/system_available_bytes")
+        baseline = self._host_baseline
+        if (
+            baseline is not None
+            and isinstance(available, int)
+            and available < (1 - limits.host_drop_fraction) * baseline
+        ):
+            raise DeviceMemorySpill(
+                f"device memory spill: host available memory fell from "
+                f"{baseline / gib:.2f} GiB after the first update to "
+                f"{available / gib:.2f} GiB, more than "
+                f"{limits.host_drop_fraction:g} "
+                "(runtime.memory.spill_guard.host_drop_fraction)"
+            )
 
     def _stop_observer(self) -> float:
         if self._observer is None:
@@ -1078,7 +1268,11 @@ class MemoryMonitor:
 
     def end_update(self) -> dict[str, float]:
         observer_seconds = self._stop_observer()
-        self.sample("end")
+        end = self.sample("end")
+        if self._host_baseline is None and isinstance(
+            end.get("memory/system_available_bytes"), int
+        ):
+            self._host_baseline = int(end["memory/system_available_bytes"])
         with self._lock:
             result = {
                 metric: float(value)

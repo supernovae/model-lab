@@ -18,6 +18,7 @@ from klab.engines.mlx_policy import validate as validate_mlx
 from klab.engines.pytorch import PyTorchEngine
 from klab.evaluation.evidence import experiment_evidence
 from klab.evaluation.post_train_triage import PROMPTS, read_triage
+from klab.training import optimizer as optimizer_module
 from klab.training.checkpoints import CheckpointManager
 from klab.training.manifest import read_manifest
 from klab.training.metrics import ExperimentStore
@@ -123,11 +124,22 @@ def config(root: Path) -> RunConfig:
 
 
 @pytest.mark.parametrize(
-    ("memory", "optimizer_name"),
-    [("none", "adamw"), ("byte", "adamw"), ("none", "adafactor")],
+    ("memory", "optimizer_name", "state_offload"),
+    [
+        ("none", "adamw", False),
+        ("byte", "adamw", False),
+        ("none", "adafactor", False),
+        # The interrupted and resumed runs keep their state in host memory and
+        # step in many buckets; they must match the resident-state run exactly.
+        ("none", "adamw", True),
+    ],
 )
 def test_interrupted_resume_matches_uninterrupted(
-    tmp_path: Path, memory: str, optimizer_name: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    memory: str,
+    optimizer_name: str,
+    state_offload: bool,
 ) -> None:
     memory_settings = (
         {
@@ -158,9 +170,14 @@ def test_interrupted_resume_matches_uninterrupted(
     split = split.model_copy(
         update={
             "model": split.model.model_copy(update=memory_settings),
-            "optimizer": full.optimizer,
+            "optimizer": full.optimizer.model_copy(
+                update={"state_offload": state_offload}
+            ),
         }
     )
+    if state_offload:
+        # Smaller than any parameter, so every tensor is streamed alone.
+        monkeypatch.setattr(optimizer_module, "STATE_OFFLOAD_BUCKET_BYTES", 1024)
     train(split, run_id="part", stop_after_step=5)
     train(
         split,
@@ -443,19 +460,62 @@ def test_mps_interrupted_checkpoint_resumes_locally(tmp_path: Path) -> None:
     assert manifest["effective_config"]["runtime"]["backend"] == "mps"
 
 
-def test_adafactor_state_offload_is_rejected(tmp_path: Path) -> None:
+def test_mlx_state_offload_is_rejected(tmp_path: Path) -> None:
     payload = config(tmp_path).model_dump(mode="json")
-    payload["optimizer"] = {
-        "name": "adafactor",
-        "peak": 0.003,
-        "floor": 0.0003,
-        "warmup_steps": 2,
-        "weight_decay": 0.1,
-        "state_offload": True,
-    }
+    payload["optimizer"]["state_offload"] = True
+    payload["runtime"].update(engine="mlx", backend="metal")
 
-    with pytest.raises(ValueError, match="state_offload is deferred"):
+    with pytest.raises(ValueError, match="state_offload requires the PyTorch engine"):
         RunConfig.model_validate(payload)
+
+
+@pytest.mark.parametrize("reading", ["device", "host"])
+def test_spill_guard_stops_run_with_recorded_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reading: str
+) -> None:
+    from klab import host_capacity, memory
+    from klab.engines import pytorch as pytorch_engine
+
+    target = config(tmp_path)
+    gib = 1024**3
+    if reading == "device":
+        # A device of 4 GiB with 3.9 GiB in use, beyond the 0.9 ceiling.
+        validate = pytorch_engine.validate_runtime
+
+        def with_device(*args, **kwargs):
+            return replace(validate(*args, **kwargs), device_total_bytes=4 * gib)
+
+        monkeypatch.setattr(pytorch_engine, "validate_runtime", with_device)
+        monkeypatch.setattr(memory, "allocated_memory_bytes", lambda _: int(3.9 * gib))
+    else:
+        # Host memory falls by three quarters after the second update.
+        ended = []
+        end_update = memory.MemoryMonitor.end_update
+
+        def counted_end(self):
+            result = end_update(self)
+            ended.append(True)
+            return result
+
+        measured = host_capacity.measure_memory
+
+        def falling():
+            value = measured()
+            return (
+                value._replace(available=value.available // 4)
+                if len(ended) >= 2
+                else value
+            )
+
+        monkeypatch.setattr(memory.MemoryMonitor, "end_update", counted_end)
+        monkeypatch.setattr(host_capacity, "measure_memory", falling)
+
+    with pytest.raises(memory.DeviceMemorySpill, match="device memory spill"):
+        train(target, run_id="spill")
+    final = _final_observation(target.logging.root_dir, "spill")
+    assert final["run_status"] == "failed"
+    assert final["reason"].startswith("device memory spill")
+    assert final["completed_steps"] == (0 if reading == "device" else 2)
 
 
 def test_resume_rejects_model_configuration_mismatch(tmp_path: Path) -> None:

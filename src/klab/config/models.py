@@ -796,16 +796,34 @@ class DatasetConfig(StrictModel):
 
 class ActivationCheckpointingConfig(StrictModel):
     enabled: bool = False
-    strategy: Literal["transformer_block"] = "transformer_block"
+    # ``transformer_block_and_attention`` also recomputes local_selected
+    # attention one chunk of query blocks at a time inside each block.
+    strategy: Literal["transformer_block", "transformer_block_and_attention"] = (
+        "transformer_block"
+    )
 
 
 class ActivationOffloadConfig(StrictModel):
     enabled: bool = False
 
 
+class SpillGuardConfig(StrictModel):
+    """Stop a running update whose memory has outgrown the device."""
+
+    enabled: bool = True
+    # Stop when host available memory falls by more than this fraction of its
+    # value after the first update. The device limit is
+    # ``max_device_memory_fraction`` of the device total.
+    host_drop_fraction: float = Field(default=0.5, gt=0, lt=1)
+
+
 class MemoryConfig(StrictModel):
     estimate_policy: Literal["enforce", "observe"] = Field(
         default="enforce", exclude_if=lambda value: value == "enforce"
+    )
+    spill_guard: SpillGuardConfig = Field(
+        default=SpillGuardConfig(),
+        exclude_if=lambda value: value == SpillGuardConfig(),
     )
     policy: Literal["fast", "balanced", "low_memory", "max_fit"] = "balanced"
     max_device_memory_fraction: float = Field(default=0.90, gt=0, le=1)
@@ -1446,8 +1464,8 @@ class RunConfig(StrictModel):
             not 0 <= beta < 1 for beta in self.optimizer.betas
         ):
             raise ValueError("optimizer.betas entries must be in [0, 1)")
-        if self.optimizer.state_offload:
-            raise ValueError("optimizer.state_offload is deferred and unsupported")
+        if self.optimizer.state_offload and self.runtime.engine != "pytorch":
+            raise ValueError("optimizer.state_offload requires the PyTorch engine")
         if self.runtime.engine == "mlx" and self.runtime.backend != "metal":
             raise ValueError("MLX engine requires runtime.backend=metal")
         if self.runtime.engine == "pytorch" and self.runtime.backend == "metal":
