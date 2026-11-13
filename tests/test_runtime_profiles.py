@@ -163,7 +163,7 @@ def fake_runtime(monkeypatch, config, backend):
         **identity.source_identity(),
     }
     monkeypatch.setattr(profiles, "_probe", lambda *args, **kwargs: dict(evidence))
-    monkeypatch.setattr(identity, "probe", lambda request: dict(evidence))
+    monkeypatch.setattr(identity, "probe", lambda request, devices=True: dict(evidence))
     config = config.model_copy(
         update={
             "runtime": config.runtime.model_copy(

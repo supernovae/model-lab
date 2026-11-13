@@ -234,11 +234,13 @@ that names the reading and the setting. No checkpoint is written for the
 interrupted update; earlier checkpoints stay resumable. The guard reads counters
 only and never synchronizes the device. It watches the primary device only.
 
-On a host with two Intel Arc cards, every device allocation on one card is also
-resident in host memory for the other (`drm-resident-gtt` in the process's DRM
-`fdinfo`), so host available memory falls by about as much as the device
-allocates. That is normal and is why the host reading is compared with its value
-after the first update, not before training.
+On a host with several Intel Arc cards, a process that can see more than one
+card holds each device allocation in host memory as well (`drm-resident-gtt` in
+the process's DRM `fdinfo`): 8 GiB on one B70 took 8.2 GiB of host RAM with both
+cards visible and 0.2 GiB with one. Lab therefore confines every XPU training
+process to its own card (see [several GPUs](training.md#several-gpus-on-one-host)).
+The host reading is still compared with its value after the first update, not
+before training.
 
 A generation key/value cache belongs to inference only; it has no part in
 training memory.

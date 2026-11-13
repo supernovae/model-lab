@@ -18,6 +18,9 @@ import numpy as np
 def _device(backend: str, index: int):
     import torch
 
+    from klab.device_visibility import visible_index
+
+    index = visible_index(backend, index)
     if backend in {"cuda", "rocm"}:
         return torch.device("cuda", index)
     if backend == "xpu":

@@ -1,114 +1,60 @@
-"""Multi-device microbatch-parallel replica execution and flat-buffer reduction."""
+"""Multi-device microbatch-parallel training: one process per secondary device.
+
+The primary process keeps the model, optimizer and checkpoints. Each secondary
+device gets a replica in its own process, started with only that device
+visible (:mod:`klab.device_visibility`): on a host with several Arc cards a
+process that sees every card also holds its device memory in host RAM. Weights
+and gradients cross between processes through shared host tensors, and
+microbatches and results through a pipe. Gradients are summed on the primary
+in replica order, so an update is the same as on one device.
+"""
 
 from __future__ import annotations
 
+import multiprocessing.connection
+import os
+import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+import traceback
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 import torch
+import torch.multiprocessing as torch_multiprocessing
 from torch.nn import functional
 
 from klab.config.models import RunConfig
+from klab.device_visibility import child_environment
 from klab.engines.base import Microbatch
 from klab.engines.output_head import chunked_output_head_cross_entropy
 from klab.model.inspection import architecture_metrics
 from klab.model.transformer import DenseLM
 from klab.runtime import precision_context, synchronize
 
+# Seconds between checks that a replica process is still alive while waiting.
+_POLL_SECONDS = 1.0
+# Seconds a replica process may take to build its model and report ready.
+_READY_SECONDS = 1800.0
+
 
 @dataclass
 class SecondaryReplica:
-    """In-process model replica bound to a secondary device."""
+    """A model replica bound to one secondary device, inside its own process."""
 
     device: torch.device
     model: DenseLM
     compiled_output_head_loss: Any = None
     trainable_params: tuple[torch.nn.Parameter, ...] = field(default=())
-    # True until the replica copies the primary's parameters at the start of a
-    # slice; set again after every applied optimizer step or state restore.
-    stale: bool = True
 
     def __post_init__(self) -> None:
         if not self.trainable_params:
             self.trainable_params = tuple(
                 p for p in self.model.parameters() if p.requires_grad
             )
-
-
-def pull_replica_weights(
-    primary_params: list[torch.nn.Parameter] | tuple[torch.nn.Parameter, ...],
-    replica: SecondaryReplica,
-) -> None:
-    """Copy the primary's trainable parameters onto one replica, tensor by tensor.
-
-    Called from the replica's own thread at the start of its slice, so the copy
-    overlaps with the primary's compute instead of delaying it.
-    """
-    with torch.no_grad():
-        for replica_param, primary_param in zip(
-            replica.trainable_params, primary_params, strict=True
-        ):
-            replica_param.copy_(primary_param, non_blocking=True)
-    replica.stale = False
-
-
-class GradientReduction:
-    """Collect replica gradients on the primary device while it is still computing.
-
-    Each replica thread pushes its gradients when its slice ends. Pushes are
-    applied in replica order so the sum is the same on every run, and the first
-    push hands over its transferred tensors, so the primary holds at most one
-    extra copy of the gradients. ``merge`` adds the collected sum to the
-    primary's own gradients once its slice has finished.
-    """
-
-    def __init__(
-        self,
-        primary_params: list[torch.nn.Parameter] | tuple[torch.nn.Parameter, ...],
-        primary_device: torch.device,
-        pushes: int,
-    ) -> None:
-        self.primary_params = primary_params
-        self.primary_device = primary_device
-        self.collected: list[torch.Tensor | None] = [None] * len(primary_params)
-        self.turns = [threading.Event() for _ in range(pushes)]
-
-    def push(self, turn: int, replica: SecondaryReplica) -> None:
-        try:
-            if turn:
-                self.turns[turn - 1].wait()
-            with torch.no_grad():
-                for index, parameter in enumerate(replica.trainable_params):
-                    if parameter.grad is None:
-                        continue
-                    moved = parameter.grad.detach().to(
-                        self.primary_device, non_blocking=True
-                    )
-                    held = self.collected[index]
-                    if held is None:
-                        self.collected[index] = moved
-                    else:
-                        held.add_(moved)
-            replica.model.zero_grad(set_to_none=True)
-        finally:
-            self.turns[turn].set()
-
-    def merge(self) -> None:
-        with torch.no_grad():
-            for parameter, collected in zip(
-                self.primary_params, self.collected, strict=True
-            ):
-                if collected is None:
-                    continue
-                if parameter.grad is None:
-                    parameter.grad = collected
-                else:
-                    parameter.grad.add_(collected)
-        self.collected = [None] * len(self.primary_params)
 
 
 def microbatch_position_mask(
@@ -163,18 +109,12 @@ def execute_replica_microbatches(
     pairs: list[tuple[Microbatch, int]],
     valid_targets: int,
     output_head_loss_fn: Any,
-    *,
-    primary_params: list[torch.nn.Parameter] | tuple[torch.nn.Parameter, ...],
-    reduction: GradientReduction,
-    turn: int,
 ) -> dict[str, Any]:
-    """Run one replica's slice: pull weights, forward/backward, push gradients."""
+    """Run one replica's slice, leaving its gradients on its parameters."""
     started = time.perf_counter()
     device = replica.device
     model = replica.model
     model.zero_grad(set_to_none=True)
-    if replica.stale:
-        pull_replica_weights(primary_params, replica)
     language_sum = torch.zeros((), device=device)
     aux_sum = torch.zeros((), device=device)
     diagnostic_sums: dict[str, torch.Tensor] = {}
@@ -250,7 +190,6 @@ def execute_replica_microbatches(
 
     synchronize(device)
     computed = time.perf_counter()
-    reduction.push(turn, replica)
     return {
         "compute_seconds": computed - started,
         "finished_at": computed,
@@ -264,102 +203,329 @@ def execute_replica_microbatches(
     }
 
 
-def _replica_slice(
-    replica: SecondaryReplica,
-    config: RunConfig,
-    pairs: list[tuple[Microbatch, int]],
-    valid_targets: int,
-    output_head_loss_fn: Any,
-    primary_params: list[torch.nn.Parameter] | tuple[torch.nn.Parameter, ...],
-    reduction: GradientReduction,
-    turn: int,
-) -> dict[str, Any]:
-    try:
-        return execute_replica_microbatches(
-            replica,
-            config,
-            pairs,
-            valid_targets,
-            output_head_loss_fn,
-            primary_params=primary_params,
-            reduction=reduction,
-            turn=turn,
-        )
-    finally:
-        # A failed slice must not leave later replicas waiting for its turn.
-        reduction.turns[turn].set()
-
-
-def dispatch_replicas_and_primary(
-    *,
-    replicas: list[SecondaryReplica],
-    config: RunConfig,
-    active_pairs: list[tuple[Microbatch, int]],
-    valid_targets: int,
-    output_head_loss_fn: Any,
-    primary_fn: Any,
-    primary_params: list[torch.nn.Parameter] | tuple[torch.nn.Parameter, ...],
-    primary_device: torch.device,
-    executor: ThreadPoolExecutor,
-) -> tuple[Any, list[dict[str, Any]], dict[str, float]]:
-    """Run each replica's slice on its own thread while the caller runs the primary's.
-
-    Compiled and eager kernels are dispatched the same way. A backward pass can
-    block its host thread (embedding backward on XPU reads a count back per
-    microbatch), so slices issued in turn from one thread run one device at a
-    time; a thread per device keeps every device busy. Compilation itself is
-    serialized by TorchDynamo's own lock.
-
-    Each replica thread also copies the updated weights before its slice and
-    moves its gradients to the primary after it, so that exchange overlaps with
-    the primary's compute. The returned timings say how long each side computed
-    and how long finished replicas waited for the primary.
-    """
-    world_size = 1 + len(replicas)
-    primary_pairs = active_pairs[0::world_size]
-    replica_tasks: list[tuple[SecondaryReplica, list[tuple[Microbatch, int]]]] = []
-    for rep_idx, replica in enumerate(replicas):
-        rep_pairs = active_pairs[rep_idx + 1 :: world_size]
-        if rep_pairs:
-            replica_tasks.append((replica, rep_pairs))
-    reduction = GradientReduction(primary_params, primary_device, len(replica_tasks))
-    started = time.perf_counter()
-    futures = [
-        executor.submit(
-            _replica_slice,
-            replica,
-            config,
-            rep_pairs,
-            valid_targets,
-            output_head_loss_fn,
-            primary_params,
-            reduction,
-            turn,
-        )
-        for turn, (replica, rep_pairs) in enumerate(replica_tasks)
-    ]
-    try:
-        primary_out = primary_fn(primary_pairs)
-        synchronize(primary_device)
-    finally:
-        primary_finished = time.perf_counter()
-        replica_outs = [future.result() for future in futures]
-    reduction.merge()
-    synchronize(primary_device)
-    finished = time.perf_counter()
-    all_computed = max(
-        [primary_finished, *(out["finished_at"] for out in replica_outs)]
+def build_replica(
+    config: RunConfig, device: torch.device, state: dict[str, torch.Tensor]
+) -> SecondaryReplica:
+    """Build the replica the primary's model would be on ``device``."""
+    from klab.engines.pytorch import (
+        apply_recomputation_strategy,
+        output_projection_cross_entropy,
     )
-    timings = {
-        "performance/primary_compute_seconds": primary_finished - started,
-        "performance/replica_compute_seconds": max(
-            (out["compute_seconds"] for out in replica_outs), default=0.0
-        ),
-        # Time finished devices spent waiting for the slowest one, summed.
-        "performance/device_wait_seconds": sum(
-            all_computed - out["finished_at"] for out in replica_outs
+    from klab.model.rope import RoPE
+    from klab.training.trainable import apply_trainable_parameter_filter
+
+    model = DenseLM(config.model, config.attention).to(device)
+    model.load_state_dict(state)
+    apply_trainable_parameter_filter(model, config)
+    apply_recomputation_strategy(model, config)
+    compiled_loss = None
+    runtime = config.runtime
+    if runtime.compile_output_head_loss:
+        compiled_loss = torch.compile(
+            output_projection_cross_entropy,
+            dynamic=runtime.compile_dynamic_shapes,
+            fullgraph=runtime.compile_dynamic_shapes,
         )
-        + (all_computed - primary_finished),
-        "performance/gradient_merge_seconds": finished - all_computed,
-    }
-    return primary_out, replica_outs, timings
+    if runtime.compile_transformer_blocks:
+        if runtime.compile_dynamic_shapes:
+            for module in model.modules():
+                if isinstance(module, RoPE):
+                    module.reserve(config.model.max_seq_len, device)
+        for block in model.blocks:
+            block.forward_with_aux = torch.compile(
+                block.forward_with_aux,
+                dynamic=runtime.compile_dynamic_shapes,
+                fullgraph=runtime.compile_dynamic_shapes,
+            )
+    return SecondaryReplica(
+        device=device, model=model, compiled_output_head_loss=compiled_loss
+    )
+
+
+def _report_failure(connection: multiprocessing.connection.Connection) -> None:
+    """Send the exception itself, so the primary raises the same kind of error."""
+    error = sys.exc_info()[1]
+    trace = traceback.format_exc()
+    try:
+        connection.send(("error", (error, trace)))
+    except Exception:  # noqa: BLE001 - an unpicklable error still reaches the primary
+        connection.send(("error", (RuntimeError(str(error)), trace)))
+
+
+def _host(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    if isinstance(value, dict):
+        return {key: _host(item) for key, item in value.items()}
+    return value
+
+
+def _replica_main(
+    connection: multiprocessing.connection.Connection,
+    config: RunConfig,
+    backend: str,
+    device_index: int,
+    state: dict[str, torch.Tensor],
+    weights: list[torch.Tensor],
+    gradients: list[torch.Tensor],
+    has_gradient: torch.Tensor,
+) -> None:
+    """A secondary device's process: build the replica, then run slices on request."""
+    try:
+        from klab.engines.pytorch import output_projection_cross_entropy
+        from klab.runtime import torch_device_for
+
+        device = torch_device_for(backend, device_index)
+        replica = build_replica(config, device, state)
+        del state
+        shapes = [tuple(parameter.shape) for parameter in replica.trainable_params]
+        if shapes != [tuple(weight.shape) for weight in weights]:
+            raise ValueError("replica trainable parameters differ from the primary's")
+        version = -1
+        connection.send(("ready", None))
+    except Exception:  # noqa: BLE001 - the primary reports the replica's error
+        _report_failure(connection)
+        return
+    while True:
+        message = connection.recv()
+        if message[0] == "stop":
+            return
+        _, weights_version, pairs, valid_targets = message
+        try:
+            if weights_version != version:
+                with torch.no_grad():
+                    for parameter, weight in zip(
+                        replica.trainable_params, weights, strict=True
+                    ):
+                        parameter.copy_(weight)
+                version = weights_version
+            result = execute_replica_microbatches(
+                replica, config, pairs, valid_targets, output_projection_cross_entropy
+            )
+            with torch.no_grad():
+                for index, parameter in enumerate(replica.trainable_params):
+                    has_gradient[index] = parameter.grad is not None
+                    if parameter.grad is not None:
+                        gradients[index].copy_(parameter.grad)
+            replica.model.zero_grad(set_to_none=True)
+            connection.send(("done", _host(result)))
+        except Exception:  # noqa: BLE001 - the primary reports the replica's error
+            _report_failure(connection)
+
+
+_ENVIRONMENT_LOCK = threading.Lock()
+
+
+@contextmanager
+def _environment(environment: dict[str, str]) -> Iterator[None]:
+    """Start a child with ``environment``; a spawned child reads it at start."""
+    with _ENVIRONMENT_LOCK:
+        saved = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(environment)
+        try:
+            yield
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+
+
+@dataclass
+class _ReplicaProcess:
+    device_index: int
+    process: Any
+    connection: multiprocessing.connection.Connection
+    gradients: list[torch.Tensor]
+    has_gradient: torch.Tensor
+
+    def receive(self, timeout: float | None = None) -> Any:
+        waited = 0.0
+        while not self.connection.poll(_POLL_SECONDS):
+            waited += _POLL_SECONDS
+            if not self.process.is_alive():
+                raise RuntimeError(
+                    f"replica process for device {self.device_index} exited "
+                    f"with status {self.process.exitcode}"
+                )
+            if timeout is not None and waited >= timeout:
+                raise TimeoutError(
+                    f"replica process for device {self.device_index} did not "
+                    f"answer within {timeout:.0f} seconds"
+                )
+        kind, payload = self.connection.recv()
+        if kind == "error":
+            error, trace = payload
+            error.add_note(f"in the replica process for device {self.device_index}:")
+            error.add_note(trace)
+            raise error
+        return payload
+
+
+class ReplicaPool:
+    """The secondary devices of one run, each in its own process."""
+
+    def __init__(
+        self,
+        config: RunConfig,
+        backend: str,
+        model: DenseLM,
+        trainable_params: list[torch.nn.Parameter],
+    ) -> None:
+        context = torch_multiprocessing.get_context("spawn")
+        self.trainable_params = trainable_params
+        self.weights = [
+            torch.empty(p.shape, dtype=p.dtype).share_memory_()
+            for p in trainable_params
+        ]
+        # The replicas' starting state, shared once and released when all are ready.
+        state = {
+            name: tensor.detach().cpu().share_memory_()
+            for name, tensor in model.state_dict().items()
+        }
+        self.replicas: list[_ReplicaProcess] = []
+        self.version = 0
+        self.stale = True
+        try:
+            for device_index in config.runtime.secondary_device_indices:
+                gradients = [torch.empty_like(w).share_memory_() for w in self.weights]
+                has_gradient = torch.zeros(
+                    len(self.weights), dtype=torch.bool
+                ).share_memory_()
+                parent, child = context.Pipe()
+                process = context.Process(
+                    target=_replica_main,
+                    args=(
+                        child,
+                        config,
+                        backend,
+                        device_index,
+                        state,
+                        self.weights,
+                        gradients,
+                        has_gradient,
+                    ),
+                    name=f"klab-replica-{device_index}",
+                    daemon=True,
+                )
+                with _environment(child_environment(backend, device_index)):
+                    process.start()
+                child.close()
+                self.replicas.append(
+                    _ReplicaProcess(
+                        device_index, process, parent, gradients, has_gradient
+                    )
+                )
+            for replica in self.replicas:
+                replica.receive(timeout=_READY_SECONDS)
+        except Exception:
+            self.close()
+            raise
+
+    def __len__(self) -> int:
+        return len(self.replicas)
+
+    def invalidate(self) -> None:
+        """The primary's weights changed; publish them before the next slice."""
+        self.stale = True
+
+    def dispatch(
+        self,
+        *,
+        active_pairs: list[tuple[Microbatch, int]],
+        valid_targets: int,
+        primary_fn: Any,
+        primary_device: torch.device,
+    ) -> tuple[Any, list[dict[str, Any]], dict[str, float]]:
+        """Run each replica's slice in its process while the caller runs the primary's.
+
+        Microbatches are dealt round-robin: the primary takes every
+        ``1 + len(self)``-th one starting at 0, replica ``i`` those starting at
+        ``i + 1``. Replica gradients are added to the primary's in replica
+        order. The timings say how long publishing weights took, how long each
+        side computed, how long finished devices waited for the slowest, and
+        how long merging gradients took.
+        """
+        world_size = 1 + len(self.replicas)
+        primary_pairs = active_pairs[0::world_size]
+        tasks = [
+            (replica, active_pairs[index + 1 :: world_size])
+            for index, replica in enumerate(self.replicas)
+            if active_pairs[index + 1 :: world_size]
+        ]
+        started = time.perf_counter()
+        if self.stale:
+            with torch.no_grad():
+                for weight, parameter in zip(
+                    self.weights, self.trainable_params, strict=True
+                ):
+                    weight.copy_(parameter)
+            self.version += 1
+            self.stale = False
+        published = time.perf_counter()
+        for replica, pairs in tasks:
+            replica.connection.send(("run", self.version, pairs, valid_targets))
+        failure: BaseException | None = None
+        try:
+            primary_out = primary_fn(primary_pairs)
+            synchronize(primary_device)
+        finally:
+            primary_finished = time.perf_counter()
+            replica_outs = []
+            for replica, _ in tasks:
+                try:
+                    replica_outs.append(replica.receive())
+                except Exception as error:  # noqa: BLE001 - raised after every replica answers
+                    failure = failure or error
+        if failure is not None:
+            raise failure
+        collected: list[torch.Tensor | None] = [None] * len(self.trainable_params)
+        with torch.no_grad():
+            for replica, _ in tasks:
+                for index, gradient in enumerate(replica.gradients):
+                    if not bool(replica.has_gradient[index]):
+                        continue
+                    moved = gradient.to(primary_device)
+                    held = collected[index]
+                    collected[index] = moved if held is None else held.add_(moved)
+            for parameter, gradient in zip(
+                self.trainable_params, collected, strict=True
+            ):
+                if gradient is None:
+                    continue
+                if parameter.grad is None:
+                    parameter.grad = gradient
+                else:
+                    parameter.grad.add_(gradient)
+        synchronize(primary_device)
+        finished = time.perf_counter()
+        all_computed = max(
+            [primary_finished, *(out["finished_at"] for out in replica_outs)]
+        )
+        timings = {
+            "performance/weight_publish_seconds": published - started,
+            "performance/primary_compute_seconds": primary_finished - published,
+            "performance/replica_compute_seconds": max(
+                (out["compute_seconds"] for out in replica_outs), default=0.0
+            ),
+            # Time finished devices spent waiting for the slowest one, summed.
+            "performance/device_wait_seconds": sum(
+                max(0.0, all_computed - out["finished_at"]) for out in replica_outs
+            )
+            + (all_computed - primary_finished),
+            "performance/gradient_merge_seconds": finished - all_computed,
+        }
+        return primary_out, replica_outs, timings
+
+    def close(self) -> None:
+        for replica in self.replicas:
+            try:
+                replica.connection.send(("stop", None))
+            except BrokenPipeError, OSError:
+                pass
+        for replica in self.replicas:
+            replica.process.join(timeout=30)
+            if replica.process.is_alive():
+                replica.process.terminate()
+                replica.process.join(timeout=10)
+            replica.connection.close()
+        self.replicas = []

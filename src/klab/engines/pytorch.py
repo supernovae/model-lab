@@ -7,7 +7,6 @@ import random
 import re
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 
 import numpy as np
@@ -26,10 +25,9 @@ from klab.engines.base import (
     WeightSource,
 )
 from klab.engines.multi_device import (
-    SecondaryReplica,
+    ReplicaPool,
     accumulate_microbatch_diagnostics,
     diagnostic_is_count,
-    dispatch_replicas_and_primary,
     microbatch_position_mask,
 )
 from klab.engines.output_head import chunked_output_head_cross_entropy
@@ -140,7 +138,7 @@ def _translate_allocation_failures(
         raise EngineOutOfMemory(f"PyTorch allocation failed: {error}") from error
 
 
-def _apply_recomputation_strategy(model: DenseLM, config: RunConfig) -> None:
+def apply_recomputation_strategy(model: DenseLM, config: RunConfig) -> None:
     """Recompute attention chunks inside blocks where the strategy asks for it."""
     recomputation = config.runtime.memory.activation_checkpointing
     chunks = (
@@ -397,8 +395,7 @@ class PyTorchEngine:
         self.objective_identity: dict[str, object] | None = None
         self._last_gradient_parameter_names: tuple[str, ...] = ()
         self._last_update_parameter_names: tuple[str, ...] = ()
-        self._secondary_replicas: list[SecondaryReplica] = []
-        self._replica_executor: ThreadPoolExecutor | None = None
+        self._replicas: ReplicaPool | None = None
 
     def validate(
         self, config: RunConfig, *, authorization: RuntimeAuthorization | None = None
@@ -420,7 +417,7 @@ class PyTorchEngine:
         if initial_weights is not None:
             model.load_state_dict(initial_weights)  # type: ignore[arg-type]
         trainable_parameters = apply_trainable_parameter_filter(model, config)
-        _apply_recomputation_strategy(model, config)
+        apply_recomputation_strategy(model, config)
         with pilot_phase("optimizer_initialization"):
             optimizer = (
                 make_optimizer(
@@ -496,55 +493,20 @@ class PyTorchEngine:
             if config.runtime.memory.activation_offload.enabled
             else None
         )
-        if self._replica_executor is not None:
-            self._replica_executor.shutdown(wait=False)
-            self._replica_executor = None
-        self._secondary_replicas = []
-        for replica in self._secondary_replicas:
-            replica.stale = True
+        if self._replicas is not None:
+            self._replicas.close()
+            self._replicas = None
         if config.runtime.secondary_device_indices:
-            saved_replica_rng = _rng_state(device, runtime.backend)
-            try:
-                primary_state = model.state_dict()
-                for sec_idx in config.runtime.secondary_device_indices:
-                    sec_device = torch_device_for(runtime.backend, sec_idx)
-                    replica_model = DenseLM(config.model, config.attention).to(
-                        sec_device
-                    )
-                    replica_model.load_state_dict(primary_state)
-                    apply_trainable_parameter_filter(replica_model, config)
-                    _apply_recomputation_strategy(replica_model, config)
-                    compiled_loss = None
-                    if config.runtime.compile_output_head_loss:
-                        compiled_loss = torch.compile(
-                            output_projection_cross_entropy,
-                            dynamic=config.runtime.compile_dynamic_shapes,
-                            fullgraph=config.runtime.compile_dynamic_shapes,
-                        )
-                    if config.runtime.compile_transformer_blocks:
-                        if config.runtime.compile_dynamic_shapes:
-                            for module in replica_model.modules():
-                                if isinstance(module, RoPE):
-                                    module.reserve(config.model.max_seq_len, sec_device)
-                        for block in replica_model.blocks:
-                            block.forward_with_aux = torch.compile(
-                                block.forward_with_aux,
-                                dynamic=config.runtime.compile_dynamic_shapes,
-                                fullgraph=config.runtime.compile_dynamic_shapes,
-                            )
-                    self._secondary_replicas.append(
-                        SecondaryReplica(
-                            device=sec_device,
-                            model=replica_model,
-                            compiled_output_head_loss=compiled_loss,
-                        )
-                    )
-                self._replica_executor = ThreadPoolExecutor(
-                    max_workers=len(self._secondary_replicas),
-                    thread_name_prefix="klab-replica",
-                )
-            finally:
-                _restore_rng(saved_replica_rng, device)
+            self._replicas = ReplicaPool(
+                config,
+                runtime.backend,
+                model,
+                [
+                    parameter
+                    for parameter in model.parameters()
+                    if parameter.requires_grad
+                ],
+            )
 
     def _initialize_objective(
         self, config: RunConfig, device: torch.device, backend: str
@@ -687,13 +649,13 @@ class PyTorchEngine:
         objective_sums: dict[str, torch.Tensor | float] = {}
         update_rows = sum(batch.inputs.shape[0] for batch, _ in active_pairs)
         if (
-            self._secondary_replicas
+            self._replicas is not None
             and len(microbatches) >= 2
             and len(active_pairs) >= 2
             and self.scaler is None
             and self.offload is None
         ):
-            devices_used = min(len(active_pairs), 1 + len(self._secondary_replicas))
+            devices_used = min(len(active_pairs), 1 + len(self._replicas))
             trainable_inputs = [
                 parameter for parameter in model.parameters() if parameter.requires_grad
             ]
@@ -795,23 +757,13 @@ class PyTorchEngine:
                 ),
                 replica_outs,
                 replica_timings,
-            ) = dispatch_replicas_and_primary(
-                replicas=self._secondary_replicas,
-                config=config,
+            ) = self._replicas.dispatch(
                 active_pairs=active_pairs,
                 valid_targets=valid_targets,
-                output_head_loss_fn=output_projection_cross_entropy,
                 primary_fn=_run_primary_slice,
-                primary_params=trainable_inputs,
                 primary_device=device,
-                executor=self._replica_executor,
             )
-            active_replicas = [
-                replica
-                for rep_idx, replica in enumerate(self._secondary_replicas)
-                if active_pairs[rep_idx + 1 :: 1 + len(self._secondary_replicas)]
-            ]
-            for replica, rep_out in zip(active_replicas, replica_outs, strict=True):
+            for rep_out in replica_outs:
                 language_sum = language_sum + rep_out["language_sum"].to(device)
                 aux_sum = aux_sum + rep_out["aux_sum"].to(device)
                 losses_finite = losses_finite & rep_out["losses_finite"].to(device)
@@ -1022,9 +974,8 @@ class PyTorchEngine:
             self.scaler.update()
             overflow = self.scaler.get_scale() < old_scale
         monitor.sample("optimizer")
-        if not overflow:
-            for replica in self._secondary_replicas:
-                replica.stale = True
+        if not overflow and self._replicas is not None:
+            self._replicas.invalidate()
         synchronize(device)
         memory_metrics = monitor.end_update()
         elapsed = time.perf_counter() - started
@@ -1047,7 +998,7 @@ class PyTorchEngine:
             "batch/accumulation_steps": float(len(microbatches)),
             **(
                 {"batch/devices_used": float(devices_used)}
-                if self._secondary_replicas
+                if self._replicas is not None
                 else {}
             ),
             **replica_timings,
@@ -1200,8 +1151,8 @@ class PyTorchEngine:
                 raise ValueError("fp16 resume requires saved GradScaler state")
             self.scaler.load_state_dict(state.scaler)
         _restore_rng(state.rng, device)
-        for replica in self._secondary_replicas:
-            replica.stale = True
+        if self._replicas is not None:
+            self._replicas.invalidate()
 
     def memory_snapshot(self) -> dict[str, float]:
         _, _, _, _, monitor = self._ready()
@@ -1220,10 +1171,9 @@ class PyTorchEngine:
         return {} if self.monitor is None else self.monitor.unavailable_reasons
 
     def close(self) -> None:
-        if self._replica_executor is not None:
-            self._replica_executor.shutdown(wait=True)
-            self._replica_executor = None
-        self._secondary_replicas.clear()
+        if self._replicas is not None:
+            self._replicas.close()
+            self._replicas = None
         if self.monitor is not None:
             self.monitor.close()
             self.monitor = None

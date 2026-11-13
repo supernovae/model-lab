@@ -18,7 +18,8 @@ and requires a discrete Intel Arc A-series or B-series SKU in the device name;
 integrated `Intel(R) Arc(TM) Graphics` does not match. Check
 `torch.xpu.get_device_name(0)` in the XPU interpreter before provisioning. On
 multi-GPU machines, register a separate explicit profile with `--device-index`
-for the desired GPU.
+for the desired GPU. Lab confines each training process to its own card before
+it loads Torch; see [several GPUs](training.md#several-gpus-on-one-host).
 
 The XPU container uses the same pins; see [containers](containers.md#intel-xpu).
 

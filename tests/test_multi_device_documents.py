@@ -6,6 +6,7 @@ import torch
 from test_document_batching import configured, rows_for
 
 from klab.data.document_batching import collate_document_update
+from klab.engines.multi_device import build_replica
 from klab.engines.pytorch import PyTorchEngine
 
 
@@ -83,7 +84,6 @@ def test_secondary_dynamic_compilation_matches_primary(tmp_path, monkeypatch):
         update={
             "runtime": cfg.runtime.model_copy(
                 update={
-                    "secondary_device_indices": (0,),
                     "compile_dynamic_shapes": True,
                     "compile_transformer_blocks": True,
                     "compile_output_head_loss": True,
@@ -102,7 +102,11 @@ def test_secondary_dynamic_compilation_matches_primary(tmp_path, monkeypatch):
     try:
         engine.validate(cfg)
         engine.initialize(cfg)
-        assert len(calls) == 2 * (cfg.model.num_layers + 1)
+        primary = list(calls)
+        # A secondary device's process builds its replica with this function.
+        build_replica(cfg, torch.device("cpu"), engine.model.state_dict())
+        assert calls[len(primary) :] == primary
+        assert len(primary) == cfg.model.num_layers + 1
         assert all(call == {"dynamic": True, "fullgraph": True} for call in calls)
     finally:
         engine.close()
