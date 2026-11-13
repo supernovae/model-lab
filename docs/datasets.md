@@ -80,7 +80,9 @@ records the symbol count as `repeat_token_symbols`. It is below
 symbols; report it next to the vocabulary size. The first token of each
 document cannot be predicted, so the loss cannot fall below about
 `ln(symbols) / (synthetic_repeat_length + 1)` per token. The task needs an
-existing tokenizer and cannot train one.
+existing tokenizer and cannot train one. A tokenizer fitted on a snapshot names
+that snapshot in `tokenizer.origin`, as in [several runs, one tokenizer](#several-runs-one-tokenizer):
+the documents are drawn from the tokenizer, so its digests bind their content.
 
 A tokenizer whose vocabulary is exactly the symbols, with no bytes or word
 pieces, would make the symbol count equal the vocabulary size as in the paper.
