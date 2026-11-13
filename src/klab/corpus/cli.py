@@ -251,6 +251,11 @@ def _handle(args: argparse.Namespace) -> None:
                     ),
                     "records": result["records"],
                     "actual_target_tokens": result["actual_target_tokens"],
+                    **{
+                        key: result[key]
+                        for key in ("stratum_exposures", "row_layout")
+                        if key in result
+                    },
                 },
                 sort_keys=True,
             )

@@ -204,6 +204,11 @@ Each transform file in the project names one `kind`:
 removed spans with reasons and document structure, and drops metadata-only front
 matter from language-model views.
 
+A Markdown file becomes one document per heading section. A source declaration
+with `markdown_documents: files` keeps each file whole as one document instead,
+for long-context training. The choice is part of the source declaration, so it
+changes the build's identity; a declaration without it builds as before.
+
 ### Rights
 
 Each source declaration records three independent decisions: training
@@ -358,6 +363,47 @@ unique tokens only, or 2), the tokenizer and optional
 token stream (`train.tokens.ids`) and a small record file; a run then uses it
 through `dataset.source: local_token_mixture`. Nothing is published until every
 quota and floor is met; a shortfall is reported per stratum.
+
+Strata are written in name order and documents in seeded rank order within a
+stratum. By default (`packing: contiguous`) the records follow each other and
+training cuts the stream every `seq_len` targets, so a row holds several short
+documents and a long one starts mid-row. Two optional settings change that:
+
+```yaml
+max_exposures: 1
+packing: document_start
+row_tokens: 2048            # must equal training.seq_len
+strata:
+  reference:
+    max_exposures: 4        # repeat this stratum only
+  books:
+    min_document_tokens: 2048
+```
+
+- **`strata.NAME.max_exposures`** (an integer of 1 or more) repeats one
+  stratum; strata without it use the mixture-wide `max_exposures`.
+- **`packing: document_start`** with `row_tokens` and at least one
+  `strata.NAME.min_document_tokens` starts every record of that many targets or
+  more (its EOS included) on a row boundary. The space before it is masked
+  filler ending in EOS, so its first token is read after an EOS as in a
+  contiguous stream. Its tokens stay contiguous, so a long document fills
+  consecutive rows in order; records after it fill the rest of its last row.
+  Each training row is an independent example, so shuffling rows never mixes
+  another document into one. Packing refuses a run whose `training.seq_len`
+  differs from `row_tokens`, and the training storage preflight sizes the
+  prepared data from the receipt's packed rows, filler included.
+
+A declaration that sets neither keeps its identity and its receipt. When
+`strata` is set the receipt adds `stratum_max_exposures` and
+`stratum_exposures` (records and target tokens per exposure, per stratum).
+`document_start` adds `row_layout`: `row_tokens`, total `rows`,
+`filler_positions` and, per stratum with a minimum, the number of row-start
+`documents` and of `rows` whose every target belongs to one such document.
+`materialize-mixture` and `verify-mixture` print both, and `verify-mixture`
+recomputes them from `train.records.jsonl` and refuses a receipt that differs.
+`training.matched_stories` still refuses a mixture, whose packed data always
+carries a loss mask; `document_start` is the mixture's way to give long
+documents their own rows.
 
 - **Resume.** An interrupted run resumes from its last committed segment in
   `.OUTPUT.assembly`; keep that directory and the output parent's `cache`.

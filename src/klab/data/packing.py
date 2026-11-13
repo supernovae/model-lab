@@ -46,6 +46,7 @@ from klab.data.preparation_workers import (
     PreparationWorkers,
     collect_parallel_stream,
 )
+from klab.data.row_layout import document_rows
 from klab.data.token_store import TokenStore
 from klab.data.verification import (
     HashingWriter,
@@ -725,13 +726,27 @@ def _collect_token_mixture(
     """Pack exact scheduled targets with BOS and masked block-end padding.
 
     The mixture stores its targets as raw int32 beside one small JSON row per
-    record, so packing is a checked copy: no token is parsed from text.
+    record, so packing is a checked copy: no token is parsed from text. A
+    ``document_start`` mixture also places masked filler, ending in EOS, so
+    each long record starts at a training row.
     """
     dataset = config.dataset
     assert dataset.train_path is not None
     target_count = sum(receipt["actual_target_tokens"].values())
     seq_len = config.training.seq_len
-    padded_targets = ((target_count + seq_len - 1) // seq_len) * seq_len
+    layout = receipt.get("row_layout")
+    rows = None
+    if layout is not None:
+        if layout["row_tokens"] != seq_len:
+            raise ValueError(
+                f"token mixture rows hold {layout['row_tokens']} targets; "
+                f"training.seq_len is {seq_len}"
+            )
+        rows = document_rows(layout)
+    # Raw target offsets where filler goes, and its length.
+    gap_offsets: list[int] = []
+    gap_lengths: list[int] = []
+    scheduled = 0
     bos = tokenizer.token_to_id("<bos>")
     eos = tokenizer.token_to_id("<eos>")
     pad = tokenizer.token_to_id("<pad>")
@@ -751,9 +766,17 @@ def _collect_token_mixture(
             count = row.get("tokens") if isinstance(row, dict) else None
             if type(count) is not int or count < 1:
                 raise ValueError("invalid token mixture target row")
+            if rows is not None and (gap := rows.place(row["stratum"], count)):
+                gap_offsets.append(scheduled)
+                gap_lengths.append(gap)
+            scheduled += count
             lengths.append(count)
             by_stratum[row["stratum"]] += count
     records = len(lengths)
+    if rows is not None and rows.summary() != layout:
+        raise ValueError("token mixture row layout differs from verified receipt")
+    filler = sum(gap_lengths)
+    padded_targets = -(-(target_count + filler) // seq_len) * seq_len
     ends = np.cumsum(np.asarray(lengths, dtype=np.int64))
     if (
         records != receipt["records"]
@@ -781,8 +804,25 @@ def _collect_token_mixture(
                 or np.any(values[ends[record:last] - 1 - position] != eos)
             ):
                 raise ValueError("invalid token mixture target row")
-            ids.append_array(np.ascontiguousarray(values, dtype=np.int32))
-            mask.append_array(np.ones(len(values), dtype=bool))
+            values = np.ascontiguousarray(values, dtype=np.int32)
+            first, stop = np.searchsorted(
+                gap_offsets, [position, position + len(values)], side="left"
+            )
+            cuts = [
+                (gap_offsets[index] - position, gap_lengths[index])
+                for index in range(int(first), int(stop))
+            ]
+            cursor = 0
+            for cut, gap in [*cuts, (len(values), 0)]:
+                if cut > cursor:
+                    ids.append_array(values[cursor:cut])
+                    mask.append_array(np.ones(cut - cursor, dtype=bool))
+                if gap:
+                    # Masked filler; its final EOS is the context a row-start
+                    # document is read after, as in a contiguous stream.
+                    ids.append([pad] * (gap - 1) + [eos])
+                    mask.append([False] * gap)
+                cursor = cut
             position += len(values)
             record = last
     if (
@@ -790,7 +830,7 @@ def _collect_token_mixture(
         or token_digest.hexdigest() != receipt["train_tokens_sha256"]
     ):
         raise ValueError("token mixture target count differs from verified receipt")
-    remaining_padding = padded_targets - target_count
+    remaining_padding = padded_targets - target_count - filler
     while remaining_padding:
         count = min(remaining_padding, 65_536)
         ids.append([pad] * count)

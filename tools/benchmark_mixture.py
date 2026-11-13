@@ -129,6 +129,8 @@ def main():
         target_quotas={"general": args.documents * args.text_bytes // 2},
         unique_train_content_floors={"general": 1},
         max_exposures=1,
+        strata={},
+        packing="contiguous",
         seed=42,
         order_policy=None,
         family_inventory=inventory,
