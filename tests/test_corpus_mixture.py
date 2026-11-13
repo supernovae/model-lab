@@ -550,6 +550,22 @@ def test_document_start_rows_and_stratum_exposures(
     )
     assert stats["supervised_target_positions"] == 38
     assert stats["masked_padding_positions"] == 10
+    from klab.workspace_preflight import projected_data_bytes
+
+    # The storage allowance (staging and published copies, past its fixed
+    # reserve) covers the packed rows, filler included, not just the targets.
+    planned = SimpleNamespace(
+        dataset=SimpleNamespace(
+            source="local_token_mixture",
+            mixture_output_path=output,
+            train_max_tokens=38,
+            validation_max_tokens=0,
+        ),
+        model=SimpleNamespace(memory="none"),
+    )
+    assert projected_data_bytes(planned) - 32 * 1024**2 >= 2 * (
+        ids.nbytes + mask.nbytes
+    )
     blocks = TokenBlockDataset(ids, 8, supervision=mask)
     long_ids = [*LONG_TEXT.encode(), 3]
     rows = [blocks.numpy_block(index)[1].tolist() for index in range(len(blocks))]

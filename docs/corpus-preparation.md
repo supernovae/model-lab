@@ -390,7 +390,8 @@ strata:
   consecutive rows in order; records after it fill the rest of its last row.
   Each training row is an independent example, so shuffling rows never mixes
   another document into one. Packing refuses a run whose `training.seq_len`
-  differs from `row_tokens`.
+  differs from `row_tokens`, and the training storage preflight sizes the
+  prepared data from the receipt's packed rows, filler included.
 
 A declaration that sets neither keeps its identity and its receipt. When
 `strata` is set the receipt adds `stratum_max_exposures` and
