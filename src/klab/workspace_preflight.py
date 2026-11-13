@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 _RESERVE_BYTES = 256 * 1024 * 1024
 _RESERVE_INODES = 128
+# A mixture receipt never exceeds its writer's cap (corpus.mixture_index).
+_MAX_MIXTURE_RECEIPT_BYTES = 256 * 1024**2
 
 
 @dataclass(frozen=True)
@@ -92,6 +94,30 @@ def require_storage(checks: list[StorageCheck]) -> list[dict[str, object]]:
     return [asdict(item) for item in checks]
 
 
+def _train_positions(config: RunConfig) -> int:
+    """Packed training positions: a document_start mixture adds masked filler.
+
+    Its receipt records the packed rows, so the allowance counts every row
+    rather than only the scheduled targets. Packing verifies the receipt; this
+    reads it for sizing only.
+    """
+    dataset = config.dataset
+    receipt = (
+        dataset.mixture_output_path / "receipt.json"
+        if dataset.source == "local_token_mixture"
+        and dataset.mixture_output_path is not None
+        else None
+    )
+    if receipt is None or not receipt.is_file():
+        return dataset.train_max_tokens
+    with receipt.open("rb") as stream:
+        layout = json.loads(stream.read(_MAX_MIXTURE_RECEIPT_BYTES)).get("row_layout")
+    if layout is None:
+        return dataset.train_max_tokens
+    # One BOS precedes the rows.
+    return max(dataset.train_max_tokens, layout["rows"] * layout["row_tokens"]) + 1
+
+
 def projected_data_bytes(config: RunConfig) -> int:
     """Planning allowance for prepared arrays, sized by the arrays a config has.
 
@@ -100,7 +126,7 @@ def projected_data_bytes(config: RunConfig) -> int:
     memory. The sum is doubled because staging and the published arrays
     coexist during finalization, then given a quarter of headroom.
     """
-    targets = config.dataset.train_max_tokens + config.dataset.validation_max_tokens
+    targets = _train_positions(config) + config.dataset.validation_max_tokens
     per_token = 4 + 1
     if config.model.memory in {"byte", "portable"}:
         per_token += 4

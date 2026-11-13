@@ -606,7 +606,9 @@ def _records_for_file(
         # separators or newlines introduced by normalizing lone CR bytes.
         passages = [
             (_normalized(content), ancestry, start, end)
-            for content, ancestry, start, end in _sections(raw_text, True)
+            for content, ancestry, start, end in _sections(
+                raw_text, source.markdown_documents == "sections"
+            )
         ]
     else:
         line_end = raw.count(b"\n") + int(not raw.endswith(b"\n"))

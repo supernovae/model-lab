@@ -33,6 +33,7 @@ from klab.corpus.mixture_index import (
     rows,
 )
 from klab.corpus.release import _verification_operation, verify_release
+from klab.data.row_layout import document_rows
 from klab.data.tokenizer import load_tokenizer, verify_tokenizer_artifact
 from klab.engram.packs import _rename_noreplace
 from klab.result_publication import sync_directory
@@ -91,6 +92,27 @@ class AdditiveRelease(BaseModel):
     release_path: Path
 
 
+class StratumPolicy(BaseModel):
+    """Settings for one stratum; an unset field keeps the mixture-wide rule."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_exposures: int | None = Field(
+        default=None, strict=True, ge=1, exclude_if=lambda value: value is None
+    )
+    # Under document_start packing, a record of at least this many targets
+    # (its EOS included) starts at a row boundary.
+    min_document_tokens: int | None = Field(
+        default=None, strict=True, ge=1, exclude_if=lambda value: value is None
+    )
+
+    @model_validator(mode="after")
+    def nonempty(self) -> StratumPolicy:
+        if self.max_exposures is None and self.min_document_tokens is None:
+            raise ValueError("a stratum policy must set at least one field")
+        return self
+
+
 class MixtureDeclaration(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -116,6 +138,17 @@ class MixtureDeclaration(BaseModel):
     )
     tokenizer_observation: TokenizerObservation | None = Field(
         default=None, exclude_if=lambda value: value is None
+    )
+    # Unset fields are excluded, so declarations without them keep their
+    # identity and their receipts.
+    strata: dict[str, StratumPolicy] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
+    packing: Literal["contiguous", "document_start"] = Field(
+        default="contiguous", exclude_if=lambda value: value == "contiguous"
+    )
+    row_tokens: int | None = Field(
+        default=None, strict=True, gt=0, exclude_if=lambda value: value is None
     )
 
     @field_validator("max_exposures", mode="before")
@@ -160,7 +193,104 @@ class MixtureDeclaration(BaseModel):
             raise ValueError(
                 "unique TRAIN content floors must cover the exact mixture strata"
             )
+        if not set(self.strata) <= set(self.target_quotas):
+            raise ValueError("stratum policies must name mixture strata")
+        document_start = self.packing == "document_start"
+        if document_start != (self.row_tokens is not None) or document_start != bool(
+            minimum_document_tokens(self)
+        ):
+            raise ValueError(
+                "document_start packing requires row_tokens and at least one "
+                "stratum min_document_tokens, and they require document_start"
+            )
         return self
+
+
+def stratum_exposures(spec, stratum: str) -> int:
+    """A stratum's own repeat limit, else the mixture-wide one."""
+    policy = spec.strata.get(stratum)
+    if policy is not None and policy.max_exposures is not None:
+        return policy.max_exposures
+    return spec.max_exposures
+
+
+def minimum_document_tokens(spec) -> dict[str, int]:
+    return {
+        stratum: policy.min_document_tokens
+        for stratum, policy in sorted(spec.strata.items())
+        if policy.min_document_tokens is not None
+    }
+
+
+def record_summary(lines, policy: dict) -> dict:
+    """Per-stratum exposure counts and the document_start row layout.
+
+    ``lines`` are the encoded record rows; ``policy`` holds the effective
+    settings the receipt records. Materialization writes this summary and
+    ``verify-mixture`` recomputes it from the records file.
+    """
+    exposures = policy.get("stratum_max_exposures")
+    counts = (
+        {
+            stratum: {"records": [0] * limit, "target_tokens": [0] * limit}
+            for stratum, limit in exposures.items()
+        }
+        if exposures is not None
+        else None
+    )
+    layout = document_rows(policy["row_layout"]) if "row_layout" in policy else None
+    for line in lines:
+        row = json.loads(line)
+        if counts is not None:
+            entry = counts[row["stratum"]]
+            entry["records"][row["exposure"] - 1] += 1
+            entry["target_tokens"][row["exposure"] - 1] += row["tokens"]
+        if layout is not None:
+            layout.place(row["stratum"], row["tokens"])
+    summary = {}
+    if counts is not None:
+        summary["stratum_exposures"] = counts
+    if layout is not None:
+        summary["row_layout"] = layout.summary()
+    return summary
+
+
+def receipt_policy(spec) -> dict:
+    """The effective per-stratum settings a receipt records, if any are declared."""
+    policy = {}
+    if spec.strata:
+        policy["stratum_max_exposures"] = {
+            stratum: stratum_exposures(spec, stratum)
+            for stratum in sorted(spec.target_quotas)
+        }
+    if spec.packing == "document_start":
+        policy["row_layout"] = {
+            "row_tokens": spec.row_tokens,
+            "strata": {
+                stratum: {"min_document_tokens": minimum}
+                for stratum, minimum in minimum_document_tokens(spec).items()
+            },
+        }
+    return policy
+
+
+def _check_record_summary(output: Path, receipt: dict) -> None:
+    """Recompute the receipt's exposure counts and row layout from its records."""
+    policy = {
+        key: receipt[key]
+        for key in ("stratum_max_exposures", "row_layout")
+        if key in receipt
+    }
+    if not policy:
+        return
+    if sha256_file(output / TRAIN_RECORDS) != receipt["train_records_sha256"]:
+        raise ValueError("mixture token export digest mismatch")
+    with (output / TRAIN_RECORDS).open("rb") as stream:
+        summary = record_summary(stream, policy)
+    if any(receipt.get(key) != value for key, value in summary.items()):
+        raise ValueError(
+            "mixture exposure counts or document rows differ from the receipt"
+        )
 
 
 _rows = rows
@@ -713,10 +843,6 @@ def _schedule(
             temporary.write_bytes(canonical_json(metrics) + b"\n")
             os.replace(temporary, progress)
 
-        # A single exposure is emitted as it is encoded; only repeats need the
-        # index to retain encoded documents.
-        direct = spec.max_exposures == 1
-
         def emit(doc, stratum, quota, exposure):
             nonlocal records
             ids = doc["token_ids"]
@@ -788,10 +914,16 @@ def _schedule(
             emission_ordinal = resumed["emission_ordinal"] if continuing else 0
             if not continuing:
                 index.record_event(["reset", None])
+            exposures = stratum_exposures(spec, stratum)
+            # A single exposure is emitted as it is encoded; only repeats need
+            # the index to retain encoded documents.
+            direct = exposures == 1
             pending = []
             pending_bytes = 0
 
-            def process(doc, family, ids, *, stratum=stratum, quota=quota):
+            def process(
+                doc, family, ids, *, stratum=stratum, quota=quota, direct=direct
+            ):
                 nonlocal available
                 if not len(ids):
                     exclude(doc, "zero_encoded_targets")
@@ -923,17 +1055,17 @@ def _schedule(
                     f"{available_content[stratum]} available, "
                     f"{spec.unique_train_content_floors[stratum]} required (EOS excluded)"
                 )
-            if available * spec.max_exposures < quota:
+            if available * exposures < quota:
                 raise ValueError(
                     f"required quota impossible for {stratum}: {available} unique, "
-                    f"{quota} required, max_exposures={spec.max_exposures}, "
-                    f"shortfall={quota - available * spec.max_exposures}"
+                    f"{quota} required, max_exposures={exposures}, "
+                    f"shortfall={quota - available * exposures}"
                 )
             available_unique[stratum] = available
             eligible_families[stratum] = index.family_count(stratum)
             if not direct:
                 start_exposure = emission_exposure or 1
-                for exposure in range(start_exposure, spec.max_exposures + 1):
+                for exposure in range(start_exposure, exposures + 1):
                     after = emission_ordinal if exposure == start_exposure else 0
                     emission_exposure = exposure
                     for doc in index.encoded(stratum, after=after):
@@ -989,6 +1121,10 @@ def _schedule(
     if spec.unique_train_content_floors is not None:
         receipt["available_unique_content_tokens"] = dict(available_content)
         receipt["unique_train_content_floors"] = spec.unique_train_content_floors
+    policy = receipt_policy(spec)
+    if policy:
+        with (staging / TRAIN_RECORDS).open("rb") as lines:
+            receipt.update(policy | record_summary(lines, policy))
     if len(canonical_json(receipt)) + 1 > MAX_RECEIPT_BYTES:
         raise ValueError("mixture receipt-byte cap exceeded")
     return receipt
@@ -1131,6 +1267,7 @@ def verify_mixture(declaration: Path, output: Path, *, audit: bool = False) -> d
     if len(raw) > MAX_RECEIPT_BYTES:
         raise ValueError("mixture receipt-byte cap exceeded")
     receipt = json.loads(raw)
+    _check_record_summary(output, receipt)
     if (
         receipt.get("completed_preparation", {}).get("policy")
         == "completed_local_preparation"

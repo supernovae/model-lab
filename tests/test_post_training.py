@@ -6,10 +6,14 @@ smaller budgets, so the example and its documentation stay runnable.
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 import shutil
 import sqlite3
+import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 import numpy as np
@@ -20,10 +24,11 @@ from pydantic import ValidationError
 
 from klab.chat_template import BUILTIN, ChatTemplate, resolve
 from klab.config.loading import load_config, load_tokenizer_config
-from klab.config.models import RunConfig
+from klab.config.models import AttentionConfig, RunConfig
 from klab.data.packing import PairedBlockDataset, TokenBlockDataset, prepare_data
 from klab.data.tokenizer import load_tokenizer, train_tokenizer
 from klab.evaluation.chat import chat_turn
+from klab.evaluation.generation import generate_with_token_ids
 from klab.evaluation.inference import load_run
 from klab.lab_mode import current_inputs, run_try
 from klab.training.objectives import read_checkpoint
@@ -417,3 +422,194 @@ def test_an_objective_from_another_package_trains_and_is_recorded(
     assert entropy and all(value > 0 for value in entropy)
     (recorded,) = events(run, "humble", "training_objective")
     assert recorded["source"] == "toy-objectives 0.1"
+
+
+# Greedy decoding of an export in an interpreter that cannot import Lab. Each
+# path reports its tokens and the logits every step chose from.
+_EXPORTED_GREEDY = r"""
+import importlib, importlib.util, json, sys
+
+site_packages, directory, prompt, steps, use_transformers = sys.argv[1:]
+# Torch and transformers, without the .pth file that puts Lab's source on the path.
+sys.path.append(site_packages)
+result = {"klab_importable": importlib.util.find_spec("klab") is not None}
+import torch
+
+prompt, steps = json.loads(prompt), int(steps)
+config = json.loads(open(f"{directory}/config.json").read())
+stops = config["eos_token_id"]
+stops = set(stops if isinstance(stops, list) else [stops])
+blocked = json.loads(open(f"{directory}/generation_config.json").read())[
+    "suppress_tokens"
+]
+
+# The export as a plain package: Lab's decoder and cache, no transformers.
+package = importlib.util.module_from_spec(
+    importlib.util.spec_from_loader("exported", loader=None, is_package=True)
+)
+package.__path__ = [directory]
+sys.modules["exported"] = package
+loader = importlib.import_module("exported.klab_model_export_loader")
+model = loader.load_model(directory)
+limit, ids, cache = model.config.max_seq_len, list(prompt), None
+tokens, scores = [], []
+with torch.inference_mode():
+    for _ in range(steps):
+        if cache is None or cache.length >= cache.capacity:
+            logits, cache = model.forward_cached(
+                torch.tensor([ids[-limit:]]), cache_capacity=limit
+            )
+        else:
+            logits, cache = model.forward_cached(torch.tensor([ids[-1:]]), cache=cache)
+        scores.append(logits[0, -1].tolist())
+        allowed = logits[0, -1].float().clone()
+        allowed[blocked] = -torch.inf
+        token = int(allowed.argmax())
+        if token in stops:
+            break
+        tokens.append(token)
+        ids.append(token)
+result["package"] = {"tokens": tokens, "logits": scores}
+
+if use_transformers == "1":
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    result["chat_template"] = AutoTokenizer.from_pretrained(directory).chat_template
+    hf = AutoModelForCausalLM.from_pretrained(directory, trust_remote_code=True)
+    output = hf.generate(
+        torch.tensor([prompt]),
+        max_new_tokens=steps,
+        do_sample=False,
+        output_logits=True,
+        return_dict_in_generate=True,
+    )
+    tokens = output.sequences[0, len(prompt) :].tolist()
+    if tokens and tokens[-1] in stops:
+        tokens.pop()
+    result["transformers"] = {
+        "tokens": tokens,
+        "logits": [step[0].tolist() for step in output.logits],
+    }
+print(json.dumps(result))
+"""
+
+
+def test_a_local_selected_ngram_run_exports_and_generates_without_lab(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_training import config as tiny_config
+
+    base = tiny_config(tmp_path)
+    run = base.model_copy(
+        update={
+            "model": base.model.model_copy(
+                update={
+                    "memory": "ngram",
+                    "memory_table_size": 31,
+                    "memory_ngram_size": 2,
+                    "memory_dim": 8,
+                    # Untied, an untrained head does not just repeat the prompt.
+                    "tie_embeddings": False,
+                }
+            ),
+            "attention": AttentionConfig(
+                kind="local_selected",
+                block_size=4,
+                window_size=4,
+                selected_blocks=1,
+                latent_dim=8,
+                selector="learned",
+            ),
+            "training": base.training.model_copy(
+                update={"max_steps": 3, "max_tokens": 96}
+            ),
+        }
+    )
+    run_id = train(run, run_id="sparse-memory")
+    runs = run.logging.root_dir
+    loaded = load_run(run_id, runs, None, "cpu")
+    seen: list[torch.Tensor] = []
+    forward_cached = loaded.model.forward_cached
+
+    def recording(*args: object, **kwargs: object) -> object:
+        logits, cache = forward_cached(*args, **kwargs)
+        seen.append(logits[0, -1])
+        return logits, cache
+
+    monkeypatch.setattr(loaded.model, "forward_cached", recording)
+    prompt, steps = "a b a b a", 40
+    # 40 tokens past a 32-token context: the cache is rebuilt along the way.
+    _, expected = generate_with_token_ids(
+        loaded.model,
+        loaded.tokenizer,
+        prompt,
+        run.model.max_seq_len,
+        steps,
+        loaded.device,
+    )
+
+    exported = tmp_path / "export"
+    receipt = export_weights(runs / run_id, exported)
+    assert receipt["format"] == "hf_remote_code"
+    source = json.loads((exported / "config.json").read_text())["klab_source"]
+    assert source["checkpoint_sha256"] == loaded.identity["checkpoint_sha256"]
+
+    use_transformers = importlib.util.find_spec("transformers") is not None
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    (isolated / "greedy.py").write_text(_EXPORTED_GREEDY)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            str(isolated / "greedy.py"),
+            sysconfig.get_paths()["purelib"],
+            str(exported),
+            json.dumps(loaded.tokenizer.encode(prompt, add_special_tokens=False).ids),
+            str(steps),
+            "1" if use_transformers else "0",
+        ],
+        cwd=isolated,
+        env={**os.environ, "HF_HOME": str(tmp_path / "hf"), "HF_HUB_OFFLINE": "1"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["klab_importable"] is False
+
+    def same_decoding(path: dict) -> None:
+        assert path["tokens"] == expected
+        torch.testing.assert_close(torch.tensor(path["logits"]), torch.stack(seen))
+
+    same_decoding(result["package"])
+    pytest.importorskip("transformers")
+    same_decoding(result["transformers"])
+    assert result["chat_template"] == run.dataset.template.to_jinja()
+
+
+def test_byte_memory_is_refused_before_anything_is_written(tmp_path: Path) -> None:
+    from test_training import config as tiny_config
+
+    base = tiny_config(tmp_path)
+    run = base.model_copy(
+        update={
+            "model": base.model.model_copy(
+                update={
+                    "memory": "byte",
+                    "memory_table_size": 64,
+                    "memory_dim": 8,
+                    "memory_ngram_size": 5,
+                }
+            ),
+            "training": base.training.model_copy(
+                update={"max_steps": 3, "max_tokens": 96}
+            ),
+        }
+    )
+    run_id = train(run, run_id="byte-memory")
+    with pytest.raises(ValueError, match="byte memory"):
+        export_weights(run.logging.root_dir / run_id, tmp_path / "export")
+    assert not (tmp_path / "export").exists()

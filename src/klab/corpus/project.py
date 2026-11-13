@@ -542,6 +542,11 @@ class SourceDeclaration(StrictModel):
         | InferenceAcquisition
     )
     rejection_reason: str | None = None
+    # Markdown files become one document per heading section by default;
+    # "files" keeps each file whole, for long-context documents.
+    markdown_documents: Literal["sections", "files"] = Field(
+        default="sections", exclude_if=lambda value: value == "sections"
+    )
 
     @field_validator("id", "source_family")
     @classmethod

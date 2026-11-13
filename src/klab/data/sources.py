@@ -1,7 +1,8 @@
 """Dataset-neutral pinned declarations and immutable, replayable text snapshots.
 
 Public API: load_source -> DatasetSource, lock_source -> lock Path,
-snapshot_source -> manifest Path, verify_snapshot -> dict, iter_snapshot -> text.
+snapshot_source -> manifest Path, verify_snapshot -> dict, iter_snapshot -> text,
+hub_identity -> pinned Hub file inventory, stream_hub -> rows from that inventory.
 Locking checks Hub metadata only. Snapshotting streams standard datasets (datasets
 4 never executes repository Python), or explicitly named verified Forge files.
 Resume replays and authenticates the committed prefix; it does not assume upstream
@@ -194,15 +195,15 @@ def forge_bindings(source: DatasetSource) -> dict:
     return result
 
 
-def _hub_file(source: DatasetSource, url: str) -> str:
+def _hub_file(repo_id: str, revision: str, url: str) -> str:
     """Accept only a file in this exact immutable Hub repository revision."""
     parsed = urlsplit(url)
     if parsed.query or parsed.fragment or parsed.username or parsed.password:
         raise ValueError("source data file must be a pinned Hub file")
     if parsed.scheme == "hf" and parsed.netloc == "datasets":
-        prefix = f"/{source.repo_id}@{source.revision}/"
+        prefix = f"/{repo_id}@{revision}/"
     elif parsed.scheme == "https" and parsed.netloc == "huggingface.co":
-        prefix = f"/datasets/{source.repo_id}/resolve/{source.revision}/"
+        prefix = f"/datasets/{repo_id}/resolve/{revision}/"
     else:
         raise ValueError(
             "external data URLs are not supported; use verified Forge files"
@@ -213,25 +214,37 @@ def _hub_file(source: DatasetSource, url: str) -> str:
     return safe_name(path[len(prefix) :])
 
 
-def _hub_identity(source: DatasetSource, *, cache_dir: Path | None = None) -> dict:
+def hub_identity(
+    repo_id: str,
+    revision: str,
+    config: str,
+    splits: dict[str, str],
+    *,
+    cache_dir: Path | None = None,
+) -> dict:
+    """Resolve the pinned revision's standard loader and per-split file inventory.
+
+    ``splits`` maps logical names to upstream split names; the inventory is
+    keyed by the logical names. Only Hub metadata is read.
+    """
     from datasets import load_dataset_builder
     from huggingface_hub import HfApi
 
     auth = hub_auth_kwargs()
     try:
         info = HfApi().dataset_info(
-            source.repo_id, revision=source.revision, files_metadata=True, **auth
+            repo_id, revision=revision, files_metadata=True, **auth
         )
         builder = load_dataset_builder(
-            source.repo_id,
-            name=source.config,
-            revision=source.revision,
+            repo_id,
+            name=config,
+            revision=revision,
             cache_dir=None if cache_dir is None else str(cache_dir),
             **auth,
         )
     except hub_access_errors() as error:
         raise_for_hub_auth(error, credential_supplied=bool(auth))
-    if info.sha != source.revision:
+    if info.sha != revision:
         raise ValueError("Hub resolved revision differs from pinned commit")
     loader = builder.info.builder_name
     if loader not in {"parquet", "json", "text", "csv", "arrow"}:
@@ -266,13 +279,13 @@ def _hub_identity(source: DatasetSource, *, cache_dir: Path | None = None) -> di
         raise ValueError("source loader must fail rather than skip malformed data")
     siblings = {item.rfilename: item for item in info.siblings or []}
     files = {}
-    for logical, upstream in source.splits.items():
+    for logical, upstream in splits.items():
         selected = (builder.config.data_files or {}).get(upstream)
         if not selected:
             raise ValueError(f"missing source split data files: {upstream}")
         rows = []
         for url in selected:
-            name = _hub_file(source, str(url))
+            name = _hub_file(repo_id, revision, str(url))
             entry = siblings.get(name)
             if entry is None or type(entry.size) is not int or entry.size < 0:
                 raise ValueError(f"missing Hub file metadata: {name}")
@@ -293,7 +306,7 @@ def _hub_identity(source: DatasetSource, *, cache_dir: Path | None = None) -> di
             raise ValueError("duplicate source data file")
         files[logical] = rows
     return {
-        "repo_id": source.repo_id,
+        "repo_id": repo_id,
         "revision": info.sha,
         "loader": loader,
         "files": files,
@@ -399,7 +412,13 @@ def lock_source(
     provenance = (
         forge_bindings(source)
         if source.kind == "forge_files"
-        else _hub_identity(source, cache_dir=Path(cache_dir))
+        else hub_identity(
+            source.repo_id,
+            source.revision,
+            source.config,
+            source.splits,
+            cache_dir=Path(cache_dir),
+        )
     )
     value = seal_snapshot_payload(
         {
@@ -461,7 +480,7 @@ def _lock_locations(path: Path, lock: dict) -> dict:
 
 
 def _stream_parquet(
-    files: list[str], options: dict, source: DatasetSource, cache_dir: Path, auth: dict
+    files: list[str], options: dict, repo_id: str, cache_dir: Path, auth: dict
 ) -> Iterator[dict]:
     """Read locked Parquet files without asynchronous Arrow-to-Python callbacks.
 
@@ -537,7 +556,7 @@ def _stream_parquet(
                     for row in table.to_pylist():
                         yield features.decode_example(
                             row,
-                            token_per_repo_id={source.repo_id: auth.get("token")},
+                            token_per_repo_id={repo_id: auth.get("token")},
                         )
             finally:
                 batches.close()
@@ -564,23 +583,45 @@ def stream_source(
                 )
             )
         return
-    from datasets import load_dataset
-
-    auth = hub_auth_kwargs()
     if inventory is None:
         raise ValueError("Hub acquisition requires a locked data-file inventory")
+    yield from stream_hub(
+        source.repo_id,
+        source.revision,
+        inventory,
+        split,
+        cache_dir,
+        label=source.splits[split],
+    )
+
+
+def stream_hub(
+    repo_id: str,
+    revision: str,
+    inventory: dict,
+    split: str,
+    cache_dir: Path,
+    *,
+    label: str | None = None,
+) -> Iterator[dict]:
+    """Stream one split's rows from only the files a ``hub_identity`` inventory names.
+
+    ``split`` is the inventory's logical name; ``label`` is the split name handed
+    to the standard loader (the logical name unless given).
+    """
+    from datasets import load_dataset
     from huggingface_hub import hf_hub_url
 
+    auth = hub_auth_kwargs()
     options = dict(inventory.get("loader_options", {}))
     files = [
-        hf_hub_url(
-            source.repo_id, row["path"], repo_type="dataset", revision=source.revision
-        )
+        hf_hub_url(repo_id, row["path"], repo_type="dataset", revision=revision)
         for row in inventory["files"][split]
     ]
+    label = split if label is None else label
     try:
         if inventory["loader"] == "parquet":
-            yield from _stream_parquet(files, options, source, cache_dir, auth)
+            yield from _stream_parquet(files, options, repo_id, cache_dir, auth)
             return
         if options.get("features") is not None:
             from datasets import Features
@@ -588,8 +629,8 @@ def stream_source(
             options["features"] = Features.from_dict(options["features"])
         yield from load_dataset(
             inventory["loader"],
-            data_files={source.splits[split]: files},
-            split=source.splits[split],
+            data_files={label: files},
+            split=label,
             streaming=True,
             cache_dir=str(cache_dir),
             **options,
