@@ -102,7 +102,8 @@ klab weights import SOURCE_DIR OUTPUT_RUN --config target.yaml \
 
 The target config must have the same dense or grouped-query layout and the same
 tokenizer. `provenance.json` (`format_version: 1`) states the source and license.
-`klab weights export` writes the reverse; see
+`klab weights export` writes the reverse, and exports other architectures with
+Lab's model code as Hugging Face remote code; see
 [post-training](post-training.md#export-for-hugging-face).
 
 ## Best checkpoint and pruning
