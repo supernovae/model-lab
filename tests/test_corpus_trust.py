@@ -75,15 +75,27 @@ def test_near_duplicates_reports_a_planted_cross_split_pair(
     }
     assert report["release_id"] == planted_release.name
     assert report["document_count"] == len(documents) > len(planted) == 2
+    # Every document is accounted for, by split and source.
+    covered = {(row["split"], row["source_id"]): row for row in report["coverage"]}
+    for split in {doc["split"] for doc in documents}:
+        in_split = [doc for doc in documents if doc["split"] == split]
+        assert sum(
+            row["documents"] for key, row in covered.items() if key[0] == split
+        ) == len(in_split)
+        assert sum(
+            row["text_bytes"] for key, row in covered.items() if key[0] == split
+        ) == sum(len(doc["text"].encode()) for doc in in_split)
     # Exactly the planted pair: unrelated documents in other splits are not flagged.
     [pair] = report["candidates"]
     assert {pair["left_document_id"], pair["right_document_id"]} == planted
     assert {pair["left_split"], pair["right_split"]} == {"train", "validation"}
     assert pair["identical_content_sha256"] is False
     assert pair["jaccard"] >= report["parameters"]["min_jaccard"]
+    assert report["candidate_count"] == 1
+    assert report["candidates_truncated"] is False
 
 
-def test_near_duplicates_refuses_rather_than_report_a_truncated_screen(
+def test_near_duplicates_refuses_a_heldout_side_over_its_bound(
     planted_release: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     monkeypatch.setattr(
@@ -94,8 +106,8 @@ def test_near_duplicates_refuses_rather_than_report_a_truncated_screen(
             "corpus",
             "near-duplicates",
             str(planted_release),
-            "--max-documents",
-            "2",
+            "--max-heldout-shingles",
+            "1",
         ],
     )
     with pytest.raises(ValueError):
