@@ -130,6 +130,14 @@ def export_weights(
     """Write ``checkpoint`` to a new directory ``output`` and return its receipt."""
     if export_format != EXPORT_FORMAT:
         raise ValueError(f"unsupported export format: {export_format}")
+    from klab.evaluation.quantization import MANIFEST
+
+    if (Path(checkpoint) / MANIFEST).is_file():
+        raise ValueError(
+            "a quantized artifact does not export: the Hugging Face Llama "
+            "directory written here holds float weights only (no "
+            "quantization_config); export its source checkpoint instead"
+        )
     output = Path(output).resolve()
     if output.exists():
         raise FileExistsError(f"refusing to overwrite export destination: {output}")

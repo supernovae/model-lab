@@ -24,8 +24,9 @@ summary, not a task list or a release promise.
   at 32k to 131k tokens of context. Next: lower its memory per token and measure
   long-range retrieval quality.
 - **After pretraining.** [Post-training](docs/post-training.md) covers
-  instruction tuning, distillation, preference optimization and Hugging Face
-  export. Next: low-rank adapters, rollout-based methods, quantization, and
+  instruction tuning, distillation, preference optimization, Hugging Face
+  export and weight-only int8/int4 inference. Next: low-rank adapters,
+  rollout-based methods, faster quantized kernels, and
   speculative decoding with corpus and draft-model drafters
   ([#358](https://github.com/supernovae/model-lab/issues/358)).
 - **Studies built from tries.** `klab sweep` runs a series of tries against one

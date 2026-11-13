@@ -1047,6 +1047,7 @@ def _generate(args: argparse.Namespace) -> None:
         args.checkpoint,
         args.backend,
         authorization=args.runtime_authorization,
+        quantized=args.quantized,
     )
     context = _inference_context(args, loaded.config.model.max_seq_len)
     settings = {
@@ -1242,6 +1243,7 @@ def _chat(args: argparse.Namespace) -> None:
         args.checkpoint,
         args.backend,
         authorization=args.runtime_authorization,
+        quantized=args.quantized,
     )
     context = _inference_context(args, loaded.config.model.max_seq_len)
     template = loaded.config.dataset.template
@@ -1381,6 +1383,21 @@ def _weights_import(args: argparse.Namespace) -> None:
         provenance=Path(args.provenance),
     )
     print(json.dumps(asdict(result), sort_keys=True, default=str))
+
+
+def _weights_quantize(args: argparse.Namespace) -> None:
+    from klab.evaluation.quantization import quantize_run
+
+    result = quantize_run(
+        args.run_id,
+        Path(args.runs_dir),
+        Path(args.output),
+        bits=args.bits,
+        group_size=args.group_size,
+        checkpoint=args.checkpoint,
+        backend=args.backend,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
 
 
 def _weights_export(args: argparse.Namespace) -> None:
@@ -2174,6 +2191,34 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         "--format", default="hf_llama_safetensors", choices=("hf_llama_safetensors",)
     )
     weight_export.set_defaults(handler=_weights_export)
+    weight_quantize = weight_commands.add_parser(
+        "quantize",
+        help="Weight-only int8/int4 quantization with held-out loss vs the source",
+        description=(
+            "Quantize the block projections of a verified checkpoint (int8 per "
+            "output channel, or int4 in groups), write a sealed artifact and "
+            "score the source and the quantized model on the run's validation "
+            "split with the same settings. Load it with --quantized DIR in "
+            "generate, chat and serve."
+        ),
+    )
+    weight_quantize.add_argument("run_id")
+    weight_quantize.add_argument("--output", required=True, help="new directory")
+    weight_quantize.add_argument("--bits", type=int, required=True, choices=(8, 4))
+    weight_quantize.add_argument(
+        "--group-size", type=int, help="int4 input columns per scale (default 128)"
+    )
+    weight_quantize.add_argument(
+        "--checkpoint", help="latest.json, best.json, or a generation path"
+    )
+    weight_quantize.add_argument("--runs-dir", default=runs_dir_default)
+    weight_quantize.add_argument(
+        "--backend",
+        default="cpu",
+        choices=("cpu", "auto", "mps", "cuda", "rocm", "xpu"),
+        help="Device for both held-out evaluations (default cpu)",
+    )
+    weight_quantize.set_defaults(handler=_weights_quantize)
     config = commands.add_parser("config")
     config_commands = config.add_subparsers(dest="config_command", required=True)
     from klab.config.validation import add_arguments as validation_arguments
@@ -2606,6 +2651,12 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         help="Run directory (default: selected persistent state root/runs)",
     )
     generation.add_argument("--checkpoint")
+    generation.add_argument(
+        "--quantized",
+        type=Path,
+        metavar="DIR",
+        help="Apply a `klab weights quantize` artifact made from this checkpoint",
+    )
     generation.add_argument("--temperature", type=float, default=0.0)
     generation.add_argument("--top-k", type=int, default=0)
     generation.add_argument("--seed", type=int, default=0)
@@ -2681,6 +2732,12 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     )
     chat.add_argument(
         "--checkpoint", help="latest.json, best.json, or a generation path"
+    )
+    chat.add_argument(
+        "--quantized",
+        type=Path,
+        metavar="DIR",
+        help="Apply a `klab weights quantize` artifact made from this checkpoint",
     )
     chat.add_argument("--temperature", type=float, default=0.0)
     chat.add_argument("--top-k", type=int, default=0)

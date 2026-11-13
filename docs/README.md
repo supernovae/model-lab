@@ -54,7 +54,7 @@ only read records. A run ID names weights; a try or probe ID names a result. Use
 | [Training](training.md) | The trainer, smoke runs, multi-GPU replicas and keeping accelerators busy |
 | [Checkpoints](checkpointing.md) | Resume, recover, extend, promote, import weights and retention |
 | [Memory](memory.md) | The memory estimate, accumulation, recomputation and offload |
-| [Post-training](post-training.md) | Instruction tuning, distillation, preference optimization, chat templates and export |
+| [Post-training](post-training.md) | Instruction tuning, distillation, preference optimization, chat templates, export and weight quantization |
 | [Metrics](metrics.md) | Logged metric names, forecasts and progress |
 
 ## Evaluate and inspect
