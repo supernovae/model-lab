@@ -406,10 +406,8 @@ def _handle(args: argparse.Namespace) -> None:
         caps = {
             name: value
             for name, value in (
-                ("max_documents", args.max_documents),
-                ("max_input_text_bytes", args.max_input_text_bytes),
-                ("max_total_shingles", args.max_total_shingles),
-                ("max_comparisons", args.max_comparisons),
+                ("max_heldout_documents", args.max_heldout_documents),
+                ("max_heldout_shingles", args.max_heldout_shingles),
                 ("max_candidates", args.max_candidates),
             )
             if value is not None
@@ -676,10 +674,8 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
             command.add_argument("--min-frequency", type=int, default=1)
         if name == "near-duplicates":
             for flag in (
-                "max-documents",
-                "max-input-text-bytes",
-                "max-total-shingles",
-                "max-comparisons",
+                "max-heldout-documents",
+                "max-heldout-shingles",
                 "max-candidates",
             ):
                 command.add_argument("--" + flag, type=int)

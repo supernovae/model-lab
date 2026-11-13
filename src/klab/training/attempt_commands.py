@@ -98,10 +98,8 @@ _SHAPES: dict[str, tuple[int, set[str], set[str], str]] = {
     "corpus near-duplicates": (
         1,
         {
-            "--max-documents",
-            "--max-input-text-bytes",
-            "--max-total-shingles",
-            "--max-comparisons",
+            "--max-heldout-documents",
+            "--max-heldout-shingles",
             "--max-candidates",
         },
         set(),
