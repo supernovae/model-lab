@@ -1436,11 +1436,13 @@ class RunConfig(StrictModel):
                 "the PyTorch engine on one device, without byte memory, matched "
                 "stories or the compiled output head"
             )
-        if self.tokenizer.origin is not None and self.dataset.source not in {
-            "snapshot",
-            "local_text",
-            "local_chat",
-        }:
+        # repeat_token documents are drawn from the tokenizer itself, so its
+        # digest binds their content as a snapshot's digest binds text.
+        if (
+            self.tokenizer.origin is not None
+            and self.dataset.source not in {"snapshot", "local_text", "local_chat"}
+            and self.dataset.synthetic_task != "repeat_token"
+        ):
             raise ValueError(
                 "explicit tokenizer origin requires a content-bound consumer"
             )

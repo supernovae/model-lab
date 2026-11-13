@@ -744,7 +744,7 @@ def shared_tokenizer(tmp_path, offline):
     path = train_tokenizer(
         TokenizerTrainConfig(
             schema_version=1,
-            vocab_size=260,
+            vocab_size=270,
             min_frequency=1,
             max_documents=2,
             output_dir=tmp_path / "tokenizer",
@@ -758,7 +758,7 @@ def shared_tokenizer(tmp_path, offline):
         Path(__file__).resolve().parents[1] / "configs/runtime_smoke_cpu.yaml"
     )
     raw = base.model_dump(mode="json")
-    raw["model"]["vocab_size"] = 260
+    raw["model"]["vocab_size"] = 270
     raw["dataset"] = consumer.model_dump(mode="json")
     raw["tokenizer"] = {
         "path": str(path),
@@ -832,6 +832,32 @@ def test_shared_tokenizer_rejects_tampered_inputs(shared_tokenizer, target):
     path.write_bytes(path.read_bytes() + b" ")
     with pytest.raises(ValueError):
         prepare_data(config, tokenizer)
+
+
+def test_repeat_token_uses_a_tokenizer_fitted_on_a_snapshot(shared_tokenizer):
+    from klab.config.models import RunConfig
+    from klab.data.packing import prepare_data
+    from klab.data.tokenizer import load_tokenizer
+
+    config, _ = shared_tokenizer
+    raw = config.model_dump(mode="json")
+    raw["dataset"] = {
+        "source": "synthetic",
+        "synthetic_task": "repeat_token",
+        "synthetic_repeat_length": 4,
+        "cache_dir": raw["dataset"]["cache_dir"],
+        "train_max_documents": 8,
+        "validation_max_documents": 4,
+        "train_max_tokens": 64,
+        "validation_max_tokens": 32,
+    }
+    spam = RunConfig.model_validate(raw)
+    prepared = prepare_data(spam, load_tokenizer(spam.tokenizer.path))
+    assert prepared.manifest["repeat_token_symbols"] >= 2
+    # The origin is still checked: a tampered origin snapshot is refused.
+    spam.tokenizer.origin.dataset.train_path.write_text("tampered")
+    with pytest.raises(ValueError):
+        prepare_data(spam, load_tokenizer(spam.tokenizer.path))
 
 
 def test_shared_tokenizer_requires_correct_explicit_origin(shared_tokenizer):
