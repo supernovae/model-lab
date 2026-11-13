@@ -11,6 +11,7 @@ import torch
 from torch.nn import functional
 
 from klab.data.packing import TokenBlockDataset
+from klab.evaluation.positions import PositionLoss
 
 
 class NonFiniteLoss(ValueError, FloatingPointError):
@@ -56,6 +57,7 @@ def evaluate(
     observer: Callable[[torch.Tensor, torch.Tensor], None] | None = None,
     before_batch: Callable[[int], None] | None = None,
     progress: Callable[[float, int, int], None] | None = None,
+    positions: PositionLoss | None = None,
 ) -> dict[str, float | int | str | None]:
     """Evaluate no more than ``max_batches`` and report exactly scored labels.
 
@@ -63,6 +65,7 @@ def evaluate(
     battery's per-window and calibration statistics) without a second pass.
     ``before_batch`` receives forward-input positions before each model call;
     ``progress`` receives cumulative NLL, valid targets and completed batches.
+    ``positions`` accumulates the same per-target losses by window position.
     """
     if batch_size <= 0 or max_batches <= 0:
         raise ValueError("batch_size and max_batches must be positive")
@@ -100,8 +103,11 @@ def evaluate(
                     logits.float().flatten(0, 1),
                     y.flatten(),
                     ignore_index=-100,
-                    reduction="sum",
+                    reduction="sum" if positions is None else "none",
                 )
+                if positions is not None:
+                    positions.add(loss.view_as(y), y)
+                    loss = loss.sum()
                 if not torch.isfinite(loss):
                     raise NonFiniteLoss("nonfinite validation loss")
                 if observer is not None:

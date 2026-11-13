@@ -81,7 +81,9 @@ def uniform(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         scoring,
         "log_probs",
-        lambda loaded, ids: np.full((len(ids), vocab), -math.log(vocab)),
+        lambda loaded, ids, last=None: np.full(
+            (last or len(ids), vocab), -math.log(vocab)
+        ),
     )
 
 

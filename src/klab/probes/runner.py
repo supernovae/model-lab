@@ -42,6 +42,7 @@ from klab.lab_records import (
 from klab.probes import metrics, scoring
 from klab.probes.suite import (
     BY_ID,
+    NEEDLE_PROBES,
     ProbeSpec,
     fact_items,
     final_verdict_access,
@@ -93,11 +94,11 @@ class Arm:
 
 
 # Probes that mean the same thing for a public reference model: lm-eval tasks
-# are defined by the harness, and the text-level ranking probes (needle
-# included: its lengths are in characters) ask the same strings of any
+# are defined by the harness, and the text-level ranking probes (the needle
+# probes included: their lengths are in characters) ask the same strings of any
 # tokenizer (their ``item_group`` proves it).
-REFERENCE_PROBES = frozenset({"lm_eval", "fact_recall", "parametric_recall", "needle"})
-TEXT_PROBES = ("fact_recall", "parametric_recall", "needle")
+TEXT_PROBES = ("fact_recall", "parametric_recall", *NEEDLE_PROBES)
+REFERENCE_PROBES = frozenset({"lm_eval", *TEXT_PROBES})
 
 
 def as_arm(value: Any) -> Arm | None:
@@ -429,7 +430,7 @@ def _measure(
             "item_group": item_group(spec.id, held),
             "items": [
                 {
-                    "prompt": i["prefix"] if spec.id != "needle" else None,
+                    "prompt": i["prefix"] if spec.id not in NEEDLE_PROBES else None,
                     "answer": i["answer"],
                     "chars": i.get("chars"),
                     "tokens": i.get("tokens"),
@@ -703,7 +704,7 @@ def _judge(
             details["baseline_control_accuracy"] = b["control_accuracy"] if b else None
             details["manifest_sha256"] = t["manifest_sha256"]
             details["manifest_seed"] = t["manifest_seed"]
-        if spec.id == "needle":
+        if spec.id in NEEDLE_PROBES:
             by_length: dict[str, dict[str, Any]] = {}
             for length in spec.params["char_lengths"]:
                 picks = [i for i, c in enumerate(t["chars"]) if c == length]

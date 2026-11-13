@@ -69,6 +69,27 @@ Two results are comparable when both are complete and their `comparison_group`
 values match. The group covers the panel protocol and runtime but not the
 checkpoint, so one panel can follow a run's trajectory.
 
+### Loss by position
+
+A complete panel result also reports `position_buckets`: the same scored
+targets grouped by their position in the window, each bucket with its `start`
+and `end` positions, `targets` and mean `loss`. A target at position `t` is
+predicted from `t + 1` tokens of context. Buckets double in width up to the
+panel's `sequence_length`. The first covers 0 up to 1,024, or up to the largest
+power of two below `sequence_length` for a shorter panel, so a 32,768-token
+panel reports `0-1024, 1024-2048, 2048-4096, 4096-8192, 8192-16384,
+16384-32768`. Bucket target counts add up to `supervised_targets`, and their
+target-weighted mean loss is the panel loss.
+
+This is the standard context-extension curve: with a working extension,
+late-position loss stays at or below early-position loss, while a model used
+past the context it learned shows loss rising in the late buckets. Buckets are
+reporting only. They do not change the panel declaration, its identity or
+which targets are scored, so earlier panel results stay comparable. Panels
+scored during training report them too, unless the run's training objective
+scores whole batches rather than single targets; then `position_buckets` is
+null and `position_buckets_unavailable` says why.
+
 ### During training
 
 `evaluation.panels` replaces the ordinary validation sample with one or more
@@ -104,3 +125,31 @@ held-out split.
 
 Panels work with dense PyTorch models without memory or with token n-gram
 memory.
+
+## Comparing context extensions
+
+A long-document panel scores held-out text at the extended window. Prepare it
+like any run's data, with the extension run's tokenizer and
+`training.seq_len` set to the panel's `sequence_length` (for example 32768).
+Use held-out documents at least that many tokens long as `validation_path` of
+a `local_text` dataset, so late positions read context from the same
+document. `data prepare` packs documents end to end, so shorter ones would put
+document boundaries inside a window:
+
+```sh
+PREPARED=$(klab data prepare long-panel.yaml)
+klab data coverage --prepared-root "$PREPARED" --config long-panel.yaml --json
+```
+
+Coverage reports the complete validation blocks and supervised targets; put
+them in the panel declaration as `blocks` and `supervised_targets`, and point
+`prepared_path` at the prepared directory.
+
+To choose an extension method, pretrain one parent at short rows, then run two
+`klab try` arms from the same `training.parent_checkpoint` that differ only in
+their RoPE setting, with the same long-document data and row length (for
+example `klab try yarn.yaml --vs abf.yaml`). Score each arm's checkpoint on the
+long panel with `klab eval --panel` and compare their `position_buckets`. Then
+run `klab probe TRY_ID --vs BASELINE --config full`, which adds
+[`long_needle`](probes.md#long-context-needle) retrieval at each length to the
+short-context probes that catch regressions at the pretraining window.

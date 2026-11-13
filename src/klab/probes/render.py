@@ -12,6 +12,8 @@ import sys
 from collections.abc import Mapping, Sequence
 from typing import Any, TextIO
 
+from klab.probes.suite import NEEDLE_PROBES
+
 GLYPH = {
     "pass": "✔",
     "warn": "▲",
@@ -152,7 +154,7 @@ def _extra(row: Mapping[str, Any]) -> str:
         return text
     if row["id"] == "repetition" and details.get("distinct_2") is not None:
         return f"distinct-2 {details['distinct_2']:.2f}"
-    if row["id"] == "needle" and details.get("by_length"):
+    if row["id"] in NEEDLE_PROBES and details.get("by_length"):
         lengths = details["by_length"]
         accs = [lengths[k]["accuracy"] for k in lengths]
         if all(lengths[k].get("chars") is not None for k in lengths):

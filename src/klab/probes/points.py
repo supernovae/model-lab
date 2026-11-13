@@ -78,6 +78,15 @@ METRICS = {
         "differ; results before suite v4 were sized in model tokens)",
         missing_hint="run `klab probe RECORD --config standard`",
     ),
+    "long_needle": Metric(
+        id="long_needle",
+        label="long-context needle retrieval",
+        group_label="item group",
+        higher_is_better=True,
+        not_comparable="different long-needle items (text, lengths or candidates "
+        "differ)",
+        missing_hint="run `klab probe RECORD --config full`",
+    ),
     "code_pass1": Metric(
         id="code_pass1",
         label="code pass@1",
@@ -89,7 +98,7 @@ METRICS = {
     ),
 }
 # Probe rows whose ``details.items`` carry per-item credit (paired evidence).
-RANKING_METRICS = ("fact_recall", "needle")
+RANKING_METRICS = ("fact_recall", "needle", "long_needle")
 
 # Cost axes: resident counts every weight held in memory, active counts what
 # one token touches (one embedding row, the routed experts and memory rows).

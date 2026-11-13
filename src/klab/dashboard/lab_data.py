@@ -30,6 +30,7 @@ from klab.dashboard.probe_hints import followup_plan, render_followup
 from klab.explorer import cached_explorations
 from klab.lab_records import is_setup_record, iter_lab_records
 from klab.probes.points import METRICS, collect_points, is_final
+from klab.probes.suite import NEEDLE_PROBES
 from klab.probes.verdict import respect_try_comparison
 
 # Lab-try comparison verdicts in plain words (``comparison.verdict``).
@@ -409,6 +410,9 @@ def recall_items(entry: ProbeEntry, probe_id: str) -> list[dict[str, Any]]:
 def needle_curves(entries: Iterable[ProbeEntry]) -> list[dict[str, Any]]:
     """Needle accuracy by context length, one curve per (checkpoint, group).
 
+    Both needle probes contribute (``needle`` and the full tier's
+    ``long_needle``); their items differ, so they never share a group.
+
     Suite v4 needle items have fixed character lengths (``length`` in
     characters, comparable across tokenizers); older results were sized in
     each model's own tokens. Either way only results in one ``item_group``
@@ -420,32 +424,33 @@ def needle_curves(entries: Iterable[ProbeEntry]) -> list[dict[str, Any]]:
     rows = []
     seen: set[tuple[str, str | None]] = set()
     for entry in sorted(entries, key=lambda e: e.created_at, reverse=True):
-        row = probe_row(entry.result, "needle") or {}
         target = entry.result.get("target") or {}
         sha = str(target.get("checkpoint_sha256"))
-        details = row.get("details") or {}
-        by_length = details.get("by_length") or {}
-        group = result_group(entry.result, row) if row else None
-        if not by_length or (sha, group) in seen:
-            continue
-        seen.add((sha, group))
-        for value in by_length.values():
-            if value.get("accuracy") is None:
+        for probe_id in NEEDLE_PROBES:
+            row = probe_row(entry.result, probe_id) or {}
+            details = row.get("details") or {}
+            by_length = details.get("by_length") or {}
+            group = result_group(entry.result, row) if row else None
+            if not by_length or (sha, group) in seen:
                 continue
-            chars = value.get("chars")
-            rows.append(
-                {
-                    "checkpoint": f"{entry.key} ({target.get('run_id')})",
-                    "checkpoint_sha256": sha,
-                    "group": group,
-                    "when": entry.created_at,
-                    "length": chars if chars is not None else value.get("tokens"),
-                    "unit": "characters" if chars is not None else "tokens",
-                    "tokens": value.get("tokens"),
-                    "accuracy": value["accuracy"],
-                    "chance": details.get("chance"),
-                }
-            )
+            seen.add((sha, group))
+            for value in by_length.values():
+                if value.get("accuracy") is None:
+                    continue
+                chars = value.get("chars")
+                rows.append(
+                    {
+                        "checkpoint": f"{entry.key} ({target.get('run_id')})",
+                        "checkpoint_sha256": sha,
+                        "group": group,
+                        "when": entry.created_at,
+                        "length": chars if chars is not None else value.get("tokens"),
+                        "unit": "characters" if chars is not None else "tokens",
+                        "tokens": value.get("tokens"),
+                        "accuracy": value["accuracy"],
+                        "chance": details.get("chance"),
+                    }
+                )
     return rows
 
 

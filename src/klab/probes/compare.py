@@ -180,8 +180,9 @@ def pair(
         )
         if metric_id == "lm_eval" and target:
             hint = f"run `klab probe {shlex.quote(str(target))} --config full` (lmeval extra)"
-        elif metric_id in {"fact_recall", "needle"} and target:
-            tier = "full" if who["kind"] == "reference" else "standard"
+        elif metric_id in {"fact_recall", "needle", "long_needle"} and target:
+            standard = who["kind"] != "reference" and metric_id != "long_needle"
+            tier = "standard" if standard else "full"
             hint = f"run `klab probe {shlex.quote(str(target))} --config {tier}`"
         elif metric_id == "code_pass1" and target:
             hint = f"run `klab bench {shlex.quote(str(target))} --task humaneval`"

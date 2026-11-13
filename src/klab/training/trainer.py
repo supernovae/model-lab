@@ -54,6 +54,7 @@ from klab.evaluation.panel_data import (
     panel_protocol,
     panel_protocol_sha256,
 )
+from klab.evaluation.positions import PositionLoss
 from klab.evaluation.post_train_triage import triage_completed_run
 from klab.memory import (
     calibrated_estimate,
@@ -2143,10 +2144,12 @@ def _train_impl(
                         named = {}
                         totals = []
                         for name, (panel, selected, identity) in fixed_panels.items():
+                            by_position = PositionLoss(panel.sequence_length)
                             measured = engine.evaluate(
                                 evaluation_batches(
                                     selected, panel.batch_size, None, name
-                                )
+                                ),
+                                positions=by_position,
                             )
                             if (
                                 measured.valid_targets != panel.supervised_targets
@@ -2160,6 +2163,7 @@ def _train_impl(
                             totals.append(measured)
                             named[name] = {
                                 **measured.to_report(),
+                                **by_position.report(),
                                 "nll_sum": measured.loss_sum,
                                 "protocol": panel_protocol(panel),
                                 "protocol_sha256": panel_protocol_sha256(panel),

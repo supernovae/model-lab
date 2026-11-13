@@ -50,3 +50,35 @@ def chunked_output_head_cross_entropy(
         else:
             total = total + chunk_loss(chunk, labels, weight)
     return total
+
+
+@torch.no_grad()
+def chunked_output_head_token_losses(
+    hidden: torch.Tensor,
+    targets: torch.Tensor,
+    weight: torch.Tensor,
+    chunk_tokens: int,
+    precision: Callable[[], Any],
+) -> torch.Tensor:
+    """Per-target cross-entropy ``[batch, positions]`` (0 where masked), chunked.
+
+    Evaluation only: the same projection and FP32 reduction as
+    :func:`chunked_output_head_cross_entropy`, kept per target.
+    """
+    flat_hidden = hidden.flatten(0, 1)
+    flat_targets = targets.flatten()
+    parts = []
+    for start in range(0, flat_hidden.shape[0], chunk_tokens):
+        with precision():
+            logits = functional.linear(
+                flat_hidden[start : start + chunk_tokens], weight
+            )
+        parts.append(
+            functional.cross_entropy(
+                logits.float(),
+                flat_targets[start : start + chunk_tokens],
+                ignore_index=-100,
+                reduction="none",
+            )
+        )
+    return torch.cat(parts).view_as(targets)
