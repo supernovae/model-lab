@@ -283,6 +283,9 @@ def named_tensor_inventory(
 
     if m.tie_embeddings:
         tensors["output.weight"] = TensorSpec((v, d), alias_of="embedding.weight")
+    elif m.output_head_rank is not None:
+        _add(tensors, "output_down.weight", (m.output_head_rank, d))
+        _add(tensors, "output.weight", (v, m.output_head_rank))
     else:
         _add(tensors, "output.weight", (v, d))
     if trainable_parameters is None:
@@ -342,7 +345,9 @@ def parameter_inventory(config: RunConfig) -> ParameterInventory:
     )
     stored = lambda name, spec: spec.alias_of is None
     embedding = _sum_specs(tensors, lambda name, spec: name == "embedding.weight")
-    output = _sum_specs(tensors, lambda name, spec: name == "output.weight")
+    output = _sum_specs(
+        tensors, lambda name, spec: name in {"output.weight", "output_down.weight"}
+    )
     attention = _sum_specs(tensors, lambda name, spec: ".attention." in name)
     dense = _sum_specs(
         tensors,
@@ -499,7 +504,12 @@ def inspect_model(model: nn.Module) -> dict[str, int | str]:
         for name, parameter in model.named_parameters()
         if name == "norm.weight" or ".norm" in name
     )
-    output_head = 0 if tied else model.output.weight.numel()
+    output_head = (
+        0
+        if tied
+        else model.output.weight.numel()
+        + (model.output_down.weight.numel() if model.output_down is not None else 0)
+    )
     active = total if tied else total - embedding + model.config.hidden_dim
     active -= routed_expert + shared_expert
     active += active_expert

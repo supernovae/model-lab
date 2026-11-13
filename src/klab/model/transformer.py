@@ -162,7 +162,13 @@ class DenseLM(nn.Module):
         if memory_rng is not None:
             torch.set_rng_state(memory_rng)
         self.semantic_memories = nn.ModuleDict()
-        self.output = nn.Linear(model.hidden_dim, model.vocab_size, bias=False)
+        rank = model.output_head_rank
+        # A factored head projects to the rank first; ``output`` then maps
+        # rank -> vocabulary, so every loss path keeps using output.weight.
+        self.output_down = (
+            nn.Linear(model.hidden_dim, rank, bias=False) if rank is not None else None
+        )
+        self.output = nn.Linear(rank or model.hidden_dim, model.vocab_size, bias=False)
         if independent_memory:
             memory, extras = self.memory, self.extra_memories
             self.memory = None
@@ -452,6 +458,8 @@ class DenseLM(nn.Module):
                 position_mask=position_mask,
             )
         x = self._apply_semantic_site(x, semantic_query_map, site="final")
+        if self.output_down is not None:
+            x = self.output_down(x)
         return (x if return_hidden else self.output(x)), auxiliary_loss
 
     def architecture_metric_tensors(self) -> dict[str, Tensor]:
@@ -818,6 +826,8 @@ class DenseLM(nn.Module):
         if self.config.memory_injection == "final":
             x = self._apply_memory(x, full_ids, byte_addresses, cache=cache)
         x = self._apply_semantic_site(x, semantic_query_map, site="final")
+        if self.output_down is not None:
+            x = self.output_down(x)
         return self.output(x), cache
 
     @property

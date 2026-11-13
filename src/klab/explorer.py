@@ -169,7 +169,9 @@ def architecture(config: Any) -> dict[str, Any]:
         "max_seq_len": m.max_seq_len,
         "tie_embeddings": m.tie_embeddings,
         "embedding_parameters": count("embedding."),
-        "output_parameters": 0 if m.tie_embeddings else count("output."),
+        "output_parameters": 0
+        if m.tie_embeddings
+        else count("output.") + count("output_down."),
         "layers": layers,
         "memory": memory,
         "inventory": inspection_report(config),

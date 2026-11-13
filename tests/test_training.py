@@ -613,6 +613,48 @@ def test_a_promoted_child_extends_rope_context_from_its_parent(tmp_path: Path) -
         train(extended, run_id="resumed", resume=checkpoint, allow_runtime_drift=True)
 
 
+def test_a_factored_output_head_trains_and_exports_its_rank_limited_logits(
+    tmp_path: Path,
+) -> None:
+    from klab.evaluation.inference import load_run
+    from klab.model.inspection import inspect_model, inspection_report
+
+    base = config(tmp_path)
+    settings = base.model_dump(mode="python")
+    settings["model"].update(tie_embeddings=False, output_head_rank=4)
+    # The chunked loss reads output.weight against the rank-4 hidden state.
+    settings["runtime"]["output_head_chunk_tokens"] = 8
+    run = RunConfig.model_validate(settings)
+    run_id = train(run, run_id="factored-head")
+    loaded = load_run(run_id, run.logging.root_dir)
+    assert loaded.model.output.weight.shape == (512, 4)
+    report = inspection_report(run)
+    actual = inspect_model(loaded.model)
+    assert report["output_head"] == actual["output_head"] == 4 * 16 + 512 * 4
+    assert report["total"] == actual["total"]
+    ids = torch.randint(0, 512, (1, 32))
+    with torch.no_grad():
+        logits = loaded.model(ids.to(loaded.device))[0].cpu()
+    # Rank 4 up to float32 rounding.
+    assert torch.linalg.matrix_rank(logits.double(), rtol=1e-5) <= 4
+    # Export multiplies the factors into the one head matrix Llama expects.
+    pytest.importorskip("transformers")
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from klab.training.weight_export import llama_config, llama_tensors
+
+    hf = LlamaForCausalLM(LlamaConfig(**llama_config(run, ()))).eval()
+    hf.load_state_dict(
+        llama_tensors(run, {k: v.cpu() for k, v in loaded.model.state_dict().items()}),
+        strict=False,
+    )
+    with torch.no_grad():
+        torch.testing.assert_close(hf(ids).logits[0], logits, rtol=1e-4, atol=1e-5)
+    settings["model"]["tie_embeddings"] = True
+    with pytest.raises(ValueError, match="output_head_rank needs"):
+        RunConfig.model_validate(settings)
+
+
 def test_mlx_validation_rejects_enabled_memory() -> None:
     base = load_config(
         Path(__file__).resolve().parents[1] / "configs" / "runtime_smoke_cpu.yaml"
