@@ -317,17 +317,33 @@ _ENVIRONMENT_LOCK = threading.Lock()
 
 
 @contextmanager
-def _environment(environment: dict[str, str]) -> Iterator[None]:
-    """Start a child with ``environment``; a spawned child reads it at start."""
+def _child_start(environment: dict[str, str]) -> Iterator[None]:
+    """Start a spawned child with ``environment`` and without the parent's script.
+
+    A spawned child reads its environment when it starts. It would also re-run
+    the parent's ``__main__`` (a console script, or a test runner's bootstrap
+    file that cannot run on its own); the replica's entry point is importable,
+    so the child is started as if the parent had no main script.
+    """
+    main = sys.modules["__main__"]
     with _ENVIRONMENT_LOCK:
-        saved = dict(os.environ)
+        saved_environment = dict(os.environ)
+        saved_main = {
+            name: main.__dict__[name]
+            for name in ("__file__", "__spec__")
+            if name in main.__dict__
+        }
         os.environ.clear()
         os.environ.update(environment)
+        main.__dict__.pop("__file__", None)
+        main.__spec__ = None
         try:
             yield
         finally:
             os.environ.clear()
-            os.environ.update(saved)
+            os.environ.update(saved_environment)
+            main.__dict__.pop("__spec__", None)
+            main.__dict__.update(saved_main)
 
 
 @dataclass
@@ -407,7 +423,7 @@ class ReplicaPool:
                     name=f"klab-replica-{device_index}",
                     daemon=True,
                 )
-                with _environment(child_environment(backend, device_index)):
+                with _child_start(child_environment(backend, device_index)):
                     process.start()
                 child.close()
                 self.replicas.append(
