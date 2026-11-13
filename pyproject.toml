@@ -34,6 +34,10 @@ mlx = [
 reference = [
     "transformers>=4.45,<5",
 ]
+# Text extraction for `pdf_documents` corpus sources.
+pdf = [
+    "pypdf>=7,<8",
+]
 # Optional standard-task backend for `klab probe --config full`.
 lmeval = [
     "lm-eval>=0.4.9,<0.5",

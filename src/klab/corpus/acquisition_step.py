@@ -1,4 +1,4 @@
-"""One exact bounded-HF declaration, using the full project's existing ledger."""
+"""One exact pinned-transfer declaration, using the full project's existing ledger."""
 
 from __future__ import annotations
 
@@ -9,7 +9,11 @@ from pathlib import Path
 
 from klab.corpus import bounded_metadata
 from klab.corpus.project import Project
-from klab.corpus.transport_budget import TransportBudget
+from klab.corpus.transport_budget import (
+    PINNED_FILE_KINDS,
+    TransportBudget,
+    pinned_transfers,
+)
 
 MANIFEST_BYTES = 256 * 1024**2
 LEDGER_BYTES = 32 * 1024**2
@@ -75,13 +79,13 @@ def prepare(
     source = next(s for s in project.sources if s.id == source_id)
     if source.redistribution == "rejected":
         raise ValueError("acquisition step source is rejected")
-    if (
+    if source.kind not in PINNED_FILE_KINDS and (
         source.kind != "huggingface_dataset"
         or source.acquisition.bounded_shards is None
         or source.acquisition.retained_subset is not None
     ):
         raise ValueError(
-            "acquisition steps require an immutable bounded-HF declaration"
+            "acquisition steps require a bounded-HF, archive, PDF or MediaWiki declaration"
         )
     if project.config.transport_budget is None:
         raise ValueError(
@@ -175,8 +179,12 @@ def prepare(
     else:
         output_bytes = source.acquisition.max_bytes
         manifest_bytes = MANIFEST_BYTES
-        compressed = sum(
-            shard.max_shard_bytes for shard in source.acquisition.bounded_shards
+        # PDF bodies are kept in the snapshot and so are already output bytes;
+        # other bodies occupy one temporary path until they are expanded.
+        compressed = (
+            0
+            if source.kind == "pdf_documents"
+            else sum(size for _, size in pinned_transfers(source))
         )
         budget.assert_source_available(source_id)
     # Expanded data + manifest appear at staging and published paths. Each
@@ -188,10 +196,7 @@ def prepare(
     peak_bytes = (
         output_bytes
         + manifest_bytes
-        + max(
-            (shard.max_shard_bytes for shard in source.acquisition.bounded_shards),
-            default=0,
-        )
+        + max((size for _, size in pinned_transfers(source)), default=0)
         * (compressed != 0)
         + LEDGER_BYTES
         + JOURNAL_BYTES

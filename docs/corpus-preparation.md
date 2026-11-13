@@ -52,12 +52,14 @@ klab --work-dir WORK corpus acquire PROJECT
 ```
 
 A project (`corpus.yaml`) lists source declarations under `sources/`. A source
-is a pinned Git repository, Hugging Face dataset shard, Wikimedia dump, local
-file, HTTP document or generator. Acquisition writes one snapshot per source and
-then an acquisition lock binding them.
+is a pinned Git repository, Hugging Face dataset shard, Wikimedia dump, tar or
+zip archive, list of PDF files, MediaWiki XML dump, local file, HTTP document or
+generator (see [source kinds](#source-kinds)). Acquisition writes one snapshot
+per source and then an acquisition lock binding them.
 
 - **Transport budgets.** `corpus budget-init PROJECT` starts a durable ledger
-  of bytes, retries, disk and wall time for bounded Hugging Face transfers;
+  of bytes, retries, disk and wall time for bounded Hugging Face and Git
+  transfers and for archive, PDF and MediaWiki downloads;
   `corpus budget-status PROJECT` reads it. Failed and interrupted transfers keep
   their full charge.
 - **Initial feasibility gate.** A budget may set `initial_body_bytes` below
@@ -91,6 +93,144 @@ then an acquisition lock binding them.
 - **Preview.** `corpus preview DECLARATION --input-root INPUTS --output NEW_DIR`
   shows seeded sample excerpts from acquired JSONL in place, without copying or
   admitting anything.
+
+### Source kinds
+
+Every downloaded body is pinned by SHA-256 and refused if a byte differs, and
+every source carries the same [rights](#rights) fields. These three kinds reach
+reference collections that have no Git mirror or Hugging Face copy. Each is
+immutable, so a verified snapshot is reused rather than fetched again, and each
+can run as a `--source-id` step under a transport budget.
+
+**`archive`**: one tar, tar.gz or zip file, such as the IETF RFC collection.
+Every regular member matching `include` (and no `exclude`) becomes one snapshot
+file, so one document:
+
+```yaml
+schema_version: 3
+id: ietf_rfcs
+kind: archive
+canonical_uri: https://www.rfc-editor.org/in-notes/tar/RFC-all.tar.gz
+revision: "2026-11-01"
+license: LicenseRef-IETF-Trust-Legal-Provisions
+license_url: https://trustee.ietf.org/license-info
+explicit_training_restriction: unknown
+rights:
+  training_eligibility: review_required
+  redistribution_mode: metadata_reconstruction_only
+  license_references: [https://trustee.ietf.org/license-info]
+  notices: [Retain the IETF Trust copyright notice of each RFC]
+domains: [standards]
+document_kinds: [specification]
+source_family: ietf
+acquisition:
+  expected_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  format: tar.gz            # tar, tar.gz or zip
+  include: ["rfc*.txt"]
+  exclude: ["rfc-index.txt"]
+  max_archive_bytes: 700000000   # the downloaded body
+  max_expanded_bytes: 2000000000 # bytes decompressed while scanning
+  max_members: 12000
+  max_member_bytes: 5000000
+  max_bytes: 1500000000          # all selected members together
+```
+
+Members are streamed, never extracted by the archive library. Any member with an
+absolute path or `..` refuses the whole archive; a selected member that is a
+symbolic link, hard link, device, sparse or encrypted file is refused, and two
+selected members may not share or nest inside one path. The snapshot records
+each member's path, size and SHA-256 and the archive's digest and size.
+`admission-draft` writes one decision per member, as for Git files, and
+`split-inventory` gives each member the family hint `archive-member:SOURCE:PATH`.
+
+**`pdf_documents`**: a list of pinned PDF files, such as NIST special
+publications, NASA handbooks or NTSB and CSB reports. The extracted text of
+each PDF is one document. It needs the optional `pdf` extra
+(`uv sync --locked --extra pdf`), which installs pypdf:
+
+```yaml
+schema_version: 3
+id: nist_sp
+kind: pdf_documents
+canonical_uri: https://csrc.nist.gov/publications/sp
+revision: "2026-11-01"
+license: LicenseRef-US-Government-Work
+license_url: https://www.nist.gov/open/copyright-fair-use-and-licensing-statements-srd-data-software-and-technical-series-publications
+explicit_training_restriction: none_found
+rights:
+  training_eligibility: review_required
+  redistribution_mode: metadata_reconstruction_only
+  license_references: [https://www.nist.gov/open/copyright-fair-use-and-licensing-statements-srd-data-software-and-technical-series-publications]
+domains: [security]
+document_kinds: [standard]
+source_family: nist
+acquisition:
+  documents:                  # sorted by name
+    - name: NIST.SP.800-53r5.txt  # the extracted text's snapshot path
+      url: https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-53r5.pdf
+      expected_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      max_bytes: 12000000
+  extraction: {engine: pypdf, version: 7.0.1, max_seconds: 120}
+  max_pages: 1000             # per document
+  max_text_bytes: 50000000    # all extracted text together
+```
+
+Text is extracted page by page in order, with LF newlines, trailing spaces
+removed and pages joined by a blank line. Each PDF is extracted in a child
+process that is killed after `max_seconds` (default 120), and a PDF that takes
+longer is refused. A PDF without a text layer is refused; there is no OCR. The snapshot keeps each PDF's bytes under `pinned/` beside the
+text and records both digests, the page count and the exact pypdf version.
+Verifying the snapshot extracts the text again from the pinned bytes and
+refuses it if the text differs or the installed pypdf is not the declared
+version, so the text is always reproducible from the bytes. Admission and
+family hints work per file as for archives, with the hint
+`pdf-document:SOURCE:NAME`.
+
+**`mediawiki_dump`**: a pinned XML export (`dumpBackup.php` or
+`Special:Export`, saved to a file) of any MediaWiki site, such as the Cynefin
+wiki. It reuses the Wikimedia page parser; each selected page is one JSONL row
+with its title, page and revision IDs and a `site_url?curid=ID` link:
+
+```yaml
+schema_version: 3
+id: cynefin_wiki
+kind: mediawiki_dump
+canonical_uri: https://example.org/dumps/cynefinwiki-20261101.xml.gz
+revision: "20261101"
+license: CC-BY-SA-4.0
+license_url: https://creativecommons.org/licenses/by-sa/4.0/
+explicit_training_restriction: none_found
+rights:
+  training_eligibility: eligible_with_obligations
+  redistribution_mode: redistributable_under_source_terms
+  spdx_expression: CC-BY-SA-4.0
+  license_references: [https://creativecommons.org/licenses/by-sa/4.0/]
+  notices: [Attribute page authors and share alike]
+domains: [management]
+document_kinds: [wiki_article]
+source_family: cynefin
+acquisition:
+  expected_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  compression: gzip           # bz2, gzip or none, matching the file suffix
+  dbname: cynefinwiki         # must match the dump's siteinfo
+  language: en                # must match the dump's language
+  site_url: https://example.org/index.php
+  namespaces: [0]
+  max_compressed_bytes: 50000000
+  max_decompressed_bytes: 500000000
+  max_scanned_pages: 100000
+  max_selected_pages: 50000
+  max_emitted_bytes: 400000000
+```
+
+The URL must name a dump file; a live API or query URL is refused. Redirects,
+pages outside `namespaces` and pages whose title or text marks them as
+non-free or not for training are skipped. For `language: en`, predominantly
+non-Latin pages are skipped too. Documents carry the declared `language`; every
+other source's documents are labelled `en`. Each page's family hint is
+`mediawiki-page:DBNAME:PAGE_ID`. `admission-draft` does not yet cover
+`mediawiki_dump` or `wikimedia_dump` rows, so they go through `corpus build`
+without a reviewed admission.
 
 ## Admit
 

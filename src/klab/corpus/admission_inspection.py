@@ -29,7 +29,7 @@ from klab.corpus.bounded_metadata import (
 )
 from klab.corpus.jsonl_records import records_from_bytes
 from klab.corpus.project import Project, load_project, source_declaration_payload
-from klab.corpus.rights import verify_record_admission
+from klab.corpus.rights import FILE_ADMISSION_KINDS, verify_record_admission
 from klab.corpus.structure_cleaning import (
     NORMALIZER_V2,
     NORMALIZER_V3,
@@ -183,7 +183,7 @@ def _scan_candidates(
         )
         for file in manifest["files"]:
             size = (snapshot / "files" / file["path"]).stat().st_size
-            if source.kind == "git" and size > _MAX_FILE_BYTES:
+            if source.kind in FILE_ADMISSION_KINDS and size > _MAX_FILE_BYTES:
                 raise ValueError("inspection file-byte cap exceeded")
             consumed += size
             if consumed > max_input_bytes:
@@ -192,7 +192,7 @@ def _scan_candidates(
         def observed(
             source_id, name, decision, record, ordinal, source=source, entry=entry
         ):
-            if source.kind == "git":
+            if source.kind in FILE_ADMISSION_KINDS:
                 candidate = _candidate(
                     source,
                     entry,
@@ -294,7 +294,7 @@ def _display(
 def _fetch_candidate(source, entry, snapshot, row, stats):
     """Replay only selected offsets, checking their content identity again."""
     path = _inside(snapshot / "files" / row["path"], snapshot.resolve())
-    if source.kind == "git":
+    if source.kind in FILE_ADMISSION_KINDS:
         raw = path.read_bytes()
         if len(raw) > _MAX_FILE_BYTES:
             raise ValueError("inspection file-byte cap exceeded")

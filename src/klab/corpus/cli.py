@@ -454,7 +454,8 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
                 help="Finalize only from already verified snapshots; never fetch or reconstruct missing sources",
             )
             command.add_argument(
-                "--source-id", help="Acquire one exact bounded-HF source declaration"
+                "--source-id",
+                help="Acquire one exact pinned-transfer source declaration",
             )
             command.add_argument(
                 "--max-new-bytes",
@@ -473,7 +474,7 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
             )
         command.set_defaults(handler=_handle)
     command = sub.add_parser(
-        "budget-init", help="Start one durable bounded-HF transport attempt"
+        "budget-init", help="Start one durable pinned-transfer transport attempt"
     )
     command.add_argument("project")
     command.set_defaults(handler=_handle)

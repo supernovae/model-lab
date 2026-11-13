@@ -44,7 +44,8 @@ prepared data, runs and records; it should live outside the checkout.
 `--extra cpu` installs PyTorch. It does not decide where a model runs: that is
 the config's `runtime.backend`. For a GPU, set up its environment once with the
 [runtime guide](docs/runtime.md). To run without a local Python, use the
-[container images](docs/containers.md).
+[container images](docs/containers.md). Add `--extra pdf` to acquire PDF corpus
+sources ([source kinds](docs/corpus-preparation.md#source-kinds)).
 
 ## Build a model
 

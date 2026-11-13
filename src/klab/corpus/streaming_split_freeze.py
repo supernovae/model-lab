@@ -20,7 +20,11 @@ from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.bounded_metadata import _HashedInput, _Reader
 from klab.corpus.jsonl_records import records_from_path
 from klab.corpus.project import project_path, source_declaration_payload
-from klab.corpus.rights import RightsPolicy, resolve_file_rights
+from klab.corpus.rights import (
+    FILE_ADMISSION_KINDS,
+    RightsPolicy,
+    resolve_file_rights,
+)
 from klab.corpus.split_runs import (
     BUFFER_BYTES,
     SplitStages,
@@ -128,7 +132,7 @@ def _admission_phase(directory, path, expected, declarations):
                     "kind": "rows",
                     "count": len(spool),
                 }
-            elif source["kind"] == "git":
+            elif source["kind"] in FILE_ADMISSION_KINDS:
                 if (
                     not policy.spdx_expression
                     or policy.training_restriction is not None

@@ -3,7 +3,7 @@
 From the repository root, install the locked development environment once:
 
 ```sh
-uv sync --locked --extra cpu --dev
+uv sync --locked --extra cpu --extra pdf --dev
 ```
 
 Run the tests nearest the files you changed first. Examples:

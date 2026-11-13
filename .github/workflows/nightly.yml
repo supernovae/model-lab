@@ -46,8 +46,9 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
-      # `reference` adds transformers, so exported models load through it here.
-      - run: uv sync --locked --extra cpu --extra reference --dev
+      # `reference` adds transformers, so exported models load through it here;
+      # `pdf` adds pypdf for PDF corpus sources.
+      - run: uv sync --locked --extra cpu --extra reference --extra pdf --dev
       - name: Full CPU suite (slow included)
         env:
           UV_OFFLINE: "1"

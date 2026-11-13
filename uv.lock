@@ -586,6 +586,78 @@ wheels = [
 ]
 
 [[package]]
+name = "kybern-model-lab"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "datasets" },
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "plotly" },
+    { name = "psutil" },
+    { name = "pyarrow" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "safetensors" },
+    { name = "streamlit" },
+    { name = "tokenizers" },
+]
+
+[package.optional-dependencies]
+cpu = [
+    { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
+    { name = "torch", version = "2.15.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'linux'" },
+]
+lmeval = [
+    { name = "lm-eval" },
+]
+mlx = [
+    { name = "mlx" },
+]
+pdf = [
+    { name = "pypdf" },
+]
+reference = [
+    { name = "transformers" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-xdist" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "datasets", specifier = ">=4,<5" },
+    { name = "huggingface-hub", specifier = ">=0.34,<2" },
+    { name = "lm-eval", marker = "extra == 'lmeval'", specifier = ">=0.4.9,<0.5" },
+    { name = "mlx", marker = "extra == 'mlx'", specifier = "==0.32.4" },
+    { name = "numpy", specifier = ">=2,<3" },
+    { name = "plotly", specifier = ">=6,<7" },
+    { name = "psutil", specifier = ">=7,<8" },
+    { name = "pyarrow", specifier = ">=25,<26" },
+    { name = "pydantic", specifier = ">=2,<3" },
+    { name = "pypdf", marker = "extra == 'pdf'", specifier = ">=7,<8" },
+    { name = "pyyaml", specifier = ">=6,<7" },
+    { name = "safetensors", specifier = ">=0.5,<1" },
+    { name = "streamlit", specifier = ">=1.64,<2" },
+    { name = "tokenizers", specifier = "==0.22.2" },
+    { name = "torch", marker = "sys_platform == 'linux' and extra == 'cpu'", specifier = "==2.15.0", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "kybern-model-lab", extra = "cpu" } },
+    { name = "torch", marker = "sys_platform != 'linux' and extra == 'cpu'", specifier = "==2.15.0" },
+    { name = "transformers", marker = "extra == 'reference'", specifier = ">=4.45,<5" },
+]
+provides-extras = ["cpu", "mlx", "reference", "pdf", "lmeval"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8,<10" },
+    { name = "pytest-xdist", specifier = ">=3,<4" },
+    { name = "ruff", specifier = ">=0.12,<1" },
+]
+
+[[package]]
 name = "lm-eval"
 version = "0.4.13"
 source = { registry = "https://pypi.org/simple" }
@@ -1197,6 +1269,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pypdf"
+version = "7.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/00/c2/4c34b3229abae3e2fcc7809e6cf80fdea159771a37142f475fbf1009c809/pypdf-7.0.1.tar.gz", hash = "sha256:0a78bb99efb41e9088260e9a8e5da134a5cbb9a322014744177bf29b5267ea6d", size = 7206748, upload-time = "2026-11-10T11:47:22.582Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d5/a9/ae11deef21eaac5113f8c3848da1c42423b7abeca0abc349bfec7abf4c4e/pypdf-7.0.1-py3-none-any.whl", hash = "sha256:6131b764b046282357037309e7ef2a1b7679d4a5c53eed3db2bfbf7c673ddc2b", size = 416136, upload-time = "2026-11-10T11:47:20.716Z" },
+]
+
+[[package]]
 name = "pytablewriter"
 version = "1.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1658,74 +1739,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/00/dc/6c58154c1c65f758ea979e7139cb76993a9cfc662d14e9be3c4a667cfb77/threadpoolctl-3.7.0.tar.gz", hash = "sha256:61348cfb77d53b9242e0017029244b559b810c142ced65b4e21eeca1843959a7", size = 31961, upload-time = "2026-09-15T15:46:20.263Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/43/3f/f88a53f60a472b46f4023f56d204dd7de33d34c5d2acbfa0d70a674e639e/threadpoolctl-3.7.0-py3-none-any.whl", hash = "sha256:cd8b60b5641b45c67bbf73c64c843235fc2d8a480c87389f52f5dbee893b86be", size = 26362, upload-time = "2026-09-15T15:46:19.168Z" },
-]
-
-[[package]]
-name = "kybern-model-lab"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "datasets" },
-    { name = "huggingface-hub" },
-    { name = "numpy" },
-    { name = "plotly" },
-    { name = "psutil" },
-    { name = "pyarrow" },
-    { name = "pydantic" },
-    { name = "pyyaml" },
-    { name = "safetensors" },
-    { name = "streamlit" },
-    { name = "tokenizers" },
-]
-
-[package.optional-dependencies]
-cpu = [
-    { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
-    { name = "torch", version = "2.15.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'linux'" },
-]
-lmeval = [
-    { name = "lm-eval" },
-]
-mlx = [
-    { name = "mlx" },
-]
-reference = [
-    { name = "transformers" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-xdist" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "datasets", specifier = ">=4,<5" },
-    { name = "huggingface-hub", specifier = ">=0.34,<2" },
-    { name = "lm-eval", marker = "extra == 'lmeval'", specifier = ">=0.4.9,<0.5" },
-    { name = "mlx", marker = "extra == 'mlx'", specifier = "==0.32.4" },
-    { name = "numpy", specifier = ">=2,<3" },
-    { name = "plotly", specifier = ">=6,<7" },
-    { name = "psutil", specifier = ">=7,<8" },
-    { name = "pyarrow", specifier = ">=25,<26" },
-    { name = "pydantic", specifier = ">=2,<3" },
-    { name = "pyyaml", specifier = ">=6,<7" },
-    { name = "safetensors", specifier = ">=0.5,<1" },
-    { name = "streamlit", specifier = ">=1.64,<2" },
-    { name = "tokenizers", specifier = "==0.22.2" },
-    { name = "torch", marker = "sys_platform == 'linux' and extra == 'cpu'", specifier = "==2.15.0", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "kybern-model-lab", extra = "cpu" } },
-    { name = "torch", marker = "sys_platform != 'linux' and extra == 'cpu'", specifier = "==2.15.0" },
-    { name = "transformers", marker = "extra == 'reference'", specifier = ">=4.45,<5" },
-]
-provides-extras = ["cpu", "mlx", "reference", "lmeval"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8,<10" },
-    { name = "pytest-xdist", specifier = ">=3,<4" },
-    { name = "ruff", specifier = ">=0.12,<1" },
 ]
 
 [[package]]

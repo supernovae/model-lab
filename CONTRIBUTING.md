@@ -5,7 +5,7 @@
 Lab uses Python 3.14 (pinned in `.python-version`) and uv:
 
 ```sh
-uv sync --locked --extra cpu --dev
+uv sync --locked --extra cpu --extra pdf --dev
 ```
 
 Work on a branch of your checkout and keep run outputs in a work directory

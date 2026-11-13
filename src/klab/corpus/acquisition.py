@@ -30,12 +30,16 @@ from urllib.parse import quote, urlencode, urljoin, urlparse
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.bounded_metadata import read_metadata
 from klab.corpus.project import (
+    IMMUTABLE_SOURCE_KINDS,
     RETAINED_MAX_BYTES,
     RETAINED_MAX_ROWS,
+    ArchiveAcquisition,
     GitAcquisition,
     HttpAcquisition,
     HuggingFaceAcquisition,
     LocalAcquisition,
+    MediaWikiDumpAcquisition,
+    PdfAcquisition,
     Project,
     SourceDeclaration,
     WikimediaDumpAcquisition,
@@ -43,7 +47,11 @@ from klab.corpus.project import (
     safe_name,
     source_declaration_payload,
 )
-from klab.corpus.transport_budget import TransportBudget
+from klab.corpus.transport_budget import (
+    PINNED_FILE_KINDS,
+    TransportBudget,
+    source_file_name,
+)
 from klab.engram.packs import _rename_noreplace
 from klab.hf_auth import hub_access_errors, hub_auth_kwargs, raise_for_hub_auth
 from klab.result_publication import sync_directory
@@ -214,7 +222,7 @@ def _reusable_immutable_adapter(
     actual = manifest["adapter"]
     expected = _adapter(source)
     return actual == expected or (
-        source.kind in {"git", "huggingface_dataset", "wikimedia_dump"}
+        source.kind in IMMUTABLE_SOURCE_KINDS
         and actual.get("id") == expected["id"]
         and actual.get("version") == expected["version"]
     )
@@ -1354,29 +1362,34 @@ def _wiki_text(wikitext: str) -> str:
     return "\n".join(line.strip() for line in text.splitlines() if line.strip()).strip()
 
 
-def _wiki_row(page: ET.Element, source: SourceDeclaration) -> dict[str, Any] | None:
-    title = page.findtext(_WIKI_NS + "title")
-    page_id = page.findtext(_WIKI_NS + "id")
+def _wiki_row(
+    page: ET.Element, source: SourceDeclaration, ns: str = _WIKI_NS
+) -> dict[str, Any] | None:
+    spec = source.acquisition
+    generic = isinstance(spec, MediaWikiDumpAcquisition)
+    namespaces = {str(item) for item in spec.namespaces} if generic else {"0"}
+    title = page.findtext(ns + "title")
+    page_id = page.findtext(ns + "id")
     if (
-        page.findtext(_WIKI_NS + "ns") != "0"
-        or page.find(_WIKI_NS + "redirect") is not None
+        page.findtext(ns + "ns") not in namespaces
+        or page.find(ns + "redirect") is not None
         or not title
         or not page_id
         or _WIKI_BLOCKED.search(title)
         or _WIKI_PRIVATE_TITLE.search(title)
     ):
         return None
-    revisions = page.findall(_WIKI_NS + "revision")
+    revisions = page.findall(ns + "revision")
     if not revisions:
         return None
     revision = max(
         revisions,
         key=lambda item: (
-            item.findtext(_WIKI_NS + "timestamp") or "",
-            int(item.findtext(_WIKI_NS + "id") or 0),
+            item.findtext(ns + "timestamp") or "",
+            int(item.findtext(ns + "id") or 0),
         ),
     )
-    content = revision.find(_WIKI_NS + "text")
+    content = revision.find(ns + "text")
     if content is None or content.get("deleted") is not None or not content.text:
         return None
     raw = content.text
@@ -1385,20 +1398,28 @@ def _wiki_row(page: ET.Element, source: SourceDeclaration) -> dict[str, Any] | N
     ):
         return None
     text = _wiki_text(raw)
-    if not text or not re.search(r"[a-zA-Z]", text):
+    english = not generic or spec.language == "en"
+    if not text or not (
+        re.search(r"[a-zA-Z]", text) if english else any(c.isalpha() for c in text)
+    ):
         return None
-    # Skip predominantly non-Latin prose; retain mathematics/code with English context.
-    letters = [char for char in text if char.isalpha()]
-    if letters and sum(char.isascii() for char in letters) * 2 < len(letters):
-        return None
-    revision_id = revision.findtext(_WIKI_NS + "id")
-    timestamp = revision.findtext(_WIKI_NS + "timestamp")
+    if english:
+        # Skip predominantly non-Latin prose; retain mathematics/code with English context.
+        letters = [char for char in text if char.isalpha()]
+        if letters and sum(char.isascii() for char in letters) * 2 < len(letters):
+            return None
+    revision_id = revision.findtext(ns + "id")
+    timestamp = revision.findtext(ns + "timestamp")
     if not revision_id or not timestamp:
         return None
-    project = urlparse(source.canonical_uri).path.split("/")[1]
-    if project not in {"enwikibooks", "enwiki"}:
-        raise ValueError("unsupported Wikimedia project for page attribution")
-    site = "wikipedia" if project == "enwiki" else "wikibooks"
+    if generic:
+        page_uri = f"{spec.site_url}?curid={page_id}"
+    else:
+        project = urlparse(source.canonical_uri).path.split("/")[1]
+        if project not in {"enwikibooks", "enwiki"}:
+            raise ValueError("unsupported Wikimedia project for page attribution")
+        site = "wikipedia" if project == "enwiki" else "wikibooks"
+        page_uri = f"https://en.{site}.org/?curid={page_id}"
     return {
         "text": text,
         "_klab_source": {
@@ -1408,9 +1429,85 @@ def _wiki_row(page: ET.Element, source: SourceDeclaration) -> dict[str, Any] | N
             "page_id": page_id,
             "revision_id": revision_id,
             "revision_timestamp": timestamp,
-            "page_uri": f"https://en.{site}.org/?curid={page_id}",
+            "page_uri": page_uri,
         },
     }
+
+
+_MEDIAWIKI_ROOT = re.compile(r"\{http://www\.mediawiki\.org/xml/export-0\.\d+/\}")
+
+
+def _wiki_jsonl(
+    source: SourceDeclaration,
+    decompressed: Any,
+    output_path: Path,
+    resources: _AcquisitionResources,
+) -> tuple[list[dict[str, str]], int, int, int]:
+    """Stream pages from a decompressed XML export into bounded JSONL rows."""
+    spec = source.acquisition
+    generic = isinstance(spec, MediaWikiDumpAcquisition)
+    emitted = scanned = 0
+    rows: list[dict[str, str]] = []
+    with resources.output(output_path) as output:
+        guarded = _BoundedXML(decompressed, spec.max_decompressed_bytes, resources)
+        context = ET.iterparse(guarded, events=("start", "end"))
+        root: ET.Element | None = None
+        ns = _WIKI_NS
+        site_verified = False
+        for event, element in context:
+            if root is None:
+                root = element
+                if generic:
+                    match = _MEDIAWIKI_ROOT.match(root.tag)
+                    if match is None or root.tag != match[0] + "mediawiki":
+                        raise ValueError("unsupported MediaWiki XML export namespace")
+                    ns = match[0]
+                elif root.tag != _WIKI_NS + "mediawiki":
+                    raise ValueError("unsupported Wikimedia XML namespace")
+            if event == "end" and element.tag == ns + "siteinfo":
+                language = element.findtext(ns + "lang") or root.get(
+                    "{http://www.w3.org/XML/1998/namespace}lang"
+                )
+                if generic:
+                    expected = (spec.language, spec.dbname)
+                else:
+                    expected = ("en", urlparse(source.canonical_uri).path.split("/")[1])
+                if (language, element.findtext(ns + "dbname")) != expected:
+                    raise ValueError(
+                        "Wikimedia dump site identity or language mismatch"
+                    )
+                site_verified = True
+            if event != "end" or element.tag != ns + "page":
+                continue
+            if not site_verified:
+                raise ValueError("Wikimedia dump lacks English siteinfo")
+            if (
+                scanned >= spec.max_scanned_pages
+                or len(rows) >= spec.max_selected_pages
+            ):
+                break
+            scanned += 1
+            row = _wiki_row(element, source, ns)
+            if row is not None:
+                line = canonical_json(row) + b"\n"
+                if len(line) > spec.max_emitted_bytes - emitted:
+                    raise ValueError("Wikimedia emitted JSONL exceeds limit")
+                output.write(line)
+                emitted += len(line)
+                rows.append(
+                    {
+                        "page_id": row["_klab_source"]["page_id"],
+                        "revision_id": row["_klab_source"]["revision_id"],
+                        "row_sha256": hashlib.sha256(line).hexdigest(),
+                    }
+                )
+            root.clear()
+        output.flush()
+        os.fsync(output.fileno())
+        resources.expanded = guarded.size
+    if not rows:
+        raise ValueError("Wikimedia bounded selection produced no pages")
+    return rows, scanned, emitted, guarded.size
 
 
 def _acquire_wikimedia(
@@ -1467,65 +1564,11 @@ def _acquire_wikimedia(
         raise ValueError("Wikimedia compressed SHA-1 mismatch")
     output_name = name + ".sample.jsonl"
     output_path = staging / "files" / output_name
-    emitted = scanned = 0
-    rows: list[dict[str, str]] = []
-    with (
-        bz2.open(compressed, "rb") as decompressed,
-        resources.output(output_path) as output,
-    ):
-        guarded = _BoundedXML(decompressed, spec.max_decompressed_bytes, resources)
-        context = ET.iterparse(guarded, events=("start", "end"))
-        root: ET.Element | None = None
-        english_site = False
-        for event, element in context:
-            if root is None:
-                root = element
-                if root.tag != _WIKI_NS + "mediawiki":
-                    raise ValueError("unsupported Wikimedia XML namespace")
-            if event == "end" and element.tag == _WIKI_NS + "siteinfo":
-                language = element.findtext(_WIKI_NS + "lang") or root.get(
-                    "{http://www.w3.org/XML/1998/namespace}lang"
-                )
-                expected_db = urlparse(source.canonical_uri).path.split("/")[1]
-                if (
-                    language != "en"
-                    or element.findtext(_WIKI_NS + "dbname") != expected_db
-                ):
-                    raise ValueError(
-                        "Wikimedia dump site identity or language mismatch"
-                    )
-                english_site = True
-            if event != "end" or element.tag != _WIKI_NS + "page":
-                continue
-            if not english_site:
-                raise ValueError("Wikimedia dump lacks English siteinfo")
-            if (
-                scanned >= spec.max_scanned_pages
-                or len(rows) >= spec.max_selected_pages
-            ):
-                break
-            scanned += 1
-            row = _wiki_row(element, source)
-            if row is not None:
-                line = canonical_json(row) + b"\n"
-                if len(line) > spec.max_emitted_bytes - emitted:
-                    raise ValueError("Wikimedia emitted JSONL exceeds limit")
-                output.write(line)
-                emitted += len(line)
-                rows.append(
-                    {
-                        "page_id": row["_klab_source"]["page_id"],
-                        "revision_id": row["_klab_source"]["revision_id"],
-                        "row_sha256": hashlib.sha256(line).hexdigest(),
-                    }
-                )
-            root.clear()
-        output.flush()
-        os.fsync(output.fileno())
-        resources.expanded = guarded.size
+    with bz2.open(compressed, "rb") as decompressed:
+        rows, scanned, emitted, _ = _wiki_jsonl(
+            source, decompressed, output_path, resources
+        )
     compressed.unlink()
-    if not rows:
-        raise ValueError("Wikimedia bounded selection produced no pages")
     return [
         {
             "path": output_name,
@@ -1545,19 +1588,449 @@ def _acquire_wikimedia(
     }
 
 
+_USER_AGENT = {"User-Agent": "KybernModelLab-Corpus-Forge/1"}
+
+
+def _fetch_pinned(
+    source: SourceDeclaration,
+    url: str,
+    key: str,
+    expected_sha256: str,
+    limit: int,
+    target: Path,
+    budget: TransportBudget | None,
+    resources: _AcquisitionResources,
+) -> int:
+    """Download one content-pinned body, charging the ledger when one is declared."""
+    if budget is None:
+        request = urllib.request.Request(url, headers=_USER_AGENT)
+        with urllib.request.build_opener().open(request, timeout=60) as response:
+            if urlparse(response.url).scheme not in ("http", "https"):
+                raise ValueError("pinned download redirect has unsafe scheme")
+            digest, size = _copy_stream(response, target, limit, resources)
+        if digest != expected_sha256:
+            raise ValueError(f"pinned download SHA-256 mismatch: {key}")
+        return size
+    budget.assert_transfer_available(source.id, key, limit, allow_verified_retry=True)
+    index = budget.reserve_transfer(source.id, key, limit, allow_verified_retry=True)
+    resources.index = index
+    try:
+        response, _ = _open_accounted(url, dict(_USER_AGENT), budget)
+        with response:
+            digest, size = _copy_hf_body(
+                response, target, limit, budget, index, resources
+            )
+        if digest != expected_sha256:
+            raise ValueError(f"pinned download SHA-256 mismatch: {key}")
+        budget.finish_transfer(index, success=True)
+    except OSError, TimeoutError, EOFError:
+        budget.finish_transfer(index, success=False, interrupted=True)
+        raise
+    except Exception:
+        budget.finish_transfer(index, success=False)
+        raise
+    except BaseException:
+        budget.finish_transfer(index, success=False, interrupted=True)
+        raise
+    return size
+
+
+class _CountedStream:
+    """Bound the bytes an archive decompressor returns, before tar parses them."""
+
+    def __init__(self, stream: Any, limit: int, resources: _AcquisitionResources):
+        self.stream = stream
+        self.limit = limit
+        self.size = 0
+        self.resources = resources
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self.stream.read(min(1024 * 1024, size if size >= 0 else 1024 * 1024))
+        self.size += len(chunk)
+        self.resources.expanded = self.size
+        if self.size > self.limit:
+            raise ValueError("archive expanded bytes exceed max_expanded_bytes")
+        return chunk
+
+
+def _archive_member(name: str) -> str | None:
+    """An archive member's logical path; any unsafe path refuses the whole archive."""
+    logical = name
+    while logical.startswith("./"):
+        logical = logical[2:]
+    logical = logical.removesuffix("/")
+    if logical in ("", "."):
+        return None  # the archive root directory entry
+    try:
+        return safe_name(logical)
+    except ValueError as error:
+        raise ValueError(f"archive member has an unsafe path: {name!r}") from error
+
+
+def _acquire_archive(
+    source: SourceDeclaration,
+    staging: Path,
+    budget: TransportBudget | None,
+    resources: _AcquisitionResources,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    import tarfile
+    import zipfile
+    import zlib
+
+    spec = source.acquisition
+    assert isinstance(spec, ArchiveAcquisition)
+    resources.observe()
+    if budget is not None:
+        budget.check_disk(staging, budget.projected_disk_bytes(source_id=source.id))
+    name = source_file_name(source.canonical_uri)
+    body = staging / "archive-input" / name
+    archive_bytes = _fetch_pinned(
+        source,
+        source.canonical_uri,
+        name,
+        spec.expected_sha256,
+        spec.max_archive_bytes,
+        body,
+        budget,
+        resources,
+    )
+    inventory: list[dict[str, Any]] = []
+    names: set[str] = set()
+    parents: set[str] = set()
+    scanned = 0
+
+    def selected(member: str) -> bool:
+        return any(
+            fnmatch.fnmatchcase(member, item) for item in spec.include
+        ) and not any(fnmatch.fnmatchcase(member, item) for item in spec.exclude)
+
+    def admit(member: str, size: int) -> int:
+        ancestors = {
+            "/".join(member.split("/")[:n]) for n in range(1, member.count("/") + 1)
+        }
+        if member in names or member in parents or ancestors & names:
+            raise ValueError(f"archive members collide: {member}")
+        if len(names) >= spec.max_members:
+            raise ValueError("archive selection exceeds max_members")
+        if size > spec.max_member_bytes:
+            raise ValueError(f"archive member exceeds max_member_bytes: {member}")
+        names.add(member)
+        parents.update(ancestors)
+        return min(
+            spec.max_member_bytes, spec.max_bytes - sum(i["size"] for i in inventory)
+        )
+
+    def copy(stream: Any, member: str, limit: int) -> None:
+        digest, size = _copy_stream(
+            stream, staging / "files" / member, limit, resources
+        )
+        inventory.append({"path": member, "sha256": digest, "size": size})
+
+    try:
+        if spec.format == "zip":
+            with zipfile.ZipFile(body) as archive:
+                expanded = 0
+                for info in archive.infolist():
+                    scanned += 1
+                    member = _archive_member(info.filename)
+                    if member is None or info.is_dir() or not selected(member):
+                        continue
+                    mode = info.external_attr >> 16
+                    if info.flag_bits & 0x1 or (mode and not stat.S_ISREG(mode)):
+                        raise ValueError(
+                            f"archive member is not a plain regular file: {member}"
+                        )
+                    limit = admit(member, info.file_size)
+                    expanded += info.file_size
+                    resources.expanded = expanded
+                    if expanded > spec.max_expanded_bytes:
+                        raise ValueError(
+                            "archive expanded bytes exceed max_expanded_bytes"
+                        )
+                    with archive.open(info) as stream:
+                        copy(stream, member, limit)
+        else:
+            with body.open("rb") as raw:
+                stream = gzip.GzipFile(fileobj=raw) if spec.format == "tar.gz" else raw
+                counted = _CountedStream(stream, spec.max_expanded_bytes, resources)
+                with tarfile.open(fileobj=counted, mode="r|") as archive:
+                    for info in archive:
+                        scanned += 1
+                        member = _archive_member(info.name)
+                        if member is None or info.isdir() or not selected(member):
+                            continue
+                        if not info.isreg() or info.issparse():
+                            raise ValueError(
+                                f"archive member is not a plain regular file: {member}"
+                            )
+                        limit = admit(member, info.size)
+                        extracted = archive.extractfile(info)
+                        assert extracted is not None
+                        with extracted:
+                            copy(extracted, member, limit)
+    except (
+        tarfile.TarError,
+        zipfile.BadZipFile,
+        gzip.BadGzipFile,
+        zlib.error,
+    ) as error:
+        raise ValueError(f"invalid {spec.format} archive: {error}") from error
+    body.unlink()
+    body.parent.rmdir()
+    resources.observe()
+    if not inventory:
+        raise ValueError("archive include patterns selected no files")
+    return sorted(inventory, key=lambda item: item["path"]), {
+        "archive_sha256": spec.expected_sha256,
+        "archive_bytes": archive_bytes,
+        "format": spec.format,
+        "scanned_members": scanned,
+        "resources": resources.receipt(),
+    }
+
+
+def _verify_archive_files(source: SourceDeclaration, manifest: dict[str, Any]) -> None:
+    spec = source.acquisition
+    assert isinstance(spec, ArchiveAcquisition)
+    files = manifest["files"]
+    if (
+        not files
+        or len(files) > spec.max_members
+        or sum(item["size"] for item in files) > spec.max_bytes
+        or any(
+            item["size"] > spec.max_member_bytes
+            or not any(fnmatch.fnmatchcase(item["path"], p) for p in spec.include)
+            or any(fnmatch.fnmatchcase(item["path"], p) for p in spec.exclude)
+            for item in files
+        )
+    ):
+        raise ValueError("archive snapshot differs from its declared selection")
+
+
+def _pypdf(spec: PdfAcquisition) -> Any:
+    try:
+        import pypdf
+    except ImportError as error:
+        raise ValueError(
+            "pdf_documents sources need the optional `pdf` extra (uv sync --extra pdf)"
+        ) from error
+    if pypdf.__version__ != spec.extraction.version:
+        raise ValueError(
+            f"PDF text extraction is pinned to pypdf {spec.extraction.version}; "
+            f"installed pypdf is {pypdf.__version__}"
+        )
+    return pypdf
+
+
+def _pdf_text(path: Path, spec: PdfAcquisition, name: str) -> tuple[bytes, int]:
+    """Extract one PDF in a child process killed at the declared deadline."""
+    import sys
+
+    from klab.runtime_env_subprocess import run_bounded
+
+    extraction = spec.extraction
+    command = [
+        sys.executable,
+        "-I",
+        "-m",
+        "klab.corpus.pdf_text",
+        str(path),
+        extraction.version,
+        str(spec.max_pages),
+    ]
+    try:
+        result = run_bounded(
+            command,
+            timeout=extraction.max_seconds,
+            output_limit=spec.max_text_bytes + 64,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ValueError(
+            f"PDF text extraction exceeded {extraction.max_seconds} s: {name}"
+        ) from error
+    except ValueError as error:
+        raise ValueError(
+            f"PDF extracted text exceeds max_text_bytes: {name}"
+        ) from error
+    if result.returncode != 0:
+        reason = result.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(f"PDF text extraction refused {name}: {reason}")
+    pages, _, text = result.stdout.partition(b"\n")
+    return text, int(pages)
+
+
+def _pinned_pdf_path(name: str) -> str:
+    return name.removesuffix(".txt") + ".pdf"
+
+
+def _acquire_pdf(
+    source: SourceDeclaration,
+    staging: Path,
+    budget: TransportBudget | None,
+    resources: _AcquisitionResources,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    spec = source.acquisition
+    assert isinstance(spec, PdfAcquisition)
+    _pypdf(spec)  # refuse a missing extra or another version before any work
+    resources.expanded = None  # PDF bodies are kept whole, not expanded
+    resources.observe()
+    if budget is not None:
+        budget.check_disk(staging, budget.projected_disk_bytes(source_id=source.id))
+    inventory = []
+    receipts = []
+    text_bytes = 0
+    for document in spec.documents:
+        pinned = staging / "pinned" / _pinned_pdf_path(document.name)
+        size = _fetch_pinned(
+            source,
+            document.url,
+            document.name,
+            document.expected_sha256,
+            document.max_bytes,
+            pinned,
+            budget,
+            resources,
+        )
+        text, pages = _pdf_text(pinned, spec, document.name)
+        text_bytes += len(text)
+        if text_bytes > spec.max_text_bytes:
+            raise ValueError("PDF extracted text exceeds max_text_bytes")
+        digest, written = _copy_stream(
+            io.BytesIO(text), staging / "files" / document.name, len(text), resources
+        )
+        inventory.append({"path": document.name, "sha256": digest, "size": written})
+        receipts.append(
+            {
+                "name": document.name,
+                "url": document.url,
+                "pdf_path": _pinned_pdf_path(document.name),
+                "pdf_sha256": document.expected_sha256,
+                "pdf_bytes": size,
+                "pages": pages,
+                "text_sha256": digest,
+            }
+        )
+    return inventory, {
+        "extraction": spec.extraction.model_dump(mode="json"),
+        "documents": receipts,
+    }
+
+
+def _verify_pdf_receipt(
+    path: Path, source: SourceDeclaration, manifest: dict[str, Any]
+) -> None:
+    """Pinned PDF bytes must still yield exactly the recorded text."""
+    spec = source.acquisition
+    assert isinstance(spec, PdfAcquisition)
+    receipt = manifest["retrieval"]
+    documents = receipt["documents"]
+    expected_files = [
+        {"path": item["name"], "sha256": item["text_sha256"]} for item in documents
+    ]
+    if (
+        receipt["extraction"] != spec.extraction.model_dump(mode="json")
+        or [
+            (item["name"], item["url"], item["pdf_sha256"], item["pdf_path"])
+            for item in documents
+        ]
+        != [
+            (d.name, d.url, d.expected_sha256, _pinned_pdf_path(d.name))
+            for d in spec.documents
+        ]
+        or [{"path": f["path"], "sha256": f["sha256"]} for f in manifest["files"]]
+        != expected_files
+    ):
+        raise ValueError("PDF receipt differs from its declaration")
+    pinned_root = path / "pinned"
+    actual = {
+        item.relative_to(pinned_root).as_posix()
+        for item in pinned_root.rglob("*")
+        if item.is_file() or item.is_symlink()
+    }
+    if actual != {item["pdf_path"] for item in documents}:
+        raise ValueError("pinned PDF inventory mismatch")
+    _pypdf(spec)  # refuse a missing extra or another version before any work
+    for item in documents:
+        pinned = pinned_root / safe_name(item["pdf_path"])
+        _regular(pinned)
+        if (
+            pinned.stat().st_size != item["pdf_bytes"]
+            or sha256_file(pinned) != item["pdf_sha256"]
+        ):
+            raise ValueError(f"pinned PDF byte mismatch: {item['name']}")
+        text, pages = _pdf_text(pinned, spec, item["name"])
+        if (
+            pages != item["pages"]
+            or hashlib.sha256(text).hexdigest() != item["text_sha256"]
+        ):
+            raise ValueError(
+                f"PDF text is not reproducible from the pinned bytes: {item['name']}"
+            )
+
+
+def _acquire_mediawiki(
+    source: SourceDeclaration,
+    staging: Path,
+    budget: TransportBudget | None,
+    resources: _AcquisitionResources,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    spec = source.acquisition
+    assert isinstance(spec, MediaWikiDumpAcquisition)
+    resources.observe()
+    if budget is not None:
+        budget.check_disk(staging, budget.projected_disk_bytes(source_id=source.id))
+    name = source_file_name(source.canonical_uri)
+    body = staging / "mediawiki-input" / name
+    compressed_bytes = _fetch_pinned(
+        source,
+        source.canonical_uri,
+        name,
+        spec.expected_sha256,
+        spec.max_compressed_bytes,
+        body,
+        budget,
+        resources,
+    )
+    output_name = name + ".sample.jsonl"
+    output_path = staging / "files" / output_name
+    opener = {"bz2": bz2.open, "gzip": gzip.open, "none": open}[spec.compression]
+    with opener(body, "rb") as decompressed:
+        rows, scanned, emitted, _ = _wiki_jsonl(
+            source, decompressed, output_path, resources
+        )
+    body.unlink()
+    body.parent.rmdir()
+    return [
+        {"path": output_name, "sha256": sha256_file(output_path), "size": emitted}
+    ], {
+        "source_uri": source.canonical_uri,
+        "source_sha256": spec.expected_sha256,
+        "compressed_bytes": compressed_bytes,
+        "scanned_pages": scanned,
+        "selected_pages": rows,
+        "output_path": output_name,
+    }
+
+
 def _verify_wikimedia_receipt(path: Path, manifest: dict[str, Any]) -> None:
     receipt = manifest["retrieval"]
     source = SourceDeclaration.model_validate(manifest["declaration"])
     spec = source.acquisition
-    assert isinstance(spec, WikimediaDumpAcquisition)
-    if (
-        receipt["source_uri"] != source.canonical_uri
-        or receipt["checksum_uri"] != spec.checksum_uri
-        or receipt["source_sha1"] != spec.expected_sha1.lower()
-        or (
-            spec.expected_sha256
-            and receipt["source_sha256"] != spec.expected_sha256.lower()
+    if isinstance(spec, WikimediaDumpAcquisition):
+        mismatch = (
+            receipt["checksum_uri"] != spec.checksum_uri
+            or receipt["source_sha1"] != spec.expected_sha1.lower()
+            or (
+                spec.expected_sha256
+                and receipt["source_sha256"] != spec.expected_sha256.lower()
+            )
         )
+    else:
+        assert isinstance(spec, MediaWikiDumpAcquisition)
+        mismatch = receipt["source_sha256"] != spec.expected_sha256
+    if (
+        mismatch
+        or receipt["source_uri"] != source.canonical_uri
         or receipt["compressed_bytes"] > spec.max_compressed_bytes
         or receipt["scanned_pages"] > spec.max_scanned_pages
         or len(receipt["selected_pages"]) > spec.max_selected_pages
@@ -1586,6 +2059,14 @@ def _verify_wikimedia_receipt(path: Path, manifest: dict[str, Any]) -> None:
             )
     if rows != receipt["selected_pages"]:
         raise ValueError("Wikimedia page receipt mismatch")
+
+
+def _retrieval_is_identity(source: SourceDeclaration) -> bool:
+    """Receipts that bind derived bytes (rows, extracted text) to their inputs."""
+    return source.kind in {"wikimedia_dump", "mediawiki_dump", "pdf_documents"} or (
+        source.kind == "huggingface_dataset"
+        and source.acquisition.retained_subset is not None
+    )
 
 
 def verify_snapshot(
@@ -1631,11 +2112,7 @@ def alias_verified_snapshot(
     if project.config.source_effects is not None:
         raise ValueError("effect-bound reuse is performed by acquire preflight")
     sources = [source for source in project.sources if source.id == source_id]
-    if len(sources) != 1 or sources[0].kind not in {
-        "git",
-        "huggingface_dataset",
-        "wikimedia_dump",
-    }:
+    if len(sources) != 1 or sources[0].kind not in IMMUTABLE_SOURCE_KINDS:
         raise ValueError("snapshot alias source is missing or not immutable")
     root = work_root.resolve(strict=True)
     if not snapshot.is_absolute() or snapshot.is_symlink():
@@ -1687,10 +2164,7 @@ def _verify_snapshot_cold(path: Path, *, _staged: bool = False) -> dict[str, Any
             "adapter": manifest["adapter"],
             "files": manifest["files"],
         }
-        if source.kind == "wikimedia_dump" or (
-            source.kind == "huggingface_dataset"
-            and source.acquisition.retained_subset is not None
-        ):
+        if _retrieval_is_identity(source):
             identity_fields["retrieval"] = manifest["retrieval"]
         expected = canonical_digest(identity_fields)
         if expected != manifest["snapshot_sha256"] or (
@@ -1718,8 +2192,12 @@ def _verify_snapshot_cold(path: Path, *, _staged: bool = False) -> dict[str, Any
         }
         if actual != names:
             raise ValueError("snapshot file inventory mismatch")
-        if source.kind == "wikimedia_dump":
+        if source.kind in {"wikimedia_dump", "mediawiki_dump"}:
             _verify_wikimedia_receipt(path, manifest)
+        if source.kind == "archive":
+            _verify_archive_files(source, manifest)
+        if source.kind == "pdf_documents":
+            _verify_pdf_receipt(path, source, manifest)
         if (
             source.kind == "huggingface_dataset"
             and source.acquisition.retained_subset is not None
@@ -2072,10 +2550,7 @@ def acquire(
         # An interrupted run can publish verified source snapshots before
         # writing its final lock. Only immutable upstream revisions are reusable.
         parent = snapshot_root / source.id
-        if (
-            source.kind in {"git", "huggingface_dataset", "wikimedia_dump"}
-            and parent.exists()
-        ):
+        if source.kind in IMMUTABLE_SOURCE_KINDS and parent.exists():
             for candidate in sorted(parent.iterdir()):
                 if not candidate.is_dir() or candidate.name.startswith("."):
                     continue
@@ -2116,6 +2591,10 @@ def acquire(
             if source.kind == "wikimedia_dump":
                 resources = _AcquisitionResources(staging)
                 resources.retain(source)
+            elif source.kind in PINNED_FILE_KINDS:
+                resources = _AcquisitionResources(staging, budget)
+                if budget is None:
+                    resources.retain(source)
             retrieval: dict[str, Any] = {}
             if source.kind == "local":
                 files, retrieval = _acquire_local(source, project.root, staging)
@@ -2131,6 +2610,14 @@ def acquire(
                 )
             elif source.kind == "wikimedia_dump":
                 files, retrieval = _acquire_wikimedia(source, staging, False, resources)
+            elif source.kind == "archive":
+                files, retrieval = _acquire_archive(source, staging, budget, resources)
+            elif source.kind == "pdf_documents":
+                files, retrieval = _acquire_pdf(source, staging, budget, resources)
+            elif source.kind == "mediawiki_dump":
+                files, retrieval = _acquire_mediawiki(
+                    source, staging, budget, resources
+                )
             else:
                 files = []
                 retrieval = {
@@ -2144,10 +2631,7 @@ def acquire(
                 "adapter": adapter,
                 "files": files,
             }
-            if source.kind == "wikimedia_dump" or (
-                source.kind == "huggingface_dataset"
-                and source.acquisition.retained_subset is not None
-            ):
+            if _retrieval_is_identity(source):
                 identity_fields["retrieval"] = retrieval
             identity = canonical_digest(identity_fields)
             manifest = {
@@ -2175,7 +2659,7 @@ def acquire(
                     verification_mode=verification_mode,
                 )
             else:
-                for directory in sorted((staging / "files").rglob("*"), reverse=True):
+                for directory in sorted(staging.rglob("*"), reverse=True):
                     if directory.is_dir():
                         sync_directory(directory)
                 sync_directory(staging / "files")
