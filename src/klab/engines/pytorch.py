@@ -33,7 +33,7 @@ from klab.engines.multi_device import (
     microbatch_position_mask,
 )
 from klab.engines.output_head import chunked_output_head_cross_entropy
-from klab.memory import MemoryMonitor
+from klab.memory import DeviceMemorySpill, MemoryMonitor, SpillLimits
 from klab.model.inspection import architecture_metrics
 from klab.model.transformer import DenseLM
 from klab.runtime import (
@@ -48,6 +48,7 @@ from klab.training.objectives import Batch as ObjectiveBatch
 from klab.training.objectives import Frozen, TrainingObjective, load_frozen_model
 from klab.training.offload import ActivationOffload
 from klab.training.optimizer import (
+    OptimizerStateOffload,
     learning_rate_for_step,
     make_adafactor,
     make_optimizer,
@@ -119,13 +120,46 @@ def _is_allocation_failure(error: BaseException) -> bool:
 
 
 @contextmanager
-def _translate_allocation_failures() -> Iterator[None]:
+def _translate_allocation_failures(
+    spill_limits: SpillLimits | None = None,
+) -> Iterator[None]:
     try:
         yield
-    except (RuntimeError, MemoryError) as error:
-        if _is_allocation_failure(error):
-            raise EngineOutOfMemory(f"PyTorch allocation failed: {error}") from error
+    except EngineOutOfMemory:
         raise
+    except (RuntimeError, MemoryError) as error:
+        if not _is_allocation_failure(error):
+            raise
+        if spill_limits is not None:
+            # The allocator itself is capped at the spill guard's device limit.
+            raise DeviceMemorySpill(
+                "device memory spill: an allocation would exceed "
+                f"{spill_limits.device_fraction:g} of device memory "
+                f"(runtime.memory.max_device_memory_fraction): {error}"
+            ) from error
+        raise EngineOutOfMemory(f"PyTorch allocation failed: {error}") from error
+
+
+def _apply_recomputation_strategy(model: DenseLM, config: RunConfig) -> None:
+    """Recompute attention chunks inside blocks where the strategy asks for it."""
+    recomputation = config.runtime.memory.activation_checkpointing
+    chunks = (
+        recomputation.enabled
+        and recomputation.strategy == "transformer_block_and_attention"
+    )
+    for module in model.modules():
+        if hasattr(module, "recompute_chunks"):
+            module.recompute_chunks = chunks
+
+
+def _cap_allocator(device: torch.device, spill_limits: SpillLimits | None) -> bool:
+    """Make the caching allocator refuse growth past the spill guard's limit."""
+    api = getattr(torch, device.type, None)
+    cap = getattr(api, "set_per_process_memory_fraction", None)
+    if spill_limits is None or device.type not in {"cuda", "xpu"} or cap is None:
+        return False
+    cap(spill_limits.device_fraction, device)
+    return True
 
 
 def _named_optimizer_state(
@@ -356,6 +390,8 @@ class PyTorchEngine:
         self.scaler: torch.amp.GradScaler | None = None
         self.monitor: MemoryMonitor | None = None
         self.offload: ActivationOffload | None = None
+        self.state_offload: OptimizerStateOffload | None = None
+        self._allocator_cap: SpillLimits | None = None
         self.objective: TrainingObjective | None = None
         self.frozen = Frozen()
         self.objective_identity: dict[str, object] | None = None
@@ -384,6 +420,7 @@ class PyTorchEngine:
         if initial_weights is not None:
             model.load_state_dict(initial_weights)  # type: ignore[arg-type]
         trainable_parameters = apply_trainable_parameter_filter(model, config)
+        _apply_recomputation_strategy(model, config)
         with pilot_phase("optimizer_initialization"):
             optimizer = (
                 make_optimizer(
@@ -415,6 +452,11 @@ class PyTorchEngine:
             raise RuntimeError(
                 "optimizer parameters differ from the explicit trainable inventory"
             )
+        self.state_offload = (
+            OptimizerStateOffload(optimizer, device)
+            if config.optimizer.state_offload
+            else None
+        )
         self.config, self.runtime, self.device = config, runtime, device
         self.model, self.optimizer = model, optimizer
         self._initialize_objective(config, device, runtime.backend)
@@ -440,7 +482,15 @@ class PyTorchEngine:
         self._last_gradient_parameter_names = ()
         self._last_update_parameter_names = ()
         self.scaler = make_grad_scaler(config, device)
-        self.monitor = MemoryMonitor(device, runtime_info=runtime)
+        self.monitor = MemoryMonitor(
+            device, runtime_info=runtime, spill_limits=SpillLimits.from_config(config)
+        )
+        self._allocator_cap = None
+        if self.monitor.spill_limits is not None:
+            # A spilling update slows inside one forward; check between blocks.
+            model.before_block = self.monitor.check_spill
+            if _cap_allocator(device, self.monitor.spill_limits):
+                self._allocator_cap = self.monitor.spill_limits
         self.offload = (
             ActivationOffload(device, model)
             if config.runtime.memory.activation_offload.enabled
@@ -463,6 +513,7 @@ class PyTorchEngine:
                     )
                     replica_model.load_state_dict(primary_state)
                     apply_trainable_parameter_filter(replica_model, config)
+                    _apply_recomputation_strategy(replica_model, config)
                     compiled_loss = None
                     if config.runtime.compile_output_head_loss:
                         compiled_loss = torch.compile(
@@ -573,7 +624,7 @@ class PyTorchEngine:
             self.config is not None and self.config.runtime.compile_dynamic_shapes
         )
         with (
-            _translate_allocation_failures(),
+            _translate_allocation_failures(self._allocator_cap),
             torch._dynamo.config.patch(
                 suppress_errors=False, fail_on_recompile_limit_hit=True
             )
@@ -1045,7 +1096,7 @@ class PyTorchEngine:
         )
 
     def evaluate(self, batches: Iterable[Microbatch]) -> EvaluationResult:
-        with _translate_allocation_failures():
+        with _translate_allocation_failures(self._allocator_cap):
             return self._evaluate(batches)
 
     def _evaluate(self, batches: Iterable[Microbatch]) -> EvaluationResult:
@@ -1141,6 +1192,9 @@ class PyTorchEngine:
             state.optimizer_parameter_names,
         )
         restore_optimizer_state(optimizer, remapped_optimizer_state)
+        if self.state_offload is not None:
+            # Loading places state beside each parameter; return it to the host.
+            self.state_offload.to_host()
         if self.scaler is not None:
             if state.scaler is None:
                 raise ValueError("fp16 resume requires saved GradScaler state")

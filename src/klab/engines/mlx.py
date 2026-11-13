@@ -27,7 +27,7 @@ from klab.engines.base import (
     WeightSource,
 )
 from klab.engines.mlx_policy import validate as validate_mlx
-from klab.memory import MemoryMonitor
+from klab.memory import MemoryMonitor, SpillLimits
 from klab.runtime import RuntimeInfo
 from klab.runtime_profile import RuntimeAuthorization, require_authorization
 from klab.training.optimizer import learning_rate_for_step
@@ -193,7 +193,9 @@ class MLXEngine:
             self.load_canonical_weights(initial_weights)
         # AdamW initializes its slots on its first update.  Keeping that lazy state
         # avoids allocating two full moment trees for inference and step-zero runs.
-        self.monitor = MemoryMonitor("metal", runtime_info=runtime)
+        self.monitor = MemoryMonitor(
+            "metal", runtime_info=runtime, spill_limits=SpillLimits.from_config(config)
+        )
         self._value_and_grad = nn.value_and_grad(self.model, self._loss_sum)
 
     def _require_initialized(self) -> tuple[Any, Any, Any]:

@@ -12,6 +12,7 @@ from tokenizers import Tokenizer
 from klab.config.models import AttentionConfig, ModelConfig
 from klab.evaluation.generation import generate_with_token_ids
 from klab.evaluation.speculation import PromptLookupSpeculation
+from klab.model.attention import local_selected
 from klab.model.attention.dense import DenseAttention
 from klab.model.attention.latent import LatentAttention
 from klab.model.attention.local_selected import LocalSelectedAttention
@@ -143,7 +144,9 @@ def test_local_selected_cached_decoding_matches_full_forward_and_survives_rewind
     torch.testing.assert_close(step, full[:, :5], atol=5e-6, rtol=1e-5)
 
 
-def test_learned_selector_starts_as_mean_key_and_trains_through_its_gate() -> None:
+def test_learned_selector_starts_as_mean_key_and_trains_through_its_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     torch.manual_seed(0)
     fixed = LocalSelectedAttention(32, 4, 512, 10000.0, 8, 8, 2)
     learned = LocalSelectedAttention(32, 4, 512, 10000.0, 8, 8, 2, selector="learned")
@@ -163,6 +166,16 @@ def test_learned_selector_starts_as_mean_key_and_trains_through_its_gate() -> No
     learned.zero_grad()
     learned(values).square().sum().backward()
     assert learned.pool_logits.grad.abs().sum() > 0
+
+    # Recomputing several chunks of query blocks in backward changes nothing.
+    resident = [parameter.grad.clone() for parameter in learned.parameters()]
+    learned.zero_grad()
+    learned.recompute_chunks = True
+    monkeypatch.setattr(local_selected, "CHUNK_CELLS", 4096)
+    learned(values).square().sum().backward()
+    for parameter, expected in zip(learned.parameters(), resident, strict=True):
+        torch.testing.assert_close(parameter.grad, expected)
+    learned.recompute_chunks = False
 
     # The coarse branch sees complete earlier blocks only, so it stays causal.
     with torch.no_grad():

@@ -97,8 +97,9 @@ cannot be combined with `compile_output_head_loss`.
 On one Arc Pro B70 (bf16, activation recomputation on), a 730M-parameter model
 with a 32,768-entry vocabulary and one 32,768-token row ran out of device memory
 while building its logits; with 2,048-token chunks the first update completed at
-a 26.9 GiB peak. That is one update of one run and still too close to the card's
-32 GiB to train on: the run then slowed as allocations spilled into host memory.
+a 26.9 GiB peak, too close to the card to train on. Adding
+`strategy: transformer_block_and_attention` and `optimizer.state_offload` brought
+the same row to an 18.7 GiB reserved peak over 20 steady updates (see below).
 
 ### Activation recomputation
 
@@ -114,6 +115,27 @@ Each decoder block keeps only its input during forward and runs again during
 backward. This cuts retained activations for extra compute; it does not reduce
 weights, gradients or optimizer state. `recompute/block_call_ratio` counts the
 extra block calls. MLX supports it too.
+
+`strategy: transformer_block_and_attention` also recomputes `local_selected`
+attention inside each block one chunk of query blocks at a time. Without it a
+block's recomputation holds every chunk's gathered keys, mask and scores at once
+for its backward: about 13 GiB for one layer of a 32,768-token row at width
+1,536 with 24 heads, against 2.7 GiB with it. The result is the same; attention
+runs forward once more, about 30% more attention time. Other attention kinds
+recompute per block only. The estimate charges such a layer one chunk of scores
+and gathered keys.
+
+Measured on one Arc Pro B70 (31.89 GiB), bf16, a 730M-parameter `local_selected`
+model, one row per microbatch, peak reserved device memory and the median
+targets/s from the fourth update on:
+
+| Row | Settings | Peak | Targets/s |
+| --- | --- | --- | --- |
+| 8,192 | `transformer_block` | 15.7 GiB | 1,679 |
+| 8,192 | `transformer_block_and_attention` | 14.0 GiB | 1,387 |
+| 32,768 | `transformer_block`, `state_offload` | 28.5 GiB, then the spill guard stopped update 2 | |
+| 32,768 | `transformer_block_and_attention` | 25.9 GiB | 1,295 |
+| 32,768 | `transformer_block_and_attention`, `state_offload` | 18.7 GiB | 1,286 (20 updates) |
 
 ### Activation offload
 
@@ -132,8 +154,30 @@ reported as `offload/transfer_seconds` and `offload/transfer_fraction`, with
 
 Before training, Lab checks that available host RAM covers the offloaded
 activations plus checkpoint staging with a 15% margin. On MPS, host and device
-share memory, so offload saves no capacity. Offload does not move parameters or
-optimizer state.
+share memory, so offload saves no capacity. Activation offload does not move
+parameters or optimizer state; optimizer state has its own setting, below.
+
+### Optimizer state offload
+
+```yaml
+optimizer:
+  state_offload: true
+```
+
+On the PyTorch engine, AdamW's two moments (or Adafactor's factors) wait in
+host memory between updates, pinned on CUDA and XPU. The optimizer step streams
+them to the device one bucket of parameters at a time (128 MiB of parameters, or
+one larger tensor alone), runs PyTorch's own single-tensor update on that bucket
+and copies the state back. The update is the same arithmetic, so a run with
+offload matches one without, and checkpoints save and resume the state the same
+way. It costs one round trip of the state per update over the host link. MLX
+refuses it. On CPU it changes nothing.
+
+The estimate charges the device one bucket of state instead of all of it and
+reports the full state as `host_optimizer_bytes`. Before training, Lab checks
+that available host RAM covers that state plus checkpoint staging with a 15%
+margin, as for activation offload. On an accelerator, `runtime.memory.policy:
+max_fit` proposes it before any change of optimizer.
 
 ### Adafactor
 
@@ -157,6 +201,44 @@ the optimizer step and at its end:
 
 MLX reports active, peak and cache memory. Unavailable readings are omitted,
 never written as zero.
+
+## Spill guard
+
+```yaml
+runtime:
+  memory:
+    spill_guard:
+      enabled: true
+      host_drop_fraction: 0.5
+```
+
+A run whose memory outgrows the device may not fail; on some drivers it slows to
+a stop. The spill guard stops it instead. Before every decoder block (including
+its recomputation during backward) and at each sample above, it reads the same
+counters and fails the update when:
+
+- device memory in use (allocated, reserved or their peaks; the driver
+  allocation on MPS) exceeds `max_device_memory_fraction` of the device total
+  (of the recommended working set on MPS and Metal), or
+- host available memory falls by more than `host_drop_fraction` of what was
+  available after the first update.
+
+On CUDA, ROCm and XPU the PyTorch caching allocator is also capped at
+`max_device_memory_fraction` of the device, so an allocation past it fails at
+once instead of waiting on the driver; that failure carries the same reason.
+Near a full card the Intel driver can stall inside one kernel for minutes before
+the next check runs, which is why the cap matters there.
+
+The run then finishes as `failed` with a reason beginning `device memory spill:`
+that names the reading and the setting. No checkpoint is written for the
+interrupted update; earlier checkpoints stay resumable. The guard reads counters
+only and never synchronizes the device. It watches the primary device only.
+
+On a host with two Intel Arc cards, every device allocation on one card is also
+resident in host memory for the other (`drm-resident-gtt` in the process's DRM
+`fdinfo`), so host available memory falls by about as much as the device
+allocates. That is normal and is why the host reading is compared with its value
+after the first update, not before training.
 
 A generation key/value cache belongs to inference only; it has no part in
 training memory.
