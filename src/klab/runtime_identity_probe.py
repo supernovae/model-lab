@@ -64,8 +64,28 @@ def _host_environment() -> dict[str, str]:
     }
 
 
-def probe(request: dict[str, object]) -> dict[str, object]:
-    """Only query the selected backend; no model allocation or precision pilot."""
+# Fields read from the devices themselves; ``probe(..., devices=False)`` leaves
+# them unset.
+DEVICE_FIELDS = frozenset(
+    {
+        "available",
+        "device_count",
+        "device_name",
+        "device_names",
+        "bf16_supported",
+        "xpu_runtime_version",
+    }
+)
+
+
+def probe(request: dict[str, object], *, devices: bool = True) -> dict[str, object]:
+    """Only query the selected backend; no model allocation or precision pilot.
+
+    ``devices=False`` identifies the interpreter, framework and source without
+    asking the backend about its devices, so a training process can confirm
+    its identity before it chooses which device it sees
+    (:mod:`klab.device_visibility`).
+    """
     if set(request) != {"id", "engine", "backend", "device_index"}:
         raise ValueError("invalid runtime identity probe request")
     engine, backend, index = (
@@ -97,7 +117,9 @@ def probe(request: dict[str, object]) -> dict[str, object]:
         assert torch is not None
         framework_path = str(Path(torch.__file__).resolve())
         framework_version = torch.__version__
-        if backend == "cpu":
+        if not devices:
+            pass
+        elif backend == "cpu":
             available, count, names = True, 1, [platform.processor() or "CPU"]
             bf16 = None
         elif backend in {"cuda", "rocm"}:

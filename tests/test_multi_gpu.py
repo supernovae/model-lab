@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import random
 import time
 from pathlib import Path
@@ -490,7 +491,7 @@ def test_worker_config_lease_acquires_primary_and_secondary_devices(
         physical_device_id="phys-b70-2300",
     )
     monkeypatch.setattr(
-        "klab.workers.execution.discover_runtimes",
+        "klab.workers.execution.discover_all_runtimes",
         lambda: [passive_gpu0, passive_gpu1],
     )
 
@@ -520,7 +521,7 @@ def test_worker_config_lease_acquires_primary_and_secondary_devices(
 
     # Missing secondary device index in passive discovery raises ValueError.
     monkeypatch.setattr(
-        "klab.workers.execution.discover_runtimes",
+        "klab.workers.execution.discover_all_runtimes",
         lambda: [passive_gpu0],
     )
     with pytest.raises(ValueError, match="secondary_device_indices index 1 is absent"):
@@ -534,7 +535,7 @@ def test_worker_config_lease_acquires_primary_and_secondary_devices(
         physical_device_id="",
     )
     monkeypatch.setattr(
-        "klab.workers.execution.discover_runtimes",
+        "klab.workers.execution.discover_all_runtimes",
         lambda: [passive_gpu0, passive_gpu1_blank],
     )
     with pytest.raises(
@@ -661,74 +662,36 @@ def test_discover_runtimes_enumerates_multi_xpu_indices_and_physical_uuids(
     )
 
 
-def test_gradient_reduction_applies_replica_pushes_in_replica_order() -> None:
-    import threading
-
-    from klab.engines.multi_device import GradientReduction, SecondaryReplica
-
-    def replica(scale: float) -> SecondaryReplica:
-        model = torch.nn.Linear(3, 2)
-        for parameter in model.parameters():
-            parameter.grad = torch.full_like(parameter, scale)
-        return SecondaryReplica(device=torch.device("cpu"), model=model)
-
-    primary = torch.nn.Linear(3, 2)
-    primary.weight.grad = torch.ones_like(primary.weight)
-    parameters = list(primary.parameters())
-    reduction = GradientReduction(parameters, torch.device("cpu"), pushes=2)
-    first, second = replica(2.0), replica(4.0)
-
-    # The later replica finishes first but must wait for its turn.
-    late = threading.Thread(target=reduction.push, args=(1, second))
-    late.start()
-    late.join(timeout=0.2)
-    assert late.is_alive()
-    assert all(collected is None for collected in reduction.collected)
-    reduction.push(0, first)
-    late.join(timeout=10)
-    assert not late.is_alive()
-
-    reduction.merge()
-    # Weight had its own gradient; bias had none and takes the collected sum.
-    assert torch.equal(primary.weight.grad, torch.full_like(primary.weight, 7.0))
-    assert torch.equal(primary.bias.grad, torch.full_like(primary.bias, 6.0))
-    assert first.model.weight.grad is None and second.model.weight.grad is None
-
-
-def test_failed_replica_slice_surfaces_without_blocking_other_replicas(
+def test_a_process_is_confined_to_its_own_xpu_before_enumeration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from concurrent.futures import ThreadPoolExecutor
+    from klab import device_visibility as visibility
 
-    from klab.engines import multi_device
+    monkeypatch.delenv("ZE_AFFINITY_MASK", raising=False)
+    monkeypatch.delenv(visibility.MARKER, raising=False)
+    monkeypatch.setattr(visibility, "_enumerated", set())
+    visibility.confine("xpu", 2)
+    assert os.environ["ZE_AFFINITY_MASK"] == "2"
+    # The process sees one card, index 0, which is configured device 2.
+    assert visibility.visible_index("xpu", 2) == 0
+    assert visibility.physical_index("xpu", 0) == 2
+    with pytest.raises(ValueError, match="needs its own process"):
+        visibility.confine("xpu", 1)
+    with pytest.raises(ValueError, match="cannot use device 1"):
+        visibility.visible_index("xpu", 1)
+    child = visibility.child_environment("xpu", 3)
+    assert child["ZE_AFFINITY_MASK"] == "3" and child[visibility.MARKER] == "xpu:3"
 
-    replicas = [
-        multi_device.SecondaryReplica(
-            device=torch.device("cpu"), model=torch.nn.Linear(2, 2)
-        )
-        for _ in range(2)
-    ]
-    primary = torch.nn.Linear(2, 2)
+    # A mask the user set is theirs: indices count within it, as before.
+    monkeypatch.setenv("ZE_AFFINITY_MASK", "0,1")
+    monkeypatch.delenv(visibility.MARKER)
+    visibility.confine("xpu", 1)
+    assert os.environ["ZE_AFFINITY_MASK"] == "0,1"
+    assert visibility.visible_index("xpu", 1) == 1
 
-    def failing(replica, config, pairs, valid_targets, loss, **options):
-        if replica is replicas[0]:
-            raise RuntimeError("replica slice failed")
-        options["reduction"].push(options["turn"], replica)
-        return {"compute_seconds": 0.0, "finished_at": 0.0}
-
-    monkeypatch.setattr(multi_device, "execute_replica_microbatches", failing)
-    with (
-        ThreadPoolExecutor(max_workers=2) as executor,
-        pytest.raises(RuntimeError, match="replica slice failed"),
-    ):
-        multi_device.dispatch_replicas_and_primary(
-            replicas=replicas,
-            config=None,
-            active_pairs=[("a", 1), ("b", 1), ("c", 1)],
-            valid_targets=3,
-            output_head_loss_fn=None,
-            primary_fn=lambda pairs: None,
-            primary_params=list(primary.parameters()),
-            primary_device=torch.device("cpu"),
-            executor=executor,
-        )
+    # Too late once the process has asked the runtime about its devices.
+    monkeypatch.delenv("ZE_AFFINITY_MASK")
+    visibility.note_enumerated("xpu")
+    with pytest.warns(RuntimeWarning, match="enumerated before Lab could confine"):
+        visibility.confine("xpu", 0)
+    assert "ZE_AFFINITY_MASK" not in os.environ

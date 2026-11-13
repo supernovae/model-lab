@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 import psutil
 
-from klab import host_capacity
+from klab import device_visibility, host_capacity
 
 try:
     import torch
@@ -180,11 +180,21 @@ def _auto_backend() -> str:
     return "cpu"
 
 
-def torch_device_for(backend: str, device_index: int = 0) -> torch.device:
+def torch_device_for(backend: str, device_index: int | None = None) -> torch.device:
+    """The device for configured ``device_index``; ``None`` means this process's own.
+
+    In a process Lab confined to one device (:mod:`klab.device_visibility`)
+    the configured index is mapped to the one device the process sees.
+    """
+    index = (
+        device_visibility.visible_index(backend, device_index)
+        if device_index is not None
+        else 0
+    )
     if backend in {"cuda", "rocm"}:
-        return torch.device("cuda", device_index)
+        return torch.device("cuda", index)
     if backend == "xpu":
-        return torch.device("xpu", device_index)
+        return torch.device("xpu", index)
     if backend == "mps":
         return torch.device("mps")
     if backend == "cpu":
@@ -196,6 +206,7 @@ def _device_count(backend: str) -> int:
     if backend in {"cuda", "rocm"}:
         return int(torch.cuda.device_count())
     if backend == "xpu":
+        device_visibility.note_enumerated("xpu")
         xpu = getattr(torch, "xpu", None)
         return int(xpu.device_count()) if xpu and hasattr(xpu, "device_count") else 0
     return 1
@@ -266,6 +277,7 @@ def discover_runtimes(
                 else getattr(torch, "cuda", None)
             )
             if api is not None and hasattr(api, "device_count"):
+                device_visibility.note_enumerated(backend)
                 count_val, _ = _safe_call(api.device_count)
             indices = (
                 tuple(range(int(count_val)))
@@ -424,10 +436,14 @@ def discover_runtimes(
                 RuntimeInfo(
                     engine="pytorch",
                     backend=backend,
-                    torch_device=str(torch_device_for(backend, index))
+                    torch_device=str(
+                        torch_device_for(
+                            backend, device_visibility.physical_index(backend, index)
+                        )
+                    )
                     if supported
                     else None,
-                    device_index=index,
+                    device_index=device_visibility.physical_index(backend, index),
                     device_name=name,
                     physical_device_id=physical_device_id,
                     framework_version=torch.__version__ if torch is not None else None,
@@ -520,6 +536,33 @@ def discover_runtimes(
 
 _PROBE_TIMEOUT_SECONDS = 30
 _MAX_PROBE_OUTPUT_BYTES = 16 * 1024
+
+
+def discover_all_runtimes() -> list[RuntimeInfo]:
+    """:func:`discover_runtimes` as an unconfined process would see it.
+
+    A process confined to one device sees only that device, so the other
+    devices are inventoried by a child started without the confinement.
+    """
+    if os.environ.get(device_visibility.MARKER) is None:
+        return discover_runtimes()
+    environment = device_visibility.unconfined_environment()
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json; from klab.runtime import discover_runtimes; "
+                "print(json.dumps([info.as_dict() for info in discover_runtimes()]))"
+            ),
+        ],
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=_PROBE_TIMEOUT_SECONDS,
+        check=True,
+    )
+    return [RuntimeInfo.from_dict(item) for item in json.loads(completed.stdout)]
 
 
 def _probe_runtime(
@@ -675,9 +718,13 @@ def validate_runtime(
     backend = _auto_backend() if runtime.backend == "auto" else runtime.backend
     if backend not in {"cpu", "mps", "cuda", "rocm", "xpu"}:
         raise ValueError(f"unsupported PyTorch backend: {backend}")
+    # Before anything below asks the device runtime about devices.
+    device_visibility.confine(backend, runtime.device_index)
     if not _backend_available(backend):
         raise ValueError(f"requested backend unavailable: {backend}")
-    if runtime.device_index >= _device_count(backend):
+    if device_visibility.visible_index(backend, runtime.device_index) >= _device_count(
+        backend
+    ):
         raise ValueError(
             f"requested device_index {runtime.device_index} unavailable for {backend}"
         )

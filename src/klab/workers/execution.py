@@ -25,7 +25,7 @@ from klab.canonical import canonical_digest, canonical_json, reject_duplicate_ke
 from klab.config.models import RunConfig
 from klab.evaluation.post_train_triage import read_triage, triage_summary
 from klab.resource_envelope import check_envelope, current_process_rss_bytes
-from klab.runtime import discover_runtimes, validate_runtime
+from klab.runtime import discover_all_runtimes, discover_runtimes, validate_runtime
 from klab.runtime_profile import authorize_worker, require_authorization
 from klab.training.manifest import source_identity
 from klab.verification_proofs import verification_options
@@ -329,7 +329,7 @@ def _acquire_config_lease(
     engine = _definition_value(definition, "engine")
     infos_by_index = {
         info.device_index: info
-        for info in discover_runtimes()
+        for info in discover_all_runtimes()
         if info.engine == engine and info.backend == passive.backend
     }
     physical_ids = [str(passive.physical_device_id).strip()]
@@ -687,9 +687,16 @@ def _spawn_executor(definition: Any, attempt_id: str) -> None:
             attempt_id,
         )
     )
+    from klab.device_visibility import child_environment
+
     try:
         subprocess.Popen(
             args,
+            # The attempt sees only its own device (klab.device_visibility).
+            env=child_environment(
+                str(_definition_value(definition, "backend")),
+                int(_definition_value(definition, "device_index")),
+            ),
             stdin=subprocess.DEVNULL,
             stdout=stdout,
             stderr=stderr,

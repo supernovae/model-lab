@@ -93,10 +93,11 @@ validation includes compiling the blocks.
 ## Several GPUs on one host
 
 `runtime.secondary_device_indices` lists more devices of the same backend. Each
-holds a replica; one update's microbatches are dealt across the primary and the
-replicas, their gradients are summed on the primary in a fixed order, and the
-primary alone clips, steps and saves. The update and its checkpoint are the same
-as on one device, so a run can resume with or without secondaries.
+holds a replica in its own process; one update's microbatches are dealt across
+the primary and the replicas, their gradients are summed on the primary in a
+fixed order, and the primary alone clips, steps and saves. The update and its
+checkpoint are the same as on one device, so a run can resume with or without
+secondaries.
 
 ```yaml
 runtime:
@@ -107,11 +108,15 @@ training:
   gradient_accumulation: 16   # every device needs a share of each update
 ```
 
-Each replica runs its share on its own host thread and exchanges weights and
-gradients alongside the primary's compute. Updates that used replicas report
-`performance/primary_compute_seconds`, `replica_compute_seconds`,
-`device_wait_seconds` and `gradient_merge_seconds`, and `batch/devices_used`
-shows how many devices took part. A persistent device wait means the devices or
+Before each slice the primary copies its updated weights into shared host
+memory, which every replica reads, and each replica writes its gradients into
+its own shared buffer, which the primary adds to its own in replica order. That
+takes host RAM of about four bytes per trainable parameter for the weights plus
+as much again per replica: 11.7 GB for a 730M model on four devices. Updates
+that used replicas report `performance/weight_publish_seconds`,
+`primary_compute_seconds`, `replica_compute_seconds`, `device_wait_seconds` and
+`gradient_merge_seconds`, and `batch/devices_used` shows how many devices took
+part. A persistent device wait means the devices or
 their shares are uneven. Clipping, the optimizer step and reporting are fixed
 costs per update, so with more devices raise `gradient_accumulation` rather than
 shrinking updates. `benchmarks/device_busy.py` shows device idle time directly.
@@ -119,6 +124,29 @@ shrinking updates. `benchmarks/device_busy.py` shows device idle time directly.
 An update with a single microbatch runs on the primary alone. FP16, activation
 offload and memory-allocation runs are refused with secondaries. Validation runs
 on the primary.
+
+On Intel XPU every training process sees only its own card. A process that can
+see several Arc cards also holds its device memory in host RAM, so Lab sets
+`ZE_AFFINITY_MASK` to the configured device before the process loads Torch,
+and starts each replica the same way; `device_index` keeps naming the physical
+card. A `ZE_AFFINITY_MASK` you set yourself is left alone, and indices then
+count within the cards it shows.
+
+Measured on two Arc Pro B70s with a 730M dense model, 4,096-token rows and
+131,072 targets per update, compiled, on a desktop whose display ran on the
+first card:
+
+| Devices | Targets/s | Fall in host available memory |
+| --- | --- | --- |
+| first card | 6,773 | 12.1 GiB |
+| second card | 8,124 | 8.3 GiB |
+| both, primary on the first | 12,682 (1.87× the first card) | 20.9 GiB |
+
+Each update waits for the slower device: here the first card, which shared its
+time with the display. Publishing weights and merging gradients took about
+0.45 s of each 10.3 s update. Host readings include every other program on
+the machine. Before Lab confined each process, one card in a process that could
+see both took about 37 GiB of host RAM.
 
 ## Forecasts and progress
 

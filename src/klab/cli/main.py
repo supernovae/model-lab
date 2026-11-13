@@ -2986,6 +2986,11 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
                 )
             }
         )
+    # Before this process imports Torch: the device runtime fixes which devices
+    # a process sees when it loads (klab.device_visibility).
+    from klab.device_visibility import confine
+
+    confine(config.runtime.backend, config.runtime.device_index)
     if profile is None:
         try:
             require_authorization(config, None)

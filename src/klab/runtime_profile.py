@@ -113,8 +113,15 @@ def _limit_probe_output() -> None:
 
 
 def _probe(
-    python: Path, *, identifier: str, engine: str, backend: str, index: int
+    python: Path,
+    *,
+    identifier: str,
+    engine: str,
+    backend: str,
+    index: int,
 ) -> dict[str, object]:
+    from klab.device_visibility import unconfined_environment
+
     request = json.dumps(
         {"id": identifier, "engine": engine, "backend": backend, "device_index": index},
         separators=(",", ":"),
@@ -124,6 +131,9 @@ def _probe(
             process = subprocess.run(
                 [str(python), "-m", "klab.runtime_identity_probe"],
                 input=request,
+                # The devices as the host has them, not as a confined
+                # training process sees them.
+                env=unconfined_environment(),
                 stdout=stdout,
                 stderr=stderr,
                 timeout=_TIMEOUT,
@@ -276,17 +286,38 @@ def _check_current(probe: dict[str, object], python: Path) -> None:
         raise ValueError(
             "profile/worker Python differs from running interpreter; execute under selected python"
         )
+    from klab.runtime_identity_probe import DEVICE_FIELDS
     from klab.runtime_identity_probe import probe as local_probe
 
+    # The devices were read by the subprocess probe; asking again here would
+    # fix which devices this process sees before it is confined to its own.
     current = local_probe(
         {
             "id": probe["profile_id"],
             "engine": probe["engine"],
             "backend": probe["backend"],
             "device_index": probe["device_index"],
-        }
+        },
+        devices=False,
     )
-    if current != probe:
+    if {key: value for key, value in current.items() if key not in DEVICE_FIELDS} != {
+        key: value for key, value in probe.items() if key not in DEVICE_FIELDS
+    }:
+        raise ValueError(
+            "selected interpreter/Torch/device/source identity changed since probe"
+        )
+    # A fresh process without this one's confinement sees the devices as the
+    # authorizing probe did.
+    devices = _probe(
+        python,
+        identifier=str(probe["profile_id"]),
+        engine=str(probe["engine"]),
+        backend=str(probe["backend"]),
+        index=int(probe["device_index"]),
+    )
+    if {key: devices.get(key) for key in DEVICE_FIELDS} != {
+        key: probe.get(key) for key in DEVICE_FIELDS
+    }:
         raise ValueError(
             "selected interpreter/Torch/device/source identity changed since probe"
         )
