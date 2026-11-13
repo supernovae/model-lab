@@ -139,9 +139,11 @@ for counts and strata, then copies the IDs in 64 MiB blocks while checking the
 digest, the vocabulary range and the EOS that closes every record. No token is
 ever parsed from text.
 
-A mixture with `max_exposures: 1` writes each document as soon as it is
-encoded. Only repeated exposures make the scratch index retain encoded
-documents, and that retained copy is still JSON.
+A stratum with one exposure (`max_exposures: 1`, or its own
+`strata.NAME.max_exposures: 1`) writes each document as soon as it is encoded.
+Only a repeated stratum makes the scratch index retain its encoded documents,
+and that retained copy is still JSON. A `document_start` mixture adds no bytes
+to these files; packing inserts the masked filler.
 
 ## Mixture speed
 

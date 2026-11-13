@@ -483,6 +483,103 @@ def test_native_packing_rejects_malformed_targets(
         _collect_token_mixture(config, tokenizer, receipt, tmp_path / "pack")
 
 
+LONG_TEXT = "abcdefghijklmnopqrst"
+
+
+def _document_start_fixture(tmp_path, monkeypatch, seq_len=8):
+    """One 21-target document under 8-target rows, and a stratum repeated 3x."""
+    declaration, _, release = _fixture(tmp_path, monkeypatch)
+    documents = release / "documents.jsonl"
+    docs = [json.loads(line) for line in documents.read_text().splitlines()]
+    docs[0]["text"] = LONG_TEXT
+    documents.write_bytes(b"".join(canonical_json(row) + b"\n" for row in docs))
+    quotas = {"explanatory": 5, "general": len(LONG_TEXT) + 1, "incident": 12}
+    total = sum(quotas.values())
+    (release / "report.json").write_text(
+        json.dumps(
+            {"requested_mixture": {key: value / total for key, value in quotas.items()}}
+        )
+    )
+    spec = yaml.safe_load(declaration.read_text())
+    spec |= {
+        "target_quotas": quotas,
+        "max_exposures": 1,
+        "packing": "document_start",
+        "row_tokens": 8,
+        "strata": {
+            "general": {"min_document_tokens": 9},
+            "incident": {"max_exposures": 3},
+        },
+    }
+    declaration.write_text(yaml.safe_dump(spec))
+    config = SimpleNamespace(
+        dataset=SimpleNamespace(train_path=tmp_path / "output" / "train.tokens.ids"),
+        training=SimpleNamespace(seq_len=seq_len),
+        model=SimpleNamespace(vocab_size=260),
+    )
+    tokenizer = SimpleNamespace(
+        token_to_id=lambda value: {"<bos>": 2, "<eos>": 3, "<pad>": 0}[value]
+    )
+    (tmp_path / "pack").mkdir()
+    return declaration, config, tokenizer
+
+
+def test_document_start_rows_and_stratum_exposures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    declaration, config, tokenizer = _document_start_fixture(tmp_path, monkeypatch)
+    output = tmp_path / "output"
+    receipt = mixture.materialize_mixture(declaration, output)
+    assert mixture.verify_mixture(declaration, output) == receipt
+    assert receipt["stratum_exposures"] == {
+        "explanatory": {"records": [1], "target_tokens": [5]},
+        "general": {"records": [1], "target_tokens": [21]},
+        "incident": {"records": [1, 1, 1], "target_tokens": [4, 4, 4]},
+    }
+    # explanatory fills targets 0-4; the long document starts on row 1 after
+    # three masked positions and fills rows 1 and 2 alone; incident shares row 3.
+    assert receipt["row_layout"] == {
+        "layout": "document_start",
+        "row_tokens": 8,
+        "rows": 6,
+        "filler_positions": 3,
+        "strata": {"general": {"min_document_tokens": 9, "documents": 1, "rows": 2}},
+    }
+    ids, mask, stats = _collect_token_mixture(
+        config, tokenizer, receipt, tmp_path / "pack"
+    )
+    assert stats["supervised_target_positions"] == 38
+    assert stats["masked_padding_positions"] == 10
+    blocks = TokenBlockDataset(ids, 8, supervision=mask)
+    long_ids = [*LONG_TEXT.encode(), 3]
+    rows = [blocks.numpy_block(index)[1].tolist() for index in range(len(blocks))]
+    # The long document fills consecutive rows in order, its first row read
+    # after an EOS; a shuffle of whole training rows cannot mix in another.
+    assert rows[0][5:] == [-100] * 3
+    assert blocks.numpy_block(1)[0][0] == 3
+    assert rows[1] == long_ids[:8] and rows[2] == long_ids[8:16]
+    assert rows[3][:5] == long_ids[16:]
+
+
+@pytest.mark.parametrize("damage", ["receipt_count", "seq_len"])
+def test_document_start_refuses_mismatched_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    declaration, config, tokenizer = _document_start_fixture(
+        tmp_path, monkeypatch, seq_len=16 if damage == "seq_len" else 8
+    )
+    output = tmp_path / "output"
+    receipt = mixture.materialize_mixture(declaration, output)
+    if damage == "seq_len":
+        with pytest.raises(ValueError, match="rows hold 8 targets"):
+            _collect_token_mixture(config, tokenizer, receipt, tmp_path / "pack")
+        return
+    receipt["row_layout"]["strata"]["general"]["rows"] = 3
+    (output / "receipt.json").write_bytes(canonical_json(receipt) + b"\n")
+    with pytest.raises(ValueError, match="document rows differ"):
+        mixture.verify_mixture(declaration, output)
+
+
 def test_tokenizer_accepts_retained_release_path_but_not_a_different_origin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -749,6 +846,8 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
         target_quotas={"general": 10},
         unique_train_content_floors={"general": 1},
         max_exposures=1,
+        strata={},
+        packing="contiguous",
         seed=42,
         order_policy=None,
         family_inventory=family_inventory,
