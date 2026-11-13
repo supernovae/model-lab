@@ -37,6 +37,7 @@ def _fixture(
     revision: str = "v1",
     uri: str = "fixture://source",
     license: str = "MIT",
+    rights: dict | None = None,
 ) -> Path:
     root = tmp_path / "recipe"
     root.mkdir(exist_ok=True)
@@ -55,35 +56,39 @@ def _fixture(
         root / "splits.yaml",
         {"schema_version": 1, "unit": "document", "assignments": {"document": "train"}},
     )
-    _yaml(
-        root / "release.yaml",
-        {
-            "schema_version": 1,
-            "mixture": {"technical_docs": 1.0},
-            "lm": {"selected": True, "training_splits": ["train", "validation"]},
-            "chat": {"selected": False, "training_splits": []},
+    release = {
+        "schema_version": 1,
+        "mixture": {"technical_docs": 1.0},
+        "lm": {"selected": True, "training_splits": ["train", "validation"]},
+        "chat": {"selected": False, "training_splits": []},
+    }
+    source = {
+        "schema_version": 1,
+        "id": "one",
+        "kind": kind,
+        "canonical_uri": uri,
+        "revision": revision,
+        "license": license,
+        "redistribution": "redistributable",
+        "domains": ["technical_docs"],
+        "document_kinds": ["markdown"],
+        "source_family": "docs",
+        "acquisition": acquisition
+        or {
+            "files": [{"path": "sources/data.md", "name": "data.md"}],
+            "max_bytes": 1024,
         },
-    )
-    _yaml(
-        root / "sources/one.yaml",
-        {
-            "schema_version": 1,
-            "id": "one",
-            "kind": kind,
-            "canonical_uri": uri,
-            "revision": revision,
-            "license": license,
-            "redistribution": "redistributable",
-            "domains": ["technical_docs"],
-            "document_kinds": ["markdown"],
-            "source_family": "docs",
-            "acquisition": acquisition
-            or {
-                "files": [{"path": "sources/data.md", "name": "data.md"}],
-                "max_bytes": 1024,
-            },
-        },
-    )
+    }
+    if rights is not None:
+        source.pop("redistribution")
+        source.update(
+            schema_version=2, rights=rights, license_url=rights["license_references"][0]
+        )
+        release.update(
+            schema_version=2, publication_mode="metadata_reconstruction_only"
+        )
+    _yaml(root / "release.yaml", release)
+    _yaml(root / "sources/one.yaml", source)
     return root / "corpus.yaml"
 
 
@@ -763,3 +768,284 @@ def test_admission_reuses_verified_snapshot_and_rejects_changed_bytes(
     (snapshot / "files/guide.md").write_text("Changed source.\n", encoding="utf-8")
     with pytest.raises(ValueError, match="mismatch"):
         draft_admission_manifest(project, work, template, document, work / "third.json")
+
+
+def _serve_pinned(
+    monkeypatch: pytest.MonkeyPatch, bodies: dict[str, bytes]
+) -> list[str]:
+    """Answer pinned HTTPS downloads from memory; record every requested URL."""
+    calls: list[str] = []
+
+    class Response(io.BytesIO):
+        status = 200
+
+        def __init__(self, body: bytes, url: str):
+            super().__init__(body)
+            self.url = url
+            self.headers = {"Content-Length": str(len(body))}
+
+    class Opener:
+        def open(self, request: urllib.request.Request, timeout: float) -> Response:
+            calls.append(request.full_url)
+            return Response(bodies[request.full_url], request.full_url)
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_args: Opener())
+    return calls
+
+
+_RFC_URL = "https://www.rfc-editor.org/in-notes/tar/RFC-all.tar.gz"
+
+
+def _tar_gz(members: list[tuple[str, bytes | None, str | None]]) -> bytes:
+    """Members are (name, regular-file bytes, or None with a symlink target)."""
+    import tarfile
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for name, data, link in members:
+            info = tarfile.TarInfo(name)
+            if data is None:
+                info.type, info.linkname = tarfile.SYMTYPE, link or ""
+                archive.addfile(info)
+            else:
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def _archive_recipe(tmp_path: Path, body: bytes, *, budget: bool = False) -> Path:
+    recipe = _fixture(
+        tmp_path,
+        kind="archive",
+        uri=_RFC_URL,
+        revision="2026-11-01",
+        license="LicenseRef-IETF-Trust",
+        rights={
+            "training_eligibility": "eligible_with_obligations",
+            "redistribution_mode": "metadata_reconstruction_only",
+            "license_references": ["https://trustee.ietf.org/license-info"],
+            "notices": ["Retain the IETF Trust copyright notice"],
+        },
+        acquisition={
+            "expected_sha256": hashlib.sha256(body).hexdigest(),
+            "format": "tar.gz",
+            "include": ["rfc*.txt"],
+            "exclude": ["rfc3.txt"],
+            "max_archive_bytes": len(body),
+            "max_expanded_bytes": 1 << 20,
+            "max_members": 10,
+            "max_member_bytes": 1024,
+            "max_bytes": 4096,
+        },
+    )
+    if budget:
+        config = yaml.safe_load(recipe.read_text(encoding="utf-8"))
+        config["transport_budget"] = {
+            "attempt_id": "rfc_fixture",
+            "max_source_body_bytes": 2 * len(body),
+            "max_metadata_body_bytes": 10000,
+            "max_transfers": 2,
+            "max_retries_per_shard": 1,
+            "max_wall_seconds": 120,
+            "max_disk_bytes": 1 << 30,
+        }
+        _yaml(recipe, config)
+    return recipe
+
+
+def test_archive_plan_step_and_snapshot_one_document_per_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    included = {"rfc1.txt": b"RFC 1 text\n", "rfc2.txt": b"RFC 2 text\n"}
+    body = _tar_gz(
+        [(name, data, None) for name, data in included.items()]
+        + [
+            ("rfc3.txt", b"excluded by pattern\n", None),
+            ("index.html", b"<html></html>", None),
+            ("latest", None, "rfc2.txt"),  # never selected, never materialized
+        ]
+    )
+    project = load_project(_archive_recipe(tmp_path, body, budget=True))
+    root = tmp_path / "work"
+    ledger = root / "corpora/example/transport-budget.sqlite"
+    TransportBudget.initialize(ledger, project)
+    calls = _serve_pinned(monkeypatch, {_RFC_URL: body})
+    step = {"source_id": "one", "max_new_bytes": 1 << 30, "min_free_bytes": 0}
+    planned = acquire(project, root, plan_only=True, **step)
+    assert planned["status"] == "planned" and calls == []
+    assert acquire(project, root, **step)["status"] == "source_verified"
+    lock = acquire(project, root)
+    assert calls == [_RFC_URL]
+    manifest = verify_snapshot(lock["sources"]["one"]["snapshot_path"])
+    assert manifest["files"] == [
+        {"path": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+        for name, data in included.items()
+    ]
+    assert manifest["retrieval"]["archive_sha256"] == hashlib.sha256(body).hexdigest()
+    assert manifest["declaration"]["rights"]["notices"] == [
+        "Retain the IETF Trust copyright notice"
+    ]
+    assert TransportBudget(ledger, project).receipt()["source_charged"] == len(body)
+    assert acquire(project, root, offline=True) == lock
+
+
+@pytest.mark.parametrize(
+    ("members", "tamper", "message"),
+    [
+        ([("../rfc9.txt", b"escape\n", None)], False, "unsafe path"),
+        ([("rfc9.txt", None, "/etc/passwd")], False, "not a plain regular file"),
+        ([("rfc9.txt", b"text\n", None)], True, "SHA-256 mismatch"),
+    ],
+)
+def test_archive_refuses_unsafe_members_and_unpinned_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    members: list,
+    tamper: bool,
+    message: str,
+) -> None:
+    body = _tar_gz([("rfc1.txt", b"RFC 1 text\n", None), *members])
+    project = load_project(_archive_recipe(tmp_path, body))
+    served = body[:-1] + bytes([body[-1] ^ 1]) if tamper else body
+    _serve_pinned(monkeypatch, {_RFC_URL: served})
+    with pytest.raises(ValueError, match=message):
+        acquire(project, tmp_path / "work")
+    assert not (tmp_path / "work/corpora/example/acquisition.json").exists()
+    published = (tmp_path / "work/corpora/example/snapshots/one").iterdir()
+    assert [path.name for path in published] == [".resource-receipts"]
+
+
+def _pdf(text: str) -> bytes:
+    """A minimal one-page PDF whose content stream shows ``text`` in Helvetica."""
+    stream = f"BT /F1 12 Tf 72 712 Td ({text}) Tj ET".encode()
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
+        ),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\n" % (len(objects) + 1)
+    out += b"startxref\n%d\n%%%%EOF\n" % xref
+    return bytes(out)
+
+
+def test_pdf_text_is_reproducible_from_pinned_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    pypdf = pytest.importorskip("pypdf")
+    from klab.corpus import acquisition
+
+    url = "https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-0.pdf"
+    body = _pdf("Pinned safety guidance text")
+    recipe = _fixture(
+        tmp_path,
+        kind="pdf_documents",
+        uri="https://csrc.nist.gov/publications/sp",
+        revision="2026-11-01",
+        license="LicenseRef-US-Government-Work",
+        acquisition={
+            "documents": [
+                {
+                    "url": url,
+                    "expected_sha256": hashlib.sha256(body).hexdigest(),
+                    "max_bytes": len(body),
+                    "name": "NIST.SP.800-0.txt",
+                }
+            ],
+            "extraction": {"engine": "pypdf", "version": pypdf.__version__},
+            "max_pages": 5,
+            "max_text_bytes": 4096,
+        },
+    )
+    project = load_project(recipe)
+    _serve_pinned(monkeypatch, {url: body})
+    lock = acquire(project, tmp_path / "work")
+    snapshot = Path(lock["sources"]["one"]["snapshot_path"])
+    text = (snapshot / "files/NIST.SP.800-0.txt").read_bytes()
+    assert text == b"Pinned safety guidance text\n"
+    document = verify_snapshot(snapshot)["retrieval"]["documents"][0]
+    assert document["text_sha256"] == hashlib.sha256(text).hexdigest()
+    assert (snapshot / "pinned/NIST.SP.800-0.pdf").read_bytes() == body
+    with monkeypatch.context() as patch:
+        patch.setattr(pypdf, "__version__", "0.0.1")
+        with pytest.raises(ValueError, match="pinned to pypdf"):
+            verify_snapshot(snapshot)
+    with monkeypatch.context() as patch:
+        patch.setattr(acquisition, "_pdf_text", lambda *_args: (b"different\n", 1))
+        with pytest.raises(ValueError, match="not reproducible"):
+            verify_snapshot(snapshot)
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, "pypdf", None)
+        with pytest.raises(ValueError, match="`pdf` extra"):
+            verify_snapshot(snapshot)
+
+
+def test_mediawiki_dump_of_any_site_yields_one_row_per_article(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gzip
+
+    url = "https://cynefin.example.org/dumps/cynefinwiki-20261101.xml.gz"
+    export = "http://www.mediawiki.org/xml/export-0.10/"
+
+    def page(page_id: int, ns: int, title: str, text: str, extra: str = "") -> str:
+        return (
+            f"<page><title>{title}</title><ns>{ns}</ns><id>{page_id}</id>{extra}"
+            f"<revision><id>{page_id + 100}</id>"
+            "<timestamp>2026-10-01T00:00:00Z</timestamp>"
+            f"<text>{text}</text></revision></page>"
+        )
+
+    body = gzip.compress(
+        (
+            f'<mediawiki xmlns="{export}" xml:lang="en"><siteinfo>'
+            "<sitename>Cynefin</sitename><dbname>cynefinwiki</dbname></siteinfo>"
+            + page(1, 0, "Complex domain", "Probe, sense, respond. '''Complex'''.")
+            + page(2, 4, "Cynefin:About", "Project page outside the namespaces.")
+            + page(3, 0, "Chaos", "#REDIRECT [[Chaotic domain]]", "<redirect />")
+            + "</mediawiki>"
+        ).encode()
+    )
+    recipe = _fixture(
+        tmp_path,
+        kind="mediawiki_dump",
+        uri=url,
+        revision="20261101",
+        license="CC-BY-SA-4.0",
+        acquisition={
+            "expected_sha256": hashlib.sha256(body).hexdigest(),
+            "compression": "gzip",
+            "dbname": "cynefinwiki",
+            "language": "en",
+            "site_url": "https://cynefin.example.org/index.php",
+            "max_compressed_bytes": len(body),
+            "max_decompressed_bytes": 1 << 20,
+            "max_scanned_pages": 10,
+            "max_selected_pages": 10,
+            "max_emitted_bytes": 1 << 20,
+        },
+    )
+    _serve_pinned(monkeypatch, {url: body})
+    lock = acquire(load_project(recipe), tmp_path / "work")
+    snapshot = Path(lock["sources"]["one"]["snapshot_path"])
+    manifest = verify_snapshot(snapshot)
+    with (snapshot / "files" / manifest["files"][0]["path"]).open("rb") as rows:
+        selected = [json.loads(line)["_klab_source"] for line in rows]
+    assert [(row["page_title"], row["page_uri"]) for row in selected] == [
+        ("Complex domain", "https://cynefin.example.org/index.php?curid=1")
+    ]
+    assert manifest["retrieval"]["scanned_pages"] == 3

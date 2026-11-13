@@ -20,7 +20,12 @@ from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.models import StrictModel
-from klab.corpus.project import ReleaseDeclaration, release_declaration_payload
+from klab.corpus.project import (
+    CURATED_SOURCE_KINDS,
+    ROW_SOURCE_KINDS,
+    ReleaseDeclaration,
+    release_declaration_payload,
+)
 from klab.corpus.provenance import (
     DERIVED_ORIGIN,
     DETERMINISTIC_ORIGIN,
@@ -469,12 +474,9 @@ def _records_for_file(
     streaming_rows = (
         source.schema_version == 3
         and suffix == ".jsonl"
-        and source.kind in {"huggingface_dataset", "wikimedia_dump"}
+        and source.kind in ROW_SOURCE_KINDS
     )
-    jsonl_rows = suffix == ".jsonl" and source.kind in {
-        "huggingface_dataset",
-        "wikimedia_dump",
-    }
+    jsonl_rows = suffix == ".jsonl" and source.kind in ROW_SOURCE_KINDS
     raw_text = ""
     if suffix != ".parquet":
         if b"\x00" in raw:
@@ -491,10 +493,7 @@ def _records_for_file(
         if streaming_rows or suffix in {".parquet", ".md", ".markdown"}
         else _normalized(raw_text)
     )
-    if suffix in {".jsonl", ".json", ".parquet"} and source.kind in {
-        "huggingface_dataset",
-        "wikimedia_dump",
-    }:
+    if suffix in {".jsonl", ".json", ".parquet"} and source.kind in ROW_SOURCE_KINDS:
         if suffix == ".parquet":
             import pyarrow.parquet as pq
 
@@ -624,10 +623,8 @@ def _records_for_file(
         if file_rights
         else source.license
     )
-    byte_offsets = (
-        [] if source.kind in {"huggingface_dataset", "wikimedia_dump"} else [0]
-    )
-    if source.kind not in {"huggingface_dataset", "wikimedia_dump"}:
+    byte_offsets = [] if source.kind in ROW_SOURCE_KINDS else [0]
+    if source.kind not in ROW_SOURCE_KINDS:
         offset = 0
         while (end := raw.find(b"\n", offset)) >= 0:
             byte_offsets.append(end + 1)
@@ -654,9 +651,7 @@ def _records_for_file(
                     {
                         "source_id": source.id,
                         "path": name,
-                        "row": start
-                        if source.kind in {"huggingface_dataset", "wikimedia_dump"}
-                        else None,
+                        "row": start if source.kind in ROW_SOURCE_KINDS else None,
                         "reason": reason,
                     }
                 )
@@ -671,7 +666,7 @@ def _records_for_file(
             content, structure = cleaned["text"], cleaned["structure"]
         location = (
             f"{name}#row={start}"
-            if source.kind in {"huggingface_dataset", "wikimedia_dump"}
+            if source.kind in ROW_SOURCE_KINDS
             else f"{name}#lines={start}-{end}"
         )
         normalizer = "cnxml-text-v1" if suffix == ".cnxml" else normalizer_version
@@ -1849,7 +1844,7 @@ def _build_stored(
         source_rank = {
             source.id: (
                 0
-                if source.kind in {"git", "wikimedia_dump", "http_document"}
+                if source.kind in CURATED_SOURCE_KINDS
                 else 1
                 if source.id.startswith("pes2o")
                 else 2

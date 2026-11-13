@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import yaml
 from pydantic import Field, field_validator, model_serializer, model_validator
@@ -267,6 +268,142 @@ class WikimediaDumpAcquisition(StrictModel):
         return self
 
 
+def _pinned_url(value: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.fragment:
+        raise ValueError("pinned download needs an exact HTTP(S) URL")
+    return value
+
+
+def _sha256_hex(value: str) -> str:
+    if not _HEX.fullmatch(value):
+        raise ValueError("expected_sha256 must be SHA-256 hex")
+    return value.lower()
+
+
+def _patterns(values: tuple[str, ...]) -> tuple[str, ...]:
+    for value in values:
+        safe_name(value.replace("*", "x").replace("?", "x"))
+    return values
+
+
+class ArchiveAcquisition(StrictModel):
+    """One pinned tar or zip archive; each included regular member is a document."""
+
+    expected_sha256: str
+    format: Literal["tar", "tar.gz", "zip"]
+    include: tuple[str, ...]
+    exclude: tuple[str, ...] = ()
+    max_archive_bytes: int = Field(gt=0)
+    max_expanded_bytes: int = Field(gt=0)
+    max_members: int = Field(gt=0)
+    max_member_bytes: int = Field(gt=0)
+    max_bytes: int = Field(gt=0)
+
+    digest_hex = field_validator("expected_sha256")(_sha256_hex)
+    patterns_safe = field_validator("include", "exclude")(_patterns)
+
+    @model_validator(mode="after")
+    def selection_required(self) -> ArchiveAcquisition:
+        if not self.include:
+            raise ValueError("archive include patterns cannot be empty")
+        return self
+
+
+class PdfDocument(StrictModel):
+    url: str
+    expected_sha256: str
+    max_bytes: int = Field(gt=0)
+    name: str
+
+    url_pinned = field_validator("url")(_pinned_url)
+    digest_hex = field_validator("expected_sha256")(_sha256_hex)
+
+    @field_validator("name")
+    @classmethod
+    def text_name(cls, value: str) -> str:
+        safe_name(value)
+        if not value.endswith(".txt"):
+            raise ValueError("PDF document name is its extracted .txt snapshot path")
+        return value
+
+
+class PdfExtraction(StrictModel):
+    engine: Literal["pypdf"]
+    version: str
+
+    @field_validator("version")
+    @classmethod
+    def exact_version(cls, value: str) -> str:
+        if not re.fullmatch(r"\d+\.\d+\.\d+", value):
+            raise ValueError("PDF extraction needs an exact engine version")
+        return value
+
+
+class PdfAcquisition(StrictModel):
+    """Pinned PDF files; the extracted text of each one is a document."""
+
+    documents: tuple[PdfDocument, ...]
+    extraction: PdfExtraction
+    max_pages: int = Field(gt=0)
+    max_text_bytes: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def distinct_documents(self) -> PdfAcquisition:
+        names = [document.name for document in self.documents]
+        if not names or names != sorted(set(names)):
+            raise ValueError("PDF documents need sorted, distinct names")
+        return self
+
+    @property
+    def max_bytes(self) -> int:
+        """Pinned PDF bytes kept in the snapshot plus their extracted text."""
+        return sum(item.max_bytes for item in self.documents) + self.max_text_bytes
+
+
+class MediaWikiDumpAcquisition(StrictModel):
+    """A pinned XML export of any MediaWiki site, read only from the dump file."""
+
+    expected_sha256: str
+    compression: Literal["bz2", "gzip", "none"]
+    dbname: str
+    language: str
+    site_url: str
+    namespaces: tuple[int, ...] = (0,)
+    max_compressed_bytes: int = Field(gt=0)
+    max_decompressed_bytes: int = Field(gt=0)
+    max_scanned_pages: int = Field(gt=0)
+    max_selected_pages: int = Field(gt=0)
+    max_emitted_bytes: int = Field(gt=0)
+
+    digest_hex = field_validator("expected_sha256")(_sha256_hex)
+    site_pinned = field_validator("site_url")(_pinned_url)
+
+    @model_validator(mode="after")
+    def valid_site(self) -> MediaWikiDumpAcquisition:
+        if not _ID.fullmatch(self.dbname) or not re.fullmatch(
+            r"[a-z]{2,3}(?:-[a-z0-9]+)*", self.language
+        ):
+            raise ValueError("MediaWiki dump needs a safe dbname and language code")
+        if not self.namespaces or list(self.namespaces) != sorted(set(self.namespaces)):
+            raise ValueError("MediaWiki namespaces must be sorted and distinct")
+        if urlparse(self.site_url).query:
+            raise ValueError("MediaWiki site_url is the bare index.php URL")
+        return self
+
+    @property
+    def text_field(self) -> str:
+        return "text"
+
+    @property
+    def max_rows(self) -> int:
+        return self.max_selected_pages
+
+    @property
+    def max_bytes(self) -> int:
+        return self.max_emitted_bytes
+
+
 class LocalAcquisition(StrictModel):
     files: tuple[LocalFile, ...]
     max_bytes: int = Field(gt=0)
@@ -314,11 +451,41 @@ class InferenceAcquisition(StrictModel):
         return _nonblank(value)
 
 
+# Content-pinned upstream bytes: a verified snapshot is reusable without refetching.
+IMMUTABLE_SOURCE_KINDS = frozenset(
+    {
+        "git",
+        "huggingface_dataset",
+        "wikimedia_dump",
+        "archive",
+        "pdf_documents",
+        "mediawiki_dump",
+    }
+)
+# Sources whose snapshot files are JSONL rows, one document per row.
+ROW_SOURCE_KINDS = frozenset(
+    {"huggingface_dataset", "wikimedia_dump", "mediawiki_dump"}
+)
+# Curated primary sources keep the canonical copy of an exact duplicate.
+CURATED_SOURCE_KINDS = frozenset(
+    {
+        "git",
+        "wikimedia_dump",
+        "http_document",
+        "archive",
+        "pdf_documents",
+        "mediawiki_dump",
+    }
+)
+
 _ACQUISITION = {
     "git": GitAcquisition,
     "http_document": HttpAcquisition,
     "huggingface_dataset": HuggingFaceAcquisition,
     "wikimedia_dump": WikimediaDumpAcquisition,
+    "archive": ArchiveAcquisition,
+    "pdf_documents": PdfAcquisition,
+    "mediawiki_dump": MediaWikiDumpAcquisition,
     "local": LocalAcquisition,
     "deterministic_generator": DeterministicAcquisition,
     "inference_generator": InferenceAcquisition,
@@ -333,6 +500,9 @@ class SourceDeclaration(StrictModel):
         "http_document",
         "huggingface_dataset",
         "wikimedia_dump",
+        "archive",
+        "pdf_documents",
+        "mediawiki_dump",
         "local",
         "deterministic_generator",
         "inference_generator",
@@ -362,6 +532,9 @@ class SourceDeclaration(StrictModel):
         | HttpAcquisition
         | HuggingFaceAcquisition
         | WikimediaDumpAcquisition
+        | ArchiveAcquisition
+        | PdfAcquisition
+        | MediaWikiDumpAcquisition
         | LocalAcquisition
         | DeterministicAcquisition
         | InferenceAcquisition
@@ -451,6 +624,17 @@ class SourceDeclaration(StrictModel):
             ):
                 raise ValueError(
                     "Wikimedia dump requires matching official checksum URI"
+                )
+        if self.kind in {"archive", "mediawiki_dump"}:
+            _pinned_url(self.canonical_uri)
+        if self.kind == "mediawiki_dump":
+            suffix = {"bz2": ".xml.bz2", "gzip": ".xml.gz", "none": ".xml"}
+            location = urlparse(self.canonical_uri)
+            if location.query or not location.path.endswith(
+                suffix[self.acquisition.compression]
+            ):
+                raise ValueError(
+                    "MediaWiki source must be a pinned XML dump file, not a live API"
                 )
         if self.schema_version == 1:
             if (
@@ -921,11 +1105,10 @@ class Project(StrictModel):
                 effect = effects[source.id]
                 if effect.declaration_sha256 != declaration_sha256(source):
                     raise ValueError(f"source effect declaration mismatch: {source.id}")
-                if effect.effect == "reuse_only" and source.kind not in {
-                    "git",
-                    "huggingface_dataset",
-                    "wikimedia_dump",
-                }:
+                if (
+                    effect.effect == "reuse_only"
+                    and source.kind not in IMMUTABLE_SOURCE_KINDS
+                ):
                     raise ValueError("reuse-only source must be immutable")
         return self
 

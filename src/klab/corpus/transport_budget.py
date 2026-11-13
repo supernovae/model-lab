@@ -9,8 +9,9 @@ import shutil
 import sqlite3
 import time
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlparse
 
 from klab.canonical import canonical_digest
 from klab.corpus.project import Project
@@ -26,6 +27,33 @@ def _valid_time_provenance(owner: Any, reference: Any) -> bool:
         and "\0" not in value
         for value, maximum in ((owner, 128), (reference, 512))
     )
+
+
+PINNED_FILE_KINDS = frozenset({"archive", "pdf_documents", "mediawiki_dump"})
+
+
+def pinned_transfers(source: Any) -> tuple[tuple[str, int], ...]:
+    """Every body transfer a source declares, as ledger path and byte cap."""
+    spec = source.acquisition
+    if source.kind == "huggingface_dataset" and spec.bounded_shards is not None:
+        return tuple(
+            (shard.path, shard.max_shard_bytes) for shard in spec.bounded_shards
+        )
+    if source.kind == "git" and spec.bounded_blobs is not None:
+        return tuple((blob.path, blob.max_bytes) for blob in spec.bounded_blobs)
+    if source.kind == "archive":
+        return ((source_file_name(source.canonical_uri), spec.max_archive_bytes),)
+    if source.kind == "mediawiki_dump":
+        return ((source_file_name(source.canonical_uri), spec.max_compressed_bytes),)
+    if source.kind == "pdf_documents":
+        return tuple((item.name, item.max_bytes) for item in spec.documents)
+    return ()
+
+
+def source_file_name(uri: str) -> str:
+    """The ledger and staging name of a pinned single-file download."""
+    name = PurePosixPath(urlparse(uri).path).name
+    return name if name not in {"", ".", ".."} else "download"
 
 
 def _binding(project: Project) -> str:
@@ -63,6 +91,25 @@ def _binding(project: Project) -> str:
             }
             for source in project.sources
             if source.kind == "git" and source.acquisition.bounded_blobs is not None
+        ]
+        + [
+            {
+                "id": source.id,
+                "kind": source.kind,
+                "uri": source.canonical_uri,
+                "revision": source.revision,
+                "transfers": [
+                    {"path": path, "max_bytes": size}
+                    for path, size in pinned_transfers(source)
+                ],
+                "sha256": (
+                    [item.expected_sha256 for item in source.acquisition.documents]
+                    if source.kind == "pdf_documents"
+                    else [source.acquisition.expected_sha256]
+                ),
+            }
+            for source in project.sources
+            if source.kind in PINNED_FILE_KINDS
         ],
     }
     if project.config.source_effects is not None:
@@ -87,12 +134,7 @@ def _validate_scope(project: Project) -> None:
             "inference_generator",
         }:
             continue
-        if not (
-            source.kind == "huggingface_dataset"
-            and source.acquisition.bounded_shards is not None
-            or source.kind == "git"
-            and source.acquisition.bounded_blobs is not None
-        ):
+        if not pinned_transfers(source):
             raise ValueError(
                 "transport budget cannot cover this unaccounted network source"
             )
@@ -278,24 +320,10 @@ class TransportBudget:
             if (effects is None or effects[source.id].effect == "acquire")
             and (source_id is None or source.id == source_id)
         ]
-        bounded_hf = [
-            source.acquisition
-            for source in transferring
-            if source.kind == "huggingface_dataset"
-            and source.acquisition.bounded_shards is not None
-        ]
-        bounded_git = [
-            source.acquisition
-            for source in transferring
-            if source.kind == "git" and source.acquisition.bounded_blobs is not None
-        ]
-        largest = [
-            shard.max_shard_bytes
-            for spec in bounded_hf
-            for shard in spec.bounded_shards
-        ] + [blob.max_bytes for spec in bounded_git for blob in spec.bounded_blobs]
+        budgeted = [source for source in transferring if pinned_transfers(source)]
+        largest = [size for source in budgeted for _, size in pinned_transfers(source)]
         return (
-            sum(spec.max_bytes for spec in (*bounded_hf, *bounded_git))
+            sum(source.acquisition.max_bytes for source in budgeted)
             + max(largest, default=0)
             + 65_536  # ledger, manifests and small staging metadata
         )
@@ -313,15 +341,10 @@ class TransportBudget:
         )
         if not any(
             (effects is None or effects[source.id].effect == "acquire")
-            and (
-                source.kind == "huggingface_dataset"
-                and source.acquisition.bounded_shards is not None
-                or source.kind == "git"
-                and source.acquisition.bounded_blobs is not None
-            )
+            and pinned_transfers(source)
             for source in project.sources
         ):
-            raise ValueError("transport budget requires bounded shards or Git blobs")
+            raise ValueError("transport budget requires pinned network transfers")
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with path.open("xb"):
@@ -613,10 +636,15 @@ class TransportBudget:
         self.remaining_seconds()
         state = self._read()
         source = next(item for item in self.project.sources if item.id == source_id)
-        for shard in source.acquisition.bounded_shards:
-            key = f"{source_id}:{shard.path}"
-            self._check_transfer(state, key, shard.max_shard_bytes)
-            state["source_charged"] += shard.max_shard_bytes
+        for path, size in pinned_transfers(source):
+            key = f"{source_id}:{path}"
+            self._check_transfer(
+                state,
+                key,
+                size,
+                allow_verified_retry=source.kind in PINNED_FILE_KINDS,
+            )
+            state["source_charged"] += size
             state["transfers"].append({"key": key, "status": "started"})
 
     def charge_transfer_actual(self, index: int, amount: int) -> None:

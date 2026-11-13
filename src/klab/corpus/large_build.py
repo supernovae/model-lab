@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.progress import BuildProgress
+from klab.corpus.project import CURATED_SOURCE_KINDS, ROW_SOURCE_KINDS
 from klab.corpus.provenance import (
     HUMAN_ORIGIN,
     SOURCE_ORIGIN,
@@ -284,9 +285,7 @@ def _prepare_file(
             docs = stack.enter_context((staging / "docs.jsonl").open("wb"))
             spans = stack.enter_context((staging / "spans.jsonl").open("wb"))
             rejected = stack.enter_context((staging / "rejected.jsonl").open("wb"))
-            if source.kind in {"huggingface_dataset", "wikimedia_dump"} and file[
-                "path"
-            ].endswith(".jsonl"):
+            if source.kind in ROW_SOURCE_KINDS and file["path"].endswith(".jsonl"):
                 with source_path.open("rb") as stream:
                     index = 0
                     from klab.corpus.jsonl_records import iter_lf_lines
@@ -538,7 +537,7 @@ def _index_prepared(
     rank = {
         source.id: (
             0
-            if source.kind in {"git", "wikimedia_dump", "http_document"}
+            if source.kind in CURATED_SOURCE_KINDS
             else 1
             if source.id.startswith("pes2o")
             else 2
@@ -1427,7 +1426,7 @@ def build_large(
     eligible_jsonl = {
         path
         for source, file, path, lock_row, nested_metadata in inputs
-        if source.kind in {"huggingface_dataset", "wikimedia_dump"}
+        if source.kind in ROW_SOURCE_KINDS
         and file["path"].endswith(".jsonl")
         and file["size"] >= _PROCESS_SHARD_MIN_BYTES
         and file["path"] not in nested_metadata
