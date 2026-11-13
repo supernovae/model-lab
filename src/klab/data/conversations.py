@@ -411,6 +411,13 @@ def _records(path: Path) -> Iterator[tuple[int, object]]:
             yield line_number, record
 
 
+def render_conversation(
+    record: object, origin: str, template: ChatTemplate = PLAIN
+) -> RenderedConversation:
+    """Validate and render one local-chat record exactly as the reader would."""
+    return _conversation_document(record, Path(origin), 0, template)
+
+
 def iter_rendered_conversations(
     path: Path, template: ChatTemplate = PLAIN
 ) -> Iterator[RenderedConversation]:

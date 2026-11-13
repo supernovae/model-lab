@@ -85,6 +85,113 @@ Lab verifies those against the snapshot before fitting a tokenizer or preparing.
 For files that need explicit control, a source declaration with
 `kind: forge_files` selects verified members of a [corpus release](corpus-preparation.md).
 
+## Convert chat, instruction and multi-field rows
+
+Public chat data with a `messages` column, instruction/response pairs and rows
+whose text spans several columns (a commit's old and new file and its message)
+become `local_chat` or `local_text` files with one declaration:
+
+```sh
+klab data convert convert.yaml --output converted --json
+klab data verify-conversion converted --json
+```
+
+`convert` writes `train.jsonl`, `validation.jsonl`, `excluded.jsonl` and
+`receipt.json`. Point a run at the two split files with `dataset.source:
+local_chat` (chat and instruction mappings) or `local_text` (text mappings) and
+the declaration's license; `klab data prepare` reads them as they are.
+
+A chat dataset, using its own splits:
+
+```yaml
+source:
+  kind: huggingface
+  repo_id: OWNER/chat-dataset
+  revision: 0123456789abcdef0123456789abcdef01234567   # exact commit
+  config: default
+license: Apache-2.0
+attribution: OWNER/chat-dataset contributors
+splits: {mode: source, train: train, validation: test}
+mapping:
+  kind: chat
+  messages_field: messages
+  role_field: role            # default
+  content_field: content      # default
+  role_map: {system: system, user: user, assistant: assistant}   # default
+  loss_mode: assistant_only   # or all_tokens
+limits: {max_rows: 200000, max_record_bytes: 65536}
+```
+
+ShareGPT-style rows use `messages_field: conversations`, `role_field: from`,
+`content_field: value` and `role_map: {human: user, gpt: assistant}`.
+
+Instruction/response pairs, split by a digest of a key column:
+
+```yaml
+source:
+  kind: huggingface
+  repo_id: OWNER/instructions
+  revision: 0123456789abcdef0123456789abcdef01234567
+license: CC-BY-4.0
+attribution: OWNER/instructions
+splits: {mode: hash, split: train, key: [instruction, input], validation_fraction: 0.02}
+mapping:
+  kind: instruction
+  system: "You are a careful assistant."   # optional
+  prompt: "{instruction}\n\n{input}"
+  response: "{output}"
+  loss_mode: assistant_only
+limits: {max_rows: 100000, max_record_bytes: 32768}
+```
+
+Commits rendered as a message and a diff, from local files:
+
+```yaml
+source:
+  kind: local
+  files: {train: commits/train.parquet}   # .parquet or .jsonl, beside this file
+license: MIT
+attribution: commit authors of the listed repositories
+splits: {mode: hash, split: train, key: [commit], validation_fraction: 0.05}
+mapping:
+  kind: text
+  template: "{message}\n\n{unified_diff(old_contents, new_contents, old_file, new_file)}"
+limits: {max_rows: 50000, max_record_bytes: 131072}
+```
+
+- **Source.** `huggingface` needs an exact commit revision and reads the
+  pinned file inventory the same way [`klab data lock`](#pin-a-dataset) does,
+  running no repository code. `local` names one JSONL or Parquet file per source
+  split; the receipt records their digests and locations.
+- **Splits.** `mode: source` maps two source splits to train and validation.
+  `mode: hash` splits one source split by a digest of the `key` columns, so the
+  same rows always land in the same split.
+- **Templates** are text with `{column}` placeholders, `{unified_diff(old,
+  new)}` or `{unified_diff(old, new, old_path, new_path)}` (a unified diff with
+  three lines of context and `a/`, `b/` path labels), and `{{` or `}}` for a
+  literal brace. Nothing else is evaluated. Instruction prompts, responses and
+  systems are stripped of surrounding whitespace; a blank system is left out.
+- **Reading** stops after `limits.max_rows` rows of each source split; the
+  receipt says whether the split was read to its end.
+- **Exclusions.** A row is excluded, never repaired, and counted by reason:
+  `missing_field`, `null_field`, `malformed` (wrong type or an invalid
+  conversation), `unmapped_role`, `empty`, `empty_diff` (old and new are the
+  same), `oversized` (an output line above `max_record_bytes`) and `duplicate`
+  (the same record earlier in the same split). `excluded.jsonl` lists each one
+  with its source split and row number.
+- **Both splits.** Records are compared by roles and whitespace-collapsed text.
+  A record that would appear in both train and validation stops the conversion
+  and nothing is published. With `mode: hash`, key on the content columns to
+  keep repeats in one split.
+
+The receipt names the declaration and its digest, the mapping digest, the
+source (repository, revision and file inventory with blob and LFS digests, or
+local file digests), per-split rows read and exclusions by reason, each output
+file's rows, bytes and SHA-256, the duplicate and overlap policy, and Lab's
+source digest. `verify-conversion` checks the receipt digest, the directory's
+files and their digests, then reads the pinned revision or local files again and
+requires the same outputs, counts and exclusions. It refuses on any difference.
+
 ## Prepare
 
 ```sh
