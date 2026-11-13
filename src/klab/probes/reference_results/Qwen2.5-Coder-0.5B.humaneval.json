@@ -1,0 +1,1636 @@
+{
+  "bench_id": "bench-20261113T013642Z-d1fbe865",
+  "benchmark": {
+    "decoding": {
+      "max_new_tokens": 512,
+      "samples": 1,
+      "strategy": "greedy",
+      "temperature": 0.0
+    },
+    "items": 164,
+    "items_sha256": "89bc5387bfcdcd8582e95c66e1c2b797e2b84bacce45ffd1f7a59f531db204c2",
+    "sandbox": {
+      "limits": {
+        "cpu_seconds": 10,
+        "file_bytes": 16777216,
+        "memory_bytes": 2147483648,
+        "open_files": 64,
+        "output_bytes": 65536,
+        "processes": 16,
+        "timeout_seconds": 10.0
+      },
+      "mechanism": "bwrap",
+      "protocol": "klab-code-sandbox-v1",
+      "python": "3.14"
+    },
+    "scoring_protocol": "klab-code-exec-v1",
+    "task": {
+      "data_file": "test-00000-of-00001.parquet",
+      "data_sha256": "2f2871a15fbc95b6c683043359f4ed8e144c5a1c4f24f25f66bc51f598dfcfb6",
+      "id_field": "task_id",
+      "max_new_tokens": 512,
+      "name": "humaneval",
+      "program": "{prompt}{completion}\n\n{test}\n\ncheck({entry_point})\n",
+      "prompt": "{prompt}",
+      "repo_id": "openai/openai_humaneval",
+      "revision": "7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544",
+      "source": "HumanEval (Chen et al. 2021), 164 problems, original tests",
+      "stop": [
+        "\nclass",
+        "\ndef",
+        "\n#",
+        "\n@",
+        "\nprint",
+        "\nif",
+        "\n```"
+      ]
+    }
+  },
+  "code_pass1": {
+    "benchmark_group": "a2b27fb310fd8c404a64bacac64e11fe46d47ca96f860649ec0deb567349efe5",
+    "passed": 46,
+    "scored": 164,
+    "statuses": {
+      "error": 0,
+      "failed": 118,
+      "passed": 46,
+      "timeout": 0
+    },
+    "total": 164,
+    "value": 0.2804878048780488
+  },
+  "completions_sha256": "3aa8e29e818f69ce3d16a0bd4cf6682a6bd7bd2d37a8ddf9ec6effe1cc95127e",
+  "created_at": "2026-11-13T01:36:42.227233+00:00",
+  "decoding": {
+    "max_new_tokens": 512,
+    "samples": 1,
+    "strategy": "greedy",
+    "temperature": 0.0
+  },
+  "format": "klab-code-bench-v1",
+  "problems": [
+    {
+      "completion_sha256": "8c77e2315c057d1326184cc618e5d1a526c712d1b17c7c2d0ca5849b027d4e8c",
+      "completion_tokens": 37,
+      "id": "HumanEval/0",
+      "returncode": 1,
+      "seconds": 0.038,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 38, in <module>\n    check(has_close_elements)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 30, in check\n    assert candidate([1.0, 2.0, 5.9, 4.0, 5.0], 0.95) == True\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "e003c4b8fab8912c1bb49e5bbfc093417d173d4577d2d737dd664fbfeeac8f44",
+      "completion_tokens": 10,
+      "id": "HumanEval/1",
+      "returncode": 1,
+      "seconds": 0.036,
+      "status": "failed",
+      "stderr_tail": "ast):\n  File \"/work/program.py\", line 38, in <module>\n    check(separate_paren_groups)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 26, in check\n    assert candidate('(()()) ((())) () ((())()())') == [\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n        '(()())', '((()))', '()', '((())()())'\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ]\n    ^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "47c4209d5a7d436ea0513c219531ac81825b71db3ad89ac238e33648091eade0",
+      "completion_tokens": 8,
+      "id": "HumanEval/2",
+      "returncode": 0,
+      "seconds": 0.019,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "44ec8eeb487270700a59d369590fcf4022070f8ab88ac3c58cc77ed93d51da03",
+      "completion_tokens": 33,
+      "id": "HumanEval/3",
+      "returncode": 0,
+      "seconds": 0.022,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "09dbf5404120e7c1a887c3e2eaa1410f4f3d9009ff9c1b4527cf7baaa2338185",
+      "completion_tokens": 17,
+      "id": "HumanEval/4",
+      "returncode": 1,
+      "seconds": 0.035,
+      "status": "failed",
+      "stderr_tail": "check(mean_absolute_deviation)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 24, in check\n    assert abs(candidate([1.0, 2.0, 3.0]) - 2.0/3.0) < 1e-6\n               ~~~~~~~~~^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 13, in mean_absolute_deviation\n    return sum(abs(x - sum(numbers) / len(numbers))) / len(numbers)\n                   ^\nNameError: name 'x' is not defined\n"
+    },
+    {
+      "completion_sha256": "a48ed0f26259f7fd900ddd8fbb339ce8627c95af7743bcf74e90debe77e6ec8b",
+      "completion_tokens": 14,
+      "id": "HumanEval/5",
+      "returncode": 1,
+      "seconds": 0.038,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 29, in <module>\n    check(intersperse)\n    ~~~~~^^^^^^^^^^^^^\n  File \"/work/program.py\", line 24, in check\n    assert candidate([], 7) == []\n           ^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "8d05c99d321116f617e66e710c7872fee07bc823ba9106b9c418d2c2b709d545",
+      "completion_tokens": 18,
+      "id": "HumanEval/6",
+      "returncode": 1,
+      "seconds": 0.035,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 30, in <module>\n    check(parse_nested_parens)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 25, in check\n    assert candidate('(()()) ((())) () ((())()())') == [2, 3, 1, 3]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "31a6916af675384c97ea85b4aecc9bfdaf43d8fcb1c561aadbd387dba2cb20c2",
+      "completion_tokens": 14,
+      "id": "HumanEval/7",
+      "returncode": 0,
+      "seconds": 0.023,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "0ad5bd2e9a0aa76929c4b31da7144bb9ea93dbde4abcd07711d9bbf9493836db",
+      "completion_tokens": 34,
+      "id": "HumanEval/8",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": "  File \"/work/program.py\", line 33, in <module>\n    check(sum_product)\n    ~~~~~^^^^^^^^^^^^^\n  File \"/work/program.py\", line 27, in check\n    assert candidate([1, 1, 1]) == (3, 1)\n           ~~~~~~~~~^^^^^^^^^^^\n  File \"/work/program.py\", line 15, in sum_product\n    return (sum(numbers), reduce(lambda x, y: x * y, numbers))\n                          ^^^^^^\nNameError: name 'reduce' is not defined\n"
+    },
+    {
+      "completion_sha256": "816a61aed989d0145b3eff54a8a61086f3499d7e89f1cfa90c0da5852be6532f",
+      "completion_tokens": 52,
+      "id": "HumanEval/9",
+      "returncode": 0,
+      "seconds": 0.024,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "6b278751cc81618c9714a47a0a8f0ff77686bfd3e34a8ddd80e4384c789da19b",
+      "completion_tokens": 53,
+      "id": "HumanEval/10",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "k/program.py\", line 46, in <module>\n    check(make_palindrome)\n    ~~~~~^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 41, in check\n    assert candidate('xyz') == 'xyzyx'\n           ~~~~~~~~~^^^^^^^\n  File \"/work/program.py\", line 26, in make_palindrome\n    return postfix + reverse(prefix) + prefix\n                     ^^^^^^^\nNameError: name 'reverse' is not defined. Did you mean: 'reversed'?\n"
+    },
+    {
+      "completion_sha256": "3c5f20758325aa48c4e75d47d19186c26c1e95b073a0e2d6ce865d113d7b7c06",
+      "completion_tokens": 24,
+      "id": "HumanEval/11",
+      "returncode": 0,
+      "seconds": 0.026,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "2ae8f10b094410a2c624f50ee09555ad218c7ac37e2bf5e0cccbebf5057ffef3",
+      "completion_tokens": 17,
+      "id": "HumanEval/12",
+      "returncode": 0,
+      "seconds": 0.021,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "66016a8df92f50835c84b5f5f70fec2534b8f009985aec7c48b61bc8041c944c",
+      "completion_tokens": 23,
+      "id": "HumanEval/13",
+      "returncode": 0,
+      "seconds": 0.019,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "66e159a388b63906e66a079963d4016f7c0c21f75289718f4f8e1de9808b9adf",
+      "completion_tokens": 16,
+      "id": "HumanEval/14",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 27, in <module>\n    check(all_prefixes)\n    ~~~~~^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 23, in check\n    assert candidate('asdfgh') == ['a', 'as', 'asd', 'asdf', 'asdfg', 'asdfgh']\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "4ed7172f27e7c2e700d1e7cbb5d248219d07646c829b2f4e99f5c053a37b613a",
+      "completion_tokens": 18,
+      "id": "HumanEval/15",
+      "returncode": 1,
+      "seconds": 0.036,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 28, in <module>\n    check(string_sequence)\n    ~~~~~^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 23, in check\n    assert candidate(0) == '0'\n           ^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "48a38011dc0d736112599989c283e4925b7367ecfed2823472789354445aff94",
+      "completion_tokens": 9,
+      "id": "HumanEval/16",
+      "returncode": 0,
+      "seconds": 0.019,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "d803e589e103603a0c2f760137da409449f54725a712006916b18a5090506f03",
+      "completion_tokens": 53,
+      "id": "HumanEval/17",
+      "returncode": 1,
+      "seconds": 0.036,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 45, in <module>\n    check(parse_music)\n    ~~~~~^^^^^^^^^^^^^\n  File \"/work/program.py\", line 40, in check\n    assert candidate('.| .| .| .|') == [1, 1, 1, 1]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "e62ed4f7bee2f48d6f2b2dff8944ca44820059dcd177ca74b5ec912db556d204",
+      "completion_tokens": 28,
+      "id": "HumanEval/18",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 31, in <module>\n    check(how_many_times)\n    ~~~~~^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 26, in check\n    assert candidate('xyxyxyx', 'x') == 4\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "6e0239ab04953847f0493853b7db8bc59a1ac69e63b9710848ccc100b0e26a41",
+      "completion_tokens": 16,
+      "id": "HumanEval/19",
+      "returncode": 1,
+      "seconds": 0.032,
+      "status": "failed",
+      "stderr_tail": ", line 11, in sort_numbers\n    return ' '.join(sorted(numbers.split(), key=lambda x: int(x)))\n                    ~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 11, in <lambda>\n    return ' '.join(sorted(numbers.split(), key=lambda x: int(x)))\n                                                          ~~~^^^\nValueError: invalid literal for int() with base 10: 'three'\n"
+    },
+    {
+      "completion_sha256": "43876b300e3297b5804cde4e54c3f28909baed7fc8d0d34c2506b111d1eac245",
+      "completion_tokens": 12,
+      "id": "HumanEval/20",
+      "returncode": 1,
+      "seconds": 0.035,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 34, in <module>\n    check(find_closest_elements)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 26, in check\n    assert candidate([1.0, 2.0, 3.9, 4.0, 5.0, 2.2]) == (3.9, 4.0)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "4c6053b84f7397f52f788f4c0161ce9c98ce90b0416affaa937fe13d0724810c",
+      "completion_tokens": 14,
+      "id": "HumanEval/21",
+      "returncode": 1,
+      "seconds": 0.037,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 30, in <module>\n    check(rescale_to_unit)\n    ~~~~~^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 23, in check\n    assert candidate([2.0, 49.9]) == [0.0, 1.0]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "2c380c9fe9e5f50372ae07e2004f91a135171551c995e50cf698243b1cfdfb13",
+      "completion_tokens": 16,
+      "id": "HumanEval/22",
+      "returncode": 0,
+      "seconds": 0.022,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "c8429aecf6961a5ba0577a41d1dc0f1d830c3adc1185ced144f8a7175363e6a5",
+      "completion_tokens": 6,
+      "id": "HumanEval/23",
+      "returncode": 0,
+      "seconds": 0.02,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "24acb9ca9a880a4d7d296046eb2f214214c19d9dfd783f5e3a3593a48dc7f2bf",
+      "completion_tokens": 8,
+      "id": "HumanEval/24",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 27, in <module>\n    check(largest_divisor)\n    ~~~~~^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 21, in check\n    assert candidate(7) == 1\n           ^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "3acaec40e2d711622872295a8fa22afa248dd3d420a8087da493e578662aef03",
+      "completion_tokens": 84,
+      "id": "HumanEval/25",
+      "returncode": 0,
+      "seconds": 0.024,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "22d24a6c2e69dffaebc8e9e8c2d9892668b40c037f91776ccb75de6b4869f660",
+      "completion_tokens": 7,
+      "id": "HumanEval/26",
+      "returncode": 1,
+      "seconds": 0.038,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 28, in <module>\n    check(remove_duplicates)\n    ~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 25, in check\n    assert candidate([1, 2, 3, 2, 4, 3, 5]) == [1, 4, 5]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "2e222ac67e1e41937d29e46f4d764e332fcfb458c7afd49c45be8c3e77cc59bf",
+      "completion_tokens": 24,
+      "id": "HumanEval/27",
+      "returncode": 1,
+      "seconds": 0.031,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 25, in <module>\n    check(flip_case)\n    ~~~~~^^^^^^^^^^^\n  File \"/work/program.py\", line 21, in check\n    assert candidate('Hello!') == 'hELLO!'\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "a7cb12118ecb97da6b544cf9917548c1718ef90f4e0bb71cf8ec08dc64966933",
+      "completion_tokens": 6,
+      "id": "HumanEval/28",
+      "returncode": 0,
+      "seconds": 0.023,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "4b315e4e4a2479b3b036a1121aa6a4ac2a629646291aa6e48c815a5bc23c58c5",
+      "completion_tokens": 15,
+      "id": "HumanEval/29",
+      "returncode": 0,
+      "seconds": 0.023,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "1855568699fdb11730eabf2e84a35d876e36dd7309f89027c1af77389a46ab61",
+      "completion_tokens": 18,
+      "id": "HumanEval/30",
+      "returncode": 0,
+      "seconds": 0.022,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "1b3b9a248b1ebe6f6fe1f26c9855086160a60d72f2830f361798c9077cbaef9f",
+      "completion_tokens": 94,
+      "id": "HumanEval/31",
+      "returncode": 0,
+      "seconds": 0.019,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "9cba9d87d1abd17e9cb1fe54bba5572a8ef693cfffd58ab28218309e48fe56b1",
+      "completion_tokens": 89,
+      "id": "HumanEval/32",
+      "returncode": 1,
+      "seconds": 0.039,
+      "status": "failed",
+      "stderr_tail": "ne 58, in <module>\n    check(find_zero)\n    ~~~~~^^^^^^^^^^^\n  File \"/work/program.py\", line 54, in check\n    assert math.fabs(poly(coeffs, solution)) < 1e-4\n                     ~~~~^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 9, in poly\n    return sum([coeff * math.pow(x, i) for i, coeff in enumerate(xs)])\n                        ~~~~~~~~^^^^^^\nTypeError: must be real number, not NoneType\n"
+    },
+    {
+      "completion_sha256": "b7a0a1947dd4327d301de6af3d69b881b2dbc2365ed77c46d2b8d2f11a208503",
+      "completion_tokens": 91,
+      "id": "HumanEval/33",
+      "returncode": 1,
+      "seconds": 0.032,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 44, in <module>\n    check(sort_third)\n    ~~~~~^^^^^^^^^^^^\n  File \"/work/program.py\", line 37, in check\n    assert tuple(candidate([5, 6, 3, 4, 8, 9, 2])) == tuple([2, 6, 3, 4, 8, 9, 5])\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "fef144e9c781e3a8fd584f52e3870854fb7f54583c1d7d64886db36b1a35b685",
+      "completion_tokens": 10,
+      "id": "HumanEval/34",
+      "returncode": 0,
+      "seconds": 0.018,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "69a00c8ee5eb0ab7d3ee2e2bc3fbdb8ed69c370731c359fa88ace0f281e4e7ee",
+      "completion_tokens": 57,
+      "id": "HumanEval/35",
+      "returncode": 0,
+      "seconds": 0.019,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "c66b3a5b67f09c1bf316591ace4818f88997dc0bd8685edd9bfd84670fd63eb4",
+      "completion_tokens": 45,
+      "id": "HumanEval/36",
+      "returncode": 1,
+      "seconds": 0.032,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 33, in <module>\n    check(fizz_buzz)\n    ~~~~~^^^^^^^^^^^\n  File \"/work/program.py\", line 22, in check\n    assert candidate(50) == 0\n           ^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "243fd079e758f442e4f37cae4e7b03f6ef1084f28a7f9df0103172f3b3de160b",
+      "completion_tokens": 19,
+      "id": "HumanEval/37",
+      "returncode": 1,
+      "seconds": 0.037,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 28, in <module>\n    check(sort_even)\n    ~~~~~^^^^^^^^^^^\n  File \"/work/program.py\", line 22, in check\n    assert tuple(candidate([1, 2, 3])) == tuple([1, 2, 3])\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "c3546bddb492e2965227b79294997cdadc0a0cbc75c650cd6f8a0720323a2d4b",
+      "completion_tokens": 102,
+      "id": "HumanEval/38",
+      "returncode": 1,
+      "seconds": 0.035,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 43, in <module>\n    check(decode_cyclic)\n    ~~~~~^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 39, in check\n    assert candidate(encoded_str) == str\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "666d09b913c654f6d42b4fe75ef022e07e2b00e341c5db3f8f7a57449cbc2797",
+      "completion_tokens": 117,
+      "id": "HumanEval/39",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 55, in <module>\n    check(prime_fib)\n    ~~~~~^^^^^^^^^^^\n  File \"/work/program.py\", line 47, in check\n    assert candidate(6) == 233\n           ~~~~~~~~~^^^\n  File \"/work/program.py\", line 30, in prime_fib\n    if is_prime(i):\n       ^^^^^^^^\nNameError: name 'is_prime' is not defined\n"
+    },
+    {
+      "completion_sha256": "f4dd9a302d125cf834162e36c71e932279ef46eb71f2be1fb61b9b6e7f99c11c",
+      "completion_tokens": 74,
+      "id": "HumanEval/40",
+      "returncode": 0,
+      "seconds": 0.018,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "afeb8c5dd6098b61e859f1e926568cdf90ab2eb06316e1213bac527632186668",
+      "completion_tokens": 15,
+      "id": "HumanEval/41",
+      "returncode": 1,
+      "seconds": 0.032,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 33, in <module>\n    check(car_race_collision)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 25, in check\n    assert candidate(2) == 4\n           ^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "13810295ab2fea186805323a00f8fc8a36d31782ba5f5fd457ba4118fd6451f9",
+      "completion_tokens": 12,
+      "id": "HumanEval/42",
+      "returncode": 0,
+      "seconds": 0.018,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "6e1e600df2457e90bdba5a62880347154957350a141299a6d8eb7a73068493c8",
+      "completion_tokens": 32,
+      "id": "HumanEval/43",
+      "returncode": 0,
+      "seconds": 0.02,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "eeb3d0d072f23709099f2bd233e2fb88be4c917384eaeeda38210cb0be527084",
+      "completion_tokens": 105,
+      "id": "HumanEval/44",
+      "returncode": 0,
+      "seconds": 0.018,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "4f4dcd61f07a6e1c5ccd67a9aa6ee467790861a1253b3700dfd102673c6e6edc",
+      "completion_tokens": 12,
+      "id": "HumanEval/45",
+      "returncode": 0,
+      "seconds": 0.02,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "e3428cebab00351c595b6273cd2363a6a6fae850c37b2a40a4ca3e11104d3737",
+      "completion_tokens": 81,
+      "id": "HumanEval/46",
+      "returncode": 0,
+      "seconds": 0.018,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "98d1f177859650b6ab0e96bc4dce119cd5c77074897533e88743c190926d4b5d",
+      "completion_tokens": 57,
+      "id": "HumanEval/47",
+      "returncode": 0,
+      "seconds": 0.02,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "e96115aa636367f2ffaa880cc61afa29e79c627011da5ef480b80b6a9b472d55",
+      "completion_tokens": 9,
+      "id": "HumanEval/48",
+      "returncode": 0,
+      "seconds": 0.018,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "3d012f15e18a70b4a2292f753870c74fb58b8a07acb004805fcd9d03d52404c6",
+      "completion_tokens": 67,
+      "id": "HumanEval/49",
+      "returncode": 1,
+      "seconds": 0.032,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 43, in <module>\n    check(modp)\n    ~~~~~^^^^^^\n  File \"/work/program.py\", line 33, in check\n    assert candidate(3, 5) == 3\n           ^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "e5ff2cf0a148cd35f6442b3df6b60544e9727aed0e7b1a6ce29b25dcdd955c9c",
+      "completion_tokens": 34,
+      "id": "HumanEval/50",
+      "returncode": 0,
+      "seconds": 0.022,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "65a147a5d573fe79a82f93cd28e98426bb2a5b05af7adee1450cbda896a7b668",
+      "completion_tokens": 23,
+      "id": "HumanEval/51",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 38, in <module>\n    check(remove_vowels)\n    ~~~~~^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 32, in check\n    assert candidate('acBAA') == 'cB'\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "7ce14e81beca7d79a7036f3dfb796d0cb1f58f56a2a216690fe3800f27bc998a",
+      "completion_tokens": 19,
+      "id": "HumanEval/52",
+      "returncode": 0,
+      "seconds": 0.019,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "3377f973d5fa74694c54205ae3de125f9d886cdf69e9d7b098d29f95227b8783",
+      "completion_tokens": 7,
+      "id": "HumanEval/53",
+      "returncode": 0,
+      "seconds": 0.021,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "338ad030564645c1ead148c5982e93a81d8a3b6a1b29857563125348523764d5",
+      "completion_tokens": 12,
+      "id": "HumanEval/54",
+      "returncode": 0,
+      "seconds": 0.019,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "8789e893312baca1586240e3d056e9b87900a9d16ced15dee618a541404e7b73",
+      "completion_tokens": 43,
+      "id": "HumanEval/55",
+      "returncode": 0,
+      "seconds": 0.018,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "acf6eae7e3ed267347fee727735ab273ddf20b2406542d30cb56e7e236d63426",
+      "completion_tokens": 71,
+      "id": "HumanEval/56",
+      "returncode": 0,
+      "seconds": 0.02,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "855b99a791a660454ff1362a28853a635b504e92f8596f28f46cbd6a94b34572",
+      "completion_tokens": 80,
+      "id": "HumanEval/57",
+      "returncode": 1,
+      "seconds": 0.032,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 42, in <module>\n    check(monotonic)\n    ~~~~~^^^^^^^^^^^\n  File \"/work/program.py\", line 33, in check\n    assert candidate([1, 20, 4, 10]) == False\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "f26d0c35fbe7b0aac549b54b7ba8c4657dd49e0c258e5b42fd8d5a4cfda16b96",
+      "completion_tokens": 16,
+      "id": "HumanEval/58",
+      "returncode": 0,
+      "seconds": 0.022,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "0fa8b99ec63919ecb35e7162d566fd3d275e0ab4690c0d73c354e3510887faa4",
+      "completion_tokens": 86,
+      "id": "HumanEval/59",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 36, in <module>\n    check(largest_prime_factor)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 28, in check\n    assert candidate(15) == 5\n           ^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "c6b16c5f37cc7b4fa447875cd12b203cb9e52d6b05b33e80ea1f87790c3d261a",
+      "completion_tokens": 27,
+      "id": "HumanEval/60",
+      "returncode": 0,
+      "seconds": 0.019,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "83af92b42e011eab03ada68dece48fad9b2374dbc81fe3cbfdd81a9f89b9e34b",
+      "completion_tokens": 71,
+      "id": "HumanEval/61",
+      "returncode": 0,
+      "seconds": 0.018,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "26bea27823013b893bbcc181cc8b63d6102141aa93bd661a946f77fd9651d12a",
+      "completion_tokens": 18,
+      "id": "HumanEval/62",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 30, in <module>\n    check(derivative)\n    ~~~~~^^^^^^^^^^^^\n  File \"/work/program.py\", line 22, in check\n    assert candidate([3, 1, 2, 4, 5]) == [1, 4, 12, 20]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "cb3408a04add72781c8ab373bd24104ae50628333bc9681f4fb1d535564aeda7",
+      "completion_tokens": 62,
+      "id": "HumanEval/63",
+      "returncode": 0,
+      "seconds": 0.018,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "98b4bddb0e859e44c3821fc6cd01697c69ab758a74745212d1987d6929901d23",
+      "completion_tokens": 36,
+      "id": "HumanEval/64",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 42, in <module>\n    check(vowels_count)\n    ~~~~~^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 30, in check\n    assert candidate(\"Alone\") == 3, \"Test 2\"\n           ^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: Test 2\n"
+    },
+    {
+      "completion_sha256": "0a55cdc8618f673303bc06f987621cb95fceb39f01298854353c44277750dcb0",
+      "completion_tokens": 36,
+      "id": "HumanEval/65",
+      "returncode": 1,
+      "seconds": 0.03,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 31, in <module>\n    check(circular_shift)\n    ~~~~~^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 21, in check\n    assert candidate(100, 2) == \"001\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "df59f148f9d83fb7ae4496468777c8af5a8e9c8f9ef8aa82998855be5b2f1b6a",
+      "completion_tokens": 15,
+      "id": "HumanEval/66",
+      "returncode": 0,
+      "seconds": 0.018,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "b58b36361159514af68dc2e5dd05ee89dab282ceb5ea830638146f74ad83dd55",
+      "completion_tokens": 512,
+      "id": "HumanEval/67",
+      "returncode": 1,
+      "seconds": 0.032,
+      "status": "failed",
+      "stderr_tail": "                                                                                                                                                                                                                                                                                                                                               ^\nSyntaxError: unterminated string literal (detected at line 16)\n"
+    },
+    {
+      "completion_sha256": "7c0490678aeb47839be70df72934d004a6f93849bc285d623e06b81d671004e2",
+      "completion_tokens": 21,
+      "id": "HumanEval/68",
+      "returncode": 1,
+      "seconds": 0.036,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 60, in <module>\n    check(pluck)\n    ~~~~~^^^^^^^\n  File \"/work/program.py\", line 47, in check\n    assert candidate([1,2,3]) == [2, 1], \"Error\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: Error\n"
+    },
+    {
+      "completion_sha256": "94318df795ac545617a16508da575f51b75caa3aa0ea687e21325fb3759f29f4",
+      "completion_tokens": 70,
+      "id": "HumanEval/69",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 60, in <module>\n    check(search)\n    ~~~~~^^^^^^^^\n  File \"/work/program.py\", line 32, in check\n    assert candidate([3, 3]) == -1\n           ^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "b6c98bde5c17bec1732100047f87b476b506cad9c94e147e585b0a11aeef8939",
+      "completion_tokens": 51,
+      "id": "HumanEval/70",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 42, in <module>\n    check(strange_sort_list)\n    ~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 27, in check\n    assert candidate([1, 2, 3, 4]) == [1, 4, 2, 3]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "1d90e12ccf980f0c51de743327daff146f12cc8c363827b230a1683343608140",
+      "completion_tokens": 53,
+      "id": "HumanEval/71",
+      "returncode": 1,
+      "seconds": 0.031,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 37, in <module>\n    check(triangle_area)\n    ~~~~~^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 23, in check\n    assert candidate(3, 4, 5) == 6.00, \"This prints if this assert fails 1 (good for debugging!)\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: This prints if this assert fails 1 (good for debugging!)\n"
+    },
+    {
+      "completion_sha256": "831e1598261844443b91516f5a6c8f9cbc0294abbc7bd3c824269b4929750891",
+      "completion_tokens": 21,
+      "id": "HumanEval/72",
+      "returncode": 1,
+      "seconds": 0.035,
+      "status": "failed",
+      "stderr_tail": "st recent call last):\n  File \"/work/program.py\", line 39, in <module>\n    check(will_it_fly)\n    ~~~~~^^^^^^^^^^^^^\n  File \"/work/program.py\", line 27, in check\n    assert candidate([3, 2, 3], 9) is True\n           ~~~~~~~~~^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 21, in will_it_fly\n    return is_balanced(q) and sum(q) <= w\n           ^^^^^^^^^^^\nNameError: name 'is_balanced' is not defined\n"
+    },
+    {
+      "completion_sha256": "11b294ce746c30c1d246a2de01139970897d47dbdbd9c5085777292842b6942a",
+      "completion_tokens": 512,
+      "id": "HumanEval/73",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 105, in <module>\n    check(smallest_change)\n    ~~~~~^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 92, in check\n    assert candidate([1,2,3,5,4,7,9,6]) == 4\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "4eb2284840a127f17befd3ee67a404995801fcc3b373df1f0a6db28e583e562a",
+      "completion_tokens": 25,
+      "id": "HumanEval/74",
+      "returncode": 1,
+      "seconds": 0.037,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 40, in <module>\n    check(total_match)\n    ~~~~~^^^^^^^^^^^^^\n  File \"/work/program.py\", line 29, in check\n    assert candidate(['hi', 'admin'], ['hI', 'hi', 'hi']) == ['hI', 'hi', 'hi']\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "4c4d55df6c626481e05603886edc84f520e992f1deea425760316acef8736504",
+      "completion_tokens": 11,
+      "id": "HumanEval/75",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 29, in <module>\n    check(is_multiply_prime)\n    ~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 17, in check\n    assert candidate(30) == True\n           ^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "e93d71f66a786d66de2d2ecf4734a1194d210630dc43ca988c0624164c10747f",
+      "completion_tokens": 53,
+      "id": "HumanEval/76",
+      "returncode": 0,
+      "seconds": 0.018,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "0088ea74f884cf64ad22010012f73af04b239d0cba4c1d839722bcd231f58f32",
+      "completion_tokens": 512,
+      "id": "HumanEval/77",
+      "returncode": 1,
+      "seconds": 0.031,
+      "status": "failed",
+      "stderr_tail": "  File \"/work/program.py\", line 101\n    if a == 42\n              ^\nSyntaxError: expected ':'\n"
+    },
+    {
+      "completion_sha256": "544238d60f48d2d16d2f38725758b610a5e73fb27cee09d8f86f4c814a4e9cbc",
+      "completion_tokens": 12,
+      "id": "HumanEval/78",
+      "returncode": 1,
+      "seconds": 0.035,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 41, in <module>\n    check(hex_key)\n    ~~~~~^^^^^^^^^\n  File \"/work/program.py\", line 28, in check\n    assert candidate(\"AB\") == 1, \"First test error: \" + str(candidate(\"AB\"))\n           ^^^^^^^^^^^^^^^^^^^^\nAssertionError: First test error: 0\n"
+    },
+    {
+      "completion_sha256": "9dc8669e37ba24b3479e681691f1216f4d2ba3674b404c274a18cf7e34c8b618",
+      "completion_tokens": 41,
+      "id": "HumanEval/79",
+      "returncode": 1,
+      "seconds": 0.032,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 34, in <module>\n    check(decimal_to_binary)\n    ~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 24, in check\n    assert candidate(0) == \"db0db\"\n           ^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "74dfe5905e615f52c2508b579adf3e23c7d9ba9c7447d4f8fcf8244359af40a1",
+      "completion_tokens": 67,
+      "id": "HumanEval/80",
+      "returncode": 1,
+      "seconds": 0.036,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 37, in <module>\n    check(is_happy)\n    ~~~~~^^^^^^^^^^\n  File \"/work/program.py\", line 30, in check\n    assert candidate(\"aabb\") == False , \"aabb\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: aabb\n"
+    },
+    {
+      "completion_sha256": "3708eb202a476175591acbdbeaa228c83de01ffb0bfb518731d69a53cf0fb94d",
+      "completion_tokens": 13,
+      "id": "HumanEval/81",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 46, in <module>\n    check(numerical_letter_grade)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 34, in check\n    assert candidate([4.0, 3, 1.7, 2, 3.5]) == ['A+', 'B', 'C-', 'C', 'A-']\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "799790cf5328783d770a5923d3390c528ce813164ee25bdd4e529f8d5411477b",
+      "completion_tokens": 512,
+      "id": "HumanEval/82",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "  File \"/work/program.py\", line 85\n    elif len\n            ^\nSyntaxError: expected ':'\n"
+    },
+    {
+      "completion_sha256": "deeb111297d97e1a9bbfcec600637f81aa11b1c4afe0a7b20f5d5d36be1b8154",
+      "completion_tokens": 53,
+      "id": "HumanEval/83",
+      "returncode": 1,
+      "seconds": 0.031,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 30, in <module>\n    check(starts_one_ends)\n    ~~~~~^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 20, in check\n    assert candidate(2) == 18\n           ^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "6de95f512220795936a251ba16bc44f30409a2b6d4ae30912e877e5c777296bd",
+      "completion_tokens": 11,
+      "id": "HumanEval/84",
+      "returncode": 1,
+      "seconds": 0.035,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 35, in <module>\n    check(solve)\n    ~~~~~^^^^^^^\n  File \"/work/program.py\", line 24, in check\n    assert candidate(1000) == \"1\", \"Error\"\n           ^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: Error\n"
+    },
+    {
+      "completion_sha256": "bfb4c60866500ef6761b5f45766062f13a960487a6461e90b2d7227369547824",
+      "completion_tokens": 36,
+      "id": "HumanEval/85",
+      "returncode": 0,
+      "seconds": 0.018,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "d037ad6ae713d2a9fcb93e631a530ea8b03dfa7871b7abd6b2ecfb96424c7564",
+      "completion_tokens": 11,
+      "id": "HumanEval/86",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 34, in <module>\n    check(anti_shuffle)\n    ~~~~~^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 23, in check\n    assert candidate('hello') == 'ehllo'\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "afe0466a1b8b46e2d5b98648e290c2f6ef13d86a59c3d6e966030453ba5272db",
+      "completion_tokens": 28,
+      "id": "HumanEval/87",
+      "returncode": 1,
+      "seconds": 0.031,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 58, in <module>\n    check(get_row)\n    ~~~~~^^^^^^^^^\n  File \"/work/program.py\", line 27, in check\n    assert candidate([\n           ^^^^^^^^^^^\n    ...<3 lines>...\n    ], 1) == [(0, 0), (1, 4), (1, 0), (2, 5), (2, 0)]\n    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "d066b835df19c637dc5ffec83010a4c124ee509c49650cf1dc5ffdab8ff88852",
+      "completion_tokens": 56,
+      "id": "HumanEval/88",
+      "returncode": 1,
+      "seconds": 0.036,
+      "status": "failed",
+      "stderr_tail": " last):\n  File \"/work/program.py\", line 45, in <module>\n    check(sort_array)\n    ~~~~~^^^^^^^^^^^^\n  File \"/work/program.py\", line 34, in check\n    assert candidate([2, 4, 3, 0, 1, 5]) == [0, 1, 2, 3, 4, 5], \"Error\"\n           ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 21, in sort_array\n    if sum(array[0]) % 2 == 0:\n       ~~~^^^^^^^^^^\nTypeError: 'int' object is not iterable\n"
+    },
+    {
+      "completion_sha256": "4ada234d9220fb7e1c711244cd1fde6ee5b6b4d4191c0e544f2649bb81526a31",
+      "completion_tokens": 70,
+      "id": "HumanEval/89",
+      "returncode": 1,
+      "seconds": 0.035,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 43, in <module>\n    check(encrypt)\n    ~~~~~^^^^^^^^^\n  File \"/work/program.py\", line 29, in check\n    assert candidate('hi') == 'lm', \"This prints if this assert fails 1 (good for debugging!)\"\n           ^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: This prints if this assert fails 1 (good for debugging!)\n"
+    },
+    {
+      "completion_sha256": "833d401c4819c2e0f5c594fae502bd8383b90585a71c6a870f878caebd91cd87",
+      "completion_tokens": 46,
+      "id": "HumanEval/90",
+      "returncode": 1,
+      "seconds": 0.032,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 38, in <module>\n    check(next_smallest)\n    ~~~~~^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 25, in check\n    assert candidate([1, 2, 3, 4, 5]) == 2\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "7be24cc6f2d9eb375699bf4eb0f5bee55b702a52fc1b18abd94b6f4842c29a0f",
+      "completion_tokens": 31,
+      "id": "HumanEval/91",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 36, in <module>\n    check(is_bored)\n    ~~~~~^^^^^^^^^^\n  File \"/work/program.py\", line 25, in check\n    assert candidate(\"Is the sky blue?\") == 0, \"Test 2\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: Test 2\n"
+    },
+    {
+      "completion_sha256": "6c5266fce9f82ae786f26f88d9fc5dfa382f9934eed9b6186a13d32bae154cf7",
+      "completion_tokens": 53,
+      "id": "HumanEval/92",
+      "returncode": 0,
+      "seconds": 0.018,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "95af9e8a4489c5e6f2bebf4636b6f9aae9ff524e396a2c1da3e5fd81ede2c28f",
+      "completion_tokens": 10,
+      "id": "HumanEval/93",
+      "returncode": 1,
+      "seconds": 0.032,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 33, in <module>\n    check(encode)\n    ~~~~~^^^^^^^^\n  File \"/work/program.py\", line 23, in check\n    assert candidate('TEST') == 'tgst', \"This prints if this assert fails 1 (good for debugging!)\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: This prints if this assert fails 1 (good for debugging!)\n"
+    },
+    {
+      "completion_sha256": "a41b70fdc960cfd48ee56b5f87724e96dafa35d67316b2208474e6113589fe68",
+      "completion_tokens": 512,
+      "id": "HumanEval/94",
+      "returncode": 1,
+      "seconds": 0.031,
+      "status": "failed",
+      "stderr_tail": "  File \"/work/program.py\", line 42\n    lst = [i for i in lst if i % 1\n          ^\nSyntaxError: '[' was never closed\n"
+    },
+    {
+      "completion_sha256": "eb3b415722de204dfc142a60842e63fcec0463d5d4e8e605695cf63993c5a61e",
+      "completion_tokens": 36,
+      "id": "HumanEval/95",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "ine 38, in <module>\n    check(check_dict_case)\n    ~~~~~^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 26, in check\n    assert candidate({\"p\":\"pineapple\", \"A\":\"banana\", \"B\":\"banana\"}) == False, \"Second test error: \" + str(candidate({\"p\":\"pineapple\", \"A\":\"banana\", \"B\":\"banana\"}))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: Second test error: True\n"
+    },
+    {
+      "completion_sha256": "95af9e8a4489c5e6f2bebf4636b6f9aae9ff524e396a2c1da3e5fd81ede2c28f",
+      "completion_tokens": 10,
+      "id": "HumanEval/96",
+      "returncode": 1,
+      "seconds": 0.035,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 32, in <module>\n    check(count_up_to)\n    ~~~~~^^^^^^^^^^^^^\n  File \"/work/program.py\", line 19, in check\n    assert candidate(5) == [2,3]\n           ^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "ac681a2472b251c5c9c9a369696d7199fb310ea9b514323992aa3f8a1237df34",
+      "completion_tokens": 20,
+      "id": "HumanEval/97",
+      "returncode": 0,
+      "seconds": 0.021,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "d4ea7e36e7b247f16291b2777cc4c31bb797a3a5386b9b9bb43a27a391718c02",
+      "completion_tokens": 42,
+      "id": "HumanEval/98",
+      "returncode": 1,
+      "seconds": 0.031,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 34, in <module>\n    check(count_upper)\n    ~~~~~^^^^^^^^^^^^^\n  File \"/work/program.py\", line 21, in check\n    assert candidate('aBCdEf')  == 1\n           ^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "cfe45881942052bc61e6d8d0f99700732020fd564710fc7865c892debc90823d",
+      "completion_tokens": 106,
+      "id": "HumanEval/99",
+      "returncode": 1,
+      "seconds": 0.037,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 46, in <module>\n    check(closest_integer)\n    ~~~~~^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 37, in check\n    assert candidate(\"14.5\") == 15, \"Test 2\"\n           ^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: Test 2\n"
+    },
+    {
+      "completion_sha256": "51a9e283ed25e8209d09b370b641f36887856fe11ee7fd68ff5f078028e8e250",
+      "completion_tokens": 49,
+      "id": "HumanEval/100",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 37, in <module>\n    check(make_a_pile)\n    ~~~~~^^^^^^^^^^^^^\n  File \"/work/program.py\", line 26, in check\n    assert candidate(3) == [3, 5, 7], \"Test 3\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: Test 3\n"
+    },
+    {
+      "completion_sha256": "d28db5a8b51f7b0011bae244b87d4020530eec0f285e786518d8570490ed1829",
+      "completion_tokens": 12,
+      "id": "HumanEval/101",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 31, in <module>\n    check(words_string)\n    ~~~~~^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 19, in check\n    assert candidate(\"Hi, my name is John\") == [\"Hi\", \"my\", \"name\", \"is\", \"John\"]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "76d00869bc9e03deae2354dfae23e51dc43650d85f261bcfdd366cb3a1231318",
+      "completion_tokens": 512,
+      "id": "HumanEval/102",
+      "returncode": 1,
+      "seconds": 0.036,
+      "status": "failed",
+      "stderr_tail": "  File \"/work/program.py\", line 111\n    if y\n        ^\nSyntaxError: expected ':'\n"
+    },
+    {
+      "completion_sha256": "d137cd45bb9e6c228cbc11af9d45c7168e67b28e3d3c249c6fe8e4c93555f393",
+      "completion_tokens": 32,
+      "id": "HumanEval/103",
+      "returncode": 0,
+      "seconds": 0.019,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "834d09719b3648ca1bb16c3c4fc53495525ded8969b6b8faec428032920e61c1",
+      "completion_tokens": 27,
+      "id": "HumanEval/104",
+      "returncode": 1,
+      "seconds": 0.038,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 32, in <module>\n    check(unique_digits)\n    ~~~~~^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 22, in check\n    assert candidate([15, 33, 1422, 1]) == [1, 15, 33]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "c7e0a97cca9b7802b4763d01eee6989423d023d0fb37c93ffea735cefa95039f",
+      "completion_tokens": 512,
+      "id": "HumanEval/105",
+      "returncode": 1,
+      "seconds": 0.032,
+      "status": "failed",
+      "stderr_tail": "  File \"/work/program.py\", line 62\n    arr = [i for i in arr if i\n          ^\nSyntaxError: '[' was never closed\n"
+    },
+    {
+      "completion_sha256": "ad17bb2748a85706c514f8221b16cef9184b80d9c683c7f97239a972cef02455",
+      "completion_tokens": 54,
+      "id": "HumanEval/106",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 28, in <module>\n    check(f)\n    ~~~~~^^^\n  File \"/work/program.py\", line 22, in check\n    assert candidate(5) == [1, 2, 6, 24, 15]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "45714d79b6d7a38ecaadade8c2b58f4c0e12c6a8ad3ff65ab1f17e1f1512334a",
+      "completion_tokens": 78,
+      "id": "HumanEval/107",
+      "returncode": 1,
+      "seconds": 0.035,
+      "status": "failed",
+      "stderr_tail": "back (most recent call last):\n  File \"/work/program.py\", line 53, in <module>\n    check(even_odd_palindrome)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 40, in check\n    assert candidate(123) == (8, 13)\n           ~~~~~~~~~^^^^^\n  File \"/work/program.py\", line 29, in even_odd_palindrome\n    if is_palindrome(i):\n       ^^^^^^^^^^^^^\nNameError: name 'is_palindrome' is not defined\n"
+    },
+    {
+      "completion_sha256": "7a785bd53b15968da31342d75ebbe5a2980f68317769a45d5611a40e80676a64",
+      "completion_tokens": 81,
+      "id": "HumanEval/108",
+      "returncode": 1,
+      "seconds": 0.031,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 44, in <module>\n    check(count_nums)\n    ~~~~~^^^^^^^^^^^^\n  File \"/work/program.py\", line 31, in check\n    assert candidate([-1, -2, 0]) == 0\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "8237cc11f32fe02fc5e6eb95e4b0ebca2a09c19147db7253f9d6f4fafdc702ab",
+      "completion_tokens": 63,
+      "id": "HumanEval/109",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 51, in <module>\n    check(move_one_ball)\n    ~~~~~^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 43, in check\n    assert candidate([3, 4, 5, 1, 2])==True, \"This prints if this assert fails 1 (good for debugging!)\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: This prints if this assert fails 1 (good for debugging!)\n"
+    },
+    {
+      "completion_sha256": "196b3d83633bf73882abf35fe9754fc5f7e1f282a7f95f1ec14a14324309ce09",
+      "completion_tokens": 77,
+      "id": "HumanEval/110",
+      "returncode": 1,
+      "seconds": 0.032,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 40, in <module>\n    check(exchange)\n    ~~~~~^^^^^^^^^^\n  File \"/work/program.py\", line 28, in check\n    assert candidate([1, 2, 3, 4], [1, 2, 3, 4]) == \"YES\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "2788d2aea9cafe92ae7f7e74ceb589fcc2d244d9c1085eb29e46874f379571f3",
+      "completion_tokens": 134,
+      "id": "HumanEval/111",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "most recent call last):\n  File \"/work/program.py\", line 50, in <module>\n    check(histogram)\n    ~~~~~^^^^^^^^^^^\n  File \"/work/program.py\", line 37, in check\n    assert candidate('a b c a b') == {'a': 2, 'b': 2}, \"This prints if this assert fails 2 (good for debugging!)\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: This prints if this assert fails 2 (good for debugging!)\n"
+    },
+    {
+      "completion_sha256": "f8f14df16cc57d6987a5e2c83d99bc4e534060c27b51d456e303f6bc16e6befd",
+      "completion_tokens": 75,
+      "id": "HumanEval/112",
+      "returncode": 0,
+      "seconds": 0.018,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "ec2d63e1fbb40d37e19b47cd8d32e066581e63dfbf5bd7b0959ba39bbccd681a",
+      "completion_tokens": 57,
+      "id": "HumanEval/113",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 34, in <module>\n    check(odd_count)\n    ~~~~~^^^^^^^^^^^\n  File \"/work/program.py\", line 21, in check\n    assert candidate(['1234567']) == [\"the number of odd elements 4n the str4ng 4 of the 4nput.\"], \"Test 1\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: Test 1\n"
+    },
+    {
+      "completion_sha256": "26007721f3e3de03b7b8a3ed04c41ef071ecd646c97833df9985ee91729b1231",
+      "completion_tokens": 59,
+      "id": "HumanEval/114",
+      "returncode": 1,
+      "seconds": 0.038,
+      "status": "failed",
+      "stderr_tail": "back (most recent call last):\n  File \"/work/program.py\", line 40, in <module>\n    check(minSubArraySum)\n    ~~~~~^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 24, in check\n    assert candidate([2, 3, 4, 1, 2, 4]) == 1, \"This prints if this assert fails 1 (good for debugging!)\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: This prints if this assert fails 1 (good for debugging!)\n"
+    },
+    {
+      "completion_sha256": "ea3fe0c87aa89578188de3de13261c3991f646dcbc3ee033816b22d205a18d77",
+      "completion_tokens": 512,
+      "id": "HumanEval/115",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "  File \"/work/program.py\", line 72\n    \"\"\"\n    ^\nSyntaxError: unterminated triple-quoted string literal (detected at line 108)\n"
+    },
+    {
+      "completion_sha256": "c9719ea562e001acc2c953e059495cec6a9751971abb7fef9aa2b7dbed2f83d8",
+      "completion_tokens": 19,
+      "id": "HumanEval/116",
+      "returncode": 0,
+      "seconds": 0.018,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "95af9e8a4489c5e6f2bebf4636b6f9aae9ff524e396a2c1da3e5fd81ede2c28f",
+      "completion_tokens": 10,
+      "id": "HumanEval/117",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "most recent call last):\n  File \"/work/program.py\", line 35, in <module>\n    check(select_words)\n    ~~~~~^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 22, in check\n    assert candidate(\"Mary had a little lamb\", 4) == [\"little\"], \"First test error: \" + str(candidate(\"Mary had a little lamb\", 4))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: First test error: None\n"
+    },
+    {
+      "completion_sha256": "80d479a9c2ac3807b684fb6118c963b4bd42204d4a83b99278f8ffcf90d7af92",
+      "completion_tokens": 78,
+      "id": "HumanEval/118",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 51, in <module>\n    check(get_closest_vowel)\n    ~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 32, in check\n    assert candidate(\"yogurt\") == \"u\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "16ef2eef07d0472eba4e8b2508a61360d24be3b8a099ad0eaa98fcef8d0a0a53",
+      "completion_tokens": 512,
+      "id": "HumanEval/119",
+      "returncode": 1,
+      "seconds": 0.037,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 125, in <module>\n    check(match_parens)\n    ~~~~~^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 107, in check\n    assert candidate(['()(', ')']) == 'Yes'\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "1c9034741196fb202fa8af579090e16179d6b4cc46044528e11d58e3327093be",
+      "completion_tokens": 32,
+      "id": "HumanEval/120",
+      "returncode": 1,
+      "seconds": 0.035,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 54, in <module>\n    check(maximum)\n    ~~~~~^^^^^^^^^\n  File \"/work/program.py\", line 39, in check\n    assert candidate([4, -4, 4], 2) == [4, 4]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "adc91fa97ca80c2d93c88945f571b7029fa7302caff922533a8941789d6661b0",
+      "completion_tokens": 33,
+      "id": "HumanEval/121",
+      "returncode": 0,
+      "seconds": 0.019,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "e6bba2c832d028dae18ac5607818b4a443b1dfbcbf348e46a39c812694be8e34",
+      "completion_tokens": 111,
+      "id": "HumanEval/122",
+      "returncode": 1,
+      "seconds": 0.036,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 49, in <module>\n    check(add_elements)\n    ~~~~~^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 39, in check\n    assert candidate([1,-2,-3,41,57,76,87,88,99], 3) == -4\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "88abe415c55bb6dad9540c9b9bb0e839eebda8a26ebb9b1e791aa86b00640c3d",
+      "completion_tokens": 62,
+      "id": "HumanEval/123",
+      "returncode": 1,
+      "seconds": 0.035,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 40, in <module>\n    check(get_odd_collatz)\n    ~~~~~^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 31, in check\n    assert candidate(14) == [1, 5, 7, 11, 13, 17]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "46a81fe9afbb14fd617afe5c7aad27d946bfba967368e65c44cf84c1f0a7f735",
+      "completion_tokens": 382,
+      "id": "HumanEval/124",
+      "returncode": 1,
+      "seconds": 0.038,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 86, in <module>\n    check(valid_date)\n    ~~~~~^^^^^^^^^^^^\n  File \"/work/program.py\", line 67, in check\n    assert candidate('04-31-3000') == False\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "cb1767a8840819b4795e799663b073c59217661fa9abe6a1f39e973e0be8cb41",
+      "completion_tokens": 45,
+      "id": "HumanEval/125",
+      "returncode": 1,
+      "seconds": 0.035,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 29, in <module>\n    check(split_words)\n    ~~~~~^^^^^^^^^^^^^\n  File \"/work/program.py\", line 20, in check\n    assert candidate(\"Hello,world!\") == [\"Hello\",\"world!\"]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "568d65f801dabb78b8f11b02d4b536a30c9e078403290c92a7c41017ba28cebb",
+      "completion_tokens": 15,
+      "id": "HumanEval/126",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": "ceback (most recent call last):\n  File \"/work/program.py\", line 43, in <module>\n    check(is_sorted)\n    ~~~~~^^^^^^^^^^^\n  File \"/work/program.py\", line 36, in check\n    assert candidate([1, 2, 2, 2, 3, 4]) == False, \"This prints if this assert fails 5 (good for debugging!)\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: This prints if this assert fails 5 (good for debugging!)\n"
+    },
+    {
+      "completion_sha256": "b213cd6ee2b2c83b61569e5b81f11195346410606594004931c2aefca8fa3341",
+      "completion_tokens": 512,
+      "id": "HumanEval/127",
+      "returncode": 1,
+      "seconds": 0.039,
+      "status": "failed",
+      "stderr_tail": "  File \"/work/program.py\", line 58\n    def check(candidate):\nIndentationError: expected an indented block after 'if' statement on line 55\n"
+    },
+    {
+      "completion_sha256": "78a3d44e13af541731582849fd8175f5570ede554bc462831c12d3c9230554ae",
+      "completion_tokens": 26,
+      "id": "HumanEval/128",
+      "returncode": 1,
+      "seconds": 0.036,
+      "status": "failed",
+      "stderr_tail": "e 23, in check\n    assert candidate([1, 2, 2, -4]) == -9\n           ~~~~~~~~~^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 16, in prod_signs\n    return sum(abs(x) * prod_sign(x) for x in arr)\n  File \"/work/program.py\", line 16, in <genexpr>\n    return sum(abs(x) * prod_sign(x) for x in arr)\n                        ^^^^^^^^^\nNameError: name 'prod_sign' is not defined. Did you mean: 'prod_signs'?\n"
+    },
+    {
+      "completion_sha256": "ae30478d2bafd9f427a2abf795ddc7220bbcc5adb9ec686b2a6e1ccaf87562ef",
+      "completion_tokens": 205,
+      "id": "HumanEval/129",
+      "returncode": 1,
+      "seconds": 0.035,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 69, in <module>\n    check(minPath)\n    ~~~~~^^^^^^^^^\n  File \"/work/program.py\", line 53, in check\n    assert candidate([[1, 2, 3], [4, 5, 6], [7, 8, 9]], 3) == [1, 2, 1]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "36892e66b57afe2793e0510cd3d3e2ec4f23b55caa52dec7686e1299f51c1cd0",
+      "completion_tokens": 66,
+      "id": "HumanEval/130",
+      "returncode": 1,
+      "seconds": 0.055,
+      "status": "failed",
+      "stderr_tail": "i(n + 1)\n                                     ~~~^^^^^^^\n  File \"/work/program.py\", line 26, in tri\n    return tri(n - 1) + tri(n - 2) + tri(n + 1)\n           ~~~^^^^^^^\n  File \"/work/program.py\", line 26, in tri\n    return tri(n - 1) + tri(n - 2) + tri(n + 1)\n                                     ~~~^^^^^^^\n  [Previous line repeated 995 more times]\nRecursionError: maximum recursion depth exceeded\n"
+    },
+    {
+      "completion_sha256": "e6c48997fd9fc4f010483e337b91ad569fdf2de79b367ece1ef2bdf74beeaec0",
+      "completion_tokens": 46,
+      "id": "HumanEval/131",
+      "returncode": 1,
+      "seconds": 0.03,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 33, in <module>\n    check(digits)\n    ~~~~~^^^^^^^^\n  File \"/work/program.py\", line 21, in check\n    assert candidate(5) == 5\n           ^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "ae35a3ba3532af04065c8d755f4cbe46ba2a14d9e7166e665aca4bd32c9e1a6f",
+      "completion_tokens": 51,
+      "id": "HumanEval/132",
+      "returncode": 1,
+      "seconds": 0.035,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 42, in <module>\n    check(is_nested)\n    ~~~~~^^^^^^^^^^^\n  File \"/work/program.py\", line 24, in check\n    assert candidate('[]]]]]]][[[[[]') == False\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "db9651c396d40e4ae959d346b36d0d2a9e5ce46806679cfb2d0d78fe0c2799e1",
+      "completion_tokens": 17,
+      "id": "HumanEval/133",
+      "returncode": 1,
+      "seconds": 0.031,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 42, in <module>\n    check(sum_squares)\n    ~~~~~^^^^^^^^^^^^^\n  File \"/work/program.py\", line 26, in check\n    assert candidate([1.4,4.2,0])==29, \"This prints if this assert fails 1 (good for debugging!)\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: This prints if this assert fails 1 (good for debugging!)\n"
+    },
+    {
+      "completion_sha256": "3a8cd9475a3647c2b5fd4ece3f6dde3cda989947dd0244021144784dbf7c7f80",
+      "completion_tokens": 31,
+      "id": "HumanEval/134",
+      "returncode": 1,
+      "seconds": 0.031,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 41, in <module>\n    check(check_if_last_char_is_a_letter)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 25, in check\n    assert candidate(\"apple\") == False\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "82d1efaaa52f3c30ac5c9c0dd629c80d9edf4220ccad91c39f20b885b4683e3b",
+      "completion_tokens": 11,
+      "id": "HumanEval/135",
+      "returncode": 1,
+      "seconds": 0.032,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 30, in <module>\n    check(can_arrange)\n    ~~~~~^^^^^^^^^^^^^\n  File \"/work/program.py\", line 20, in check\n    assert candidate([1,2,4,3,5])==3\n           ^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "0db3cd3f27d1cd481393ea74fc52e4696530d0364217fd0a3e9129d47e458898",
+      "completion_tokens": 34,
+      "id": "HumanEval/136",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 40, in <module>\n    check(largest_smallest_integers)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 24, in check\n    assert candidate([2, 4, 1, 3, 5, 7]) == (None, 1)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "85c6ec7c525a552d3d31cd9a11e935460ce6414a9c585cb14528128b2f45348d",
+      "completion_tokens": 54,
+      "id": "HumanEval/137",
+      "returncode": 1,
+      "seconds": 0.036,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 44, in <module>\n    check(compare_one)\n    ~~~~~^^^^^^^^^^^^^\n  File \"/work/program.py\", line 34, in check\n    assert candidate(1, \"2,3\") == \"2,3\"\n           ~~~~~~~~~^^^^^^^^^^\n  File \"/work/program.py\", line 17, in compare_one\n    b = float(b)\nValueError: could not convert string to float: '2,3'\n"
+    },
+    {
+      "completion_sha256": "f27554dee23725bba6ae311e03ffcbe8aca66edadd94ec7c1067fff15f47dd4f",
+      "completion_tokens": 16,
+      "id": "HumanEval/138",
+      "returncode": 0,
+      "seconds": 0.018,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "b1ff061212c053311f4c9a3b555ae54b38c7c257148e9ae1992a94de983f1f08",
+      "completion_tokens": 28,
+      "id": "HumanEval/139",
+      "returncode": 1,
+      "seconds": 0.031,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 32, in <module>\n    check(special_factorial)\n    ~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 23, in check\n    assert candidate(4) == 288, \"Test 4\"\n           ^^^^^^^^^^^^^^^^^^^\nAssertionError: Test 4\n"
+    },
+    {
+      "completion_sha256": "99bbf62d378f076e48671a9e3c295449f210e277ce5a94314900e61cbcfc4c14",
+      "completion_tokens": 21,
+      "id": "HumanEval/140",
+      "returncode": 1,
+      "seconds": 0.034,
+      "status": "failed",
+      "stderr_tail": "ceback (most recent call last):\n  File \"/work/program.py\", line 30, in <module>\n    check(fix_spaces)\n    ~~~~~^^^^^^^^^^^^\n  File \"/work/program.py\", line 25, in check\n    assert candidate(\"Exa   mple\") == \"Exa-mple\", \"This prints if this assert fails 4 (good for debugging!)\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: This prints if this assert fails 4 (good for debugging!)\n"
+    },
+    {
+      "completion_sha256": "6af873e8137157301292cc734eba6321162584160e947521779ed5144c31ace2",
+      "completion_tokens": 512,
+      "id": "HumanEval/141",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nSyntaxError: expected 'else' after 'if' expression\n"
+    },
+    {
+      "completion_sha256": "b68daf06fff4f2a25c9ed243e9f56c06c2dce719815b818d059eb0978c19c321",
+      "completion_tokens": 70,
+      "id": "HumanEval/142",
+      "returncode": 1,
+      "seconds": 0.031,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 45, in <module>\n    check(sum_squares)\n    ~~~~~^^^^^^^^^^^^^\n  File \"/work/program.py\", line 29, in check\n    assert candidate([1,2,3]) == 6\n           ^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "891180c48edfa3dffabb0953aa492663dea6e66e4194ae8c771a9926e5fff87a",
+      "completion_tokens": 47,
+      "id": "HumanEval/143",
+      "returncode": 1,
+      "seconds": 0.031,
+      "status": "failed",
+      "stderr_tail": " recent call last):\n  File \"/work/program.py\", line 47, in <module>\n    check(words_in_sentence)\n    ~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 35, in check\n    assert candidate(\"This is a test\") == \"is\"\n           ~~~~~~~~~^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 26, in words_in_sentence\n    if is_prime(len(word)):\n       ^^^^^^^^\nNameError: name 'is_prime' is not defined\n"
+    },
+    {
+      "completion_sha256": "b5ef3a1fa417c4640940130457e861682d8cd3e35e6c6a6a6c818c297c483e84",
+      "completion_tokens": 35,
+      "id": "HumanEval/144",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": "\"/work/program.py\", line 41, in <module>\n    check(simplify)\n    ~~~~~^^^^^^^^^^\n  File \"/work/program.py\", line 22, in check\n    assert candidate(\"1/5\", \"5/1\") == True, 'test1'\n           ~~~~~~~~~^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 16, in simplify\n    return numerator % denominator == 0\n           ~~~~~~~~~~^~~~~~~~~~~~~\nTypeError: not all arguments converted during string formatting\n"
+    },
+    {
+      "completion_sha256": "b2f0440af2c186aad40930caa874195f792f9ed1c3c05740524f2f1118c8e71a",
+      "completion_tokens": 21,
+      "id": "HumanEval/145",
+      "returncode": 1,
+      "seconds": 0.037,
+      "status": "failed",
+      "stderr_tail": "e 13, in <lambda>\n    return sorted(nums, key=lambda x: sum(int(digit) for digit in str(x)))\n                                      ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 13, in <genexpr>\n    return sorted(nums, key=lambda x: sum(int(digit) for digit in str(x)))\n                                          ~~~^^^^^^^\nValueError: invalid literal for int() with base 10: '-'\n"
+    },
+    {
+      "completion_sha256": "812195fae1fa7bae5503f070eea9ee679423e398c291503a45168fe55a54623a",
+      "completion_tokens": 12,
+      "id": "HumanEval/146",
+      "returncode": 1,
+      "seconds": 0.032,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 30, in <module>\n    check(specialFilter)\n    ~~~~~^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 18, in check\n    assert candidate([15, -73, 14, -15]) == 1\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "2cd273f0da8850dd8bee9665361410ee1517d834483da68433c609bbdd3d8db4",
+      "completion_tokens": 13,
+      "id": "HumanEval/147",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 28, in <module>\n    check(get_max_triples)\n    ~~~~~^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 22, in check\n    assert candidate(5) == 1\n           ^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "a453ac5fe20d0413db0619c3b9e06d52be96339113c2e43064f39c1ccee06c53",
+      "completion_tokens": 11,
+      "id": "HumanEval/148",
+      "returncode": 1,
+      "seconds": 0.031,
+      "status": "failed",
+      "stderr_tail": "in <module>\n    check(bf)\n    ~~~~~^^^^\n  File \"/work/program.py\", line 25, in check\n    assert candidate(\"Jupiter\", \"Neptune\") == (\"Saturn\", \"Uranus\"), \"First test error: \" + str(len(candidate(\"Jupiter\", \"Neptune\")))\n                                                                                               ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nTypeError: object of type 'NoneType' has no len()\n"
+    },
+    {
+      "completion_sha256": "bc24f9a8db3bdf188bea53bd06186432e1ddde216d2a5db168111e3008872de1",
+      "completion_tokens": 52,
+      "id": "HumanEval/149",
+      "returncode": 1,
+      "seconds": 0.032,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 36, in <module>\n    check(sorted_list_sum)\n    ~~~~~^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 24, in check\n    assert candidate([\"aa\", \"a\", \"aaa\"]) == [\"aa\"]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "ca7303ce7f11df55f8414c7e6d4cff4d6f1a10b8dce90696676edbe7b9c9f1a9",
+      "completion_tokens": 18,
+      "id": "HumanEval/150",
+      "returncode": 1,
+      "seconds": 0.031,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 36, in <module>\n    check(x_or_y)\n    ~~~~~^^^^^^^^\n  File \"/work/program.py\", line 20, in check\n    assert candidate(7, 34, 12) == 34\n           ~~~~~~~~~^^^^^^^^^^^\n  File \"/work/program.py\", line 11, in x_or_y\n    if is_prime(n):\n       ^^^^^^^^\nNameError: name 'is_prime' is not defined\n"
+    },
+    {
+      "completion_sha256": "fa33793ca4091e76f00aa0966633107acdd67314e8a0c7c4b39315fb9614431d",
+      "completion_tokens": 57,
+      "id": "HumanEval/151",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": "t recent call last):\n  File \"/work/program.py\", line 43, in <module>\n    check(double_the_difference)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 30, in check\n    assert candidate([0.1, 0.2, 0.3]) == 0 , \"This prints if this assert fails 3 (good for debugging!)\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: This prints if this assert fails 3 (good for debugging!)\n"
+    },
+    {
+      "completion_sha256": "eae847ca191c87c13c77035a848e2cd00d51e1494ad41c1401840ce7249646e8",
+      "completion_tokens": 29,
+      "id": "HumanEval/152",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": ",4,5,1],[1,2,3,4,2,-2])==[0,0,0,0,3,3], \"This prints if this assert fails 1 (good for debugging!)\"\n           ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 18, in compare\n    return [abs(guess - score) for score, guess in zip(game,guesses)]\n                                                            ^^^^^^^\nNameError: name 'guesses' is not defined. Did you mean: 'guess'?\n"
+    },
+    {
+      "completion_sha256": "249d959f879d5519daf32a6aa96975899ff901e6d348ba1c9e606f832cb80f71",
+      "completion_tokens": 12,
+      "id": "HumanEval/153",
+      "returncode": 1,
+      "seconds": 0.038,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 40, in <module>\n    check(Strongest_Extension)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 26, in check\n    assert candidate('Watashi', ['tEN', 'niNE', 'eIGHt8OKe']) == 'Watashi.eIGHt8OKe'\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "5e55363d2e94c48718f54b316d689f40e3702b43edec56e0a5e93737ee044fde",
+      "completion_tokens": 512,
+      "id": "HumanEval/154",
+      "returncode": 1,
+      "seconds": 0.031,
+      "status": "failed",
+      "stderr_tail": "  File \"/work/program.py\", line 68\n    if a\n        ^\nSyntaxError: expected ':'\n"
+    },
+    {
+      "completion_sha256": "ff486632816ccf2a43a9ad5768cf50e6b25b4cb48a0651a00b28cd387ee0602d",
+      "completion_tokens": 68,
+      "id": "HumanEval/155",
+      "returncode": 1,
+      "seconds": 0.031,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 39, in <module>\n    check(even_odd_count)\n    ~~~~~^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 25, in check\n    assert candidate(-78) == (1, 1)\n           ^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "777e16aedd7f0e822a6e920b005ae278754da959d764a9f6b1090dcae529835c",
+      "completion_tokens": 188,
+      "id": "HumanEval/156",
+      "returncode": 0,
+      "seconds": 0.019,
+      "status": "passed",
+      "stderr_tail": ""
+    },
+    {
+      "completion_sha256": "25c01b840312d8c655c31abc64084981df6a27224fc03a3cc4d8272e845f3daa",
+      "completion_tokens": 14,
+      "id": "HumanEval/157",
+      "returncode": 1,
+      "seconds": 0.037,
+      "status": "failed",
+      "stderr_tail": "raceback (most recent call last):\n  File \"/work/program.py\", line 35, in <module>\n    check(right_angle_triangle)\n    ~~~~~^^^^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 19, in check\n    assert candidate(3, 4, 5) == True, \"This prints if this assert fails 1 (good for debugging!)\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: This prints if this assert fails 1 (good for debugging!)\n"
+    },
+    {
+      "completion_sha256": "278916577767e9ff58bf9c2c4c7e03c44858ecec16c121057ea545b505268d74",
+      "completion_tokens": 13,
+      "id": "HumanEval/158",
+      "returncode": 1,
+      "seconds": 0.035,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 35, in <module>\n    check(find_max)\n    ~~~~~^^^^^^^^^^\n  File \"/work/program.py\", line 20, in check\n    assert (candidate([\"name\", \"of\", \"string\"]) == \"string\"), \"t1\"\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: t1\n"
+    },
+    {
+      "completion_sha256": "c79597c2f695c04727a3f412dc7333a9ba72156fbf474e95ac6c67322638f361",
+      "completion_tokens": 33,
+      "id": "HumanEval/159",
+      "returncode": 1,
+      "seconds": 0.037,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 54, in <module>\n    check(eat)\n    ~~~~~^^^^^\n  File \"/work/program.py\", line 42, in check\n    assert candidate(5, 6, 10) == [11, 4], \"Error\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: Error\n"
+    },
+    {
+      "completion_sha256": "a8475ed5160c909242b4416a611c9c524edc94403bf71f4f8a8aa09aaae5cad2",
+      "completion_tokens": 13,
+      "id": "HumanEval/160",
+      "returncode": 1,
+      "seconds": 0.036,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 44, in <module>\n    check(do_algebra)\n    ~~~~~^^^^^^^^^^^^\n  File \"/work/program.py\", line 35, in check\n    assert candidate(['**', '*', '+'], [2, 3, 4, 5]) == 37\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "cccf605960a9093890dfcf9e8336c9c6b83e29773e87b444540348b1a2b8ee2a",
+      "completion_tokens": 31,
+      "id": "HumanEval/161",
+      "returncode": 1,
+      "seconds": 0.033,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 38, in <module>\n    check(solve)\n    ~~~~~^^^^^^^\n  File \"/work/program.py\", line 27, in check\n    assert candidate(\"#a@C\") == \"#A@c\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+    },
+    {
+      "completion_sha256": "713396f19abee933ad4c5706f6046671fe437df47b065e39faf91506c10513fd",
+      "completion_tokens": 24,
+      "id": "HumanEval/162",
+      "returncode": 1,
+      "seconds": 0.035,
+      "status": "failed",
+      "stderr_tail": "ring_to_md5)\n    ~~~~~^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 17, in check\n    assert candidate('Hello world') == '3e25960a79dbc69b674cd4ec67a72c62'\n           ~~~~~~~~~^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 11, in string_to_md5\n    return hashlib.md5(text.encode('utf-8')).hexdigest()\n           ^^^^^^^\nNameError: name 'hashlib' is not defined. Did you forget to import 'hashlib'?\n"
+    },
+    {
+      "completion_sha256": "6d258a81510b2f023737ab6033d7e75aa33cf634219b1c8c09d1283a777645a5",
+      "completion_tokens": 25,
+      "id": "HumanEval/163",
+      "returncode": 1,
+      "seconds": 0.04,
+      "status": "failed",
+      "stderr_tail": "Traceback (most recent call last):\n  File \"/work/program.py\", line 28, in <module>\n    check(generate_integers)\n    ~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"/work/program.py\", line 18, in check\n    assert candidate(2, 10) == [2, 4, 6, 8], \"Test 1\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: Test 1\n"
+    }
+  ],
+  "record_sha256": "7e753dccf062d243a3a52c6e5479bfd1518038d702b07bc7225612c45a39fbd7",
+  "request": {
+    "limit": null,
+    "target": "ref:Qwen2.5-Coder-0.5B",
+    "task": "humaneval"
+  },
+  "sandbox": {
+    "environment": "empty",
+    "filesystem": "read-only system and interpreter; writable empty /work and private /tmp",
+    "limits": {
+      "cpu_seconds": 10,
+      "file_bytes": 16777216,
+      "memory_bytes": 2147483648,
+      "open_files": 64,
+      "output_bytes": 65536,
+      "processes": 16,
+      "timeout_seconds": 10.0
+    },
+    "mechanism": "bwrap",
+    "network": "none",
+    "protocol": "klab-code-sandbox-v1",
+    "python": {
+      "executable": "/usr/bin/python3.14",
+      "flags": "-I -S -B",
+      "version": "3.14.8"
+    }
+  },
+  "status": "complete",
+  "stop": {
+    "kind": null,
+    "reason": null
+  },
+  "target": {
+    "active_parameter_bytes": 1976131072,
+    "active_parameters": 494032768,
+    "checkpoint": "Qwen/Qwen2.5-Coder-0.5B@8123ea2e9354afb7ffcc6c8641d1b2f5ecf18301",
+    "checkpoint_sha256": "b7ec9d4ca70b0fdf765ad4ae3105901de3765739eed36e922c4d4eff44bee201",
+    "context_length": 2048,
+    "max_seq_len": 2048,
+    "parameter_bytes": 1976131072,
+    "parameters": 494032768,
+    "reference": {
+      "architecture": "Qwen2ForCausalLM",
+      "family": "Qwen2.5-Coder",
+      "license": "Apache-2.0",
+      "model_type": "qwen2",
+      "name": "Qwen2.5-Coder-0.5B",
+      "repo_id": "Qwen/Qwen2.5-Coder-0.5B",
+      "revision": "8123ea2e9354afb7ffcc6c8641d1b2f5ecf18301",
+      "step": null,
+      "training_tokens": 5500000000000,
+      "training_tokens_source": "technical report (arXiv:2409.12186): 5.5T tokens of code-focused continued pretraining from Qwen2.5 (the base model's tokens not counted)",
+      "url": "https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B"
+    },
+    "run_dir": "hf://Qwen/Qwen2.5-Coder-0.5B@8123ea2e9354afb7ffcc6c8641d1b2f5ecf18301",
+    "run_id": "ref:Qwen2.5-Coder-0.5B",
+    "step": null,
+    "tokenizer_sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
+    "tokens_seen": 5500000000000,
+    "validation_sha256": null
+  },
+  "task": {
+    "data_file": "openai_humaneval/test-00000-of-00001.parquet",
+    "data_sha256": "2f2871a15fbc95b6c683043359f4ed8e144c5a1c4f24f25f66bc51f598dfcfb6",
+    "id_field": "task_id",
+    "max_new_tokens": 512,
+    "name": "humaneval",
+    "program": "{prompt}{completion}\n\n{test}\n\ncheck({entry_point})\n",
+    "prompt": "{prompt}",
+    "repo_id": "openai/openai_humaneval",
+    "revision": "7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544",
+    "source": "HumanEval (Chen et al. 2021), 164 problems, original tests",
+    "stop": [
+      "\nclass",
+      "\ndef",
+      "\n#",
+      "\n@",
+      "\nprint",
+      "\nif",
+      "\n```"
+    ]
+  },
+  "timing": {
+    "execution_seconds": 4.946,
+    "generation_seconds": 1103.332,
+    "tokens": 12626
+  }
+}

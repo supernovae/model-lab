@@ -195,7 +195,10 @@ def load_run(
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
     expected_checkpoint_sha256: str | None = None,
+    quantized: Path | None = None,
 ) -> InferenceRun:
+    """Load a verified checkpoint; QUANTIZED applies a ``weights quantize``
+    artifact made from exactly this checkpoint (PyTorch engine only)."""
     run = (runs_dir / run_id).resolve()
     config, manifest, selected, metadata, manager = _verified_checkpoint(
         run, checkpoint, proof_store=proof_store, verification_mode=verification_mode
@@ -282,6 +285,8 @@ def load_run(
             )
         },
     }
+    if quantized is not None and config.runtime.engine != "pytorch":
+        raise ValueError("quantized weights need the PyTorch engine (not MLX)")
     if config.runtime.engine == "mlx":
         # Native construction changes MLX/Python/NumPy state.  Weight loading
         # does not need caller RNG, and no Torch model is constructed here.
@@ -329,6 +334,13 @@ def load_run(
         model = DenseLM(model_config, config.attention)
         model.load_state_dict(weights)
     del weights
+    quantization = None
+    if quantized is not None:
+        from klab.evaluation.quantization import apply_artifact
+
+        quantization = apply_artifact(
+            model, quantized, checkpoint_sha256=metadata["sha256"]
+        )
     model.to(device).eval()
     runtime = next(
         info
@@ -354,6 +366,8 @@ def load_run(
             "parameter_inventory": inspection_report(config),
         }
     )
+    if quantization is not None:
+        identity["quantization"] = quantization
     return InferenceRun(run, config, model, tokenizer, device, identity)
 
 

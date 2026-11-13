@@ -29,6 +29,7 @@ def serve(args: argparse.Namespace) -> None:
         args.checkpoint,
         args.backend,
         authorization=args.runtime_authorization,
+        quantized=args.quantized,
     )
     inference = LocalInference(loaded, args.model_id, limits)
     with LocalHTTPServer((args.host, args.port), inference) as server:
@@ -60,6 +61,12 @@ def add_command(commands: argparse._SubParsersAction, runs_dir_default: str) -> 
     parser.add_argument(
         "--checkpoint",
         help="latest.json, best.json, or a generation path; resolved once at startup",
+    )
+    parser.add_argument(
+        "--quantized",
+        type=Path,
+        metavar="DIR",
+        help="Apply a `klab weights quantize` artifact made from this checkpoint",
     )
     parser.add_argument(
         "--backend", choices=("auto", "metal", "mps", "cuda", "rocm", "xpu", "cpu")

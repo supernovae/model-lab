@@ -133,7 +133,8 @@ def footprint(model: Any, inventory: Mapping[str, Any] | None) -> dict[str, int]
     }
 
 
-def _identity(loaded: Any) -> dict[str, Any]:
+def arm_identity(loaded: Any) -> dict[str, Any]:
+    """Checkpoint identity and footprint of one loaded arm (probe and bench records)."""
     identity = loaded.identity
     return {
         "run_id": identity.get("run_id"),
@@ -179,7 +180,7 @@ def _tokenizer_digest(loaded: Any) -> str:
 def _describe(loaded: Any, arm: Arm) -> None:
     """Identity facts recorded the first time an arm is opened."""
     if "identity" not in arm.cache:
-        arm.cache["identity"] = _identity(loaded)
+        arm.cache["identity"] = arm_identity(loaded)
         arm.cache["validation_identity"] = _validation_identity(loaded)
         arm.cache["tokenizer_digest"] = _tokenizer_digest(loaded)
         arm.cache["config"] = loaded.config

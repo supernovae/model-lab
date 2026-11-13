@@ -351,8 +351,8 @@ tokens, the same bins ECE is computed from.
 
 ## Reference models and `klab compare`
 
-Our runs should sit on a known curve, not only next to each other. Four public
-checkpoints in the 70M–360M range are pinned in
+Our runs should sit on a known curve, not only next to each other. Five public
+checkpoints in the 70M–500M range are pinned in
 `klab.reference_models` (immutable Hugging Face commits, safe snapshots
 only: static metadata and `*.safetensors`, no pickles, remote code or
 quantization configs):
@@ -363,6 +363,11 @@ quantization configs):
 | `ref:pythia-160m-deduped` | `EleutherAI/pythia-160m-deduped@c54a0e0b` (step 143000) | 162.3M / 123.7M | 299,892,736,000 |
 | `ref:SmolLM2-135M` | `HuggingFaceTB/SmolLM2-135M@93efa2f0` | 134.5M / 134.5M | "2T" |
 | `ref:SmolLM2-360M` | `HuggingFaceTB/SmolLM2-360M@f8027fd0` | 361.8M / 361.8M | "4T" |
+| `ref:Qwen2.5-Coder-0.5B` | `Qwen/Qwen2.5-Coder-0.5B@8123ea2e` | 494.0M / 494.0M | 5.5T (code continued pretraining) |
+
+Qwen2.5-Coder-0.5B is the [code benchmark](#code-benchmarks-klab-bench)'s
+reproduction reference; its packaged result is a HumanEval bench record, not
+lm-eval.
 
 A reference is scored by the same battery, the same token-scoring path and the
 same lm-eval adapter as our checkpoints:
@@ -502,6 +507,96 @@ COMPARE  lab-try-20261010T191906Z-6a192ff3@60 vs 4 point(s) · comparisons only 
 sits below chance on lm-eval and at chance on fact recall; the point is the
 placement, not the score.) `--json` emits
 `{subject, points, comparisons, curve}`.
+
+## Code benchmarks (`klab bench`)
+
+Tasks whose metric is "does the generated code pass its tests" cannot run in
+lm-eval here (the adapter never confirms unsafe code and needs an accuracy
+metric). `klab bench` scores them by execution, opt-in, in a sandbox:
+
+```sh
+klab bench TRY_ID --task humaneval --backend cpu
+klab bench ref:Qwen2.5-Coder-0.5B --task humaneval
+klab bench RUN --task mbpp --limit 50 --backend cpu
+klab compare TRY_ID --references
+```
+
+**Tasks are data.** A task pins a dataset file (Hugging Face repository and
+commit, or a local `.parquet`/`.jsonl` file) with its SHA-256, a prompt
+template, a program template that joins the prompt, the completion and the
+tests, stop sequences and a completion budget. A mismatched digest is refused.
+
+| `--task` | Data (pinned commit) | Problems | Prompt |
+| --- | --- | --- | --- |
+| `humaneval` | `openai/openai_humaneval@7dce6050`, `test` | 164 | the published prompt, unchanged |
+| `mbpp` | `google-research-datasets/mbpp@4bb6404f`, `full/test` | 500 | a docstring with the task text and its first test (zero-shot) |
+
+Completions stop at a new top-level statement: for HumanEval
+`"\nclass" "\ndef" "\n#" "\n@" "\nprint" "\nif"` and a code fence, for MBPP
+`"\nclass" "\nassert" '\n"""' "\nprint" "\nif"` and a code fence.
+Prompts and stops follow bigcode-evaluation-harness. Any other task is a
+JSON or YAML declaration with the fields of `klab.probes.code_bench.CodeTask`
+(`name`, `repo_id`, `revision`, `data_file`, `data_sha256`, `id_field`,
+`prompt`, `program`, `stop`, `max_new_tokens`, `source`); with `repo_id: null`
+the data file is local, relative to the declaration. Templates are
+`str.format` over a problem's fields; a list field `x` is also offered as
+`x_lines` (joined by newlines).
+
+**Decoding.** One greedy completion per problem (pass@1 with n=1, temperature
+0), at most `max_new_tokens` (512 for the shipped tasks), cut at the first stop
+sequence. A lab run decodes with `klab generate`'s path; a reference decodes
+with its own key/value cache.
+
+**Sandbox.** Each assembled program runs once in a fresh
+[Bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) sandbox:
+
+- new user, network, PID, IPC and UTS namespaces: no network (loopback only),
+  only its own processes, killed with its parent;
+- read-only `/usr` and the interpreter; the only writable places are an empty
+  per-program `/work` and a private `/tmp`; the rest of the host filesystem
+  (your home directory included) is not visible;
+- an empty environment (`PATH`, `HOME=/work`);
+- hard limits set before the program starts: CPU seconds (`--timeout`), 2 GiB
+  address space, 16 MiB per file, 64 open files, 16 processes (counted inside
+  the namespace), no core dumps, 64 KiB of output;
+- a wall-clock timeout (`--timeout`, default 10 s) that kills the process
+  group.
+
+A problem is `passed` (exit 0), `failed`, `timeout` (wall clock or CPU) or
+`error` (output limit). If `bwrap` is missing or cannot create namespaces on
+the host, `bench` refuses before loading a model. `--allow-unsandboxed-execution`
+runs the code anyway with your user's network and file access (rlimits and the
+timeout still apply); the record says `unsandboxed` and lands in another
+comparison group. Treat generated code as untrusted.
+
+**Record.** `WORK_DIR/lab/benchmarks/<bench-id>/bench.json`, sealed like every
+lab record (`klab report BENCH_ID`), keeps the task declaration, decoding,
+sandbox settings and interpreter, the target's checkpoint identity, every
+problem's outcome (status, return code, stderr tail, seconds, completion
+digest) and `code_pass1`. The completions are in `completions.jsonl` beside it
+(digest in the record). An interrupted or stopped run (Ctrl-C, the printed
+`CANCEL` file) or a sandbox failure is published `incomplete` with no value:
+missing evidence, never a low score.
+
+**Comparing.** `klab compare` reads bench records as the `code pass@1` metric,
+within one code benchmark group: a digest of the scoring protocol
+(`klab-code-exec-v1`), the task declaration and data digest, every rendered
+item, `--limit`, the decoding settings, the sandbox mechanism, Python version
+and limits. Two results in a group get a paired standard error from the
+per-problem outcomes. A try or probe ID picks up a bench of the same
+checkpoint, like lm-eval. References are text-level, so they share the group.
+
+**Reproduction.** `ref:Qwen2.5-Coder-0.5B` (`Qwen/Qwen2.5-Coder-0.5B@8123ea2e`,
+base model) reports HumanEval pass@1 28.0 with greedy decoding
+([Qwen2.5-Coder technical report](https://arxiv.org/abs/2409.12186), Table 3).
+The tolerance, fixed before running, is ±3.0 points (about one binomial
+standard error at 164 problems). Measured here with `klab bench
+ref:Qwen2.5-Coder-0.5B --task humaneval` on CPU (fp32, transformers 4.57.6,
+Python 3.14, 18.5 minutes for 12,626 generated tokens): **46/164 = 0.2805**
+(Δ +0.05 points), 0 timeouts. The sealed record ships as
+`src/klab/probes/reference_results/Qwen2.5-Coder-0.5B.humaneval.json`, so
+`klab compare RESULT --references` places a HumanEval result next to it without
+downloading anything.
 
 ## Dashboard
 

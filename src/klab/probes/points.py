@@ -6,15 +6,18 @@ import here). Sources are verified lab records only (``lab_records``):
 * try records: each arm's held-out score (with its ``eval_group``) and cost,
   so runs without a probe battery still appear;
 * probe records: the battery's target and baseline, including lm-eval;
+* code benchmark records (``klab bench``): execution-scored pass@1;
 * packaged reference results (``probes/reference_results/*.json``): sealed
-  probe records of pinned public checkpoints, so nothing is downloaded to plot
-  or compare against them.
+  probe and code benchmark records of pinned public checkpoints, so nothing is
+  downloaded to plot or compare against them.
 
 A metric value only compares within its group: held-out loss within one
 ``eval_group`` (validation data, tokenizer, loss mask, protocol), lm-eval
 accuracy within one ``benchmark_group`` (tasks, task versions, shots, items),
 fact recall within one ``item_group`` (the same rendered prompts, answers and
-candidates under one ranking protocol; text-level, so tokenizer-independent).
+candidates under one ranking protocol; text-level, so tokenizer-independent),
+code pass@1 within one ``benchmark_group`` of ``klab bench`` (task, data,
+items, decoding and sandbox).
 """
 
 from __future__ import annotations
@@ -75,6 +78,15 @@ METRICS = {
         "differ; results before suite v4 were sized in model tokens)",
         missing_hint="run `klab probe RECORD --config standard`",
     ),
+    "code_pass1": Metric(
+        id="code_pass1",
+        label="code pass@1",
+        group_label="code benchmark group",
+        higher_is_better=True,
+        not_comparable="different code benchmark group (task, data, items, "
+        "decoding or sandbox differ)",
+        missing_hint="run `klab bench RECORD --task humaneval`",
+    ),
 }
 # Probe rows whose ``details.items`` carry per-item credit (paired evidence).
 RANKING_METRICS = ("fact_recall", "needle")
@@ -128,14 +140,18 @@ def consistent_chance(values: Iterable[Any]) -> float | None:
     return mean_chance({"chance": known[0]})
 
 
-def packaged_reference_records() -> list[tuple[Path, dict[str, Any]]]:
-    """Sealed reference results shipped with Model Lab (verified on read)."""
+def packaged_reference_records(
+    kind: str = "probe",
+) -> list[tuple[Path, dict[str, Any]]]:
+    """Sealed reference results of KIND shipped with Model Lab (verified on read)."""
     folder = resources.files("klab.probes") / "reference_results"
     out = []
     for item in sorted(folder.iterdir(), key=lambda p: p.name):
         if item.name.endswith(".json"):
             path = Path(str(item))
-            out.append((path, read_lab_record(path, "probe")[1]))
+            found, record = read_lab_record(path)
+            if found == kind:
+                out.append((path, record))
     return out
 
 
@@ -299,9 +315,61 @@ def try_points(record: Mapping[str, Any], path: Path) -> list[dict[str, Any]]:
     return points
 
 
+def bench_points(
+    record: Mapping[str, Any], path: Path, *, packaged: bool = False
+) -> list[dict[str, Any]]:
+    """The scored checkpoint of one complete code benchmark (else nothing)."""
+    who = record.get("target") or {}
+    code = record.get("code_pass1") or {}
+    if (
+        not who.get("checkpoint_sha256")
+        or record.get("status") != "complete"
+        or code.get("value") is None
+        or not code.get("benchmark_group")
+    ):
+        return []
+    task = record["task"]["name"]
+    reference = who.get("reference")
+    return [
+        {
+            **{k: who.get(k) for k in IDENTITY_FIELDS},
+            "label": reference["name"]
+            if reference
+            else f"{who.get('run_id')}@{who.get('step')}",
+            "kind": "reference" if reference else "bench",
+            "role": "candidate",
+            "reference": reference,
+            "packaged": packaged,
+            "ms_per_token": None,
+            "verdict": None,
+            "final": False,
+            "verdict_split": "heldout",
+            "source": str(record.get("bench_id")),
+            "path": str(path),
+            "created_at": str(record.get("created_at")),
+            "metrics": {
+                "code_pass1": {
+                    "value": code["value"],
+                    "group": code["benchmark_group"],
+                    "tasks": {task: code["value"]},
+                    "items": {
+                        task: [
+                            1.0 if p["status"] == "passed" else 0.0
+                            for p in record["problems"]
+                        ]
+                    },
+                    "chance": None,
+                }
+            },
+        }
+    ]
+
+
 def points_from_record(
     kind: str, record: Mapping[str, Any], path: Path, *, packaged: bool = False
 ) -> list[dict[str, Any]]:
+    if kind == "bench":
+        return bench_points(record, path, packaged=packaged)
     if kind == "try":
         out = try_points(record, path)
         probe = record.get("probe")
@@ -339,13 +407,14 @@ def collect_points(
     """
     points: list[dict[str, Any]] = []
     if lab_dir is not None and lab_dir.is_dir():
-        accepted, _ = iter_lab_records(lab_dir, limit)
+        accepted, _ = iter_lab_records(lab_dir, limit, ("try", "probe", "bench"))
         for kind, path, record in accepted:
             points += points_from_record(kind, record, path)
     points.sort(key=lambda p: p["created_at"], reverse=True)
     if references and not final:
-        for path, record in packaged_reference_records():
-            points += points_from_record("probe", record, path, packaged=True)
+        for kind in ("probe", "bench"):
+            for path, record in packaged_reference_records(kind):
+                points += points_from_record(kind, record, path, packaged=True)
     return [p for p in points if bool(p.get("final")) == final]
 
 

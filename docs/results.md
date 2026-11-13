@@ -1,7 +1,7 @@
 # Results
 
-`try` and `probe` print a record ID. Keep it: the everyday commands all accept
-it.
+`try`, `probe` and [`bench`](probes.md#code-benchmarks-klab-bench) print a
+record ID. Keep it: the everyday commands all accept it.
 
 ```sh
 klab report TRY_ID
@@ -87,6 +87,7 @@ scored baseline row records the checkpoint and digest actually used.
 ## Comparing results
 
 `klab compare RESULT [RESULT...] [--references] [--final] [--json]` places
-results side by side using only recorded measurements, and compares a metric
-only within one comparison group. See
+results side by side using only recorded measurements (held-out loss, lm-eval
+accuracy, fact recall, needle retrieval and code pass@1 from `klab bench`), and
+compares a metric only within one comparison group. See
 [reference models and `klab compare`](probes.md#reference-models-and-klab-compare).

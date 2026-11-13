@@ -289,8 +289,58 @@ Remote code refuses, with the reason:
 
 The export also refuses if the copied code would import anything outside the
 decoder's modules, the standard library, Torch, safetensors and
-`transformers`. Quantization and GGUF conversion are not in Lab; run them on
-the exported directory with the tools built for that format.
+`transformers`.
+
+Both formats hold float weights: a quantized artifact (below) is refused, so
+export its source checkpoint. GGUF conversion is not in Lab; run it on the
+exported directory with the tools built for that format.
+
+## Quantize weights
+
+```sh
+klab weights quantize prefer --runs-dir work/runs --bits 8 --output work/quantized/prefer-int8
+klab weights quantize prefer --runs-dir work/runs --bits 4 --group-size 128 --output work/quantized/prefer-int4
+klab generate prefer --runs-dir work/runs --quantized work/quantized/prefer-int8 --prompt "Hello"
+klab chat prefer --runs-dir work/runs --quantized work/quantized/prefer-int8 --message "Hello"
+klab serve prefer --runs-dir work/runs --quantized work/quantized/prefer-int8
+```
+
+Weight-only, symmetric quantization of a verified checkpoint (activations stay
+fp32):
+
+| `--bits` | Scheme | Scale |
+| --- | --- | --- |
+| `8` | int8, codes in [-127, 127] | one per output channel |
+| `4` | int4, codes in [-7, 7], two per byte | one per `--group-size` input columns (default 128; must divide every projection's input width) |
+
+Only the `nn.Linear` projections inside decoder blocks are quantized
+(attention and feed-forward, MoE experts included). Token embeddings, the output
+head (often tied to them), norms, MoE routers and memory modules keep their
+checkpoint weights. A quantized layer stores codes and scales and dequantizes on
+the fly, so resident weight memory drops but decoding is not faster than fp32.
+No quantization library is in the locked environment (torchao, bitsandbytes,
+optimum-quanto, llm-compressor), and `torch.ao` dynamic quantization also
+quantizes activations and has no 4-bit path, so Lab implements this minimal
+scheme itself.
+
+`quantize` scores the source checkpoint and the quantized model on the run's
+validation split with the same evaluation settings (`evaluation.batch_size`,
+`evaluation.max_batches`, `training.seq_len`, on `--backend`, default `cpu`),
+and prints and records both losses, their difference (`loss_delta`, quantized
+minus source) and the resident weight bytes. The output directory holds
+`quantized.safetensors` and a sealed `klab_quantized.json`: the source run,
+checkpoint and digest, the scheme, the quantized modules, the weight file's
+SHA-256 and the `heldout` block. On a 300-step CPU smoke run (2 layers, hidden
+width 32, 4 validation batches) the source loss was 1.8039; int8 scored 1.8042
+(+0.0003) and int4 with group size 32 scored 1.7932 (-0.0106, within that tiny
+evaluation's noise).
+
+`--quantized DIR` in `generate`, `chat` and `serve` loads the run's checkpoint
+through the usual verified path, then swaps in the artifact's layers. The
+artifact must come from exactly that checkpoint (otherwise it is refused with
+the `--checkpoint` to pass), its manifest digest and weight file must verify,
+and its modules must match the model. The loaded identity carries a
+`quantization` block. MLX runs and attached semantic packs are refused.
 
 ## Write your own objective
 
@@ -367,7 +417,8 @@ a teacher that behaves the way you want, or a loss term of your own.
 - **Memory:** a teacher or reference is a second model on the device.
   `klab inspect` does not count it.
 - **Not implemented:** low-rank adapters (LoRA), rollout-based reinforcement
-  learning, quantization, GGUF. Partial freezing through
+  learning, activation or quantization-aware training, GGUF. Weight-only int8
+  and int4 inference is [above](#quantize-weights). Partial freezing through
   `training.trainable_parameters` works with every objective.
 - **Export check:** the exported directory was verified by importing it back.
   It has not been loaded with `transformers` in Lab's test environment, which

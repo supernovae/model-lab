@@ -1,5 +1,7 @@
 """``klab compare``: place sealed results against each other and against
-pinned reference models, metric by metric, only within a comparison group.
+pinned reference models, metric by metric, only within a comparison group
+(held-out loss, lm-eval accuracy, fact recall, needle retrieval and
+execution-scored code pass@1 from ``klab bench``).
 
 Every pair is one of: ``higher``/``lower``/``within_noise`` (same group, with a
 paired standard error when both sides kept per-item evidence),
@@ -85,7 +87,8 @@ def resolve_point(
         ]
         if not found:
             raise ValueError(
-                f"no result for {spec}: run `klab probe {spec} --config full`"
+                f"no result for {spec}: run `klab probe {spec} --config full` "
+                f"or `klab bench {spec} --task humaneval`"
             )
         own = _merge(found)
     else:
@@ -180,6 +183,8 @@ def pair(
         elif metric_id in {"fact_recall", "needle"} and target:
             tier = "full" if who["kind"] == "reference" else "standard"
             hint = f"run `klab probe {shlex.quote(str(target))} --config {tier}`"
+        elif metric_id == "code_pass1" and target:
+            hint = f"run `klab bench {shlex.quote(str(target))} --task humaneval`"
         return {
             **out,
             "status": "missing_evidence",
@@ -353,7 +358,8 @@ def render(report: Mapping[str, Any], *, color: bool = False) -> str:
         "",
         _paint(
             f"    {'point':<{width}} {'resident':>9} {'active':>9} {'tokens':>8}"
-            f" {'held-out loss':>14} {'lm-eval acc':>12} {'fact recall':>12}",
+            f" {'held-out loss':>14} {'lm-eval acc':>12} {'fact recall':>12}"
+            f" {'code pass@1':>12}",
             "2",
             color,
         ),
@@ -367,6 +373,7 @@ def render(report: Mapping[str, Any], *, color: bool = False) -> str:
             f" {_metric_value(point, 'heldout_loss'):>14}"
             f" {_metric_value(point, 'lm_eval'):>12}"
             f" {_metric_value(point, 'fact_recall'):>12}"
+            f" {_metric_value(point, 'code_pass1'):>12}"
         )
     lines += _provenance(points, color)
     for metric_id, metric in METRICS.items():

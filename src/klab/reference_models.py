@@ -1,4 +1,4 @@
-"""Pinned external reference models (Pythia, SmolLM2), loaded safely.
+"""Pinned external reference models (Pythia, SmolLM2, Qwen2.5-Coder), loaded safely.
 
 Every reference is a fixed Hugging Face repository at an immutable commit. Only
 static metadata and ``*.safetensors`` weights may enter a snapshot (no pickles,
@@ -7,8 +7,9 @@ no remote code, no quantization configs).
 A loaded reference behaves like a loaded Model Lab run for the probe battery
 (``model``, ``tokenizer``, ``config.model.max_seq_len``, ``identity``), so it
 is scored by the same :mod:`klab.probes.scoring` path. It is only
-compared on tokenizer-independent standard tasks (lm-eval); its held-out loss
-on our validation data is never computed (different tokenizer and data).
+compared on tokenizer-independent text-level tasks (lm-eval, fact recall,
+execution-scored code benchmarks); its held-out loss on our validation data is
+never computed (different tokenizer and data).
 
 Install with ``uv sync --extra reference --extra lmeval``.
 """
@@ -118,6 +119,22 @@ REFERENCES: Mapping[str, ReferenceModel] = {
             None,
             4_000_000_000_000,
             "model card: 'Pretraining tokens: 4T' (rounded by the authors)",
+        ),
+        # A code model with a published HumanEval pass@1 (28.0, greedy, base
+        # model; arXiv:2409.12186 Table 3): the code benchmark's reproduction
+        # check (`klab bench ref:Qwen2.5-Coder-0.5B --task humaneval`).
+        ReferenceModel(
+            "Qwen2.5-Coder-0.5B",
+            "Qwen2.5-Coder",
+            "Qwen/Qwen2.5-Coder-0.5B",
+            "8123ea2e9354afb7ffcc6c8641d1b2f5ecf18301",
+            "qwen2",
+            "Qwen2ForCausalLM",
+            "Apache-2.0",
+            None,
+            5_500_000_000_000,
+            "technical report (arXiv:2409.12186): 5.5T tokens of code-focused "
+            "continued pretraining from Qwen2.5 (the base model's tokens not counted)",
         ),
     )
 }
