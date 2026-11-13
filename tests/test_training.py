@@ -655,6 +655,37 @@ def test_a_factored_output_head_trains_and_exports_its_rank_limited_logits(
         RunConfig.model_validate(settings)
 
 
+def test_repeat_token_documents_repeat_one_tokenizer_word(tmp_path: Path) -> None:
+    base = config(tmp_path)
+    settings = base.model_dump(mode="python")
+    settings["dataset"].update(synthetic_task="repeat_token", synthetic_repeat_length=8)
+    run = RunConfig.model_validate(settings)
+    run_id = train(run, run_id="repeat-token")
+    data = run.logging.root_dir / run_id / "data"
+    manifest = json.loads((data / "manifest.json").read_text())
+    assert manifest["repeat_token_symbols"] >= 2
+    tokens = np.load(data / "validation.npy")
+    eos = 3  # <eos>
+    documents = np.split(tokens, np.flatnonzero(tokens == eos) + 1)[:-1]
+    # Each document is one symbol token, eight times, then <eos>.
+    assert {len(document) for document in documents} == {9}
+    assert all(len(set(document[:-1].tolist())) == 1 for document in documents)
+    assert len({int(document[0]) for document in documents}) > 1
+    # The symbols come from a tokenizer; the task cannot train one.
+    with pytest.raises(ValueError, match="existing tokenizer"):
+        train_tokenizer(
+            TokenizerTrainConfig.model_validate(
+                {
+                    "schema_version": 1,
+                    "vocab_size": 512,
+                    "max_documents": 10,
+                    "output_dir": tmp_path / "unused",
+                    "dataset": settings["dataset"],
+                }
+            )
+        )
+
+
 def test_mlx_validation_rejects_enabled_memory() -> None:
     base = load_config(
         Path(__file__).resolve().parents[1] / "configs" / "runtime_smoke_cpu.yaml"

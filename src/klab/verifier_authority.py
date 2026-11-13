@@ -148,6 +148,9 @@ _ARRAY_EXCLUDED_EDGES = frozenset(
         ("data.packing", "data.byte_hash"),
         ("data.packing", "data.conversations"),
         ("data.packing", "data.datasets"),
+        # repeat_token draws synthetic documents from the tokenizer; only
+        # _prepare_data uses it, while packed bytes are verified as they are.
+        ("data.packing", "data.repeat_token"),
         ("data.packing", "data.encoding"),
         # Snapshot acquisition is used only by _prepare_data. The array/file
         # and prepared-inventory verifiers authenticate already packed bytes.
@@ -203,8 +206,12 @@ def _excluded_edges(kind: str) -> frozenset[tuple[str, str]]:
 _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
+        "data.repeat_token",
+    ): "f686e05b86cae244cfbee1f9f8bb6db2fe4413b1946ee9c883ef7f88b4de4e9a",
+    (
+        "data.packing",
         "data.preparation_workers",
-    ): "a9659aa033f1780991bb8d5e834a3e7ac2db05214ac3fd147cb01e4b68a55e89",
+    ): "123c3f533c3e9ca368e48055b387ed6bade1dafb6335201b50746b50395d795f",
     (
         "experiments.artifacts",
         "data.sources",
@@ -212,7 +219,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "corpus.mixture",
-    ): "4f4b12fe42b033148a0bd729db279ce4227e1c086d49f9782bd7134012a179bf",
+    ): "5bead36f731303e6b03550ef14c8b34486c2677781f14111e9d531662673b523",
     (
         "workers",
         "workers.transport",
@@ -220,11 +227,11 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "data.tokenizer",
-    ): "55ae572e9f7743525183294ee59a3a0cd411f68e3c886c190db1349f9f5175bc",
+    ): "89fa27e02895b8017c42e0e633e8d285d79aa381298dc23394ba7c29bc2273ab",
     (
         "data.packing",
         "data.sources",
-    ): "6b85867400fa8a1472090f3a0fc2137b9e493ebc9fa0344e36a440ce9b70bd23",
+    ): "499367c230ee5c920746f4addcc13abac8039dfe145c0c9f04d55ce38753d315",
     (
         "data",
         "data.tokenizer",
@@ -232,39 +239,39 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "corpus.export",
-    ): "0d166c5bcdfe075d51df8e525d95ea0952cf16175b4af6862dd562614af47d68",
+    ): "c78a6dd82cb1f56923b57b944a6a88f978f986a13c8809f68138ad53ba688bf8",
     (
         "data.packing",
         "data.byte_hash",
-    ): "ba5a65c4059dacd0c84a56fbf5378e5963e464352d63be88dea03361738a1238",
+    ): "3b74727d6f6e035aa419a4d18fe95543fe74b2fe000ebca1025dde5aceeacff5",
     (
         "data.packing",
         "data.conversations",
-    ): "392c1097c3c88740860ab036839cbb014478d40aaa3917e90748e9e89661595f",
+    ): "84d289902917b89d979d229c398642b9207be77af85ff088c00c5f158569c7d7",
     (
         "data.packing",
         "data.datasets",
-    ): "0bbf6d3d2f08d9cf8371d3b30259682f05915087fba092250b2e327488842a18",
+    ): "e7ecac083bb23553dfbdd02fc8245fd3a606e44b645cae572eca977989981da3",
     (
         "data.packing",
         "data.encoding",
-    ): "257de09bb83e91a6b47951fd8b9e11dd5f87c520b73c7f56336d99bff1e18448",
+    ): "0db06382d74a9da475b2aebdc5cbffda92ebb7ab5e9743640294a31dce4ce590",
     (
         "data.packing",
         "data.preparation_chunks",
-    ): "88a4a0edbf0561e1fb6da78611f0aa6745e64e0926fd36f813f8e8a404ce2a7c",
+    ): "f52a2425c1b7f9c90dcccf1d8a6c16d7875cbd672ed116df15c321e08706dd03",
     (
         "data.packing",
         "data.preparation_telemetry",
-    ): "9254f7704c40363de42f52f67a4e33f26aeeffa08331ce1095fcd6a653773b74",
+    ): "4083b0b3a8c3e083707de3674bbb34953b71e404831ca58bc3556b4150abc3dc",
     (
         "data.packing",
         "progress",
-    ): "0a2d02f96ff024cc8b23f6ce0e314367eb09bb8ab94f906c5fb98a5f8445188e",
+    ): "3acd2adc479054f051dd9ae704129c469c7b379eddc8e2850ff8a5a1fd77cec9",
     (
         "data.packing",
         "resource_envelope",
-    ): "751da753a17dfaec792c53a3762edfc0521187bbcb2c06629b0928a3049757f9",
+    ): "7fb33842f0cf524be4a4c291fd964b6751edc06c3776d71badbcf8b291d9aaae",
     (
         "data.packing",
         "workdir",
@@ -276,7 +283,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "data.packing",
         "workspace_preflight",
-    ): "e76347569a842cf5e91676d59b884c3bcea0b89f3f7f0dd77e7810614b8bfa49",
+    ): "2c5cdd69029bb5aeb40c3eafbe19264a3937f5f2d081332598b1c4749cb4fdb7",
     (
         "corpus.tokenizer_bakeoff",
         "corpus.cli",

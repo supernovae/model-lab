@@ -686,7 +686,12 @@ class DatasetConfig(StrictModel):
         "chat_recall",
         "engram_recall",
         "withheld_facts",
+        "repeat_token",
     ] = Field(default="stories", exclude_if=lambda value: value == "stories")
+    # Tokens per document for synthetic_task=repeat_token.
+    synthetic_repeat_length: int | None = Field(
+        default=None, strict=True, gt=1, exclude_if=lambda value: value is None
+    )
     revision: str | None = None
     dataset_config: str | None = None
     cache_dir: Path
@@ -753,6 +758,13 @@ class DatasetConfig(StrictModel):
             raise ValueError("dataset.source_manifest_path requires source=snapshot")
         if self.source != "synthetic" and self.synthetic_task != "stories":
             raise ValueError("dataset.synthetic_task requires source=synthetic")
+        if (self.synthetic_task == "repeat_token") != (
+            self.synthetic_repeat_length is not None
+        ):
+            raise ValueError(
+                "dataset.synthetic_repeat_length is set exactly for "
+                "synthetic_task=repeat_token"
+            )
         if self.dataset_config is not None and self.source not in {
             "huggingface",
             "snapshot",

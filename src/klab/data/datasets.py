@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 from datasets import load_dataset
 
@@ -12,6 +13,7 @@ from klab.data.chat_recall import iter_chat_recall
 from klab.data.conversations import iter_conversations, iter_preference_pairs
 from klab.data.engram_recall import iter_engram_recall
 from klab.data.instruction_reference import iter_instruction_reference
+from klab.data.repeat_token import iter_repeat_token
 from klab.data.synthetic import iter_synthetic
 from klab.data.withheld_facts import training_documents
 from klab.hf_auth import hub_access_errors, hub_auth_kwargs, raise_for_hub_auth
@@ -91,10 +93,25 @@ def iter_documents(
     split: str,
     *,
     local_text_source_bytes: int | None = None,
+    tokenizer: Any = None,
 ) -> Iterator[str]:
-    """Yield source documents in stable stream order, without implicit fallbacks."""
+    """Yield source documents in stable stream order, without implicit fallbacks.
+
+    ``synthetic_task: repeat_token`` draws its symbols from TOKENIZER.
+    """
     if split not in {"train", "validation"}:
         raise ValueError(f"unknown split {split!r}")
+    if config.source == "synthetic" and config.synthetic_task == "repeat_token":
+        if tokenizer is None:
+            raise ValueError(
+                "repeat_token draws its symbols from an existing tokenizer; "
+                "it cannot train one"
+            )
+        assert config.synthetic_repeat_length is not None
+        yield from iter_repeat_token(
+            tokenizer, config.synthetic_seed, split, config.synthetic_repeat_length
+        )
+        return
     if config.source == "synthetic":
         yield from _SYNTHETIC[config.synthetic_task](config.synthetic_seed, split)
         return

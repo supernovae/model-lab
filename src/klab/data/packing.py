@@ -46,6 +46,7 @@ from klab.data.preparation_workers import (
     PreparationWorkers,
     collect_parallel_stream,
 )
+from klab.data.repeat_token import symbols as repeat_symbols
 from klab.data.row_layout import document_rows
 from klab.data.token_store import TokenStore
 from klab.data.verification import (
@@ -434,6 +435,7 @@ def _source_documents(
     split: str,
     *,
     local_text_source_bytes: int | None = None,
+    tokenizer: Tokenizer | None = None,
 ) -> Iterator[RenderedConversation]:
     if config.source == "local_chat":
         path = config.train_path if split == "train" else config.validation_path
@@ -441,10 +443,13 @@ def _source_documents(
         yield from iter_rendered_conversations(path, config.template)
         return
     documents = (
-        iter_documents(config, split)
+        iter_documents(config, split, tokenizer=tokenizer)
         if local_text_source_bytes is None
         else iter_documents(
-            config, split, local_text_source_bytes=local_text_source_bytes
+            config,
+            split,
+            local_text_source_bytes=local_text_source_bytes,
+            tokenizer=tokenizer,
         )
     )
     for text in documents:
@@ -502,6 +507,7 @@ def _collect(
             local_text_source_bytes=TOKENIZER_BATCH_SOURCE_BYTES
             if root is not None
             else None,
+            tokenizer=tokenizer,
         )
     )
     source_wait_seconds = 0.0
@@ -1080,6 +1086,7 @@ def _collect_streaming(
                     if config.source == "local_text"
                     else None
                 ),
+                tokenizer=tokenizer,
             )
         )
         if chunks is not None:
@@ -2470,6 +2477,7 @@ def _prepare_data(
                             local_text_source_bytes=tokenizer_batch_source_bytes
                             if config.dataset.source == "local_text"
                             else None,
+                            tokenizer=tokenizer,
                         ),
                         chunks,
                         workers,
@@ -2668,6 +2676,12 @@ def _prepare_data(
         "revision": config.dataset.revision,
         "dataset_config": config.dataset.dataset_config,
         **({"token_mixture": token_mixture} if token_mixture is not None else {}),
+        **(
+            {"repeat_token_symbols": len(repeat_symbols(tokenizer))}
+            if config.dataset.source == "synthetic"
+            and config.dataset.synthetic_task == "repeat_token"
+            else {}
+        ),
         **attributions[config.dataset.source],
         **({"corpus_export": corpus_export} if corpus_export is not None else {}),
         "tokenizer_sha256": canonical_tokenizer_sha256(tokenizer),
