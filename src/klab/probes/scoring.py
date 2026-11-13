@@ -53,8 +53,12 @@ def _byte_inputs(loaded: Any, ids: list[int]) -> dict[str, Any]:
     }
 
 
-def log_probs(loaded: Any, ids: Sequence[int]) -> np.ndarray:
-    """Log-softmax over the vocabulary at every position of IDS -> [T, V]."""
+def log_probs(loaded: Any, ids: Sequence[int], last: int | None = None) -> np.ndarray:
+    """Log-softmax over the vocabulary at every position of IDS -> [T, V].
+
+    LAST keeps only the final LAST positions: a short continuation after a
+    long context then never copies ``[T, V]`` to the host.
+    """
     import torch
 
     ids = list(ids)
@@ -63,8 +67,12 @@ def log_probs(loaded: Any, ids: Sequence[int]) -> np.ndarray:
         raise ValueError(f"log_probs needs 1..{limit} tokens, got {len(ids)}")
     x = torch.tensor([ids], dtype=torch.long, device=loaded.device)
     with torch.inference_mode():
-        logits = loaded.model(x, **_byte_inputs(loaded, ids))[0].float()
-        return torch.log_softmax(logits, dim=-1).cpu().numpy().astype(np.float64)
+        logits = loaded.model(x, **_byte_inputs(loaded, ids))[0]
+        if last is not None:
+            logits = logits[-last:]
+        return (
+            torch.log_softmax(logits.float(), dim=-1).cpu().numpy().astype(np.float64)
+        )
 
 
 def score_tokens(
@@ -85,7 +93,7 @@ def score_tokens(
     while start < len(tokens):
         end = min(start + length, len(tokens))  # targets tokens[start:end]
         first = max(0, end - 1 - length)  # inputs tokens[first:end - 1]
-        rows = log_probs(loaded, tokens[first : end - 1])[-(end - start) :]
+        rows = log_probs(loaded, tokens[first : end - 1], last=end - start)
         targets = np.asarray(tokens[start:end])
         values.append(rows[np.arange(len(targets)), targets])
         hits.append(rows.argmax(axis=-1) == targets)

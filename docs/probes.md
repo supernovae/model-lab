@@ -86,6 +86,7 @@ Probes run cheapest first: by tier, then declared cost.
 | Fact recall (from weights) | standard · 1 | closed-book: ranks the trained value of one of the run's own withheld-facts *training* facts (manifest of its `dataset.synthetic_seed`) among the values of the same relation, with no context; also reports never-trained control facts | −0.05 / −0.15 | no | the facts are not stored in the weights (runs trained on `withheld_facts` only; inapplicable elsewhere) |
 | Fact recall (reworded) | standard · 2 | ranks the stated answer among candidates from the same relation (mean token log-prob), asked in different words than the fact was stated; fractional tie credit | −0.05 / −0.15 | no | context handling or memory wiring |
 | Needle in context | standard · 3 | retrieve a code word stated at the start of a filler context of exactly 96/192/384 characters (text-level: the same strings for every tokenizer, references included; a context beyond the model's window scores chance); fractional tie credit | −0.05 / −0.15 | no | attention span, positions or sequence-length changes |
+| Needle in long context | full · 4 | the needle items at 16,384/32,768/65,536/131,072 characters, about 4k/8k/16k/32k tokens for a 32k-vocabulary BPE (see [long-context needle](#long-context-needle)); fractional tie credit | −0.05 / −0.15 | no | RoPE scaling or base, the extension stage's row length or its long-document data |
 | Standard tasks (lm-eval) | full · 4 | mean `acc` over lambada_openai, hellaswag, arc_easy, piqa at `limit=50` | −0.02 / −0.05 | no | treat small moves as noise at tiny scale |
 
 **Credit.** Recall and needle rank candidates by mean token log-prob of
@@ -143,9 +144,34 @@ records each task, the chance level and this caveat in the result.
   under a second on the CPU smoke model.
 - `standard`: adds fact recall from weights, reworded fact recall and needle
   retrieval.
-- `full`: adds lm-eval. The `lmeval` extra stays optional: without it the probe
-  is `unavailable` with the install hint and the battery is **incomplete**
-  (see below), never a pass.
+- `full`: adds long-context needle retrieval and lm-eval. The `lmeval` extra
+  stays optional: without it that probe is `unavailable` with the install hint
+  and the battery is **incomplete** (see below), never a pass.
+
+### Long-context needle
+
+`long_needle` asks the needle probe's items (same code words, filler and
+question) at 16,384, 32,768, 65,536 and 131,072 characters, so it can tell
+context-extension methods apart where the 96–384 character needle cannot. With
+a 32k-vocabulary BPE these are about 4k, 8k, 16k and 32k tokens: the first is
+a common pretraining window and serves as the in-distribution control, and each
+further length doubles the distance to the code word. The code word always
+opens the context, so every length measures retrieval across the whole
+context. As with the needle probe, a context longer than the model's window
+pushes the code word out of view and scores as chance; `details.by_length`
+records each length's characters, this model's token count and both arms'
+accuracy.
+
+Cost: each length scores 6 held-out items × 6 candidates and 4 dev items × 4
+candidates, so 52 forwards per length and 208 per arm, each over the item's
+last `max_seq_len` tokens. Candidates are scored one forward each, without a
+shared prefix cache, because the ranking protocol scores every candidate through
+the one token-scoring path that references also use. Only the continuation's
+rows of the log-softmax are copied to the host. On a 32k-window model the
+131,072-character length dominates, at 52 forwards of about 32k tokens per
+arm. On the CPU smoke model (64-token window) the probe takes about 7 s per
+arm, mostly tokenizing the long contexts. To compare extension arms with it,
+see [comparing context extensions](evaluation.md#comparing-context-extensions).
 
 The lm-eval adapter scores through the same token-scoring path as the probes
 (`klab.probes.scoring`). It follows the harness boundary rules (trailing
@@ -298,7 +324,7 @@ inside a document.
 
 | Split | Items screened |
 |---|---|
-| `heldout` | fact recall question + answer; closed-book control facts of a `withheld_facts` run (its trained facts are in its data by design and are exempt, `exempt.heldout_trained_facts`); needle contexts + code word; agreement/generation prompts (any window) |
+| `heldout` | fact recall question + answer; closed-book control facts of a `withheld_facts` run (its trained facts are in its data by design and are exempt, `exempt.heldout_trained_facts`); needle and long-needle contexts + code word; agreement/generation prompts (any window) |
 | `final` | the same kinds in the held-back wording, every closed-book fact included; only counts are kept |
 | `dev` | not screened: dev items are not held out |
 
@@ -339,10 +365,11 @@ loss), `delta_se`, `within_noise`, `improved`, `note`, `details`, `seconds`.
 Keys are stable within a format version; `tests/test_probes.py` pins them.
 
 Per-probe details that the dashboard and `compare` read. The ranking probes
-(both fact recalls and needle) keep `details.items`: per held-out item, the
-`answer`, what the candidate `picked` and its `credit`, `baseline_picked` and
-`baseline_credit` when a baseline ran, and the `prompt` (not for needle, whose
-prompts are long filler). They also keep `details.item_group`, the digest of
+(both fact recalls and both needle probes) keep `details.items`: per held-out
+item, the `answer`, what the candidate `picked` and its `credit`,
+`baseline_picked` and `baseline_credit` when a baseline ran, and the `prompt`
+(not for the needle probes, whose prompts are long filler). The needle probes
+also keep `details.by_length`. They also keep `details.item_group`, the digest of
 the probe, the ranking protocol and the rendered items. Two results with
 different item groups are `not_comparable` ("different items"), never
 compared. Calibration keeps `details.reliability` (and `baseline_reliability`):
@@ -403,15 +430,14 @@ any particular result, include held-back final evidence, or prove model quality.
 
 A reference runs the probes that are defined at the text level (`--config full`
 is required): **fact recall** (reworded, in-context), **fact recall from
-weights** and **lm-eval**. Recall items are rendered text (prompt, answer,
+weights**, both **needle** probes and **lm-eval**. Recall items are rendered text (prompt, answer,
 candidates) scored by mean token log-prob under each model's own tokenizer, so
 `details.item_group` (a digest of the probe, the ranking protocol and the
 items) is the same for every model and fact recall compares across references
 and lab runs. Its held-out loss on our validation split is never computed or
-compared, because it has its own tokenizer and training data. The needle probe
-is *not* run on references. Its filler context is sized in the model's own
-tokens (~50/75/95% of `max_seq_len`), so its items differ per tokenizer and the
-result would never be comparable. A reference is never a `--vs`
+compared, because it has its own tokenizer and training data. The needle probes
+are sized in characters, so their items are also the same for every model (the
+packaged results predate suite v4 and have no needle row). A reference is never a `--vs`
 baseline. Without the optional extras the command stops before any work with
 `uv sync --extra reference --extra lmeval`.
 

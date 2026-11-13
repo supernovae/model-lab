@@ -55,6 +55,8 @@ PINNED_SUITE = {
     # v5: battery and scoring protocol identities renamed with the project
     # (sparselab-* -> klab-*); probe declarations and items unchanged.
     5: "b7f7b01dc04b9531f5680b398afbf4ffb0e7333e267fe79540e73eda84c20ec9",
+    # v6: long_needle in the full tier (the needle items at 16k-131k characters).
+    6: "6b09c6ab9c21c10d2ae0eb3984c52ffdf6d73931c5f3d7f57129d7f7d5778f2f",
 }
 
 RESULT_KEYS = {
@@ -257,7 +259,9 @@ def test_uniform_scores_give_chance_accuracy(
     monkeypatch.setattr(
         scoring,
         "log_probs",
-        lambda loaded, ids: np.full((len(ids), vocab), -math.log(vocab)),
+        lambda loaded, ids, last=None: np.full(
+            (last or len(ids), vocab), -math.log(vocab)
+        ),
     )
     loaded = _Loaded(_TinyTokenizer(), max_seq_len=256)
     if probe == "fact_recall":
@@ -847,9 +851,9 @@ def _bigram(vocab: int) -> Callable[[Any, list[int]], np.ndarray]:
         np.random.default_rng(7).dirichlet(np.ones(vocab), size=vocab)
     ).astype(np.float64)
 
-    def log_probs(loaded: Any, ids: list[int]) -> np.ndarray:
+    def log_probs(loaded: Any, ids: list[int], last: int | None = None) -> np.ndarray:
         assert 0 < len(ids) <= loaded.config.model.max_seq_len
-        return table[np.asarray(ids)]
+        return table[np.asarray(ids[-last:] if last else ids)]
 
     log_probs.table = table  # type: ignore[attr-defined]
     return log_probs
@@ -894,10 +898,10 @@ def test_score_tokens_windows_every_target_once(
 ) -> None:
     calls: list[list[int]] = []
 
-    def uniform(loaded: Any, ids: list[int]) -> np.ndarray:
+    def uniform(loaded: Any, ids: list[int], last: int | None = None) -> np.ndarray:
         calls.append(list(ids))
         assert len(ids) <= loaded.config.model.max_seq_len
-        return np.full((len(ids), 10), -math.log(10))
+        return np.full((last or len(ids), 10), -math.log(10))
 
     monkeypatch.setattr(scoring, "log_probs", uniform)
     loaded = _Loaded(_TinyTokenizer(), max_seq_len=4)
@@ -909,11 +913,11 @@ def test_score_tokens_windows_every_target_once(
 
 
 def test_continuation_greedy_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    def peaked(loaded: Any, ids: list[int]) -> np.ndarray:
+    def peaked(loaded: Any, ids: list[int], last: int | None = None) -> np.ndarray:
         rows = np.full((len(ids), 50), -20.0)
         for i, token in enumerate(ids):
             rows[i, (token + 1) % 50] = 0.0  # always predicts token + 1
-        return rows
+        return rows[-last:] if last else rows
 
     monkeypatch.setattr(scoring, "log_probs", peaked)
     tokenizer = _TinyTokenizer()
@@ -1137,6 +1141,33 @@ def test_probe_cli_without_baseline_reports_absolute_values(
     text = _cli(monkeypatch, capsys, root, "probe", str(run_dir))
     assert "next → COMPARE" in text
     assert "--vs BASELINE" in text
+
+
+def test_full_tier_scores_long_needle_by_length(
+    tried: tuple[Path, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root, record = tried
+    out = _cli(
+        monkeypatch,
+        capsys,
+        root,
+        "probe",
+        record["arms"]["candidate"]["run_id"],
+        "--config",
+        "full",
+        "--json",
+    )
+    row = next(r for r in json.loads(out)["probes"] if r["id"] == "long_needle")
+    lengths = BY_ID["long_needle"].params["char_lengths"]
+    by_length = row["details"]["by_length"]
+    assert sorted(v["chars"] for v in by_length.values()) == lengths
+    # Every length is far beyond the 64-token smoke window, yet each item is
+    # scored (code word out of view), never dropped or turned into an error.
+    assert all(v["tokens"] > 64 for v in by_length.values())
+    assert all(v["accuracy"] is not None for v in by_length.values())
+    assert row["status"] not in MISSING_STATUSES and row["details"]["n"] == 24
 
 
 def test_standalone_probe_scores_validation_once_per_arm(

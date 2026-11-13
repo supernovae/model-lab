@@ -36,7 +36,7 @@ from typing import Any, Literal
 from klab.data.withheld_facts import _FACTS, diagnostic_manifest, split_facts
 
 SUITE_NAME = "klab-probe-battery"
-SUITE_VERSION = 5
+SUITE_VERSION = 6
 SPLITS = ("dev", "heldout", "final")
 # Splits a selection loop (``try``, ``probe`` without a final declaration) may read.
 SELECTION_SPLITS = ("dev", "heldout")
@@ -222,6 +222,37 @@ PROBES: tuple[ProbeSpec, ...] = (
         params={"char_lengths": [96, 192, 384], "credit": "fractional_ties"},
     ),
     ProbeSpec(
+        id="long_needle",
+        title="Needle in long context",
+        tier="full",
+        cost=4,
+        metric="accuracy",
+        higher_is_better=True,
+        mode="delta_abs",
+        warn=0.05,
+        fail=0.15,
+        hard=False,
+        suggests="Retrieval across thousands of tokens degraded: compare RoPE "
+        "scaling or base, the extension stage's row length and its long-document "
+        "data.",
+        explains="The needle probe's items at long context lengths, for comparing "
+        "context-extension methods (RoPE base, interpolation, NTK, YaRN). The "
+        "code word opens 16,384, 32,768, 65,536 or 131,072 characters of "
+        "filler, about 4k, 8k, 16k and 32k tokens for a 32k-vocabulary BPE: the "
+        "first is a common pretraining window, so it is the in-distribution "
+        "control, and each further length doubles the distance to the code "
+        "word up to a 32k-token extension target. Lengths are in characters, "
+        "so every tokenizer is asked the same strings; a context longer than "
+        "the model's window pushes the code word out of view and scores as "
+        "chance. Scored by candidate ranking at each length (ties share credit).",
+        reference="needle-in-a-haystack (text-level, long context), candidate ranking",
+        uncertainty="paired_items",
+        params={
+            "char_lengths": [16384, 32768, 65536, 131072],
+            "credit": "fractional_ties",
+        },
+    ),
+    ProbeSpec(
         id="lm_eval",
         title="Standard tasks (lm-eval)",
         tier="full",
@@ -251,6 +282,8 @@ PROBES: tuple[ProbeSpec, ...] = (
     ),
 )
 BY_ID = {spec.id: spec for spec in PROBES}
+# Probes built from the needle items, differing only in their character lengths.
+NEEDLE_PROBES = ("needle", "long_needle")
 
 # --- Items -----------------------------------------------------------------
 
@@ -561,8 +594,10 @@ def _leakage_items(
     for fact in closed_book:
         item = _parametric_item(fact, split)
         yield f"parametric_recall/{fact.subject}", item["question"], item["answer"]
-    for item in needle_items(split, BY_ID["needle"].params["char_lengths"]):
-        yield f"needle/{item['answer']}@{item['chars']}", item["prefix"], item["answer"]
+    for probe in NEEDLE_PROBES:
+        for item in needle_items(split, BY_ID[probe].params["char_lengths"]):
+            item_id = f"{probe}/{item['answer']}@{item['chars']}"
+            yield item_id, item["prefix"], item["answer"]
     for index, prompt in enumerate(prompts(split)):
         yield f"prompt/{index}", prompt, None
 

@@ -21,6 +21,7 @@ from klab.data.packing import (
 from klab.evaluation.inference import load_run
 from klab.evaluation.language_model import evaluate
 from klab.evaluation.panel_data import select_panel as _dataset
+from klab.evaluation.positions import PositionLoss
 from klab.training.attempt_budget import AttemptBudget
 
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -68,6 +69,7 @@ def run_panel(
         "accounting_complete": False,
         "reason": "evaluation did not complete",
         "loss": None,
+        "position_buckets": None,
         "nll_sum": 0.0,
         "valid_targets": 0,
         "batches": 0,
@@ -146,6 +148,7 @@ def run_panel(
             def progress(total: float, targets: int, batches: int) -> None:
                 result.update(nll_sum=total, valid_targets=targets, batches=batches)
 
+            by_position = PositionLoss(panel.sequence_length)
             evaluation_started = time.monotonic()
             metrics = evaluate(
                 loaded.model,
@@ -155,10 +158,11 @@ def run_panel(
                 device=loaded.device,
                 before_batch=before_batch,
                 progress=progress,
+                positions=by_position,
             )
             if metrics["valid_targets"] != panel.supervised_targets:
                 raise ValueError("native evaluation did not complete panel coverage")
-            result.update(metrics)
+            result.update(metrics, **by_position.report())
             result.update(status="complete", evidence_complete=True, reason=None)
         except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 - retain failed panel evidence
             result.update(

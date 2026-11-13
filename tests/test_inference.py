@@ -130,3 +130,77 @@ def test_chat_explicit_run_directory_remains_cwd_relative(
     )
 
     assert response["identity"]["checkpoint_sha256"] == pointer["manifest_sha256"]
+
+
+def _assert_position_buckets(report: dict, panel: dict) -> None:
+    buckets = report["position_buckets"]
+    assert [(b["start"], b["end"]) for b in buckets] == [(0, 8), (8, 16)]
+    targets = sum(b["targets"] for b in buckets)
+    assert targets == panel["supervised_targets"] == report["valid_targets"]
+    weighted = sum(b["loss"] * b["targets"] for b in buckets) / targets
+    assert weighted == pytest.approx(report["loss"], rel=1e-6)
+
+
+def test_panels_report_loss_by_position_during_and_after_training(
+    trained_run, tmp_path
+):
+    from klab.data.packing import TokenBlockDataset, load_prepared_data
+    from klab.evaluation.panels import run_panel
+    from klab.training.manifest import sha256_file
+
+    source = load_run("original", trained_run.logging.root_dir)
+    data = source.run / "data"
+    prepared = load_prepared_data(data, byte_enabled=False)
+    seq_len = trained_run.training.seq_len
+    blocks = TokenBlockDataset(
+        prepared.validation, seq_len, supervision=prepared.validation_supervision
+    )
+    count = min(len(blocks), 6)
+    panel = {
+        "name": "heldout",
+        "prepared_path": str(data),
+        "prepared_manifest_sha256": prepared.manifest["manifest_sha256"],
+        "tokenizer_file_sha256": sha256_file(trained_run.tokenizer.path),
+        "tokenizer_canonical_sha256": prepared.manifest["tokenizer_sha256"],
+        "split": "validation",
+        "sampling": "first_eligible_blocks",
+        "sequence_length": seq_len,
+        "blocks": count,
+        "supervised_targets": sum(
+            int((blocks.numpy_block(i)[1] != -100).sum()) for i in range(count)
+        ),
+        "batch_size": 2,
+        "max_forward_positions": count * seq_len,
+    }
+    # During training: every evaluation point reports the panel's buckets.
+    raw = trained_run.model_dump(mode="json")
+    raw["evaluation"]["panels"] = [panel]
+    train(type(trained_run).model_validate(raw), run_id="paneled")
+    reports = sorted(
+        (trained_run.logging.root_dir / "paneled/evaluations").glob("*.json")
+    )
+    assert reports
+    for path in reports:
+        report = json.loads(path.read_text())["panels"]["heldout"]
+        _assert_position_buckets(report, panel)
+    # After training: `klab eval --panel` reports them for one checkpoint.
+    declaration = tmp_path / "panel.json"
+    declaration.write_text(
+        json.dumps(
+            {
+                **panel,
+                "schema_version": 1,
+                "purpose": "development",
+                "checkpoint_sha256": source.identity["checkpoint_sha256"],
+            }
+        )
+    )
+    result = run_panel(
+        "original",
+        trained_run.logging.root_dir,
+        source.identity["checkpoint_relative_path"],
+        declaration,
+        tmp_path / "result.json",
+    )
+    assert result["status"] == "complete", result["reason"]
+    _assert_position_buckets(result, panel)

@@ -32,7 +32,11 @@ from klab.engines.multi_device import (
     dispatch_replicas_and_primary,
     microbatch_position_mask,
 )
-from klab.engines.output_head import chunked_output_head_cross_entropy
+from klab.engines.output_head import (
+    chunked_output_head_cross_entropy,
+    chunked_output_head_token_losses,
+)
+from klab.evaluation.positions import PositionLoss
 from klab.memory import DeviceMemorySpill, MemoryMonitor, SpillLimits
 from klab.model.inspection import architecture_metrics
 from klab.model.transformer import DenseLM
@@ -1095,11 +1099,16 @@ class PyTorchEngine:
             metrics,
         )
 
-    def evaluate(self, batches: Iterable[Microbatch]) -> EvaluationResult:
+    def evaluate(
+        self, batches: Iterable[Microbatch], positions: PositionLoss | None = None
+    ) -> EvaluationResult:
+        """Held-out loss; POSITIONS also collects it by window position."""
         with _translate_allocation_failures(self._allocator_cap):
-            return self._evaluate(batches)
+            return self._evaluate(batches, positions)
 
-    def _evaluate(self, batches: Iterable[Microbatch]) -> EvaluationResult:
+    def _evaluate(
+        self, batches: Iterable[Microbatch], positions: PositionLoss | None
+    ) -> EvaluationResult:
         config, device, model, _, _ = self._ready()
         was_training = model.training
         rng = _rng_state(device, config.runtime.backend)
@@ -1116,6 +1125,11 @@ class PyTorchEngine:
                         else torch.from_numpy(batch.byte_addresses).to(device)
                     )
                     if self.objective is not None:
+                        if positions is not None:
+                            positions.unavailable = (
+                                "the training objective scores whole batches, "
+                                "not single targets"
+                            )
                         targets_in_batch = int(np.count_nonzero(batch.targets != -100))
                         total_loss += float(
                             self.objective.evaluation_loss(
@@ -1131,25 +1145,30 @@ class PyTorchEngine:
                         hidden, _ = model.forward_with_aux(
                             x, byte_addresses=addresses, return_hidden=True
                         )
-                        total_loss += float(
-                            chunked_output_head_cross_entropy(
-                                hidden,
-                                y,
-                                model.output.weight,
-                                config.runtime.output_head_chunk_tokens,
-                                lambda: precision_context(config, device),
-                            )
+                        head = (
+                            chunked_output_head_cross_entropy
+                            if positions is None
+                            else chunked_output_head_token_losses
+                        )
+                        loss = head(
+                            hidden,
+                            y,
+                            model.output.weight,
+                            config.runtime.output_head_chunk_tokens,
+                            lambda: precision_context(config, device),
                         )
                     else:
                         logits = model(x, byte_addresses=addresses)
-                        total_loss += float(
-                            functional.cross_entropy(
-                                logits.float().flatten(0, 1),
-                                y.flatten(),
-                                ignore_index=-100,
-                                reduction="sum",
-                            )
+                        loss = functional.cross_entropy(
+                            logits.float().flatten(0, 1),
+                            y.flatten(),
+                            ignore_index=-100,
+                            reduction="sum" if positions is None else "none",
                         )
+                    if positions is not None:
+                        positions.add(loss.view_as(y), y)
+                        loss = loss.sum()
+                    total_loss += float(loss)
                     total_targets += int(np.count_nonzero(batch.targets != -100))
                     count += 1
         finally:

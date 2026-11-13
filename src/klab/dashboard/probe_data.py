@@ -16,6 +16,7 @@ from typing import Any
 
 from klab.lab_records import is_setup_record, iter_lab_records
 from klab.probes.points import is_final
+from klab.probes.suite import NEEDLE_PROBES
 from klab.probes.verdict import respect_try_comparison
 
 LIVE_STATES = {"loading", "running"}
@@ -143,7 +144,9 @@ def probe_row(result: dict[str, Any], probe_id: str) -> dict[str, Any] | None:
 
 # Probes measured on their own item set: their scale is the benchmark/item
 # group in the row's details, never the run's eval group.
-OWN_GROUP_PROBES = frozenset({"lm_eval", "fact_recall", "parametric_recall", "needle"})
+OWN_GROUP_PROBES = frozenset(
+    {"lm_eval", "fact_recall", "parametric_recall", *NEEDLE_PROBES}
+)
 
 
 def result_group(result: dict[str, Any], row: dict[str, Any]) -> str | None:

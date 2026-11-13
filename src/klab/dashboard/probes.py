@@ -33,7 +33,7 @@ from klab.probes.points import (
     metric_points,
     pareto_frontier,
 )
-from klab.probes.suite import PROBES
+from klab.probes.suite import NEEDLE_PROBES, PROBES
 
 _chip = chip
 _num = num
@@ -142,7 +142,10 @@ def _detail(row: dict[str, Any]) -> str:
             f"chance {details['chance']:.2f} · never-trained control "
             f"{num(details.get('control_accuracy'), 2)} · n={details.get('n')}"
         )
-    if row["id"] in {"fact_recall", "needle"} and details.get("chance") is not None:
+    if (
+        row["id"] in {"fact_recall", *NEEDLE_PROBES}
+        and details.get("chance") is not None
+    ):
         return f"chance {details['chance']:.2f} · n={details.get('n')}"
     if row["id"] == "calibration" and details.get("reliability"):
         return f"{len(details['reliability'])} confidence bins"
@@ -220,9 +223,10 @@ def _comparison_chart(result: dict[str, Any]) -> None:
     figure.update_layout(height=260, margin={"l": 10, "r": 10, "t": 40, "b": 10})
     figure.update_annotations(font_size=11)
     st.plotly_chart(figure, use_container_width=True)
-    needle = next((r for r in rows if r["id"] == "needle"), None)
-    by_length = (needle or {}).get("details", {}).get("by_length") or {}
-    if by_length:
+    for needle in (r for r in rows if r["id"] in NEEDLE_PROBES):
+        by_length = needle.get("details", {}).get("by_length") or {}
+        if not by_length:
+            continue
         frame = pd.DataFrame(
             [
                 {
@@ -244,7 +248,7 @@ def _comparison_chart(result: dict[str, Any]) -> None:
             y="accuracy",
             color="arm",
             markers=True,
-            title="Needle retrieval by context length",
+            title=f"{needle['title']}: retrieval by context length",
             color_discrete_map={
                 "candidate": SERIES["candidate"],
                 "baseline": SERIES["baseline"],

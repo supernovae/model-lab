@@ -49,7 +49,8 @@ SEED_CAVEAT = (
 )
 NEXT_TIER_CHECKS = {
     "standard": "reworded fact recall and needle retrieval",
-    "full": "standard lm-eval tasks; needs `uv sync --extra lmeval`",
+    "full": "long-context needle retrieval and standard lm-eval tasks (lm-eval "
+    "needs `uv sync --extra lmeval`)",
 }
 
 
