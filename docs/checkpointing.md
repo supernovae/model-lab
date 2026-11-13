@@ -82,7 +82,9 @@ With `append_data`, the extension may also train on newly appended data; see
 
 `--promote` copies weights into a fresh run: new optimizer, schedule, random
 state, cursor and counters, with the target config's data and budget. The
-architecture and tokenizer must match. `training.parent_checkpoint` in a config
+architecture and tokenizer must match, except that a child may change RoPE and
+raise `model.max_seq_len` to extend its context (see
+[context length](training.md#context-length)). `training.parent_checkpoint` in a config
 does the same thing declaratively, so [post-training](post-training.md) stages
 chain and both arms of a `klab try` start from one parent.
 

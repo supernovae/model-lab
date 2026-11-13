@@ -10,7 +10,7 @@ from torch import Tensor, nn
 from torch.nn import functional
 
 from klab.model.cache import AttentionKVCache
-from klab.model.rope import RoPE
+from klab.model.rope import RoPE, RopeScaling
 
 
 class LatentAttention(nn.Module):
@@ -22,6 +22,7 @@ class LatentAttention(nn.Module):
         max_seq_len: int,
         rope_base: float,
         *,
+        rope_scaling: RopeScaling | None = None,
         implementation: Literal["reference", "sdpa"] = "reference",
     ) -> None:
         super().__init__()
@@ -35,7 +36,7 @@ class LatentAttention(nn.Module):
         self.kv_down = nn.Linear(hidden_dim, latent_dim, bias=False)
         self.k_up = nn.Linear(latent_dim, hidden_dim, bias=False)
         self.out_proj = nn.Linear(latent_dim, hidden_dim, bias=False)
-        self.rope = RoPE(self.head_dim, rope_base)
+        self.rope = RoPE(self.head_dim, rope_base, rope_scaling)
         self.max_seq_len = max_seq_len
 
     def _project(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:

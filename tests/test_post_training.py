@@ -519,6 +519,8 @@ def test_a_local_selected_ngram_run_exports_and_generates_without_lab(
                 selected_blocks=1,
                 latent_dim=8,
                 selector="learned",
+                # The export rebuilds the scaled schedule from plain JSON.
+                rope_scaling={"type": "yarn", "original_max_seq_len": 16},
             ),
             "training": base.training.model_copy(
                 update={"max_steps": 3, "max_tokens": 96}
@@ -588,6 +590,40 @@ def test_a_local_selected_ngram_run_exports_and_generates_without_lab(
     pytest.importorskip("transformers")
     same_decoding(result["transformers"])
     assert result["chat_template"] == run.dataset.template.to_jinja()
+
+
+@pytest.mark.parametrize("scaling", ["linear", "ntk", "yarn", "llama3"])
+def test_an_extended_rope_context_exports_to_the_same_llama_logits(
+    tmp_path: Path, scaling: str
+) -> None:
+    pytest.importorskip("transformers")
+    from test_training import config as tiny_config
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from klab.model.transformer import DenseLM
+    from klab.training.weight_export import llama_config, llama_tensors
+
+    settings = tiny_config(tmp_path).model_dump(mode="python")
+    settings["model"]["max_seq_len"] = 64
+    settings["attention"]["rope_scaling"] = {
+        "type": scaling,
+        "original_max_seq_len": 16,
+    }
+    run = RunConfig.model_validate(settings)
+    torch.manual_seed(0)
+    model = DenseLM(run.model, run.attention).eval()
+    with torch.no_grad():
+        # Sharp attention, so the logits depend on every rotary frequency.
+        for name, parameter in model.named_parameters():
+            if name.endswith(("q_proj.weight", "k_proj.weight")):
+                parameter.mul_(40)
+    hf = LlamaForCausalLM(LlamaConfig(**llama_config(run, ()))).eval()
+    hf.load_state_dict(llama_tensors(run, model.state_dict()), strict=False)
+    hf.tie_weights()
+    # Every position past the original 16 uses the scaled frequencies.
+    ids = torch.randint(0, run.model.vocab_size, (1, 64))
+    with torch.no_grad():
+        torch.testing.assert_close(hf(ids).logits, model(ids), rtol=1e-4, atol=1e-5)
 
 
 def test_byte_memory_is_refused_before_anything_is_written(tmp_path: Path) -> None:

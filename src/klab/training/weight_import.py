@@ -236,7 +236,10 @@ def _llama_config(source: Path) -> dict[str, Any]:
     if config["hidden_act"] != "silu":
         raise ValueError("only SiLU Llama SwiGLU is compatible")
     if config.get("rope_scaling") not in (None, {}):
-        raise ValueError("scaled rotary embeddings are incompatible with Model Lab")
+        raise ValueError(
+            "Llama import does not read rope_scaling; import an unscaled model "
+            "and extend it with attention.rope_scaling in a child stage"
+        )
     if config["hidden_size"] % config["num_attention_heads"]:
         raise ValueError("Llama hidden_size must be divisible by num_attention_heads")
     head_dim = config["hidden_size"] // config["num_attention_heads"]
@@ -294,6 +297,11 @@ def _llama_weights(
         float(config["rope_theta"]), attention.rope_base, rel_tol=0.0, abs_tol=0.0
     ):
         raise ValueError("Llama rope_theta differs from destination")
+    if attention.rope_scaling is not None:
+        raise ValueError(
+            "Llama import has no rope_scaling to match the destination's "
+            "attention.rope_scaling"
+        )
     shards = sorted(
         path
         for path in source.glob("*.safetensors")

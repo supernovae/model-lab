@@ -65,6 +65,36 @@ hidden width. `latent_dim` must divide evenly across heads. With
 `implementation: sdpa` it uses the fused kernel. `local_selected` also accepts
 `latent_dim`, combining latent keys and values with sparse selection.
 
+### Rotary positions
+
+Every built-in attention kind encodes positions with RoPE. `attention.rope_base`
+sets its base (10,000 by default). `attention.rope_scaling` rescales the
+frequencies for a context longer than the one the model was trained on:
+
+```yaml
+model:
+  max_seq_len: 32768
+attention:
+  rope_scaling:
+    type: yarn                  # linear, ntk, yarn or llama3
+    original_max_seq_len: 4096  # the context the parent was trained on
+```
+
+The factor is always `model.max_seq_len / original_max_seq_len`.
+
+| `type` | Schedule | Extra settings |
+| --- | --- | --- |
+| `linear` | Position interpolation: every frequency divided by the factor. | |
+| `ntk` | Static NTK-aware: the base raised to `base × factor^(d/(d−2))` for head width `d`. | |
+| `yarn` | YaRN: low frequencies interpolated and high ones kept, ramped by wavelength, with attention sharpened by `0.1 ln(factor) + 1`. | `beta_fast` (32), `beta_slow` (1) |
+| `llama3` | Llama 3.1's piecewise schedule by wavelength. | `low_freq_factor` (1), `high_freq_factor` (4) |
+
+Raising `rope_base` alone is adjusted base frequency (ABF), as in Code Llama and
+Qwen2.5. Each schedule follows Hugging Face `transformers`, so a Llama export
+writes the same `rope_scaling` and reproduces Lab's logits. Scaling needs the
+PyTorch engine, and is refused for attention kinds from another package. See
+[context length](training.md#context-length) for when to use it.
+
 ### Generation cache
 
 Generation with dense, grouped-query, sliding-window, latent and
