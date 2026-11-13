@@ -1324,7 +1324,9 @@ def _train_impl(
             + (
                 (
                     {
-                        "requested": "activation_offload",
+                        "requested": "offload",
+                        "activation_offload": config.runtime.memory.activation_offload.enabled,
+                        "optimizer_state_offload": config.optimizer.state_offload,
                         "effective": True,
                         "reason": "conservative host headroom checked before model allocation",
                         "host_budget": offload_headroom,

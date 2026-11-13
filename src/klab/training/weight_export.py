@@ -1,13 +1,18 @@
-"""Export a checkpoint as a Hugging Face Llama directory.
+"""Export a checkpoint as a Hugging Face directory.
 
-The inverse of ``weights import --format hf_llama_safetensors``: the same
-tensor names, the same rotary-coordinate permutation and the same config
-fields, so an exported directory imports back to identical weights and loads
-with ``transformers.LlamaForCausalLM``. The tokenizer is copied beside the
-weights with the run's chat template in the form ``apply_chat_template`` reads.
-
-Only the architecture Llama can express exports: dense attention (grouped
+``hf_llama_safetensors`` is the inverse of ``weights import --format
+hf_llama_safetensors``: the same tensor names, the same rotary-coordinate
+permutation and the same config fields, so an exported directory imports back
+to identical weights and loads with ``transformers.LlamaForCausalLM``. Only the
+architecture Llama can express exports this way: dense attention (grouped
 key/value heads included), dense SwiGLU feed-forward and no memory.
+
+``hf_remote_code`` exports any other built-in architecture with Lab's decoder
+modules beside the weights (see :mod:`klab.training.remote_code`). Without a
+format, a Llama-shaped run exports as Llama and any other as remote code.
+
+Either way the tokenizer is copied beside the weights with the run's chat
+template in the form ``apply_chat_template`` reads.
 """
 
 from __future__ import annotations
@@ -23,10 +28,20 @@ from safetensors.torch import save_file
 
 from klab.config.models import RunConfig
 from klab.data.tokenizer import SPECIAL_TOKENS, load_tokenizer
-from klab.training.manifest import canonical_json, sha256_file
+from klab.training.manifest import canonical_json, sha256_file, source_identity
 from klab.training.objectives import read_checkpoint
+from klab.training.remote_code import (
+    EXPORT_FORMAT as REMOTE_CODE_FORMAT,
+)
+from klab.training.remote_code import (
+    remote_code_config,
+    remote_code_refusal,
+    remote_code_tensors,
+    vendor_modules,
+)
 
 EXPORT_FORMAT = "hf_llama_safetensors"
+EXPORT_FORMATS = (EXPORT_FORMAT, REMOTE_CODE_FORMAT)
 _BLOCK_NAMES = {
     "norm1.weight": "input_layernorm.weight",
     "norm2.weight": "post_attention_layernorm.weight",
@@ -40,7 +55,7 @@ _BLOCK_NAMES = {
 }
 
 
-def _require_llama_architecture(config: RunConfig) -> None:
+def _llama_refusal(config: RunConfig) -> str | None:
     model, attention = config.model, config.attention
     if (
         config.attention_kinds != {"dense"}
@@ -48,14 +63,16 @@ def _require_llama_architecture(config: RunConfig) -> None:
         or model.memory != "none"
         or attention.window_size is not None
     ):
-        raise ValueError(
+        return (
             "Llama export requires dense attention, dense SwiGLU and no memory; "
             "this run uses "
             f"attention {sorted(config.attention_kinds)}, "
-            f"feed-forward {sorted(config.ffn_kinds)}, memory {model.memory}"
+            f"feed-forward {sorted(config.ffn_kinds)}, memory {model.memory}; "
+            f"--format {REMOTE_CODE_FORMAT} exports it with Lab's model code"
         )
     if (model.hidden_dim // model.num_heads) % 2:
-        raise ValueError("Llama export requires an even attention head width")
+        return "Llama export requires an even attention head width"
+    return None
 
 
 def llama_config(config: RunConfig, stop_ids: tuple[int, ...]) -> dict[str, Any]:
@@ -125,10 +142,10 @@ def llama_tensors(
 
 
 def export_weights(
-    checkpoint: Path, output: Path, *, export_format: str = EXPORT_FORMAT
+    checkpoint: Path, output: Path, *, export_format: str | None = None
 ) -> dict[str, Any]:
     """Write ``checkpoint`` to a new directory ``output`` and return its receipt."""
-    if export_format != EXPORT_FORMAT:
+    if export_format is not None and export_format not in EXPORT_FORMATS:
         raise ValueError(f"unsupported export format: {export_format}")
     from klab.evaluation.quantization import MANIFEST
 
@@ -142,18 +159,54 @@ def export_weights(
     if output.exists():
         raise FileExistsError(f"refusing to overwrite export destination: {output}")
     config, snapshot, manifest = read_checkpoint(Path(checkpoint), role="export")
-    _require_llama_architecture(config)
+    llama_refusal = _llama_refusal(config)
+    if export_format is None:
+        export_format = REMOTE_CODE_FORMAT if llama_refusal else EXPORT_FORMAT
+    refusal = (
+        llama_refusal if export_format == EXPORT_FORMAT else remote_code_refusal(config)
+    )
+    if refusal:
+        raise ValueError(f"cannot export run {manifest['run_id']}: {refusal}")
     run_root = Path(manifest["run_root"])
     tokenizer = load_tokenizer(run_root / "tokenizer.json")
     if [tokenizer.token_to_id(token) for token in SPECIAL_TOKENS] != [0, 1, 2, 3]:
         raise ValueError("tokenizer special token IDs are not the required 0..3")
     template = config.dataset.template
-    tensors = llama_tensors(config, dict(snapshot.model))
+    stop_ids = template.stop_token_ids(tokenizer)
+    code: dict[str, tuple[str, str]] = {}
+    if export_format == EXPORT_FORMAT:
+        tensors = llama_tensors(config, dict(snapshot.model))
+        model_config = llama_config(config, stop_ids)
+    else:
+        source_sha256 = str(source_identity()["sha256"])
+        tensors = remote_code_tensors(config, dict(snapshot.model))
+        model_config = remote_code_config(
+            config,
+            stop_ids,
+            {
+                "lab_source_sha256": source_sha256,
+                "run_id": manifest["run_id"],
+                "checkpoint_sha256": snapshot.checkpoint_sha256,
+                "tokenizer_sha256": sha256_file(run_root / "tokenizer.json"),
+            },
+        )
+        code = vendor_modules(source_sha256)
+    generation: dict[str, Any] = {
+        key: value for key, value in model_config.items() if key.endswith("_token_id")
+    }
+    if code:
+        # klab generate never emits these; suppressing them keeps greedy
+        # decoding token-for-token the same.
+        generation["suppress_tokens"] = sorted(
+            SPECIAL_TOKENS.index(name) for name in ("<pad>", "<unk>", "<bos>")
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
     staged = Path(tempfile.mkdtemp(prefix=f".{output.name}.export.", dir=output.parent))
     try:
         save_file(tensors, staged / "model.safetensors", metadata={"format": "pt"})
         shutil.copyfile(run_root / "tokenizer.json", staged / "tokenizer.json")
+        for name, (_, source) in code.items():
+            (staged / name).write_text(source, encoding="utf-8")
         special = dict(
             zip(
                 ("pad_token", "unk_token", "bos_token", "eos_token"),
@@ -162,14 +215,8 @@ def export_weights(
             )
         )
         documents: dict[str, dict[str, Any]] = {
-            "config.json": llama_config(config, template.stop_token_ids(tokenizer)),
-            "generation_config.json": {
-                key: value
-                for key, value in llama_config(
-                    config, template.stop_token_ids(tokenizer)
-                ).items()
-                if key.endswith("_token_id")
-            },
+            "config.json": model_config,
+            "generation_config.json": generation,
             "tokenizer_config.json": {
                 "tokenizer_class": "PreTrainedTokenizerFast",
                 "model_max_length": config.model.max_seq_len,
@@ -184,7 +231,7 @@ def export_weights(
                 json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
             )
         receipt = {
-            "format": EXPORT_FORMAT,
+            "format": export_format,
             "run_id": manifest["run_id"],
             "checkpoint_sha256": snapshot.checkpoint_sha256,
             "chat_template": template.name,
@@ -193,6 +240,8 @@ def export_weights(
                 path.name: sha256_file(path) for path in sorted(staged.iterdir())
             },
         }
+        if code:
+            receipt["code"] = {name: module for name, (module, _) in code.items()}
         (staged / "klab_export.json").write_bytes(canonical_json(receipt) + b"\n")
         staged.replace(output)
     finally:

@@ -2181,14 +2181,16 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     weight_import.set_defaults(handler=_weights_import)
     weight_export = weight_commands.add_parser(
         "export",
-        help="Write a checkpoint as a Hugging Face Llama directory",
+        help="Write a checkpoint as a Hugging Face directory",
     )
     weight_export.add_argument(
         "checkpoint", help="run directory, checkpoint generation or latest.json"
     )
     weight_export.add_argument("output", help="new directory to create")
     weight_export.add_argument(
-        "--format", default="hf_llama_safetensors", choices=("hf_llama_safetensors",)
+        "--format",
+        choices=("hf_llama_safetensors", "hf_remote_code"),
+        help="default: Llama when the architecture is Llama-shaped, else remote code",
     )
     weight_export.set_defaults(handler=_weights_export)
     weight_quantize = weight_commands.add_parser(

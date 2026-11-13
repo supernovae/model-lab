@@ -40,14 +40,14 @@ def declaration(**updates):
     }
 
 
-def inventory(source, **kwargs):
+def inventory(repo_id, revision, config, splits, **kwargs):
     return {
-        "repo_id": source.repo_id,
-        "revision": source.revision,
+        "repo_id": repo_id,
+        "revision": revision,
         "loader": "parquet",
         "files": {
             split: [{"path": f"data/{split}.parquet", "size": 42, "blob_id": "b" * 40}]
-            for split in source.splits
+            for split in splits
         },
     }
 
@@ -58,7 +58,7 @@ def offline(monkeypatch):
         "train": [{"text": "train one"}, {"text": "train two"}],
         "validation": [{"text": "validation one"}],
     }
-    monkeypatch.setattr(sources, "_hub_identity", inventory)
+    monkeypatch.setattr(sources, "hub_identity", inventory)
     monkeypatch.setattr(
         sources, "stream_source", lambda source, split, cache, **kw: iter(rows[split])
     )
@@ -296,8 +296,9 @@ def test_interrupted_export_replays_without_duplicate_output(
     ],
 )
 def test_inventory_rejects_external_or_unpinned_files(url):
+    source = sources.DatasetSource.model_validate(declaration())
     with pytest.raises(ValueError):
-        sources._hub_file(sources.DatasetSource.model_validate(declaration()), url)
+        sources._hub_file(source.repo_id, source.revision, url)
 
 
 def test_hub_lock_resolves_file_inventory_and_stream_uses_only_it(
@@ -330,12 +331,14 @@ def test_hub_lock_resolves_file_inventory_and_stream_uses_only_it(
             config=SimpleNamespace(data_files=files),
         ),
     )
-    identity = sources._hub_identity(source)
+    identity = sources.hub_identity(
+        source.repo_id, source.revision, source.config, source.splits
+    )
     assert identity["files"]["train"][0]["path"] == "data/training.parquet"
     assert identity["files"]["train"][0]["lfs_sha256"] == "c" * 64
 
-    def load(files, options, selected_source, cache, auth):
-        assert selected_source == source
+    def load(files, options, repo_id, cache, auth):
+        assert repo_id == source.repo_id
         assert cache == tmp_path
         assert files == [
             f"https://huggingface.co/datasets/{source.repo_id}/resolve/{source.revision}/data/training.parquet"
@@ -391,7 +394,7 @@ def test_parquet_reads_synchronously_and_closes_on_bounded_stop(
     monkeypatch.setattr("datasets.utils.file_utils.xopen", open_file)
     source = sources.DatasetSource.model_validate(declaration())
     stream = sources._stream_parquet(
-        ["first", "second"], {"batch_size": 2}, source, tmp_path, {}
+        ["first", "second"], {"batch_size": 2}, source.repo_id, tmp_path, {}
     )
     if bounded:
         assert next(stream) == {"text": "row 0"}
@@ -422,7 +425,7 @@ def test_parquet_preserves_filter_projection_and_feature_cast(tmp_path):
         "features": Features({"text": Value("string")}).to_dict(),
     }
     assert list(
-        sources._stream_parquet([str(path)], options, source, tmp_path, {})
+        sources._stream_parquet([str(path)], options, source.repo_id, tmp_path, {})
     ) == [{"text": "2"}, {"text": "3"}]
 
 
@@ -444,7 +447,7 @@ def test_parquet_caps_decoder_batches(tmp_path, monkeypatch, declared_batch_size
     stream = sources._stream_parquet(
         [str(path)],
         {"batch_size": declared_batch_size},
-        sources.DatasetSource.model_validate(declaration()),
+        sources.DatasetSource.model_validate(declaration()).repo_id,
         tmp_path,
         {},
     )
@@ -477,7 +480,7 @@ path = Path(sys.argv[1])
 source = DatasetSource.model_validate(json.loads(sys.argv[2]))
 with patch('datasets.utils.file_utils.xopen',
            side_effect=lambda *a, **k: io.BytesIO(path.read_bytes())):
-    stream = _stream_parquet([str(path)], {}, source, path.parent, {})
+    stream = _stream_parquet([str(path)], {}, source.repo_id, path.parent, {})
     assert next(stream) == {'text': 'row'}
     stream.close()
 print('complete', flush=True)

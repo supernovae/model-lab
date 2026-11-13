@@ -67,7 +67,13 @@ Limits today:
   defaults.
 - With training retained for backward, each layer holds its gathered keys and
   values: about twice dense fused attention's memory per token on XPU. Enable
-  activation checkpointing for deep models or very long context.
+  activation checkpointing for deep models or very long context, with
+  [`strategy: transformer_block_and_attention`](memory.md#activation-recomputation)
+  at tens of thousands of tokens.
+- Attention runs through PyTorch's unfused masked attention over gathered keys:
+  at 8,192 tokens on an Arc Pro B70 it trains at under half of dense fused
+  attention's speed. A fused selected-block kernel for XPU and CUDA does not
+  exist yet.
 - At long context the output head, not attention, can be the largest tensor:
   set [`runtime.output_head_chunk_tokens`](memory.md#chunked-output-head).
 - Measured on one accelerator type (Intel Arc Pro B70, XPU). CUDA is unmeasured.

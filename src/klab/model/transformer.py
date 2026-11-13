@@ -3,20 +3,14 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import torch
 from torch import Tensor, nn
 
 from klab.components import build as build_component
-from klab.config.models import AttentionConfig, ModelConfig
-from klab.engram.semantic import (
-    SemanticMemoryAdapter,
-    SemanticQueryBatch,
-    SemanticRetriever,
-)
 from klab.model.cache import (
     AttentionKVCache,
     GenerationCache,
@@ -26,7 +20,17 @@ from klab.model.memory import build_token_memory
 from klab.model.moe import diagnostic_writes_enabled, suppress_diagnostic_writes
 from klab.model.norm import RMSNorm
 
-SemanticQueryInput = SemanticQueryBatch | Mapping[str, SemanticQueryBatch] | None
+if TYPE_CHECKING:
+    # Semantic packs attach at run time and are imported only when one is used,
+    # so the decoder's own import closure stays inside klab.model.
+    from klab.config.models import AttentionConfig, ModelConfig
+    from klab.engram.semantic import (
+        SemanticMemoryAdapter,
+        SemanticQueryBatch,
+        SemanticRetriever,
+    )
+
+    SemanticQueryInput = SemanticQueryBatch | Mapping[str, SemanticQueryBatch] | None
 
 
 def _offers(module: nn.Module, method: str) -> bool:
@@ -175,6 +179,9 @@ class DenseLM(nn.Module):
         self._forward_block_calls = 0
         self._cache_owner = object()
         self._recomputed_block_calls = 0
+        # Called before every block runs, including its recomputation during
+        # backward. Training uses it to stop an update that outgrows the device.
+        self.before_block: Callable[[], None] | None = None
 
     _initialize = staticmethod(initialize_module)
 
@@ -243,6 +250,8 @@ class DenseLM(nn.Module):
         min_score: float | None = None,
     ) -> SemanticMemoryAdapter:
         """Attach one verified semantic pack with independent site ownership."""
+        from klab.engram.semantic import SemanticMemoryAdapter, SemanticRetriever
+
         if site not in ("embedding", "after_block", "final"):
             raise ValueError(f"unsupported semantic injection site: {site!r}")
         if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", name):
@@ -294,6 +303,8 @@ class DenseLM(nn.Module):
             if semantic_queries is not None:
                 raise ValueError("semantic queries were supplied without an attachment")
             return {}
+        from klab.engram.semantic import SemanticQueryBatch
+
         if semantic_queries is None:
             raise ValueError("attached semantic memory requires explicit query vectors")
         if isinstance(semantic_queries, SemanticQueryBatch):
@@ -378,6 +389,8 @@ class DenseLM(nn.Module):
         x = self._apply_semantic_site(x, semantic_query_map, site="embedding")
         auxiliary_loss = x.new_zeros(())
         for block_index, block in enumerate(self.blocks):
+            if self.before_block is not None:
+                self.before_block()
             if activation_checkpointing and self.training and torch.is_grad_enabled():
 
                 def run_block(
@@ -387,6 +400,8 @@ class DenseLM(nn.Module):
                         self._forward_block_calls += 1
                     else:
                         self._recomputed_block_calls += 1
+                        if self.before_block is not None:
+                            self.before_block()
                     return current.forward_with_aux(
                         hidden,
                         valid_target_mask=valid_target_mask,

@@ -61,6 +61,15 @@ def test_markdown_ancestry_fences_and_raw_evidence() -> None:
         == docs[1][0]["text"].encode()
     )
     assert docs[2][0]["content_sha256"] != docs[1][0]["content_sha256"]
+    # Declared whole-file Markdown is one document; the default leaves the
+    # source declaration's serialized identity unchanged.
+    assert "markdown_documents" not in source.model_dump(mode="json")
+    whole = SourceDeclaration.model_validate(
+        {**source.model_dump(mode="json"), "markdown_documents": "files"}
+    )
+    [(document, span)] = _records_for_file(raw, "any.md", whole, "a" * 64)
+    assert document["text"] == raw.decode() and document["section_path"] == []
+    assert (span["line_start"], span["line_end"]) == (1, 8)
 
 
 def test_raw_spans_count_physical_lf_lines_not_unicode_separators() -> None:

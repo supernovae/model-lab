@@ -207,14 +207,6 @@ def test_mps_inventory_does_not_offer_rejected_fp16(monkeypatch):
         runtime.validate_runtime(_config(backend="mps", precision="fp16"))
 
 
-def test_state_offload_stays_explicitly_unsupported() -> None:
-    config = _config()
-    config.optimizer.state_offload = True
-
-    with pytest.raises(ValueError, match="state_offload is deferred"):
-        runtime.validate_runtime(config)
-
-
 def test_bf16_checkpoint_probe_reports_only_exercised_precision_and_features():
     requested = _config(precision="bf16", checkpointing=True)
     info = runtime.validate_runtime(requested)

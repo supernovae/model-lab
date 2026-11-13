@@ -143,6 +143,132 @@ def make_optimizer(
     )
 
 
+# Parameter bytes whose optimizer state is on the device at once during an
+# offloaded step. A larger tensor is streamed alone.
+STATE_OFFLOAD_BUCKET_BYTES = 128 * 1024 * 1024
+
+
+def offloaded_state_device_bytes(state_bytes: int, largest_parameter_bytes: int) -> int:
+    """Upper bound on optimizer state resident on the device during one bucket.
+
+    AdamW and Adafactor keep at most two FP32 slots the size of a parameter, so
+    one bucket holds at most twice its parameter bytes.
+    """
+    return min(
+        state_bytes, 2 * max(STATE_OFFLOAD_BUCKET_BYTES, largest_parameter_bytes)
+    )
+
+
+class OptimizerStateOffload:
+    """Keep optimizer state in host memory and stream it per bucket for a step.
+
+    Between steps every non-scalar state tensor lives in host memory (pinned on
+    CUDA and XPU). ``step`` replaces the optimizer's own: for each bucket of
+    parameters it copies their state to the device, runs the unchanged PyTorch
+    update on that bucket alone and copies the state back into the same host
+    buffers. Scalar step counters stay where PyTorch keeps them. The update is
+    the optimizer's own single-tensor arithmetic, so it matches a resident-state
+    run; only where the state waits between steps changes.
+    """
+
+    def __init__(self, optimizer: torch.optim.Optimizer, device: torch.device) -> None:
+        if any(
+            group.get("foreach") or group.get("fused")
+            for group in optimizer.param_groups
+        ):
+            raise ValueError("optimizer state offload needs single-tensor updates")
+        self.optimizer = optimizer
+        self.device = device
+        self.pinned = device.type in {"cuda", "xpu"}
+        self._resident_step = optimizer.step
+        # GradScaler and the engine both call ``optimizer.step``.
+        optimizer.step = self.step  # type: ignore[method-assign]
+        self.to_host()
+
+    def _host(self, value: torch.Tensor) -> torch.Tensor:
+        host = torch.empty(
+            value.shape, dtype=value.dtype, device="cpu", pin_memory=self.pinned
+        )
+        host.copy_(value)
+        return host
+
+    def to_host(self) -> None:
+        """Move any device-resident state, for example after a checkpoint load."""
+        for values in self.optimizer.state.values():
+            for key, value in values.items():
+                if (
+                    isinstance(value, torch.Tensor)
+                    and value.ndim
+                    and (
+                        value.device.type != "cpu"
+                        or (self.pinned and not value.is_pinned())
+                    )
+                ):
+                    values[key] = self._host(value)
+
+    def _buckets(
+        self, groups: list[list[torch.nn.Parameter]]
+    ) -> list[tuple[int, list[torch.nn.Parameter]]]:
+        buckets: list[tuple[int, list[torch.nn.Parameter]]] = []
+        for index, parameters in enumerate(groups):
+            bucket: list[torch.nn.Parameter] = []
+            size = 0
+            for parameter in parameters:
+                nbytes = parameter.numel() * parameter.element_size()
+                if bucket and size + nbytes > STATE_OFFLOAD_BUCKET_BYTES:
+                    buckets.append((index, bucket))
+                    bucket, size = [], 0
+                bucket.append(parameter)
+                size += nbytes
+            if bucket:
+                buckets.append((index, bucket))
+        return buckets
+
+    def step(self, closure: object = None) -> None:
+        if closure is not None:
+            raise ValueError("optimizer state offload does not take a closure")
+        state = self.optimizer.state
+        groups = self.optimizer.param_groups
+        saved = [group["params"] for group in groups]
+        try:
+            for group in groups:
+                group["params"] = []
+            for index, bucket in self._buckets(saved):
+                hosts: dict[tuple[int, str], torch.Tensor] = {}
+                for parameter in bucket:
+                    values = state.get(parameter, {})
+                    for key, value in values.items():
+                        if isinstance(value, torch.Tensor) and value.ndim:
+                            hosts[(id(parameter), key)] = value
+                            values[key] = value.to(
+                                self.device, non_blocking=self.pinned
+                            )
+                groups[index]["params"] = bucket
+                self._resident_step()
+                groups[index]["params"] = []
+                for parameter in bucket:
+                    values = state[parameter]
+                    for key, value in values.items():
+                        if not isinstance(value, torch.Tensor) or not value.ndim:
+                            continue
+                        host = hosts.get((id(parameter), key))
+                        if host is None:
+                            # State created by this first step gets its buffer.
+                            host = torch.empty(
+                                value.shape,
+                                dtype=value.dtype,
+                                device="cpu",
+                                pin_memory=self.pinned,
+                            )
+                        # Stream-ordered: the next read of ``host`` is either a
+                        # copy on the same stream or follows a device sync.
+                        host.copy_(value, non_blocking=self.pinned)
+                        values[key] = host
+        finally:
+            for group, parameters in zip(groups, saved, strict=True):
+                group["params"] = parameters
+
+
 def make_adafactor(
     model: nn.Module,
     learning_rate: float,

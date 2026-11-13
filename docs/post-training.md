@@ -43,7 +43,8 @@ stage's own state; the parent is not loaded again as the model.
 `dataset.source: local_chat` reads JSONL conversations, one per line. Paths are
 relative to the config; train and validation must be separate files, and a
 conversation that appears in both is refused. Use the same `dataset` section in
-the tokenizer config and the run config.
+the tokenizer config and the run config. To build these files from a public chat
+or instruction dataset, see [converting rows](datasets.md#convert-chat-instruction-and-multi-field-rows).
 
 ```yaml
 dataset:
@@ -232,19 +233,67 @@ seeds before calling it a result.
 klab weights export work/runs/prefer exported/prefer
 ```
 
-writes a directory `transformers.LlamaForCausalLM` reads: `config.json`,
-`model.safetensors`, the tokenizer with the run's chat template as its
-`chat_template`, generation settings that stop at the template's end-of-turn
-token, and `klab_export.json` with the source checkpoint digest and file
-hashes. It is the inverse of
+writes a new directory with `model.safetensors`, `config.json`, the tokenizer
+with the run's chat template as its `chat_template`, generation settings that
+stop at the template's end-of-turn token, and `klab_export.json` with the
+source checkpoint digest and file hashes. `--format` picks one of two layouts;
+without it, a run Llama can express exports as Llama and any other run as
+remote code.
+
+**`hf_llama_safetensors`** is for dense attention (grouped key/value heads
+included), dense SwiGLU feed-forward and no memory. The directory loads with
+`transformers.LlamaForCausalLM` and needs no Lab code. It is the inverse of
 `klab weights import --format hf_llama_safetensors`, and a test imports an
 exported directory back to bit-identical weights.
 
-Only what Llama can express exports: dense attention (grouped key/value heads
-included), dense SwiGLU feed-forward, no memory. Other architectures are
-refused with the reason. The export holds float weights; a quantized artifact
-(below) is refused, so export its source checkpoint. GGUF conversion is not in
-Lab; run it on the exported directory with the tools built for that format.
+**`hf_remote_code`** is for every other built-in architecture: `local_selected`
+(with `latent_dim` and `selector: learned`), `block_sparse`, `mla`,
+`sliding_window`, MoE feed-forward, `ngram` memory at any injection site and
+per-block `model.layers`. The directory carries Lab's own decoder modules
+(attention, memory, cache, the model) as flat `klab_*.py` files, with imports
+rewritten to point at each other, plus a thin `transformers` wrapper.
+`config.json` names that wrapper in `auto_map`, so
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model = AutoModelForCausalLM.from_pretrained("exported/run", trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained("exported/run")
+```
+
+loads it without Lab installed. `config.json` also states the architecture
+(`klab_architecture`: the model and attention settings, and each block's when
+`model.layers` overrides some) and its origin (`klab_source`: the Lab source
+digest the code was copied from, the run, the checkpoint digest and the
+tokenizer digest). Without `transformers`, `klab_model_export_loader.py` builds
+and loads the model with only Torch and safetensors; import the directory as a
+package and call `load_model(directory)`.
+
+The wrapper decodes with Lab's own incremental cache and follows
+`klab generate`'s context rule: it reads the newest `max_position_embeddings`
+tokens and starts a new cache when one fills. `generation_config.json`
+suppresses `<pad>`, `<unk>` and `<bos>`, as `klab generate` does, so greedy
+`model.generate(ids, do_sample=False)` gives the same tokens as
+`klab generate --temperature 0` on the source checkpoint. A test checks this,
+logits included, in an interpreter that cannot import Lab. Batches with
+padding are refused: generate one prompt per call.
+
+Remote code refuses, with the reason:
+
+- `byte` memory, whose addresses Lab computes from the tokenizer's bytes
+  outside the model;
+- `portable` memory, which reads an Engram package outside the checkpoint;
+- attention, feed-forward or memory kinds from another package;
+- a checkpoint whose tensors the decoder does not define, such as attached
+  semantic memory.
+
+The export also refuses if the copied code would import anything outside the
+decoder's modules, the standard library, Torch, safetensors and
+`transformers`.
+
+Both formats hold float weights: a quantized artifact (below) is refused, so
+export its source checkpoint. GGUF conversion is not in Lab; run it on the
+exported directory with the tools built for that format.
 
 ## Quantize weights
 
