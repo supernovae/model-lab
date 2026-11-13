@@ -32,7 +32,11 @@ from klab.corpus.provenance import (
     validate_lineage,
     verification,
 )
-from klab.corpus.rights import reported_spdx_expression, resolve_file_rights
+from klab.corpus.rights import (
+    FILE_ADMISSION_KINDS,
+    reported_spdx_expression,
+    resolve_file_rights,
+)
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
@@ -244,8 +248,8 @@ def _prepare_file(
                 ".jsonl"
             ):
                 raise ValueError("streamed record admission requires an HF JSONL shard")
-        elif source.kind != "git":
-            raise ValueError("file admission requires a Git source")
+        elif source.kind not in FILE_ADMISSION_KINDS:
+            raise ValueError("file admission requires a file-admitted source")
         if decision != record_admission["rights"]:
             raise ValueError("admitted shard file rights differ from verified policy")
     identity = _receipt_identity(build_id, source, snapshot_sha, file)

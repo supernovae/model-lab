@@ -25,6 +25,7 @@ from klab.corpus.project import (
     ROW_SOURCE_KINDS,
     ReleaseDeclaration,
     release_declaration_payload,
+    source_language,
 )
 from klab.corpus.provenance import (
     DERIVED_ORIGIN,
@@ -39,6 +40,7 @@ from klab.corpus.provenance import (
     verification,
 )
 from klab.corpus.rights import (
+    FILE_ADMISSION_KINDS,
     FileRights,
     reported_spdx_expression,
     resolve_file_rights,
@@ -708,7 +710,7 @@ def _records_for_file(
                 else Path(name).name
             ),
             "section_path": ancestry,
-            "language": "en",
+            "language": source_language(source),
             "text": content,
             "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
             "raw_content_sha256": raw_content_sha,
@@ -1497,7 +1499,7 @@ def _uses_disk_lm_builder(project: Any, transforms: list[Any]) -> bool:
                 project.release.record_admission is not None
                 and project.release.fraction is None
                 and all(
-                    source.kind in {"huggingface_dataset", "git"}
+                    source.kind in {"huggingface_dataset", *FILE_ADMISSION_KINDS}
                     for source in project.sources
                 )
             )

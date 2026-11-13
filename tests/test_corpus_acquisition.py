@@ -813,19 +813,23 @@ def _tar_gz(members: list[tuple[str, bytes | None, str | None]]) -> bytes:
     return buffer.getvalue()
 
 
+_ARCHIVE_RIGHTS = {
+    "training_eligibility": "eligible_with_obligations",
+    "redistribution_mode": "metadata_reconstruction_only",
+    "spdx_expression": "BSD-3-Clause",
+    "license_references": ["https://trustee.ietf.org/license-info"],
+    "notices": ["Retain the IETF Trust notice"],
+}
+
+
 def _archive_recipe(tmp_path: Path, body: bytes, *, budget: bool = False) -> Path:
     recipe = _fixture(
         tmp_path,
         kind="archive",
         uri=_RFC_URL,
         revision="2026-11-01",
-        license="LicenseRef-IETF-Trust",
-        rights={
-            "training_eligibility": "eligible_with_obligations",
-            "redistribution_mode": "metadata_reconstruction_only",
-            "license_references": ["https://trustee.ietf.org/license-info"],
-            "notices": ["Retain the IETF Trust copyright notice"],
-        },
+        license="BSD-3-Clause",
+        rights=_ARCHIVE_RIGHTS,
         acquisition={
             "expected_sha256": hashlib.sha256(body).hexdigest(),
             "format": "tar.gz",
@@ -853,10 +857,23 @@ def _archive_recipe(tmp_path: Path, body: bytes, *, budget: bool = False) -> Pat
     return recipe
 
 
-def test_archive_plan_step_and_snapshot_one_document_per_member(
+def test_archive_plan_step_snapshot_and_reviewed_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    included = {"rfc1.txt": b"RFC 1 text\n", "rfc2.txt": b"RFC 2 text\n"}
+    from klab.corpus.admission_draft import draft_admission_manifest
+    from klab.corpus.pipeline import build
+    from klab.corpus.release import freeze, verify_release
+    from klab.corpus.split_freeze import freeze_splits
+    from klab.corpus.split_inventory import write_split_inventory
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "settings"))
+    included = {
+        f"rfc{number}.txt": (
+            f"Request for Comments {number} defines protocol behaviour {number}. "
+            "Implementations follow each numbered step and check the result.\n"
+        ).encode()
+        for number in (1, 2, 4, 5)
+    }
     body = _tar_gz(
         [(name, data, None) for name, data in included.items()]
         + [
@@ -865,8 +882,9 @@ def test_archive_plan_step_and_snapshot_one_document_per_member(
             ("latest", None, "rfc2.txt"),  # never selected, never materialized
         ]
     )
-    project = load_project(_archive_recipe(tmp_path, body, budget=True))
-    root = tmp_path / "work"
+    recipe = _archive_recipe(tmp_path, body, budget=True)
+    project = load_project(recipe)
+    root = tmp_path  # the recipe, and so its frozen splits, lie in the work root
     ledger = root / "corpora/example/transport-budget.sqlite"
     TransportBudget.initialize(ledger, project)
     calls = _serve_pinned(monkeypatch, {_RFC_URL: body})
@@ -882,11 +900,82 @@ def test_archive_plan_step_and_snapshot_one_document_per_member(
         for name, data in included.items()
     ]
     assert manifest["retrieval"]["archive_sha256"] == hashlib.sha256(body).hexdigest()
-    assert manifest["declaration"]["rights"]["notices"] == [
-        "Retain the IETF Trust copyright notice"
-    ]
+    assert manifest["declaration"]["rights"] == {
+        **project.sources[0].rights.model_dump(mode="json"),
+        **_ARCHIVE_RIGHTS,
+    }
     assert TransportBudget(ledger, project).receipt()["source_charged"] == len(body)
     assert acquire(project, root, offline=True) == lock
+
+    # Reviewed path: one admission decision and one family per archive member.
+    policy = recipe.parent / "policy.md"
+    policy.write_text("Reviewed RFC fixture policy.\n", encoding="utf-8")
+    template = tmp_path / "template.json"
+    template.write_text(
+        json.dumps(
+            {
+                "policy_id": "rfc-fixture",
+                "policy_sha256": hashlib.sha256(policy.read_bytes()).hexdigest(),
+                "sources": [
+                    {
+                        "source_id": "one",
+                        "license_label": "BSD-3-Clause local research",
+                        "rights": _ARCHIVE_RIGHTS,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    draft = draft_admission_manifest(
+        project, root, template, policy, root / "admission.json"
+    )
+    assert draft["counts"] == {"qualify": 4, "exclude": 0, "quarantine": 0}
+    admission = recipe.parent / "admission.json"
+    admission.write_bytes((root / "admission.json").read_bytes())
+    release = yaml.safe_load((recipe.parent / "release.yaml").read_text())
+    release["record_admission"] = {
+        "path": admission.name,
+        "sha256": hashlib.sha256(admission.read_bytes()).hexdigest(),
+    }
+    _yaml(recipe.parent / "release.yaml", release)
+    project = load_project(recipe)
+    inventory = root / "inventory.jsonl"
+    write_split_inventory(project, root, inventory)
+    hints = [json.loads(line)["family_hint"] for line in inventory.open()]
+    assert sorted(hints) == [f"archive-member:one:{name}" for name in included]
+    clusters = root / "clusters.json"
+    clusters.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "inventory_sha256": hashlib.sha256(inventory.read_bytes()).hexdigest(),
+                "seed": "rfc-fixture",
+                "source_strata": {"one": "technical_docs"},
+                "split_weights": {"train": 2, "validation": 1, "test": 1},
+                "merges": [],
+                "reviewer": "Fixture reviewer",
+                "reviewed_on": "2026-11-12",
+            }
+        ),
+        encoding="utf-8",
+    )
+    freeze_splits(project, root, inventory, clusters, recipe.parent / "frozen.yaml")
+    config = yaml.safe_load(recipe.read_text(encoding="utf-8"))
+    config.update(splits="frozen.yaml", transforms=["transforms/lm.yaml"])
+    _yaml(recipe, config)
+    _yaml(
+        recipe.parent / "transforms/lm.yaml",
+        {
+            "id": "lm",
+            "version": "1",
+            "kind": "lm_text",
+            "parameters": {},
+            "inputs": ["one"],
+        },
+    )
+    published = freeze(build(load_project(recipe), root, offline=True), root)
+    assert verify_release(published)["release_id"] == published.name
 
 
 @pytest.mark.parametrize(
@@ -994,10 +1083,20 @@ def test_pdf_text_is_reproducible_from_pinned_bytes(
             verify_snapshot(snapshot)
 
 
+@pytest.mark.parametrize(
+    ("language", "article"),
+    [
+        ("en", "Probe, sense, respond. '''Complex'''."),
+        # Non-English sites keep their own script and label documents with it.
+        ("ru", "Исследуй, распознай, реагируй."),
+    ],
+)
 def test_mediawiki_dump_of_any_site_yields_one_row_per_article(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, language: str, article: str
 ) -> None:
     import gzip
+
+    from klab.corpus.pipeline import _records_for_file
 
     url = "https://cynefin.example.org/dumps/cynefinwiki-20261101.xml.gz"
     export = "http://www.mediawiki.org/xml/export-0.10/"
@@ -1012,9 +1111,9 @@ def test_mediawiki_dump_of_any_site_yields_one_row_per_article(
 
     body = gzip.compress(
         (
-            f'<mediawiki xmlns="{export}" xml:lang="en"><siteinfo>'
+            f'<mediawiki xmlns="{export}" xml:lang="{language}"><siteinfo>'
             "<sitename>Cynefin</sitename><dbname>cynefinwiki</dbname></siteinfo>"
-            + page(1, 0, "Complex domain", "Probe, sense, respond. '''Complex'''.")
+            + page(1, 0, "Complex domain", article)
             + page(2, 4, "Cynefin:About", "Project page outside the namespaces.")
             + page(3, 0, "Chaos", "#REDIRECT [[Chaotic domain]]", "<redirect />")
             + "</mediawiki>"
@@ -1030,7 +1129,7 @@ def test_mediawiki_dump_of_any_site_yields_one_row_per_article(
             "expected_sha256": hashlib.sha256(body).hexdigest(),
             "compression": "gzip",
             "dbname": "cynefinwiki",
-            "language": "en",
+            "language": language,
             "site_url": "https://cynefin.example.org/index.php",
             "max_compressed_bytes": len(body),
             "max_decompressed_bytes": 1 << 20,
@@ -1040,12 +1139,16 @@ def test_mediawiki_dump_of_any_site_yields_one_row_per_article(
         },
     )
     _serve_pinned(monkeypatch, {url: body})
-    lock = acquire(load_project(recipe), tmp_path / "work")
+    project = load_project(recipe)
+    lock = acquire(project, tmp_path / "work")
     snapshot = Path(lock["sources"]["one"]["snapshot_path"])
     manifest = verify_snapshot(snapshot)
-    with (snapshot / "files" / manifest["files"][0]["path"]).open("rb") as rows:
-        selected = [json.loads(line)["_klab_source"] for line in rows]
-    assert [(row["page_title"], row["page_uri"]) for row in selected] == [
-        ("Complex domain", "https://cynefin.example.org/index.php?curid=1")
-    ]
+    name = manifest["files"][0]["path"]
+    raw = (snapshot / "files" / name).read_bytes()
+    assert [
+        (row["_klab_source"]["page_title"], row["_klab_source"]["page_uri"])
+        for row in map(json.loads, raw.splitlines())
+    ] == [("Complex domain", "https://cynefin.example.org/index.php?curid=1")]
     assert manifest["retrieval"]["scanned_pages"] == 3
+    documents = _records_for_file(raw, name, project.sources[0], snapshot.name)
+    assert [document["language"] for document, _ in documents] == [language]

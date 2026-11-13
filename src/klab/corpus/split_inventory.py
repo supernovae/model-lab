@@ -249,8 +249,17 @@ def _family_hint(
             )
             if isinstance(locator, str) and (hint := _wiki_locator_hint(locator)):
                 return hint
+    path = document["source_location"].split("#", 1)[0]
     if source.kind == "git":
-        return f"git-file:{source.id}:{document['source_location'].split('#', 1)[0]}"
+        return f"git-file:{source.id}:{path}"
+    if source.kind == "archive":
+        return f"archive-member:{source.id}:{path}"
+    if source.kind == "pdf_documents":
+        return f"pdf-document:{source.id}:{path}"
+    if source.kind == "mediawiki_dump":
+        page = source_metadata.get("page_id") or metadata.get("page_id")
+        if page:
+            return f"mediawiki-page:{source.acquisition.dbname}:{page}"
     return f"unresolved-family:{document['document_id']}"
 
 

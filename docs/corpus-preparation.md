@@ -140,6 +140,8 @@ absolute path or `..` refuses the whole archive; a selected member that is a
 symbolic link, hard link, device, sparse or encrypted file is refused, and two
 selected members may not share or nest inside one path. The snapshot records
 each member's path, size and SHA-256 and the archive's digest and size.
+`admission-draft` writes one decision per member, as for Git files, and
+`split-inventory` gives each member the family hint `archive-member:SOURCE:PATH`.
 
 **`pdf_documents`**: a list of pinned PDF files, such as NIST special
 publications, NASA handbooks or NTSB and CSB reports. The extracted text of
@@ -168,18 +170,21 @@ acquisition:
       url: https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-53r5.pdf
       expected_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
       max_bytes: 12000000
-  extraction: {engine: pypdf, version: 7.0.1}
+  extraction: {engine: pypdf, version: 7.0.1, max_seconds: 120}
   max_pages: 1000             # per document
   max_text_bytes: 50000000    # all extracted text together
 ```
 
 Text is extracted page by page in order, with LF newlines, trailing spaces
-removed and pages joined by a blank line. A PDF without a text layer is refused;
-there is no OCR. The snapshot keeps each PDF's bytes under `pinned/` beside the
+removed and pages joined by a blank line. Each PDF is extracted in a child
+process that is killed after `max_seconds` (default 120), and a PDF that takes
+longer is refused. A PDF without a text layer is refused; there is no OCR. The snapshot keeps each PDF's bytes under `pinned/` beside the
 text and records both digests, the page count and the exact pypdf version.
 Verifying the snapshot extracts the text again from the pinned bytes and
 refuses it if the text differs or the installed pypdf is not the declared
-version, so the text is always reproducible from the bytes.
+version, so the text is always reproducible from the bytes. Admission and
+family hints work per file as for archives, with the hint
+`pdf-document:SOURCE:NAME`.
 
 **`mediawiki_dump`**: a pinned XML export (`dumpBackup.php` or
 `Special:Export`, saved to a file) of any MediaWiki site, such as the Cynefin
@@ -221,7 +226,11 @@ acquisition:
 The URL must name a dump file; a live API or query URL is refused. Redirects,
 pages outside `namespaces` and pages whose title or text marks them as
 non-free or not for training are skipped. For `language: en`, predominantly
-non-Latin pages are skipped too.
+non-Latin pages are skipped too. Documents carry the declared `language`; every
+other source's documents are labelled `en`. Each page's family hint is
+`mediawiki-page:DBNAME:PAGE_ID`. `admission-draft` does not yet cover
+`mediawiki_dump` or `wikimedia_dump` rows, so they go through `corpus build`
+without a reviewed admission.
 
 ## Admit
 

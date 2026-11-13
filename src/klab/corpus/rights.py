@@ -36,6 +36,8 @@ RedistributionMode = Literal[
     "review_required",
 ]
 WeightLicenseStatus = Literal["separate_analysis_required"]
+# Sources admitted one reviewed decision per pinned snapshot file.
+FILE_ADMISSION_KINDS = frozenset({"git", "archive", "pdf_documents"})
 
 
 class TrainingRestriction(StrictModel):
@@ -1021,7 +1023,9 @@ def verify_record_admission(
         if sources[item["source_id"]]["kind"] == "huggingface_dataset"
     ]
     git_entries = [
-        item for item in entries if sources[item["source_id"]]["kind"] == "git"
+        item
+        for item in entries
+        if sources[item["source_id"]]["kind"] in FILE_ADMISSION_KINDS
     ]
     if len(hf_entries) + len(git_entries) != len(entries):
         raise ValueError("record admission source kind is unsupported")

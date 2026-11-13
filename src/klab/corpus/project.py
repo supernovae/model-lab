@@ -331,6 +331,8 @@ class PdfDocument(StrictModel):
 class PdfExtraction(StrictModel):
     engine: Literal["pypdf"]
     version: str
+    # Wall time allowed to extract one PDF; a slower one is refused.
+    max_seconds: int = Field(default=120, gt=0, le=3600)
 
     @field_validator("version")
     @classmethod
@@ -706,6 +708,11 @@ class SourceDeclaration(StrictModel):
                     "eligible external source requires license URL and references"
                 )
         return self
+
+
+def source_language(source: Any) -> str:
+    """A source's declared document language; sources without one are English."""
+    return getattr(getattr(source, "acquisition", None), "language", None) or "en"
 
 
 def source_declaration_payload(source: SourceDeclaration) -> dict[str, Any]:

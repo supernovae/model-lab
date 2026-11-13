@@ -1398,9 +1398,12 @@ def _wiki_row(
     ):
         return None
     text = _wiki_text(raw)
-    if not text or not re.search(r"[a-zA-Z]", text):
+    english = not generic or spec.language == "en"
+    if not text or not (
+        re.search(r"[a-zA-Z]", text) if english else any(c.isalpha() for c in text)
+    ):
         return None
-    if not generic or spec.language == "en":
+    if english:
         # Skip predominantly non-Latin prose; retain mathematics/code with English context.
         letters = [char for char in text if char.isalpha()]
         if letters and sum(char.isascii() for char in letters) * 2 < len(letters):
@@ -1819,32 +1822,41 @@ def _pypdf(spec: PdfAcquisition) -> Any:
     return pypdf
 
 
-def _pdf_text(
-    pypdf: Any, path: Path, spec: PdfAcquisition, name: str
-) -> tuple[bytes, int]:
-    """Deterministic text of one PDF: page order, LF newlines, blank-line page joins."""
+def _pdf_text(path: Path, spec: PdfAcquisition, name: str) -> tuple[bytes, int]:
+    """Extract one PDF in a child process killed at the declared deadline."""
+    import sys
+
+    from klab.runtime_env_subprocess import run_bounded
+
+    extraction = spec.extraction
+    command = [
+        sys.executable,
+        "-I",
+        "-m",
+        "klab.corpus.pdf_text",
+        str(path),
+        extraction.version,
+        str(spec.max_pages),
+    ]
     try:
-        reader = pypdf.PdfReader(path)
-        if reader.is_encrypted and not reader.decrypt(""):
-            raise ValueError(f"PDF requires a password: {name}")
-        pages = len(reader.pages)
-        if pages > spec.max_pages:
-            raise ValueError(f"PDF exceeds max_pages: {name}")
-        texts = []
-        for page in reader.pages:
-            text = (page.extract_text() or "").replace("\r\n", "\n").replace("\r", "\n")
-            text = "\n".join(
-                line.rstrip() for line in text.replace("\x00", "").split("\n")
-            )
-            if text.strip():
-                texts.append(text.strip("\n"))
-    except pypdf.errors.PdfReadError as error:
-        raise ValueError(f"invalid PDF {name}: {error}") from error
-    if not texts:
-        raise ValueError(
-            f"PDF has no extractable text layer (OCR is unsupported): {name}"
+        result = run_bounded(
+            command,
+            timeout=extraction.max_seconds,
+            output_limit=spec.max_text_bytes + 64,
         )
-    return ("\n\n".join(texts) + "\n").encode("utf-8", errors="replace"), pages
+    except subprocess.TimeoutExpired as error:
+        raise ValueError(
+            f"PDF text extraction exceeded {extraction.max_seconds} s: {name}"
+        ) from error
+    except ValueError as error:
+        raise ValueError(
+            f"PDF extracted text exceeds max_text_bytes: {name}"
+        ) from error
+    if result.returncode != 0:
+        reason = result.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(f"PDF text extraction refused {name}: {reason}")
+    pages, _, text = result.stdout.partition(b"\n")
+    return text, int(pages)
 
 
 def _pinned_pdf_path(name: str) -> str:
@@ -1859,7 +1871,7 @@ def _acquire_pdf(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     spec = source.acquisition
     assert isinstance(spec, PdfAcquisition)
-    pypdf = _pypdf(spec)
+    _pypdf(spec)  # refuse a missing extra or another version before any work
     resources.expanded = None  # PDF bodies are kept whole, not expanded
     resources.observe()
     if budget is not None:
@@ -1879,7 +1891,7 @@ def _acquire_pdf(
             budget,
             resources,
         )
-        text, pages = _pdf_text(pypdf, pinned, spec, document.name)
+        text, pages = _pdf_text(pinned, spec, document.name)
         text_bytes += len(text)
         if text_bytes > spec.max_text_bytes:
             raise ValueError("PDF extracted text exceeds max_text_bytes")
@@ -1937,7 +1949,7 @@ def _verify_pdf_receipt(
     }
     if actual != {item["pdf_path"] for item in documents}:
         raise ValueError("pinned PDF inventory mismatch")
-    pypdf = _pypdf(spec)
+    _pypdf(spec)  # refuse a missing extra or another version before any work
     for item in documents:
         pinned = pinned_root / safe_name(item["pdf_path"])
         _regular(pinned)
@@ -1946,7 +1958,7 @@ def _verify_pdf_receipt(
             or sha256_file(pinned) != item["pdf_sha256"]
         ):
             raise ValueError(f"pinned PDF byte mismatch: {item['name']}")
-        text, pages = _pdf_text(pypdf, pinned, spec, item["name"])
+        text, pages = _pdf_text(pinned, spec, item["name"])
         if (
             pages != item["pages"]
             or hashlib.sha256(text).hexdigest() != item["text_sha256"]

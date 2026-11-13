@@ -21,6 +21,7 @@ from klab.corpus.acquisition import declaration_sha256, verify_acquisition
 from klab.corpus.bounded_metadata import metadata_operation, read_metadata
 from klab.corpus.project import Project, source_declaration_payload
 from klab.corpus.rights import (
+    FILE_ADMISSION_KINDS,
     RightsPolicy,
     _admission_exceptions,
     _admission_profile,
@@ -307,7 +308,7 @@ def _draft_admission_manifest(
                 if next(rows, None) is not None:
                     raise ValueError("snapshot has undeclared HF rows")
             entry["records"] = decisions
-        elif source.kind == "git":
+        elif source.kind in FILE_ADMISSION_KINDS:
             if rights.spdx_expression is None:
                 raise ValueError("Git admission policy requires SPDX expression")
             decisions = []
