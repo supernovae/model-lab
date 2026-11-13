@@ -39,6 +39,9 @@ from klab.reference_models import (
 )
 
 LM_TASKS = BY_ID["lm_eval"].params["tasks"]
+# References with a packaged lm-eval result (Qwen2.5-Coder ships a code
+# benchmark result instead).
+LM_REFERENCES = set(REFERENCES) - {"Qwen2.5-Coder-0.5B"}
 
 
 # --- Registry and snapshot safety ---------------------------------------------
@@ -50,10 +53,11 @@ def test_registry_pins_immutable_commits_and_declared_facts() -> None:
         "pythia-160m-deduped",
         "SmolLM2-135M",
         "SmolLM2-360M",
+        "Qwen2.5-Coder-0.5B",
     }
     for ref in REFERENCES.values():
         assert len(ref.revision) == 40 and int(ref.revision, 16) >= 0
-        assert ref.repo_id.split("/")[0] in {"EleutherAI", "HuggingFaceTB"}
+        assert ref.repo_id.split("/")[0] in {"EleutherAI", "HuggingFaceTB", "Qwen"}
         assert ref.training_tokens > 0 and ref.training_tokens_source
     assert reference_for("ref:SmolLM2-135M") is REFERENCES["SmolLM2-135M"]
     with pytest.raises(ValueError, match="known: ref:pythia-70m-deduped"):
@@ -339,7 +343,7 @@ def test_packaged_reference_results_are_sealed_and_match_the_registry() -> None:
             assert len(task["items"]) == BY_ID["lm_eval"].params["limit"]
             assert task["acc"] == pytest.approx(np.mean(task["items"]))
         groups.add(details["benchmark_group"])
-    assert names == set(REFERENCES)
+    assert names == LM_REFERENCES
     assert len(groups) == 1  # every reference sits on one comparable curve
 
 
@@ -444,7 +448,7 @@ def test_try_arms_without_probes_are_pareto_points_with_active_and_resident(
     everything = collect_points(tmp_path)
     assert {p["kind"] for p in everything} == {"try", "reference"}
     lm = metric_points(everything, "lm_eval")
-    assert {p["kind"] for p in lm} == {"reference"} and len(lm) == len(REFERENCES)
+    assert {p["kind"] for p in lm} == {"reference"} and len(lm) == len(LM_REFERENCES)
 
 
 def test_compare_never_crosses_groups_and_names_missing_evidence(
@@ -505,9 +509,13 @@ def test_compare_pairs_lm_eval_with_references_in_the_same_benchmark_group(
         tmp_path, "probe-2", lm_row=other, group="h" * 64, checkpoint="z" * 64
     )
     report = compare_mod.compare("probe-2", [], lab_dir=tmp_path, references=True)
-    statuses = {c["other"]: c["pairs"][1]["status"] for c in report["comparisons"]}
+    statuses = {
+        c["other"]: c["pairs"][1]["status"]
+        for c in report["comparisons"]
+        if c["other"] in LM_REFERENCES
+    }
     assert set(statuses.values()) == {"not_comparable"}
-    assert report["curve"]["excluded"] == len(REFERENCES)
+    assert report["curve"]["excluded"] == len(LM_REFERENCES)
 
 
 def test_compare_cli_lists_references_and_renders(
@@ -634,7 +642,7 @@ def test_dashboard_pareto_renders_references_and_try_points(tmp_path: Path) -> N
     assert not test.exception
     assert len(test.get("plotly_chart")) == 1
     frame = test.dataframe[0].value
-    assert set(frame["source"]) == {"reference"} and len(frame) == len(REFERENCES)
+    assert set(frame["source"]) == {"reference"} and len(frame) == len(LM_REFERENCES)
 
 
 # --- Review fixes (PR #62): each test failed before its fix. -----------------
@@ -655,7 +663,11 @@ def test_compare_picks_up_a_later_probe_of_the_same_checkpoint(tmp_path: Path) -
 
     def lm_pairs() -> tuple[dict[str, Any], dict[str, Any]]:
         report = compare_mod.compare("try-1", [], lab_dir=tmp_path, references=True)
-        lm = {c["other"]: c["pairs"][1] for c in report["comparisons"]}
+        lm = {
+            c["other"]: c["pairs"][1]
+            for c in report["comparisons"]
+            if c["other"] in LM_REFERENCES
+        }
         return report, lm
 
     report, lm = lm_pairs()
@@ -785,9 +797,11 @@ def test_compare_uses_the_checkpoints_measurement_in_the_shared_group(
     stale["details"]["benchmark_group"] = "s" * 64  # e.g. an older protocol
     _probe_record(tmp_path, "probe-stale", lm_row=stale, group="h" * 64)
     report = compare_mod.compare("probe-stale", [], lab_dir=tmp_path, references=True)
-    assert {c["pairs"][1]["status"] for c in report["comparisons"]} == {
-        "not_comparable"
-    }
+    assert {
+        c["pairs"][1]["status"]
+        for c in report["comparisons"]
+        if c["other"] in LM_REFERENCES
+    } == {"not_comparable"}
     _probe_record(
         tmp_path,
         "probe-fresh",
@@ -796,7 +810,9 @@ def test_compare_uses_the_checkpoints_measurement_in_the_shared_group(
         created_at="2026-10-10T14:00:00+00:00",
     )
     report = compare_mod.compare("probe-stale", [], lab_dir=tmp_path, references=True)
-    pairs = [c["pairs"][1] for c in report["comparisons"]]
+    pairs = [
+        c["pairs"][1] for c in report["comparisons"] if c["other"] in LM_REFERENCES
+    ]
     assert {p["status"] for p in pairs} <= {"higher", "lower", "within_noise"}
     assert {p["evidence"] for p in pairs} == {"probe-fresh"}
     assert "subject measured in probe-fresh" in compare_mod.render(report)
@@ -865,7 +881,7 @@ def test_custom_task_without_chance_compares_with_references_and_no_chance_line(
 
     report = compare_mod.compare("probe-wino", [], lab_dir=lab, references=True)
     assert report["curve"]["chance"] is None
-    assert report["curve"]["excluded"] == len(REFERENCES)
+    assert report["curve"]["excluded"] == len(LM_REFERENCES)
     monkeypatch.setenv("NO_COLOR", "1")
     monkeypatch.setattr(
         sys,

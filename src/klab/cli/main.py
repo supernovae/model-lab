@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import secrets
 import sys
@@ -1597,6 +1598,11 @@ def _report(args: argparse.Namespace) -> None:
         from klab.sweep import summarize_sweep
 
         print(summarize_sweep(record, target))
+    elif kind == "bench":
+        from klab.probes.code_bench import render as render_bench
+
+        print(render_bench(record))
+        print(f"  record: {target}")
     else:
         print(summarize(record, target, color=use_color()))
 
@@ -1695,6 +1701,41 @@ def _probe(args: argparse.Namespace) -> None:
         print(json.dumps({**result, "record": str(path)}, indent=2, sort_keys=True))
     else:
         print(render(result, color=use_color()))
+        print(f"  record: {path}")
+
+
+def _bench(args: argparse.Namespace) -> None:
+    """Run an execution-scored code benchmark and publish its sealed record."""
+    from klab.lab_mode import lab_root
+    from klab.probes.code_bench import render, run_bench
+    from klab.probes.code_sandbox import SandboxLimits, SandboxUnavailable
+    from klab.reference_models import ReferenceUnavailable
+
+    if not 0 < args.timeout <= 600:
+        raise SystemExit("klab bench: --timeout must be in (0, 600] seconds")
+    try:
+        record, path = run_bench(
+            args.target,
+            args.task,
+            lab_dir=lab_root(resolve_work_dir(args.work_dir), args.lab_dir),
+            runs_dir=Path(args.runs_dir) if args.runs_dir else None,
+            backend=args.backend,
+            authorization=args.runtime_authorization,
+            limit=args.limit,
+            limits=SandboxLimits(
+                timeout_seconds=args.timeout, cpu_seconds=math.ceil(args.timeout)
+            ),
+            allow_unsandboxed=args.allow_unsandboxed_execution,
+        )
+    except (ValueError, OSError, ReferenceUnavailable, SandboxUnavailable) as error:
+        _lab_lookup_failure(args, error)
+        raise SystemExit(f"klab bench: {error}") from None
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None
+    if args.json:
+        print(json.dumps({**record, "record": str(path)}, indent=2, sort_keys=True))
+    else:
+        print(render(record))
         print(f"  record: {path}")
 
 
@@ -2023,6 +2064,51 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         lab_dir=None,
         runs_dir=None,
     )
+    bench = commands.add_parser(
+        "bench",
+        help="Execution-scored code benchmark (HumanEval, MBPP) in a no-network sandbox",
+        description=(
+            "Generate one greedy completion per problem of a pinned code "
+            "benchmark and run each program with its tests in a fresh sandbox "
+            "(no network, empty directory, resource limits, timeout). Writes a "
+            "sealed record that `klab compare` reads (code pass@1). Refuses to "
+            "run generated code when the sandbox is unavailable."
+        ),
+    )
+    bench.add_argument(
+        "target",
+        help="Try/probe/bench record (its candidate), run id/directory, "
+        "checkpoint or ref:NAME",
+    )
+    bench.add_argument(
+        "--task",
+        required=True,
+        metavar="NAME_OR_FILE",
+        help="humaneval, mbpp, or a JSON/YAML task declaration",
+    )
+    bench.add_argument(
+        "--limit", type=int, help="Score only the first N problems (own group)"
+    )
+    bench.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="Wall seconds per program (also its CPU seconds; part of the group)",
+    )
+    bench.add_argument(
+        "--allow-unsandboxed-execution",
+        action="store_true",
+        help="Run generated code with the host's network and files when no "
+        "sandbox works (unsafe; recorded in the result and its group)",
+    )
+    bench.add_argument(
+        "--backend", choices=("auto", "mps", "cuda", "rocm", "xpu", "cpu")
+    )
+    bench.add_argument("--runtime", metavar="ID", help="Registered native runtime")
+    bench.add_argument("--runs-dir", help="Saved run location")
+    bench.add_argument("--lab-dir", type=Path)
+    bench.add_argument("--json", action="store_true")
+    bench.set_defaults(handler=_bench, runtime_profile=None)
     explore = commands.add_parser(
         "explore",
         help="Model explorer: architecture, weights, attention, routing, memory",
@@ -2738,6 +2824,7 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
         "try",
         "sweep",
         "probe",
+        "bench",
         "explore",
         "train",
         "stage",
@@ -2788,13 +2875,13 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
         config = load_config(Path(args.config))
     elif args.command in {"try", "sweep"}:
         config = load_config(Path(args.vs))
-    elif args.command in {"probe", "explore"}:
+    elif args.command in {"probe", "explore", "bench"}:
         from klab.config.models import RunConfig
         from klab.lab_mode import lab_root
         from klab.lab_results import resolve_checkpoint
         from klab.reference_models import is_reference
 
-        if args.command == "probe" and is_reference(args.target):
+        if args.command in {"probe", "bench"} and is_reference(args.target):
             # Pinned public checkpoints load in-process through transformers
             # on the CPU; there is no Model Lab run config to authorize.
             if profile is not None:
@@ -2822,6 +2909,7 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
             "try",
             "sweep",
             "probe",
+            "bench",
             "explore",
             "train",
             "eval",
@@ -2843,7 +2931,7 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
         try:
             require_authorization(config, None)
         except ValueError as error:
-            if args.command == "probe" and args.backend is None:
+            if args.command in {"probe", "bench"} and args.backend is None:
                 from klab.lab_results import ResultLookupError
 
                 raise ResultLookupError(

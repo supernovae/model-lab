@@ -62,7 +62,7 @@ only read records. A run ID names weights; a try or probe ID names a result. Use
 | Page | Covers |
 | --- | --- |
 | [Results](results.md) | Record IDs, reports and how lookup works |
-| [Probes](probes.md) | Probe tiers, verdicts, the final split and reference models |
+| [Probes](probes.md) | Probe tiers, verdicts, the final split, reference models and execution-scored code benchmarks |
 | [Evaluation](evaluation.md) | Held-out loss and fixed evaluation panels |
 | [Inspecting models](models.md) | Generate, chat and explore a checkpoint |
 | [Local API](local-api.md) | Serving a checkpoint over HTTP |

@@ -1,7 +1,8 @@
 """Sealed lab records: one writer and one verified reader for every lab surface.
 
-Lab tries (``tries/<id>/try.json``), probe runs (``probes/<id>/probe.json``)
-and sweeps (``sweeps/<id>/sweep.json``) are self-hashed JSON documents. ``try``, ``probe``, ``report`` and the dashboard
+Lab tries (``tries/<id>/try.json``), probe runs (``probes/<id>/probe.json``),
+sweeps (``sweeps/<id>/sweep.json``) and code benchmarks
+(``benchmarks/<id>/bench.json``) are self-hashed JSON documents. ``try``, ``probe``, ``report`` and the dashboard
 all read them through :func:`read_lab_record`, so an edited record is rejected
 everywhere, not only on the command line.
 """
@@ -21,11 +22,13 @@ DIGEST_FIELD = "record_sha256"
 TRY_FORMAT = "klab-lab-try-v1"
 PROBE_FORMAT = "klab-probe-v1"
 SWEEP_FORMAT = "klab-lab-sweep-v1"
+BENCH_FORMAT = "klab-code-bench-v1"
 # kind -> (format, folder under the lab root, file name in a record folder)
 KINDS = {
     "try": (TRY_FORMAT, "tries", "try.json"),
     "probe": (PROBE_FORMAT, "probes", "probe.json"),
     "sweep": (SWEEP_FORMAT, "sweeps", "sweep.json"),
+    "bench": (BENCH_FORMAT, "benchmarks", "bench.json"),
 }
 _BY_FORMAT = {fmt: kind for kind, (fmt, _, _) in KINDS.items()}
 
@@ -159,9 +162,12 @@ def read_lab_record(path: Path, kind: str | None = None) -> tuple[str, dict[str,
         _BY_FORMAT.get(record.get("format")) if isinstance(record, dict) else None
     )
     if found_kind is None or (kind is not None and found_kind != kind):
-        expected = {"try": "lab try", "probe": "probe", "sweep": "sweep"}.get(
-            kind or "", "lab"
-        )
+        expected = {
+            "try": "lab try",
+            "probe": "probe",
+            "sweep": "sweep",
+            "bench": "code benchmark",
+        }.get(kind or "", "lab")
         raise ValueError(f"not a {expected} record: {path}")
     if not is_sealed(record):
         raise ValueError(f"{found_kind} record digest mismatch: {path}")
