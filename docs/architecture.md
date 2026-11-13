@@ -27,6 +27,26 @@ causal mask keeps every position from seeing later ones. SwiGLU computes
 `down(silu(gate(x)) * up(x))`. With `model.tie_embeddings`, the output head
 reuses the input embedding.
 
+### Output head rank
+
+`model.output_head_rank: D` factors the output head through a narrower width:
+the final hidden state is projected to `D` (`output_down`), then to the
+vocabulary (`output`), so the head is `W = A·B` with `A` vocabulary × `D` and
+`B` `D` × hidden. The logits then have rank at most `D` for any input. This is
+the softmax bottleneck, made adjustable while the rest of the model stays
+fixed, as in studies of how the head limits what a model can learn and how its
+gradient reaches the rest of the network. It needs `model.tie_embeddings:
+false`, at most `model.hidden_dim`, and the PyTorch engine. Every loss path,
+including chunked and compiled output-head losses, works unchanged. A
+Hugging Face export multiplies the two factors into the one head matrix Llama
+expects, which gives the same logits.
+
+```yaml
+model:
+  tie_embeddings: false
+  output_head_rank: 64
+```
+
 ## Attention
 
 `attention.kind` selects the attention for every block. All of them keep causal
@@ -195,3 +215,4 @@ diagnostics; it says nothing about a trained model.
 | N-gram lookup memory | [Engram](https://arxiv.org/abs/2601.07372) |
 | Byte-addressed memory | [Tokenizer-Agnostic Engram](https://arxiv.org/abs/2607.29065) |
 | Factored optimizer state | [Adafactor](https://arxiv.org/abs/1804.04235) |
+| Rank-limited output head | [Breaking the Softmax Bottleneck](https://arxiv.org/abs/1711.03953), [Lost in Backpropagation](https://arxiv.org/abs/2603.10145) |

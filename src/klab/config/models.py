@@ -312,6 +312,12 @@ class ModelConfig(StrictModel):
     max_seq_len: int
     rms_norm_eps: float = 1e-6
     tie_embeddings: bool = True
+    # Factor the output head through a narrower width: hidden -> rank ->
+    # vocabulary, so the logits have rank at most this (the softmax
+    # bottleneck). Needs untied embeddings.
+    output_head_rank: int | None = Field(
+        default=None, strict=True, gt=0, exclude_if=lambda value: value is None
+    )
     ffn: str = "dense"
     ffn_params: dict[str, Any] = Field(
         default_factory=dict, exclude_if=lambda value: not value
@@ -458,6 +464,16 @@ class ModelConfig(StrictModel):
             )
         if self.rms_norm_eps <= 0:
             raise ValueError("model.rms_norm_eps must be positive")
+        if self.output_head_rank is not None:
+            if self.tie_embeddings:
+                raise ValueError(
+                    "model.output_head_rank needs model.tie_embeddings: false; a "
+                    "factored head has no vocabulary-by-hidden matrix to share"
+                )
+            if self.output_head_rank > self.hidden_dim:
+                raise ValueError(
+                    "model.output_head_rank must not exceed model.hidden_dim"
+                )
         _validate_feed_forward(
             self.ffn,
             self.num_experts,
@@ -1467,6 +1483,8 @@ class RunConfig(StrictModel):
                 raise ValueError(
                     "SDPA requires PyTorch dense attention with equal Q/KV head counts"
                 )
+        if self.runtime.engine == "mlx" and self.model.output_head_rank is not None:
+            raise ValueError("model.output_head_rank needs the PyTorch engine")
         if self.runtime.engine == "mlx" and (
             self.model.layers or self.external_components
         ):

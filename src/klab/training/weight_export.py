@@ -152,6 +152,10 @@ def llama_tensors(
         "model.norm.weight": remaining.pop("norm.weight"),
     }
     output = remaining.pop("output.weight")
+    down = remaining.pop("output_down.weight", None)
+    if down is not None:
+        # A factored head exports as the one matrix it computes (rank-limited).
+        output = output @ down
     if not model.tie_embeddings:
         exported["lm_head.weight"] = output
     head_dim = model.hidden_dim // model.num_heads
