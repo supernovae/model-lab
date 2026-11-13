@@ -38,6 +38,29 @@ not a target. Chat and preference data, whose targets are masked, are refused.
 Prepare enough validation documents for every tokenizer you compare: a token
 cap that cuts the split at a different document changes the digest.
 
+### Gradient bottleneck
+
+The output head maps a hidden state to the vocabulary, so the gradient the rest
+of the network receives keeps only the part of the logit gradient that lies in
+the head's column space: at most as many directions as the head's rank, out of
+the vocabulary's. Set `evaluation.gradient_bottleneck: true` to measure how
+much is lost on the same held-out targets the loss is scored on (Godey and
+Artzi, [Lost in Backpropagation](https://arxiv.org/abs/2603.10145), section
+3.3). `eval` then also reports `gradient_bottleneck`:
+
+| Field | Meaning |
+| --- | --- |
+| `kernel_norm_fraction` | Share of the logit gradient's Frobenius norm in the kernel of the head's transpose: lost before it reaches the network |
+| `kept_cosine` | Cosine between the logit gradient and the part that is kept |
+| `kept_squared_fraction` | `kept_cosine` squared |
+| `head_rank`, `vocab_size` | Rank of `output.weight` (the head's last factor with [`output_head_rank`](architecture.md#output-head-rank)) and the vocabulary |
+| `random_kept_squared_fraction` | `head_rank / vocab_size`: what a gradient pointing in a random direction would keep |
+
+The logit gradient of each target is `softmax(logits) - onehot(target)`. A
+`try` whose baseline sets the field measures both arms, and a sweep reports the
+candidates' mean `kernel_norm_fraction` per point. To follow it over training,
+keep periodic checkpoints and `eval` each one.
+
 ## Panels
 
 A panel is a fixed, named slice of prepared held-out data: for example one panel
