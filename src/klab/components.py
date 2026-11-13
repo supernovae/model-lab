@@ -1,7 +1,8 @@
 """Registry of the attention, feed-forward and memory kinds a decoder is built from.
 
 A decoder block looks its attention and feed-forward modules up here by kind, and
-the model looks its memory up the same way. Lab registers its own kinds below.
+the model looks its memory up the same way. Lab's own kinds are built by
+:mod:`klab.component_builders`.
 Another installed package adds a kind by declaring an entry point in the
 ``klab.components`` group whose name is ``SLOT.KIND`` and whose value is a
 :class:`Component`::
@@ -25,6 +26,8 @@ from importlib.metadata import entry_points
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel
+
+from klab.component_builders import BUILDERS
 
 if TYPE_CHECKING:
     from torch import nn
@@ -68,122 +71,9 @@ class Component:
             raise TypeError("component params must be a pydantic model class")
 
 
-def _dense_attention(model, attention, params):
-    from klab.model.attention.dense import DenseAttention
-
-    return DenseAttention(
-        model.hidden_dim,
-        model.num_heads,
-        model.max_seq_len,
-        attention.rope_base,
-        attention.window_size,
-        model.num_kv_heads,
-        implementation=attention.implementation,
-    )
-
-
-def _latent_attention(model, attention, params):
-    from klab.model.attention.latent import LatentAttention
-
-    return LatentAttention(
-        model.hidden_dim,
-        model.num_heads,
-        attention.latent_dim,
-        model.max_seq_len,
-        attention.rope_base,
-        implementation=attention.implementation,
-    )
-
-
-def _block_sparse_attention(model, attention, params):
-    from klab.model.attention.sparse import BlockSparseAttention
-
-    return BlockSparseAttention(
-        model.hidden_dim,
-        model.num_heads,
-        model.max_seq_len,
-        attention.rope_base,
-        attention.block_size,
-        attention.selected_blocks,
-    )
-
-
-def _local_selected_attention(model, attention, params):
-    from klab.model.attention.local_selected import LocalSelectedAttention
-
-    return LocalSelectedAttention(
-        model.hidden_dim,
-        model.num_heads,
-        model.max_seq_len,
-        attention.rope_base,
-        attention.block_size,
-        attention.window_size,
-        attention.selected_blocks,
-        attention.latent_dim,
-        selector=attention.selector,
-    )
-
-
-def _dense_ffn(model, attention, params):
-    from klab.model.ffn import SwiGLU
-
-    return SwiGLU(model.hidden_dim, model.ffn_dim)
-
-
-def _moe_ffn(model, attention, params):
-    from klab.model.moe import TopKMoE
-
-    return TopKMoE(
-        model.hidden_dim,
-        model.ffn_dim,
-        model.num_experts,
-        model.experts_per_token,
-        model.shared_expert,
-        model.router_aux_loss_coefficient,
-    )
-
-
-def _ngram_memory(model, attention, params):
-    from klab.model.memory import build_token_memory
-
-    return build_token_memory(model)
-
-
-def _byte_memory(model, attention, params):
-    from klab.model.memory import ByteAddressMemory
-
-    return ByteAddressMemory(
-        model.hidden_dim, model.memory_table_size, model.memory_dim
-    )
-
-
-def _portable_memory(model, attention, params):
-    from klab.model.portable_engram import PortableEngramAdapter, load_portable_engram
-
-    return PortableEngramAdapter(
-        load_portable_engram(
-            model.memory_package_path,
-            expected_shape=(model.memory_table_size, model.memory_dim),
-            expected_ngram_size=model.memory_ngram_size,
-        ),
-        model.hidden_dim,
-    )
-
-
 BUILTIN: Mapping[tuple[str, str], Component] = {
-    (item.slot, item.kind): item
-    for item in (
-        Component("attention", "dense", _dense_attention),
-        Component("attention", "sliding_window", _dense_attention),
-        Component("attention", "mla", _latent_attention),
-        Component("attention", "block_sparse", _block_sparse_attention),
-        Component("attention", "local_selected", _local_selected_attention),
-        Component("ffn", "dense", _dense_ffn),
-        Component("ffn", "moe", _moe_ffn),
-        Component("memory", "ngram", _ngram_memory),
-        Component("memory", "byte", _byte_memory),
-        Component("memory", "portable", _portable_memory),
-    )
+    (slot, kind): Component(slot, kind, builder)  # type: ignore[arg-type]
+    for (slot, kind), builder in BUILDERS.items()
 }
 _EXTERNAL: dict[tuple[str, str], Component] = {}
 
