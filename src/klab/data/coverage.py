@@ -19,13 +19,6 @@ import yaml
 from klab.canonical import canonical_digest
 from klab.config.loading import load_config
 from klab.config.models import RunConfig
-from klab.data.packing import (
-    _local_chat_identity,
-    canonical_tokenizer_sha256,
-    load_prepared_data,
-    packing_identity,
-)
-from klab.data.tokenizer import load_tokenizer
 from klab.training.manifest import source_identity
 
 _CHUNK_TOKENS = 1 << 20
@@ -42,7 +35,13 @@ _LOCATION_KEYS = {
 def _bind_config(manifest: dict, config: RunConfig) -> dict | None:
     """Match the native packing identity, including live source bindings."""
     identity = manifest["cache_identity"]
-    from klab.data.packing import prepared_source_matches
+    from klab.data.packing import (
+        _local_chat_identity,
+        canonical_tokenizer_sha256,
+        packing_identity,
+        prepared_source_matches,
+    )
+    from klab.data.tokenizer import load_tokenizer
 
     if not prepared_source_matches(identity, source_identity()["sha256"]):
         raise ValueError("prepared source identity differs from current source")
@@ -173,6 +172,8 @@ def coverage(prepared_root: Path, config: RunConfig | Path | None = None) -> dic
     no assertion of current source compatibility is made. Embedded source coverage
     is reported as recorded and authenticated against the packed source binding.
     """
+    from klab.data.packing import load_prepared_data
+
     root = Path(prepared_root)
     if isinstance(config, (str, Path)):
         config = load_config(Path(config))

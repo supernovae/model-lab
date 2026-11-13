@@ -32,7 +32,7 @@ from klab.corpus import acquisition as forge
 from klab.corpus.project import safe_name
 from klab.documents import read_document
 from klab.engram.packs import _rename_noreplace
-from klab.hf_auth import HUB_ACCESS_ERRORS, hub_auth_kwargs, raise_for_hub_auth
+from klab.hf_auth import hub_access_errors, hub_auth_kwargs, raise_for_hub_auth
 from klab.result_publication import sync_directory
 from klab.training.manifest import sha256_file
 from klab.verification_proofs import VerificationMode
@@ -229,7 +229,7 @@ def _hub_identity(source: DatasetSource, *, cache_dir: Path | None = None) -> di
             cache_dir=None if cache_dir is None else str(cache_dir),
             **auth,
         )
-    except HUB_ACCESS_ERRORS as error:
+    except hub_access_errors() as error:
         raise_for_hub_auth(error, credential_supplied=bool(auth))
     if info.sha != source.revision:
         raise ValueError("Hub resolved revision differs from pinned commit")
@@ -595,7 +595,7 @@ def stream_source(
             **options,
             **auth,
         )
-    except HUB_ACCESS_ERRORS as error:
+    except hub_access_errors() as error:
         raise_for_hub_auth(error, credential_supplied=bool(auth))
 
 

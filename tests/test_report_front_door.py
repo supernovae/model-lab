@@ -66,10 +66,15 @@ def test_run_report_retains_negative_and_rejected_observations(
         "core": {"integrity": {"status": "PASS"}},
         "triggers": {"collapse": {"fired": True}},
     }
-    monkeypatch.setattr(cli, "experiment_evidence", lambda path: evidence)
-    monkeypatch.setattr(cli, "read_triage", lambda *args: triage)
     monkeypatch.setattr(
-        cli, "triage_summary", lambda report: "negative diagnostic retained"
+        "klab.evaluation.evidence.experiment_evidence", lambda path: evidence
+    )
+    monkeypatch.setattr(
+        "klab.evaluation.post_train_triage.read_triage", lambda *args: triage
+    )
+    monkeypatch.setattr(
+        "klab.evaluation.post_train_triage.triage_summary",
+        lambda report: "negative diagnostic retained",
     )
     work = tmp_path / "absent-work"
     runs = tmp_path / "runs"
@@ -104,7 +109,8 @@ def test_invalid_triage_shape_stays_visible(tmp_path, monkeypatch, capsys):
     payload["core"] = None
     path = _write_triage_shape(tmp_path, payload)
     monkeypatch.setattr(
-        cli, "experiment_evidence", lambda path: {"quality_observations": []}
+        "klab.evaluation.evidence.experiment_evidence",
+        lambda path: {"quality_observations": []},
     )
     # The envelope's evidence reader requires a manifest location; the malformed
     # triage is rejected by the real reader before its manifest-binding check.
@@ -147,7 +153,8 @@ def test_unexpected_triage_reader_bugs_propagate(tmp_path, monkeypatch, source):
 
     monkeypatch.setattr(triage, source, broken)
     monkeypatch.setattr(
-        cli, "experiment_evidence", lambda path: {"quality_observations": []}
+        "klab.evaluation.evidence.experiment_evidence",
+        lambda path: {"quality_observations": []},
     )
     with pytest.raises(TypeError, match="unexpected reader bug"):
         _report(

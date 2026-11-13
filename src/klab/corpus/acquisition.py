@@ -45,7 +45,7 @@ from klab.corpus.project import (
 )
 from klab.corpus.transport_budget import TransportBudget
 from klab.engram.packs import _rename_noreplace
-from klab.hf_auth import HUB_ACCESS_ERRORS, hub_auth_kwargs, raise_for_hub_auth
+from klab.hf_auth import hub_access_errors, hub_auth_kwargs, raise_for_hub_auth
 from klab.result_publication import sync_directory
 from klab.training.manifest import sha256_file
 
@@ -1047,7 +1047,7 @@ def _bounded_hf_acquire(
                         transfer_index,
                         resources,
                     )
-            except (*HUB_ACCESS_ERRORS, HTTPError) as error:
+            except (*hub_access_errors(), HTTPError) as error:
                 if budget is not None and transfer_index is not None:
                     budget.finish_transfer(
                         transfer_index, success=False, interrupted=False
@@ -1240,7 +1240,7 @@ def _acquire_hf(
                 **auth,
             )
         )
-    except HUB_ACCESS_ERRORS as error:
+    except hub_access_errors() as error:
         raise_for_hub_auth(error, credential_supplied=bool(auth))
     if location.name.lower() != source.revision.lower():
         raise ValueError("HF snapshot revision does not match pinned commit")

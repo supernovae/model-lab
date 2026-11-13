@@ -15,7 +15,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from klab.batch_calibration import calibrate_batch
 from klab.config.loading import load_config, load_tokenizer_config
 from klab.dashboard.stores import configured_stores, parse_run_store
 from klab.data.encoding import (
@@ -23,36 +22,11 @@ from klab.data.encoding import (
     TOKENIZER_BATCH_SOURCE_BYTES,
     validate_tokenizer_batch_limits,
 )
-from klab.data.packing import prepare_data
-from klab.data.tokenizer import (
-    load_tokenizer,
-    train_tokenizer,
-    verify_run_tokenizer,
-)
-from klab.engram.packs import (
-    compile_pack,
-    inspect_pack,
-    verify_pack,
-)
-from klab.evaluation.chat import ChatMessage, assistant_reply, prepare_chat_prompt
-from klab.evaluation.evidence import experiment_evidence
-from klab.evaluation.generation import generate
-from klab.evaluation.inference import load_run, write_inference_result
-from klab.evaluation.post_train_triage import read_triage, triage_summary
 from klab.hf_auth import (
     HuggingFaceAccessError,
     HuggingFaceCredentialError,
     set_token_file,
 )
-from klab.memory import (
-    calibrated_estimate,
-    calibration_key,
-    plan_memory,
-    write_resource_proposal,
-)
-from klab.model.inspection import inspection_report, parameter_inventory
-from klab.model.memory import ByteAddressMemory
-from klab.model.portable_engram import export_portable_engram, load_portable_engram
 from klab.readiness import SMOKE_FAMILIES, smoke_readiness
 from klab.resource_envelope import (
     check_envelope,
@@ -67,11 +41,8 @@ from klab.runtime_profile import (
     probe_runtime_profile,
     require_authorization,
 )
-from klab.staging import inspect_runtime, stage
-from klab.training.checkpoints import CheckpointManager, _safe_member
 from klab.training.manifest import source_identity
 from klab.training.metrics import ExperimentStore
-from klab.training.trainer import train
 from klab.verification_proofs import verification_options
 from klab.workdir import (
     ensure_work_dir,
@@ -85,6 +56,9 @@ from klab.workspace_preflight import (
     tokenizer_storage_checks,
     training_storage_checks,
 )
+
+# Model frameworks (torch, datasets, pandas, pyarrow) load only inside the
+# command handlers that use them, so every other command starts quickly.
 
 
 def _dashboard(args: argparse.Namespace) -> None:
@@ -140,6 +114,9 @@ def _workspace_cleanup_apply(args: argparse.Namespace) -> None:
 
 
 def _engram_export(args: argparse.Namespace) -> None:
+    from klab.evaluation.inference import load_run
+    from klab.model.memory import ByteAddressMemory
+    from klab.model.portable_engram import export_portable_engram
     from klab.training.manifest import read_manifest, trained_memory_addressing
 
     # load_run refuses a run trained with pre-fix degenerate addressing; the
@@ -170,6 +147,8 @@ def _engram_export(args: argparse.Namespace) -> None:
 
 
 def _engram_inspect(args: argparse.Namespace) -> None:
+    from klab.model.portable_engram import load_portable_engram
+
     package = load_portable_engram(Path(args.path))
     print(json.dumps(package.manifest.as_dict(), sort_keys=True))
 
@@ -179,6 +158,8 @@ def _engram_pack_compile(args: argparse.Namespace) -> None:
 
     from pyarrow import ArrowException
     from safetensors import SafetensorError
+
+    from klab.engram.packs import compile_pack
 
     try:
         manifest = compile_pack(
@@ -237,6 +218,8 @@ def _engram_pack_compile(args: argparse.Namespace) -> None:
 
 
 def _engram_pack_inspect(args: argparse.Namespace) -> None:
+    from klab.engram.packs import inspect_pack
+
     try:
         payload = inspect_pack(Path(args.path))
     except (OSError, RuntimeError, TypeError, ValueError, KeyError) as error:
@@ -254,6 +237,8 @@ def _engram_pack_inspect(args: argparse.Namespace) -> None:
 
 
 def _engram_pack_verify(args: argparse.Namespace) -> None:
+    from klab.engram.packs import verify_pack
+
     try:
         report = verify_pack(Path(args.path), expected_pack_id=args.expected_pack_id)
     except (OSError, RuntimeError, TypeError, ValueError, KeyError) as error:
@@ -397,6 +382,8 @@ def _architecture_derive(args: argparse.Namespace) -> None:
 
 
 def _checkpoint_inspect(args: argparse.Namespace) -> None:
+    from klab.training.checkpoints import CheckpointManager, _safe_member
+
     path = Path(args.path)
     directory = CheckpointManager(path.parent.parent)._resolve(path)
     if not directory.is_dir() or directory.is_symlink():
@@ -413,6 +400,8 @@ def _checkpoint_inspect(args: argparse.Namespace) -> None:
 
 
 def _checkpoint_verify(args: argparse.Namespace) -> None:
+    from klab.training.checkpoints import CheckpointManager
+
     path = Path(args.path)
     try:
         expected_config = load_config(Path(args.config)) if args.config else None
@@ -443,6 +432,15 @@ def _checkpoint_verify(args: argparse.Namespace) -> None:
 
 
 def _inspect(args: argparse.Namespace) -> None:
+    from klab.memory import (
+        calibrated_estimate,
+        calibration_key,
+        plan_memory,
+        write_resource_proposal,
+    )
+    from klab.model.inspection import inspection_report, parameter_inventory
+    from klab.staging import inspect_runtime
+
     if args.estimate_runtime and args.write_proposal:
         raise ValueError("--estimate-runtime is read-only; write proposals separately")
     config = load_config(Path(args.config))
@@ -654,6 +652,9 @@ def _runtime_probe(args: argparse.Namespace) -> None:
 
 
 def _data_prepare(args: argparse.Namespace) -> None:
+    from klab.data.packing import prepare_data
+    from klab.data.tokenizer import load_tokenizer, verify_run_tokenizer
+
     config = load_config(Path(args.config))
     if config.dataset.source != "local_token_mixture":
         verify_run_tokenizer(config)
@@ -782,10 +783,13 @@ def _workspace_preflight(args: argparse.Namespace) -> None:
 
 
 def _tokenizer_train(args: argparse.Namespace) -> None:
+    from klab.data.tokenizer import train_tokenizer
+
     print(train_tokenizer(load_tokenizer_config(Path(args.config))))
 
 
 def _stage(args: argparse.Namespace) -> None:
+    from klab.staging import stage
     from klab.training.pilot_deadline import load_pilot_deadline_policy
 
     options = verification_options(
@@ -847,6 +851,8 @@ def _stage(args: argparse.Namespace) -> None:
 
 
 def _batch_calibrate(args: argparse.Namespace) -> None:
+    from klab.batch_calibration import calibrate_batch
+
     print(
         calibrate_batch(
             load_config(Path(args.config)),
@@ -874,6 +880,8 @@ def _triage_summary(
     run_id: str | None = None,
     runs_dir: Path | None = None,
 ) -> str:
+    from klab.evaluation.post_train_triage import triage_summary
+
     if report is None:
         return f"POST-TRAIN TRIAGE\n  UNKNOWN: {error or 'no verified report'}"
     triggers = report["triggers"]
@@ -903,6 +911,8 @@ def _triage_summary(
 def _triage_report(
     run_id: str, runs_dir: Path
 ) -> tuple[dict[str, object] | None, str | None]:
+    from klab.evaluation.post_train_triage import read_triage
+
     try:
         report = read_triage(run_id, runs_dir)
     except (OSError, ValueError) as error:
@@ -924,6 +934,7 @@ def _checkpoint_plan_spot(args: argparse.Namespace) -> None:
 
 def _train(args: argparse.Namespace) -> None:
     from klab.training.spot_safety import load_spot_policy
+    from klab.training.trainer import train
 
     config = load_config(Path(args.config))
     if args.runs_dir is not None:
@@ -981,6 +992,8 @@ def _train(args: argparse.Namespace) -> None:
 
 
 def _eval(args: argparse.Namespace) -> None:
+    from klab.evaluation.inference import load_run, write_inference_result
+
     if args.panel is not None:
         from klab.evaluation.panels import run_panel
 
@@ -1024,6 +1037,9 @@ def _inference_context(args: argparse.Namespace, native: int) -> int:
 
 
 def _generate(args: argparse.Namespace) -> None:
+    from klab.evaluation.generation import generate
+    from klab.evaluation.inference import load_run
+
     loaded = load_run(
         args.run_id,
         Path(args.runs_dir),
@@ -1211,6 +1227,14 @@ def _learn_probe(args: argparse.Namespace) -> None:
 
 
 def _chat(args: argparse.Namespace) -> None:
+    from klab.evaluation.chat import (
+        ChatMessage,
+        assistant_reply,
+        prepare_chat_prompt,
+    )
+    from klab.evaluation.generation import generate
+    from klab.evaluation.inference import load_run
+
     loaded = load_run(
         args.run_id,
         Path(args.runs_dir),
@@ -1501,6 +1525,8 @@ def _sweep(args: argparse.Namespace) -> None:
 
 def _report_run(args: argparse.Namespace) -> None:
     """Keep verified observations and advisory triage separate in one run view."""
+    from klab.evaluation.evidence import experiment_evidence
+
     run_id = args.record
     if Path(run_id).name != run_id or run_id in {".", ".."}:
         raise SystemExit("klab report: run ID must be one safe path component")

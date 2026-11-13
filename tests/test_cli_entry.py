@@ -70,6 +70,23 @@ runpy.run_path(sys.argv[0], run_name='__main__')
     assert not (tmp_path / "work").exists()
 
 
+def test_parser_construction_leaves_model_frameworks_unloaded():
+    # Every command pays this import; frameworks load in the handlers that use them.
+    script = (
+        "import sys, klab.cli.main as m; m.build_parser(); "
+        "print(sorted(name for name in ('torch', 'datasets', 'pandas', 'pyarrow') "
+        "if name in sys.modules))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    assert result.stdout.strip() == "[]"
+
+
 @pytest.mark.parametrize("prefix", PREFIXES)
 def test_environment_handoff_preserves_remainder_and_work_root(
     monkeypatch, tmp_path, prefix

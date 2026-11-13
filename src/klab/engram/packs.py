@@ -38,7 +38,6 @@ from klab.engram.records import (
     canonical_record_bytes,
     iter_knowledge_records,
 )
-from klab.model.portable_engram import load_portable_engram
 from klab.result_publication import sync_directory
 from klab.training.manifest import ArtifactIdentity, sha256_file
 
@@ -648,6 +647,8 @@ def compile_pack(
         if lexical_package is not None:
             lexical_copy = temporary / "lexical.engram"
             _copy_regular(lexical_package, lexical_copy)
+            from klab.model.portable_engram import load_portable_engram
+
             portable = load_portable_engram(lexical_copy)
             lexical_component = _validate_model(
                 LexicalComponent,
@@ -916,6 +917,8 @@ def _verify_internal(
 
         if manifest.lexical is not None and "lexical.engram" in members:
             try:
+                from klab.model.portable_engram import load_portable_engram
+
                 lexical = manifest.lexical
                 package = load_portable_engram(
                     members["lexical.engram"],

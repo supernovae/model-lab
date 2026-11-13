@@ -9,15 +9,12 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any
-
-import numpy as np
+from typing import TYPE_CHECKING, Any
 
 from klab.config import RunConfig, load_config
-from klab.data.story_packing import MatchedStoryDataset
-from klab.data.tokenizer import load_tokenizer
-from klab.derivation import derive_config
-from klab.staging import verify_prepared_inputs
+
+if TYPE_CHECKING:
+    from klab.data.story_packing import MatchedStoryDataset
 
 
 def schedule_settings(config: RunConfig, plan: MatchedStoryDataset) -> dict[str, Any]:
@@ -64,6 +61,13 @@ def schedule_settings(config: RunConfig, plan: MatchedStoryDataset) -> dict[str,
 
 def derive_schedule(source: Path, bundle: Path, output: Path) -> dict[str, Any]:
     """Cold-verify actual packed bytes and publish a native config derivation."""
+    import numpy as np
+
+    from klab.data.story_packing import MatchedStoryDataset
+    from klab.data.tokenizer import load_tokenizer
+    from klab.derivation import derive_config
+    from klab.staging import verify_prepared_inputs
+
     config = load_config(source)
     matched = config.training.matched_stories
     if matched is None:
