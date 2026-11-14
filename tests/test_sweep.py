@@ -155,6 +155,24 @@ def test_a_sweep_is_not_a_checkpoint(tmp_path: Path) -> None:
         checkpoint_from_result(path.parent.name, result)
 
 
+def test_a_sweep_may_vary_a_path_field(tmp_path: Path) -> None:
+    write_smoke_inputs(tmp_path, train_tokenizer_now=False)
+    declaration = _declaration(tmp_path)
+    body = yaml.safe_load(declaration.read_text())
+    del body["vary"]
+    body["points"] = [{"tokenizer.path": "other/tokenizer.json"}]
+    declaration.write_text(yaml.safe_dump(body))
+    calls: list[object] = []
+
+    def run(delta: Path, baseline: Path, **kwargs: object):
+        calls.append(yaml.safe_load(delta.read_text())["set"])
+        return {"status": "failed", "exit_status": 1}, delta.parent / "try.json"
+
+    run_sweep(declaration, work_dir=tmp_path / "work", try_fn=run)
+    # Not the baseline's own path, so the point is trained rather than crashing.
+    assert calls == [{"tokenizer.path": "other/tokenizer.json"}]
+
+
 def test_sweep_trains_the_baseline_once_per_seed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
