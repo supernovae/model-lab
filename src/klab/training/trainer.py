@@ -2134,7 +2134,12 @@ def _train_impl(
             )
             validation_started = time.perf_counter()
             bottleneck = None
-            if config.evaluation.gradient_bottleneck:
+            if (
+                config.evaluation.gradient_bottleneck
+                and (validation_pass_index - 1)
+                % config.evaluation.gradient_bottleneck_every
+                == 0
+            ):
                 if not isinstance(engine, PyTorchEngine) or fixed_panels:
                     raise ValueError(
                         "evaluation.gradient_bottleneck during training needs the "

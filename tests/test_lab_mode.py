@@ -191,6 +191,8 @@ def test_each_arm_measures_how_much_logit_gradient_its_head_passes_back(
     root, baseline = lab
     config = yaml.safe_load(baseline.read_text())
     config["evaluation"]["gradient_bottleneck"] = True
+    config["evaluation"]["gradient_bottleneck_every"] = 2
+    config["evaluation"]["every_steps"] = 1
     measured = root / "measured.yaml"
     measured.write_text(yaml.safe_dump(config))
     narrow = {"model.tie_embeddings": False, "model.output_head_rank": 4}
@@ -218,8 +220,15 @@ def test_each_arm_measures_how_much_logit_gradient_its_head_passes_back(
             "'validation/gradient_bottleneck/kernel_norm_fraction' ORDER BY step",
             (record["arms"]["candidate"]["run_id"],),
         ).fetchall()
-    assert len(steps) >= 2
-    assert steps[-1][1] == pytest.approx(cand["kernel_norm_fraction"], abs=0.01)
+    with sqlite3.connect(root / "work/lab/runs/experiments.sqlite3") as connection:
+        evaluations = connection.execute(
+            "SELECT COUNT(*) FROM metrics WHERE run_id = ? AND name = 'validation/loss'",
+            (record["arms"]["candidate"]["run_id"],),
+        ).fetchone()[0]
+    # gradient_bottleneck_every: 2 measures the 1st, 3rd, ... evaluations only.
+    assert evaluations >= 3 and len(steps) == (evaluations + 1) // 2
+    if evaluations % 2:
+        assert steps[-1][1] == pytest.approx(cand["kernel_norm_fraction"], abs=0.01)
     # The observer's share equals projecting the gradient onto ker(W^T) directly.
     loaded = load_run(record["arms"]["candidate"]["run_id"], root / "work/lab/runs")
     torch.manual_seed(0)

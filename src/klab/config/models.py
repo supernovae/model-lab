@@ -1215,6 +1215,10 @@ class EvaluationConfig(StrictModel):
     gradient_bottleneck: bool = Field(
         default=False, strict=True, exclude_if=lambda value: not value
     )
+    # Measure it on every Nth evaluation (the first included) to lower its cost.
+    gradient_bottleneck_every: int = Field(
+        default=1, strict=True, gt=0, exclude_if=lambda value: value == 1
+    )
     panels: tuple[FixedValidationPanel, ...] = Field(
         default=(), exclude_if=lambda value: not value
     )
@@ -1234,6 +1238,10 @@ class EvaluationConfig(StrictModel):
             raise ValueError("fixed validation requires distinct named panels")
         if self.every_steps is None and self.every_tokens is None:
             raise ValueError("at least one evaluation cadence is required")
+        if self.gradient_bottleneck_every > 1 and not self.gradient_bottleneck:
+            raise ValueError(
+                "gradient_bottleneck_every needs evaluation.gradient_bottleneck"
+            )
         return self
 
 
