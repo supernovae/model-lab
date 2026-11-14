@@ -1051,14 +1051,25 @@ class PyTorchEngine:
         )
 
     def evaluate(
-        self, batches: Iterable[Microbatch], positions: PositionLoss | None = None
+        self,
+        batches: Iterable[Microbatch],
+        positions: PositionLoss | None = None,
+        observer: Callable[[torch.Tensor, torch.Tensor], None] | None = None,
     ) -> EvaluationResult:
-        """Held-out loss; POSITIONS also collects it by window position."""
+        """Held-out loss; POSITIONS also collects it by window position.
+
+        OBSERVER sees each batch's logits and targets (the gradient-bottleneck
+        measurement); it needs the full logits, so the chunked head and custom
+        objectives refuse it.
+        """
         with _translate_allocation_failures(self._allocator_cap):
-            return self._evaluate(batches, positions)
+            return self._evaluate(batches, positions, observer)
 
     def _evaluate(
-        self, batches: Iterable[Microbatch], positions: PositionLoss | None
+        self,
+        batches: Iterable[Microbatch],
+        positions: PositionLoss | None,
+        observer: Callable[[torch.Tensor, torch.Tensor], None] | None,
     ) -> EvaluationResult:
         config, device, model, _, _ = self._ready()
         was_training = model.training
@@ -1075,6 +1086,15 @@ class PyTorchEngine:
                         if batch.byte_addresses is None
                         else torch.from_numpy(batch.byte_addresses).to(device)
                     )
+                    if observer is not None and (
+                        self.objective is not None
+                        or config.runtime.output_head_chunk_tokens is not None
+                    ):
+                        raise ValueError(
+                            "evaluation.gradient_bottleneck needs the full logits: "
+                            "unset runtime.output_head_chunk_tokens and the "
+                            "custom training objective"
+                        )
                     if self.objective is not None:
                         if positions is not None:
                             positions.unavailable = (
@@ -1110,6 +1130,8 @@ class PyTorchEngine:
                         )
                     else:
                         logits = model(x, byte_addresses=addresses)
+                        if observer is not None:
+                            observer(logits, y)
                         loss = functional.cross_entropy(
                             logits.float().flatten(0, 1),
                             y.flatten(),

@@ -39,6 +39,27 @@ METRICS = {
             "evaluation",
         ),
         MetricSpec(
+            "validation/gradient_bottleneck/kernel_norm_fraction",
+            "ratio",
+            "Share of the held-out logit gradient's norm lost in the output head.",
+            "gradient-bottleneck",
+            "evaluation",
+        ),
+        MetricSpec(
+            "validation/gradient_bottleneck/kept_cosine",
+            "ratio",
+            "Cosine between the held-out logit gradient and the part the head keeps.",
+            "gradient-bottleneck",
+            "evaluation",
+        ),
+        MetricSpec(
+            "validation/gradient_bottleneck/kept_squared_fraction",
+            "ratio",
+            "Squared kept cosine: the share of the logit gradient's energy the head keeps.",
+            "gradient-bottleneck",
+            "evaluation",
+        ),
+        MetricSpec(
             "optimizer/learning_rate",
             "ratio",
             "AdamW update learning rate, or Adafactor relative learning-rate cap.",

@@ -58,8 +58,17 @@ Artzi, [Lost in Backpropagation](https://arxiv.org/abs/2603.10145), section
 
 The logit gradient of each target is `softmax(logits) - onehot(target)`. A
 `try` whose baseline sets the field measures both arms, and a sweep reports the
-candidates' mean `kernel_norm_fraction` per point. To follow it over training,
-keep periodic checkpoints and `eval` each one.
+candidates' mean `kernel_norm_fraction` per point.
+
+A training run with the field set also measures it at every evaluation, on the
+same held-out targets as the loss, and records `kernel_norm_fraction`,
+`kept_cosine` and `kept_squared_fraction` as
+`validation/gradient_bottleneck/...` beside `validation/loss`. The dashboard's
+Evaluation tab draws them against the step, marks saved checkpoints and shows
+each metric's change since the previous evaluation, so a bend in training shows
+as a spike. The measurement needs the full logits: it refuses a run that uses
+fixed validation panels, `runtime.output_head_chunk_tokens`, a custom objective
+or the MLX engine, and it adds a short SVD of the head per evaluation.
 
 ## Panels
 
