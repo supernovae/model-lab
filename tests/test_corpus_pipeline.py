@@ -11,7 +11,12 @@ import yaml
 from corpus_fixtures import neutral_corpus
 
 from klab.corpus.acquisition import acquire
-from klab.corpus.pipeline import _records_for_file, _split, build
+from klab.corpus.pipeline import (
+    _records_for_file,
+    _split,
+    _uses_disk_lm_builder,
+    build,
+)
 from klab.corpus.project import SourceDeclaration, load_project
 from klab.corpus.release import freeze, lineage, review, sample, verify_release
 from klab.corpus.rights import resolve_file_rights
@@ -402,3 +407,31 @@ def test_empty_selected_training_view_cannot_replace_previous_release(
         freeze(candidate, tmp_path)
     assert verify_release(published)["release_id"] == published.name
     assert (published / "manifest.json").read_bytes() == original_digest
+
+
+def _disk_builder_project(**overrides):
+    from types import SimpleNamespace as N
+
+    release = N(
+        schema_version=2,
+        fraction=None,
+        record_admission=None,
+        lm=N(selected=True),
+        chat=N(selected=False),
+    )
+    for name, value in overrides.items():
+        setattr(release, name, value)
+    sources = [
+        N(kind="huggingface_dataset", schema_version=2),
+        N(kind="git", schema_version=2),
+    ]
+    return N(release=release, sources=sources), [N(kind="lm_text")]
+
+
+def test_a_v2_release_without_reviewed_admission_uses_the_disk_builder():
+    # Large corpora must stay memory-bounded without a reviewed admission.
+    assert _uses_disk_lm_builder(*_disk_builder_project())
+
+
+def test_a_fractional_v2_release_keeps_the_in_memory_builder():
+    assert not _uses_disk_lm_builder(*_disk_builder_project(fraction=0.5))

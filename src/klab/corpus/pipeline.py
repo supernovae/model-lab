@@ -1498,8 +1498,7 @@ def _uses_disk_lm_builder(project: Any, transforms: list[Any]) -> bool:
         and (
             project.release.schema_version == 3
             or (
-                project.release.record_admission is not None
-                and project.release.fraction is None
+                project.release.fraction is None
                 and all(
                     source.kind in {"huggingface_dataset", *FILE_ADMISSION_KINDS}
                     for source in project.sources

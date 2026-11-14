@@ -324,6 +324,14 @@ duplicates (refusing cross-split or incompatible-rights duplicates) and writes
 documents, spans, lineage and language-model and chat views. `freeze` publishes
 an immutable release with a content-derived ID.
 
+A language-model-only release (schema version 2 or 3, no `fraction`) is built
+with the disk-backed builder, so peak memory is bounded by individual records
+rather than corpus size; no reviewed admission is required. Fractional and
+chat releases still build in memory and need RAM comparable to the corpus.
+The builder's index is rebuildable scratch under `WORK/corpora/<id>/builds/indices`;
+it is I/O-heavy, so point that directory at fast storage (a symlink works) when
+`WORK` is on spinning disks.
+
 `--reuse-completed-preparation` on both commands continues from completed local
 preparation: `build` renders admitted shards without replaying the acquisition
 audit, and `freeze` publishes the release in place without copying the payload.
