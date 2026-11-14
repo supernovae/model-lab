@@ -379,3 +379,12 @@ def test_mixture_tokenizer_origin_requires_one_pinned_declaration(
     del raw["tokenizer"]["origin"]["mixture_declaration_sha256"]
     with pytest.raises(ValueError, match="requires its digest"):
         RunConfig.model_validate(raw)
+
+
+def test_gradient_bottleneck_cadence_needs_the_measurement() -> None:
+    raw = _run()
+    raw["evaluation"] = {"gradient_bottleneck_every": 5}
+    with pytest.raises(ValueError, match="needs evaluation.gradient_bottleneck"):
+        RunConfig.model_validate(raw)
+    raw["evaluation"]["gradient_bottleneck"] = True
+    assert RunConfig.model_validate(raw).evaluation.gradient_bottleneck_every == 5

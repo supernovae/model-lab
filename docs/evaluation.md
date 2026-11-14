@@ -60,7 +60,7 @@ The logit gradient of each target is `softmax(logits) - onehot(target)`. A
 `try` whose baseline sets the field measures both arms, and a sweep reports the
 candidates' mean `kernel_norm_fraction` per point.
 
-A training run with the field set also measures it at every evaluation, on the
+A training run with the field set also measures it at each evaluation, on the
 same held-out targets as the loss, and records `kernel_norm_fraction`,
 `kept_cosine` and `kept_squared_fraction` as
 `validation/gradient_bottleneck/...` beside `validation/loss`. The dashboard's
@@ -68,7 +68,15 @@ Evaluation tab draws them against the step, marks saved checkpoints and shows
 each metric's change since the previous evaluation, so a bend in training shows
 as a spike. The measurement needs the full logits: it refuses a run that uses
 fixed validation panels, `runtime.output_head_chunk_tokens`, a custom objective
-or the MLX engine, and it adds a short SVD of the head per evaluation.
+or the MLX engine.
+
+It costs a short SVD of the head plus a softmax over the whole vocabulary for
+every held-out target. On one Arc Pro B70 (a 42M model, 32,768-token vocabulary,
+1,048,576 targets per evaluation) the SVD took 0.35 s and the softmax pass 5.3 s,
+against a few seconds for the evaluation itself. Set
+`evaluation.gradient_bottleneck_every: N` to measure on every Nth evaluation
+(the first included), or leave `gradient_bottleneck` off during training and
+`eval` the kept checkpoints afterwards, on any idle device.
 
 ## Panels
 
