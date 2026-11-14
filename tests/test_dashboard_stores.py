@@ -23,6 +23,8 @@ def test_switching_stores_isolates_duplicate_run_ids_and_restores_selection(tmp_
         store = ExperimentStore(root)
         store.create_run("same-id", {"name": "same-id"}, {"purpose": "training"})
         store.log_metrics("same-id", 2, 20, 2.0, {"train/loss": loss})
+        # Finished, so neither store is "active" and the page opens on the primary.
+        store.finish_run("same-id", "completed")
     app = AppTest.from_function(_stores_page, args=(str(primary), str(pilot))).run()
     assert not app.exception
     assert app.dataframe[-1].value.iloc[0]["value"] == 3.0
@@ -37,6 +39,35 @@ def test_switching_stores_isolates_duplicate_run_ids_and_restores_selection(tmp_
     assert app.multiselect(key="selected_runs").value == []
     assert not app.dataframe
     assert not app.exception
+
+
+def _evaluation_page(root):
+    from pathlib import Path
+
+    from klab.dashboard.app import _run_page, _selection_controls
+
+    _selection_controls(Path(root))
+    _run_page(Path(root), "evaluation")
+
+
+def test_evaluation_page_shows_where_a_metric_moved_between_evaluations(tmp_path):
+    store = ExperimentStore(tmp_path)
+    store.create_run("run", {"name": "run"}, {"purpose": "training"})
+    for step, loss, kept in [(0, 5.0, 0.01), (500, 2.0, 0.02), (1000, 1.9, 0.02)]:
+        store.log_metrics(
+            "run",
+            step,
+            step * 10,
+            1.0,
+            {
+                "validation/loss": loss,
+                "validation/gradient_bottleneck/kept_squared_fraction": kept,
+            },
+        )
+    app = AppTest.from_function(_evaluation_page, args=(str(tmp_path),)).run()
+    assert not app.exception
+    assert [h.value for h in app.subheader] == ["Change since the previous evaluation"]
+    assert len(app.get("plotly_chart")) == 2
 
 
 def _lab_page(primary, lab_runs):

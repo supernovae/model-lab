@@ -2133,6 +2133,16 @@ def _train_impl(
                 raw_counters={"optimizer_step": step, "completed_targets": tokens},
             )
             validation_started = time.perf_counter()
+            bottleneck = None
+            if config.evaluation.gradient_bottleneck:
+                if not isinstance(engine, PyTorchEngine) or fixed_panels:
+                    raise ValueError(
+                        "evaluation.gradient_bottleneck during training needs the "
+                        "PyTorch engine and no fixed validation panels"
+                    )
+                from klab.evaluation.gradient_bottleneck import GradientBottleneck
+
+                bottleneck = GradientBottleneck(engine.model)
             try:
                 with pilot_phase(
                     "validation",
@@ -2181,7 +2191,8 @@ def _train_impl(
                         }
                     else:
                         evaluation_result = engine.evaluate(
-                            evaluation_batches()
+                            evaluation_batches(),
+                            **({"observer": bottleneck} if bottleneck else {}),
                         ).to_report()
                 result: dict[str, object] = {}
                 result.update(evaluation_result)
@@ -2212,6 +2223,17 @@ def _train_impl(
             perplexity = result.get("perplexity")
             if isinstance(perplexity, (int, float)):
                 metrics["validation/perplexity"] = float(perplexity)
+            if bottleneck is not None:
+                # Follow the head's gradient loss through training, per evaluation.
+                result["gradient_bottleneck"] = bottleneck.result()
+                for key in (
+                    "kernel_norm_fraction",
+                    "kept_cosine",
+                    "kept_squared_fraction",
+                ):
+                    metrics[f"validation/gradient_bottleneck/{key}"] = float(
+                        result["gradient_bottleneck"][key]
+                    )
             for name, panel_result in result.get("panels", {}).items():
                 metrics[f"validation/{name}/loss"] = float(panel_result["loss"])
                 if panel_result["perplexity"] is not None:

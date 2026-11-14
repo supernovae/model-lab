@@ -11,6 +11,7 @@ import json
 import sqlite3
 from datetime import UTC, datetime
 from importlib.resources import files
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -619,6 +620,25 @@ def architecture_diagnostics(view: DashboardSnapshot) -> None:
         )
 
 
+def evaluation_changes(points: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Each metric's change since the same run's previous evaluation."""
+    series: dict[tuple[object, object], list[dict[str, object]]] = {}
+    for point in sorted(points, key=lambda row: int(row["step"])):  # type: ignore[call-overload]
+        series.setdefault((point["run_id"], point["name"]), []).append(point)
+    changes = []
+    for (run_id, name), rows in series.items():
+        for before, after in pairwise(rows):
+            changes.append(
+                {
+                    "run_id": run_id,
+                    "name": name,
+                    "step": after["step"],
+                    "change": float(after["value"]) - float(before["value"]),  # type: ignore[arg-type]
+                }
+            )
+    return changes
+
+
 def evaluation(view: DashboardSnapshot) -> None:
     st.header("Evaluation")
     _, selected_ids = selected(view)
@@ -630,14 +650,49 @@ def evaluation(view: DashboardSnapshot) -> None:
     if not points:
         st.info("No persisted evaluation metrics are available for the selected runs.")
         return
-    st.plotly_chart(
+    figure = (
         px.line(
             points, x="step", y="value", color="run_id", facet_row="name", markers=True
         )
         .update_yaxes(matches=None)
-        .update_layout(height=max(350, 220 * len({point["name"] for point in points}))),
-        width="stretch",
+        .update_layout(height=max(350, 220 * len({point["name"] for point in points})))
     )
+    checkpoints = sorted(
+        {
+            int(row["step"])  # type: ignore[call-overload]
+            for row in _rows_for(view.stages, selected_ids)
+            if row["stage"] == "CHECKPOINTED" and row["status"] == "complete"
+        }
+    )
+    for step in checkpoints:
+        figure.add_vline(
+            x=step, line_dash="dot", line_color="#8c959f", row="all", col="all"
+        )
+    st.plotly_chart(figure, width="stretch")
+    if checkpoints:
+        st.caption("Dotted lines mark saved checkpoints.")
+    changes = evaluation_changes(points)
+    if changes:
+        st.subheader("Change since the previous evaluation")
+        st.caption(
+            "Where a metric moves most between evaluations: a bend in the loss, "
+            "or in the share of gradient the head loses, shows as a spike here."
+        )
+        st.plotly_chart(
+            px.bar(
+                changes,
+                x="step",
+                y="change",
+                color="run_id",
+                facet_row="name",
+                barmode="group",
+            )
+            .update_yaxes(matches=None)
+            .update_layout(
+                height=max(350, 200 * len({row["name"] for row in changes}))
+            ),
+            width="stretch",
+        )
 
 
 def runtime_view(view: DashboardSnapshot) -> None:

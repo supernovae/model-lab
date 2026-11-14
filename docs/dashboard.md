@@ -278,6 +278,13 @@ Save-time verification is distinct from a current local file check. Existing
 **Checkpoints** verification and **Explorer** remain available through the quick
 links.
 
+The **Evaluation** page draws every `validation/` metric against the step for the
+selected runs, so several runs overlay (for example the arms of a sweep). Dotted
+lines mark saved checkpoints, and a second chart shows each metric's change since
+the run's previous evaluation, which is where a bend in training stands out.
+With [`evaluation.gradient_bottleneck`](evaluation.md#gradient-bottleneck) set,
+the share of the logit gradient the head loses is drawn here too.
+
 Automatic refresh defaults to ten seconds and offers two seconds, thirty seconds,
 or paused. **Refresh now** refreshes the telemetry fragment without a full-page
 rerun. Only the selected runs are read. A failed read keeps that selection's

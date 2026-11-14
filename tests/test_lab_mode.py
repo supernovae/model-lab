@@ -208,6 +208,18 @@ def test_each_arm_measures_how_much_logit_gradient_its_head_passes_back(
     assert cand["kernel_norm_fraction"] ** 2 + cand["kept_cosine"] ** 2 == (
         pytest.approx(1.0)
     )
+    # Every evaluation during training measured it too, so its path is visible:
+    # the last one is the final scored checkpoint.
+    import sqlite3
+
+    with sqlite3.connect(root / "work/lab/runs/experiments.sqlite3") as connection:
+        steps = connection.execute(
+            "SELECT step, value FROM metrics WHERE run_id = ? AND name = "
+            "'validation/gradient_bottleneck/kernel_norm_fraction' ORDER BY step",
+            (record["arms"]["candidate"]["run_id"],),
+        ).fetchall()
+    assert len(steps) >= 2
+    assert steps[-1][1] == pytest.approx(cand["kernel_norm_fraction"], abs=0.01)
     # The observer's share equals projecting the gradient onto ker(W^T) directly.
     loaded = load_run(record["arms"]["candidate"]["run_id"], root / "work/lab/runs")
     torch.manual_seed(0)
