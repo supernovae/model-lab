@@ -134,6 +134,10 @@ def _validate_scope(project: Project) -> None:
             "inference_generator",
         }:
             continue
+        if source.kind == "git" and source.acquisition.bounded_blobs is None:
+            # Selected by pattern from a fetched tree, so only the snapshot's own
+            # `max_bytes` bounds it, not the ledger.
+            continue
         if not pinned_transfers(source):
             raise ValueError(
                 "transport budget cannot cover this unaccounted network source"

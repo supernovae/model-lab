@@ -1152,3 +1152,39 @@ def test_mediawiki_dump_of_any_site_yields_one_row_per_article(
     assert manifest["retrieval"]["scanned_pages"] == 3
     documents = _records_for_file(raw, name, project.sources[0], snapshot.name)
     assert [document["language"] for document, _ in documents] == [language]
+
+
+def test_a_transport_budget_admits_a_git_source_selected_by_pattern(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.test")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "docs").mkdir()
+    (repo / "docs/guide.md").write_text("# Guide\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "first")
+    body = _tar_gz([("rfc1.txt", b"Request for Comments 1 defines behaviour.\n", None)])
+    recipe = _archive_recipe(tmp_path, body, budget=True)
+    sources = recipe.parent / "sources"
+    two = yaml.safe_load((sources / "one.yaml").read_text(encoding="utf-8"))
+    two.update(
+        id="two",
+        kind="git",
+        canonical_uri=str(repo),
+        revision=_git(repo, "rev-parse", "HEAD"),
+        acquisition={"include": ["docs/*.md"], "max_bytes": 1024},
+    )
+    _yaml(sources / "two.yaml", two)
+    config = yaml.safe_load(recipe.read_text(encoding="utf-8"))
+    config["sources"].append("sources/two.yaml")
+    _yaml(recipe, config)
+    project = load_project(recipe)
+    ledger = tmp_path / "corpora/example/transport-budget.sqlite"
+    TransportBudget.initialize(ledger, project)
+    _serve_pinned(monkeypatch, {_RFC_URL: body})
+    lock = acquire(project, tmp_path)
+    assert set(lock["sources"]) == {"one", "two"}
+    assert TransportBudget(ledger, project).receipt()["source_charged"] == len(body)
