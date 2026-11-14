@@ -102,7 +102,8 @@ plan lists the failed comparison checks instead: fix those inputs before a new
 each metric against other results and, optionally, the reference models. Cells
 read **better**, **worse** or **within noise** (|Δ| ≤ 2 SE). **Not comparable**
 gives the reason (for example, held-out loss against a reference with another
-tokenizer). **Missing evidence** names the command that measures it.
+tokenizer). **Not run** means no result carries that measurement, as for the probes
+above the fast tier; the cell names the command that measures it.
 
 ## Models
 

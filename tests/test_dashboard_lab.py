@@ -308,6 +308,33 @@ def test_experiments_page_shows_results_trends_and_compare(lab: Path) -> None:
     assert "NOT COMPARABLE" in text
 
 
+def test_a_sweep_point_is_not_shown_as_an_abandoned_idea(tmp_path: Path) -> None:
+    def write(root: Path, request: dict[str, Any]) -> None:
+        name = "try-1"
+        write_sealed(
+            _mk(root / f"tries/{name}/try.json"),
+            {
+                "format": "klab-lab-try-v1",
+                "try_id": name,
+                "created_at": "2026-10-10T18:00:00+00:00",
+                "request": request,
+                "arms": {
+                    "baseline": {**BASELINE, "heldout": {"loss": 3.278}},
+                    "candidate": {**CANDIDATE, "heldout": {"loss": 3.247}},
+                },
+                "comparison": {"verdict": "CANDIDATE_LOWER_LOSS", "metric": "loss"},
+                "probe": _probe_result(),
+            },
+        )
+
+    write(tmp_path / "plain", {})
+    assert "Tweak and retry" in _text(_render("experiments", tmp_path / "plain"))
+    write(tmp_path / "swept", {"sweep_id": "sweep-x"})
+    text = _text(_render("experiments", tmp_path / "swept"))
+    assert "one point of sweep sweep-x" in text
+    assert "Tweak and retry" not in text
+
+
 def test_models_page_lists_catalog_references_and_unscored_runs(lab: Path) -> None:
     test = _render("models", lab)
     assert len(test.dataframe) >= 2  # catalog + references
