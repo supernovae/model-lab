@@ -301,6 +301,13 @@ another store. Run selections are remembered per directory;
 checkpoint and metric selectors reset on a store change, and stale snapshots are
 also scoped to that directory. Identical run IDs in different stores stay separate.
 
+The `LAB/runs` store, where lab tries train, is added as **Lab tries** when it
+holds a database. The dashboard opens on the store with a run recorded as
+running and updated in the last 15 minutes (a killed run stays "running", so
+the stored status alone does not count), and selects that run, so a try in
+progress shows its training without touching the selector. With none, it opens
+on the primary store.
+
 `--lab-dir` selects the Lab records for Home, Experiments, Models and
 Behaviors. Explorer sees the selected run store plus `LAB/runs`. Changing the
 run store does not change the Lab records directory.

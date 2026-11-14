@@ -39,6 +39,38 @@ def test_switching_stores_isolates_duplicate_run_ids_and_restores_selection(tmp_
     assert not app.exception
 
 
+def _lab_page(primary, lab_runs):
+    from pathlib import Path
+
+    from klab.dashboard.app import _selection_controls, _store_controls
+
+    root = _store_controls(Path(primary), [], Path(lab_runs))
+    _selection_controls(root)
+
+
+def test_dashboard_opens_on_the_store_with_a_recently_updated_running_run(tmp_path):
+    primary, lab_runs = tmp_path / "runs", tmp_path / "lab" / "runs"
+    ExperimentStore(primary).create_run("old", {"name": "old"}, {"purpose": "training"})
+    ExperimentStore(primary).finish_run("old", "completed")
+    ExperimentStore(lab_runs).create_run(
+        "try", {"name": "try"}, {"purpose": "training"}
+    )
+    app = AppTest.from_function(_lab_page, args=(str(primary), str(lab_runs))).run()
+    assert not app.exception
+    assert app.selectbox(key="dashboard_run_store").value == "Lab tries"
+    assert app.multiselect(key="selected_runs").value == ["try"]
+    # A run left "running" by a killed process is not treated as active.
+    stale = tmp_path / "stale"
+    store = ExperimentStore(stale / "lab" / "runs")
+    store.create_run("dead", {"name": "dead"}, {"purpose": "training"})
+    with store._connect() as connection:
+        connection.execute("UPDATE runs SET updated_at='2020-01-01 00:00:00'")
+    app = AppTest.from_function(
+        _lab_page, args=(str(primary), str(stale / "lab" / "runs"))
+    ).run()
+    assert app.selectbox(key="dashboard_run_store").value == PRIMARY_STORE
+
+
 def test_missing_store_does_not_show_previous_stores_data(tmp_path):
     primary, missing = tmp_path / "history", tmp_path / "missing"
     store = ExperimentStore(primary)
