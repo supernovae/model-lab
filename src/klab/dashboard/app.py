@@ -207,9 +207,42 @@ def _selection_controls(root: Path) -> None:
     )
 
 
-def _store_controls(primary: Path, extra: list[tuple[str, str]]) -> Path:
+_RECENT_SECONDS = 15 * 60
+
+
+def _default_store_label(stores: dict[str, Path]) -> str:
+    """The store whose newest recorded-running run was updated in the last 15 minutes.
+
+    Stored status alone is not a heartbeat (a killed run stays "running"), so a
+    store is chosen only on a recent update. With none, the first store.
+    """
+    now = datetime.now(UTC)
+    best: tuple[float, str] | None = None
+    for label, path in stores.items():
+        if not (path / "experiments.sqlite3").is_file():
+            continue
+        try:
+            records = runs(path)
+        except OSError, sqlite3.Error, ValueError:
+            continue
+        for record in records:
+            if record.status.lower() != "running":
+                continue
+            try:
+                updated = datetime.fromisoformat(record.updated_at).replace(tzinfo=UTC)
+            except ValueError:
+                continue
+            age = (now - updated).total_seconds()
+            if age <= _RECENT_SECONDS and (best is None or age < best[0]):
+                best = (age, label)
+    return best[1] if best else next(iter(stores))
+
+
+def _store_controls(
+    primary: Path, extra: list[tuple[str, str]], lab_runs: Path | None = None
+) -> Path:
     """Switch whole read-only projections, keeping selections scoped by directory."""
-    stores, warnings = available_stores(primary, extra)
+    stores, warnings = available_stores(primary, extra, lab_runs)
     previous_label = st.session_state.get("dashboard_run_store")
     previous_path = st.session_state.get("dashboard_active_store")
     if previous_label and previous_label not in stores and previous_path:
@@ -241,7 +274,11 @@ def _store_controls(primary: Path, extra: list[tuple[str, str]]) -> Path:
         st.sidebar.selectbox(
             "Run store",
             labels,
-            index=labels.index(previous_label) if previous_label in labels else 0,
+            index=labels.index(
+                previous_label
+                if previous_label in labels
+                else _default_store_label(stores)
+            ),
             key="dashboard_run_store",
         )
         if len(stores) > 1
@@ -1101,8 +1138,13 @@ def main() -> None:
     st.set_page_config(page_title="Kybern Model Lab", page_icon="🔬", layout="wide")
     ui.style()
     args = arguments()
+    lab_dir = (
+        Path(args.lab_dir)
+        if args.lab_dir
+        else Path(args.runs_dir).expanduser().resolve().parent / "lab"
+    )
     try:
-        root = _store_controls(Path(args.runs_dir), args.run_store)
+        root = _store_controls(Path(args.runs_dir), args.run_store, lab_dir / "runs")
     except ValueError as error:
         st.error(str(error))
         st.stop()
@@ -1110,7 +1152,9 @@ def main() -> None:
 
         @st.fragment(run_every=60)
         def watch_stores():
-            stores, warnings = available_stores(Path(args.runs_dir), args.run_store)
+            stores, warnings = available_stores(
+                Path(args.runs_dir), args.run_store, lab_dir / "runs"
+            )
             signature = (tuple(stores.items()), warnings)
             previous = st.session_state.get("store_discovery_signature")
             st.session_state["store_discovery_signature"] = signature
@@ -1120,11 +1164,6 @@ def main() -> None:
 
         with st.sidebar:
             watch_stores()
-    lab_dir = (
-        Path(args.lab_dir)
-        if args.lab_dir
-        else Path(args.runs_dir).expanduser().resolve().parent / "lab"
-    )
     runs_dirs = [root, lab_dir / "runs"]
     pages: dict[str, Any] = {}
     lab = [
