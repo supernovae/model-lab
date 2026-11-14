@@ -9,6 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 
 PRIMARY_STORE = "Primary run store"
+LAB_STORE = "Lab tries"
 
 
 def parse_run_store(value: str) -> tuple[str, str]:
@@ -103,8 +104,18 @@ def discovered_stores(roots: tuple[str, ...]):
     return _discover(roots, int(time.monotonic() // 60))
 
 
-def available_stores(primary: Path, extra: list[tuple[str, str]]):
+def available_stores(
+    primary: Path, extra: list[tuple[str, str]], lab_runs: Path | None = None
+):
     stores = configured_stores(primary, extra)
+    # Lab tries train under LAB/runs; offer that store without a --run-store flag.
+    if (
+        lab_runs is not None
+        and (lab_runs / "experiments.sqlite3").is_file()
+        and lab_runs.resolve() not in stores.values()
+        and LAB_STORE not in stores
+    ):
+        stores[LAB_STORE] = lab_runs.resolve()
     discovered, warnings = discovered_stores(discovery_roots())
     for label, path in discovered:
         if path not in stores.values() and label not in stores:

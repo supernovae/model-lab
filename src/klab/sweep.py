@@ -162,7 +162,7 @@ def _baseline_values(baseline: Path, fields: list[str]) -> dict[str, Any]:
                 break
             node = node[part]
         else:
-            values[field] = node
+            values[field] = str(node) if isinstance(node, Path) else node
     return values
 
 

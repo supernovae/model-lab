@@ -23,6 +23,8 @@ def test_switching_stores_isolates_duplicate_run_ids_and_restores_selection(tmp_
         store = ExperimentStore(root)
         store.create_run("same-id", {"name": "same-id"}, {"purpose": "training"})
         store.log_metrics("same-id", 2, 20, 2.0, {"train/loss": loss})
+        # Finished, so neither store is "active" and the page opens on the primary.
+        store.finish_run("same-id", "completed")
     app = AppTest.from_function(_stores_page, args=(str(primary), str(pilot))).run()
     assert not app.exception
     assert app.dataframe[-1].value.iloc[0]["value"] == 3.0
@@ -66,6 +68,38 @@ def test_evaluation_page_shows_where_a_metric_moved_between_evaluations(tmp_path
     assert not app.exception
     assert [h.value for h in app.subheader] == ["Change since the previous evaluation"]
     assert len(app.get("plotly_chart")) == 2
+
+
+def _lab_page(primary, lab_runs):
+    from pathlib import Path
+
+    from klab.dashboard.app import _selection_controls, _store_controls
+
+    root = _store_controls(Path(primary), [], Path(lab_runs))
+    _selection_controls(root)
+
+
+def test_dashboard_opens_on_the_store_with_a_recently_updated_running_run(tmp_path):
+    primary, lab_runs = tmp_path / "runs", tmp_path / "lab" / "runs"
+    ExperimentStore(primary).create_run("old", {"name": "old"}, {"purpose": "training"})
+    ExperimentStore(primary).finish_run("old", "completed")
+    ExperimentStore(lab_runs).create_run(
+        "try", {"name": "try"}, {"purpose": "training"}
+    )
+    app = AppTest.from_function(_lab_page, args=(str(primary), str(lab_runs))).run()
+    assert not app.exception
+    assert app.selectbox(key="dashboard_run_store").value == "Lab tries"
+    assert app.multiselect(key="selected_runs").value == ["try"]
+    # A run left "running" by a killed process is not treated as active.
+    stale = tmp_path / "stale"
+    store = ExperimentStore(stale / "lab" / "runs")
+    store.create_run("dead", {"name": "dead"}, {"purpose": "training"})
+    with store._connect() as connection:
+        connection.execute("UPDATE runs SET updated_at='2020-01-01 00:00:00'")
+    app = AppTest.from_function(
+        _lab_page, args=(str(primary), str(stale / "lab" / "runs"))
+    ).run()
+    assert app.selectbox(key="dashboard_run_store").value == PRIMARY_STORE
 
 
 def test_missing_store_does_not_show_previous_stores_data(tmp_path):

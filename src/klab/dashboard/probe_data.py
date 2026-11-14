@@ -33,6 +33,7 @@ class ProbeEntry:
     question: str | None
     delta: dict[str, Any]
     comparison: dict[str, Any] | None
+    sweep_id: str | None = None
 
     @property
     def label(self) -> str:
@@ -94,6 +95,7 @@ def load_history(
                     question=record.get("question"),
                     delta=record.get("delta") or {},
                     comparison=record.get("comparison"),
+                    sweep_id=(record.get("request") or {}).get("sweep_id"),
                 )
             )
         elif not is_final(record):
