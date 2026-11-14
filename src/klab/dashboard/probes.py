@@ -63,10 +63,22 @@ def _meter(row: dict[str, Any]) -> str:
     )
 
 
-def _verdict_banner(result: dict[str, Any]) -> None:
+def _verdict_banner(result: dict[str, Any], sweep_id: str | None = None) -> None:
     verdict = result.get("verdict") or {}
     status = str(verdict.get("status", "info"))
     action = ACTION_TEXT.get(verdict.get("action", ""), verdict.get("action", ""))
+    suggestion = str(verdict.get("suggestion", ""))
+    if sweep_id and status in {"warn", "fail"}:
+        # One point on a sweep's curve: the screen's "abandon" or "tweak" judges a
+        # single idea, but a sweep measures how a setting moves the result.
+        suggestion = (
+            f"This try is one point of sweep {sweep_id}. The probe screen's "
+            f"{status.upper()} says the change did not beat the baseline here, "
+            f"which is a reading on the curve, not a failed run. {suggestion} "
+            f"Read the whole curve with `klab report {sweep_id}`."
+        )
+        status = "info"
+        action = "Read the whole sweep curve"
     next_tier = verdict.get("next_tier")
     guard = result.get("guard") or {}
     guard_text = (
@@ -94,7 +106,7 @@ def _verdict_banner(result: dict[str, Any]) -> None:
         f"next: {html.escape(str(action))}"
         + (f" (--config {html.escape(next_tier)})" if next_tier else "")
         + "</h3>"
-        f"<p>{html.escape(str(verdict.get('suggestion', '')))}</p>"
+        f"<p>{html.escape(suggestion)}</p>"
         f"<p style='font-size:.85rem'>Guard: {html.escape(guard_text)} · "
         f"tiers run: {html.escape(' → '.join(result.get('tiers_run') or []))} · "
         f"{result.get('seconds', 0):.1f}s</p>{stop_text}</div>",
@@ -117,7 +129,7 @@ def _metrics(result: dict[str, Any]) -> None:
         delta = row.get("delta")
         column.metric(
             label,
-            "–" if value is None else f"{value:.3f}",
+            ("not run" if not row else "–") if value is None else f"{value:.3f}",
             None if delta is None else f"{delta:+.3f} vs baseline",
             delta_color=mode,
             help=(next((p.explains for p in PROBES if p.id == probe_id), None)),

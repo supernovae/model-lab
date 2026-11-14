@@ -148,7 +148,7 @@ def home_page(lab_dir: Path, runs_dirs: Sequence[Path], pages: PageLinks) -> Non
             latest = snap.entries[0]
             st.subheader("Latest verdict")
             st.caption(latest.label)
-            _verdict_banner(latest.result)
+            _verdict_banner(latest.result, latest.sweep_id)
         else:
             st.subheader("Latest try")
             _activity_table(lab_data.activity(snap, 1))
@@ -256,7 +256,7 @@ def experiments_page(lab_dir: Path) -> None:
                 else ""
             )
         )
-    _verdict_banner(result)
+    _verdict_banner(result, entry.sweep_id)
     _metrics(result)
     results_tab, trends_tab, compare_tab, explain_tab = st.tabs(
         ["Results", "History & trends", "Compare", "What the probes mean"]
@@ -418,8 +418,9 @@ def _compare(entry: ProbeEntry, snap: lab_data.LabSnapshot) -> None:
                 else f"{item['delta']:+.4f}"
                 + ("" if item.get("se") is None else f" ±{item['se']:.4f}")
             )
+            shown = "not run" if word == "missing_evidence" else word
             cells.append(
-                f"<td>{chip(tone, word)}"
+                f"<td>{chip(tone, shown)}"
                 f"<br>{delta}<br><span class='pb-hint'>"
                 f"{html.escape(str(item.get('note') or ''))}</span></td>"
             )
@@ -438,7 +439,8 @@ def _compare(entry: ProbeEntry, snap: lab_data.LabSnapshot) -> None:
         "standard errors. **within noise** means it is not. **not comparable** "
         "means the two values were measured on different data, tokenizers or "
         "items (their comparison group differs), so no delta is shown. "
-        "**missing evidence** names the command that would measure it.",
+        "**not run** means no result carries that measurement (the fast tier does "
+        "not run it); the cell names the command that would measure it.",
     )
 
 
