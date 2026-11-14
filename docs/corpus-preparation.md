@@ -61,7 +61,10 @@ per source and then an acquisition lock binding them.
   of bytes, retries, disk and wall time for bounded Hugging Face and Git
   transfers and for archive, PDF and MediaWiki downloads;
   `corpus budget-status PROJECT` reads it. Failed and interrupted transfers keep
-  their full charge.
+  their full charge. A Git source selected by `include` patterns is admitted
+  under a budget but not metered by it: Git fetches the repository itself, and
+  only the snapshot's own `max_bytes` bounds what is kept. List exact blobs
+  (`bounded_blobs`) to have the ledger charge each file.
 - **Initial feasibility gate.** A budget may set `initial_body_bytes` below
   `max_total_body_bytes`. Acquisition stops at the initial cap until
   `corpus budget-release-gate PROJECT --report REPORT --review REVIEW` records
