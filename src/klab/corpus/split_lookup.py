@@ -8,8 +8,7 @@ from uuid import uuid4
 
 from klab.corpus.bounded_metadata import _fingerprint, _input_stat
 from klab.corpus.jsonl_records import records_from_path
-
-_SPLITS = ("train", "validation", "test")
+from klab.corpus.project import SPLITS
 
 
 def stamp(path):
@@ -46,7 +45,7 @@ class AssignmentLookup(Mapping):
                     or set(row) != {"document_id", "split"}
                     or not isinstance(row["document_id"], str)
                     or not row["document_id"]
-                    or row["split"] not in _SPLITS
+                    or row["split"] not in SPLITS
                     or previous is not None
                     and row["document_id"] <= previous
                 ):
@@ -55,7 +54,7 @@ class AssignmentLookup(Mapping):
                 encoded = previous.encode("utf-8")
                 offset_file.write(struct.pack("<Q", position))
                 key_file.write(encoded)
-                split_file.write(bytes([_SPLITS.index(row["split"])]))
+                split_file.write(bytes([SPLITS.index(row["split"])]))
                 position += len(encoded)
                 self.count += 1
             offset_file.write(struct.pack("<Q", position))
@@ -92,7 +91,7 @@ class AssignmentLookup(Mapping):
                 right = middle
         if left == self.count or self._key(left) != encoded:
             raise KeyError(key)
-        return _SPLITS[self.maps[2][left]]
+        return SPLITS[self.maps[2][left]]
 
     def __iter__(self):
         for index in range(self.count):

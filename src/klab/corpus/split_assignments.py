@@ -5,8 +5,19 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from klab.corpus.bounded_metadata import current_metadata_store
+from klab.corpus.project import SPLITS
 from klab.corpus.split_lookup import AssignmentLookup, stamp
 from klab.training.manifest import sha256_file
+
+# The lineage field that identifies a split-policy unit.
+UNIT_FIELDS = {
+    "document": "parent_document_ids",
+    "source_document_family": "source_family_ids",
+    "source_repository": "source_family_ids",
+    "scenario_family": "scenario_family_id",
+    "generator_world": "generator_world_id",
+    "template_family": "template_family_id",
+}
 
 
 def assignment_path(directory, reference):
@@ -81,3 +92,29 @@ def verify_document_assignments(root, identity, documents):
     for doc in documents:
         if assignments.get(doc["document_id"]) != doc["split"]:
             raise ValueError("document differs from frozen split assignment")
+
+
+def assign_split(record, policy):
+    """The split a record's policy unit was assigned to."""
+    unit = policy["unit"]
+    if unit == "document":
+        keys = record.get("parent_document_ids") or [
+            record.get("document_id") or record.get("scenario_family_id")
+        ]
+    elif unit in {"source_repository", "source_document_family"}:
+        keys = record.get("source_family_ids") or [
+            record.get("source_family") or record.get("scenario_family_id")
+        ]
+    else:
+        keys = [record.get(UNIT_FIELDS[unit])]
+    keys = [k for k in keys if k]
+    if not keys:
+        raise ValueError(f"missing {unit} split lineage")
+    assignments = policy["assignments"]
+    choices = {assignments[k] for k in keys if k in assignments}
+    if len(choices) != 1 or any(k not in assignments for k in keys):
+        raise ValueError(f"missing/conflicting split assignment: {keys}")
+    choice = choices.pop()
+    if choice not in SPLITS:
+        raise ValueError("invalid split")
+    return choice

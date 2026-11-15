@@ -25,6 +25,11 @@ from klab.corpus.admission_inspection_cache import (
     unchanged,
 )
 from klab.corpus.bounded_metadata import _HashedInput, _Reader
+from klab.corpus.build_outputs import (
+    publish_staging,
+    rights_file_entry,
+    stage_declared_inputs,
+)
 from klab.corpus.preparation_inputs import (
     corpus_work_root,
     local_dependencies,
@@ -366,7 +371,6 @@ def build_completed(project, work_root):
         _uses_disk_lm_builder,
     )
     from klab.corpus.progress import BuildProgress
-    from klab.corpus.split_assignments import copy_assignments
     from klab.corpus.split_inventory_adoption import (
         _inside,
         adopt_completed_inventory,
@@ -581,21 +585,15 @@ def build_completed(project, work_root):
         )
         prepared.append(Path(result["prepared"]))
         rights_files.append(
-            {
-                "source_id": source.id,
-                "path": header["sample_path"],
-                "sha256": header["sample_sha256"],
-                "size": source_paths[source.id].stat().st_size,
-                "role": "document",
-                "canonical_uri": source.canonical_uri,
-                "revision": source.revision,
-                "license_url": source.license_url,
-                "rights": header["rights"],
-                "admission_policy_id": header["policy_id"],
-                "admission_policy_sha256": header["policy_sha256"],
-                "admission_license_label": header["license_label"],
-                "admission_policy_spdx_expression": header["policy_spdx_expression"],
-            }
+            rights_file_entry(
+                source,
+                path=header["sample_path"],
+                sha256=header["sample_sha256"],
+                size=source_paths[source.id].stat().st_size,
+                role="document",
+                rights=header["rights"],
+                admitted=header,
+            )
         )
     ordered = StreamBuildRows.create(
         stages, prepared, project, family_reference=family_reference
@@ -617,8 +615,7 @@ def build_completed(project, work_root):
             )
         staging = directory / "build"
         staging.mkdir()
-        copy_assignments(project, staging)
-        shutil.copyfile(admission_path, staging / "record-admission.json")
+        stage_declared_inputs(project, staging, admission_path)
         shutil.copyfile(
             families["files"][0]["path"], staging / "family-inventory.jsonl"
         )
@@ -642,8 +639,7 @@ def build_completed(project, work_root):
         )
         unchanged(request["inputs"])
         unchanged(source_configuration)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        staging.rename(target)
+        publish_staging(staging, target)
         manifest = _small(target / "build.json")
         outputs = [
             {
