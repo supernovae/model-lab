@@ -133,9 +133,7 @@ def test_common_manager_rejects_unknown_native_codec_and_strict_pointer(
     generation = root / record.relative_path
     manifest = json.loads((generation / "manifest.json").read_text())
     required = current_required_versions()
-    required["state_codecs"][manifest["state_codec"]] = [
-        manifest["state_codec_version"]
-    ]
+    required["state_codecs"][manifest["state_codec"]] = manifest["state_codec_version"]
     validate_required_versions(required)
     manifest["state_codec_version"] = 2
     manifest.pop("sha256")
