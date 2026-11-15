@@ -14,6 +14,7 @@ from klab.address_hash import (
     engram_ngram_address,
     engram_table_sizes,
 )
+from klab.canonical import canonical_digest
 from klab.data.engram_sizing import (
     EngramSetup,
     analyze,
@@ -146,14 +147,20 @@ def test_cli_reads_a_prepared_root_and_refuses_out_of_vocabulary_ids(tmp_path):
     root.mkdir()
     ids = np.random.default_rng(4).integers(0, 64, 5_000).astype(np.int32)
     np.save(root / "train.npy", ids)
+    (root / "manifest.json").write_text(json.dumps({"manifest_sha256": "ab" * 32}))
     command = [
         sys.executable, "-m", "klab", "data", "engram-sizing", str(root),
         "--orders", "2", "--heads", "2", "--vocab-size", "64",
         "--memory-dim", "8", "--sizes", "64,1024", "--json",
+        "--output", str(tmp_path / "sizing.json"),
     ]  # fmt: skip
     done = subprocess.run(command, capture_output=True, text=True, check=True)
     report = json.loads(done.stdout)
     assert report["sample_tokens"] == 5_000
+    assert report["source"]["prepared_manifest_sha256"] == "ab" * 32
+    sealed = json.loads((tmp_path / "sizing.json").read_text())
+    assert sealed.pop("sha256") == canonical_digest(sealed)
+    assert sealed["source"] == report["source"]
     assert math.isfinite(report["sites"][0]["orders"][0]["distinct"])
     bad = command.copy()
     bad[bad.index("64", bad.index("--vocab-size"))] = "32"

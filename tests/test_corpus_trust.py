@@ -101,6 +101,37 @@ def test_near_duplicates_reports_a_planted_cross_split_pair(
     assert report["candidates_truncated"] is False
 
 
+def test_decision_record_must_decide_every_pair_of_this_report() -> None:
+    from klab.corpus.near_duplicates import check_decisions
+
+    report = {
+        "release_id": "r1",
+        "candidates": [
+            {"left_document_id": "a", "right_document_id": "b"},
+            {"left_document_id": "c", "right_document_id": "d"},
+        ],
+    }
+    record = {
+        "schema_version": 1,
+        "report_sha256": "h",
+        "release_id": "r1",
+        "accepted_by": "reviewer",
+        "accepted_on": "2026-01-01",
+        "decisions": [
+            {"documents": ["b", "a"], "decision": "dropped"},
+            {"documents": ["c", "d"], "decision": "kept"},
+        ],
+    }
+    result = check_decisions(report, "h", record)
+    assert result["undecided_count"] == 0
+    assert result["problems"] == ["pair c / d is kept without a reason"]
+    record["decisions"].pop()
+    record["report_sha256"] = "other"
+    result = check_decisions(report, "h", record)
+    assert result["undecided"] == [["c", "d"]]
+    assert "written for a different report" in result["problems"][0]
+
+
 def test_near_duplicates_refuses_a_heldout_side_over_its_bound(
     planted_release: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:

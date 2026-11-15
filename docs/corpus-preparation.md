@@ -713,6 +713,24 @@ words (matched by identical text only) for each split and source.
 limits only how many are listed, in document-ID order, and
 `candidates_truncated` says when the list is shorter than the count.
 
+Save the report to a file and decide every listed pair in a decision record
+that names the report by the SHA-256 of that file, so a record cannot be reused
+for another screen:
+
+```yaml
+schema_version: 1
+release_id: RELEASE_ID
+report_sha256: SHA256_OF_THE_REPORT_FILE
+accepted_by: NAME
+accepted_on: 2026-01-31
+decisions:
+  - documents: [DOCUMENT_ID, DOCUMENT_ID]
+    decision: merged   # merged, dropped, or kept (kept needs a reason:)
+```
+
+A record is complete when every listed pair has a decision, `kept` pairs give a
+reason, and the report is not truncated.
+
 ## Guard held-out data across releases
 
 When a new release replaces one whose validation or test documents back a
