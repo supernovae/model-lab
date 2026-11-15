@@ -314,3 +314,21 @@ def test_memory_and_disk_builders_decide_identically(
     # The corpora exercise both outcomes under every policy.
     assert compared + errors == 40
     assert compared >= 1
+
+
+def test_a_declared_source_without_documents_fails_the_build() -> None:
+    from types import SimpleNamespace
+
+    from klab.corpus.large_build import _require_every_source_has_documents
+
+    connection = _database(
+        [("a-train", "train", "r1", "n1"), ("b-train", "train", "r2", "n2")]
+    )
+    # _database records every document under the source "s".
+    declared = SimpleNamespace(
+        sources=[SimpleNamespace(id="s"), SimpleNamespace(id="code_python")]
+    )
+    with pytest.raises(ValueError, match="produced no documents: code_python"):
+        _require_every_source_has_documents(connection, declared)
+    complete = SimpleNamespace(sources=[SimpleNamespace(id="s")])
+    _require_every_source_has_documents(connection, complete)

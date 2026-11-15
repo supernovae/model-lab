@@ -424,6 +424,29 @@ def _prepare_file(
     return destination
 
 
+def _require_every_source_has_documents(
+    connection: sqlite3.Connection, project: Any
+) -> None:
+    """Fail when a declared source contributed no document at all.
+
+    This build is language-model only, so every declared source feeds the
+    corpus. A source that yields nothing has had every file set aside (for
+    example by a rights rule), and a quiet gap would shrink the training mix.
+    """
+    present = {
+        source_id
+        for (source_id,) in connection.execute(
+            "SELECT DISTINCT source_id FROM documents"
+        )
+    }
+    empty = sorted(source.id for source in project.sources if source.id not in present)
+    if empty:
+        raise ValueError(
+            f"declared source(s) produced no documents: {', '.join(empty)}; "
+            "every file was set aside (see rejected.jsonl and license-report.json)"
+        )
+
+
 def _index_prepared(
     database: Path, prepared: list[Path], project: Any, progress: BuildProgress
 ) -> sqlite3.Connection:
@@ -1313,6 +1336,7 @@ def build_large(
             Path(index_dir) / "documents.sqlite", prepared, project, progress
         )
         try:
+            _require_every_source_has_documents(connection, project)
             _verify_admitted_inventory(connection, record_admission)
             progress.update(phase="deduplicating")
             groups_path = Path(index_dir) / "groups.jsonl"
