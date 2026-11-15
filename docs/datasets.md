@@ -328,10 +328,11 @@ config and vocabulary and used by many runs. Each run keeps the export's
 `dataset` and `tokenizer` sections exactly. `klab corpus verify-export RUN.yaml`
 checks a run's release and export without preparing anything.
 
-Releases may set `release.normalizer: normalizer-structure-v3`, which records
-retained line spans, removed spans with reasons and document structure, and
-drops metadata-only front matter from language-model views while keeping it in
-the release.
+A release declares `release.normalizer` options (see [normalizer
+options](corpus-preparation.md#normalizer-options)). With `structure_cleaning:
+true` they record retained line spans, removed spans with reasons and document
+structure, and drop metadata-only front matter from language-model views while
+keeping it in the release.
 
 ## Hugging Face credentials
 

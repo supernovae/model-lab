@@ -30,4 +30,7 @@ keep_nonredistributable_local: true
 record_admission:
   path: ${REVIEWED_ADMISSION_FILE}
   sha256: ${REVIEWED_ADMISSION_SHA256}
-normalizer: normalizer-structure-v3
+normalizer:
+  structure_cleaning: true
+  front_matter_extra_keys: {}
+  gutenberg_boilerplate: []

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from corpus_fixtures import STRICT_POLICY
+from corpus_fixtures import PLAIN_NORMALIZER, STRICT_POLICY
 from lab_fixtures import write_smoke_inputs
 
 from klab.cli.main import main
@@ -191,6 +191,7 @@ def bakeoff_report(tmp_path_factory: pytest.TempPathFactory) -> Path:
             "lm": {"selected": True, "training_splits": ["train", "validation"]},
             "chat": {"selected": False, "training_splits": []},
             "publication_mode": "redistributable_under_source_terms",
+            "normalizer": PLAIN_NORMALIZER,
         },
         "corpus.yaml": {
             "schema_version": 1,

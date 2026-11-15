@@ -11,9 +11,7 @@ import re
 import unicodedata
 from typing import Any
 
-NORMALIZER_V1 = "normalizer-nfc-markdown-v1"
-NORMALIZER_V2 = "normalizer-structure-v2"
-NORMALIZER_V3 = "normalizer-structure-v3"
+from klab.corpus.project import NormalizerOptions
 
 _FRONT_MATTER_KEYS = frozenset(
     {
@@ -27,9 +25,6 @@ _FRONT_MATTER_KEYS = frozenset(
         "slug",
         "description",
     }
-)
-_PAGERDUTY_FRONT_MATTER_KEYS = frozenset(
-    {"cover", "hero", "hero_alt_text", "style", "pdf"}
 )
 _GUTENBERG_START = re.compile(
     r"^\*\*\*\s*START OF (?:THE )?PROJECT GUTENBERG (?:EBOOK|ETEXT)\b.*\*\*\*\s*$",
@@ -54,7 +49,7 @@ def _lines(text: str) -> list[str]:
 
 
 def _front_matter_end(
-    lines: list[str], *, source_id: str, normalizer: str
+    lines: list[str], *, source_id: str, options: NormalizerOptions
 ) -> tuple[int | None, str | None]:
     if not lines or lines[0].strip() != "---":
         return None, None
@@ -73,16 +68,16 @@ def _front_matter_end(
         if match is None:
             return None, "ambiguous_yaml_header"
         keys.add(match.group(1).lower())
-    allowed = _FRONT_MATTER_KEYS
-    if normalizer == NORMALIZER_V3 and source_id == "kml_scale_pagerduty":
-        allowed = allowed | _PAGERDUTY_FRONT_MATTER_KEYS
+    allowed = _FRONT_MATTER_KEYS | set(
+        options.front_matter_extra_keys.get(source_id, ())
+    )
     if not keys or not keys <= allowed:
         return None, "configuration_or_ambiguous_yaml"
     return closing + 1, None
 
 
 def clean_structure(
-    text: str, *, source_id: str, normalizer: str = NORMALIZER_V2
+    text: str, *, source_id: str, options: NormalizerOptions
 ) -> dict[str, Any]:
     """Return text and structural provenance without rewriting useful syntax.
 
@@ -90,8 +85,8 @@ def clean_structure(
     field. The enclosing document source span still identifies the snapshot row
     or file-line interval. Output offsets are character offsets in cleaned text.
     """
-    if normalizer not in {NORMALIZER_V2, NORMALIZER_V3}:
-        raise ValueError("unsupported structured normalizer")
+    if not options.structure_cleaning:
+        raise ValueError("structure cleaning is not enabled in the normalizer")
     normalized = unicodedata.normalize(
         "NFC", text.replace("\r\n", "\n").replace("\r", "\n")
     )
@@ -117,16 +112,14 @@ def clean_structure(
         )
 
     front_end, front_flag = _front_matter_end(
-        lines, source_id=source_id, normalizer=normalizer
+        lines, source_id=source_id, options=options
     )
     if front_flag:
         flags.append(front_flag)
     if front_end is not None:
         remove(0, front_end, "recognized_yaml_front_matter")
 
-    if source_id.startswith("project_gutenberg") or (
-        normalizer == NORMALIZER_V3 and source_id == "kml_scale_project_gutenberg"
-    ):
+    if source_id in options.gutenberg_boilerplate:
         start = next(
             (
                 n
@@ -258,7 +251,7 @@ def clean_structure(
     return {
         "text": result,
         "structure": {
-            "normalizer": normalizer,
+            "normalizer": options.identity,
             "retained_spans": retained,
             "removed_spans": removed,
             "blocks": blocks,

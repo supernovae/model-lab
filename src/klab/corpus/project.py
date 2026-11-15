@@ -914,6 +914,61 @@ class DocumentPolicy(StrictModel):
     row_files: Literal["buffered", "streaming"]
 
 
+_FRONT_MATTER_KEY = re.compile(r"[a-z][a-z0-9_-]*\Z")
+
+
+class NormalizerOptions(StrictModel):
+    """Text cleaning applied to every admitted document, recorded in the release.
+
+    Lab never recognises a source by its ID: a recipe names the sources that
+    get a pass. The options are part of the release declaration, the build
+    identity and every document identity (`identity`).
+    """
+
+    # false: only NFC and line-ending normalisation; the other options must be
+    # empty. true: recognised YAML front matter is removed, structure is
+    # recorded, and a document left empty is excluded from LM views.
+    structure_cleaning: bool
+    # Source ID -> front-matter keys removed in addition to the built-in set
+    # (title, weight, categories, category, tags, date, draft, slug,
+    # description).
+    front_matter_extra_keys: dict[str, tuple[str, ...]]
+    # Sources whose Project Gutenberg header, production credit and footer are
+    # stripped.
+    gutenberg_boilerplate: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def valid_options(self) -> NormalizerOptions:
+        for source_id, keys in self.front_matter_extra_keys.items():
+            if (
+                not keys
+                or len(set(keys)) != len(keys)
+                or any(not _FRONT_MATTER_KEY.fullmatch(key) for key in keys)
+            ):
+                raise ValueError(
+                    "front_matter_extra_keys need unique lowercase YAML key names"
+                )
+            if not _ID.fullmatch(source_id):
+                raise ValueError("front_matter_extra_keys need source IDs")
+        if len(set(self.gutenberg_boilerplate)) != len(self.gutenberg_boilerplate):
+            raise ValueError("gutenberg_boilerplate source IDs must be unique")
+        if not self.structure_cleaning and (
+            self.front_matter_extra_keys or self.gutenberg_boilerplate
+        ):
+            raise ValueError("cleaning passes require structure_cleaning: true")
+        return self
+
+    @property
+    def identity(self) -> str:
+        """The name stored in documents, spans and manifests for these options."""
+        from klab.canonical import canonical_digest
+
+        return "normalizer-" + canonical_digest(self.model_dump(mode="json"))[:16]
+
+    def source_ids(self) -> set[str]:
+        return set(self.front_matter_extra_keys) | set(self.gutenberg_boilerplate)
+
+
 class ReleasePolicy(StrictModel):
     duplicates: DuplicatePolicy
     documents: DocumentPolicy
@@ -945,9 +1000,7 @@ class ReleaseDeclaration(StrictModel):
     ]
     policy: ReleasePolicy
     record_admission: RecordAdmissionReference | None = None
-    normalizer: Literal["normalizer-structure-v2", "normalizer-structure-v3"] | None = (
-        None
-    )
+    normalizer: NormalizerOptions
 
     @model_validator(mode="after")
     def weights_valid(self) -> ReleaseDeclaration:
@@ -982,8 +1035,6 @@ def release_declaration_payload(release: ReleaseDeclaration) -> dict[str, Any]:
     result = release.model_dump(mode="json")
     if release.record_admission is None:
         result.pop("record_admission")
-    if release.normalizer is None:
-        result.pop("normalizer")
     return result
 
 
@@ -1247,6 +1298,9 @@ def load_project(path: Path | str, *, verify_inputs: bool = True) -> Project:
     release = ReleaseDeclaration.model_validate(
         _yaml(project_path(root, config.release))
     )
+    unknown = release.normalizer.source_ids() - source_ids
+    if unknown:
+        raise ValueError(f"normalizer names unknown sources: {sorted(unknown)}")
     project = Project(
         root=root,
         config=config,

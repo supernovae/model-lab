@@ -22,6 +22,7 @@ from klab.canonical import canonical_digest, canonical_json
 from klab.config.models import StrictModel
 from klab.corpus.project import (
     ROW_SOURCE_KINDS,
+    NormalizerOptions,
     ReleaseDeclaration,
     release_declaration_payload,
     source_language,
@@ -448,17 +449,9 @@ def _records_for_file(
     full_file_sha256: str | None = None,
     first_row_index: int = 1,
     record_admission: dict[str, Any] | None = None,
-    normalizer_version: str = "normalizer-nfc-markdown-v1",
+    normalizer_options: NormalizerOptions,
     document_policy: Any,
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-    from klab.corpus.structure_cleaning import (
-        NORMALIZER_V1,
-        NORMALIZER_V2,
-        NORMALIZER_V3,
-    )
-
-    if normalizer_version not in {NORMALIZER_V1, NORMALIZER_V2, NORMALIZER_V3}:
-        raise ValueError("unsupported corpus normalizer")
     suffix = Path(name).suffix.lower()
     streaming_rows = (
         document_policy.row_files == "streaming"
@@ -648,11 +641,11 @@ def _records_for_file(
                 )
             continue
         structure = None
-        if normalizer_version in {NORMALIZER_V2, NORMALIZER_V3} and suffix != ".cnxml":
+        if normalizer_options.structure_cleaning and suffix != ".cnxml":
             from klab.corpus.structure_cleaning import clean_structure
 
             cleaned = clean_structure(
-                content, source_id=source.id, normalizer=normalizer_version
+                content, source_id=source.id, options=normalizer_options
             )
             content, structure = cleaned["text"], cleaned["structure"]
         location = (
@@ -660,7 +653,9 @@ def _records_for_file(
             if source.kind in ROW_SOURCE_KINDS
             else f"{name}#lines={start}-{end}"
         )
-        normalizer = "cnxml-text-v1" if suffix == ".cnxml" else normalizer_version
+        normalizer = (
+            "cnxml-text-v1" if suffix == ".cnxml" else normalizer_options.identity
+        )
         identity = digest([snapshot_id, location, raw_sha, normalizer])
         byte_start = byte_offsets[start - 1] if byte_offsets else None
         byte_end = byte_offsets[end] if byte_offsets else None
@@ -1777,8 +1772,7 @@ def _build_stored(
                         file_rights=decision,
                         rejected_records=rejected,
                         record_admission=admitted,
-                        normalizer_version=project.release.normalizer
-                        or "normalizer-nfc-markdown-v1",
+                        normalizer_options=project.release.normalizer,
                         document_policy=project.release.policy.documents,
                     )
                     documents.extend(doc for doc, _ in pairs)
@@ -2663,7 +2657,7 @@ def _build_stored(
                     "record_id": doc["document_id"],
                     "record_kind": "document",
                     "transform_id": doc.get("metadata", {}).get(
-                        "normalizer", "normalizer-nfc-markdown-v1"
+                        "normalizer", project.release.normalizer.identity
                     ),
                     "parent_document_ids": [doc["document_id"]],
                     "original_parent_document_ids": [doc["document_id"]],
@@ -2703,7 +2697,9 @@ def _build_stored(
                 item["domains"] = payload["domains"]
                 status, method, proof = (
                     "schema_validated",
-                    payload.get("metadata", {}).get("normalizer", "normalizer_v1"),
+                    payload.get("metadata", {}).get(
+                        "normalizer", project.release.normalizer.identity
+                    ),
                     {"schema_id": "normalized_document_v1"},
                 )
                 rendered = rendered_digest(payload["text"], text=True)
@@ -3149,6 +3145,7 @@ def _build_stored(
         report = {
             "schema_version": 1,
             "release_policy": project.release.policy.model_dump(mode="json"),
+            "normalizer": project.release.normalizer.model_dump(mode="json"),
             "corpus_id": project.config.id,
             "requested_mixture": mixture,
             "actual_mixture": actual,

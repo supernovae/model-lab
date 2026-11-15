@@ -418,7 +418,7 @@ decide every duplicate group with the same code (`dedup_policy.py`).
 
 ### Release policy
 
-Behaviour is chosen by named options in `release.policy`, never by a version
+Behaviour is chosen by named options in `release.policy` and `release.normalizer`, never by a version
 number. Every option is required, and the resolved policy is recorded in
 `build.json`, the release manifest, `report.json` and `license-report.json`.
 
@@ -463,6 +463,45 @@ policy:
   private-research training unless a prohibition is recorded; every source then
   declares `explicit_training_restriction`.
 
+### Normalizer options
+
+`release.normalizer` declares how documents are cleaned. It is required, never a
+version, and Lab recognises no source by name: the recipe lists the sources that
+get a pass.
+
+```yaml
+normalizer:
+  structure_cleaning: true          # false: only NFC and LF line endings
+  front_matter_extra_keys:          # source ID -> keys removed with the built-in set
+    docs_with_covers: [cover, hero, hero_alt_text, pdf, style]
+  gutenberg_boilerplate:            # sources whose Project Gutenberg wrapper is stripped
+    - books
+```
+
+- **`structure_cleaning`.** `false` applies only NFC normalisation and LF line
+  endings, and the other two options must be empty. `true` removes recognised
+  YAML front matter (keys `title`, `weight`, `categories`, `category`, `tags`,
+  `date`, `draft`, `slug`, `description`; anything else leaves the header in
+  place and flags it), records retained and removed line spans with reasons and
+  the document structure, and drops metadata-only front matter from
+  language-model views while keeping it in the release.
+- **`front_matter_extra_keys`.** Additional lowercase YAML keys accepted as
+  front matter for the named source only.
+- **`gutenberg_boilerplate`.** Removes the Project Gutenberg header through the
+  start marker (or a short production credit) and the footer from the end
+  marker, for the named sources only.
+
+Every source ID must be declared in the project. The options are recorded in
+`build.json`, the release manifest and `report.json`, and their digest names the
+normalizer (`normalizer-<16 hex>`) in each document identity, span and lineage
+row, so any change builds a different release. Replaces the earlier
+`normalizer-structure-v2`/`-v3` names, which hard-coded source IDs: rebuild
+releases that used them. `normalizer-structure-v3` for a corpus with a
+`project_gutenberg` source and a PagerDuty docs source is `structure_cleaning:
+true` with those sources listed in `gutenberg_boilerplate` and the PagerDuty
+source given `front_matter_extra_keys: [cover, hero, hero_alt_text, pdf,
+style]`.
+
 A record admission manifest has one format (`schema_version: 2`): it lists
 every project source, with reviewed rows for Hugging Face sources and a
 per-file decision for pinned Git sources. The earlier Hugging Face-only format
@@ -491,9 +530,8 @@ Each transform file in the project names one `kind`:
 - `deterministic_scenarios`: worlds from a registered generator and its oracle.
 - `chat_sft`, `tool_episode`: chat and tool-trace views of the records above.
 
-`release.normalizer: normalizer-structure-v3` records retained line spans,
-removed spans with reasons and document structure, and drops metadata-only front
-matter from language-model views.
+`release.normalizer` is required and chooses the text cleaning by named options
+(see Normalizer options below).
 
 A Markdown file becomes one document per heading section. A source declaration
 with `markdown_documents: files` keeps each file whole as one document instead,

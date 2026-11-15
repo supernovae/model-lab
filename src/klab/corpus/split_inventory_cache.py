@@ -45,8 +45,7 @@ class InventoryCache(InspectionCache):
             "sources": [
                 source_declaration_payload(source) for source in project.sources
             ],
-            "normalizer": getattr(getattr(project, "release", None), "normalizer", None)
-            or "normalizer-nfc-markdown-v1",
+            "normalizer": project.release.normalizer.model_dump(mode="json"),
             "family_fields_by_source": getattr(splits, "family_fields_by_source", {}),
         }
 

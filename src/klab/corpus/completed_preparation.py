@@ -301,7 +301,7 @@ def _prepared_source(directory, source, header, path, build_id, progress, normal
             source_path=path,
             decision=rights,
             progress=progress,
-            normalizer_version=normalizer,
+            normalizer_options=normalizer,
             record_admission=admitted,
             admission_sha256=header["admission_sha256"],
         )
@@ -492,7 +492,7 @@ def build_completed(project, work_root):
         source_request = {
             "producer": _producer(),
             "source": declarations[source.id],
-            "normalizer": project.release.normalizer,
+            "normalizer": project.release.normalizer.model_dump(mode="json"),
             "admission": {
                 **{key: value for key, value in header.items() if key != "decisions"},
                 "decisions": {
@@ -575,7 +575,7 @@ def build_completed(project, work_root):
                     source_paths[source.id],
                     source_identity,
                     progress,
-                    project.release.normalizer or "normalizer-nfc-markdown-v1",
+                    project.release.normalizer,
                 )
             ),
         )

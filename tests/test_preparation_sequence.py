@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from corpus_fixtures import STRICT_POLICY
+from corpus_fixtures import PLAIN_NORMALIZER, STRICT_POLICY, STRUCTURED_NORMALIZER
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
@@ -350,6 +350,7 @@ def _sources(root: Path, project_id: str) -> tuple[Path, dict[str, str]]:
         recipe / "release-quarantine.yaml",
         {
             "publication_mode": "metadata_reconstruction_only",
+            "normalizer": PLAIN_NORMALIZER,
             "policy": STRICT_POLICY,
             "mixture": {
                 "general_prose": 0.4,
@@ -552,7 +553,7 @@ def _reviewed_release(recipe: Path, admission: Path) -> None:
                 "path": admission.name,
                 "sha256": sha256_file(admission),
             },
-            "normalizer": "normalizer-structure-v3",
+            "normalizer": STRUCTURED_NORMALIZER,
         },
     )
     _write_yaml(
@@ -1085,7 +1086,7 @@ def test_offline_preparation_sequence_through_native_supervision(
             {
                 "format": "klab-admission-inspection-selection-v1",
                 "seed": "fixture-pre-admission-review-v1",
-                "normalizer": "normalizer-structure-v3",
+                "normalizer": STRUCTURED_NORMALIZER,
                 "sources": [
                     {
                         "source_id": source_id,
@@ -1592,7 +1593,7 @@ def test_freeze_rejects_missing_admission_and_mismatched_normalizer_or_inventory
     _clusters(clusters, inventory, strata)
     release_file = recipe / "release-reviewed.yaml"
     release_data = yaml.safe_load(release_file.read_text())
-    release_data["normalizer"] = "normalizer-structure-v2"
+    release_data["normalizer"] = PLAIN_NORMALIZER
     _write_yaml(release_file, release_data)
     with pytest.raises(ValueError, match="inventory differs"):
         freeze_splits(
@@ -1602,7 +1603,7 @@ def test_freeze_rejects_missing_admission_and_mismatched_normalizer_or_inventory
             clusters,
             recipe / "wrong-normalizer.yaml",
         )
-    release_data["normalizer"] = "normalizer-structure-v3"
+    release_data["normalizer"] = STRUCTURED_NORMALIZER
     _write_yaml(release_file, release_data)
     rows = inventory.read_bytes().splitlines()
     rows[0] = rows[0].replace(b'"books"', b'"other"', 1)
@@ -1753,7 +1754,7 @@ def test_native_inventory_handoff_reuses_completed_proof_and_rejects_changed_loc
     recipe, _ = _sources(root, "fixture-native-inventory-handoff")
     release = recipe / "release-quarantine.yaml"
     release_data = yaml.safe_load(release.read_text())
-    release_data["normalizer"] = "normalizer-structure-v3"
+    release_data["normalizer"] = STRUCTURED_NORMALIZER
     _write_yaml(release, release_data)
     producer = load_project(recipe / "acquire.yaml")
     inventory = recipe / "inventory.jsonl"

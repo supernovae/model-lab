@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from corpus_fixtures import STRICT_POLICY, fixture_rights
+from corpus_fixtures import PLAIN_OPTIONS, STRICT_POLICY, fixture_rights
 
 from klab.corpus.acquisition import acquire
 from klab.corpus.pipeline import (
@@ -326,7 +326,9 @@ def test_cnxml_extracts_prose_skips_local_media_and_rejects_entities_external_me
     from functools import partial
     from types import SimpleNamespace
 
-    records = partial(_records_for_file, document_policy=STRICT_DOCS)
+    records = partial(
+        _records_for_file, normalizer_options=PLAIN_OPTIONS, document_policy=STRICT_DOCS
+    )
 
     source = SimpleNamespace(
         id="physics",

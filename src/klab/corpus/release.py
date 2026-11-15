@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.bounded_metadata import metadata_operation, read_metadata
+from klab.corpus.project import NormalizerOptions
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
@@ -241,20 +242,21 @@ def _iter_rows(path: Path):
         yield record.value
 
 
+def _release_normalizer(identity: dict[str, Any]) -> NormalizerOptions:
+    return NormalizerOptions.model_validate(identity["release"]["normalizer"])
+
+
 def _verify_structure_replay(
-    doc: dict[str, Any], raw_text: str, *, expected_normalizer: str | None = None
+    doc: dict[str, Any], raw_text: str, *, options: NormalizerOptions
 ) -> None:
-    """Recreate opt-in cleaning from the authenticated source text."""
+    """Recreate the declared cleaning from the authenticated source text."""
     from klab.corpus.pipeline import _normalized
     from klab.corpus.structure_cleaning import clean_structure
 
     original = _normalized(raw_text)
-    normalizer = (doc.get("structure") or {}).get("normalizer")
-    if expected_normalizer is not None and normalizer != expected_normalizer:
+    if (doc.get("structure") or {}).get("normalizer") != options.identity:
         raise ValueError("structured document normalizer mismatch")
-    replay = clean_structure(
-        original, source_id=doc["source_id"], normalizer=normalizer
-    )
+    replay = clean_structure(original, source_id=doc["source_id"], options=options)
     if (
         replay["text"] != doc["text"]
         or replay["structure"] != doc.get("structure")
@@ -267,9 +269,9 @@ def _verify_structure_replay(
         raise ValueError("structured document replay mismatch")
 
 
-def _verify_cleaning_decision(doc: dict[str, Any], normalizer: str) -> None:
+def _verify_cleaning_decision(doc: dict[str, Any], options: NormalizerOptions) -> None:
     excluded = (
-        normalizer in {"normalizer-structure-v2", "normalizer-structure-v3"}
+        options.structure_cleaning
         and (doc.get("structure") or {}).get("decision") == "exclude_lm_metadata_only"
     )
     if (doc.get("drop_reason") == "metadata_only_front_matter") != excluded:
@@ -305,6 +307,7 @@ def _validate_rows_streaming(
         root / ("build.json" if (root / "build.json").exists() else "manifest.json")
     )
     identity = receipt.get("identity", receipt.get("build_identity"))
+    options = _release_normalizer(identity)
     pinned_snapshots = {row["source_id"]: row["sha256"] for row in receipt["snapshots"]}
     if len(pinned_snapshots) != len(receipt["snapshots"]) or pinned_snapshots != {
         source["id"]: source["snapshot_sha256"]
@@ -383,10 +386,7 @@ def _validate_rows_streaming(
                     != hashlib.sha256(text.encode("utf-8")).hexdigest()
                 ):
                     raise ValueError("document content digest mismatch")
-                _verify_cleaning_decision(
-                    doc,
-                    identity["release"].get("normalizer", "normalizer-nfc-markdown-v1"),
-                )
+                _verify_cleaning_decision(doc, options)
                 span_row = db.execute(
                     "SELECT data FROM spans WHERE id=?", (doc["document_id"],)
                 ).fetchone()
@@ -528,9 +528,7 @@ def _validate_rows_streaming(
                     normalizer = (
                         "cnxml-text-v1"
                         if raw_path.suffix.lower() == ".cnxml"
-                        else identity["release"].get(
-                            "normalizer", "normalizer-nfc-markdown-v1"
-                        )
+                        else options.identity
                     )
                     if (
                         span.get("normalizer") != normalizer
@@ -574,16 +572,16 @@ def _validate_rows_streaming(
                             or digest.hexdigest() != doc["raw_content_sha256"]
                         ):
                             raise ValueError("document raw byte range mismatch")
-                        if normalizer in {
-                            "normalizer-structure-v2",
-                            "normalizer-structure-v3",
-                        }:
+                        if (
+                            options.structure_cleaning
+                            and normalizer == options.identity
+                        ):
                             _verify_structure_replay(
                                 doc,
                                 raw_path.read_bytes()[byte_start:current_offset].decode(
                                     "utf-8"
                                 ),
-                                expected_normalizer=normalizer,
+                                options=options,
                             )
                         if doc["source_location"] != (
                             f"{span['raw_path']}#lines={start}-{end}"
@@ -634,13 +632,11 @@ def _validate_rows_streaming(
                                 "text_field"
                             ]
                         ]
-                        if normalizer in {
-                            "normalizer-structure-v2",
-                            "normalizer-structure-v3",
-                        }:
-                            _verify_structure_replay(
-                                doc, source_text, expected_normalizer=normalizer
-                            )
+                        if (
+                            options.structure_cleaning
+                            and normalizer == options.identity
+                        ):
+                            _verify_structure_replay(doc, source_text, options=options)
                         elif (
                             _normalized(source_text) != doc["text"]
                             or doc["raw_content_sha256"] != doc["content_sha256"]
@@ -869,9 +865,8 @@ def _validate_rows_stored(
         root / ("build.json" if (root / "build.json").exists() else "manifest.json")
     )
     identity = receipt.get("identity", receipt.get("build_identity"))
-    selected_normalizer = identity["release"].get(
-        "normalizer", "normalizer-nfc-markdown-v1"
-    )
+    options = _release_normalizer(identity)
+    selected_normalizer = options.identity
     from klab.corpus.jsonl_records import records_from_path
     from klab.corpus.row_index import RowIndex
 
@@ -891,7 +886,7 @@ def _validate_rows_stored(
     for doc in document_map.values():
         if doc["content_sha256"] != hashlib.sha256(doc["text"].encode()).hexdigest():
             raise ValueError("document content digest mismatch")
-        _verify_cleaning_decision(doc, selected_normalizer)
+        _verify_cleaning_decision(doc, options)
     spans = row_index(root / "spans.jsonl")
     sources = {item["id"]: item for item in _load(root / "sources.json")}
     from klab.corpus.acquisition import verify_snapshot
@@ -1003,9 +998,7 @@ def _validate_rows_stored(
             offsets = [0]
             sample_rows = None
             needs_rows = ("_admission_decisions" in file) or (
-                selected_normalizer
-                in {"normalizer-structure-v2", "normalizer-structure-v3"}
-                and "#row=" in doc["source_location"]
+                options.structure_cleaning and "#row=" in doc["source_location"]
             )
             if needs_rows and raw_path.suffix == ".jsonl":
                 from klab.corpus.jsonl_records import forward_rows
@@ -1060,10 +1053,7 @@ def _validate_rows_stored(
             if raw_path.suffix.lower() == ".cnxml"
             else selected_normalizer
         )
-        if selected_normalizer in {
-            "normalizer-structure-v2",
-            "normalizer-structure-v3",
-        } and (
+        if options.structure_cleaning and (
             span.get("normalizer") != expected_normalizer
             or doc["document_id"]
             != canonical_digest(
@@ -1087,24 +1077,15 @@ def _validate_rows_stored(
                 or span["line_end"] != line_number
                 or doc["source_location"] != f"{span['raw_path']}#row={line_number}"
                 or (
-                    selected_normalizer
-                    not in {"normalizer-structure-v2", "normalizer-structure-v3"}
+                    not options.structure_cleaning
                     and _normalized(selected_row[text_field]) != doc["text"]
                 )
             ):
                 raise ValueError("admitted document differs from selected source row")
-        if (
-            selected_normalizer
-            in {"normalizer-structure-v2", "normalizer-structure-v3"}
-            and "#row=" in doc["source_location"]
-        ):
+        if options.structure_cleaning and "#row=" in doc["source_location"]:
             if selected_row is None:
                 raise ValueError("structured source row unavailable")
-            _verify_structure_replay(
-                doc,
-                selected_row[text_field],
-                expected_normalizer=expected_normalizer,
-            )
+            _verify_structure_replay(doc, selected_row[text_field], options=options)
         if "#lines=" in doc["source_location"]:
             start, end = span["line_start"], span["line_end"]
             if start < 1 or end < start or end >= len(offsets):
@@ -1117,15 +1098,9 @@ def _validate_rows_stored(
                 != doc["raw_content_sha256"]
             ):
                 raise ValueError("document raw byte range mismatch")
-            if (
-                selected_normalizer
-                in {"normalizer-structure-v2", "normalizer-structure-v3"}
-                and expected_normalizer != "cnxml-text-v1"
-            ):
+            if options.structure_cleaning and expected_normalizer != "cnxml-text-v1":
                 _verify_structure_replay(
-                    doc,
-                    raw[byte_start:byte_end].decode("utf-8"),
-                    expected_normalizer=expected_normalizer,
+                    doc, raw[byte_start:byte_end].decode("utf-8"), options=options
                 )
     replay_stack.close()
     for (source_id, path), file in rights_files.items():

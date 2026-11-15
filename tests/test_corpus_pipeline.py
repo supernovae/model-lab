@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 import yaml
 from corpus_fixtures import (
+    PLAIN_OPTIONS,
     PRIVATE_RESEARCH_POLICY,
     STRICT_POLICY,
     fixture_rights,
@@ -57,7 +58,12 @@ def test_markdown_ancestry_fences_and_raw_evidence() -> None:
         }
     )
     docs = _records_for_file(
-        raw, "any.md", source, "a" * 64, document_policy=STRICT_DOCS
+        raw,
+        "any.md",
+        source,
+        "a" * 64,
+        normalizer_options=PLAIN_OPTIONS,
+        document_policy=STRICT_DOCS,
     )
     assert [row[0]["section_path"] for row in docs] == [
         [],
@@ -81,7 +87,12 @@ def test_markdown_ancestry_fences_and_raw_evidence() -> None:
         {**source.model_dump(mode="json"), "markdown_documents": "files"}
     )
     [(document, span)] = _records_for_file(
-        raw, "any.md", whole, "a" * 64, document_policy=STRICT_DOCS
+        raw,
+        "any.md",
+        whole,
+        "a" * 64,
+        normalizer_options=PLAIN_OPTIONS,
+        document_policy=STRICT_DOCS,
     )
     assert document["text"] == raw.decode() and document["section_path"] == []
     assert (span["line_start"], span["line_end"]) == (1, 8)
@@ -91,7 +102,12 @@ def test_raw_spans_count_physical_lf_lines_not_unicode_separators() -> None:
     source = next(item for item in _project().sources if item.id == "sample_docs")
     raw = "first\fspace\vtab\u2028paragraph\u2029next\nsecond\n".encode()
     document, span = _records_for_file(
-        raw, "document.txt", source, "a" * 64, document_policy=STRICT_DOCS
+        raw,
+        "document.txt",
+        source,
+        "a" * 64,
+        normalizer_options=PLAIN_OPTIONS,
+        document_policy=STRICT_DOCS,
     )[0]
     assert document["source_location"] == "document.txt#lines=1-2"
     assert (span["line_start"], span["line_end"]) == (1, 2)
@@ -99,7 +115,12 @@ def test_raw_spans_count_physical_lf_lines_not_unicode_separators() -> None:
 
     lone_cr = b"first\rsecond"
     normalized, physical = _records_for_file(
-        lone_cr, "document.txt", source, "c" * 64, document_policy=STRICT_DOCS
+        lone_cr,
+        "document.txt",
+        source,
+        "c" * 64,
+        normalizer_options=PLAIN_OPTIONS,
+        document_policy=STRICT_DOCS,
     )[0]
     assert normalized["text"] == "first\nsecond"
     assert (physical["line_start"], physical["line_end"]) == (1, 1)
@@ -107,7 +128,12 @@ def test_raw_spans_count_physical_lf_lines_not_unicode_separators() -> None:
 
     markdown = b"# Heading\nline \f and \v stay inside one raw line\n## Next\nbody\n"
     sections = _records_for_file(
-        markdown, "document.md", source, "b" * 64, document_policy=STRICT_DOCS
+        markdown,
+        "document.md",
+        source,
+        "b" * 64,
+        normalizer_options=PLAIN_OPTIONS,
+        document_policy=STRICT_DOCS,
     )
     assert [item[0]["section_path"] for item in sections] == [
         ["Heading"],
@@ -143,6 +169,7 @@ def test_normalized_duplicates_preserve_distinct_raw_origins() -> None:
         "any.txt",
         source,
         "a" * 64,
+        normalizer_options=PLAIN_OPTIONS,
         document_policy=STRICT_DOCS,
     )[0]
     decomposed, _ = _records_for_file(
@@ -150,6 +177,7 @@ def test_normalized_duplicates_preserve_distinct_raw_origins() -> None:
         "any.txt",
         source,
         "b" * 64,
+        normalizer_options=PLAIN_OPTIONS,
         document_policy=STRICT_DOCS,
     )[0]
     assert composed["text"] == decomposed["text"] == "café\n"
@@ -197,6 +225,7 @@ def test_prospective_hf_rows_keep_provenance_and_exclude_private_material(
             source.rights, name, raw, prospective_private_research=True
         ),
         rejected_records=rejected,
+        normalizer_options=PLAIN_OPTIONS,
         document_policy=PRIVATE_DOCS,
     )
     assert len(pairs) == 1
@@ -245,6 +274,7 @@ def test_scholarly_abstracts_and_full_papers_keep_distinct_kinds_and_corpus_ids(
                 source.rights, name, raw, prospective_private_research=True
             ),
             rejected_records=rejected,
+            normalizer_options=PLAIN_OPTIONS,
             document_policy=PRIVATE_DOCS,
         )
         assert len(rows) == 1
@@ -278,6 +308,7 @@ def test_wikimedia_rows_keep_page_revision_not_jsonl_envelope(tmp_path: Path) ->
         file_rights=resolve_file_rights(
             source.rights, name, raw + b"\n", prospective_private_research=True
         ),
+        normalizer_options=PLAIN_OPTIONS,
         document_policy=PRIVATE_DOCS,
     )
     assert len(documents) == 1
@@ -328,6 +359,10 @@ def test_build_freeze_replay_spans_semantics_and_tamper(tmp_path: Path) -> None:
     published = freeze(first, tmp_path)
     assert freeze(first, tmp_path) == published
     manifest = verify_release(published)
+    declared = project.release.normalizer.model_dump(mode="json")
+    assert json.loads((published / "report.json").read_text())["normalizer"] == declared
+    build_record = json.loads((first / "build.json").read_text())
+    assert build_record["identity"]["release"]["normalizer"] == declared
     docs = [
         json.loads(line)
         for line in (published / "documents.jsonl").read_text().splitlines()

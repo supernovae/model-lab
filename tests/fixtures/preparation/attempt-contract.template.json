@@ -12,7 +12,11 @@
   "content_identity_sha256": "${SEALED_CONTENT_IDENTITY_SHA256}",
   "acquisition_project_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "preparation_acquisition_identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "preparation_normalizer": "normalizer-structure-v3",
+  "preparation_normalizer": {
+    "structure_cleaning": true,
+    "front_matter_extra_keys": {},
+    "gutenberg_boilerplate": []
+  },
   "admission_lock_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "admission_policy_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "admission_selection_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
