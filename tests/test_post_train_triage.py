@@ -204,7 +204,9 @@ def test_valid_shape_fixture_and_nonobject_progress(tmp_path, monkeypatch):
 
     payload = _triage_shape_fixture(tmp_path)
     path = _write_triage_shape(tmp_path, payload)
-    (path.parent.parent / "manifest.json").write_text("{}")
+    (path.parent.parent / "manifest.json").write_text(
+        json.dumps({"requested_config": {}, "effective_config": {}, "artifacts": []})
+    )
     before = path.read_bytes()
     monkeypatch.setattr(triage, "read_manifest", lambda path: {"run_id": "run"})
     progress = tmp_path / "run" / "progress.json"
@@ -293,8 +295,26 @@ def test_manifest_nested_shape_errors_are_local_value_error(tmp_path, field, val
 
 def _triage_pass_fixture(tmp_path):
     from klab.canonical import canonical_digest, canonical_json
+    from klab.training.manifest import (
+        ARCHITECTURE_VERSION,
+        IDENTITY_VERSION,
+        architecture_sha256,
+        config_sha256,
+    )
 
-    manifest = {"manifest_version": 1, "run_id": "run"}
+    effective = {"model": {}, "attention": {}}
+    manifest = {
+        "manifest_version": 1,
+        "run_id": "run",
+        "architecture_version": ARCHITECTURE_VERSION,
+        "identity_version": IDENTITY_VERSION,
+        "requested_config": {},
+        "effective_config": effective,
+        "requested_config_sha256": config_sha256({}),
+        "effective_config_sha256": config_sha256(effective),
+        "architecture_sha256": architecture_sha256(effective),
+        "artifacts": [],
+    }
     manifest["sha256"] = canonical_digest(manifest)
     bound_manifest = {key: value for key, value in manifest.items() if key != "sha256"}
     payload = _triage_shape_fixture(tmp_path)
@@ -311,7 +331,7 @@ def _triage_pass_fixture(tmp_path):
         "generation_manifest_sha256": checkpoint["sha256"],
     }
     path = _write_triage_shape(tmp_path, payload)
-    # Bind the fixture to the verified legacy-format run manifest.
+    # Bind the fixture to the verified run manifest.
     payload.pop("identity")
     payload["identity"] = {
         "run_id": "run",

@@ -249,20 +249,20 @@ def test_resigned_invalid_artifact_inventory_is_rejected(
         read_manifest(path)
 
 
-def test_legacy_v1_manifest_digest_is_verified_without_reinterpretation(
-    tmp_path: Path,
+@pytest.mark.parametrize("identity", [None, "run-identity-v1", 2, ""])
+def test_manifest_without_the_current_identity_version_is_refused(
+    tmp_path: Path, identity: object
 ) -> None:
-    legacy = {
+    record = {
         "manifest_version": 1,
         "run_id": "historic",
         "requested_config_sha256": "historical-digest",
     }
-    legacy["sha256"] = canonical_digest(legacy)
-    path = tmp_path / "legacy.json"
-    path.write_bytes(canonical_json(legacy) + b"\n")
+    if identity is not None:
+        record["identity_version"] = identity
+    record["sha256"] = canonical_digest(record)
+    path = tmp_path / "manifest.json"
+    path.write_bytes(canonical_json(record) + b"\n")
 
-    assert read_manifest(path) == {
-        "manifest_version": 1,
-        "run_id": "historic",
-        "requested_config_sha256": "historical-digest",
-    }
+    with pytest.raises(ValueError, match="unsupported manifest identity version"):
+        read_manifest(path)

@@ -380,8 +380,10 @@ def read_manifest(path: Path) -> dict[str, Any]:
     if not isinstance(actual, str) or canonical_digest(data) != actual:
         raise ValueError("manifest hash mismatch")
     identity_version = data.get("identity_version")
-    if identity_version is not None and identity_version != IDENTITY_VERSION:
-        raise ValueError(f"unsupported manifest identity version: {identity_version!r}")
-    if identity_version == IDENTITY_VERSION:
-        _validate_current_identity(data)
+    if identity_version != IDENTITY_VERSION:
+        raise ValueError(
+            f"unsupported manifest identity version: {identity_version!r}; "
+            f"this Lab verifies only {IDENTITY_VERSION!r}"
+        )
+    _validate_current_identity(data)
     return data

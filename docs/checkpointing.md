@@ -23,6 +23,11 @@ config and the training state, and exits non-zero with structured errors when
 something is wrong. `--weights-only` checks only what generation or promotion
 needs.
 
+A run's `manifest.json` records `identity_version` (`run-identity-v2`), and
+Lab verifies only that version. A manifest without it, or with another value, is
+refused rather than interpreted, so the run is not verifiable by `report`,
+`probe` or `explore`; its files stay on disk untouched.
+
 A checkpoint is written to a temporary sibling, verified, then published
 atomically before the pointers move. A per-run lock keeps two writers out of the
 same run.

@@ -446,15 +446,35 @@ def test_receipt_includes_manifest_declared_hidden_cache_owner(tmp_path: Path) -
     import json
 
     from klab.canonical import canonical_digest
+    from klab.training.manifest import (
+        ARCHITECTURE_VERSION,
+        IDENTITY_VERSION,
+        architecture_sha256,
+        config_sha256,
+    )
     from klab.workers.execution import _final_artifacts
 
     run = tmp_path / "runs" / "run"
     (run / "data").mkdir(parents=True)
     (run / "data" / ".klab-cache-owner.json").write_text("{}")
     (run / ".transient").write_text("not declared")
+    effective = {"model": {}, "attention": {}}
     manifest = {
         "manifest_version": 1,
-        "artifacts": [{"relative_path": "data/.klab-cache-owner.json"}],
+        "architecture_version": ARCHITECTURE_VERSION,
+        "identity_version": IDENTITY_VERSION,
+        "requested_config": {},
+        "effective_config": effective,
+        "requested_config_sha256": config_sha256({}),
+        "effective_config_sha256": config_sha256(effective),
+        "architecture_sha256": architecture_sha256(effective),
+        "artifacts": [
+            {
+                "relative_path": "data/.klab-cache-owner.json",
+                "sha256": "a" * 64,
+                "size_bytes": 2,
+            }
+        ],
     }
     (run / "manifest.json").write_text(
         json.dumps(
