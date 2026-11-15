@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import yaml
+
 from klab.corpus.project import NormalizerOptions, Project
 
 # The explicit release policies tests build on. STRICT is the cautious profile:
@@ -179,3 +181,69 @@ def neutral_corpus(root: Path) -> Project:
             },
         }
     )
+
+
+def write_prose_project(
+    root: Path, texts: dict[str, list[str]], *, corpus_id: str = "prose-fixture"
+) -> Path:
+    """A language-model-only project: one local source per `prose_<split>` family.
+
+    Each listed text is one file and so one document. Returns the project directory.
+    """
+    project = root / "project"
+    (project / "sources").mkdir(parents=True)
+    (project / "transforms").mkdir()
+    for family, documents in texts.items():
+        files = []
+        for index, text in enumerate(documents):
+            name = f"{family}-{index}.txt"
+            (project / "sources" / name).write_text(text, encoding="utf-8")
+            files.append({"path": f"sources/{name}", "name": name})
+        source = {
+            "id": family,
+            "kind": "local",
+            "origin": "human_authored",
+            "canonical_uri": f"klab://fixture/{family}",
+            "revision": "v1",
+            "license": "MIT",
+            "rights": {**fixture_rights(), "notices": ["Synthetic fixture."]},
+            "domains": ["prose"],
+            "document_kinds": ["prose"],
+            "source_family": family,
+            "acquisition": {"files": files, "max_bytes": 1 << 24},
+        }
+        (project / "sources" / f"{family}.yaml").write_text(yaml.safe_dump(source))
+    documents = {
+        "transforms/lm.yaml": {
+            "id": "lm",
+            "version": "1",
+            "kind": "lm_text",
+            "parameters": {},
+            "inputs": list(texts),
+        },
+        "splits.yaml": {
+            "schema_version": 1,
+            "unit": "source_document_family",
+            "family_key": "source_family",
+            "assignments": {family: family.split("_")[1] for family in texts},
+        },
+        "release.yaml": {
+            "policy": STRICT_POLICY,
+            "mixture": {"prose": 1.0},
+            "lm": {"selected": True, "training_splits": ["train", "validation"]},
+            "chat": {"selected": False, "training_splits": []},
+            "publication_mode": "redistributable_under_source_terms",
+            "normalizer": PLAIN_NORMALIZER,
+        },
+        "corpus.yaml": {
+            "schema_version": 1,
+            "id": corpus_id,
+            "sources": sorted(f"sources/{family}.yaml" for family in texts),
+            "transforms": ["transforms/lm.yaml"],
+            "splits": "splits.yaml",
+            "release": "release.yaml",
+        },
+    }
+    for name, value in documents.items():
+        (project / name).write_text(yaml.safe_dump(value))
+    return project

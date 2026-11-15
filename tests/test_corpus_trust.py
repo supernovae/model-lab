@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from corpus_fixtures import PLAIN_NORMALIZER, STRICT_POLICY
+from corpus_fixtures import write_prose_project
 from lab_fixtures import write_smoke_inputs
 
 from klab.cli.main import main
@@ -137,73 +137,16 @@ def _words(seed: int, count: int, lexicon_size: int) -> str:
 def bakeoff_report(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A prose-only v2 release with enough distinct text for every candidate size."""
     root = tmp_path_factory.mktemp("bakeoff")
-    project = root / "project"
-    (project / "sources").mkdir(parents=True)
-    (project / "transforms").mkdir()
     # Train must fill the largest candidate vocabulary; held-out families are small.
-    texts = {
-        "prose_train": _words(1, 120_000, 40_000),
-        "prose_validation": _words(2, 400, 200),
-        "prose_test": _words(3, 400, 200),
-    }
-    for family, text in texts.items():
-        (project / "sources" / f"{family}.txt").write_text(text, encoding="utf-8")
-        source = {
-            "id": family,
-            "kind": "local",
-            "origin": "human_authored",
-            "canonical_uri": f"klab://fixture/{family}.txt",
-            "revision": "v1",
-            "license": "MIT",
-            "rights": {
-                "training_eligibility": "eligible",
-                "redistribution_mode": "redistributable_under_source_terms",
-                "spdx_expression": "MIT",
-                "license_references": ["https://example.org/license"],
-                "notices": ["Synthetic fixture."],
-            },
-            "domains": ["prose"],
-            "document_kinds": ["prose"],
-            "source_family": family,
-            "acquisition": {
-                "files": [{"path": f"sources/{family}.txt", "name": f"{family}.txt"}],
-                "max_bytes": 1 << 24,
-            },
-        }
-        (project / "sources" / f"{family}.yaml").write_text(yaml.safe_dump(source))
-    documents = {
-        "transforms/lm.yaml": {
-            "id": "lm",
-            "version": "1",
-            "kind": "lm_text",
-            "parameters": {},
-            "inputs": list(texts),
+    project = write_prose_project(
+        root,
+        {
+            "prose_train": [_words(1, 120_000, 40_000)],
+            "prose_validation": [_words(2, 400, 200)],
+            "prose_test": [_words(3, 400, 200)],
         },
-        "splits.yaml": {
-            "schema_version": 1,
-            "unit": "source_document_family",
-            "family_key": "source_family",
-            "assignments": {family: family.split("_")[1] for family in texts},
-        },
-        "release.yaml": {
-            "policy": STRICT_POLICY,
-            "mixture": {"prose": 1.0},
-            "lm": {"selected": True, "training_splits": ["train", "validation"]},
-            "chat": {"selected": False, "training_splits": []},
-            "publication_mode": "redistributable_under_source_terms",
-            "normalizer": PLAIN_NORMALIZER,
-        },
-        "corpus.yaml": {
-            "schema_version": 1,
-            "id": "bakeoff-fixture",
-            "sources": sorted(f"sources/{family}.yaml" for family in texts),
-            "transforms": ["transforms/lm.yaml"],
-            "splits": "splits.yaml",
-            "release": "release.yaml",
-        },
-    }
-    for name, value in documents.items():
-        (project / name).write_text(yaml.safe_dump(value))
+        corpus_id="bakeoff-fixture",
+    )
     declaration = root / "bakeoff.yaml"
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("KLAB_WORK_DIR", str(root / "work"))

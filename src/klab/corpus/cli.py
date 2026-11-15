@@ -29,7 +29,40 @@ def _release_path(value: str, work_root: Path) -> Path:
     return Path(value).resolve()
 
 
+def _verification_flags(command: argparse.ArgumentParser) -> None:
+    command.add_argument(
+        "--scratch-dir",
+        type=Path,
+        help="Directory for disposable verification state; default is WORK/scratch. "
+        "Allow 2-3x the release size on fast storage",
+    )
+    command.add_argument(
+        "--workers",
+        type=int,
+        help="Verification worker processes (default 8, at most the CPU count)",
+    )
+    command.add_argument(
+        "--cold",
+        action="store_true",
+        help="Verify from the bytes instead of reusing a signed receipt",
+    )
+
+
 def _handle(args: argparse.Namespace) -> None:
+    """Run one command with the operator's verification placement and receipts."""
+    from klab.corpus.release_verify import verification_settings
+
+    root = resolve_work_dir(args.work_dir)
+    with verification_settings(
+        scratch_dir=getattr(args, "scratch_dir", None),
+        workers=getattr(args, "workers", None),
+        echo=sys.stderr,
+        **verification_options(root, cold=getattr(args, "cold", False)),
+    ):
+        _run(args)
+
+
+def _run(args: argparse.Namespace) -> None:
     from klab.corpus import release as publication
     from klab.corpus.acquisition import acquire
     from klab.corpus.export import export_release
@@ -71,7 +104,7 @@ def _handle(args: argparse.Namespace) -> None:
         print(json.dumps(result, sort_keys=True, default=str))
         return
     verification = (
-        verification_options(root)
+        verification_options(root, cold=getattr(args, "cold", False))
         if command in {"acquire", "build", "freeze", "export"}
         and not (command == "acquire" and args.source_id is not None)
         else {}
@@ -658,6 +691,7 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     command.set_defaults(handler=_handle)
     command = sub.add_parser("freeze")
     command.add_argument("build")
+    _verification_flags(command)
     command.add_argument(
         "--reuse-completed-preparation",
         action="store_true",
@@ -714,6 +748,7 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     ):
         command = sub.add_parser(name)
         command.add_argument("release")
+        _verification_flags(command)
         if name in {"sample", "review"}:
             command.add_argument("--domain")
             command.add_argument("--kind")
