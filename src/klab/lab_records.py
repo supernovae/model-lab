@@ -23,12 +23,14 @@ TRY_FORMAT = "klab-lab-try-v1"
 PROBE_FORMAT = "klab-probe-v1"
 SWEEP_FORMAT = "klab-lab-sweep-v1"
 BENCH_FORMAT = "klab-code-bench-v1"
+SPECULATION_FORMAT = "klab-speculation-bench-v1"
 # kind -> (format, folder under the lab root, file name in a record folder)
 KINDS = {
     "try": (TRY_FORMAT, "tries", "try.json"),
     "probe": (PROBE_FORMAT, "probes", "probe.json"),
     "sweep": (SWEEP_FORMAT, "sweeps", "sweep.json"),
     "bench": (BENCH_FORMAT, "benchmarks", "bench.json"),
+    "speculation": (SPECULATION_FORMAT, "speculation", "speculation.json"),
 }
 _BY_FORMAT = {fmt: kind for kind, (fmt, _, _) in KINDS.items()}
 
@@ -167,6 +169,7 @@ def read_lab_record(path: Path, kind: str | None = None) -> tuple[str, dict[str,
             "probe": "probe",
             "sweep": "sweep",
             "bench": "code benchmark",
+            "speculation": "speculation",
         }.get(kind or "", "lab")
         raise ValueError(f"not a {expected} record: {path}")
     if not is_sealed(record):

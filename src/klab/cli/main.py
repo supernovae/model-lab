@@ -1131,28 +1131,16 @@ def _generate(args: argparse.Namespace) -> None:
             ngram=args.prompt_lookup, max_draft_tokens=args.draft_tokens
         )
     elif args.draft_run is not None:
-        from klab.evaluation.speculation import DraftModelSpeculation
+        from klab.evaluation.speculation import load_draft_model
 
-        drafting = load_run(
+        speculation, draft_identity = load_draft_model(
+            loaded,
             args.draft_run,
-            Path(args.runs_dir),
+            args.runs_dir,
             args.draft_checkpoint,
             args.backend,
             authorization=args.runtime_authorization,
-        )
-        if drafting.identity["tokenizer_sha256"] != loaded.identity["tokenizer_sha256"]:
-            raise ValueError("the draft run must use the target run's tokenizer")
-        if drafting.engine is not None:
-            raise ValueError("a draft model needs the PyTorch engine")
-        speculation = DraftModelSpeculation(
-            drafting.model,
-            drafting.device,
             max_draft_tokens=args.draft_tokens,
-            blocked_ids=[
-                token_id
-                for name in ("<pad>", "<bos>", "<unk>")
-                if (token_id := loaded.tokenizer.token_to_id(name)) is not None
-            ],
         )
     if args.show_prompt:
         print(json.dumps({"format": "raw", "prompt": args.prompt}), file=sys.stderr)
@@ -1186,7 +1174,7 @@ def _generate(args: argparse.Namespace) -> None:
         if args.draft_run is not None:
             speculation_report.update(
                 drafter="draft_model",
-                draft_identity=drafting.identity,
+                draft_identity=draft_identity,
                 draft_model_calls=speculation.draft_model_calls,
             )
         elif args.ngram_table is not None:
@@ -1680,6 +1668,11 @@ def _report(args: argparse.Namespace) -> None:
         from klab.sweep import summarize_sweep
 
         print(summarize_sweep(record, target))
+    elif kind == "speculation":
+        from klab.evaluation.speculation_bench import render as render_speculation
+
+        print(render_speculation(record))
+        print(f"  record: {target}")
     elif kind == "bench":
         from klab.probes.code_bench import render as render_bench
 
@@ -1784,6 +1777,112 @@ def _probe(args: argparse.Namespace) -> None:
     else:
         print(render(result, color=use_color()))
         print(f"  record: {path}")
+
+
+def _speculation(args: argparse.Namespace) -> None:
+    """Measure drafters against plain greedy decoding and publish a sealed record."""
+    from klab.evaluation.ngram_table import CorpusNgramSpeculation, load_ngram_table
+    from klab.evaluation.speculation import PromptLookupSpeculation, load_draft_model
+    from klab.evaluation.speculation_bench import (
+        read_prompts,
+        render,
+        run_speculation_bench,
+        validation_prompts,
+    )
+    from klab.lab_mode import lab_root
+    from klab.lab_results import resolve_checkpoint
+    from klab.probes.cli import load_target
+    from klab.probes.runner import arm_identity
+
+    if not (args.prompt_lookup or args.ngram_table or args.draft_run):
+        raise SystemExit(
+            "klab speculation: choose a drafter: --prompt-lookup, --ngram-table "
+            "or --draft-run"
+        )
+    lab_dir = lab_root(resolve_work_dir(args.work_dir), args.lab_dir)
+    runs_dir = Path(args.runs_dir) if args.runs_dir else None
+    try:
+        selected = resolve_checkpoint(args.target, lab_dir=lab_dir, runs_dir=runs_dir)
+        loaded = load_target(
+            args.target,
+            lab_dir=lab_dir,
+            runs_dir=runs_dir,
+            backend=args.backend,
+            authorization=args.runtime_authorization,
+            selected=selected,
+        )
+        if args.prompts is not None:
+            prompts = read_prompts(args.prompts)
+            source = {"kind": "file", "name": args.prompts.name}
+        else:
+            prompts = validation_prompts(
+                loaded.run,
+                loaded.tokenizer,
+                count=args.prompt_count,
+                tokens=args.prompt_tokens,
+            )
+            source = {
+                "kind": "validation split",
+                "count": args.prompt_count,
+                "tokens": args.prompt_tokens,
+            }
+        drafters: dict[str, object] = {}
+        identities: dict[str, object] = {}
+        for ngram in args.prompt_lookup or ():
+            name = f"prompt_lookup:{ngram}"
+            drafters[name] = PromptLookupSpeculation(
+                ngram=ngram, max_draft_tokens=args.draft_tokens
+            )
+            identities[name] = {"kind": "prompt_lookup", "ngram": ngram}
+        for directory in args.ngram_table or ():
+            table = load_ngram_table(
+                directory, tokenizer_sha256=loaded.identity["tokenizer_sha256"]
+            )
+            name = f"ngram_table:{table.manifest['manifest_sha256'][:12]}"
+            drafters[name] = CorpusNgramSpeculation(
+                table, max_draft_tokens=args.draft_tokens
+            )
+            identities[name] = {"kind": "corpus_ngram", **table.identity}
+        for run_id in args.draft_run or ():
+            name = f"draft_model:{run_id}"
+            drafters[name], draft_identity = load_draft_model(
+                loaded,
+                run_id,
+                runs_dir or selected.run.parent,
+                None,
+                args.backend,
+                authorization=args.runtime_authorization,
+                max_draft_tokens=args.draft_tokens,
+            )
+            identities[name] = {"kind": "draft_model", **draft_identity}
+        record, path = run_speculation_bench(
+            loaded,
+            drafters,
+            identities,
+            prompts=prompts,
+            prompt_source=source,
+            lab_dir=lab_dir,
+            request={
+                "target": args.target,
+                "draft_tokens": args.draft_tokens,
+                "backend_override": args.backend,
+            },
+            max_new_tokens=args.max_new_tokens,
+            repeats=args.repeats,
+            arm_identity=arm_identity,
+        )
+    except (ValueError, OSError) as error:
+        _lab_lookup_failure(args, error)
+        raise SystemExit(f"klab speculation: {error}") from None
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None
+    if args.json:
+        print(json.dumps({**record, "record": str(path)}, indent=2, sort_keys=True))
+    else:
+        print(render(record))
+        print(f"  record: {path}")
+    if record["status"] != "complete":
+        raise SystemExit(1)
 
 
 def _bench(args: argparse.Namespace) -> None:
@@ -2191,6 +2290,64 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     bench.add_argument("--lab-dir", type=Path)
     bench.add_argument("--json", action="store_true")
     bench.set_defaults(handler=_bench, runtime_profile=None)
+    speculation = commands.add_parser(
+        "speculation",
+        help="Measure speculative drafters against plain greedy decoding",
+        description=(
+            "Decode fixed prompts greedily with and without each drafter. Every "
+            "drafter must produce the same tokens as plain decoding (exit 1 "
+            "otherwise); the sealed record then reports acceptance rate, "
+            "verifying model calls and wall-time tokens per second on this host "
+            "and backend."
+        ),
+    )
+    speculation.add_argument(
+        "target",
+        help="Try/probe record (its candidate), run id/directory or checkpoint",
+    )
+    speculation.add_argument(
+        "--prompt-lookup",
+        type=int,
+        action="append",
+        metavar="N",
+        help="Measure prompt lookup with this n-gram length (repeatable)",
+    )
+    speculation.add_argument(
+        "--ngram-table",
+        type=Path,
+        action="append",
+        metavar="DIR",
+        help="Measure a `klab data ngram-table` directory (repeatable)",
+    )
+    speculation.add_argument(
+        "--draft-run",
+        action="append",
+        metavar="RUN_ID",
+        help="Measure a smaller run as a draft model (repeatable)",
+    )
+    speculation.add_argument("--draft-tokens", type=int, default=4)
+    speculation.add_argument(
+        "--prompts",
+        type=Path,
+        metavar="FILE",
+        help="JSON list of prompts (default: windows of the validation split)",
+    )
+    speculation.add_argument("--prompt-count", type=int, default=8)
+    speculation.add_argument("--prompt-tokens", type=int, default=16)
+    speculation.add_argument("--max-new-tokens", type=int, default=64)
+    speculation.add_argument(
+        "--repeats", type=int, default=3, help="Timed decodes per prompt (median kept)"
+    )
+    speculation.add_argument(
+        "--backend", choices=("auto", "mps", "cuda", "rocm", "xpu", "cpu")
+    )
+    speculation.add_argument(
+        "--runtime", metavar="ID", help="Registered native runtime"
+    )
+    speculation.add_argument("--runs-dir", help="Saved run location")
+    speculation.add_argument("--lab-dir", type=Path)
+    speculation.add_argument("--json", action="store_true")
+    speculation.set_defaults(handler=_speculation, runtime_profile=None)
     explore = commands.add_parser(
         "explore",
         help="Model explorer: architecture, weights, attention, routing, memory",
@@ -2971,6 +3128,7 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
         "sweep",
         "probe",
         "bench",
+        "speculation",
         "explore",
         "train",
         "stage",
@@ -3021,7 +3179,7 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
         config = load_config(Path(args.config))
     elif args.command in {"try", "sweep"}:
         config = load_config(Path(args.vs))
-    elif args.command in {"probe", "explore", "bench"}:
+    elif args.command in {"probe", "explore", "bench", "speculation"}:
         from klab.config.models import RunConfig
         from klab.lab_mode import lab_root
         from klab.lab_results import resolve_checkpoint
@@ -3056,6 +3214,7 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
             "sweep",
             "probe",
             "bench",
+            "speculation",
             "explore",
             "train",
             "eval",
@@ -3082,7 +3241,10 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
         try:
             require_authorization(config, None)
         except ValueError as error:
-            if args.command in {"probe", "bench"} and args.backend is None:
+            if (
+                args.command in {"probe", "bench", "speculation"}
+                and args.backend is None
+            ):
                 from klab.lab_results import ResultLookupError
 
                 raise ResultLookupError(

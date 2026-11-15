@@ -1083,3 +1083,55 @@ def test_a_table_drafter_keeps_the_target_greedy_tokens(tmp_path: Path) -> None:
         assert speculative == reference
         accepted[name] = drafter.accepted_tokens
     assert accepted["good"] > 20 > accepted["bad"]
+
+
+def test_the_speculation_measurement_flags_a_drafter_that_changes_the_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from klab.evaluation import speculation_bench
+    from klab.lab_records import read_lab_record
+
+    tokenizer = _tokenizer()
+    loaded = SimpleNamespace(
+        model=_speculation_model(tokenizer, 0),
+        tokenizer=tokenizer,
+        device=torch.device("cpu"),
+        engine=None,
+        config=SimpleNamespace(
+            model=SimpleNamespace(max_seq_len=64),
+            runtime=SimpleNamespace(backend="cpu", precision="fp32"),
+        ),
+    )
+    honest = _ScriptedDrafter(lambda ids, limit: [])
+    results = speculation_bench.measure(
+        loaded, ["hello", "world"], {"honest": honest}, max_new_tokens=6, repeats=1
+    )
+    assert (
+        results["honest"]["matches_plain"]
+        and results["plain"]["generated_tokens"] == 12
+    )
+
+    real = speculation_bench.generate_with_token_ids
+
+    def broken(*args, speculation=None, **kwargs):
+        text, tokens = real(*args, speculation=speculation, **kwargs)
+        return text, (tokens[:-1] + [9] if speculation is not None else tokens)
+
+    monkeypatch.setattr(speculation_bench, "generate_with_token_ids", broken)
+    record, path = speculation_bench.run_speculation_bench(
+        loaded,
+        {"broken": honest},
+        {"broken": {}},
+        prompts=["hello"],
+        prompt_source={"kind": "file"},
+        lab_dir=tmp_path,
+        request={},
+        max_new_tokens=6,
+        repeats=1,
+        arm_identity=lambda _: {"run_id": "t", "step": 1},
+    )
+    assert record["status"] == "mismatch"
+    assert not record["results"]["broken"]["matches_plain"]
+    assert read_lab_record(path, "speculation")[1]["status"] == "mismatch"

@@ -170,3 +170,47 @@ class DraftModelSpeculation:
                 if len(proposed) == limit:
                     return proposed
                 logits = self._forward(proposed[-1:], cache=self._cache)
+
+
+def load_draft_model(
+    target: Any,
+    run_id: str,
+    runs_dir: Any,
+    checkpoint: str | None,
+    backend: str | None,
+    *,
+    authorization: Any = None,
+    max_draft_tokens: int = 4,
+) -> tuple[DraftModelSpeculation, dict[str, Any]]:
+    """Load a smaller run as a drafter for the loaded ``target``; return it and its identity.
+
+    The draft must share the target's tokenizer and run on the PyTorch engine.
+    """
+    from pathlib import Path
+
+    from klab.evaluation.inference import load_run
+
+    drafting = load_run(
+        run_id,
+        Path(runs_dir),
+        checkpoint,
+        backend,
+        authorization=authorization,
+    )
+    if drafting.identity["tokenizer_sha256"] != target.identity["tokenizer_sha256"]:
+        raise ValueError("the draft run must use the target run's tokenizer")
+    if drafting.engine is not None:
+        raise ValueError("a draft model needs the PyTorch engine")
+    return (
+        DraftModelSpeculation(
+            drafting.model,
+            drafting.device,
+            max_draft_tokens=max_draft_tokens,
+            blocked_ids=[
+                token_id
+                for name in ("<pad>", "<bos>", "<unk>")
+                if (token_id := target.tokenizer.token_to_id(name)) is not None
+            ],
+        ),
+        drafting.identity,
+    )

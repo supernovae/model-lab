@@ -105,6 +105,44 @@ Pick `--params` from the cost of a draft forward against the target's: drafting
 pays off when the draft costs a small fraction of a target forward and agrees
 with it often. Measure acceptance and wall time rather than assuming either.
 
+## Measure drafters
+
+`klab speculation` decodes a fixed set of prompts greedily with and without each
+drafter and publishes a sealed record, in the same lab store as probes and
+benchmarks:
+
+```sh
+klab speculation TARGET_RUN_ID --backend cpu \
+  --prompt-lookup 3 --ngram-table TABLE_DIR --draft-run DRAFT_RUN_ID \
+  --draft-tokens 4 --max-new-tokens 64 --repeats 3
+klab report SPECULATION_ID
+```
+
+Each option may be repeated to compare several drafters (prompt-lookup lengths,
+tables, draft runs) in one record. The prompts are evenly spaced windows of the
+run's held-out validation split (`--prompt-count`, `--prompt-tokens`), which a
+table built from the training split has not seen, or a JSON list of strings
+given with `--prompts FILE`. The record stores a digest of the prompts.
+
+The first check is the failure criterion: every drafter's completion must equal
+plain greedy decoding's on every prompt and repeat. A drafter that differs makes
+the record `mismatch` and the command exit 1. Then, per drafter:
+
+| Field | Meaning |
+|---|---|
+| `acceptance_rate` | `accepted_tokens / drafted_tokens` over all prompts. |
+| `model_calls` | Cached forwards that verified a draft; see the table above. |
+| `tokens_per_second` | Generated tokens over summed wall seconds. Each prompt's time is the median of `--repeats` decodes, after one untimed warm-up decode per decoder. |
+| `speedup_vs_plain` | `tokens_per_second` over plain decoding's, on the same prompts, host and backend. A value below 1 is a slowdown. |
+
+The record names the backend, device, precision, torch version, CPU and thread
+count. Wall times are properties of that host, model size and prompt set; they
+do not transfer to another device, so run the same command with
+`--backend cuda`, `--runtime ID` or the backend you will serve on. Acceptance
+rate and `model_calls` do not depend on the device. Prompts that fit the context
+only: decoding past the model's context window re-encodes it and proposes no
+drafts (see above).
+
 ## Scope
 
 - Drafts run only while the prompt and completion fit in `max_seq_len`; see

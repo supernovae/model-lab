@@ -121,3 +121,40 @@ def test_drafters_for_generate_never_change_its_tokens(
     assert tabled["speculation"]["drafted_tokens"] > 0
     with pytest.raises(ValueError, match="choose one drafter"):
         klab(*request, "--ngram-table", str(table), "--draft-run", "draft")
+
+    measured = json.loads(
+        klab(
+            "speculation",
+            "target",
+            "--runs-dir",
+            "work/runs",
+            "--backend",
+            "cpu",
+            "--prompt-lookup",
+            "2",
+            "--ngram-table",
+            str(table),
+            "--draft-run",
+            "draft",
+            "--prompt-count",
+            "2",
+            "--prompt-tokens",
+            "4",
+            "--max-new-tokens",
+            "8",
+            "--repeats",
+            "1",
+            "--json",
+        )
+    )
+    assert measured["status"] == "complete"
+    assert set(measured["results"]) == {
+        "plain",
+        "prompt_lookup:2",
+        f"ngram_table:{built['manifest_sha256'][:12]}",
+        "draft_model:draft",
+    }
+    assert all(result["matches_plain"] for result in measured["results"].values())
+    assert measured["results"]["draft_model:draft"]["drafted_tokens"] > 0
+    assert measured["host"]["backend"] == "cpu"
+    assert "SPECULATION" in klab("report", measured["speculation_id"])
