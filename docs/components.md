@@ -32,6 +32,7 @@ vocabulary and context length come from the base unless `--vocab-size` or
 | `dense_gqa` | dense with grouped-query attention, three query heads per key/value head |
 | `moe` | dense attention, eight routed experts with two per token, plus a shared expert |
 | `moe_ngram` | `moe` with a hashed token n-gram memory at the embedding |
+| `draft` | a shallow, narrow dense decoder for [speculative decoding](speculative-decoding.md#train-a-draft-model) |
 | `sparse` | long-context attention over a local window plus selected earlier blocks |
 
 Scaling keeps the preset's head width, feed-forward ratio, key/value head ratio
