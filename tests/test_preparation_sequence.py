@@ -35,7 +35,7 @@ from klab.corpus.export import (
     verify_release_export,
 )
 from klab.corpus.pipeline import build
-from klab.corpus.project import load_project, source_declaration_payload
+from klab.corpus.project import acquisition_identity_payload, load_project
 from klab.corpus.protected_lineage import audit_protected_lineage
 from klab.corpus.release import freeze, verify_release
 from klab.corpus.release_review import verify_admission_review
@@ -404,7 +404,7 @@ def _sources(root: Path, project_id: str) -> tuple[Path, dict[str, str]]:
         manifest = {
             "schema_version": 1,
             "source_id": source.id,
-            "declaration": source_declaration_payload(source),
+            "declaration": acquisition_identity_payload(source),
             "declaration_sha256": declaration_sha256(source),
             "adapter": _adapter(source),
             "files": files,

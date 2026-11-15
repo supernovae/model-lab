@@ -38,7 +38,7 @@ from klab.corpus.preparation_inputs import (
 from klab.corpus.project import (
     load_project,
     project_path,
-    source_declaration_payload,
+    source_build_declarations,
 )
 from klab.corpus.rights import RightsPolicy, resolve_file_rights
 from klab.corpus.split_runs import (
@@ -336,12 +336,8 @@ def _prepared_source(directory, source, header, path, build_id, progress, normal
 
 def _check_completed_producer(project, producer):
     """Keep producer source identity; inventory-only runs have no admission."""
-    declarations = {
-        source.id: source_declaration_payload(source) for source in project.sources
-    }
-    producer_declarations = {
-        source.id: source_declaration_payload(source) for source in producer.sources
-    }
+    declarations = source_build_declarations(project.sources)
+    producer_declarations = source_build_declarations(producer.sources)
     current_admission = project.release.record_admission
     producer_admission = producer.release.record_admission
     if (
@@ -534,6 +530,7 @@ def build_completed(project, work_root):
             key: {k: value[k] for k in ("declaration_sha256", "snapshot_sha256")}
             for key, value in sorted(lock["sources"].items())
         },
+        "sources": declarations,
         "transforms": [_model(t) for t in transforms],
         "split": _model(project.splits),
         "release": _model(project.release),

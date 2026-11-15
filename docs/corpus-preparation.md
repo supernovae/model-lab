@@ -66,8 +66,8 @@ per source and then an acquisition lock binding them.
   only the snapshot's own `max_bytes` bounds what is kept. List exact blobs
   (`bounded_blobs`) to have the ledger charge each file.
 - **Transport cache.** `--transport-cache DIR` or `KLAB_TRANSPORT_CACHE` keeps
-  raw downloads so that a declaration edit does not re-download; see
-  [transport cache](#transport-cache).
+  raw downloads so that a change to an acquisition field that does not alter the
+  request does not re-download; see [transport cache](#transport-cache).
 - **Initial feasibility gate.** A budget may set `initial_body_bytes` below
   `max_total_body_bytes`. Acquisition stops at the initial cap until
   `corpus budget-release-gate PROJECT --report REPORT --review REVIEW` records
@@ -100,12 +100,36 @@ per source and then an acquisition lock binding them.
   shows seeded sample excerpts from acquired JSONL in place, without copying or
   admitting anything.
 
+### What identifies an acquisition
+
+A snapshot's identity (`declaration_sha256` in its manifest, the acquisition
+lock and the build identity's `lock`) depends only on what determines the
+acquired bytes: `id`, `kind`, `canonical_uri`, `revision` and the whole
+`acquisition` block. That block holds Git patterns and pinned blobs, Hugging
+Face shards, row qualification and retained subsets, archive, PDF, MediaWiki and
+Wikimedia pins and bounds, local file names and generator names. For a Git
+source selected by `include` patterns, `rights.nested_metadata_path` is part of
+the identity too, because the acquisition retains that file even when no
+pattern selects it. For a local source, the file paths are not (only the
+logical names), so moving a recipe does not orphan its snapshot.
+
+Everything else is read only by builds and releases and never touches the
+snapshot: `license`, `license_url`, `notes`, `rights` (including
+`allowed_boundary_paths`, which classifies files after acquisition),
+`explicit_training_restriction`, `domains`, `document_kinds`, `source_family`,
+`origin` and `markdown_documents`. Editing them re-acquires nothing. They are
+bound by the build identity instead, which records every source's full
+declaration: a new rights statement is a new build, and release verification
+refuses a `sources.json` row, license report or build identity that differs from
+the declaration the build ran with.
+
 ### Transport cache
 
-Editing a source declaration (even a note) changes its declaration hash, so the
-snapshot no longer matches and acquisition downloads it again. A transport cache
-keeps the raw downloaded bodies, keyed by what was requested rather than by the
-declaration, so a re-acquire after any declaration edit makes no request.
+Editing an acquisition field that changes the identity (a larger cap, a wider
+`include`) makes the snapshot stale, so acquisition downloads again. A transport
+cache keeps the raw downloaded bodies, keyed by what was requested rather than by
+the declaration, so a re-acquire after such an edit makes no request when the
+request itself is unchanged.
 
 It is a host setting, never recipe content: no recipe field names it. Choose the
 directory per command or per host, in this order, and without one nothing is
@@ -583,7 +607,8 @@ rights:
 - **Release policy.** The release declares a `publication_mode` and
   `policy.rights.training_use` (see Release policy above). With
   `allowed_unless_explicitly_prohibited`, sources record
-  `explicit_training_restriction`; identical text from several sources keeps one
+  `explicit_training_restriction` (a build input: editing it rebuilds but does
+  not re-acquire); identical text from several sources keeps one
   copy and every origin's attribution.
 - **Conflicts.** With `duplicates.rights_conflict: error`, identical text with
   incompatible rights fails the build.

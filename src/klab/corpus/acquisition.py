@@ -34,6 +34,7 @@ from klab.corpus.project import (
     IMMUTABLE_SOURCE_KINDS,
     RETAINED_MAX_BYTES,
     RETAINED_MAX_ROWS,
+    AcquisitionIdentity,
     ArchiveAcquisition,
     GitAcquisition,
     HttpAcquisition,
@@ -44,9 +45,10 @@ from klab.corpus.project import (
     Project,
     SourceDeclaration,
     WikimediaDumpAcquisition,
+    acquisition_identity,
+    acquisition_identity_payload,
     project_path,
     safe_name,
-    source_declaration_payload,
 )
 from klab.corpus.release_verify import worker_count
 from klab.corpus.transport_budget import (
@@ -192,8 +194,10 @@ class _AcquisitionResources:
                 self.observe()
 
 
-def _identity_declaration(source: SourceDeclaration) -> dict[str, Any]:
-    declaration = source_declaration_payload(source)
+def _identity_declaration(
+    source: SourceDeclaration | AcquisitionIdentity,
+) -> dict[str, Any]:
+    declaration = acquisition_identity_payload(source)
     if source.kind == "local":
         declaration["acquisition"]["files"] = [
             {"name": entry.name} for entry in source.acquisition.files
@@ -201,11 +205,12 @@ def _identity_declaration(source: SourceDeclaration) -> dict[str, Any]:
     return declaration
 
 
-def declaration_sha256(source: SourceDeclaration) -> str:
+def declaration_sha256(source: SourceDeclaration | AcquisitionIdentity) -> str:
+    """Digest of the acquisition identity: only what determines the acquired bytes."""
     return canonical_digest(_identity_declaration(source))
 
 
-def _adapter(source: SourceDeclaration) -> dict[str, str]:
+def _adapter(source: SourceDeclaration | AcquisitionIdentity) -> dict[str, str]:
     return {
         "id": source.kind,
         "version": ADAPTER_VERSION,
@@ -214,7 +219,7 @@ def _adapter(source: SourceDeclaration) -> dict[str, str]:
 
 
 def _reusable_immutable_adapter(
-    source: SourceDeclaration, manifest: dict[str, Any]
+    source: SourceDeclaration | AcquisitionIdentity, manifest: dict[str, Any]
 ) -> bool:
     """A pinned, verified snapshot survives incidental adapter-module edits.
 
@@ -355,7 +360,7 @@ def _acquire_git(
     inventory = []
     total = 0
     selected = set()
-    metadata_path = source.rights.nested_metadata_path if source.rights else None
+    metadata_path = acquisition_identity(source).nested_metadata_path
     metadata_seen = False
     for record in tree.split(b"\0"):
         if not record:
@@ -2235,7 +2240,7 @@ def _acquire_mediawiki(
 
 def _verify_wikimedia_receipt(path: Path, manifest: dict[str, Any]) -> None:
     receipt = manifest["retrieval"]
-    source = SourceDeclaration.model_validate(manifest["declaration"])
+    source = AcquisitionIdentity.model_validate(manifest["declaration"])
     spec = source.acquisition
     if isinstance(spec, WikimediaDumpAcquisition):
         mismatch = (
@@ -2282,7 +2287,7 @@ def _verify_wikimedia_receipt(path: Path, manifest: dict[str, Any]) -> None:
         raise ValueError("Wikimedia page receipt mismatch")
 
 
-def _retrieval_is_identity(source: SourceDeclaration) -> bool:
+def _retrieval_is_identity(source: SourceDeclaration | AcquisitionIdentity) -> bool:
     """Receipts that bind derived bytes (rows, extracted text) to their inputs."""
     return source.kind in {"wikimedia_dump", "mediawiki_dump", "pdf_documents"} or (
         source.kind == "huggingface_dataset"
@@ -2345,7 +2350,7 @@ def alias_verified_snapshot(
     if (
         manifest["source_id"] != source_id
         or manifest["declaration_sha256"] != declaration_sha256(sources[0])
-        or manifest["declaration"] != source_declaration_payload(sources[0])
+        or manifest["declaration"] != acquisition_identity_payload(sources[0])
     ):
         raise ValueError("snapshot alias differs from current source declaration")
     target = (
@@ -2374,7 +2379,7 @@ def _verify_snapshot_cold(path: Path, *, _staged: bool = False) -> dict[str, Any
             or manifest["source_id"] != manifest["declaration"]["id"]
         ):
             raise ValueError("snapshot metadata mismatch")
-        source = SourceDeclaration.model_validate(manifest["declaration"])
+        source = AcquisitionIdentity.model_validate(manifest["declaration"])
         if (
             declaration_sha256(source) != manifest["declaration_sha256"]
             or manifest["adapter"]["id"] != source.kind
@@ -2443,11 +2448,11 @@ def _verify_snapshot_cold(path: Path, *, _staged: bool = False) -> dict[str, Any
 
 
 def _project_sha(project: Project) -> str:
-    """Only acquisition declarations bind the lock; release variants share snapshots."""
+    """Only acquisition identities bind the lock; rights and release variants share snapshots."""
     identity = {
         "project_id": project.config.id,
         "sources": [
-            source_declaration_payload(s)
+            acquisition_identity_payload(s)
             for s in sorted(project.sources, key=lambda s: s.id)
         ],
     }
@@ -2503,7 +2508,7 @@ def _verify_retained(
         manifest["source_id"] != source.id
         or manifest["snapshot_sha256"] != effect.snapshot_sha256
         or manifest["declaration_sha256"] != effect.declaration_sha256
-        or manifest["declaration"] != source_declaration_payload(source)
+        or manifest["declaration"] != acquisition_identity_payload(source)
         or not _reusable_immutable_adapter(source, manifest)
     ):
         raise ValueError(f"retained snapshot identity mismatch: {source.id}")
@@ -2570,7 +2575,7 @@ def verify_acquisition(
             if (
                 manifest["snapshot_sha256"] != entry["snapshot_sha256"]
                 or manifest["declaration_sha256"] != entry["declaration_sha256"]
-                or manifest["declaration"] != source_declaration_payload(source)
+                or manifest["declaration"] != acquisition_identity_payload(source)
             ):
                 raise ValueError("snapshot provenance mismatch")
             status = "generator" if source.kind.endswith("generator") else "acquired"
@@ -2758,7 +2763,7 @@ def acquire(
                 )
                 if (
                     source.kind not in ("local", "http_document")
-                    and manifest["declaration"] == source_declaration_payload(source)
+                    and manifest["declaration"] == acquisition_identity_payload(source)
                     and _reusable_immutable_adapter(source, manifest)
                 ):
                     entries[source.id] = old
@@ -2782,7 +2787,7 @@ def acquire(
                     continue
                 if (
                     manifest["declaration_sha256"] != declared_digest
-                    or manifest["declaration"] != source_declaration_payload(source)
+                    or manifest["declaration"] != acquisition_identity_payload(source)
                     or not _reusable_immutable_adapter(source, manifest)
                 ):
                     continue
@@ -2861,7 +2866,7 @@ def acquire(
             manifest = {
                 "schema_version": 1,
                 "source_id": source.id,
-                "declaration": source_declaration_payload(source),
+                "declaration": acquisition_identity_payload(source),
                 "declaration_sha256": declared_digest,
                 "adapter": adapter,
                 "files": files,
