@@ -283,6 +283,11 @@ def _run(args: argparse.Namespace) -> None:
         )
         print(json.dumps(result, sort_keys=True))
         return
+    if command == "derive-family-inventory":
+        from klab.corpus.declared_family_inventory import derive_family_inventory
+
+        print(json.dumps(derive_family_inventory(Path(args.mixture)), sort_keys=True))
+        return
     if command == "audit-protected-lineage":
         from klab.corpus.protected_lineage import audit_protected_lineage
 
@@ -647,11 +652,18 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     command.set_defaults(handler=_handle)
     command = sub.add_parser(
         "finalize-family-inventory",
-        help="Bind kept release documents to frozen family assignments",
+        help="Bind kept release documents to reviewed, frozen family assignments",
     )
     command.add_argument("release")
     command.add_argument("--splits", required=True)
     command.add_argument("--output", required=True)
+    command.add_argument("--json", action="store_true")
+    command.set_defaults(handler=_handle)
+    command = sub.add_parser(
+        "derive-family-inventory",
+        help="Write a mixture's family inventory for a release with declared splits",
+    )
+    command.add_argument("mixture")
     command.add_argument("--json", action="store_true")
     command.set_defaults(handler=_handle)
     command = sub.add_parser(

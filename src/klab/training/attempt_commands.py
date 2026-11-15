@@ -111,6 +111,7 @@ _SHAPES: dict[str, tuple[int, set[str], set[str], str]] = {
         {"--json"},
         "preparation",
     ),
+    "corpus derive-family-inventory": (1, set(), {"--json"}, "preparation"),
     "corpus audit-protected-lineage": (
         0,
         {

@@ -807,6 +807,14 @@ def finalize_family_inventory(
     from klab.corpus.completed_preparation import local_scope
 
     manifest = verify_release(release)
+    if manifest["build_identity"]["split"]["unit"] in (
+        "source_document_family",
+        "source_repository",
+    ):
+        raise ValueError(
+            "release uses declared source-family splits, which have no frozen "
+            "bundle; run derive-family-inventory with the mixture declaration"
+        )
     scope = local_scope(manifest)
     if scope is not None:
         from klab.corpus.project import SplitDeclaration
