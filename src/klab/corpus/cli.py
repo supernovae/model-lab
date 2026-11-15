@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from contextlib import nullcontext
@@ -11,6 +12,10 @@ from pathlib import Path
 
 from klab.verification_proofs import verification_options
 from klab.workdir import resolve_work_dir
+
+_CACHE_HELP = (
+    "Operator-local cold storage for raw downloads (flag > KLAB_TRANSPORT_CACHE > none)"
+)
 
 
 def _release_path(value: str, work_root: Path) -> Path:
@@ -33,6 +38,38 @@ def _handle(args: argparse.Namespace) -> None:
 
     root = resolve_work_dir(args.work_dir)
     command = args.corpus_command
+    if getattr(args, "transport_cache", None) is not None:
+        from klab.corpus.transport_cache import (
+            TRANSPORT_CACHE_ENV,
+            resolve_transport_cache,
+        )
+
+        os.environ[TRANSPORT_CACHE_ENV] = str(
+            resolve_transport_cache(args.transport_cache)
+        )
+    if command in {"cache-fill", "cache-list", "cache-prune"}:
+        from klab.corpus.transport_cache import TransportCache, resolve_transport_cache
+
+        cache_root = resolve_transport_cache()
+        if cache_root is None:
+            raise ValueError(
+                "no transport cache: pass --transport-cache or set KLAB_TRANSPORT_CACHE"
+            )
+        if command == "cache-fill":
+            from klab.corpus.acquisition import fill_transport_cache
+
+            result = fill_transport_cache(
+                load_project(Path(args.project)),
+                root,
+                transport_cache=cache_root,
+                source_id=args.source_id,
+            )
+        elif command == "cache-list":
+            result = TransportCache(cache_root).entries(verify=args.verify)
+        else:
+            result = TransportCache(cache_root).prune()
+        print(json.dumps(result, sort_keys=True, default=str))
+        return
     verification = (
         verification_options(root)
         if command in {"acquire", "build", "freeze", "export"}
@@ -434,6 +471,7 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         command = sub.add_parser(name)
         command.add_argument("project")
         command.add_argument("--offline", action="store_true")
+        command.add_argument("--transport-cache", type=Path, help=_CACHE_HELP)
         if name == "build":
             command.add_argument(
                 "--reuse-completed-preparation",
@@ -486,6 +524,26 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     command.set_defaults(handler=_handle)
     command = sub.add_parser("budget-status", help="Read the existing transport budget")
     command.add_argument("project")
+    command.set_defaults(handler=_handle)
+    command = sub.add_parser(
+        "cache-fill",
+        help="Download every declared body into the transport cache; make no snapshot",
+    )
+    command.add_argument("project")
+    command.add_argument("--source-id", help="Fill one source only")
+    command.add_argument("--transport-cache", type=Path, help=_CACHE_HELP)
+    command.set_defaults(handler=_handle)
+    command = sub.add_parser("cache-list", help="List transport cache entries")
+    command.add_argument(
+        "--verify", action="store_true", help="Re-hash every entry and report its state"
+    )
+    command.add_argument("--transport-cache", type=Path, help=_CACHE_HELP)
+    command.set_defaults(handler=_handle)
+    command = sub.add_parser(
+        "cache-prune",
+        help="Remove corrupt entries, unreferenced bodies and stale scratch; never a valid entry",
+    )
+    command.add_argument("--transport-cache", type=Path, help=_CACHE_HELP)
     command.set_defaults(handler=_handle)
     command = sub.add_parser(
         "budget-observe-time",
