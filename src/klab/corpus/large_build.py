@@ -596,6 +596,34 @@ def _index_prepared(
     return connection
 
 
+def _contaminated_groups(connection: sqlite3.Connection) -> set[tuple[str, str]]:
+    """Exact-text groups spanning train and exactly one held-out split.
+
+    These are resolved by dropping the train copies; any other cross-split
+    overlap (two held-out splits) remains an error in the caller.
+    """
+    found: set[tuple[str, str]] = set()
+    candidates = connection.execute(
+        "SELECT o.method,o.origin FROM origins o "
+        "JOIN documents d ON d.rowid=o.document_number "
+        "WHERE o.method IN ('raw','normalized') "
+        "GROUP BY o.method,o.origin HAVING COUNT(DISTINCT d.split)>1"
+    ).fetchall()
+    for method, key in candidates:
+        splits = {
+            split
+            for (split,) in connection.execute(
+                "SELECT d.split FROM origins o "
+                "JOIN documents d ON d.rowid=o.document_number "
+                "WHERE o.method=? AND o.origin=?",
+                (method, key),
+            )
+        }
+        if "train" in splits and len(splits - {"train"}) == 1:
+            found.add((method, key))
+    return found
+
+
 def _deduplicate_v2(
     connection: sqlite3.Connection,
     groups_path: Path,
@@ -604,8 +632,13 @@ def _deduplicate_v2(
     progress: BuildProgress,
     rejected_path: Path | None = None,
 ) -> tuple[int, int]:
-    """Apply the native v2 raw/normalized policy without corpus-sized maps."""
+    """Apply the native v2 raw/normalized policy without corpus-sized maps.
+
+    Text shared by train and one held-out split keeps the held-out document and
+    drops the train copies as ``contaminated_heldout``, as the v3 policy does.
+    """
     connection.execute("UPDATE documents SET representative_id=document_id")
+    contaminated = _contaminated_groups(connection)
     groups = 0
     with groups_path.open("wb") as output:
         for method in ("raw", "normalized"):
@@ -625,10 +658,12 @@ def _deduplicate_v2(
                 signature = None
                 incompatible = False
                 count = 0
+                cross = (method, key) in contaminated
                 for identifier, split, payload in connection.execute(
                     query, (method, key)
                 ):
-                    first = first or identifier
+                    if not cross or split != "train":
+                        first = first or identifier
                     splits.add(split)
                     count += 1
                     if method == "normalized":
@@ -671,7 +706,7 @@ def _deduplicate_v2(
                 )
                 error = (
                     "cross-split exact text overlap"
-                    if len(splits) > 1
+                    if len(splits) > 1 and not cross
                     else "duplicate source text has incompatible rights evidence"
                     if incompatible
                     else None
@@ -701,9 +736,18 @@ def _deduplicate_v2(
                         report.flush()
                         os.fsync(report.fileno())
                     raise ValueError(error)
+                if cross:
+                    # Train copies follow the held-out document unconditionally;
+                    # no held-out link ever points back to a train document.
+                    connection.execute(
+                        "UPDATE documents SET representative_id=? WHERE split='train' "
+                        "AND rowid IN (SELECT document_number FROM origins WHERE method=? AND origin=?)",
+                        (first, method, key),
+                    )
                 connection.execute(
                     "UPDATE documents SET representative_id=MIN(representative_id,?) "
-                    "WHERE rowid IN (SELECT document_number FROM origins WHERE method=? AND origin=?)",
+                    "WHERE rowid IN (SELECT document_number FROM origins WHERE method=? AND origin=?) "
+                    + ("AND split<>'train'" if cross else ""),
                     (first, method, key),
                 )
                 groups += 1
@@ -722,14 +766,27 @@ def _deduplicate_v2(
         if not changed:
             break
     dropped = 0
-    for number, identifier, representative, payload in connection.execute(
-        "SELECT rowid,document_id,representative_id,payload FROM documents ORDER BY rowid"
+    for (
+        number,
+        identifier,
+        representative,
+        payload,
+        split,
+        kept_split,
+    ) in connection.execute(
+        "SELECT d.rowid,d.document_id,d.representative_id,d.payload,d.split,p.split "
+        "FROM documents d JOIN documents p ON p.document_id=d.representative_id "
+        "ORDER BY d.rowid"
     ):
         doc = json.loads(payload)
         reason = (
             "metadata_only_front_matter"
             if (doc.get("structure") or {}).get("decision")
             == "exclude_lm_metadata_only"
+            else "contaminated_heldout"
+            if identifier != representative
+            and split == "train"
+            and kept_split != "train"
             else "duplicate"
             if identifier != representative
             else None
