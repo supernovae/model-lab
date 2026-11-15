@@ -63,11 +63,11 @@ depthwise causal convolution whose dilation is the longest n-gram order; `0`
 
 ### Addressing
 
-`memory_addressing` chooses the hash. The default hashes a polynomial of the
-token IDs into `memory_table_size` rows. `prime_xor_v1` uses seeded XOR
-coefficients over prime-sized tables: set `memory_hash_seed` and
-`memory_table_sizes`, one distinct prime per stream and site, in site, order,
-head order (`memory_table_size` equals the first entry).
+Token n-gram memory uses seeded XOR coefficients over prime-sized tables: set
+`memory_hash_seed` (default 0) and `memory_table_sizes`, one distinct prime per
+stream and site, in site, order, head order (`memory_table_size` equals the
+first entry). Raw-byte memory hashes a base-257 polynomial and refuses a
+`memory_table_size` that is a multiple of 257.
 
 A tokenizer can map IDs before hashing, so that tokens differing only in case or
 spacing share addresses. `klab tokenizer memory-map` builds the map and writes
@@ -135,9 +135,9 @@ case-folded or escaped. EOS gets address zero. When a character spans several
 tokens, each token contributes only the bytes it actually covers, and
 generation computes addresses the same way.
 
-The hash depends on the table size: sizes that share a factor with 257 use a
-mixing hash, others a polynomial over 257. Equal byte spans produce equal
-addresses regardless of how a tokenizer splits them.
+The hash is a polynomial over 257, so `memory_table_size` must not be a
+multiple of 257. Equal byte spans produce equal addresses regardless of how a
+tokenizer splits them.
 
 ## Portable tables
 

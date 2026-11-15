@@ -13,9 +13,6 @@ from klab.address_hash import (
     engram_address_finish,
     engram_address_step,
     engram_multipliers,
-    token_address_finish,
-    token_address_init,
-    token_address_step,
     validate_engram_table_sizes,
 )
 from klab.model.norm import RMSNorm
@@ -136,7 +133,6 @@ class TokenNgramMemory(nn.Module):
         variant: Literal["hidden_gate", "context_key"] = "hidden_gate",
         norm_eps: float = 1e-6,
         conv_kernel_size: int = 0,
-        addressing: str = "legacy",
         table_sizes: tuple[int, ...] = (),
         hash_seed: int = 0,
         token_mapping: tuple[int, ...] | None = None,
@@ -150,28 +146,21 @@ class TokenNgramMemory(nn.Module):
         self.ngram_size = ngram_size
         self.ngram_orders = ngram_orders or (ngram_size,)
         self.hash_heads = hash_heads
-        self.addressing = addressing
         self.padding_id = (
             token_mapping[padding_token_id]
             if token_mapping is not None
             else padding_token_id
         )
         streams = len(self.ngram_orders) * hash_heads
-        if addressing == "prime_xor_v1":
-            self.table_sizes = validate_engram_table_sizes(table_sizes, streams)
-            if self.table_sizes[0] != table_size or vocab_size is None:
-                raise ValueError(
-                    "prime XOR requires vocabulary and matching first table size"
-                )
-            memory_vocab = vocab_size  # Fixed original-vocabulary bound isolates mapping ablations.
-            self.multipliers = engram_multipliers(
-                hash_seed, max(self.ngram_orders), memory_vocab, layer_id=layer_id
+        self.table_sizes = validate_engram_table_sizes(table_sizes, streams)
+        if self.table_sizes[0] != table_size or vocab_size is None:
+            raise ValueError(
+                "token memory requires vocabulary and matching first table size"
             )
-        elif addressing == "legacy" and not table_sizes and not hash_seed:
-            self.table_sizes = (table_size,) * streams
-            self.multipliers = ()
-        else:
-            raise ValueError("invalid token memory addressing settings")
+        # Fixed original-vocabulary bound isolates mapping ablations.
+        self.multipliers = engram_multipliers(
+            hash_seed, max(self.ngram_orders), vocab_size, layer_id=layer_id
+        )
         self.register_buffer(
             "token_mapping",
             None
@@ -229,23 +218,13 @@ class TokenNgramMemory(nn.Module):
         self, shifts: list[Tensor], order: int, seed: int
     ) -> Tensor:
         base = shifts[0]
-        if self.addressing == "prime_xor_v1":
-            stream = self.ngram_orders.index(order) * self.hash_heads + seed
-            address = torch.zeros_like(base, dtype=torch.long)
-            for offset in range(order):
-                address = engram_address_step(
-                    address, shifts[offset], self.multipliers[offset]
-                )
-            return engram_address_finish(address, self.table_sizes[stream])
-        address = torch.full(
-            base.shape,
-            token_address_init(seed),
-            dtype=torch.long,
-            device=base.device,
-        )
+        stream = self.ngram_orders.index(order) * self.hash_heads + seed
+        address = torch.zeros_like(base, dtype=torch.long)
         for offset in range(order):
-            address = token_address_step(address, shifts[offset], self.table_size, seed)
-        return token_address_finish(address, self.table_size, seed)
+            address = engram_address_step(
+                address, shifts[offset], self.multipliers[offset]
+            )
+        return engram_address_finish(address, self.table_sizes[stream])
 
     def addresses(
         self, input_ids: Tensor, order: int | None = None, seed: int = 0
@@ -256,16 +235,6 @@ class TokenNgramMemory(nn.Module):
         return self._addresses_from_shifts(shifts, order, seed)
 
     def _all_addresses(self, input_ids: Tensor) -> list[Tensor]:
-        if (
-            "addresses" in self.__dict__
-            or getattr(type(self).addresses, "__func__", type(self).addresses)
-            is not _DEFAULT_ADDRESSES
-        ):
-            return [
-                self.addresses(input_ids, order, head)
-                for order in self.ngram_orders
-                for head in range(self.hash_heads)
-            ]
         shifts = self._shifted_inputs(input_ids, max(self.ngram_orders))
         return [
             self._addresses_from_shifts(shifts, order, head)
@@ -284,86 +253,6 @@ class TokenNgramMemory(nn.Module):
         retrieved = [
             table(address) for table, address in zip(tables, addresses, strict=True)
         ]
-        # Preserve the vectorized legacy path and its shared-table diagnostics.
-        if (
-            self.variant == "hidden_gate"
-            and self.addressing == "legacy"
-            and position_mask is None
-        ):
-            if len(addresses) == 1:
-                # One stream has nothing to batch: its diagnostics are the
-                # table's, so skip the stacking and the second count pass.
-                values = self.output(retrieved[0])
-                gate = torch.sigmoid(self.gate(hidden))
-                stream = _diagnostics(
-                    addresses[0], gate, values, hidden, self.table_size
-                )
-                self.last_diagnostics = replace(stream, streams=(stream,))
-                return hidden + gate * values, None
-            # One projection over every stream instead of one call per stream.
-            stacked_values = self.output(torch.stack(retrieved))
-            values = stacked_values.mean(dim=0)
-            gate = torch.sigmoid(self.gate(hidden))
-            num_streams = len(addresses)
-            gate_mean = gate.mean().detach()
-            hidden_norm = hidden.norm(dim=-1).mean().detach()
-            stream_value_norms = stacked_values.norm(dim=-1).mean(dim=(1, 2)).detach()
-            per_stream_lookups = addresses[0].numel()
-            # Build counts on the device: no host-to-device copy per forward.
-            lookup_tensor = torch.full(
-                (), per_stream_lookups, dtype=torch.long, device=hidden.device
-            )
-            stream_denom = lookup_tensor.clamp_min(1)
-            flat_addresses = torch.stack([address.flatten() for address in addresses])
-            stream_offsets = (
-                torch.arange(num_streams, device=hidden.device)[:, None]
-                * self.table_size
-            )
-            counts_by_stream = torch.bincount(
-                (flat_addresses + stream_offsets).flatten(),
-                minlength=num_streams * self.table_size,
-            ).view(num_streams, self.table_size)
-            uniques = (counts_by_stream > 0).sum(dim=-1)
-            collisions = lookup_tensor - uniques
-            reuse_rates = (collisions.float() / stream_denom).detach()
-            utilizations = (uniques.float() / self.table_size).detach()
-            max_fractions = (
-                counts_by_stream.max(dim=-1).values.float() / stream_denom
-            ).detach()
-            stream_diagnostics = tuple(
-                MemoryDiagnostics(
-                    lookup_count=lookup_tensor.detach(),
-                    unique_addresses=uniques[index].detach(),
-                    collision_count=collisions[index].detach(),
-                    bucket_reuse_rate=reuse_rates[index],
-                    table_utilization=utilizations[index],
-                    maximum_address_fraction=max_fractions[index],
-                    gate_mean=gate_mean,
-                    value_norm=stream_value_norms[index],
-                    hidden_norm=hidden_norm,
-                )
-                for index in range(num_streams)
-            )
-            combined_counts = counts_by_stream.sum(dim=0)
-            total_lookups = lookup_tensor * num_streams
-            total_unique = (combined_counts > 0).sum()
-            total_collisions = total_lookups - total_unique
-            total_denom = total_lookups.clamp_min(1)
-            self.last_diagnostics = MemoryDiagnostics(
-                lookup_count=total_lookups.detach(),
-                unique_addresses=total_unique.detach(),
-                collision_count=total_collisions.detach(),
-                bucket_reuse_rate=(total_collisions.float() / total_denom).detach(),
-                table_utilization=(total_unique.float() / self.table_size).detach(),
-                maximum_address_fraction=(
-                    combined_counts.max().float() / total_denom
-                ).detach(),
-                gate_mean=gate_mean,
-                value_norm=values.norm(dim=-1).mean().detach(),
-                hidden_norm=hidden_norm,
-                streams=stream_diagnostics,
-            )
-            return hidden + gate * values, None
         if self.variant == "context_key":
             concatenated = torch.cat(retrieved, dim=-1)
             values = self.output(concatenated)
@@ -501,7 +390,6 @@ def build_token_memory(
         model.memory_variant,
         model.rms_norm_eps,
         model.memory_conv_kernel_size,
-        addressing=model.memory_addressing,
         table_sizes=sizes,
         hash_seed=model.memory_hash_seed,
         token_mapping=None
@@ -512,9 +400,6 @@ def build_token_memory(
         padding_token_id=model.memory_padding_token_id,
         gate_transform=model.memory_gate_transform,
     )
-
-
-_DEFAULT_ADDRESSES = TokenNgramMemory.addresses
 
 
 class ByteAddressMemory(nn.Module):

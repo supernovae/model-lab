@@ -113,7 +113,6 @@ def test_unpadded_native_train_resume(tmp_path, multiport, width):
             memory_hash_heads=2,
             memory_table_size=31,
             memory_table_sizes=list(engram_table_sizes(31, 8)),
-            memory_addressing="prime_xor_v1",
             memory_token_mapping=build_memory_token_map(
                 base.tokenizer.path, mode="identity"
             ).to_dict(),

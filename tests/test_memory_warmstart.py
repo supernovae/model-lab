@@ -53,7 +53,6 @@ def _configs(
         memory_injection="after_block",
         memory_block_index=0,
         memory_conv_kernel_size=4,
-        memory_addressing="prime_xor_v1",
         memory_table_sizes=[31, 37, 41, 43],
         memory_hash_seed=13,
         memory_independent_init=True,
@@ -83,21 +82,14 @@ def _migrate(source: RunConfig, target: RunConfig, model: DenseLM):
 
 
 @pytest.mark.parametrize(
-    "addressing,gate_transform,multiport",
-    [
-        ("legacy", "identity", False),
-        ("prime_xor_v1", "identity", False),
-        ("prime_xor_v1", "identity", True),
-        ("prime_xor_v1", "signed_sqrt", False),
-    ],
+    "gate_transform,multiport",
+    [("identity", False), ("identity", True), ("signed_sqrt", False)],
 )
 def test_zero_impact_warmstart_preserves_trunk_rng_and_learns(
-    tmp_path: Path, addressing: str, gate_transform: str, multiport: bool
+    tmp_path: Path, gate_transform: str, multiport: bool
 ) -> None:
     source, target = _configs(tmp_path, multiport=multiport)
-    changes = {"memory_addressing": addressing, "memory_gate_transform": gate_transform}
-    if addressing == "legacy":
-        changes.update(memory_table_sizes=(), memory_hash_seed=0)
+    changes = {"memory_gate_transform": gate_transform}
     target = target.model_copy(
         update={"model": target.model.model_copy(update=changes)}
     )

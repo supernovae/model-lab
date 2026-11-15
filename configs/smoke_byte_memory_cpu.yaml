@@ -9,7 +9,7 @@ model:
   ffn_dim: 96
   max_seq_len: 64
   memory: byte
-  memory_table_size: 257
+  memory_table_size: 263
   memory_ngram_size: 3
   memory_dim: 16
 tokenizer:

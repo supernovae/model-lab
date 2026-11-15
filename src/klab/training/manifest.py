@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from klab.address_hash import memory_addressing_identity, memory_schemes
+from klab.address_hash import engram_identity
 from klab.canonical import canonical_digest, canonical_json
 
 if TYPE_CHECKING:
@@ -68,14 +68,11 @@ def _without_default_injection(model: Mapping[str, Any]) -> dict[str, Any]:
     return identity
 
 
-def architecture_sha256(
-    config: Mapping[str, Any], *, memory_addressing: bool = True
-) -> str:
+def architecture_sha256(config: Mapping[str, Any]) -> str:
     """Digest model semantics, excluding the separately inventoried package location.
 
-    Memory tables whose address scheme changed (``klab.address_hash``) also
-    bind that scheme, so a checkpoint records the addressing it was trained
-    with. ``memory_addressing=False`` reproduces the pre-fix digest.
+    Token n-gram memory also binds its address scheme and multipliers
+    (``klab.address_hash``).
     """
     model = config.get("model", config)
     if not isinstance(model, Mapping):
@@ -93,30 +90,10 @@ def architecture_sha256(
         "model": model_identity,
         "attention": dict(attention),
     }
-    addressing = memory_addressing_identity(model_identity)
-    if memory_addressing and addressing is not None:
+    addressing = engram_identity(model_identity)
+    if addressing is not None:
         identity["memory_addressing"] = addressing
     return canonical_digest(identity)
-
-
-def trained_memory_addressing(
-    effective_config: Mapping[str, Any], recorded_architecture_sha256: object
-) -> dict[str, object]:
-    """Address schemes a run was trained with, from its recorded architecture digest.
-
-    The digest was written at training time, so it tells current code from
-    pre-fix code at affected table sizes. Anything else is unknown and refused.
-    """
-    model = effective_config.get("model", effective_config)
-    if not isinstance(model, Mapping):
-        raise TypeError("architecture identity requires a mapping-valued model")
-    if recorded_architecture_sha256 == architecture_sha256(effective_config):
-        return memory_schemes(model)
-    if recorded_architecture_sha256 == architecture_sha256(
-        effective_config, memory_addressing=False
-    ):
-        return memory_schemes(model, legacy=True)
-    raise ValueError("recorded architecture digest names no known memory addressing")
 
 
 def config_sha256(config: Mapping[str, Any]) -> str:
@@ -335,13 +312,6 @@ def _validate_current_identity(data: dict[str, Any]) -> None:
         raise ValueError("manifest effective config hash mismatch")
     expected_architecture = architecture_sha256(effective)
     if data.get("architecture_sha256") != expected_architecture:
-        if data.get("architecture_sha256") == architecture_sha256(
-            effective, memory_addressing=False
-        ):
-            raise ValueError(
-                "run was trained with pre-fix degenerate memory addressing "
-                "(table size shares a factor with 257); retrain it"
-            )
         raise ValueError("manifest architecture hash mismatch")
     artifacts = data.get("artifacts")
     if not isinstance(artifacts, list):

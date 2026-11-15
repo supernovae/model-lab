@@ -10,8 +10,8 @@ def test_equal_utf8_bytes_share_address_across_segment_boundaries() -> None:
     reconstructed = "caf" + "é\n"
     assert source.encode("utf-8") == reconstructed.encode("utf-8")
     assert hash_text(source) == hash_text(reconstructed)
-    assert table_address(source.encode("utf-8"), 257) == table_address(
-        reconstructed.encode("utf-8"), 257
+    assert table_address(source.encode("utf-8"), 263) == table_address(
+        reconstructed.encode("utf-8"), 263
     )
 
 

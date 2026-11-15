@@ -540,6 +540,7 @@ def test_memory_placement_cannot_resume_or_promote_across_sites(
         update={
             "memory": "ngram",
             "memory_table_size": 31,
+            "memory_table_sizes": (31,),
             "memory_ngram_size": 3,
             "memory_dim": 8,
             "memory_injection": "final",

@@ -41,6 +41,30 @@ class MemoryTokenMapping(StrictModel):
         return self
 
 
+def _with_default_ngram_tables(data: Any) -> Any:
+    """Expand omitted n-gram table sizes to consecutive primes from the first.
+
+    ``memory_table_size`` is rounded up to the first prime; the sizes then name
+    one distinct prime per stream and memory site, so the resolved config
+    always states its row counts.
+    """
+    if not isinstance(data, dict) or data.get("memory") != "ngram":
+        return data
+    size = data.get("memory_table_size")
+    if data.get("memory_table_sizes") or type(size) is not int or size < 2:
+        return data
+    heads = data.get("memory_hash_heads", 1)
+    orders = data.get("memory_ngram_orders") or (None,)
+    indices = data.get("memory_block_indices") or ()
+    if type(heads) is not int or heads < 1:
+        return data
+    sites = len(indices) if indices else 1
+    from klab.address_hash import engram_table_sizes
+
+    sizes = engram_table_sizes(size, len(orders) * heads * sites)
+    return {**data, "memory_table_size": sizes[0], "memory_table_sizes": sizes}
+
+
 def _with_normalized_params(
     data: Any, slot: str, kind_field: str, params_field: str, default_kind: str
 ) -> Any:
@@ -349,9 +373,6 @@ class ModelConfig(StrictModel):
     memory_gate_transform: Literal["identity", "signed_sqrt"] = Field(
         default="identity", exclude_if=lambda value: value == "identity"
     )
-    memory_addressing: Literal["legacy", "prime_xor_v1"] = Field(
-        default="legacy", exclude_if=lambda value: value == "legacy"
-    )
     memory_table_sizes: tuple[Annotated[int, Field(strict=True, gt=0)], ...] = Field(
         default=(), exclude_if=lambda value: not value
     )
@@ -422,9 +443,10 @@ class ModelConfig(StrictModel):
     @classmethod
     def _normalize_params(cls, data: Any) -> Any:
         data = _with_normalized_params(data, "ffn", "ffn", "ffn_params", "dense")
-        return _with_normalized_params(
+        data = _with_normalized_params(
             data, "memory", "memory", "memory_params", "none"
         )
+        return _with_default_ngram_tables(data)
 
     @model_serializer(mode="wrap")
     def _serialize_legacy_final(
@@ -530,15 +552,16 @@ class ModelConfig(StrictModel):
         if self.memory_conv_kernel_size and self.memory_variant != "context_key":
             raise ValueError("memory convolution requires context_key memory")
         if self.memory != "ngram" and (
-            self.memory_addressing != "legacy"
+            self.memory_table_sizes
+            or self.memory_hash_seed
             or self.memory_token_mapping is not None
             or self.memory_independent_init
             or self.memory_padding_token_id
         ):
             raise ValueError(
-                "token addressing/mapping/independent initialization requires ngram memory"
+                "token table sizes, seed, mapping and independent initialization require ngram memory"
             )
-        if self.memory_addressing == "prime_xor_v1":
+        if self.memory == "ngram":
             from klab.address_hash import validate_engram_table_sizes
 
             streams = (len(self.memory_ngram_orders) or 1) * self.memory_hash_heads
@@ -547,8 +570,6 @@ class ModelConfig(StrictModel):
             )
             if self.memory_table_sizes[0] != self.memory_table_size:
                 raise ValueError("memory_table_size must equal first prime stream size")
-        elif self.memory_table_sizes or self.memory_hash_seed:
-            raise ValueError("per-stream sizes and hash seed require prime_xor_v1")
         if self.memory_padding_token_id >= self.vocab_size:
             raise ValueError("memory padding token must belong to vocabulary")
         if (
@@ -581,6 +602,10 @@ class ModelConfig(StrictModel):
             raise ValueError(
                 "model.memory_ngram_orders must be sorted unique values >= 2"
             )
+        if self.memory in {"byte", "portable"}:
+            from klab.address_hash import validate_byte_table_size
+
+            validate_byte_table_size(self.memory_table_size)
         if self.memory == "byte" and self.memory_ngram_orders:
             raise ValueError("byte memory uses its configured raw-byte ngram size")
         if (self.memory == "portable") != (self.memory_package_path is not None):

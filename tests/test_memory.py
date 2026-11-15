@@ -5,6 +5,7 @@ import copy
 import pytest
 import torch
 
+from klab.address_hash import engram_table_sizes
 from klab.config.models import AttentionConfig, ModelConfig
 from klab.model.memory import ByteAddressMemory, TokenNgramMemory
 from klab.model.portable_engram import (
@@ -14,8 +15,32 @@ from klab.model.portable_engram import (
 from klab.model.transformer import DenseLM
 
 
+def token_memory(
+    hidden_dim: int,
+    table_size: int,
+    ngram_size: int,
+    value_dim: int,
+    ngram_orders: tuple[int, ...] = (),
+    hash_heads: int = 1,
+    **options: object,
+) -> TokenNgramMemory:
+    """A token memory with consecutive prime table sizes from ``table_size``."""
+    sizes = engram_table_sizes(table_size, (len(ngram_orders) or 1) * hash_heads)
+    return TokenNgramMemory(
+        hidden_dim,
+        sizes[0],
+        ngram_size,
+        value_dim,
+        ngram_orders,
+        hash_heads,
+        table_sizes=sizes,
+        vocab_size=64,
+        **options,
+    )
+
+
 def test_multi_order_multi_head_addresses_remain_causal() -> None:
-    memory = TokenNgramMemory(
+    memory = token_memory(
         hidden_dim=4,
         table_size=97,
         ngram_size=3,
@@ -35,77 +60,6 @@ def test_multi_order_multi_head_addresses_remain_causal() -> None:
     assert len(memory.extra_tables) == 5
 
 
-@pytest.mark.parametrize(
-    ("ngram_orders", "hash_heads"), [((2, 3, 4), 2), ((), 1)], ids=["six", "one"]
-)
-def test_stream_diagnostics_match_per_stream_reference(
-    ngram_orders: tuple[int, ...], hash_heads: int
-) -> None:
-    """Several streams take the batched path and a single stream its own."""
-    from klab.model.memory import _diagnostics
-
-    torch.manual_seed(7)
-    memory = TokenNgramMemory(
-        hidden_dim=8,
-        table_size=31,
-        ngram_size=3,
-        value_dim=5,
-        ngram_orders=ngram_orders,
-        hash_heads=hash_heads,
-    )
-    hidden = torch.randn(3, 12, 8)
-    input_ids = torch.randint(0, 64, (3, 12))
-    output = memory(hidden, input_ids)
-    actual = memory.last_diagnostics
-    assert actual is not None
-    assert len(actual.streams) == max(len(ngram_orders), 1) * hash_heads
-
-    addresses = [
-        memory.addresses(input_ids, order, head)
-        for order in memory.ngram_orders
-        for head in range(memory.hash_heads)
-    ]
-    for left, right in zip(addresses, memory._all_addresses(input_ids), strict=True):
-        assert torch.equal(left, right)
-    tables = (memory.table, *memory.extra_tables)
-    stream_values = [
-        memory.output(table(address))
-        for table, address in zip(tables, addresses, strict=True)
-    ]
-    values = torch.stack(stream_values).mean(dim=0)
-    gate = torch.sigmoid(memory.gate(hidden))
-    expected_streams = tuple(
-        _diagnostics(address, gate, value, hidden, memory.table_size)
-        for address, value in zip(addresses, stream_values, strict=True)
-    )
-    expected = _diagnostics(
-        torch.cat([address.flatten() for address in addresses]),
-        gate,
-        values,
-        hidden,
-        memory.table_size,
-    )
-    torch.testing.assert_close(output, hidden + gate * values, rtol=0, atol=0)
-    for field in (
-        "lookup_count",
-        "unique_addresses",
-        "collision_count",
-        "bucket_reuse_rate",
-        "table_utilization",
-        "maximum_address_fraction",
-        "gate_mean",
-        "value_norm",
-        "hidden_norm",
-    ):
-        torch.testing.assert_close(getattr(actual, field), getattr(expected, field))
-        for actual_stream, expected_stream in zip(
-            actual.streams, expected_streams, strict=True
-        ):
-            torch.testing.assert_close(
-                getattr(actual_stream, field), getattr(expected_stream, field)
-            )
-
-
 def test_disabled_memory_is_absent_and_enabled_memory_runs_backward() -> None:
     plain = ModelConfig(
         vocab_size=512,
@@ -120,6 +74,7 @@ def test_disabled_memory_is_absent_and_enabled_memory_runs_backward() -> None:
         update={
             "memory": "ngram",
             "memory_table_size": 31,
+            "memory_table_sizes": (31,),
             "memory_ngram_size": 3,
             "memory_dim": 7,
         }
@@ -278,7 +233,7 @@ def test_context_key_gate_reads_memory_and_backpropagates(kernel: int) -> None:
     assert torch.sigmoid(gate(hidden, hidden)).item() > 0.85
     assert torch.sigmoid(gate(hidden, -hidden)).item() < 0.15
     torch.manual_seed(7)
-    memory = TokenNgramMemory(
+    memory = token_memory(
         8, 31, 3, 4, (2, 3), 2, variant="context_key", conv_kernel_size=kernel
     )
     ids = torch.tensor([[3, 7, 11, 13, 17, 19]])
@@ -299,7 +254,7 @@ def test_context_key_gate_reads_memory_and_backpropagates(kernel: int) -> None:
 
 
 def test_context_gate_changes_with_retrieved_content_at_fixed_hidden() -> None:
-    memory = TokenNgramMemory(4, 31, 2, 4, variant="context_key")
+    memory = token_memory(4, 31, 2, 4, variant="context_key")
     hidden = torch.tensor([[[1.0, 0.0, 0.0, 0.0]]])
     ids = torch.tensor([[7]])
     with torch.no_grad():

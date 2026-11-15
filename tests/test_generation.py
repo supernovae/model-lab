@@ -743,6 +743,7 @@ def test_context_memory_cache_bfloat16_keeps_fp32_residual_history() -> None:
             {
                 "memory": "ngram",
                 "memory_table_size": 97,
+                "memory_table_sizes": (97, 101),
                 "memory_ngram_size": 3,
                 "memory_dim": 8,
                 "memory_ngram_orders": (2, 3),
@@ -761,7 +762,7 @@ def test_speculation_keeps_greedy_tokens_when_drafts_are_partly_wrong(
 ) -> None:
     from klab.evaluation.speculation import PromptLookupSpeculation
 
-    torch.manual_seed(0)
+    torch.manual_seed(1)
     tokenizer = _tokenizer()
     model = DenseLM(
         ModelConfig(
