@@ -381,18 +381,29 @@ def _span_rows(spans: str, start: int, end: int):
     return rows, end - start
 
 
+def _declared_keys(doc: dict[str, Any], methods: tuple[str, ...]) -> list[str]:
+    """The duplicate keys a release's policy declares for one document."""
+    from klab.corpus.pipeline import _origin_keys
+
+    by_method = {
+        "raw": lambda: ["raw:" + doc["raw_content_sha256"]],
+        "normalized": lambda: ["normalized:" + doc["content_sha256"]],
+        "canonical_origin": lambda: ["origin:" + key for key in _origin_keys(doc)],
+    }
+    return [key for method in methods for key in by_method[method]()]
+
+
 def _document_rows(
     span_database: str,
     documents: str,
     start: int,
     end: int,
     options: NormalizerOptions,
+    keys: tuple[str, ...],
 ):
-    from klab.corpus.pipeline import _origin_keys
-
     db = _readonly(span_database)
     try:
-        rows, keys = [], []
+        rows, duplicate_keys = [], []
         for doc, offset, length in range_records(Path(documents), start, end):
             if (
                 doc["content_sha256"]
@@ -425,13 +436,10 @@ def _document_rows(
                     span[3],
                 )
             )
-            for key in (
-                "raw:" + doc["raw_content_sha256"],
-                "normalized:" + doc["content_sha256"],
-                *("origin:" + value for value in _origin_keys(doc)),
-            ):
-                keys.append((key, doc["document_id"]))
-        return rows, keys, end - start
+            duplicate_keys.extend(
+                (key, doc["document_id"]) for key in _declared_keys(doc, keys)
+            )
+        return rows, duplicate_keys, end - start
     finally:
         db.close()
 
@@ -860,7 +868,14 @@ def _validate_rows_streaming(
             run_tasks(
                 _document_rows,
                 (
-                    (span_database, str(documents_path), start, end, options)
+                    (
+                        span_database,
+                        str(documents_path),
+                        start,
+                        end,
+                        options,
+                        tuple(identity["release"]["policy"]["duplicates"]["keys"]),
+                    )
                     for start, end in chunk_ranges(documents_path)
                 ),
                 lambda result: (
