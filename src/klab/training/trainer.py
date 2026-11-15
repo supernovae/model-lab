@@ -63,6 +63,7 @@ from klab.memory import (
     validate_offload_headroom,
 )
 from klab.objectives import objective as registered_objective
+from klab.preflight import Gate, open_gate, requires_preflight
 from klab.progress import ProgressReporter
 from klab.resource_envelope import (
     ResourceEnvelope,
@@ -528,8 +529,13 @@ def train(
     require_prepared: bool = False,
     checkpoint_committed: Callable[[Path, CheckpointRecord], None] | None = None,
     spot_policy: SpotSafetyPolicy | None = None,
+    preflight: str | None = None,
 ) -> str:
-    """Run one independent experiment, optionally bound to a stage bundle."""
+    """Run one independent experiment, optionally bound to a stage bundle.
+
+    A fresh run on a token mixture is a pretraining run: it needs a current
+    `klab preflight` report (or a recorded `waive:REASON`) in `preflight`.
+    """
     if add_ngram_memory and promote is None:
         raise ValueError("--add-ngram-memory requires --promote")
     if extend_context and not add_ngram_memory:
@@ -540,6 +546,11 @@ def train(
         raise ValueError("--append-data requires --extend-budget")
     require_model_runtime_allowed()
     require_authorization(config, authorization)
+    gate = None
+    if requires_preflight(
+        config, continuation=any((resume, promote, recover, extend_budget))
+    ):
+        gate = open_gate(preflight, config)
     validate_tokenizer_batch_limits(
         tokenizer_batch_documents, tokenizer_batch_source_bytes
     )
@@ -590,6 +601,7 @@ def train(
         require_prepared=require_prepared,
         checkpoint_committed=checkpoint_committed,
         spot_policy=spot_policy,
+        preflight=gate,
     )
     if _attempt_contract_suppresses_triage():
         return completed_run_id
@@ -655,6 +667,7 @@ def _train_impl(
     require_prepared: bool = False,
     checkpoint_committed: Callable[[Path, CheckpointRecord], None] | None = None,
     spot_policy: SpotSafetyPolicy | None = None,
+    preflight: Gate | None = None,
 ) -> str:
 
     require_model_runtime_allowed()
@@ -962,6 +975,11 @@ def _train_impl(
                     if purpose == "training"
                     else None,
                 )
+        if preflight is not None:
+            preflight.bind(
+                stage_bundle_sha256=str(staged["sha256"]) if staged else None,
+                prepared_manifest_sha256=str(data.manifest["manifest_sha256"]),
+            )
         if config.model.memory_token_mapping is not None:
             from klab.memory_tokenizer import validate_memory_token_map
 
@@ -1289,6 +1307,7 @@ def _train_impl(
             purpose=purpose,
             stage_bundle_sha256=stage_digest,
             pilot_reports=pilot_reports,
+            preflight=preflight.record if preflight is not None else None,
             artifacts=artifacts,
             resource_decisions=continuation_state.decisions
             + dispatch_decisions

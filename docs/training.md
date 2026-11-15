@@ -38,6 +38,11 @@ klab train RUN.yaml --run-id RUN --require-prepared
 With `--require-prepared`, a missing cache fails immediately and names the
 `data prepare` command to run.
 
+A fresh run on a token mixture (a pretraining run) also needs
+`--preflight REPORT`, the sealed report from `klab preflight`, or
+`--preflight waive:REASON`, which is recorded in the run manifest. See
+[pretraining preflight](pretraining-preflight.md).
+
 ## Smoke runs
 
 ```sh

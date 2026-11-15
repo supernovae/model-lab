@@ -161,8 +161,9 @@ klab data engram-sizing "$PREPARED" --config model.yaml --target-tokens 12000000
 ```
 
 Add `--output sizing.json` to keep the sealed result. It names the prepared
-data's manifest digest and the configured table sizes, so a later check can tell
-that the tables in a run's config were measured on these tokens.
+data's manifest digest and the configured table sizes, so
+[`klab preflight --engram-sizing`](pretraining-preflight.md) can tell that the
+tables in a run's config were measured on these tokens.
 
 The command hashes a sample of the tokens (`--max-tokens`, default 33.5
 million, about 40 bytes per token of memory) with the exact functions the model

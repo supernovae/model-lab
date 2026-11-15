@@ -210,3 +210,4 @@ before changing its settings.
 | Topic | File | Read when |
 | --- | --- | --- |
 | Engram memory | [docs/engram.md](docs/engram.md#size-the-tables) | adding n-gram memory or choosing its table sizes, heads or optimizer settings |
+| Pretraining preflight | [docs/pretraining-preflight.md](docs/pretraining-preflight.md) | starting a multi-day pretraining run, or when `klab preflight` fails or `klab train` asks for `--preflight` |

@@ -335,13 +335,18 @@ def _run_identity(run: Path) -> dict[str, Any]:
     }
 
 
-def code_revision() -> dict[str, Any]:
-    """Best-effort Git revision of the running checkout (read-only Git calls)."""
+def git_state(directory: Path, *, upstream: str | None = None) -> dict[str, Any]:
+    """Git revision, dirty state and (given `upstream`) containment of a checkout.
+
+    Read-only Git calls. Outside a checkout the commit and dirty state are
+    None. `in_upstream` is None when `upstream` is not given or not known
+    locally; this does not fetch.
+    """
     import subprocess
 
     def git(*arguments: str) -> bytes:
         return subprocess.run(
-            ["git", "-C", str(Path(__file__).parent), *arguments],
+            ["git", "-C", str(directory), *arguments],
             check=True,
             capture_output=True,
         ).stdout
@@ -350,8 +355,36 @@ def code_revision() -> dict[str, Any]:
         commit = git("rev-parse", "HEAD").decode().strip()
         dirty = bool(git("status", "--porcelain=v1", "--untracked-files=no"))
     except OSError, subprocess.CalledProcessError, UnicodeError:
-        return {"git_commit": None, "git_dirty": None}
-    return {"git_commit": commit, "git_dirty": dirty}
+        return {"git_commit": None, "git_dirty": None, "in_upstream": None}
+    contained = None
+    if upstream is not None:
+        try:
+            git("rev-parse", "--verify", "--quiet", upstream)
+            contained = (
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(directory),
+                        "merge-base",
+                        "--is-ancestor",
+                        "HEAD",
+                        upstream,
+                    ],
+                    capture_output=True,
+                    check=False,
+                ).returncode
+                == 0
+            )
+        except OSError, subprocess.CalledProcessError:
+            contained = None
+    return {"git_commit": commit, "git_dirty": dirty, "in_upstream": contained}
+
+
+def code_revision() -> dict[str, Any]:
+    """Best-effort Git revision of the running checkout (read-only Git calls)."""
+    state = git_state(Path(__file__).parent)
+    return {"git_commit": state["git_commit"], "git_dirty": state["git_dirty"]}
 
 
 def _peak_rss_bytes() -> int | None:

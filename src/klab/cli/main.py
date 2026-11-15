@@ -816,6 +816,33 @@ def _checkpoint_plan_spot(args: argparse.Namespace) -> None:
     )
 
 
+def _preflight(args: argparse.Namespace) -> None:
+    from klab.corpus.release_verify import verification_settings
+    from klab.preflight import Evidence, render, run_preflight, write_report
+
+    options = verification_options(
+        resolve_work_dir(args.work_dir), cold=args.cold_verify
+    )
+    with verification_settings(echo=sys.stderr, **options):
+        report = run_preflight(
+            Evidence(
+                load_config(Path(args.config)),
+                stage_bundle=args.stage_bundle,
+                recipe=args.recipe,
+                near_duplicates=args.near_duplicates,
+                near_duplicate_decisions=args.near_duplicate_decisions,
+                engram_sizing=args.engram_sizing,
+                max_set_aside_share=args.max_set_aside_share,
+                **options,
+            )
+        )
+    path = write_report(report, args.output)
+    print(render(report))
+    print(path)
+    if report["status"] == "FAIL":
+        raise SystemExit(1)
+
+
 def _train(args: argparse.Namespace) -> None:
     from klab.training.spot_safety import load_spot_policy
     from klab.training.trainer import train
@@ -856,6 +883,7 @@ def _train(args: argparse.Namespace) -> None:
         tokenizer_batch_documents=args.tokenizer_batch_documents,
         tokenizer_batch_source_bytes=args.tokenizer_batch_source_bytes,
         require_prepared=args.require_prepared,
+        preflight=args.preflight,
     )
     print(run_id)
     progress = config.logging.root_dir / run_id / "progress.json"
@@ -2610,6 +2638,13 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     training.add_argument("--stop-after-step", type=int)
     training.add_argument("--stage-bundle")
     training.add_argument(
+        "--preflight",
+        metavar="REPORT|waive:REASON",
+        help="a pretraining run (fresh, on a token mixture) needs the sealed "
+        "report `klab preflight` wrote for this exact config, or an explicit "
+        "waiver whose reason is recorded in the run manifest",
+    )
+    training.add_argument(
         "--require-prepared",
         action="store_true",
         help="never tokenize or pack in this process: fail before the model is "
@@ -2621,6 +2656,32 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     training.add_argument("--resource-envelope", type=Path)
     _tokenizer_batch_arguments(training)
     training.set_defaults(handler=_train)
+    preflight = commands.add_parser(
+        "preflight",
+        help="Check that the release, tokenizer, mixture, prepared data, model and "
+        "warmup agree before a long pretraining run; write a sealed report.",
+    )
+    preflight.add_argument("config", help="the composed pretraining config")
+    preflight.add_argument("--output", type=Path, required=True)
+    preflight.add_argument("--stage-bundle", type=Path)
+    preflight.add_argument(
+        "--recipe", type=Path, help="the recipe directory, to record its Git revision"
+    )
+    preflight.add_argument(
+        "--near-duplicates", type=Path, help="the screen's JSON report"
+    )
+    preflight.add_argument("--near-duplicate-decisions", type=Path)
+    preflight.add_argument(
+        "--engram-sizing", type=Path, help="`klab data engram-sizing --output` result"
+    )
+    preflight.add_argument(
+        "--max-set-aside-share",
+        type=float,
+        default=0.25,
+        help="warn when a source loses more than this share of its files or records",
+    )
+    preflight.add_argument("--cold-verify", action="store_true")
+    preflight.set_defaults(handler=_preflight)
     architecture = commands.add_parser(
         "architecture",
         help="List named architecture presets or scale one to a parameter target.",
