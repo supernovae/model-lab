@@ -360,7 +360,14 @@ def test_build_freeze_replay_spans_semantics_and_tamper(tmp_path: Path) -> None:
     assert freeze(first, tmp_path) == published
     manifest = verify_release(published)
     declared = project.release.normalizer.model_dump(mode="json")
-    assert json.loads((published / "report.json").read_text())["normalizer"] == declared
+    report = json.loads((published / "report.json").read_text())
+    assert report["normalizer"] == declared
+    ledger = {row["source_id"]: row for row in report["source_ledger"]}
+    assert set(ledger) == {source.id for source in project.sources}
+    assert {k: v["retained_documents"] for k, v in ledger.items()} == {
+        k: report["source_counts"].get(k, 0) for k in ledger
+    }
+    assert "## Sources" in (published / "report.md").read_text()
     build_record = json.loads((first / "build.json").read_text())
     assert build_record["identity"]["release"]["normalizer"] == declared
     docs = [
@@ -498,3 +505,54 @@ def test_the_build_strategy_can_force_either_builder():
     assert not _uses_disk_lm_builder(*_disk_builder_project(strategy="memory"))
     with pytest.raises(ValueError, match="build.strategy disk"):
         _uses_disk_lm_builder(*_disk_builder_project(strategy="disk", fraction=0.5))
+
+
+def test_source_ledger_names_a_source_whose_files_were_all_set_aside() -> None:
+    from types import SimpleNamespace
+
+    from klab.corpus.build_outputs import Tally, source_ledger, source_ledger_markdown
+
+    project = SimpleNamespace(
+        sources=[SimpleNamespace(id="docs"), SimpleNamespace(id="code_rust")]
+    )
+    tally = Tally()
+    for index in range(3):
+        tally.add(
+            {
+                "text": "hello",
+                "split": "train",
+                "source_id": "docs",
+                "document_kind": "prose",
+                "domains": [],
+            }
+        )
+    tally.add_dropped({"source_id": "docs", "drop_reason": "duplicate"})
+    rights_files = [
+        {"role": "document", "source_id": "docs"},
+        {"role": "document", "source_id": "code_rust"},
+        {"role": "document", "source_id": "code_rust"},
+        {"role": "transform_input", "source_id": "code_rust"},
+    ]
+    rejected = [
+        {"source_id": "code_rust", "path": "a.rs", "reason": "rights ineligible: x"},
+        {"source_id": "code_rust", "path": "b.rs", "reason": "rights ineligible: x"},
+        {"source_id": "docs", "path": "d.md", "row": 4, "reason": "empty_or_nontext"},
+    ]
+    ledger = {
+        row["source_id"]: row
+        for row in source_ledger(project, rights_files, rejected, tally)
+    }
+    assert ledger["code_rust"]["retained_documents"] == 0
+    assert ledger["code_rust"]["files_seen"] == 2
+    assert ledger["code_rust"]["file_set_aside_share"] == 1.0
+    assert ledger["code_rust"]["set_aside_reasons"] == [
+        {"level": "files", "reason": "rights ineligible: x", "count": 2}
+    ]
+    assert ledger["docs"]["rows_set_aside"] == 1
+    assert ledger["docs"]["dedup_dropped"] == {"duplicate": 1}
+    assert ledger["docs"]["documents_built"] == 4
+    table = source_ledger_markdown(list(ledger.values()))
+    assert (
+        "WARNING: 1 declared source(s) have no retained documents: code_rust" in table
+    )
+    assert "NONE RETAINED" in table

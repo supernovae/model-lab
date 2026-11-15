@@ -51,6 +51,9 @@ _RIGHTS_SUMMARY_KEYS = frozenset(
 )
 _SCALE_KEYS = ("documents", "utf8_bytes", "characters", "whitespace_words")
 ADMISSION_COPY = "record-admission.json"
+_REASON_LIMIT = 160
+_DISTINCT_REASONS = 50
+_REPORTED_REASONS = 5
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -258,6 +261,11 @@ class Tally:
             lambda: {"documents": 0, "utf8_bytes": 0}
         )
         self.source_scale: dict[str, dict[str, dict[str, int]]] = defaultdict(dict)
+        self.dedup_dropped: dict[str, Counter[str]] = defaultdict(Counter)
+
+    def add_dropped(self, doc: Mapping[str, Any]) -> None:
+        """Count a built document that the duplicate policy removed, by reason."""
+        self.dedup_dropped[doc["source_id"]][doc["drop_reason"]] += 1
 
     def add(self, doc: Mapping[str, Any]) -> None:
         text = doc["text"]
@@ -278,10 +286,100 @@ class Tally:
         counts["whitespace_words"] += len(text.split())
 
 
+def source_ledger(
+    project: Any,
+    rights_files: Iterable[Mapping[str, Any]],
+    rejected: Iterable[Mapping[str, Any]],
+    tally: Tally,
+) -> list[dict[str, Any]]:
+    """One row per declared source: what was seen, kept and set aside, and why.
+
+    `rejected` rows without a `row` key set a whole file aside (a rights
+    decision, an unreadable file); rows with one set aside a single record.
+    One streaming pass, with the distinct reasons per source bounded.
+    """
+    files_seen: Counter[str] = Counter()
+    for item in rights_files:
+        if item["role"] == "document":
+            files_seen[item["source_id"]] += 1
+    files_aside: Counter[str] = Counter()
+    rows_aside: Counter[str] = Counter()
+    reasons: dict[str, Counter[tuple[str, str]]] = defaultdict(Counter)
+    for row in rejected:
+        source = row.get("source_id")
+        if source is None:
+            continue  # a generated record, not a set-aside source file or row
+        level = "rows" if "row" in row else "files"
+        (rows_aside if level == "rows" else files_aside)[source] += 1
+        reason = str(row["reason"])[:_REASON_LIMIT]
+        counts = reasons[source]
+        if (level, reason) not in counts and len(counts) >= _DISTINCT_REASONS:
+            reason = "other reasons"
+        counts[(level, reason)] += 1
+    ledger = []
+    for source in project.sources:
+        retained = tally.by_source[source.id]
+        dropped = tally.dedup_dropped.get(source.id, Counter())
+        seen = files_seen[source.id]
+        ledger.append(
+            {
+                "source_id": source.id,
+                "files_seen": seen,
+                "files_set_aside": files_aside[source.id],
+                "file_set_aside_share": (files_aside[source.id] / seen)
+                if seen
+                else None,
+                "rows_set_aside": rows_aside[source.id],
+                "documents_built": retained + sum(dropped.values()),
+                "dedup_dropped": dict(sorted(dropped.items())),
+                "retained_documents": retained,
+                "set_aside_reasons": [
+                    {"level": level, "reason": reason, "count": count}
+                    for (level, reason), count in sorted(
+                        reasons[source.id].items(), key=lambda kv: (-kv[1], kv[0])
+                    )[:_REPORTED_REASONS]
+                ],
+            }
+        )
+    return ledger
+
+
+def source_ledger_markdown(ledger: list[Mapping[str, Any]]) -> str:
+    """The ledger as a table, with sources that kept nothing named first."""
+    empty = [row["source_id"] for row in ledger if row["retained_documents"] == 0]
+    lines = ["## Sources\n"]
+    if empty:
+        lines.append(
+            f"WARNING: {len(empty)} declared source(s) have no retained "
+            f"documents: {', '.join(empty)}.\n"
+        )
+    lines += [
+        (
+            "| source | files seen | files set aside | rows set aside | built | "
+            "dedup dropped | retained | top set-aside reasons |"
+        ),
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for row in ledger:
+        why = "; ".join(
+            f"{item['count']} {item['level']}: {item['reason']}".replace("|", "/")
+            for item in row["set_aside_reasons"][:3]
+        )
+        marker = " **NONE RETAINED**" if row["retained_documents"] == 0 else ""
+        lines.append(
+            f"| {row['source_id']}{marker} | {row['files_seen']} | "
+            f"{row['files_set_aside']} | {row['rows_set_aside']} | "
+            f"{row['documents_built']} | {sum(row['dedup_dropped'].values())} | "
+            f"{row['retained_documents']} | {why} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def release_report(
     project: Any,
     rights: Mapping[str, Any],
     tally: Tally,
+    ledger: list[dict[str, Any]],
     *,
     document_count: int,
     view_counts: Mapping[str, Mapping[str, int]],
@@ -328,6 +426,7 @@ def release_report(
         "split_counts": {split: tally.by_split[split] for split in SPLITS},
         "view_counts": view_counts,
         "source_counts": dict(tally.by_source),
+        "source_ledger": ledger,
         "source_concentration": {
             source: count / kept for source, count in sorted(tally.by_source.items())
         }
@@ -389,7 +488,9 @@ def write_release_files(
             f"Training tokens: {report['measurement']['training_mixture']['actual_tokens']} with pinned tokenizer {tokenizer_sha256}.\n"
             if tokenizer_sha256 is not None
             else "No tokenizer declared; token counts unavailable.\n"
-        ),
+        )
+        + "\n"
+        + source_ledger_markdown(report["source_ledger"]),
         encoding="utf-8",
     )
     write_json(

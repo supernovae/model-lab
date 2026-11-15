@@ -28,6 +28,7 @@ from klab.corpus.build_outputs import (
     rights_file_entry,
     rights_report,
     source_declarations,
+    source_ledger,
     stage_declared_inputs,
     write_json,
     write_release_files,
@@ -2924,12 +2925,16 @@ def _build_stored(
         rights = rights_report(project, sources, rights_files)
         write_json(staging / "license-report.json", rights)
         tally = Tally()
-        for doc in kept:
-            tally.add(doc)
+        for doc in documents:
+            if doc["drop_reason"]:
+                tally.add_dropped(doc)
+            else:
+                tally.add(doc)
         report = release_report(
             project,
             rights,
             tally,
+            source_ledger(project, rights_files, rejected, tally),
             document_count=len(documents),
             view_counts={
                 view: {
