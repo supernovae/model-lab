@@ -398,7 +398,15 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     assert prepared_dir.is_dir()
 
     # Two CPU updates on the prepared data; nothing is tokenized or packed here.
-    lab.run("train", str(run_config), "--run-id", "mini", "--require-prepared")
+    lab.run(
+        "train",
+        str(run_config),
+        "--run-id",
+        "mini",
+        "--require-prepared",
+        "--preflight",
+        "waive:two-step CPU run in the recipe-shape test, not a pretraining run",
+    )
     run = tmp_path / "runs/mini"
     assert json.loads((run / "progress.json").read_text())["step"] == 2
     assert (run / "checkpoints/latest.json").is_file()
