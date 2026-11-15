@@ -145,8 +145,10 @@ print(json.dumps({'module':klab.__file__,'torch':torch.__version__,'uid':os.getu
                 "python",
                 "-c",
                 """import sqlite3,time
+from klab.dashboard.queries import SCHEMA_VERSION
 c=sqlite3.connect('/state/work/runs/experiments.sqlite3')
-c.execute('pragma journal_mode=WAL');c.execute('create table fixture(n integer)');c.commit()
+c.execute('pragma journal_mode=WAL');c.execute(f'pragma user_version={SCHEMA_VERSION}')
+c.execute('create table fixture(n integer)');c.commit()
 for n in range(40):
  c.execute('insert into fixture values (?)',(n,));c.commit();time.sleep(.1)
 """,
