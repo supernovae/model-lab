@@ -314,3 +314,20 @@ def test_each_snapshot_is_hashed_once_per_verification(
     )
     verify_release(release)
     assert len(seen) == len(set(seen)) == len(TEXTS)
+
+
+def test_duplicate_keys_follow_the_declared_policy() -> None:
+    # Two pages with the same URL are distinct documents unless the release
+    # declares canonical_origin duplicates; verification must not assume they merge.
+    doc = {
+        "raw_content_sha256": "r" * 64,
+        "content_sha256": "n" * 64,
+        "source_id": "web",
+        "metadata": {"url": "https://example.org/page"},
+    }
+    strict = release_module._declared_keys(doc, ("raw", "normalized"))
+    assert strict == ["raw:" + "r" * 64, "normalized:" + "n" * 64]
+    full = release_module._declared_keys(doc, ("raw", "normalized", "canonical_origin"))
+    assert full[:2] == strict
+    assert full[2:] == ["origin:url:example.org/page"]
+    assert release_module._declared_keys(doc, ("canonical_origin",)) == full[2:]
