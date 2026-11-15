@@ -513,7 +513,7 @@ def _spec_from_path(path: Path) -> dict[str, Any]:
 
 
 def _attempt_cold_verify(directory: Path) -> bool:
-    """Operational launch policy; missing external/legacy policy stays independent."""
+    """Operational launch policy; a missing policy file means cold verification."""
     path = directory / "verification.json"
     if path.is_symlink():
         raise ValueError("symlinked attempt verification policy")

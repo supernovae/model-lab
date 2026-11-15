@@ -69,7 +69,7 @@ def _validate_manifest_reference(value: Mapping[str, object]) -> None:
 def manifest_projection_matches(
     projected: object, digest: str, payload: object
 ) -> bool:
-    """Accept full historical projections or an exact current artifact reference."""
+    """Accept the materialized manifest or its exact artifact reference."""
     return projected == payload or projected == {
         "manifest_reference": manifest_reference(digest, payload)
     }
@@ -656,8 +656,8 @@ class ExperimentStore:
             sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
         ) as con:
             version = con.execute("PRAGMA user_version").fetchone()[0]
-            if version > SCHEMA_VERSION:
-                raise ValueError("unsupported newer calibration store schema")
+            if version != SCHEMA_VERSION:
+                raise ValueError("unsupported calibration store schema")
             if not con.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='calibration'"
             ).fetchone():
@@ -1062,11 +1062,6 @@ class ExperimentStore:
                     payload["sha256"],
                     _canonical_json({"manifest_reference": payload}),
                 ),
-            )
-        elif kind == "manifest":
-            con.execute(
-                "INSERT OR IGNORE INTO manifests(run_id,digest,json) VALUES(?,?,?)",
-                (run_id, payload["digest"], _canonical_json(payload["payload"])),
             )
         elif kind == "checkpoint":
             con.execute(

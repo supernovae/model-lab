@@ -60,14 +60,12 @@ def _without_machine_local_paths(value: object) -> object:
     return value
 
 
-def _without_legacy_final_injection(config: Mapping[str, Any]) -> dict[str, Any]:
-    normalized = dict(config)
-    model = normalized.get("model")
-    if isinstance(model, Mapping) and model.get("memory_injection") == "final":
-        model_identity = dict(model)
-        model_identity.pop("memory_injection", None)
-        normalized["model"] = model_identity
-    return normalized
+def _without_default_injection(model: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop ``memory_injection: final``, the default that configs omit."""
+    identity = dict(model)
+    if identity.get("memory_injection") == "final":
+        identity.pop("memory_injection")
+    return identity
 
 
 def architecture_sha256(
@@ -85,10 +83,8 @@ def architecture_sha256(
     attention = config.get("attention", {})
     if not isinstance(attention, Mapping):
         raise TypeError("architecture identity requires a mapping-valued attention")
-    model_identity = dict(model)
+    model_identity = _without_default_injection(model)
     model_identity.pop("memory_package_path", None)
-    if model_identity.get("memory_injection") == "final":
-        model_identity.pop("memory_injection", None)
     identity: dict[str, object] = {
         "identity_version": IDENTITY_VERSION,
         "architecture_version": config.get(
@@ -125,8 +121,8 @@ def trained_memory_addressing(
 
 def config_sha256(config: Mapping[str, Any]) -> str:
     """Digest scientific configuration while excluding machine-local locations."""
-    # The new generic source binds content through the authenticated snapshot.
-    # Preserve historical local_stories identities, which included this field.
+    # A snapshot source binds content through the authenticated snapshot, so
+    # its machine-local manifest path is not part of the identity.
     dataset = config.get("dataset")
     if isinstance(dataset, Mapping) and dataset.get("source") == "snapshot":
         config = {
@@ -162,7 +158,14 @@ def config_sha256(config: Mapping[str, Any]) -> str:
         {
             "identity_version": IDENTITY_VERSION,
             "config": _without_machine_local_paths(
-                _without_legacy_final_injection(config)
+                {
+                    **config,
+                    **(
+                        {"model": _without_default_injection(config["model"])}
+                        if isinstance(config.get("model"), Mapping)
+                        else {}
+                    ),
+                }
             ),
         }
     )
