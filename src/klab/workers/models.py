@@ -26,91 +26,71 @@ SCHEMA_VERSION = 1
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
-_REQUIRED_VERSION_KEYS = frozenset(
-    {
-        "protocol",
-        "config",
-        "manifest",
-        "checkpoint",
-        "bundle",
-        "architecture",
-        "state_codecs",
-    }
-)
+_INTEGER_VERSIONS = ("protocol", "config", "manifest", "checkpoint", "bundle")
+_CODEC_NAMES = frozenset({"pytorch_native", "mlx_native"})
 MAX_RELATIVE_PATH_BYTES = 4096
 
 
 def current_required_versions() -> dict[str, object]:
-    """Return a fresh canonical worker compatibility requirement envelope."""
+    """Return a fresh canonical worker compatibility envelope.
+
+    Every entry is the one version this build implements; a worker and a
+    dispatch requirement are compatible only when the envelopes are equal.
+    """
     from klab.training.mlx_checkpoints import CODEC_VERSION as MLX_CODEC_VERSION
 
     return {
-        "protocol": [PROTOCOL_VERSION],
-        "config": [2],
-        "manifest": [1],
-        "checkpoint": [2],
-        "bundle": [1],
-        "architecture": ["klab-decoder-v1"],
+        "protocol": PROTOCOL_VERSION,
+        "config": 2,
+        "manifest": 1,
+        "checkpoint": 2,
+        "bundle": 1,
+        "architecture": "klab-decoder-v1",
         "state_codecs": {"pytorch_native": 2, "mlx_native": MLX_CODEC_VERSION},
     }
 
 
-def _closed_required_versions(required: Mapping[str, object]) -> dict[str, object]:
-    if not isinstance(required, Mapping) or set(required) != _REQUIRED_VERSION_KEYS:
-        raise ValueError("required_versions has unsupported or missing keys")
-    value = dict(required)
-    for key in ("protocol", "config", "manifest", "checkpoint", "bundle"):
-        versions = value[key]
-        if (
-            not isinstance(versions, (list, tuple))
-            or not versions
-            or any(type(item) is not int or item < 1 for item in versions)
-        ):
-            raise ValueError(
-                f"required_versions.{key} must be nonempty integer versions"
-            )
-    architecture = value["architecture"]
-    if (
-        not isinstance(architecture, (list, tuple))
-        or not architecture
-        or any(not isinstance(item, str) or not item for item in architecture)
-    ):
-        raise ValueError("required_versions.architecture must be nonempty strings")
+def _closed_versions(versions: object, label: str) -> dict[str, object]:
+    expected = {*_INTEGER_VERSIONS, "architecture", "state_codecs"}
+    if not isinstance(versions, Mapping) or set(versions) != expected:
+        raise ValueError(f"{label} has unsupported or missing keys")
+    value = dict(versions)
+    for key in _INTEGER_VERSIONS:
+        if type(value[key]) is not int or value[key] < 1:
+            raise ValueError(f"{label}.{key} must be one positive integer version")
+    if not isinstance(value["architecture"], str) or not value["architecture"]:
+        raise ValueError(f"{label}.architecture must be a nonempty string")
     codecs = value["state_codecs"]
-    if not isinstance(codecs, Mapping) or set(codecs) != {
-        "pytorch_native",
-        "mlx_native",
-    }:
-        raise ValueError("required_versions.state_codecs must name supported codecs")
+    if not isinstance(codecs, Mapping) or set(codecs) != _CODEC_NAMES:
+        raise ValueError(f"{label}.state_codecs must name supported codecs")
     for name, codec_version in codecs.items():
         if type(codec_version) is not int or codec_version < 1:
             raise ValueError(
-                f"required_versions.state_codecs.{name} must be one positive integer version"
+                f"{label}.state_codecs.{name} must be one positive integer version"
             )
-    normalized = {
-        key: list(value[key])
-        for key in (
-            "protocol",
-            "config",
-            "manifest",
-            "checkpoint",
-            "bundle",
-            "architecture",
-        )
+    value["state_codecs"] = {name: codecs[name] for name in sorted(_CODEC_NAMES)}
+    return value
+
+
+def _closed_required_versions(required: Mapping[str, object]) -> dict[str, object]:
+    return _closed_versions(required, "required_versions")
+
+
+def _flat(versions: Mapping[str, object]) -> dict[str, object]:
+    return {
+        **{k: v for k, v in versions.items() if k != "state_codecs"},
+        **{f"state_codecs.{k}": v for k, v in versions["state_codecs"].items()},
     }
-    normalized["state_codecs"] = {
-        name: codecs[name] for name in ("pytorch_native", "mlx_native")
-    }
-    return normalized
 
 
 def validate_required_versions(
     required: Mapping[str, object],
     capabilities: WorkerCapabilities | Mapping[str, object] | None = None,
 ) -> None:
-    """Reject unsupported persisted schemas, optionally against a worker advertisement."""
+    """Require the exact versions this build implements, and a worker advertising them."""
     normalized = _closed_required_versions(required)
-    if normalized != current_required_versions():
+    current = current_required_versions()
+    if normalized != current:
         raise ValueError("required_versions is not supported by this worker protocol")
     if capabilities is None:
         return
@@ -118,33 +98,14 @@ def validate_required_versions(
         capabilities
         if isinstance(capabilities, WorkerCapabilities)
         else WorkerCapabilities.model_validate(capabilities)
-    )
-    advertised_versions: dict[str, object] = {
-        "protocol": list(advertised.protocol_versions),
-        "config": list(advertised.config_versions),
-        "manifest": list(advertised.manifest_versions),
-        "checkpoint": list(advertised.checkpoint_versions),
-        "bundle": list(advertised.bundle_versions),
-        "architecture": list(advertised.architecture_versions),
-        "state_codecs": dict(advertised.state_codecs),
-    }
-    for key in (
-        "protocol",
-        "config",
-        "manifest",
-        "checkpoint",
-        "bundle",
-        "architecture",
-    ):
-        if not set(normalized[key]).issubset(advertised_versions[key]):
-            raise ValueError(f"worker does not support required {key} versions")
-    for codec, required_version in normalized["state_codecs"].items():
-        advertised_version = advertised_versions["state_codecs"].get(codec)
-        if advertised_version != required_version:
+    ).versions
+    flat_advertised = _flat(advertised)
+    for key, required_version in _flat(current).items():
+        if flat_advertised[key] != required_version:
             raise ValueError(
-                f"worker advertises {codec} state codec version "
-                f"{advertised_version!r}; this controller requires exactly "
-                f"{required_version}; upgrade or replace the worker"
+                f"worker advertises {key} version {flat_advertised[key]!r}; "
+                f"this controller requires exactly {required_version!r}; "
+                "upgrade or replace the worker"
             )
 
 
@@ -193,13 +154,6 @@ class WorkerModel(StrictModel):
             "min_device_memory_gb",
             "min_system_memory_gb",
         }
-        version_fields = {
-            "protocol_versions",
-            "config_versions",
-            "manifest_versions",
-            "checkpoint_versions",
-            "bundle_versions",
-        }
         pending = [value]
         while pending:
             node = pending.pop()
@@ -231,19 +185,6 @@ class WorkerModel(StrictModel):
                     and type(item) is not bool
                 ):
                     raise ValueError(f"{name} must be a JSON boolean")
-                if name in version_fields and (
-                    not isinstance(item, (list, tuple))
-                    or any(type(version) is not int for version in item)
-                ):
-                    raise ValueError(f"{name} must contain integer versions")
-                if (
-                    name == "state_codecs"
-                    and isinstance(item, Mapping)
-                    and any(type(version) is not int for version in item.values())
-                ):
-                    raise ValueError(
-                        "state_codecs must map codec names to one integer version"
-                    )
         return value
 
     @field_validator("*")
@@ -416,15 +357,9 @@ class WorkerCapabilities(WorkerDefinition):
     validated_at: str | None = None
     status: Literal["idle", "busy", "offline", "unknown"] = "unknown"
     last_seen_at: str | None = None
-    protocol_versions: tuple[int, ...] = (PROTOCOL_VERSION,)
     klab_version: str
     source_identity_sha256: str
-    architecture_versions: tuple[str, ...]
-    config_versions: tuple[int, ...]
-    manifest_versions: tuple[int, ...]
-    checkpoint_versions: tuple[int, ...]
-    bundle_versions: tuple[int, ...]
-    state_codecs: dict[str, int] = Field(default_factory=dict)
+    versions: dict[str, object]
 
     @field_validator("runtime")
     @classmethod
@@ -446,33 +381,10 @@ class WorkerCapabilities(WorkerDefinition):
             raise ValueError("max_concurrent_runs must be exactly 1")
         return value
 
-    @field_validator(
-        "protocol_versions",
-        "config_versions",
-        "manifest_versions",
-        "checkpoint_versions",
-        "bundle_versions",
-    )
+    @field_validator("versions")
     @classmethod
-    def versions(cls, value: tuple[int, ...]) -> tuple[int, ...]:
-        if not value or any(type(item) is not int or item < 1 for item in value):
-            raise ValueError("versions must be nonempty positive integers")
-        return value
-
-    @field_validator("state_codecs")
-    @classmethod
-    def codec_versions(cls, value: dict[str, int]) -> dict[str, int]:
-        if not isinstance(value, dict) or any(
-            not isinstance(name, str)
-            or not name
-            or type(version) is not int
-            or version < 1
-            for name, version in value.items()
-        ):
-            raise ValueError(
-                "state codecs must map names to one positive integer version"
-            )
-        return value
+    def advertised_versions(cls, value: dict[str, object]) -> dict[str, object]:
+        return _closed_versions(value, "versions")
 
 
 class SchedulingRequirements(WorkerModel):

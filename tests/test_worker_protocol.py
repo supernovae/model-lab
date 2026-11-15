@@ -109,12 +109,16 @@ def test_canonical_worker_public_contract_fixtures() -> None:
     with pytest.raises(ValueError, match="requires exactly|not supported"):
         validate_required_versions(incompatible, capabilities)
     old_worker = json.loads(capabilities.model_dump_json())
-    old_worker["state_codecs"]["pytorch_native"] = 1
+    old_worker["versions"]["state_codecs"]["pytorch_native"] = 1
     with pytest.raises(ValueError, match="pytorch_native.*requires exactly 2"):
         validate_required_versions(current_required_versions(), old_worker)
-    with pytest.raises(ValueError):
+    old_worker["versions"]["state_codecs"]["pytorch_native"] = 2
+    old_worker["versions"]["config"] = 1
+    with pytest.raises(ValueError, match="config version 1.*requires exactly 2"):
+        validate_required_versions(current_required_versions(), old_worker)
+    with pytest.raises(ValueError, match="one positive integer"):
         WorkerCapabilities.model_validate(
-            {**old_worker, "state_codecs": {"pytorch_native": [2]}}
+            {**old_worker, "versions": {**old_worker["versions"], "protocol": [1]}}
         )
     status = json.loads((fixtures / "worker_status_v1.json").read_bytes())
     assert validate_operation_result("status", status)["receipts"] == []

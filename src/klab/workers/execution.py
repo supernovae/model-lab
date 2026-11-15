@@ -382,7 +382,6 @@ def _caps(
 ) -> dict[str, Any]:
     from .models import current_required_versions
 
-    versions = current_required_versions()
     runtime = runtime or _runtime_for_definition(definition)
     from .hosted_status import instance_identity
 
@@ -416,15 +415,9 @@ def _caps(
         "validated_at": runtime.validated_at,
         "status": "idle",
         "last_seen_at": _utc(),
-        "protocol_versions": versions["protocol"],
         "klab_version": _package_version(),
         "source_identity_sha256": source_identity()["sha256"],
-        "architecture_versions": versions["architecture"],
-        "config_versions": versions["config"],
-        "manifest_versions": versions["manifest"],
-        "checkpoint_versions": versions["checkpoint"],
-        "bundle_versions": versions["bundle"],
-        "state_codecs": versions["state_codecs"],
+        "versions": current_required_versions(),
     }
 
 
