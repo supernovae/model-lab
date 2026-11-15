@@ -387,6 +387,7 @@ def test_try_compares_two_preference_settings_from_the_same_parent(
     delta.write_text(
         yaml.safe_dump(
             {
+                "kind": "delta",
                 "question": "Does a tighter hold on the parent change the chosen replies' loss?",
                 "set": {"training.objective.params.beta": 3.0},
             }

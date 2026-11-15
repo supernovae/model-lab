@@ -42,6 +42,7 @@ To compare two preference settings from the same parent in lab mode:
 
 ```sh
 cat > gentler.yaml <<'YAML'
+kind: delta
 question: Does a tighter hold on the parent keep more of the chosen replies' likelihood?
 set:
   training.objective.params.beta: 3.0

@@ -1013,7 +1013,9 @@ def tried(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, dict[str, Any
     baseline = write_smoke_inputs(root, max_steps=8)
     delta = root / "wider.yaml"
     delta.write_text(
-        yaml.safe_dump({"question": "wider?", "set": {"model.ffn_dim": 128}})
+        yaml.safe_dump(
+            {"kind": "delta", "question": "wider?", "set": {"model.ffn_dim": 128}}
+        )
     )
     from klab.evaluation.inference import InferenceRun
 
@@ -1258,7 +1260,9 @@ def test_try_stopped_during_probing_keeps_partial_battery_and_comparison(
     baseline = write_smoke_inputs(tmp_path, max_steps=8)
     delta = tmp_path / "wider.yaml"
     delta.write_text(
-        yaml.safe_dump({"question": "wider?", "set": {"model.ffn_dim": 128}})
+        yaml.safe_dump(
+            {"kind": "delta", "question": "wider?", "set": {"model.ffn_dim": 128}}
+        )
     )
     work = tmp_path / "work"
 

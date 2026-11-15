@@ -540,7 +540,7 @@ def run_sweep(
     delta_paths = []
     for index, settings in enumerate(grid):
         path = deltas / f"point-{index:03d}.yaml"
-        body = {"lab_delta_version": 1, "set": settings}
+        body = {"kind": "delta", "set": settings}
         if config.question:
             body["question"] = config.question
         path.write_text(yaml.safe_dump(body, sort_keys=False), encoding="utf-8")

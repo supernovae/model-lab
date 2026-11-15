@@ -28,6 +28,13 @@ def _write(path, raw):
     return path
 
 
+def _config_candidate(tmp_path, seed=7):
+    _write(tmp_path / "config.yaml", _raw(seed))
+    return _write(
+        tmp_path / "candidate.yaml", {"kind": "run_config", "config": "config.yaml"}
+    )
+
+
 @pytest.mark.parametrize("seed", [-1, 2**32])
 def test_invalid_seed_loading_and_derivation_have_no_outputs(tmp_path, seed):
     source = _write(tmp_path / "source.yaml", _raw(seed))
@@ -67,11 +74,9 @@ def test_try_rejects_invalid_seed_before_artifacts(tmp_path, monkeypatch, locati
     baseline = _write(
         tmp_path / "base.yaml", _raw(seed if location == "baseline" else 7)
     )
-    candidate = _write(
-        tmp_path / "candidate.yaml", _raw(seed if location == "candidate" else 7)
-    )
+    candidate = _config_candidate(tmp_path, seed if location == "candidate" else 7)
     if location == "delta":
-        _write(candidate, {"lab_delta_version": 1, "set": {"seed": seed}})
+        _write(candidate, {"kind": "delta", "set": {"seed": seed}})
     monkeypatch.setattr(
         resource_envelope,
         "resolve_lab_try_limits",
@@ -86,7 +91,11 @@ def test_try_rejects_invalid_seed_before_artifacts(tmp_path, monkeypatch, locati
             train_fn=lambda *a, **kw: pytest.fail("training reached"),
         )
     assert not (tmp_path / "work").exists()
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["base.yaml", "candidate.yaml"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "base.yaml",
+        "candidate.yaml",
+        "config.yaml",
+    ]
 
 
 def test_try_boundary_override_supersedes_delta_before_setup(tmp_path, monkeypatch):
@@ -95,9 +104,7 @@ def test_try_boundary_override_supersedes_delta_before_setup(tmp_path, monkeypat
     seed = 2**32 - 1
 
     baseline = _write(tmp_path / "base.yaml", _raw())
-    candidate = _write(
-        tmp_path / "delta.yaml", {"lab_delta_version": 1, "set": {"seed": -1}}
-    )
+    candidate = _write(tmp_path / "delta.yaml", {"kind": "delta", "set": {"seed": -1}})
 
     class Validated(Exception):
         pass
@@ -126,7 +133,7 @@ def test_try_rejects_merged_baseline_seed_before_artifacts(tmp_path, monkeypatch
     del raw["seed"]
     baseline = tmp_path / "base.yaml"
     baseline.write_text(f"<<: &defaults {{seed: {seed}}}\n" + yaml.safe_dump(raw))
-    candidate = _write(tmp_path / "candidate.yaml", _raw())
+    candidate = _config_candidate(tmp_path)
     monkeypatch.setattr(
         resource_envelope,
         "resolve_lab_try_limits",
@@ -146,7 +153,7 @@ def test_try_merged_baseline_uses_effective_valid_seed(tmp_path, monkeypatch):
     baseline = tmp_path / "base.yaml"
     baseline.write_text("<<: &defaults {seed: -1}\n" + yaml.safe_dump(raw))
     assert load_config(baseline).seed == seed
-    candidate = _write(tmp_path / "candidate.yaml", _raw())
+    candidate = _config_candidate(tmp_path)
 
     class Validated(Exception):
         pass

@@ -35,7 +35,9 @@ LOOP_BUDGET_SECONDS = float(os.environ.get("KLAB_LAB_LOOP_BUDGET_SECONDS", "900"
 
 def _delta(root: Path, name: str, settings: dict[str, object]) -> Path:
     path = root / name
-    path.write_text(yaml.safe_dump({"question": name, "set": settings}))
+    path.write_text(
+        yaml.safe_dump({"kind": "delta", "question": name, "set": settings})
+    )
     return path
 
 
@@ -408,13 +410,44 @@ def test_noop_and_malformed_deltas_are_refused(lab: tuple[Path, Path]) -> None:
             work_dir=root / "work",
         )
     bad = root / "bad.yaml"
-    bad.write_text("set: {}\n")
+    bad.write_text("kind: delta\nset: {}\n")
     with pytest.raises(ValueError, match="nonempty"):
         read_candidate(bad)
-    bad.write_text("sett:\n  model.ffn_dim: 1\n")
+    bad.write_text("kind: delta\nsett:\n  model.ffn_dim: 1\n")
     with pytest.raises(ValueError, match="unexpected"):
         read_candidate(bad)
-    assert read_candidate(baseline).kind == "config"
+
+
+def test_candidate_requires_explicit_kind(tmp_path: Path) -> None:
+    """A candidate is typed by `kind`, never sniffed from `schema_version`."""
+    path = tmp_path / "c.yaml"
+    path.write_text("set:\n  model.ffn_dim: 1\n")
+    with pytest.raises(ValueError, match="no 'kind'.*kind: delta.*kind: run_config"):
+        read_candidate(path)
+    # A bare RunConfig (schema_version present) is no longer a candidate.
+    path.write_text("schema_version: 2\nseed: 1\n")
+    with pytest.raises(ValueError, match="no 'kind'"):
+        read_candidate(path)
+    path.write_text("kind: config\nset:\n  model.ffn_dim: 1\n")
+    with pytest.raises(ValueError, match="unsupported candidate kind 'config'"):
+        read_candidate(path)
+    path.write_text("kind: delta\nlab_delta_version: 1\nset:\n  model.ffn_dim: 1\n")
+    with pytest.raises(ValueError, match="unexpected: lab_delta_version"):
+        read_candidate(path)
+
+
+def test_run_config_candidate_names_its_file(tmp_path: Path) -> None:
+    path = tmp_path / "c.yaml"
+    path.write_text("kind: run_config\nconfig: sub/full.yaml\n")
+    candidate = read_candidate(path)
+    assert candidate.kind == "run_config"
+    assert candidate.source == tmp_path / "sub/full.yaml"
+    path.write_text("kind: run_config\nconfig: full.yaml\nset: {a: 1}\n")
+    with pytest.raises(ValueError, match="unexpected: set"):
+        read_candidate(path)
+    path.write_text("kind: run_config\n")
+    with pytest.raises(ValueError, match="config"):
+        read_candidate(path)
 
 
 def test_cpu_smoke_loop_yaml_to_report_within_budget(tmp_path: Path) -> None:

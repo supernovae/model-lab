@@ -6,6 +6,7 @@ behavioral probes and writes one sealed record.
 
 ```sh
 cat > wider-ffn.yaml <<'YAML'
+kind: delta
 question: Does a wider feed-forward lower held-out loss at a fixed token budget?
 set:
   model.ffn_dim: 128
@@ -15,8 +16,12 @@ klab report TRY_ID
 ```
 
 `BASELINE.yaml` is any run config whose tokenizer exists. The candidate is a
-**lab delta** (`set:` with dotted fields and an optional `question:`) or a whole
-run config. The output looks like:
+**candidate document**, whose required `kind:` says what it is. `kind: delta`
+carries `set:` (dotted fields) and an optional `question:`. `kind: run_config`
+carries `config: PATH` (relative to the document) naming a whole run config to
+use as the candidate. A document without `kind` is refused with an error that
+names both. The run config's own `schema_version` is a file-format version, not
+a type tag. The output looks like:
 
 ```text
 LAB TRY try-20261010T052417Z-b9361b7d  status: completed  (lab mode)

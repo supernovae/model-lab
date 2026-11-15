@@ -43,7 +43,12 @@ def test_try_flags_a_planted_heldout_item_and_keeps_the_clean_arm_clean(
     baseline.write_text(yaml.safe_dump(config, sort_keys=False))
     delta = tmp_path / "leaky.yaml"
     delta.write_text(
-        yaml.safe_dump({"set": {"dataset.train_path": str(tmp_path / "leaky.jsonl")}})
+        yaml.safe_dump(
+            {
+                "kind": "delta",
+                "set": {"dataset.train_path": str(tmp_path / "leaky.jsonl")},
+            }
+        )
     )
 
     record, _ = run_try(delta, baseline, work_dir=tmp_path / "work")

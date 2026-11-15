@@ -471,7 +471,7 @@ def test_a_try_started_by_a_sweep_records_which_sweep(
     monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
     baseline = write_smoke_inputs(tmp_path, train_tokenizer_now=False)
     delta = tmp_path / "delta.yaml"
-    delta.write_text(yaml.safe_dump({"lab_delta_version": 1, "set": {"seed": 5}}))
+    delta.write_text(yaml.safe_dump({"kind": "delta", "set": {"seed": 5}}))
     seen: dict[str, object] = {}
 
     def run(*args: object, request: dict, **kwargs: object):
