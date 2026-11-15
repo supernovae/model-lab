@@ -104,14 +104,10 @@ def _verify_rights_files(
     )
 
     report = _load(root / "license-report.json")
-    if report.get("schema_version") not in (2, 3) or report.get("sources") != list(
+    if report.get("schema_version") != 1 or report.get("sources") != list(
         sources.values()
     ):
         raise ValueError("prospective rights report/source mismatch")
-    if report["schema_version"] == 3 and report.get("training_use_policy") != (
-        "allowed_unless_explicitly_prohibited"
-    ):
-        raise ValueError("unrecognized prospective training-use policy")
     rows = report["files"]
     indexed = {(row["source_id"], row["path"]): row for row in rows}
     if len(indexed) != len(rows):
@@ -280,16 +276,17 @@ def _verify_cleaning_decision(doc: dict[str, Any], normalizer: str) -> None:
         raise ValueError("metadata-only cleaning decision mismatch")
 
 
-def _streaming_v3(identity: dict[str, Any]) -> bool:
+def _streaming_rows(identity: dict[str, Any]) -> bool:
+    """Whether the bounded-memory row validator applies (no reviewed admission)."""
     return (
-        identity["release"].get("schema_version") == 3
+        identity["release"].get("record_admission") is None
         and not identity["release"]["chat"]["selected"]
         and all(spec["kind"] == "lm_text" for spec in identity["transforms"])
         and identity["release"].get("fraction") is None
     )
 
 
-def _validate_rows_v3(
+def _validate_rows_streaming(
     root: Path,
     *,
     proof_store: ProofStore | None = None,
@@ -342,8 +339,7 @@ def _validate_rows_v3(
         ):
             raise ValueError("source declaration attribution mismatch")
         if (
-            declaration.get("schema_version") != 3
-            or source["rights_policy"] != declaration["rights"]
+            source["rights_policy"] != declaration["rights"]
             or source["license_url"] != declaration["license_url"]
             or source["redistribution"] != declaration["rights"]["redistribution_mode"]
             or source.get("explicit_training_restriction")
@@ -490,12 +486,12 @@ def _validate_rows_v3(
                         raise ValueError("document lacks pinned file rights")
                     decision = file["rights"]
                     if (
-                        source.get("explicit_training_restriction") != "none_found"
+                        source.get("explicit_training_restriction", "none_found")
+                        != "none_found"
                         or doc["source_revision"] != source["revision"]
                         or doc["source_family"] != source["source_family"]
                         or decision["training_eligibility"]
                         not in ("eligible", "eligible_with_obligations")
-                        or doc.get("schema_version") != 3
                         or doc.get("rights") != decision
                         or doc.get("file_sha256") != file["sha256"]
                         or doc["license"]
@@ -930,26 +926,19 @@ def _validate_rows_stored(
             "origin", "primary_source"
         ):
             raise ValueError("source declaration attribution mismatch")
-        if "rights_policy" in source:
-            if (
-                declaration.get("schema_version") not in (2, 3)
-                or source["rights_policy"] != declaration["rights"]
-                or source["license_url"] != declaration["license_url"]
-                or source["redistribution"]
-                != declaration["rights"]["redistribution_mode"]
-            ):
-                raise ValueError("prospective source rights declaration mismatch")
-            if declaration["schema_version"] == 3 and (
-                source.get("explicit_training_restriction")
-                != declaration.get("explicit_training_restriction")
-            ):
-                raise ValueError(
-                    "source training restriction state differs from declaration"
-                )
-        elif source["redistribution"] != declaration["redistribution"]:
-            raise ValueError("source declaration attribution mismatch")
-    prospective = any("rights_policy" in source for source in sources.values())
-    rights_files = _verify_rights_files(root, sources, snapshots) if prospective else {}
+        if (
+            source["rights_policy"] != declaration["rights"]
+            or source["license_url"] != declaration["license_url"]
+            or source["redistribution"] != declaration["rights"]["redistribution_mode"]
+        ):
+            raise ValueError("prospective source rights declaration mismatch")
+        if source.get("explicit_training_restriction") != declaration.get(
+            "explicit_training_restriction"
+        ):
+            raise ValueError(
+                "source training restriction state differs from declaration"
+            )
+    rights_files = _verify_rights_files(root, sources, snapshots)
     if not spans.same_keys(document_map):
         raise ValueError("document evidence span inventory mismatch")
     previous_file: Path | None = None
@@ -965,52 +954,41 @@ def _validate_rows_stored(
             or doc["source_family"] != source["source_family"]
         ):
             raise ValueError("document attribution mismatch")
-        if prospective:
-            file = rights_files.get((doc["source_id"], span["raw_path"]))
-            if file is None or file["role"] != "document":
-                raise ValueError("document lacks pinned file rights")
-            decision = file["rights"]
-            if (
-                source.get("explicit_training_restriction", "none_found")
-                != "none_found"
-            ):
-                raise ValueError("document source has unresolved training restriction")
-            if (
-                decision["training_eligibility"]
-                not in ("eligible", "eligible_with_obligations")
-                or doc.get("schema_version")
-                != (3 if "explicit_training_restriction" in source else 2)
-                or doc.get("rights") != decision
-                or doc.get("file_sha256") != file["sha256"]
-                or doc["license"]
-                != (
-                    file.get("admission_license_label")
-                    or decision["detected_spdx_expression"]
-                    or source["rights_policy"]["spdx_expression"]
-                    or source["license"]
-                )
-                or doc["redistribution"] != decision["redistribution_mode"]
-            ):
-                raise ValueError("document rights attribution mismatch")
-            if file.get("_admission_file_decision", "qualify") != "qualify":
-                raise ValueError("document lacks qualifying file admission")
-            if "_admission_decisions" in file:
-                metadata = doc.get("metadata") or {}
-                index = metadata.get("source_row_index")
-                choice = file["_admission_decisions"].get(index)
-                if (
-                    type(index) is not int
-                    or choice is None
-                    or choice["decision"] != "qualify"
-                    or metadata.get("source_row_sha256") != choice["source_row_sha256"]
-                ):
-                    raise ValueError("document lacks qualifying record admission")
-                coverage.observe(doc["source_id"], span["raw_path"], index, unique=True)
-        elif (
-            doc["license"] != source["license"]
-            or doc["redistribution"] != source["redistribution"]
+        file = rights_files.get((doc["source_id"], span["raw_path"]))
+        if file is None or file["role"] != "document":
+            raise ValueError("document lacks pinned file rights")
+        decision = file["rights"]
+        if source.get("explicit_training_restriction", "none_found") != "none_found":
+            raise ValueError("document source has unresolved training restriction")
+        if (
+            decision["training_eligibility"]
+            not in ("eligible", "eligible_with_obligations")
+            or doc.get("rights") != decision
+            or doc.get("file_sha256") != file["sha256"]
+            or doc["license"]
+            != (
+                file.get("admission_license_label")
+                or decision["detected_spdx_expression"]
+                or source["rights_policy"]["spdx_expression"]
+                or source["license"]
+            )
+            or doc["redistribution"] != decision["redistribution_mode"]
         ):
-            raise ValueError("document attribution mismatch")
+            raise ValueError("document rights attribution mismatch")
+        if file.get("_admission_file_decision", "qualify") != "qualify":
+            raise ValueError("document lacks qualifying file admission")
+        if "_admission_decisions" in file:
+            metadata = doc.get("metadata") or {}
+            index = metadata.get("source_row_index")
+            choice = file["_admission_decisions"].get(index)
+            if (
+                type(index) is not int
+                or choice is None
+                or choice["decision"] != "qualify"
+                or metadata.get("source_row_sha256") != choice["source_row_sha256"]
+            ):
+                raise ValueError("document lacks qualifying record admission")
+            coverage.observe(doc["source_id"], span["raw_path"], index, unique=True)
         snapshot = (
             root.parent.parent
             / "snapshots"
@@ -1024,7 +1002,7 @@ def _validate_rows_stored(
             raw_sha = sha256_file(raw_path)
             offsets = [0]
             sample_rows = None
-            needs_rows = (prospective and "_admission_decisions" in file) or (
+            needs_rows = ("_admission_decisions" in file) or (
                 selected_normalizer
                 in {"normalizer-structure-v2", "normalizer-structure-v3"}
                 and "#row=" in doc["source_location"]
@@ -1037,9 +1015,7 @@ def _validate_rows_stored(
                     forward_rows(
                         raw_path,
                         max_record_bytes=(
-                            8 * 1024**2
-                            if prospective and "_admission_decisions" in file
-                            else None
+                            8 * 1024**2 if "_admission_decisions" in file else None
                         ),
                         expected_sha256=raw_sha,
                     )
@@ -1100,7 +1076,7 @@ def _validate_rows_stored(
             )
         ):
             raise ValueError("structured document identity mismatch")
-        if prospective and "_admission_decisions" in file:
+        if "_admission_decisions" in file:
             from klab.corpus.pipeline import _normalized
 
             line_number = span["line_start"]
@@ -1687,7 +1663,11 @@ def _verify_build_cold(
         )
         if receipt["snapshot_sha256"] != snapshot["sha256"]:
             raise ValueError("build snapshot identity mismatch")
-    (_validate_rows_v3 if _streaming_v3(manifest["identity"]) else _validate_rows)(
+    (
+        _validate_rows_streaming
+        if _streaming_rows(manifest["identity"])
+        else _validate_rows
+    )(
         path,
         proof_store=proof_store,
         verification_mode=verification_mode,
@@ -1945,8 +1925,8 @@ def _verify_release_cold(
         if receipt["snapshot_sha256"] != snapshot["sha256"]:
             raise ValueError("release snapshot identity mismatch")
     (
-        _validate_rows_v3
-        if _streaming_v3(manifest["build_identity"])
+        _validate_rows_streaming
+        if _streaming_rows(manifest["build_identity"])
         else _validate_rows
     )(path, proof_store=proof_store, verification_mode=verification_mode)
     with metadata_operation(path.parent, max_database_bytes=None):
@@ -1968,7 +1948,7 @@ def describe(path: Path, *, tokenizer: Path | None = None) -> dict[str, Any]:
     measured = measure_views(
         Path(path), tokenizer, release_spec=manifest["build_identity"]["release"]
     )
-    if report.get("schema_version") in (2, 3) and tokenizer is not None:
+    if tokenizer is not None:
         from klab.corpus.measurement import measure_source_rights
 
         counted = measure_source_rights(Path(path), tokenizer)

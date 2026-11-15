@@ -77,8 +77,6 @@ def prepare(
             "acquisition steps require cold verification without metadata scratch"
         )
     source = next(s for s in project.sources if s.id == source_id)
-    if source.redistribution == "rejected":
-        raise ValueError("acquisition step source is rejected")
     if source.kind not in PINNED_FILE_KINDS and (
         source.kind != "huggingface_dataset"
         or source.acquisition.bounded_shards is None

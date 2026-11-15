@@ -44,11 +44,7 @@ def _licenses(release_dir: Path) -> str:
     for item in items:
         if isinstance(item, dict):
             declaration = item.get("declaration", item)
-            if (
-                isinstance(declaration, dict)
-                and declaration.get("license")
-                and declaration.get("redistribution") != "rejected"
-            ):
+            if isinstance(declaration, dict) and declaration.get("license"):
                 names.add(str(declaration["license"]))
     if any(isinstance(item, dict) and "rights_policy" in item for item in items):
         with (release_dir / "documents.jsonl").open(encoding="utf-8") as handle:
@@ -144,14 +140,12 @@ def _export_metadata(
             )
         },
     }
-    if manifest["build_identity"]["release"]["schema_version"] in (2, 3):
-        rights = json.loads(
-            (release_dir / "license-report.json").read_text(encoding="utf-8")
-        )
-        sidecar["publication_mode"] = rights["publication_mode"]
-        sidecar["weight_license_status"] = rights["weight_license_status"]
-        if rights["schema_version"] == 3:
-            sidecar["training_use_policy"] = rights["training_use_policy"]
+    rights = json.loads(
+        (release_dir / "license-report.json").read_text(encoding="utf-8")
+    )
+    sidecar["publication_mode"] = rights["publication_mode"]
+    sidecar["weight_license_status"] = rights["weight_license_status"]
+    sidecar["release_policy"] = rights["release_policy"]
     return sidecar
 
 

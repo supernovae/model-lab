@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pytest
 import yaml
-from corpus_fixtures import neutral_corpus
+from corpus_fixtures import (
+    PRIVATE_RESEARCH_POLICY,
+    STRICT_POLICY,
+    fixture_rights,
+    neutral_corpus,
+)
 
 from klab.corpus.acquisition import acquire
 from klab.corpus.pipeline import (
@@ -17,10 +22,12 @@ from klab.corpus.pipeline import (
     _uses_disk_lm_builder,
     build,
 )
-from klab.corpus.project import SourceDeclaration, load_project
+from klab.corpus.project import DocumentPolicy, SourceDeclaration, load_project
 from klab.corpus.release import freeze, lineage, review, sample, verify_release
 from klab.corpus.rights import resolve_file_rights
 
+STRICT_DOCS = DocumentPolicy.model_validate(STRICT_POLICY["documents"])
+PRIVATE_DOCS = DocumentPolicy.model_validate(PRIVATE_RESEARCH_POLICY["documents"])
 PROJECT = (
     Path(__file__).resolve().parents[1] / "tests/fixtures/corpus-sample/corpus.yaml"
 )
@@ -34,13 +41,12 @@ def test_markdown_ancestry_fences_and_raw_evidence() -> None:
     raw = b"Introduction.\n# Alpha\n- preserve list\n```md\n# not a heading\n```\n## Beta\nkey = value\n"
     source = SourceDeclaration.model_validate(
         {
-            "schema_version": 1,
             "id": "docs",
             "kind": "local",
             "canonical_uri": "fixture:docs",
             "revision": "v1",
             "license": "MIT",
-            "redistribution": "redistributable",
+            "rights": fixture_rights(),
             "domains": ["technical_docs"],
             "document_kinds": ["markdown"],
             "source_family": "docs",
@@ -50,7 +56,9 @@ def test_markdown_ancestry_fences_and_raw_evidence() -> None:
             },
         }
     )
-    docs = _records_for_file(raw, "any.md", source, "a" * 64)
+    docs = _records_for_file(
+        raw, "any.md", source, "a" * 64, document_policy=STRICT_DOCS
+    )
     assert [row[0]["section_path"] for row in docs] == [
         [],
         ["Alpha"],
@@ -72,7 +80,9 @@ def test_markdown_ancestry_fences_and_raw_evidence() -> None:
     whole = SourceDeclaration.model_validate(
         {**source.model_dump(mode="json"), "markdown_documents": "files"}
     )
-    [(document, span)] = _records_for_file(raw, "any.md", whole, "a" * 64)
+    [(document, span)] = _records_for_file(
+        raw, "any.md", whole, "a" * 64, document_policy=STRICT_DOCS
+    )
     assert document["text"] == raw.decode() and document["section_path"] == []
     assert (span["line_start"], span["line_end"]) == (1, 8)
 
@@ -80,21 +90,25 @@ def test_markdown_ancestry_fences_and_raw_evidence() -> None:
 def test_raw_spans_count_physical_lf_lines_not_unicode_separators() -> None:
     source = next(item for item in _project().sources if item.id == "sample_docs")
     raw = "first\fspace\vtab\u2028paragraph\u2029next\nsecond\n".encode()
-    document, span = _records_for_file(raw, "document.txt", source, "a" * 64)[0]
+    document, span = _records_for_file(
+        raw, "document.txt", source, "a" * 64, document_policy=STRICT_DOCS
+    )[0]
     assert document["source_location"] == "document.txt#lines=1-2"
     assert (span["line_start"], span["line_end"]) == (1, 2)
     assert (span["byte_start"], span["byte_end"]) == (0, len(raw))
 
     lone_cr = b"first\rsecond"
-    normalized, physical = _records_for_file(lone_cr, "document.txt", source, "c" * 64)[
-        0
-    ]
+    normalized, physical = _records_for_file(
+        lone_cr, "document.txt", source, "c" * 64, document_policy=STRICT_DOCS
+    )[0]
     assert normalized["text"] == "first\nsecond"
     assert (physical["line_start"], physical["line_end"]) == (1, 1)
     assert (physical["byte_start"], physical["byte_end"]) == (0, len(lone_cr))
 
     markdown = b"# Heading\nline \f and \v stay inside one raw line\n## Next\nbody\n"
-    sections = _records_for_file(markdown, "document.md", source, "b" * 64)
+    sections = _records_for_file(
+        markdown, "document.md", source, "b" * 64, document_policy=STRICT_DOCS
+    )
     assert [item[0]["section_path"] for item in sections] == [
         ["Heading"],
         ["Heading", "Next"],
@@ -109,13 +123,12 @@ def test_raw_spans_count_physical_lf_lines_not_unicode_separators() -> None:
 def test_normalized_duplicates_preserve_distinct_raw_origins() -> None:
     source = SourceDeclaration.model_validate(
         {
-            "schema_version": 1,
             "id": "docs",
             "kind": "local",
             "canonical_uri": "fixture:docs",
             "revision": "v1",
             "license": "MIT",
-            "redistribution": "redistributable",
+            "rights": fixture_rights(),
             "domains": ["technical_docs"],
             "document_kinds": ["plain_text"],
             "source_family": "docs",
@@ -125,9 +138,19 @@ def test_normalized_duplicates_preserve_distinct_raw_origins() -> None:
             },
         }
     )
-    composed, _ = _records_for_file("café\r\n".encode(), "any.txt", source, "a" * 64)[0]
+    composed, _ = _records_for_file(
+        "café\r\n".encode(),
+        "any.txt",
+        source,
+        "a" * 64,
+        document_policy=STRICT_DOCS,
+    )[0]
     decomposed, _ = _records_for_file(
-        "cafe\u0301\n".encode(), "any.txt", source, "b" * 64
+        "cafe\u0301\n".encode(),
+        "any.txt",
+        source,
+        "b" * 64,
+        document_policy=STRICT_DOCS,
     )[0]
     assert composed["text"] == decomposed["text"] == "café\n"
     assert composed["content_sha256"] == decomposed["content_sha256"]
@@ -174,6 +197,7 @@ def test_prospective_hf_rows_keep_provenance_and_exclude_private_material(
             source.rights, name, raw, prospective_private_research=True
         ),
         rejected_records=rejected,
+        document_policy=PRIVATE_DOCS,
     )
     assert len(pairs) == 1
     document, evidence = pairs[0]
@@ -221,6 +245,7 @@ def test_scholarly_abstracts_and_full_papers_keep_distinct_kinds_and_corpus_ids(
                 source.rights, name, raw, prospective_private_research=True
             ),
             rejected_records=rejected,
+            document_policy=PRIVATE_DOCS,
         )
         assert len(rows) == 1
         assert rows[0][0]["document_kind"] == expected_kind
@@ -253,6 +278,7 @@ def test_wikimedia_rows_keep_page_revision_not_jsonl_envelope(tmp_path: Path) ->
         file_rights=resolve_file_rights(
             source.rights, name, raw + b"\n", prospective_private_research=True
         ),
+        document_policy=PRIVATE_DOCS,
     )
     assert len(documents) == 1
     item, evidence = documents[0]
@@ -409,29 +435,31 @@ def test_empty_selected_training_view_cannot_replace_previous_release(
     assert (published / "manifest.json").read_bytes() == original_digest
 
 
-def _disk_builder_project(**overrides):
+def _disk_builder_project(strategy="auto", **release_overrides):
     from types import SimpleNamespace as N
 
     release = N(
-        schema_version=2,
         fraction=None,
-        record_admission=None,
         lm=N(selected=True),
         chat=N(selected=False),
+        policy=N(build=N(strategy=strategy)),
     )
-    for name, value in overrides.items():
+    for name, value in release_overrides.items():
         setattr(release, name, value)
-    sources = [
-        N(kind="huggingface_dataset", schema_version=2),
-        N(kind="git", schema_version=2),
-    ]
+    sources = [N(kind="huggingface_dataset"), N(kind="git")]
     return N(release=release, sources=sources), [N(kind="lm_text")]
 
 
-def test_a_v2_release_without_reviewed_admission_uses_the_disk_builder():
+def test_an_lm_only_release_uses_the_disk_builder_without_reviewed_admission():
     # Large corpora must stay memory-bounded without a reviewed admission.
     assert _uses_disk_lm_builder(*_disk_builder_project())
 
 
-def test_a_fractional_v2_release_keeps_the_in_memory_builder():
+def test_a_fractional_release_keeps_the_in_memory_builder_under_auto():
     assert not _uses_disk_lm_builder(*_disk_builder_project(fraction=0.5))
+
+
+def test_the_build_strategy_can_force_either_builder():
+    assert not _uses_disk_lm_builder(*_disk_builder_project(strategy="memory"))
+    with pytest.raises(ValueError, match="build.strategy disk"):
+        _uses_disk_lm_builder(*_disk_builder_project(strategy="disk", fraction=0.5))

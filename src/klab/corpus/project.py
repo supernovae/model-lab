@@ -495,7 +495,6 @@ _ACQUISITION = {
 
 
 class SourceDeclaration(StrictModel):
-    schema_version: Literal[1, 2, 3]
     id: str
     kind: Literal[
         "git",
@@ -516,16 +515,11 @@ class SourceDeclaration(StrictModel):
     license: str
     license_url: str | None = None
     notes: str | None = None
-    redistribution: (
-        Literal[
-            "redistributable", "derived_only", "reference_only", "unknown", "rejected"
-        ]
-        | None
-    ) = None
-    rights: RightsPolicy | None = None
+    rights: RightsPolicy
+    # Required exactly when the release policy is allowed_unless_explicitly_prohibited.
     explicit_training_restriction: (
         Literal["none_found", "restricted", "incompatible", "unknown"] | None
-    ) = None
+    ) = Field(default=None, exclude_if=lambda value: value is None)
     domains: tuple[str, ...]
     document_kinds: tuple[str, ...]
     source_family: str
@@ -541,7 +535,6 @@ class SourceDeclaration(StrictModel):
         | DeterministicAcquisition
         | InferenceAcquisition
     )
-    rejection_reason: str | None = None
     # Markdown files become one document per heading section by default;
     # "files" keeps each file whole, for long-context documents.
     markdown_documents: Literal["sections", "files"] = Field(
@@ -643,75 +636,39 @@ class SourceDeclaration(StrictModel):
                 raise ValueError(
                     "MediaWiki source must be a pinned XML dump file, not a live API"
                 )
-        if self.schema_version == 1:
-            if (
-                self.rights is not None
-                or self.redistribution is None
-                or self.explicit_training_restriction is not None
+        state = self.explicit_training_restriction
+        restriction = self.rights.training_restriction
+        if state is not None:
+            if state == "incompatible" and (
+                self.rights.training_eligibility != "ineligible"
+                or restriction is None
+                or restriction.kind != "prohibited"
             ):
-                raise ValueError(
-                    "v1 source needs legacy redistribution and no rights policy"
-                )
-            if self.redistribution == "rejected" and (
-                not self.rejection_reason or not self.rejection_reason.strip()
-            ):
-                raise ValueError("rejected sources require rejection_reason")
-            if self.redistribution != "rejected" and self.rejection_reason is not None:
-                raise ValueError("rejection_reason only applies to rejected sources")
-        else:
-            if (
-                self.rights is None
-                or self.redistribution is not None
-                or self.rejection_reason is not None
-            ):
-                raise ValueError(
-                    "v2/v3 source needs rights, not legacy redistribution/rejection"
-                )
-            if (
-                self.schema_version == 2
-                and self.explicit_training_restriction is not None
-            ):
-                raise ValueError("explicit_training_restriction requires v3 source")
-            if self.schema_version == 3:
-                state = self.explicit_training_restriction
-                restriction = self.rights.training_restriction
-                if state is None:
-                    raise ValueError("v3 source needs explicit_training_restriction")
-                if state == "incompatible" and (
-                    self.rights.training_eligibility != "ineligible"
-                    or restriction is None
-                    or restriction.kind != "prohibited"
-                ):
-                    raise ValueError("incompatible training requires prohibited basis")
-                if state in {
-                    "restricted",
-                    "unknown",
-                } and self.rights.training_eligibility not in {
-                    "review_required",
-                    "ineligible",
-                }:
-                    raise ValueError(
-                        "restricted/unknown training requires rights review"
-                    )
-                if state == "none_found" and restriction is not None:
-                    raise ValueError("none_found conflicts with a training restriction")
-            if self.rights.nested_metadata_path and self.kind != "git":
-                raise ValueError(
-                    "nested repository rights metadata requires Git acquisition"
-                )
-            if (
-                self.rights.spdx_expression
-                and self.rights.spdx_expression != self.license
-            ):
-                raise ValueError("declared license differs from source SPDX expression")
-            if self.kind not in {"local", "deterministic_generator"} and (
-                self.rights.training_eligibility
-                in {"eligible", "eligible_with_obligations"}
-                and (not self.license_url or not self.rights.license_references)
-            ):
-                raise ValueError(
-                    "eligible external source requires license URL and references"
-                )
+                raise ValueError("incompatible training requires prohibited basis")
+            if state in {
+                "restricted",
+                "unknown",
+            } and self.rights.training_eligibility not in {
+                "review_required",
+                "ineligible",
+            }:
+                raise ValueError("restricted/unknown training requires rights review")
+            if state == "none_found" and restriction is not None:
+                raise ValueError("none_found conflicts with a training restriction")
+        if self.rights.nested_metadata_path and self.kind != "git":
+            raise ValueError(
+                "nested repository rights metadata requires Git acquisition"
+            )
+        if self.rights.spdx_expression and self.rights.spdx_expression != self.license:
+            raise ValueError("declared license differs from source SPDX expression")
+        if self.kind not in {"local", "deterministic_generator"} and (
+            self.rights.training_eligibility
+            in {"eligible", "eligible_with_obligations"}
+            and (not self.license_url or not self.rights.license_references)
+        ):
+            raise ValueError(
+                "eligible external source requires license URL and references"
+            )
         return self
 
 
@@ -721,12 +678,8 @@ def source_language(source: Any) -> str:
 
 
 def source_declaration_payload(source: SourceDeclaration) -> dict[str, Any]:
-    """Preserve v1/v2 acquisition receipts byte-for-byte when v3 is added."""
+    """Canonical declaration; optional fields that are unset stay out of the hash."""
     result = source.model_dump(mode="json")
-    if source.schema_version == 1:
-        result.pop("rights")
-    if source.schema_version in (1, 2):
-        result.pop("explicit_training_restriction")
     if source.kind == "git" and source.acquisition.bounded_blobs is None:
         result["acquisition"].pop("tree_oid")
         result["acquisition"].pop("bounded_blobs")
@@ -889,8 +842,86 @@ class RecordAdmissionReference(StrictModel):
         return self
 
 
+class DuplicatePolicy(StrictModel):
+    """How exact and shared-origin duplicate documents are resolved."""
+
+    # error: any text shared across splits fails the build.
+    # drop_train_copy: text shared by train and exactly one held-out split keeps the
+    # held-out document and drops the train copies as contaminated_heldout; text
+    # shared by two held-out splits still fails.
+    heldout_overlap: Literal["error", "drop_train_copy"]
+    keys: tuple[Literal["raw", "normalized", "canonical_origin"], ...] = Field(
+        min_length=1
+    )
+    # chain_smallest_id: each duplicate group links to its smallest document id.
+    # component_ranked: connected components of shared keys keep one document chosen
+    # by held-out split, source rank, non-paper kind, then id, and fail on
+    # validation/test page-origin overlap and discordant cleaning decisions.
+    resolution: Literal["chain_smallest_id", "component_ranked"]
+    # error: duplicate normalized text with differing rights evidence fails the build.
+    rights_conflict: Literal["error", "allow"]
+
+    @model_validator(mode="after")
+    def unique_keys(self) -> DuplicatePolicy:
+        if len(set(self.keys)) != len(self.keys):
+            raise ValueError("duplicate keys must be unique")
+        if self.resolution == "component_ranked" and self.rights_conflict == "error":
+            raise ValueError(
+                "component_ranked resolution does not check rights conflicts; "
+                "set rights_conflict: allow"
+            )
+        if self.resolution == "chain_smallest_id" and "canonical_origin" in self.keys:
+            raise ValueError("canonical_origin keys need component_ranked resolution")
+        if (
+            self.resolution == "component_ranked"
+            and self.heldout_overlap != "drop_train_copy"
+        ):
+            raise ValueError(
+                "component_ranked resolution requires heldout_overlap drop_train_copy"
+            )
+        return self
+
+
+class ReleaseRightsPolicy(StrictModel):
+    # explicit_eligibility_required: a source is admitted only with explicit
+    # eligibility evidence; a reviewed record_admission is allowed.
+    # allowed_unless_explicitly_prohibited: private-research training is allowed
+    # unless the source records a prohibition; every source declares
+    # explicit_training_restriction.
+    training_use: Literal[
+        "explicit_eligibility_required", "allowed_unless_explicitly_prohibited"
+    ]
+
+
+class BuildPolicy(StrictModel):
+    # auto: the disk-backed builder for language-model-only releases without a
+    # fraction, otherwise in memory. disk: always bounded memory (fails if the
+    # release needs views the disk builder lacks). memory: holds the corpus in RAM.
+    strategy: Literal["auto", "disk", "memory"]
+
+
+class DocumentPolicy(StrictModel):
+    # error: an empty or non-text passage fails the build. skip: it is recorded in
+    # rejected.jsonl and left out.
+    empty_text: Literal["error", "skip"]
+    # none: no content exclusions. research_privacy: drop passages with secrets or
+    # private identifiers, disallowed platform mirrors and unknown page provenance.
+    exclusions: Literal["none", "research_privacy"]
+    # first_declared: a Markdown passage takes the source's first document kind.
+    # prose_when_declared: "prose" when the source declares it.
+    markdown_kind: Literal["first_declared", "prose_when_declared"]
+    # buffered: JSONL row files are read whole. streaming: row by row.
+    row_files: Literal["buffered", "streaming"]
+
+
+class ReleasePolicy(StrictModel):
+    duplicates: DuplicatePolicy
+    documents: DocumentPolicy
+    rights: ReleaseRightsPolicy
+    build: BuildPolicy
+
+
 class ReleaseDeclaration(StrictModel):
-    schema_version: Literal[1, 2, 3]
     mixture: dict[str, float]
     accepted_generation_statuses: tuple[
         Literal[
@@ -909,11 +940,10 @@ class ReleaseDeclaration(StrictModel):
     include_origins: tuple[str, ...] | None = None
     fraction: FractionDeclaration | None = None
     keep_nonredistributable_local: bool = True
-    publication_mode: (
-        Literal["metadata_reconstruction_only", "redistributable_under_source_terms"]
-        | None
-    ) = None
-    training_use_policy: Literal["allowed_unless_explicitly_prohibited"] | None = None
+    publication_mode: Literal[
+        "metadata_reconstruction_only", "redistributable_under_source_terms"
+    ]
+    policy: ReleasePolicy
     record_admission: RecordAdmissionReference | None = None
     normalizer: Literal["normalizer-structure-v2", "normalizer-structure-v3"] | None = (
         None
@@ -927,14 +957,14 @@ class ReleaseDeclaration(StrictModel):
             or abs(sum(self.mixture.values()) - 1) > 1e-8
         ):
             raise ValueError("mixture weights must sum to one")
-        if (self.schema_version == 1 and self.publication_mode is not None) or (
-            self.schema_version in (2, 3) and self.publication_mode is None
+        if (
+            self.record_admission is not None
+            and self.policy.rights.training_use != "explicit_eligibility_required"
         ):
-            raise ValueError("v2/v3 releases require an explicit publication_mode")
-        if (self.schema_version == 3) != (self.training_use_policy is not None):
-            raise ValueError("training_use_policy is required only for v3 releases")
-        if self.record_admission is not None and self.schema_version != 2:
-            raise ValueError("record admission currently requires a v2 release")
+            raise ValueError(
+                "record admission requires rights.training_use "
+                "explicit_eligibility_required"
+            )
         from klab.corpus.provenance import ORIGINS, SHAPES
 
         for values, allowed, label in (
@@ -950,10 +980,6 @@ class ReleaseDeclaration(StrictModel):
 
 def release_declaration_payload(release: ReleaseDeclaration) -> dict[str, Any]:
     result = release.model_dump(mode="json")
-    if release.schema_version == 1:
-        result.pop("publication_mode")
-    if release.schema_version in (1, 2):
-        result.pop("training_use_policy")
     if release.record_admission is None:
         result.pop("record_admission")
     if release.normalizer is None:
@@ -1100,12 +1126,21 @@ class Project(StrictModel):
                     "family_fields": overrides[source.id],
                 }
             )
-        if any(
-            source.schema_version != self.release.schema_version
-            for source in self.sources
+        declares = {
+            source.explicit_training_restriction is not None for source in self.sources
+        }
+        if self.release.policy.rights.training_use == (
+            "allowed_unless_explicitly_prohibited"
         ):
+            if declares != {True}:
+                raise ValueError(
+                    "every source needs explicit_training_restriction when "
+                    "rights.training_use is allowed_unless_explicitly_prohibited"
+                )
+        elif True in declares:
             raise ValueError(
-                "source rights schema must match release publication policy"
+                "explicit_training_restriction requires rights.training_use "
+                "allowed_unless_explicitly_prohibited"
             )
         if self.config.source_effects is not None:
             from klab.corpus.acquisition import declaration_sha256

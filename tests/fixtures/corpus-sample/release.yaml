@@ -1,4 +1,19 @@
-schema_version: 1
+publication_mode: redistributable_under_source_terms
+policy:
+  duplicates:
+    heldout_overlap: error
+    keys: [raw, normalized]
+    resolution: chain_smallest_id
+    rights_conflict: error
+  documents:
+    empty_text: error
+    exclusions: none
+    markdown_kind: first_declared
+    row_files: buffered
+  rights:
+    training_use: explicit_eligibility_required
+  build:
+    strategy: auto
 mixture:
   technical_docs: 0.4
   code: 0.2

@@ -424,6 +424,7 @@ class AttemptBudget:
                 raise AttemptBudgetError("resolved artifact contract identity mismatch")
             if kind in {"pre_freeze_project", "build_project"}:
                 from klab.corpus.acquisition import _project_sha
+                from klab.corpus.dedup_policy import is_strict_chain
                 from klab.corpus.project import load_project, project_path
                 from klab.corpus.release_review import verify_admission_review
                 from klab.training.manifest import sha256_file
@@ -433,7 +434,7 @@ class AttemptBudget:
                     contract.preparation_acquisition_identity_sha256 is None
                     or _project_sha(project)
                     != contract.preparation_acquisition_identity_sha256
-                    or project.release.schema_version != 2
+                    or not is_strict_chain(project.release.policy.duplicates)
                     or project.release.record_admission is None
                     or project.release.normalizer != contract.preparation_normalizer
                     or sha256_file(
@@ -560,6 +561,7 @@ class AttemptBudget:
             load_workspace_baseline(Path(path), root)
         if kind in {"pre_freeze_project", "build_project"}:
             from klab.corpus.acquisition import _project_sha
+            from klab.corpus.dedup_policy import is_strict_chain
             from klab.corpus.project import load_project, project_path
             from klab.corpus.release_review import verify_admission_review
             from klab.training.manifest import sha256_file
@@ -569,7 +571,7 @@ class AttemptBudget:
             if (
                 _project_sha(project)
                 != contract.preparation_acquisition_identity_sha256
-                or project.release.schema_version != 2
+                or not is_strict_chain(project.release.policy.duplicates)
                 or project.release.normalizer != contract.preparation_normalizer
                 or reference is None
                 or sha256_file(project_path(project.root, reference.path))

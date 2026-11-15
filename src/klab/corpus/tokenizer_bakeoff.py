@@ -481,10 +481,6 @@ def bakeoff(declaration: Path, output: Path, *, work_root: Path | None = None) -
         if not release.is_absolute():
             release = (declaration.parent / release).resolve()
     manifest = verify_release(release)
-    if spec.schema_version == 2 and manifest["build_identity"]["release"][
-        "schema_version"
-    ] not in (2, 3):
-        raise ValueError("pilot bakeoff requires a prospective rights-tracked release")
     selected, heldout, train = _selection(release, spec)
     receipt = _receipt(selected, heldout, train, spec)
     identity = {

@@ -21,7 +21,6 @@ from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.models import StrictModel
 from klab.corpus.project import (
-    CURATED_SOURCE_KINDS,
     ROW_SOURCE_KINDS,
     ReleaseDeclaration,
     release_declaration_payload,
@@ -55,7 +54,6 @@ if TYPE_CHECKING:
 class NormalizedDocument(StrictModel):
     """Versioned document retaining source attribution and raw evidence identity."""
 
-    schema_version: Literal[1, 2, 3]
     document_id: str
     source_id: str
     modality: Literal["text"]
@@ -79,18 +77,6 @@ class NormalizedDocument(StrictModel):
     split: str | None = None
     representative_id: str | None = None
     drop_reason: str | None = None
-
-
-def _require_consistent_cleaning_decisions(documents: list[dict[str, Any]]) -> None:
-    """Reject duplicate source rules that disagree about LM eligibility."""
-    decisions = {
-        (doc.get("structure") or {}).get("decision") == "exclude_lm_metadata_only"
-        for doc in documents
-    }
-    if len(decisions) > 1:
-        raise ValueError(
-            "discordant metadata-only cleaning decisions in duplicate component"
-        )
 
 
 class GenerationRecord(StrictModel):
@@ -463,6 +449,7 @@ def _records_for_file(
     first_row_index: int = 1,
     record_admission: dict[str, Any] | None = None,
     normalizer_version: str = "normalizer-nfc-markdown-v1",
+    document_policy: Any,
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     from klab.corpus.structure_cleaning import (
         NORMALIZER_V1,
@@ -474,7 +461,7 @@ def _records_for_file(
         raise ValueError("unsupported corpus normalizer")
     suffix = Path(name).suffix.lower()
     streaming_rows = (
-        source.schema_version == 3
+        document_policy.row_files == "streaming"
         and suffix == ".jsonl"
         and source.kind in ROW_SOURCE_KINDS
     )
@@ -640,13 +627,13 @@ def _records_for_file(
         metadata = passage[4] if len(passage) > 4 else None
         raw_content = content
         if not isinstance(content, str) or not content.strip():
-            if source.schema_version != 3:
+            if document_policy.empty_text == "error":
                 raise ValueError("empty/nontext document")
             reason = "empty_or_nontext"
         else:
             reason = (
                 _excluded_research_record(content, metadata or {}, source.id)
-                if source.schema_version == 3
+                if document_policy.exclusions == "research_privacy"
                 else None
             )
         if reason:
@@ -684,7 +671,6 @@ def _records_for_file(
         )
         raw_content_sha = hashlib.sha256(raw_passage).hexdigest()
         document = {
-            "schema_version": source.schema_version,
             "document_id": identity,
             "source_id": source.id,
             "modality": source.modality,
@@ -694,12 +680,12 @@ def _records_for_file(
             "redistribution": (
                 file_rights.redistribution_mode
                 if file_rights
-                else source.redistribution
+                else source.rights.redistribution_mode
             ),
             "domains": list(source.domains),
             "document_kind": (
                 "prose"
-                if source.schema_version == 3
+                if document_policy.markdown_kind == "prose_when_declared"
                 and suffix in {".md", ".markdown"}
                 and "prose" in source.document_kinds
                 else next(iter(source.document_kinds))
@@ -1485,27 +1471,27 @@ def _staged_build(root: Path, build_id: str) -> Iterator[Path]:
 
 
 def _uses_disk_lm_builder(project: Any, transforms: list[Any]) -> bool:
-    return (
-        project.release.schema_version in (2, 3)
-        and len(transforms) == 1
+    """Whether the bounded-memory builder applies, per `release.policy.build`."""
+    strategy = project.release.policy.build.strategy
+    if strategy == "memory":
+        return False
+    eligible = (
+        len(transforms) == 1
         and transforms[0].kind == "lm_text"
         and project.release.lm.selected
         and not project.release.chat.selected
+        and project.release.fraction is None
         and all(
-            source.schema_version == project.release.schema_version
+            source.kind in {"huggingface_dataset", *FILE_ADMISSION_KINDS}
             for source in project.sources
         )
-        and (
-            project.release.schema_version == 3
-            or (
-                project.release.fraction is None
-                and all(
-                    source.kind in {"huggingface_dataset", *FILE_ADMISSION_KINDS}
-                    for source in project.sources
-                )
-            )
-        )
     )
+    if strategy == "disk" and not eligible:
+        raise ValueError(
+            "build.strategy disk needs a language-model-only release without a "
+            "fraction and sources of Hugging Face or file-admitted kinds"
+        )
+    return eligible
 
 
 def build(
@@ -1602,14 +1588,8 @@ def _build_stored(
         "provenance_implementation_sha256": sha256_file(
             Path(__file__).with_name("provenance.py")
         ),
-        **(
-            {
-                "rights_implementation_sha256": sha256_file(
-                    Path(__file__).with_name("rights.py")
-                )
-            }
-            if project.release.schema_version in (2, 3)
-            else {}
+        "rights_implementation_sha256": sha256_file(
+            Path(__file__).with_name("rights.py")
         ),
     }
     large_lm_build = _uses_disk_lm_builder(project, transforms)
@@ -1684,11 +1664,7 @@ def _build_stored(
                 auxiliary_files.add((params["source_id"], params["path"]))
         for source in sorted(project.sources, key=lambda s: s.id):
             entry = lock["sources"].get(source.id)
-            if (
-                source.redistribution == "rejected"
-                or not entry
-                or not entry.get("snapshot_path")
-            ):
+            if not entry or not entry.get("snapshot_path"):
                 continue
             from klab.corpus.acquisition import verify_snapshot
 
@@ -1731,7 +1707,10 @@ def _build_stored(
                         name,
                         raw,
                         nested_metadata=nested_metadata,
-                        prospective_private_research=source.schema_version == 3,
+                        prospective_private_research=(
+                            project.release.policy.rights.training_use
+                            == "allowed_unless_explicitly_prohibited"
+                        ),
                     )
                     if source.rights
                     else None
@@ -1800,6 +1779,7 @@ def _build_stored(
                         record_admission=admitted,
                         normalizer_version=project.release.normalizer
                         or "normalizer-nfc-markdown-v1",
+                        document_policy=project.release.policy.documents,
                     )
                     documents.extend(doc for doc, _ in pairs)
                     evidence.extend(span for _, span in pairs)
@@ -1840,193 +1820,38 @@ def _build_stored(
         policy = split_policy(project)
         for doc in documents:
             doc["split"] = _split(doc, policy)
-        groups: dict[str, list[str]] = defaultdict(list)
-        normalized: dict[str, list[str]] = defaultdict(list)
-        origin: dict[str, list[str]] = defaultdict(list)
+        from klab.corpus.dedup_policy import (
+            DuplicateError,
+            deduplicate_documents,
+            drop_reason,
+            is_metadata_only,
+            source_rank,
+        )
+
         by_id = {d["document_id"]: d for d in documents}
-        source_rank = {
-            source.id: (
-                0
-                if source.kind in CURATED_SOURCE_KINDS
-                else 1
-                if source.id.startswith("pes2o")
-                else 2
+        try:
+            duplicate_groups, representative = deduplicate_documents(
+                documents,
+                {source.id: source_rank(source) for source in project.sources},
+                project.release.policy.duplicates,
+                _origin_keys,
             )
-            for source in project.sources
-        }
-        for doc in documents:
-            groups[doc["raw_content_sha256"]].append(doc["document_id"])
-            normalized[doc["content_sha256"]].append(doc["document_id"])
-            if project.release.schema_version == 3:
-                for key in _origin_keys(doc):
-                    origin[key].append(doc["document_id"])
-        duplicate_groups = []
-        representative = {d["document_id"]: d["document_id"] for d in documents}
-        mappings = [("raw", groups), ("normalized", normalized)]
-        if project.release.schema_version == 3:
-            mappings.append(("canonical_origin", origin))
-        for method, mapping in mappings:
-            for content_id, ids in sorted(mapping.items()):
-                if len(ids) < 2:
-                    continue
-                ids = sorted(ids)
-                splits = {by_id[i]["split"] for i in ids}
-                heldout = splits - {"train"}
-                priority = next(iter(heldout)) if heldout else None
-                selected = (
-                    min(
-                        ids,
-                        key=lambda i: (
-                            by_id[i]["split"] != priority if priority else False,
-                            source_rank[by_id[i]["source_id"]],
-                            by_id[i]["document_kind"] != "paper",
-                            i,
-                        ),
-                    )
-                    if project.release.schema_version == 3
-                    else ids[0]
-                )
-                duplicate_groups.append(
-                    {
-                        "method": method,
-                        "sha256": (
-                            hashlib.sha256(content_id.encode()).hexdigest()
-                            if method == "canonical_origin"
-                            else content_id
-                        ),
-                        "origins": ids,
-                        "splits": sorted(splits),
-                        "representative": selected,
-                    }
-                )
-                if len(splits) > 1 and (
-                    project.release.schema_version != 3 or len(heldout) != 1
-                ):
-                    diagnostic = {
-                        "duplicates": duplicate_groups,
-                        "rejected": rejected,
-                        "error": "cross-split exact text overlap",
-                    }
-                    _json(staging / "audit.json", diagnostic)
-                    _json(root / "diagnostics" / f"{build_id}.json", diagnostic)
-                    raise ValueError("cross-split exact text overlap")
-                if method == "normalized" and project.release.schema_version == 2:
-                    rights_signatures = {
-                        canonical_json(
-                            {
-                                "license": by_id[i]["license"],
-                                "redistribution": by_id[i]["redistribution"],
-                                "training_eligibility": by_id[i]["rights"][
-                                    "training_eligibility"
-                                ],
-                                "license_references": by_id[i]["rights"][
-                                    "license_references"
-                                ],
-                                "notices": by_id[i]["rights"]["notices"],
-                                "training_restriction": by_id[i]["rights"][
-                                    "training_restriction"
-                                ],
-                            }
-                        )
-                        for i in ids
-                    }
-                    if len(rights_signatures) > 1:
-                        diagnostic = {
-                            "duplicates": duplicate_groups,
-                            "rejected": rejected,
-                            "error": "duplicate source text has incompatible rights evidence",
-                        }
-                        _json(staging / "audit.json", diagnostic)
-                        _json(root / "diagnostics" / f"{build_id}.json", diagnostic)
-                        raise ValueError(
-                            "duplicate source text has incompatible rights evidence"
-                        )
-                if project.release.schema_version == 3:
-                    if method == "normalized":
-                        for i in ids:
-                            representative[i] = selected
-                else:
-                    for i in ids[1:]:
-                        representative[i] = min(representative[i], ids[0])
-
-        if project.release.schema_version == 3:
-            # Raw, normalized, page-URL and paper-ID groups can be connected
-            # transitively. Resolve each connected component once: a chain of
-            # locally chosen representatives would otherwise introduce cycles.
-            parents = {identifier: identifier for identifier in by_id}
-
-            def root_of(identifier: str) -> str:
-                while parents[identifier] != identifier:
-                    parents[identifier] = parents[parents[identifier]]
-                    identifier = parents[identifier]
-                return identifier
-
-            for group in duplicate_groups:
-                first = root_of(group["origins"][0])
-                for identifier in group["origins"][1:]:
-                    parents[root_of(identifier)] = first
-            components: dict[str, list[str]] = defaultdict(list)
-            for identifier in by_id:
-                components[root_of(identifier)].append(identifier)
-            for ids in components.values():
-                heldout = {by_id[i]["split"] for i in ids} - {"train"}
-                if len(heldout) > 1:
-                    diagnostic = {
-                        "duplicates": duplicate_groups,
-                        "rejected": rejected,
-                        "error": "validation/test page or paper origin overlap",
-                    }
-                    _json(staging / "audit.json", diagnostic)
-                    _json(root / "diagnostics" / f"{build_id}.json", diagnostic)
-                    raise ValueError("validation/test page or paper origin overlap")
-                try:
-                    _require_consistent_cleaning_decisions([by_id[i] for i in ids])
-                except ValueError as error:
-                    diagnostic = {
-                        "duplicates": duplicate_groups,
-                        "rejected": rejected,
-                        "error": str(error),
-                    }
-                    _json(staging / "audit.json", diagnostic)
-                    _json(root / "diagnostics" / f"{build_id}.json", diagnostic)
-                    raise
-                priority = next(iter(heldout)) if heldout else None
-                selected = min(
-                    ids,
-                    key=lambda i: (
-                        by_id[i]["split"] != priority if priority else False,
-                        source_rank[by_id[i]["source_id"]],
-                        by_id[i]["document_kind"] != "paper",
-                        i,
-                    ),
-                )
-                for identifier in ids:
-                    representative[identifier] = selected
-
-        def chosen(identifier: str) -> str:
-            current = identifier
-            while representative[current] != current:
-                current = representative[current]
-            representative[identifier] = current
-            return current
-
-        for identifier in representative:
-            chosen(identifier)
+        except DuplicateError as error:
+            diagnostic = {
+                "duplicates": error.groups,
+                "rejected": rejected,
+                "error": str(error),
+            }
+            _json(staging / "audit.json", diagnostic)
+            _json(root / "diagnostics" / f"{build_id}.json", diagnostic)
+            raise
         for doc in documents:
             doc["representative_id"] = representative[doc["document_id"]]
-            doc["drop_reason"] = (
-                "metadata_only_front_matter"
-                if (doc.get("structure") or {}).get("decision")
-                == "exclude_lm_metadata_only"
-                else (
-                    "contaminated_heldout"
-                    if project.release.schema_version == 3
-                    and doc["split"] == "train"
-                    and by_id[doc["representative_id"]]["split"] != "train"
-                    else "duplicate"
-                )
-                if doc["representative_id"] != doc["document_id"]
-                else None
+            doc["drop_reason"] = drop_reason(
+                metadata_only=is_metadata_only(doc),
+                split=doc["split"],
+                is_representative=doc["representative_id"] == doc["document_id"],
+                representative_split=by_id[doc["representative_id"]]["split"],
             )
         kept = [d for d in documents if not d["drop_reason"]]
         stages: list[dict[str, Any]] = []
@@ -3213,20 +3038,12 @@ def _build_stored(
                 "canonical_uri": s.canonical_uri,
                 "revision": s.revision,
                 "license": s.license,
-                "redistribution": s.rights.redistribution_mode
-                if s.rights
-                else s.redistribution,
-                **(
-                    {
-                        "license_url": s.license_url,
-                        "rights_policy": s.rights.model_dump(mode="json"),
-                    }
-                    if s.rights
-                    else {}
-                ),
+                "redistribution": s.rights.redistribution_mode,
+                "license_url": s.license_url,
+                "rights_policy": s.rights.model_dump(mode="json"),
                 **(
                     {"explicit_training_restriction": s.explicit_training_restriction}
-                    if s.schema_version == 3
+                    if s.explicit_training_restriction is not None
                     else {}
                 ),
                 "origin": s.origin,
@@ -3236,7 +3053,7 @@ def _build_stored(
                     "generator_dependent"
                     if s.kind == "inference_generator"
                     else "script_reproducible_not_redistributed"
-                    if (s.rights.redistribution_mode if s.rights else s.redistribution)
+                    if s.rights.redistribution_mode
                     in {
                         "reference_only",
                         "derived_only",
@@ -3252,62 +3069,47 @@ def _build_stored(
             for s in project.sources
         ]
         _json(staging / "sources.json", sources)
-        if project.release.schema_version in (2, 3):
-            file_decisions = [
-                item for item in rights_files if item["role"] == "document"
-            ]
-            rights_counts = Counter(
-                item["rights"]["training_eligibility"] for item in file_decisions
-            )
-            bytes_by_state: Counter[str] = Counter()
-            spdx_counts: Counter[str] = Counter()
-            modes: Counter[str] = Counter()
-            source_spdx = {s.id: s.rights.spdx_expression for s in project.sources}
-            for item in file_decisions:
-                decision = item["rights"]
-                bytes_by_state[decision["training_eligibility"]] += item["size"]
-                spdx_counts[
-                    reported_spdx_expression(item, source_spdx[item["source_id"]])
-                ] += 1
-                modes[decision["redistribution_mode"]] += 1
-            rights_report = {
-                "schema_version": project.release.schema_version,
-                "publication_mode": project.release.publication_mode,
-                **(
-                    {"training_use_policy": project.release.training_use_policy}
-                    if project.release.schema_version == 3
-                    else {}
-                ),
-                "weight_license_status": "separate_analysis_required",
-                "sources": sources,
-                "files": rights_files,
-                "training_eligibility": {
-                    state: {
-                        "files": rights_counts[state],
-                        "source_bytes": bytes_by_state[state],
-                        "source_tokens": None,
-                        "token_count_reason": "tokenizer_not_declared",
-                    }
-                    for state in (
-                        "eligible",
-                        "eligible_with_obligations",
-                        "review_required",
-                        "ineligible",
-                    )
-                },
-                "spdx_expressions": dict(spdx_counts),
-                "redistribution_modes": dict(modes),
-                "unresolved_rights_files": rights_counts["review_required"],
-                "advisory": "Source/derived-data rights and model-weight licensing are separate decisions; not a legal conclusion.",
-            }
-        else:
-            rights_report = {
-                "sources": sources,
-                "redistribution_classes": dict(
-                    Counter(s.redistribution for s in project.sources)
-                ),
-                "advisory": "Declared attribution and redistribution classifications are inventory metadata, not legal review.",
-            }
+        file_decisions = [item for item in rights_files if item["role"] == "document"]
+        rights_counts = Counter(
+            item["rights"]["training_eligibility"] for item in file_decisions
+        )
+        bytes_by_state: Counter[str] = Counter()
+        spdx_counts: Counter[str] = Counter()
+        modes: Counter[str] = Counter()
+        source_spdx = {s.id: s.rights.spdx_expression for s in project.sources}
+        for item in file_decisions:
+            decision = item["rights"]
+            bytes_by_state[decision["training_eligibility"]] += item["size"]
+            spdx_counts[
+                reported_spdx_expression(item, source_spdx[item["source_id"]])
+            ] += 1
+            modes[decision["redistribution_mode"]] += 1
+        rights_report = {
+            "schema_version": 1,
+            "publication_mode": project.release.publication_mode,
+            "release_policy": project.release.policy.model_dump(mode="json"),
+            "weight_license_status": "separate_analysis_required",
+            "sources": sources,
+            "files": rights_files,
+            "training_eligibility": {
+                state: {
+                    "files": rights_counts[state],
+                    "source_bytes": bytes_by_state[state],
+                    "source_tokens": None,
+                    "token_count_reason": "tokenizer_not_declared",
+                }
+                for state in (
+                    "eligible",
+                    "eligible_with_obligations",
+                    "review_required",
+                    "ineligible",
+                )
+            },
+            "spdx_expressions": dict(spdx_counts),
+            "redistribution_modes": dict(modes),
+            "unresolved_rights_files": rights_counts["review_required"],
+            "advisory": "Source/derived-data rights and model-weight licensing are separate decisions; not a legal conclusion.",
+        }
         _json(staging / "license-report.json", rights_report)
         mixture = _model(project.release).get("mixture", {})
         actual = {
@@ -3328,25 +3130,25 @@ def _build_stored(
         generation_total = len(generations) + len(scenarios)
         source_counts = Counter(d["source_id"] for d in kept)
         source_scale: dict[str, dict[str, dict[str, int]]] = defaultdict(dict)
-        if project.release.schema_version == 3:
-            for doc in kept:
-                split = doc["split"]
-                counts = source_scale[doc["source_id"]].setdefault(
-                    split,
-                    {
-                        "documents": 0,
-                        "utf8_bytes": 0,
-                        "characters": 0,
-                        "whitespace_words": 0,
-                    },
-                )
-                text = doc["text"]
-                counts["documents"] += 1
-                counts["utf8_bytes"] += len(text.encode("utf-8"))
-                counts["characters"] += len(text)
-                counts["whitespace_words"] += len(text.split())
+        for doc in kept:
+            split = doc["split"]
+            counts = source_scale[doc["source_id"]].setdefault(
+                split,
+                {
+                    "documents": 0,
+                    "utf8_bytes": 0,
+                    "characters": 0,
+                    "whitespace_words": 0,
+                },
+            )
+            text = doc["text"]
+            counts["documents"] += 1
+            counts["utf8_bytes"] += len(text.encode("utf-8"))
+            counts["characters"] += len(text)
+            counts["whitespace_words"] += len(text.split())
         report = {
-            "schema_version": project.release.schema_version,
+            "schema_version": 1,
+            "release_policy": project.release.policy.model_dump(mode="json"),
             "corpus_id": project.config.id,
             "requested_mixture": mixture,
             "actual_mixture": actual,
@@ -3355,11 +3157,7 @@ def _build_stored(
             "split_counts": {s: sum(d["split"] == s for d in kept) for s in SPLITS},
             "view_counts": {
                 view: {
-                    split: (
-                        _line_count(staging / view / f"{split}.jsonl")
-                        if project.release.schema_version == 3
-                        else len(_rows(staging / view / f"{split}.jsonl"))
-                    )
+                    split: _line_count(staging / view / f"{split}.jsonl")
                     for split in SPLITS
                 }
                 for view in ("lm", "chat")
@@ -3393,43 +3191,41 @@ def _build_stored(
             if fraction is not None
             else "tokenizer_not_declared",
         }
-        if project.release.schema_version == 3:
-            report["source_scale"] = {
-                source: dict(sorted(splits.items()))
-                for source, splits in sorted(source_scale.items())
+        report["source_scale"] = {
+            source: dict(sorted(splits.items()))
+            for source, splits in sorted(source_scale.items())
+        }
+        train_scale = {
+            key: sum(
+                per_split.get("train", {}).get(key, 0)
+                for per_split in source_scale.values()
+            )
+            for key in ("documents", "utf8_bytes", "characters", "whitespace_words")
+        }
+        report["train_source_scale"] = {
+            **train_scale,
+            "utf8_bytes_div4_proxy": train_scale["utf8_bytes"] // 4,
+            "actual_tokens": None,
+            "token_count_reason": "final_tokenizer_not_fitted",
+            "proxy_warning": (
+                "Whitespace words and UTF-8 bytes/4 are tokenizer-independent "
+                "descriptors, not measured token counts."
+            ),
+        }
+        report["rights"] = {
+            key: value
+            for key, value in rights_report.items()
+            if key
+            in {
+                "training_eligibility",
+                "spdx_expressions",
+                "redistribution_modes",
+                "unresolved_rights_files",
+                "weight_license_status",
+                "publication_mode",
+                "release_policy",
             }
-            train_scale = {
-                key: sum(
-                    per_split.get("train", {}).get(key, 0)
-                    for per_split in source_scale.values()
-                )
-                for key in ("documents", "utf8_bytes", "characters", "whitespace_words")
-            }
-            report["train_source_scale"] = {
-                **train_scale,
-                "utf8_bytes_div4_proxy": train_scale["utf8_bytes"] // 4,
-                "actual_tokens": None,
-                "token_count_reason": "final_tokenizer_not_fitted",
-                "proxy_warning": (
-                    "Whitespace words and UTF-8 bytes/4 are tokenizer-independent "
-                    "descriptors, not measured token counts."
-                ),
-            }
-        if project.release.schema_version in (2, 3):
-            report["rights"] = {
-                key: value
-                for key, value in rights_report.items()
-                if key
-                in {
-                    "training_eligibility",
-                    "spdx_expressions",
-                    "redistribution_modes",
-                    "unresolved_rights_files",
-                    "weight_license_status",
-                    "publication_mode",
-                    "training_use_policy",
-                }
-            }
+        }
         from klab.corpus.measurement import summarize_release
 
         report["measurement"] = summarize_release(

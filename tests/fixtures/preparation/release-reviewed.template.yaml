@@ -1,5 +1,19 @@
-schema_version: 2
 publication_mode: metadata_reconstruction_only
+policy:
+  duplicates:
+    heldout_overlap: error
+    keys: [raw, normalized]
+    resolution: chain_smallest_id
+    rights_conflict: error
+  documents:
+    empty_text: error
+    exclusions: none
+    markdown_kind: first_declared
+    row_files: buffered
+  rights:
+    training_use: explicit_eligibility_required
+  build:
+    strategy: auto
 mixture:
   general_prose: 0.81
   explanatory_prose: 0.18

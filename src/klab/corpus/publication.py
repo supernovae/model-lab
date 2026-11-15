@@ -20,8 +20,8 @@ def publication_manifest(release: Path) -> dict[str, Any]:
     release = Path(release)
     manifest = verify_release(release)
     rights = json.loads((release / "license-report.json").read_text(encoding="utf-8"))
-    if rights.get("schema_version") not in (2, 3):
-        raise ValueError("historical release has no prospective publication policy")
+    if rights.get("schema_version") != 1 or "release_policy" not in rights:
+        raise ValueError("release has no recorded publication policy")
     sources = []
     for source in rights["sources"]:
         snapshot_id = source["snapshot_sha256"]
@@ -72,7 +72,7 @@ def publication_manifest(release: Path) -> dict[str, Any]:
                             "explicit_training_restriction"
                         ]
                     }
-                    if rights["schema_version"] == 3
+                    if "explicit_training_restriction" in source
                     else {}
                 ),
                 "snapshot_sha256": snapshot_id,
@@ -86,11 +86,7 @@ def publication_manifest(release: Path) -> dict[str, Any]:
         "release_manifest_sha256": sha256_file(release / "manifest.json"),
         "rights_report_sha256": sha256_file(release / "license-report.json"),
         "publication_mode": rights["publication_mode"],
-        **(
-            {"training_use_policy": rights["training_use_policy"]}
-            if rights["schema_version"] == 3
-            else {}
-        ),
+        "release_policy": rights["release_policy"],
         "weight_license_status": rights["weight_license_status"],
         "sources": sources,
         "project": manifest["build_identity"]["project"],

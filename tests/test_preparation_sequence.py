@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from corpus_fixtures import STRICT_POLICY
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
@@ -270,7 +271,6 @@ def _sources(root: Path, project_id: str) -> tuple[Path, dict[str, str]]:
             _write_yaml(
                 recipe / "sources" / f"{source_id}.yaml",
                 {
-                    "schema_version": 2,
                     "id": source_id,
                     "kind": "huggingface_dataset",
                     "canonical_uri": "https://huggingface.co/datasets/common-pile/project_gutenberg_filtered",
@@ -321,7 +321,6 @@ def _sources(root: Path, project_id: str) -> tuple[Path, dict[str, str]]:
         _write_yaml(
             recipe / "sources" / f"{source_id}.yaml",
             {
-                "schema_version": 2,
                 "id": source_id,
                 "kind": "git",
                 "canonical_uri": f"https://github.com/example/{source_id}",
@@ -350,8 +349,8 @@ def _sources(root: Path, project_id: str) -> tuple[Path, dict[str, str]]:
     _write_yaml(
         recipe / "release-quarantine.yaml",
         {
-            "schema_version": 2,
             "publication_mode": "metadata_reconstruction_only",
+            "policy": STRICT_POLICY,
             "mixture": {
                 "general_prose": 0.4,
                 "incident_response_docs": 0.2,
@@ -540,8 +539,8 @@ def _reviewed_release(recipe: Path, admission: Path) -> None:
     _write_yaml(
         recipe / "release-reviewed.yaml",
         {
-            "schema_version": 2,
             "publication_mode": "metadata_reconstruction_only",
+            "policy": STRICT_POLICY,
             "mixture": {
                 "general_prose": 0.4,
                 "incident_response_docs": 0.2,

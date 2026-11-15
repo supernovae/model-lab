@@ -84,6 +84,10 @@ user's own repository, not in Lab.
   Change a format by updating it and every caller in the same pull request, and
   say what must be rebuilt. Do not add compatibility readers, version adapters,
   aliases or a second runner to keep old artifacts working.
+- **Options, not versions.** New behaviour arrives as a named, recorded option
+  (for example `release.policy.duplicates.heldout_overlap`), never as a new
+  `schema_version` that bundles unrelated choices. A schema version describes a
+  file format only.
 - **Use what Lab provides.** Do not reimplement hashing, checkpoint selection,
   accounting or workflow state in a script. If Lab lacks an operation, add it to
   Lab with a test, or open an issue stating the inputs, the expected output and

@@ -358,6 +358,7 @@ def _check_completed_producer(project, producer):
 
 def build_completed(project, work_root):
     from klab.corpus.acquisition import declaration_sha256
+    from klab.corpus.dedup_policy import is_strict_chain
     from klab.corpus.large_build import _emit_build
     from klab.corpus.pipeline import (
         _model,
@@ -375,7 +376,7 @@ def build_completed(project, work_root):
     transforms = _ordered_transforms(project)
     if (
         not _uses_disk_lm_builder(project, transforms)
-        or project.release.schema_version != 2
+        or not is_strict_chain(project.release.policy.duplicates)
         or project.splits.unit != "document"
         or any(source.kind != "huggingface_dataset" for source in project.sources)
     ):

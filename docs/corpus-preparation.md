@@ -110,7 +110,6 @@ Every regular member matching `include` (and no `exclude`) becomes one snapshot
 file, so one document:
 
 ```yaml
-schema_version: 3
 id: ietf_rfcs
 kind: archive
 canonical_uri: https://www.rfc-editor.org/in-notes/tar/RFC-all.tar.gz
@@ -152,7 +151,6 @@ each PDF is one document. It needs the optional `pdf` extra
 (`uv sync --locked --extra pdf`), which installs pypdf:
 
 ```yaml
-schema_version: 3
 id: nist_sp
 kind: pdf_documents
 canonical_uri: https://csrc.nist.gov/publications/sp
@@ -195,7 +193,6 @@ wiki. It reuses the Wikimedia page parser; each selected page is one JSONL row
 with its title, page and revision IDs and a `site_url?curid=ID` link:
 
 ```yaml
-schema_version: 3
 id: cynefin_wiki
 kind: mediawiki_dump
 canonical_uri: https://example.org/dumps/cynefinwiki-20261101.xml.gz
@@ -248,7 +245,8 @@ klab corpus inspect-admission --draft draft.json --policy-document policy.json \
 `admission-draft` writes a conservative decision (qualify, exclude or
 quarantine) for every row or file of the verified snapshots. `inspect-admission`
 draws a deterministic sample for a reviewer; reissuing it after an interruption
-resumes. A reviewed admission (v2) must be bound to that inspection.
+resumes. A reviewed admission must be bound to that inspection (it needs
+`rights.training_use: explicit_eligibility_required`).
 
 ### Qualifying Hugging Face rows
 
@@ -324,16 +322,65 @@ duplicates (refusing cross-split or incompatible-rights duplicates) and writes
 documents, spans, lineage and language-model and chat views. `freeze` publishes
 an immutable release with a content-derived ID.
 
-A language-model-only release (schema version 2 or 3, no `fraction`) is built
-with the disk-backed builder, so peak memory is bounded by individual records
-rather than corpus size; no reviewed admission is required. Fractional and
-chat releases still build in memory and need RAM comparable to the corpus.
-In the disk-backed builder, text shared by train and exactly one held-out split
-keeps the held-out document and drops the train copies as `contaminated_heldout`
-(as the v3 policy does); text shared by two held-out splits, or by documents with
-incompatible rights, still fails the build. The builder's index is rebuildable scratch under `WORK/corpora/<id>/builds/indices`;
-it is I/O-heavy, so point that directory at fast storage (a symlink works) when
-`WORK` is on spinning disks.
+`release.build.strategy` chooses the builder: `auto` (the default) uses the
+disk-backed builder for a language-model-only release without a `fraction`, so
+peak memory is bounded by individual records and no reviewed admission is
+needed; `memory` holds the corpus in RAM and `disk` fails if the release needs
+the in-memory builder. The disk builder's index is rebuildable scratch under
+`WORK/corpora/<id>/builds/indices`; it is I/O-heavy, so point that directory at
+fast storage (a symlink works) when `WORK` is on spinning disks. Both builders
+decide every duplicate group with the same code (`dedup_policy.py`).
+
+### Release policy
+
+Behaviour is chosen by named options in `release.policy`, never by a version
+number. Every option is required, and the resolved policy is recorded in
+`build.json`, the release manifest, `report.json` and `license-report.json`.
+
+```yaml
+policy:
+  duplicates:
+    heldout_overlap: error          # or drop_train_copy
+    keys: [raw, normalized]         # also canonical_origin
+    resolution: chain_smallest_id   # or component_ranked
+    rights_conflict: error          # or allow
+  documents:
+    empty_text: error               # or skip
+    exclusions: none                # or research_privacy
+    markdown_kind: first_declared   # or prose_when_declared
+    row_files: buffered             # or streaming
+  rights:
+    training_use: explicit_eligibility_required
+    # or allowed_unless_explicitly_prohibited
+  build:
+    strategy: auto                  # or disk, memory
+```
+
+- **`heldout_overlap`.** `error` fails the build on any text shared across
+  splits. `drop_train_copy` keeps the held-out document and drops the train
+  copies as `contaminated_heldout` when exactly one held-out split shares the
+  text; text shared by two held-out splits still fails.
+- **`resolution`.** `chain_smallest_id` links each duplicate group to its
+  smallest document id. `component_ranked` resolves connected components of
+  shared keys (including `canonical_origin` page and paper identities), keeping
+  one document ranked by held-out split, source rank, non-paper kind and id; it
+  requires `heldout_overlap: drop_train_copy` and `rights_conflict: allow`, and
+  fails on validation/test overlap within a component.
+- **`rights_conflict`.** `error` fails the build when identical normalized text
+  carries differing rights evidence.
+- **`documents`.** `empty_text: skip` records empty or non-text passages in
+  `rejected.jsonl`. `exclusions: research_privacy` drops passages with secrets
+  or private identifiers, disallowed platform mirrors and unknown page
+  provenance. `row_files: streaming` reads JSONL row files row by row.
+- **`rights.training_use`.** `explicit_eligibility_required` admits only
+  sources with explicit eligibility evidence and allows a reviewed
+  `record_admission`. `allowed_unless_explicitly_prohibited` allows
+  private-research training unless a prohibition is recorded; every source then
+  declares `explicit_training_restriction`.
+
+The reviewed-admission and completed-preparation builds implement only the
+strict policy (`heldout_overlap: error`, `keys: [raw, normalized]`,
+`resolution: chain_smallest_id`, `rights_conflict: error`) and refuse any other.
 
 `--reuse-completed-preparation` on both commands continues from completed local
 preparation: `build` renders admitted shards without replaying the acquisition
@@ -370,7 +417,6 @@ eligibility, redistribution and the license of trained weights. No license name
 settles all three.
 
 ```yaml
-schema_version: 2
 id: upstream_docs
 kind: git
 canonical_uri: https://example.org/upstream.git
@@ -393,11 +439,13 @@ rights:
 - **File-level evidence.** Git sources may pin a REUSE-style
   `nested_metadata_path`; SPDX headers in the first 30 lines of each file are
   recorded.
-- **Release policy.** The release declares a `publication_mode`. With schema 3,
-  sources record `explicit_training_restriction` and the release declares
-  `training_use_policy: allowed_unless_explicitly_prohibited`; identical text
-  from several sources keeps one copy and every origin's attribution.
-- **Conflicts.** Identical text with incompatible rights fails the build.
+- **Release policy.** The release declares a `publication_mode` and
+  `policy.rights.training_use` (see Release policy above). With
+  `allowed_unless_explicitly_prohibited`, sources record
+  `explicit_training_restriction`; identical text from several sources keeps one
+  copy and every origin's attribution.
+- **Conflicts.** With `duplicates.rights_conflict: error`, identical text with
+  incompatible rights fails the build.
 - **Reports.** `license-report.json` counts eligibility, redistribution modes
   and SPDX expressions. `klab corpus publication RELEASE` emits a metadata
   manifest (source URIs, revisions, file paths and hashes) for sharing what was

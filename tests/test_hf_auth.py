@@ -14,6 +14,7 @@ from pathlib import Path
 import huggingface_hub
 import pytest
 import yaml
+from corpus_fixtures import STRICT_POLICY, fixture_rights
 from huggingface_hub.errors import HfHubHTTPError
 from requests import Response
 
@@ -55,19 +56,20 @@ def test_hub_token_authorizes_without_changing_frozen_source_identity(
             "assignments": {"fixture": "train"},
         },
         "release.yaml": {
-            "schema_version": 1,
+            "publication_mode": "metadata_reconstruction_only",
+            "policy": STRICT_POLICY,
             "mixture": {"technical_docs": 1},
             "lm": {"selected": False, "training_splits": []},
             "chat": {"selected": False, "training_splits": []},
         },
         "sources/hub.yaml": {
-            "schema_version": 1,
             "id": "hub",
             "kind": "huggingface_dataset",
             "canonical_uri": "org/example",
             "revision": revision,
             "license": "MIT",
-            "redistribution": "redistributable",
+            "license_url": "https://example.org/license",
+            "rights": fixture_rights(),
             "domains": ["technical_docs"],
             "document_kinds": ["text"],
             "source_family": "fixture",
@@ -152,13 +154,13 @@ def test_http_hub_token_never_leaks_to_other_origins(
 
     monkeypatch.setattr(urllib.request, "build_opener", lambda redirect: Opener())
     declaration = {
-        "schema_version": 1,
         "id": "document",
         "kind": "http_document",
         "canonical_uri": Response.url,
         "revision": "pinned-source-v1",
         "license": "MIT",
-        "redistribution": "redistributable",
+        "license_url": "https://example.org/license",
+        "rights": fixture_rights(),
         "domains": ["technical_docs"],
         "document_kinds": ["markdown"],
         "source_family": "notes",
@@ -255,13 +257,13 @@ def test_hub_snapshot_denial_redacts_token(
     monkeypatch.setenv("HF_TOKEN", token)
     source = SourceDeclaration.model_validate(
         {
-            "schema_version": 1,
             "id": "hub",
             "kind": "huggingface_dataset",
             "canonical_uri": "org/example",
             "revision": "a" * 40,
             "license": "MIT",
-            "redistribution": "redistributable",
+            "license_url": "https://example.org/license",
+            "rights": fixture_rights(),
             "domains": ["technical_docs"],
             "document_kinds": ["text"],
             "source_family": "example",
@@ -298,13 +300,13 @@ def test_http_hub_denial_redacts_token(
     monkeypatch.setenv("HF_TOKEN", token)
     source = SourceDeclaration.model_validate(
         {
-            "schema_version": 1,
             "id": "document",
             "kind": "http_document",
             "canonical_uri": "https://huggingface.co/datasets/org/private/resolve/main/note.md",
             "revision": "pinned-v1",
             "license": "MIT",
-            "redistribution": "redistributable",
+            "license_url": "https://example.org/license",
+            "rights": fixture_rights(),
             "domains": ["technical_docs"],
             "document_kinds": ["markdown"],
             "source_family": "notes",
