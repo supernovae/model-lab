@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from tokenizers import Tokenizer
@@ -936,3 +937,149 @@ def test_a_draft_model_equal_to_the_target_is_always_accepted() -> None:
     assert speculation.accepted_tokens == speculation.drafted_tokens > 0
     # Two requests together use fewer target calls than one plain request.
     assert speculation.model_calls < len(reference)
+
+
+class _ScriptedDrafter:
+    """A pluggable drafter that follows a script instead of any real source."""
+
+    def __init__(self, propose) -> None:
+        self.propose = propose
+        self.model_calls = self.drafted_tokens = self.accepted_tokens = 0
+
+    def begin(self) -> None:
+        pass
+
+    def draft(self, ids, limit):
+        return self.propose(list(ids), limit)
+
+
+def _varied_model(tokenizer, max_seq_len: int, *, ends: bool):
+    """An untrained model made to emit varied tokens, and EOS if ``ends``.
+
+    Untrained tiny models repeat one token; a hook on the output layer adds a
+    fixed function of the hidden state so greedy decoding visits many tokens.
+    """
+    eos = tokenizer.token_to_id("<eos>")
+    model = _speculation_model(tokenizer, 0, max_seq_len=max_seq_len)
+
+    def vary(module, inputs, output):
+        wave = torch.sin(
+            inputs[0].sum(-1, keepdim=True) * torch.arange(output.shape[-1])
+        )
+        output = output + 20 * wave
+        if ends:
+            fires = output.argmax(-1) % 20 == 0
+            output[..., eos] = torch.where(
+                fires, output.max(-1).values + 1, output[..., eos]
+            )
+        return output
+
+    model.output.register_forward_hook(vary)
+    return model
+
+
+@pytest.mark.parametrize("max_seq_len", [64, 16])
+@pytest.mark.parametrize("behaviour", ["always_wrong", "past_eos", "past_limit"])
+def test_adversarial_drafters_never_change_greedy_tokens(
+    behaviour: str, max_seq_len: int
+) -> None:
+    tokenizer = _tokenizer()
+    eos = tokenizer.token_to_id("<eos>")
+    prompt = "hello world"
+    prompt_length = len(tokenizer.encode(prompt, add_special_tokens=False).ids)
+    model = _varied_model(tokenizer, max_seq_len, ends=behaviour == "past_eos")
+    _, reference = generate_with_token_ids(
+        model, tokenizer, prompt, max_seq_len, 30, torch.device("cpu")
+    )
+    assert len(set(reference)) > 3
+    assert (len(reference) < 30) == (behaviour == "past_eos")
+    future = reference + [eos, 7, 8, 9, 10]
+
+    def propose(ids, limit):
+        done = len(ids) - prompt_length
+        if behaviour == "always_wrong":
+            return [
+                (future[done + i] + 1) % tokenizer.get_vocab_size()
+                for i in range(limit)
+            ]
+        if behaviour == "past_eos":
+            # Right until the true end, then the EOS and tokens after it.
+            return future[done : done + limit]
+        # Ignores the limit it was given and returns far too many tokens.
+        return future[done : done + limit + 6] + [11] * 6
+
+    drafter = _ScriptedDrafter(propose)
+    _, speculative = generate_with_token_ids(
+        model,
+        tokenizer,
+        prompt,
+        max_seq_len,
+        30,
+        torch.device("cpu"),
+        speculation=drafter,
+    )
+    assert speculative == reference
+    if behaviour == "always_wrong":
+        assert drafter.accepted_tokens == 0 < drafter.drafted_tokens
+
+
+def test_a_drafter_outside_the_vocabulary_is_refused() -> None:
+    tokenizer = _tokenizer()
+    model = _speculation_model(tokenizer, 0)
+    drafter = _ScriptedDrafter(lambda ids, limit: [tokenizer.get_vocab_size()])
+    with pytest.raises(ValueError, match="outside the vocabulary"):
+        generate(
+            model,
+            tokenizer,
+            "hello",
+            64,
+            8,
+            torch.device("cpu"),
+            speculation=drafter,
+        )
+
+
+def _table(root: Path, stream: list[int]) -> None:
+    from klab.evaluation.ngram_table import build_ngram_table
+
+    build_ngram_table(
+        np.array(stream, dtype=np.int32),
+        root,
+        order=2,
+        table_size=1 << 12,
+        vocab_size=260,
+        eos_id=2,
+        source={"tokenizer_sha256": "a" * 64},
+    )
+
+
+def test_a_table_drafter_keeps_the_target_greedy_tokens(tmp_path: Path) -> None:
+    from klab.evaluation.ngram_table import CorpusNgramSpeculation, load_ngram_table
+
+    tokenizer = _tokenizer()
+    target = _speculation_model(tokenizer, 0)
+    prompt = "hello world"
+    _, reference = generate_with_token_ids(
+        target, tokenizer, prompt, 64, 40, torch.device("cpu")
+    )
+    prompt_ids = tokenizer.encode(prompt, add_special_tokens=False).ids
+    # A corpus that holds the model's own continuation is the best case...
+    _table(tmp_path / "good", prompt_ids + reference)
+    # ...and one of unrelated tokens is the worst: every guess is wrong or absent.
+    _table(tmp_path / "bad", [5, 6, 7, 8, 9] * 40)
+    accepted = {}
+    for name in ("good", "bad"):
+        table = load_ngram_table(tmp_path / name, tokenizer_sha256="a" * 64)
+        drafter = CorpusNgramSpeculation(table, max_draft_tokens=6)
+        _, speculative = generate_with_token_ids(
+            target,
+            tokenizer,
+            prompt,
+            64,
+            40,
+            torch.device("cpu"),
+            speculation=drafter,
+        )
+        assert speculative == reference
+        accepted[name] = drafter.accepted_tokens
+    assert accepted["good"] > 20 > accepted["bad"]

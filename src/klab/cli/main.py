@@ -739,6 +739,37 @@ def _prepared_input_summary(
     return result
 
 
+def _data_ngram_table(args: argparse.Namespace) -> None:
+    from klab.data.packing import load_prepared_data
+    from klab.data.tokenizer import load_tokenizer
+    from klab.evaluation.ngram_table import build_ngram_table
+    from klab.training.manifest import sha256_file
+
+    run = (Path(args.runs_dir) / args.run_id).resolve()
+    recorded = json.loads((run / "data" / "manifest.json").read_text(encoding="utf-8"))
+    data = load_prepared_data(
+        run / "data",
+        byte_enabled=recorded.get("byte_addressing") is not None,
+        verification="deep",
+    )
+    tokenizer = load_tokenizer(run / "tokenizer.json")
+    manifest = build_ngram_table(
+        data.train,
+        args.output,
+        order=args.order,
+        table_size=args.table_size,
+        vocab_size=tokenizer.get_vocab_size(),
+        eos_id=tokenizer.token_to_id("<eos>"),
+        source={
+            "run_id": args.run_id,
+            "split": "train",
+            "prepared_manifest_sha256": data.manifest["manifest_sha256"],
+            "tokenizer_sha256": sha256_file(run / "tokenizer.json"),
+        },
+    )
+    print(json.dumps(manifest, sort_keys=True))
+
+
 def _data_prepared_inputs(args: argparse.Namespace) -> None:
     from klab.staging import materialize_prepared_inputs, verify_prepared_inputs
 
@@ -1073,9 +1104,27 @@ def _generate(args: argparse.Namespace) -> None:
         "strict_context": args.strict_context,
     }
     speculation = None
-    if args.prompt_lookup is not None and args.draft_run is not None:
-        raise ValueError("choose one drafter: --prompt-lookup or --draft-run")
-    if args.prompt_lookup is not None:
+    if (
+        sum(
+            option is not None
+            for option in (args.prompt_lookup, args.draft_run, args.ngram_table)
+        )
+        > 1
+    ):
+        raise ValueError(
+            "choose one drafter: --prompt-lookup, --draft-run or --ngram-table"
+        )
+    if args.ngram_table is not None:
+        from klab.evaluation.ngram_table import (
+            CorpusNgramSpeculation,
+            load_ngram_table,
+        )
+
+        table = load_ngram_table(
+            args.ngram_table, tokenizer_sha256=loaded.identity["tokenizer_sha256"]
+        )
+        speculation = CorpusNgramSpeculation(table, max_draft_tokens=args.draft_tokens)
+    elif args.prompt_lookup is not None:
         from klab.evaluation.speculation import PromptLookupSpeculation
 
         speculation = PromptLookupSpeculation(
@@ -1139,6 +1188,10 @@ def _generate(args: argparse.Namespace) -> None:
                 drafter="draft_model",
                 draft_identity=drafting.identity,
                 draft_model_calls=speculation.draft_model_calls,
+            )
+        elif args.ngram_table is not None:
+            speculation_report.update(
+                drafter="corpus_ngram", table_identity=speculation.table.identity
             )
         else:
             speculation_report.update(drafter="prompt_lookup", ngram=speculation.ngram)
@@ -2371,6 +2424,20 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     data_prepare.add_argument("--cold-verify", action="store_true")
     data_prepare.add_argument("--observations-output", type=Path)
     _tokenizer_batch_arguments(data_prepare)
+    data_ngram = data_commands.add_parser(
+        "ngram-table",
+        help="Build a next-token table from a run's training split for drafting",
+    )
+    data_ngram.add_argument("run_id")
+    data_ngram.add_argument("--output", required=True, type=Path)
+    data_ngram.add_argument("--order", type=int, default=3)
+    data_ngram.add_argument("--table-size", type=int, default=1 << 20)
+    data_ngram.add_argument(
+        "--runs-dir",
+        default=runs_dir_default,
+        help="Run directory (default: selected persistent state root/runs)",
+    )
+    data_ngram.set_defaults(handler=_data_ngram_table)
     prepared_inputs = data_commands.add_parser(
         "prepared-inputs", help="Publish or cold-verify immutable training inputs"
     )
@@ -2699,7 +2766,15 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         "--draft-tokens",
         type=int,
         default=8,
-        help="Most tokens drafted per model call with --prompt-lookup or --draft-run",
+        help="Most tokens drafted per model call with --prompt-lookup, --ngram-table "
+        "or --draft-run",
+    )
+    generation.add_argument(
+        "--ngram-table",
+        type=Path,
+        metavar="DIR",
+        help="Draft with a `klab data ngram-table` built from a training split "
+        "and verify the draft in one model call; greedy output is unchanged",
     )
     generation.add_argument(
         "--draft-run",

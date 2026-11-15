@@ -401,9 +401,10 @@ def generate_with_token_ids(
         if cache.length + resend > cache.capacity:
             feed_start = None
             return rebuild_cache(remaining)
-        draft = speculation.draft(
-            ids, min(remaining - 1, cache.capacity - cache.length - resend)
-        )
+        limit = min(remaining - 1, cache.capacity - cache.length - resend)
+        draft = list(speculation.draft(ids, limit))[: max(limit, 0)]
+        if any(not 0 <= drafted < tokenizer.get_vocab_size() for drafted in draft):
+            raise ValueError("a drafter proposed a token outside the vocabulary")
         feed_start = (cache.length, cache.memory_history, dict(cache.memory_histories))
         confirmed = resend
         step_logits, cache = model.forward_cached(  # type: ignore[attr-defined]
