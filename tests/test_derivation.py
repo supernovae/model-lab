@@ -329,13 +329,6 @@ def test_config_relocation_preserves_all_typed_input_targets(
 ):
     raw = yaml.safe_load(source_config.read_text())
     raw["dataset"].update(dataset)
-    raw["model"].update(
-        memory="portable",
-        memory_table_size=64,
-        memory_ngram_size=2,
-        memory_dim=8,
-        memory_package_path="memory/package",
-    )
     source_config.write_text(yaml.safe_dump(raw))
     output = tmp_path / "relocated.yaml"
     receipt = derive_config(source_config, output, {"optimizer.peak": 0.001})
@@ -346,16 +339,13 @@ def test_config_relocation_preserves_all_typed_input_targets(
                 getattr(loaded.dataset, field)
                 == (source_config.parent / authored).resolve()
             )
-    assert (
-        loaded.model.memory_package_path
-        == (source_config.parent / "memory/package").resolve()
-    )
     assert receipt["delta"] == {"optimizer.peak": {"base": 0.003, "variant": 0.001}}
     rebound = {row["path"]: row for row in receipt["path_rebindings"]}
-    assert rebound["model.memory_package_path"]["source_value"] == "memory/package"
-    assert rebound["model.memory_package_path"]["resolved_target"] == str(
-        loaded.model.memory_package_path
-    )
+    for field in dataset:
+        if field.endswith("_path"):
+            assert rebound[f"dataset.{field}"]["resolved_target"] == str(
+                getattr(loaded.dataset, field)
+            )
 
 
 @pytest.mark.parametrize("destination", ["invalid.json", "missing/derived.yaml"])

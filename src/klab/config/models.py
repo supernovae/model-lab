@@ -364,9 +364,6 @@ class ModelConfig(StrictModel):
     memory_block_indices: tuple[Annotated[int, Field(strict=True, ge=0)], ...] = Field(
         default=(), exclude_if=lambda value: not value
     )
-    memory_variant: Literal["hidden_gate", "context_key"] = Field(
-        default="hidden_gate", exclude_if=lambda value: value == "hidden_gate"
-    )
     memory_conv_kernel_size: int = Field(
         default=0, strict=True, ge=0, le=16, exclude_if=lambda value: value == 0
     )
@@ -391,7 +388,6 @@ class ModelConfig(StrictModel):
     memory_table_size: int = 0
     memory_ngram_size: int = 0
     memory_dim: int = 0
-    memory_package_path: Path | None = None
     memory_ngram_orders: tuple[int, ...] = ()
     memory_hash_heads: int = Field(default=1, gt=0)
 
@@ -542,15 +538,12 @@ class ModelConfig(StrictModel):
                 )
         elif self.memory_block_index is not None or self.memory_block_indices:
             raise ValueError("memory block indices require after_block injection")
-        if self.memory_variant != "hidden_gate" and self.memory != "ngram":
-            raise ValueError("context_key requires token ngram memory")
-        if (
-            self.memory_gate_transform != "identity"
-            and self.memory_variant != "context_key"
+        if self.memory != "ngram" and (
+            self.memory_gate_transform != "identity" or self.memory_conv_kernel_size
         ):
-            raise ValueError("gate transform requires context_key memory")
-        if self.memory_conv_kernel_size and self.memory_variant != "context_key":
-            raise ValueError("memory convolution requires context_key memory")
+            raise ValueError(
+                "gate transform and memory convolution require token ngram memory"
+            )
         if self.memory != "ngram" and (
             self.memory_table_sizes
             or self.memory_hash_seed
@@ -581,10 +574,7 @@ class ModelConfig(StrictModel):
         if self.memory == "none" and self.memory_injection != "final":
             raise ValueError("embedding memory injection requires enabled memory")
         if self.memory == "none" and (
-            any(settings)
-            or self.memory_package_path is not None
-            or self.memory_ngram_orders
-            or self.memory_hash_heads != 1
+            any(settings) or self.memory_ngram_orders or self.memory_hash_heads != 1
         ):
             raise ValueError("disabled model.memory requires zero memory settings")
         if self.memory != "none" and (
@@ -602,14 +592,12 @@ class ModelConfig(StrictModel):
             raise ValueError(
                 "model.memory_ngram_orders must be sorted unique values >= 2"
             )
-        if self.memory in {"byte", "portable"}:
+        if self.memory == "byte":
             from klab.address_hash import validate_byte_table_size
 
             validate_byte_table_size(self.memory_table_size)
         if self.memory == "byte" and self.memory_ngram_orders:
             raise ValueError("byte memory uses its configured raw-byte ngram size")
-        if (self.memory == "portable") != (self.memory_package_path is not None):
-            raise ValueError("portable memory requires exactly memory_package_path")
         return self
 
     def _validate_external_memory(self) -> ModelConfig:
@@ -1459,7 +1447,7 @@ class RunConfig(StrictModel):
             )
         if (objective.kind != DEFAULT_KIND or paired_data) and (
             self.runtime.engine != "pytorch"
-            or self.model.memory in {"byte", "portable"}
+            or self.model.memory == "byte"
             or matched is not None
             or self.runtime.compile_output_head_loss
             or self.runtime.secondary_device_indices

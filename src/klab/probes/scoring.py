@@ -37,7 +37,7 @@ def eot(loaded: Any) -> int:
 
 def _byte_inputs(loaded: Any, ids: list[int]) -> dict[str, Any]:
     config = loaded.config.model
-    if config.memory not in {"byte", "portable"}:
+    if config.memory != "byte":
         return {}
     import torch
 

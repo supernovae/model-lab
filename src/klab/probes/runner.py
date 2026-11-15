@@ -110,8 +110,6 @@ def as_arm(value: Any) -> Arm | None:
 def _require_torch_engine(loaded: Any) -> None:
     if loaded.engine is not None:
         raise ProbeUnsupported("probes need the PyTorch engine (MLX not supported)")
-    if getattr(loaded.model, "semantic_memories", None):
-        raise ProbeUnsupported("probes do not support attached semantic packs")
 
 
 def footprint(model: Any, inventory: Mapping[str, Any] | None) -> dict[str, int]:

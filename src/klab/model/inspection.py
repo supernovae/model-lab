@@ -207,8 +207,7 @@ def named_tensor_inventory(
     """Return the canonical parameter schema without constructing a model.
 
     Alias entries have the same shape as their stored tensor and point at its
-    canonical name.  Portable table dimensions come from the resolved config;
-    package identity and contents are deliberately not opened by inspection.
+    canonical name.
     """
     attention = attention_config or AttentionConfig()
     m = model_config
@@ -246,15 +245,7 @@ def named_tensor_inventory(
             sizes = (m.memory_table_sizes or (m.memory_table_size,) * streams * ports)[
                 port * streams : (port + 1) * streams
             ]
-            frozen = m.memory == "portable"
-            _add(
-                tensors,
-                f"{prefix}.table.weight"
-                if m.memory != "portable"
-                else f"{prefix}.embedding.weight",
-                (sizes[0], m.memory_dim),
-                trainable=not frozen,
-            )
+            _add(tensors, f"{prefix}.table.weight", (sizes[0], m.memory_dim))
             if m.memory == "ngram":
                 for stream in range(1, streams):
                     _add(
@@ -265,7 +256,7 @@ def named_tensor_inventory(
                             m.memory_dim,
                         ),
                     )
-            if m.memory_variant == "context_key":
+            if m.memory == "ngram":
                 _add(tensors, f"{prefix}.output.weight", (d, streams * m.memory_dim))
                 _add(tensors, f"{prefix}.key.weight", (d, streams * m.memory_dim))
                 _add(tensors, f"{prefix}.gate.query_norm.weight", (d,))
@@ -371,7 +362,7 @@ def parameter_inventory(config: RunConfig) -> ParameterInventory:
     adapter = _sum_specs(
         tensors,
         lambda name, spec: (
-            name.startswith(("memory.", "extra_memories.", "semantic_memories."))
+            name.startswith(("memory.", "extra_memories."))
             and not (_memory_table_name(name))
         ),
     )
@@ -439,7 +430,6 @@ def inspection_report(config: RunConfig) -> dict[str, int | str]:
         "memory_injection": "none"
         if config.model.memory == "none"
         else config.model.memory_injection,
-        "memory_variant": config.model.memory_variant,
         "memory_block_index": config.model.memory_block_index,
         **(
             {"memory_block_indices": list(config.model.memory_block_indices)}
@@ -554,7 +544,6 @@ def inspect_model(model: nn.Module) -> dict[str, int | str]:
         "memory_injection": "none"
         if model.memory is None
         else model.config.memory_injection,
-        "memory_variant": model.config.memory_variant,
         "memory_block_index": model.config.memory_block_index,
         **(
             {"memory_block_indices": list(model.config.memory_block_indices)}

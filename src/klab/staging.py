@@ -47,7 +47,6 @@ from klab.memory import (
     write_resource_proposal,
 )
 from klab.model.inspection import inspection_report, named_tensor_inventory
-from klab.model.portable_engram import load_portable_engram
 from klab.owned_copy import owned_copy
 from klab.resource_envelope import (
     ResourceEnvelope,
@@ -364,7 +363,7 @@ def pilot_config(
                 data = _load_inventory_prepared(
                     root / "assets",
                     proofs,
-                    byte_enabled=config.model.memory in {"byte", "portable"},
+                    byte_enabled=config.model.memory == "byte",
                 )
                 tokenizer = load_tokenizer(root / "assets" / "tokenizer.json")
                 matched_dataset = _pilot_story_dataset(
@@ -441,7 +440,7 @@ def verify_stage_bundle(
         verification_mode=verification_mode,
     )
     data = _load_inventory_prepared(
-        assets, proofs, byte_enabled=base.model.memory in {"byte", "portable"}
+        assets, proofs, byte_enabled=base.model.memory == "byte"
     )
     tokenizer = load_tokenizer(root / "assets" / "tokenizer.json")
     if matched_pilot:
@@ -731,28 +730,6 @@ def materialize_prepared_inputs(
             from klab.evaluation.panel_data import copy_fixed_panels
 
             copy_fixed_panels(config, assets, training_manifest=data.manifest)
-            if config.model.memory_package_path is not None:
-                copied.update(
-                    {
-                        f"portable_package/{name}"
-                        if config.model.memory_package_path.is_dir()
-                        else "portable_package": proof
-                        for name, proof in _copy_tree(
-                            config.model.memory_package_path,
-                            assets / "portable_package",
-                            copy_observations=copy_observations,
-                            observer=observer,
-                        ).items()
-                    }
-                )
-                load_portable_engram(
-                    assets / "portable_package",
-                    expected_shape=(
-                        config.model.memory_table_size,
-                        config.model.memory_dim,
-                    ),
-                    expected_ngram_size=config.model.memory_ngram_size,
-                )
         else:
             source = prepared_inputs.resolve(strict=True)
             if source.name == "assets":
@@ -860,7 +837,7 @@ def verify_prepared_inputs(
         verification_mode=verification_mode,
     )
     data = _load_inventory_prepared(
-        assets, proofs, byte_enabled=config.model.memory in {"byte", "portable"}
+        assets, proofs, byte_enabled=config.model.memory == "byte"
     )
     tokenizer = load_tokenizer(root / "assets" / "tokenizer.json")
     if tokenizer.get_vocab_size() != config.model.vocab_size:
@@ -871,12 +848,6 @@ def verify_prepared_inputs(
         verify_portable_corpus_binding(config, assets)
     if not len(data.train) or not len(data.validation):
         raise ValueError("prepared data is empty")
-    if config.model.memory_package_path is not None:
-        load_portable_engram(
-            root / "assets" / "portable_package",
-            expected_shape=(config.model.memory_table_size, config.model.memory_dim),
-            expected_ngram_size=config.model.memory_ngram_size,
-        )
     if _proofs is not None:
         _proofs.update(proofs)
     return {**inputs, "assets_root": str(root / "assets")}

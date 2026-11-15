@@ -507,6 +507,7 @@ def test_a_local_selected_ngram_run_exports_and_generates_without_lab(
                 update={
                     "memory": "ngram",
                     "memory_table_size": 31,
+                    "memory_table_sizes": (31,),
                     "memory_ngram_size": 2,
                     "memory_dim": 8,
                     # Untied, an untrained head does not just repeat the prompt.

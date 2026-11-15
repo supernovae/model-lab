@@ -3,7 +3,6 @@
   "version": 1,
   "id": "dense",
   "title": "Dense decoder baseline",
-  "mechanism_kind": "model",
   "summary": "Build and probe the ordinary tied-embedding dense decoder directly to inspect its forward shapes and initialized behavior.",
   "benefit_scope": ["training", "inference", "capacity"],
   "steps": [

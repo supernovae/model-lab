@@ -264,8 +264,6 @@ def quantize_run(
     )
     if loaded.engine is not None:
         raise ValueError("weight quantization needs the PyTorch engine (not MLX)")
-    if getattr(loaded.model, "semantic_memories", None):
-        raise ValueError("weight quantization does not support attached semantic packs")
     source_eval = loaded.evaluate()
     source_bytes = _weight_bytes(loaded.model)
     tensors = quantize_tensors(loaded.model, scheme)

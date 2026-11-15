@@ -128,7 +128,7 @@ def projected_data_bytes(config: RunConfig) -> int:
     """
     targets = _train_positions(config) + config.dataset.validation_max_tokens
     per_token = 4 + 1
-    if config.model.memory in {"byte", "portable"}:
+    if config.model.memory == "byte":
         per_token += 4
     return math.ceil(1.25 * 2 * targets * per_token) + 32 * 1024 * 1024
 

@@ -35,9 +35,8 @@ from klab.corpus.mixture_index import (
 from klab.corpus.release import _verification_operation, verify_release
 from klab.data.row_layout import document_rows
 from klab.data.tokenizer import load_tokenizer, verify_tokenizer_artifact
-from klab.engram.packs import _rename_noreplace
 from klab.result_publication import sync_directory
-from klab.safe_io import write_canonical_json
+from klab.safe_io import rename_noreplace, write_canonical_json
 from klab.training.manifest import sha256_file
 
 MIXTURE_BATCH_SOURCE_BYTES = 8 * 1024**2
@@ -589,7 +588,7 @@ def _materialize_mixture(
             }
         write_canonical_json(staging / "receipt.json", receipt, exclusive=True)
         sync_directory(staging)
-        _rename_noreplace(staging, output)
+        rename_noreplace(staging, output)
         sync_directory(output.parent)
         if completed is not None:
             _seal_completed_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)

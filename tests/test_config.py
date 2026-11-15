@@ -303,7 +303,6 @@ def test_origin_binding_requires_pins_and_frozen_sources(origin_bound_config, ch
         {"memory_injection": "after_block"},
         {"memory_injection": "after_block", "memory_block_index": 2},
         {"memory_block_index": 0},
-        {"memory_conv_kernel_size": 4},
     ],
 )
 def test_context_memory_rejects_invalid_placement_and_refinement(change):
@@ -336,13 +335,11 @@ def test_context_memory_roundtrip_preserves_distinct_architecture():
         memory_ngram_size=3,
         memory_dim=4,
     )
-    assert "memory_variant" not in base.model_dump()
     assert "memory_block_index" not in base.model_dump()
     assert "memory_conv_kernel_size" not in base.model_dump()
     contextual = ModelConfig.model_validate(
         base.model_dump()
         | {
-            "memory_variant": "context_key",
             "memory_injection": "after_block",
             "memory_block_index": 0,
             "memory_conv_kernel_size": 4,

@@ -216,7 +216,7 @@ def experiment_evidence(
         raise ValueError("run inventory lacks required supervision masks")
     prepared = load_prepared_data(
         data_root,
-        byte_enabled=config["model"]["memory"] in {"byte", "portable"},
+        byte_enabled=config["model"]["memory"] == "byte",
         verification="structural",
         receipt=_receipt_from_proofs(data_root, data_manifest, array_proofs),
     )

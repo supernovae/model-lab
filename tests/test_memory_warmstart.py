@@ -49,7 +49,6 @@ def _configs(
         memory_dim=4,
         memory_ngram_orders=[2, 3],
         memory_hash_heads=2,
-        memory_variant="context_key",
         memory_injection="after_block",
         memory_block_index=0,
         memory_conv_kernel_size=4,

@@ -59,7 +59,7 @@ class InferenceRun:
             np.load(root / "validation.npy", mmap_mode="r", allow_pickle=False),
             self.config.training.seq_len,
             np.load(addresses, mmap_mode="r", allow_pickle=False)
-            if self.config.model.memory in {"byte", "portable"}
+            if self.config.model.memory == "byte"
             else None,
             np.load(supervision, mmap_mode="r", allow_pickle=False)
             if needs_mask
@@ -246,7 +246,7 @@ def load_run(
         required.update(
             {"data/train_supervision.npy", "data/validation_supervision.npy"}
         )
-    if config.model.memory in {"byte", "portable"}:
+    if config.model.memory == "byte":
         required.update(
             {"data/train_byte_addresses.npy", "data/validation_byte_addresses.npy"}
         )
@@ -257,7 +257,7 @@ def load_run(
     receipt = _receipt_from_proofs(run / "data", data_manifest, array_proofs)
     load_prepared_data(
         run / "data",
-        byte_enabled=config.model.memory in {"byte", "portable"},
+        byte_enabled=config.model.memory == "byte",
         verification="structural",
         receipt=receipt,
     )
@@ -342,15 +342,8 @@ def load_run(
         else selected_device.type
     )
     device = torch_device_for(actual_backend, runtime_config.runtime.device_index)
-    model_config = config.model
-    if model_config.memory_package_path is not None:
-        if "portable_package" not in artifacts:
-            raise ValueError("run lacks a verified portable memory package")
-        model_config = model_config.model_copy(
-            update={"memory_package_path": run / "portable_package"}
-        )
     with torch.random.fork_rng(devices=[]):
-        model = DenseLM(model_config, config.attention)
+        model = DenseLM(config.model, config.attention)
         model.load_state_dict(weights)
     del weights
     quantization = None

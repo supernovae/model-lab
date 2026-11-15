@@ -286,10 +286,8 @@ Remote code refuses, with the reason:
 
 - `byte` memory, whose addresses Lab computes from the tokenizer's bytes
   outside the model;
-- `portable` memory, which reads an Engram package outside the checkpoint;
 - attention, feed-forward or memory kinds from another package;
-- a checkpoint whose tensors the decoder does not define, such as attached
-  semantic memory.
+- a checkpoint whose tensors the decoder does not define.
 
 The export also refuses if the copied code would import anything outside the
 decoder's modules, the standard library, Torch, safetensors and
@@ -344,7 +342,7 @@ through the usual verified path, then swaps in the artifact's layers. The
 artifact must come from exactly that checkpoint (otherwise it is refused with
 the `--checkpoint` to pass), its manifest digest and weight file must verify,
 and its modules must match the model. The loaded identity carries a
-`quantization` block. MLX runs and attached semantic packs are refused.
+`quantization` block. MLX runs are refused.
 
 ## Write your own objective
 
@@ -415,9 +413,9 @@ a teacher that behaves the way you want, or a loss term of your own.
 ## Limits
 
 - **Engine:** objectives other than `next_token`, and `local_preference` data,
-  run on the PyTorch engine on one device. They are refused with byte or
-  portable memory, allocation or portability sidecars, matched stories, the
-  compiled output head and secondary devices. MLX is refused.
+  run on the PyTorch engine on one device. They are refused with byte memory,
+  allocation or portability sidecars, matched stories, the compiled output head
+  and secondary devices. MLX is refused.
 - **Memory:** a teacher or reference is a second model on the device.
   `klab inspect` does not count it.
 - **Not implemented:** low-rank adapters (LoRA), rollout-based reinforcement

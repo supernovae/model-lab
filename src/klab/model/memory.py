@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor, nn
@@ -130,7 +130,6 @@ class TokenNgramMemory(nn.Module):
         value_dim: int,
         ngram_orders: tuple[int, ...] = (),
         hash_heads: int = 1,
-        variant: Literal["hidden_gate", "context_key"] = "hidden_gate",
         norm_eps: float = 1e-6,
         conv_kernel_size: int = 0,
         table_sizes: tuple[int, ...] = (),
@@ -169,11 +168,6 @@ class TokenNgramMemory(nn.Module):
             persistent=False,
         )
 
-        if variant not in {"hidden_gate", "context_key"}:
-            raise ValueError(f"unknown token memory variant: {variant}")
-        self.variant = variant
-        if conv_kernel_size and variant != "context_key":
-            raise ValueError("memory convolution requires context_key memory")
         self.conv_history_length = max(self.ngram_orders) * max(conv_kernel_size - 1, 0)
         self.conv = (
             nn.Conv1d(
@@ -192,14 +186,10 @@ class TokenNgramMemory(nn.Module):
         self.extra_tables = nn.ModuleList(
             nn.Embedding(size, value_dim) for size in self.table_sizes[1:]
         )
-        if variant == "context_key":
-            concatenated_dim = value_dim * len(self.ngram_orders) * hash_heads
-            self.output = nn.Linear(concatenated_dim, hidden_dim, bias=False)
-            self.key = nn.Linear(concatenated_dim, hidden_dim, bias=False)
-            self.gate = ContextKeyGate(hidden_dim, norm_eps, gate_transform)
-        else:
-            self.output = nn.Linear(value_dim, hidden_dim, bias=False)
-            self.gate = nn.Linear(hidden_dim, 1, bias=False)
+        concatenated_dim = value_dim * len(self.ngram_orders) * hash_heads
+        self.output = nn.Linear(concatenated_dim, hidden_dim, bias=False)
+        self.key = nn.Linear(concatenated_dim, hidden_dim, bias=False)
+        self.gate = ContextKeyGate(hidden_dim, norm_eps, gate_transform)
         self.last_diagnostics: MemoryDiagnostics | None = None
 
     def _shifted_inputs(self, input_ids: Tensor, max_order: int) -> list[Tensor]:
@@ -253,20 +243,13 @@ class TokenNgramMemory(nn.Module):
         retrieved = [
             table(address) for table, address in zip(tables, addresses, strict=True)
         ]
-        if self.variant == "context_key":
-            concatenated = torch.cat(retrieved, dim=-1)
-            values = self.output(concatenated)
-            gate = torch.sigmoid(self.gate(hidden, self.key(concatenated)))
-            stream_values = retrieved
-        else:
-            stacked_values = self.output(torch.stack(retrieved))
-            stream_values = stacked_values.unbind(0)
-            values = stacked_values.mean(dim=0)
-            gate = torch.sigmoid(self.gate(hidden))
+        concatenated = torch.cat(retrieved, dim=-1)
+        values = self.output(concatenated)
+        gate = torch.sigmoid(self.gate(hidden, self.key(concatenated)))
         stream_diagnostics = tuple(
             _diagnostics(address, gate, value, hidden, size, position_mask)
             for address, value, size in zip(
-                addresses, stream_values, self.table_sizes, strict=True
+                addresses, retrieved, self.table_sizes, strict=True
             )
         )
         if position_mask is not None:
@@ -387,7 +370,6 @@ def build_token_memory(
         model.memory_dim,
         model.memory_ngram_orders,
         model.memory_hash_heads,
-        model.memory_variant,
         model.rms_norm_eps,
         model.memory_conv_kernel_size,
         table_sizes=sizes,

@@ -22,7 +22,6 @@ from klab.data.verification import (
     required_arrays,
     verify_file,
 )
-from klab.model.portable_engram import load_portable_engram
 from klab.owned_copy import owned_copy
 from klab.staging import (
     materialize_prepared_inputs,
@@ -256,11 +255,7 @@ def _continuation_assets(destination: Path, selected: Path, *, resume: bool) -> 
     if not required <= artifacts:
         raise ValueError("selected continuation lacks bound run-owned artifacts")
     for name in sorted(artifacts):
-        if (
-            resume
-            or name in {"tokenizer.json", "portable_package"}
-            or name.startswith("portable_package/")
-        ):
+        if resume or name == "tokenizer.json":
             source = _safe_member(run, name)
             if source is None:
                 raise ValueError(f"unsafe continuation artifact: {name}")
@@ -582,22 +577,6 @@ def prepare_dispatch_bundle(
                 # Forge preparation also seals the tokenizer's original export
                 # provenance. Keep that verified source context; the copied bytes
                 # are checked against the parent again below.
-                if config.model.memory_package_path is not None:
-                    from klab.training.continuation import _package_identity
-
-                    if _package_identity(
-                        config.model.memory_package_path
-                    ) != _package_identity(run / "portable_package"):
-                        raise ValueError(
-                            "promotion requires matching portable package identity"
-                        )
-                    prepared_config = prepared_config.model_copy(
-                        update={
-                            "model": config.model.model_copy(
-                                update={"memory_package_path": run / "portable_package"}
-                            )
-                        }
-                    )
             prepared = work / "prepared"
             materialize_prepared_inputs(
                 prepared_config,
@@ -827,7 +806,7 @@ def _verify_bundle_inputs(
         )
     data = load_prepared_data(
         assets / "data",
-        byte_enabled=config.model.memory in {"byte", "portable"},
+        byte_enabled=config.model.memory == "byte",
         verification="structural" if receipt is not None else "deep",
         receipt=receipt,
     )
@@ -838,12 +817,6 @@ def _verify_bundle_inputs(
         verify_portable_corpus_binding(config, assets)
     if not len(data.train) or not len(data.validation):
         raise ValueError("bundle prepared data is empty")
-    if config.model.memory_package_path is not None:
-        load_portable_engram(
-            assets / "portable_package",
-            expected_shape=(config.model.memory_table_size, config.model.memory_dim),
-            expected_ngram_size=config.model.memory_ngram_size,
-        )
 
 
 def _cache_paths(worker_root: Path, digest: str) -> tuple[Path, Path]:

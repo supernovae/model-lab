@@ -55,10 +55,9 @@ from klab.corpus.transport_budget import (
     source_file_name,
 )
 from klab.corpus.transport_cache import BodyKey, TransportCache, resolve_transport_cache
-from klab.engram.packs import _rename_noreplace
 from klab.hf_auth import hub_access_errors, hub_auth_kwargs, raise_for_hub_auth
 from klab.result_publication import sync_directory
-from klab.safe_io import symlinked, write_canonical_json
+from klab.safe_io import rename_noreplace, symlinked, write_canonical_json
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
@@ -2720,7 +2719,7 @@ def acquire(
                         elif member.is_dir():
                             sync_directory(member)
                     sync_directory(staging)
-                    _rename_noreplace(staging, destination)
+                    rename_noreplace(staging, destination)
                     sync_directory(destination.parent)
                 finally:
                     if staging.exists():
@@ -2890,7 +2889,7 @@ def acquire(
                         sync_directory(directory)
                 sync_directory(staging / "files")
                 sync_directory(staging)
-                _rename_noreplace(staging, destination)
+                rename_noreplace(staging, destination)
                 sync_directory(parent)
                 verify_snapshot(
                     destination,

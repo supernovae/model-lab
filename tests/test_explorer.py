@@ -508,7 +508,6 @@ def test_multiport_explorer_captures_every_table_and_gate() -> None:
             "num_layers": 3,
             "memory_injection": "after_block",
             "memory_block_indices": [0, 2],
-            "memory_variant": "context_key",
             "memory_table_sizes": [97, 101, 103, 107],
             "memory_table_size": 97,
         }

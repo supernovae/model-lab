@@ -1,14 +1,14 @@
 """Request-local decoding with usage and cancellation for the local server.
 
 The historical generation.py is byte-pinned by scientific preregistrations.
-Keep that reference decoder unchanged; reuse its sampling, addressing, semantic
+Keep that reference decoder unchanged; reuse its sampling, addressing
 context and cache-capability helpers here, with parity tests guarding trajectory.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from threading import Event
 from typing import Any, Literal
@@ -18,13 +18,11 @@ from tokenizers import Tokenizer
 
 from klab.data.byte_hash import table_address, token_bytes
 from klab.engines.mlx import MLXEngine, preserve_rng_state
-from klab.engram.semantic import SemanticQueryBatch
 from klab.evaluation.generation import (
     _cache_capability,
     _mlx_next_token,
     _next_token,
     _prompt_byte_addresses,
-    _semantic_queries_for_context,
     _validate_generation_options,
 )
 from klab.training.attempt_budget import AttemptBudget, AttemptBudgetError
@@ -78,20 +76,12 @@ def generate_result(
     use_cache: bool = True,
     cancellation: Event | Callable[[], bool] | None = None,
     engine: MLXEngine | None = None,
-    semantic_queries: SemanticQueryBatch
-    | Mapping[str, SemanticQueryBatch]
-    | None = None,
     accounting_label: str | None = None,
 ) -> GenerationResult:
     """Continue ``prompt`` with sampling metadata and cooperative cancellation.
 
     Cancellation is checked at token boundaries; it cannot interrupt a running
     backend kernel. Request-local caches are discarded and model mode restored.
-
-    Semantic inputs are already-encoded, identity-checked query batches. Sequence
-    queries track context truncation and repeat their final position across generated
-    tokens; cached and full-prefix PyTorch paths preserve the same query trajectory.
-    Native MLX does not implement semantic attachments.
 
     Returned IDs are sampled completion tokens (not prompt or EOS), before any
     text-only stop-sequence trimming. They preserve the exact decoding trajectory
@@ -105,16 +95,11 @@ def generate_result(
             raise ValueError(
                 "native MLX generation requires its model and device='metal'"
             )
-        if semantic_queries is not None:
-            raise ValueError("native MLX generation does not support semantic queries")
     elif not isinstance(device, torch.device):
         raise TypeError("PyTorch generation requires a torch.device")
     mx = engine._mx if engine is not None else None
     ids = tokenizer.encode(prompt, add_special_tokens=False).ids
-    byte_memory = engine is None and getattr(model.config, "memory", "none") in {
-        "byte",
-        "portable",
-    }
+    byte_memory = engine is None and getattr(model.config, "memory", "none") == "byte"
     if not ids:
         bos = tokenizer.token_to_id("<bos>")
         if bos is None:
@@ -196,14 +181,6 @@ def generate_result(
             else None
         )
         options: dict[str, Any] = {"byte_addresses": byte_addresses}
-        query_input = _semantic_queries_for_context(
-            semantic_queries,
-            prompt_length=prompt_length,
-            active_start=len(ids) - len(active_ids),
-            active_length=len(active_ids),
-        )
-        if query_input is not None:
-            options["semantic_queries"] = query_input
         return model(input_ids, **options)[0, -1]
 
     def rebuild_cache(remaining_tokens: int) -> torch.Tensor:
@@ -220,14 +197,6 @@ def generate_result(
             "cache_capacity": min(max_seq_len, len(active_ids) + remaining_tokens),
             "byte_addresses": byte_addresses,
         }
-        query_input = _semantic_queries_for_context(
-            semantic_queries,
-            prompt_length=prompt_length,
-            active_start=len(ids) - len(active_ids),
-            active_length=len(active_ids),
-        )
-        if query_input is not None:
-            options["semantic_queries"] = query_input
         logits, cache = model.forward_cached(  # type: ignore[attr-defined]
             input_ids, **options
         )
@@ -301,14 +270,6 @@ def generate_result(
                         "cache": cache,
                         "byte_addresses": next_addresses,
                     }
-                    query_input = _semantic_queries_for_context(
-                        semantic_queries,
-                        prompt_length=prompt_length,
-                        active_start=len(ids) - 1,
-                        active_length=1,
-                    )
-                    if query_input is not None:
-                        options["semantic_queries"] = query_input
                     next_logits, cache = model.forward_cached(  # type: ignore[attr-defined]
                         next_ids, **options
                     )

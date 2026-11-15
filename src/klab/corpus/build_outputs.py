@@ -76,8 +76,8 @@ def stage_declared_inputs(
 
 def publish_staging(staging: Path, target: Path) -> None:
     """Make the staged files durable, then rename the directory into place."""
-    from klab.engram.packs import _rename_noreplace
     from klab.result_publication import sync_directory
+    from klab.safe_io import rename_noreplace
 
     for entry in sorted(staging.rglob("*"), reverse=True):
         if entry.is_file():
@@ -87,7 +87,7 @@ def publish_staging(staging: Path, target: Path) -> None:
             sync_directory(entry)
     sync_directory(staging)
     target.parent.mkdir(parents=True, exist_ok=True)
-    _rename_noreplace(staging, target)
+    rename_noreplace(staging, target)
     sync_directory(target.parent)
 
 

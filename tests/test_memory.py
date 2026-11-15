@@ -8,10 +8,6 @@ import torch
 from klab.address_hash import engram_table_sizes
 from klab.config.models import AttentionConfig, ModelConfig
 from klab.model.memory import ByteAddressMemory, TokenNgramMemory
-from klab.model.portable_engram import (
-    PortableEngramAdapter,
-    export_portable_engram,
-)
 from klab.model.transformer import DenseLM
 
 
@@ -106,21 +102,17 @@ def _legacy_final_forward(
     hidden = model.norm(hidden)
     if isinstance(model.memory, TokenNgramMemory):
         hidden = model.memory(hidden, input_ids)
-    elif isinstance(model.memory, (ByteAddressMemory, PortableEngramAdapter)):
+    elif isinstance(model.memory, ByteAddressMemory):
         if byte_addresses is None:
             raise ValueError("test reference requires byte addresses")
         hidden = model.memory(hidden, byte_addresses)
     return model.output(hidden), auxiliary_loss
 
 
-@pytest.mark.parametrize("memory_kind", ["none", "ngram", "byte", "portable"])
+@pytest.mark.parametrize("memory_kind", ["none", "ngram", "byte"])
 def test_final_memory_matches_legacy_forward_outputs_and_gradients(
-    memory_kind: str, tmp_path
+    memory_kind: str,
 ) -> None:
-    package = None
-    if memory_kind == "portable":
-        package = tmp_path / "memory.engram"
-        export_portable_engram(torch.zeros(17, 5), package, ngram_size=3)
     config = ModelConfig(
         vocab_size=260,
         hidden_dim=8,
@@ -132,7 +124,6 @@ def test_final_memory_matches_legacy_forward_outputs_and_gradients(
         memory_table_size=17 if memory_kind != "none" else 0,
         memory_ngram_size=3 if memory_kind != "none" else 0,
         memory_dim=5 if memory_kind != "none" else 0,
-        memory_package_path=package,
     )
     torch.manual_seed(19)
     actual = DenseLM(config, AttentionConfig())
@@ -151,20 +142,13 @@ def test_final_memory_matches_legacy_forward_outputs_and_gradients(
     }
 
     input_ids = torch.tensor([[3, 7, 11, 13], [5, 9, 15, 17]])
-    addresses = (
-        torch.randint(0, 17, input_ids.shape)
-        if memory_kind in {"byte", "portable"}
-        else None
-    )
+    addresses = torch.randint(0, 17, input_ids.shape) if memory_kind == "byte" else None
     logits, auxiliary = actual.forward_with_aux(input_ids, byte_addresses=addresses)
     expected, expected_auxiliary = _legacy_final_forward(
         reference, input_ids, addresses
     )
     torch.testing.assert_close(logits, expected)
     torch.testing.assert_close(auxiliary, expected_auxiliary)
-    if memory_kind == "portable":
-        assert isinstance(actual.memory, PortableEngramAdapter)
-        assert not actual.memory.embedding.weight.requires_grad
 
     (logits.square().mean() + auxiliary).backward()
     (expected.square().mean() + expected_auxiliary).backward()
@@ -211,7 +195,7 @@ def test_embedding_injection_carries_prefix_memory_into_later_logits() -> None:
             memory.table.weight.zero_()
             memory.output.weight.zero_()
             memory.output.weight[:8, :8] = torch.eye(8)
-            memory.gate.weight.zero_()
+            memory.gate.key_norm.weight.zero_()
         for model in (models[1], models[3]):
             memory = model.memory
             assert isinstance(memory, TokenNgramMemory)
@@ -233,9 +217,7 @@ def test_context_key_gate_reads_memory_and_backpropagates(kernel: int) -> None:
     assert torch.sigmoid(gate(hidden, hidden)).item() > 0.85
     assert torch.sigmoid(gate(hidden, -hidden)).item() < 0.15
     torch.manual_seed(7)
-    memory = token_memory(
-        8, 31, 3, 4, (2, 3), 2, variant="context_key", conv_kernel_size=kernel
-    )
+    memory = token_memory(8, 31, 3, 4, (2, 3), 2, conv_kernel_size=kernel)
     ids = torch.tensor([[3, 7, 11, 13, 17, 19]])
     states = torch.randn(1, 6, 8, requires_grad=True)
     output = memory(states, ids)
@@ -254,7 +236,7 @@ def test_context_key_gate_reads_memory_and_backpropagates(kernel: int) -> None:
 
 
 def test_context_gate_changes_with_retrieved_content_at_fixed_hidden() -> None:
-    memory = token_memory(4, 31, 2, 4, variant="context_key")
+    memory = token_memory(4, 31, 2, 4)
     hidden = torch.tensor([[[1.0, 0.0, 0.0, 0.0]]])
     ids = torch.tensor([[7]])
     with torch.no_grad():
@@ -280,7 +262,6 @@ def test_convolved_memory_rejects_masked_allocation() -> None:
         memory_table_size=31,
         memory_ngram_size=3,
         memory_dim=4,
-        memory_variant="context_key",
         memory_conv_kernel_size=4,
     )
     model = DenseLM(config, AttentionConfig())

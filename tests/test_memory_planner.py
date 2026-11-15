@@ -20,7 +20,7 @@ from klab.memory import (
     registered_runtime_buffers_bytes,
     write_resource_proposal,
 )
-from klab.model.inspection import inspection_report, named_tensor_inventory
+from klab.model.inspection import inspection_report
 from klab.runtime import RuntimeInfo
 from klab.training.manifest import config_sha256
 from klab.training.metrics import ExperimentStore
@@ -74,25 +74,6 @@ def test_unified_offload_rejects_fit_without_host_staging_headroom(monkeypatch) 
     monkeypatch.setattr(memory_module.psutil, "virtual_memory", lambda: memory)
     with pytest.raises(MemoryError):
         memory_module.validate_offload_headroom(config, runtime, estimate)
-
-
-def test_shape_report_never_opens_portable_package() -> None:
-    base = load_config(Path("configs/smoke_byte_memory_cpu.yaml"))
-    config = base.model_copy(
-        update={
-            "model": base.model.model_copy(
-                update={
-                    "memory": "portable",
-                    "memory_package_path": Path("/definitely/unavailable.engram"),
-                }
-            )
-        }
-    )
-    report = inspection_report(config)
-    tensors = named_tensor_inventory(config.model, config.attention)
-    assert report["frozen"] == config.model.memory_table_size * config.model.memory_dim
-    assert tensors["memory.embedding.weight"].trainable is False
-    assert tensors["output.weight"].alias_of == "embedding.weight"
 
 
 def test_billion_scale_shape_inspection_has_no_model_state() -> None:

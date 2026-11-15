@@ -974,13 +974,6 @@ def execute_attempt(definition: Any, attempt_id: str) -> dict[str, Any]:
                         "tokenizer": effective.tokenizer.model_copy(
                             update={"path": asset_root / "tokenizer.json"}
                         ),
-                        "model": effective.model.model_copy(
-                            update={
-                                "memory_package_path": asset_root / "portable_package"
-                                if effective.model.memory_package_path is not None
-                                else None
-                            }
-                        ),
                     }
                 )
                 continuation_spec = spec.get("continuation", {})

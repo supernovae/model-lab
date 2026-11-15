@@ -36,7 +36,7 @@ only read records. A run ID names weights; a try or probe ID names a result. Use
 | [Architecture](architecture.md) | The decoder and each shipped mechanism |
 | [Components](components.md) | The component registry, per-layer schedules, presets and kinds from other packages |
 | [Sparse attention](sparse-attention.md) | Block-sparse and local-plus-selected attention |
-| [Engram memory](engram.md) | Hashed n-gram memory, byte addressing and portable packs |
+| [Engram memory](engram.md) | Hashed n-gram memory and byte addressing |
 
 ## Data
 

@@ -41,15 +41,12 @@ MODELING_MODULE = "klab.model.hf_modeling"
 SUBSTITUTES = {"klab.components": "klab.component_builders"}
 VENDORED = ("klab.model", "klab.address_hash", "klab.component_builders")
 NOT_EXPORTED = {
-    "klab.engram.semantic": "semantic memory packs attach at run time",
     "klab.model.attention.hip_sparse": "the ROCm block-sparse kernel is not exported",
-    "klab.model.portable_engram": "portable memory reads a package outside the model",
 }
 THIRD_PARTY = frozenset({"torch", "safetensors", "transformers"})
 _UNSUPPORTED_MEMORY = {
     "byte": "byte memory reads addresses Lab prepares from the tokenizer's bytes "
     "outside the model",
-    "portable": "portable memory reads an Engram package outside the checkpoint",
 }
 
 

@@ -149,8 +149,7 @@ drafts (see above).
   the note under the table.
 - Greedy decoding only (`--temperature 0`), on the PyTorch KV-cache path: dense,
   grouped-query, sliding-window and MLA attention, with or without token n-gram
-  memory. Block-sparse attention, byte-addressed or portable memory, semantic
-  queries, sampling and the MLX engine are refused.
+  memory. Block-sparse attention, byte-addressed memory, sampling and the MLX engine are refused.
 - Tokens match plain greedy decoding. Verifying several positions in one call can
   differ from single-token calls in the last floating-point bits, the same as the
   KV cache against full-prefix decoding.

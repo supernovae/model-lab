@@ -116,16 +116,11 @@ def run_pilot(
             or not 0 < snapshot.tokens_seen <= config.training.max_tokens
         ):
             raise ValueError("pilot did not complete its declared horizon")
-        model_config = config.model
-        if model_config.memory_package_path is not None:
-            model_config = model_config.model_copy(
-                update={"memory_package_path": run / "portable_package"}
-            )
-        reloaded = DenseLM(model_config, config.attention).eval()
+        reloaded = DenseLM(config.model, config.attention).eval()
         reloaded.load_state_dict(snapshot.model, strict=True)
     with pilot_phase("data_open"):
         data = load_prepared_data(
-            run / "data", byte_enabled=config.model.memory in {"byte", "portable"}
+            run / "data", byte_enabled=config.model.memory == "byte"
         )
         example = TokenBlockDataset(
             data.validation, config.training.seq_len, data.validation_byte_addresses

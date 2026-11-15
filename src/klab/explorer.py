@@ -138,7 +138,6 @@ def architecture(config: Any) -> dict[str, Any]:
         memory = {
             "kind": m.memory,
             "injection": m.memory_injection,
-            "variant": m.memory_variant,
             "conv_kernel_size": m.memory_conv_kernel_size,
             "block_index": m.memory_block_index,
             "tables": streams * max(1, len(m.memory_block_sites)),
@@ -600,10 +599,6 @@ def _require_supported(loaded: Any) -> None:
     if getattr(loaded, "engine", None) is not None:
         raise ExplorerUnavailable(
             "the explorer needs the PyTorch engine (MLX not supported)"
-        )
-    if getattr(loaded.model, "semantic_memories", None):
-        raise ExplorerUnavailable(
-            "the explorer does not support attached semantic packs"
         )
 
 

@@ -60,7 +60,6 @@ class MechanismLesson(_Versioned):
     version: Literal[1]
     id: StrictStr
     title: StrictStr
-    mechanism_kind: Literal["model", "artifact"]
     summary: StrictStr
     benefit_scope: list[Literal["training", "inference", "capacity"]]
     steps: list[LessonStep]
@@ -91,12 +90,8 @@ class MechanismLesson(_Versioned):
     def validate_kind(self) -> MechanismLesson:
         if not self.title.strip() or not self.summary.strip():
             raise ValueError("lesson title and summary must be nonempty")
-        if self.mechanism_kind == "model" and set(self.patches_by_scale) != set(
-            _SCALE_IDS
-        ):
-            raise ValueError("model lessons must define every runnable scale")
-        if self.mechanism_kind == "artifact" and self.patches_by_scale:
-            raise ValueError("artifact-only lessons cannot define model patches")
+        if set(self.patches_by_scale) != set(_SCALE_IDS):
+            raise ValueError("lessons must define every runnable scale")
         return self
 
 

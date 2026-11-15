@@ -482,11 +482,7 @@ def _verify_artifacts(root: Path, manifest: dict[str, Any], *, resume: bool) -> 
         if name in names:
             raise ValueError(f"duplicate run artifact: {name}")
         names.add(name)
-        if (
-            not resume
-            and name != "tokenizer.json"
-            and not name.startswith("portable_package")
-        ):
+        if not resume and name != "tokenizer.json":
             continue
         relative = Path(name)
         path = root / relative
@@ -509,20 +505,6 @@ def _verify_artifacts(root: Path, manifest: dict[str, Any], *, resume: bool) -> 
             f"run lacks bound continuation artifacts: {sorted(required - names)}; "
             "use weight promotion to start from its weights"
         )
-
-
-def _package_identity(path: Path) -> dict[str, str]:
-    if path.is_file():
-        return {".": sha256_file(path)}
-    if not path.is_dir():
-        raise ValueError(f"portable package is missing: {path}")
-    inventory = {}
-    for member in sorted(path.rglob("*")):
-        if member.is_symlink():
-            raise ValueError(f"symlinked portable package member: {member}")
-        if member.is_file():
-            inventory[str(member.relative_to(path))] = sha256_file(member)
-    return inventory
 
 
 def load_continuation(
@@ -700,12 +682,6 @@ def load_continuation(
                     source_tokens_seen=checkpoint_manifest["tokens_seen"],
                 )
                 decisions.append(migration)
-            if config.model.memory_package_path is not None and _package_identity(
-                root / "portable_package"
-            ) != _package_identity(config.model.memory_package_path):
-                raise ValueError(
-                    "promotion requires matching portable package identity"
-                )
             return Continuation(
                 "PROMOTED",
                 snapshot,

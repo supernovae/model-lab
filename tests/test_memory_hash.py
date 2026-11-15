@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import random
-from pathlib import Path
 
 import pytest
 import torch
 
 from klab.address_hash import (
-    BYTE_HASHING,
     ENGRAM_SCHEME,
     engram_address_finish,
     engram_address_step,
@@ -20,12 +18,6 @@ from klab.address_hash import (
     validate_engram_table_sizes,
 )
 from klab.data.byte_hash import hash_bytes, table_address
-from klab.model import portable_engram
-from klab.model.portable_engram import (
-    PortableEngramManifest,
-    export_portable_engram,
-    load_portable_engram,
-)
 
 
 def _expected_distinct(draws: int, table_size: int) -> float:
@@ -50,35 +42,14 @@ def test_byte_addresses_spread_over_rows_and_use_every_byte(table_size: int) -> 
             assert moved >= 4
 
 
-def test_byte_table_sizes_sharing_a_factor_with_257_are_refused(
-    tmp_path: Path,
-) -> None:
+def test_byte_table_sizes_sharing_a_factor_with_257_are_refused() -> None:
     """Such a table would send every byte address to row 0."""
     for size in (257, 514):
         with pytest.raises(ValueError, match="shares a factor"):
             validate_byte_table_size(size)
         with pytest.raises(ValueError, match="shares a factor"):
             table_address(b"abc", size)
-        with pytest.raises(ValueError, match="shares a factor"):
-            export_portable_engram(
-                torch.zeros((size, 4)), tmp_path / "x.enbyte", ngram_size=3
-            )
     assert validate_byte_table_size(256) == 256
-    assert not list(tmp_path.iterdir())
-
-
-def test_portable_pack_names_its_hashing_and_refuses_another(tmp_path: Path) -> None:
-    table = torch.zeros((256, 4), dtype=torch.float32)
-    package = tmp_path / "ok.enbyte"
-    assert export_portable_engram(table, package, ngram_size=3).hashing == BYTE_HASHING
-    load_portable_engram(package, expected_shape=(256, 4), expected_ngram_size=3)
-    other = tmp_path / "other.enbyte"
-    manifest = PortableEngramManifest(
-        1, "raw-utf8-v1", "other-hash", 3, 256, 4, portable_engram._digest(table)
-    )
-    torch.save({"manifest": manifest.as_dict(), "table": table}, other)
-    with pytest.raises(ValueError, match="addressing algorithm is unsupported"):
-        load_portable_engram(other, expected_shape=(256, 4), expected_ngram_size=3)
 
 
 # Fixed signed-int64 vectors pin both coefficient expansion and overflow semantics.

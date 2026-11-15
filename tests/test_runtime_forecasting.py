@@ -118,7 +118,6 @@ def test_signature_has_all_performance_dimensions_and_ignores_memory_path() -> N
         "activation_recomputation",
         "activation_offload",
     }
-    assert "memory_package_path" not in signature["architecture_identity"]["model"]
 
 
 def test_matcher_requires_each_dimension_and_explains_rejections() -> None:

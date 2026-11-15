@@ -476,9 +476,6 @@ def calibration_key(
 ) -> str:
     """Stable key for exact execution settings; observations never cross settings."""
     model = config.model.model_dump(mode="json")
-    # Local artifact paths do not affect allocation shape and must not fragment
-    # otherwise identical warmup observations.
-    model.pop("memory_package_path", None)
     payload = {
         "engine": runtime.engine,
         "backend": runtime.backend,

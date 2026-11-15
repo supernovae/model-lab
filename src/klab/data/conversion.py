@@ -36,9 +36,8 @@ from klab.canonical import (
     reject_duplicate_keys,
 )
 from klab.documents import read_document
-from klab.engram.packs import _rename_noreplace
 from klab.result_publication import read_canonical, sync_directory
-from klab.safe_io import write_canonical_json
+from klab.safe_io import rename_noreplace, write_canonical_json
 from klab.training.manifest import sha256_file, source_identity
 
 FORMAT = "klab-dataset-conversion-v1"
@@ -586,7 +585,7 @@ def convert_dataset(
         body["lab_source_sha256"] = source_identity()["sha256"]
         write_canonical_json(work / RECEIPT, _seal(body), exclusive=True)
         sync_directory(work)
-        _rename_noreplace(work, output)
+        rename_noreplace(work, output)
     except BaseException:
         shutil.rmtree(work, ignore_errors=True)
         raise

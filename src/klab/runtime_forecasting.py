@@ -58,7 +58,6 @@ def runtime_signature(config: RunConfig, runtime: RuntimeInfo) -> dict[str, obje
     model = _json_model(config.model)
     if not isinstance(model, dict):
         raise TypeError("model configuration must serialize to an object")
-    model.pop("memory_package_path", None)
     mapping = model.get("memory_token_mapping")
     if isinstance(mapping, Mapping):
         model["memory_token_mapping"] = {"sha256": canonical_digest(mapping)}

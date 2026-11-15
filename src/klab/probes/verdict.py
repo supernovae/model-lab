@@ -233,8 +233,8 @@ def _incomplete_verdict(missing: list[dict[str, Any]]) -> dict[str, Any]:
 
 NOT_COMPARABLE_SUGGESTION = (
     "The try's arms are not comparable (failed held-out checks: {failed}), so "
-    "no probe result can promote it. Fix the cause (same data, tokenizer, "
-    "memory packages and eval protocol for both arms) and re-run the try."
+    "no probe result can promote it. Fix the cause (same data, tokenizer "
+    "and eval protocol for both arms) and re-run the try."
 )
 
 

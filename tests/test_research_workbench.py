@@ -14,7 +14,6 @@ from tokenizers.pre_tokenizers import ByteLevel
 from klab.config.loading import load_config
 from klab.config.models import AttentionConfig
 from klab.data.tokenizer import SPECIAL_TOKENS, load_tokenizer
-from klab.engram.packs import compile_pack, verify_pack
 from klab.evaluation.generation import _prompt_byte_addresses
 from klab.research.probe import probe_model
 from klab.research.scaffold import scaffold_lesson
@@ -145,85 +144,10 @@ def test_initialized_probe_bounds_and_reports_mechanisms(tmp_path: Path) -> None
     assert torch.equal(rng_state, torch.random.get_rng_state())
 
 
-def test_engrampack_lesson_emits_compile_ready_jsonl(tmp_path: Path) -> None:
-    lesson = scaffold_lesson("engrampack", tmp_path / "engrampack")
-    source = lesson / "records.jsonl"
-    records = [
-        json.loads(line) for line in source.read_text(encoding="utf-8").splitlines()
-    ]
-    assert len(records) == 3
-    assert {record["id"] for record in records} == {
-        "tutorial-atlas-maps-to-beacon",
-        "tutorial-beacon-maps-to-amber",
-        "tutorial-cipher-maps-to-delta",
-    }
-
-    pack = tmp_path / "compiled.enpack"
-    manifest = compile_pack(
-        source,
-        pack,
-        name="tutorial-map",
-        namespace="tutorial",
-        default_license="CC0-1.0",
-        source_name="original-tutorial-records",
-        created_at="2026-09-23T00:00:00Z",
-    )
-    assert manifest.record_count == 3
-    assert verify_pack(pack).valid
-
-
-def test_semantic_retrieval_lesson_builds_verified_pack_and_runnable_workspace(
-    tmp_path: Path,
-) -> None:
-    lesson = scaffold_lesson("semantic-retrieval", tmp_path / "semantic-lesson")
-    payload = json.loads((lesson / "lesson.json").read_text(encoding="utf-8"))
-    pack_info = payload["semantic_pack"]
-    assert pack_info["path"] == "semantic-pack"
-    assert (lesson / "demo.py").is_file()
-    assert "python demo.py" in (lesson / "README.md").read_text(encoding="utf-8")
-    assert {
-        "records.jsonl",
-        "semantic_keys.safetensors",
-        "semantic_values.safetensors",
-        "semantic.json",
-        "demo.py",
-    } <= {item["path"] for item in payload["inputs"]}
-
-    from klab.engram.packs import load_pack
-    from klab.engram.semantic import SemanticRetriever
-
-    pack = load_pack(lesson / pack_info["path"], expected_pack_id=pack_info["pack_id"])
-    assert pack.manifest.semantic is not None
-    assert pack.manifest.semantic.key_dim == 6
-    assert pack.manifest.semantic.memory_dim == 7
-    retriever = SemanticRetriever.from_pack(
-        lesson / pack_info["path"], expected_pack_id=pack_info["pack_id"]
-    )
-    hit = retriever.retrieve(
-        torch.tensor([1.0, 0, 0, 0, 0, 0]),
-        key_encoder=retriever.key_encoder,
-        min_score=0.9,
-    )
-    assert hit.status == "hit"
-    assert hit.hits[0].record_id == "lesson-atlas-maps-to-beacon"
-    conflict = retriever.retrieve(
-        torch.tensor([0.0, 0, 0, 0, 0, 1]),
-        key_encoder=retriever.key_encoder,
-        top_k=2,
-        min_score=0.9,
-    )
-    assert conflict.status == "conflict"
-    assert tuple(item.record_id for item in conflict.hits) == (
-        "lesson-fork-left",
-        "lesson-fork-right",
-    )
-
-
 def _scaffolded_lessons() -> list[str]:
     from klab.research.catalog import list_lessons
 
-    # portable-engram needs a trained memory package, which its refusal names.
-    return [lesson.id for lesson in list_lessons() if lesson.id != "portable-engram"]
+    return [lesson.id for lesson in list_lessons()]
 
 
 @pytest.mark.parametrize("identifier", _scaffolded_lessons())

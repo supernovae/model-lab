@@ -18,7 +18,6 @@ def _model(
     memory: str = "none",
     attention: str = "dense",
     memory_injection: str = "final",
-    memory_variant: str = "hidden_gate",
     memory_conv_kernel_size: int = 0,
 ) -> DenseLM:
     options = (
@@ -40,7 +39,6 @@ def _model(
         router_aux_loss_coefficient=0.1 if ffn == "moe" else 0.0,
         memory_injection=memory_injection,
         memory_block_index=0 if memory_injection == "after_block" else None,
-        memory_variant=memory_variant,
         memory_conv_kernel_size=memory_conv_kernel_size,
         memory=memory,
         **options,
@@ -203,7 +201,6 @@ def test_context_memory_checkpointed_gradients_and_update(kernel: int) -> None:
     plain = _model(
         memory="ngram",
         memory_injection="after_block",
-        memory_variant="context_key",
         memory_conv_kernel_size=kernel,
     )
     checkpointed = copy.deepcopy(plain)

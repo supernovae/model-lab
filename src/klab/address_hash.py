@@ -16,7 +16,6 @@ from math import gcd
 from typing import Final
 
 BYTE_BASE: Final = 257
-BYTE_HASHING: Final = "poly257-terminal"
 ENGRAM_SCHEME: Final = "token-ngram-prime-xor-splitmix64"
 _INT64_MAX: Final = 2**63 - 1
 _UINT64_MASK: Final = 2**64 - 1
