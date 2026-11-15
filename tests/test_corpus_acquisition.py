@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from corpus_fixtures import STRICT_POLICY, fixture_rights
 
 from klab.corpus.acquisition import (
     acquire,
@@ -57,19 +58,21 @@ def _fixture(
         {"schema_version": 1, "unit": "document", "assignments": {"document": "train"}},
     )
     release = {
-        "schema_version": 1,
         "mixture": {"technical_docs": 1.0},
         "lm": {"selected": True, "training_splits": ["train", "validation"]},
         "chat": {"selected": False, "training_splits": []},
+        "publication_mode": "metadata_reconstruction_only",
+        "policy": STRICT_POLICY,
     }
+    rights = rights or {**fixture_rights(), "spdx_expression": license}
     source = {
-        "schema_version": 1,
         "id": "one",
         "kind": kind,
         "canonical_uri": uri,
         "revision": revision,
         "license": license,
-        "redistribution": "redistributable",
+        "license_url": rights["license_references"][0],
+        "rights": rights,
         "domains": ["technical_docs"],
         "document_kinds": ["markdown"],
         "source_family": "docs",
@@ -79,14 +82,6 @@ def _fixture(
             "max_bytes": 1024,
         },
     }
-    if rights is not None:
-        source.pop("redistribution")
-        source.update(
-            schema_version=2, rights=rights, license_url=rights["license_references"][0]
-        )
-        release.update(
-            schema_version=2, publication_mode="metadata_reconstruction_only"
-        )
     _yaml(root / "release.yaml", release)
     _yaml(root / "sources/one.yaml", source)
     return root / "corpus.yaml"
@@ -232,8 +227,6 @@ def test_git_v2_acquires_pinned_nested_license_metadata(tmp_path: Path) -> None:
     )
     source_path = recipe.parent / "sources/one.yaml"
     source = yaml.safe_load(source_path.read_text())
-    source["schema_version"] = 2
-    source.pop("redistribution")
     source["license_url"] = "https://example.org/upstream/LICENSE"
     source["rights"] = {
         "training_eligibility": "eligible",
@@ -245,12 +238,11 @@ def test_git_v2_acquires_pinned_nested_license_metadata(tmp_path: Path) -> None:
     _yaml(source_path, source)
     release_path = recipe.parent / "release.yaml"
     release = yaml.safe_load(release_path.read_text())
-    release.update(schema_version=2, publication_mode="metadata_reconstruction_only")
     _yaml(release_path, release)
     lock = acquire(load_project(recipe), tmp_path / "work")
     source = load_project(recipe).sources[0]
     legacy_payload = source.model_dump(mode="json")
-    legacy_payload.pop("explicit_training_restriction")
+    assert "explicit_training_restriction" not in legacy_payload
     legacy_payload["acquisition"].pop("tree_oid")
     legacy_payload["acquisition"].pop("bounded_blobs")
     assert source_declaration_payload(source) == legacy_payload
@@ -462,7 +454,7 @@ def _mock_hf_stream(monkeypatch: pytest.MonkeyPatch, content: bytes) -> list[str
     return calls
 
 
-def test_hf_legacy_declaration_hash_and_receipt_reuse(
+def test_hf_declaration_hash_and_receipt_reuse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     content = b'{"text":"one"}\n'
@@ -470,8 +462,7 @@ def test_hf_legacy_declaration_hash_and_receipt_reuse(
     project = load_project(recipe)
     source = project.sources[0]
     expected = source.model_dump(mode="json")
-    expected.pop("rights")
-    expected.pop("explicit_training_restriction")
+    assert "explicit_training_restriction" not in expected
     expected["acquisition"].pop("include")
     expected["acquisition"].pop("max_decompressed_bytes")
     for shard in expected["acquisition"]["bounded_shards"]:
@@ -483,10 +474,6 @@ def test_hf_legacy_declaration_hash_and_receipt_reuse(
         == hashlib.sha256(
             json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
-    )
-    assert (
-        declaration_sha256(source)
-        == "feae644fd3f3070beab148748c16f77ccae4654af7e322abedb00c39e8926b25"
     )
     calls = _mock_hf_stream(monkeypatch, content)
     first = acquire(project, tmp_path / "work")
@@ -708,8 +695,6 @@ def test_admission_reuses_verified_snapshot_and_rejects_changed_bytes(
     )
     declaration_path = recipe.parent / "sources/one.yaml"
     declaration = yaml.safe_load(declaration_path.read_text())
-    declaration["schema_version"] = 2
-    declaration.pop("redistribution")
     declaration["license_url"] = "https://example.test/LICENSE"
     declaration["rights"] = {
         "training_eligibility": "eligible",
@@ -720,7 +705,6 @@ def test_admission_reuses_verified_snapshot_and_rejects_changed_bytes(
     _yaml(declaration_path, declaration)
     release_path = recipe.parent / "release.yaml"
     release = yaml.safe_load(release_path.read_text())
-    release.update(schema_version=2, publication_mode="metadata_reconstruction_only")
     _yaml(release_path, release)
     project = load_project(recipe)
     work = tmp_path / "work"
@@ -1150,7 +1134,13 @@ def test_mediawiki_dump_of_any_site_yields_one_row_per_article(
         for row in map(json.loads, raw.splitlines())
     ] == [("Complex domain", "https://cynefin.example.org/index.php?curid=1")]
     assert manifest["retrieval"]["scanned_pages"] == 3
-    documents = _records_for_file(raw, name, project.sources[0], snapshot.name)
+    documents = _records_for_file(
+        raw,
+        name,
+        project.sources[0],
+        snapshot.name,
+        document_policy=project.release.policy.documents,
+    )
     assert [document["language"] for document, _ in documents] == [language]
 
 

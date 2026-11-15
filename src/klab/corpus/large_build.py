@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.progress import BuildProgress
-from klab.corpus.project import CURATED_SOURCE_KINDS, ROW_SOURCE_KINDS
+from klab.corpus.project import ROW_SOURCE_KINDS
 from klab.corpus.provenance import (
     HUMAN_ORIGIN,
     SOURCE_ORIGIN,
@@ -225,6 +225,7 @@ def _prepare_file(
     decision: Any,
     progress: BuildProgress,
     normalizer_version: str = "normalizer-nfc-markdown-v1",
+    document_policy: Any,
     record_admission: dict[str, Any] | None = None,
     admission_sha256: str | None = None,
 ) -> Path:
@@ -254,6 +255,7 @@ def _prepare_file(
             raise ValueError("admitted shard file rights differ from verified policy")
     identity = _receipt_identity(build_id, source, snapshot_sha, file)
     identity["normalizer_version"] = normalizer_version
+    identity["document_policy"] = document_policy.model_dump(mode="json")
     identity["rights"] = decision.model_dump(mode="json")
     if record_admission is not None:
         # Bind only this verified file's decisions, not the admission plan for
@@ -325,6 +327,7 @@ def _prepare_file(
                                 full_file_sha256=file["sha256"],
                                 first_row_index=index,
                                 normalizer_version=normalizer_version,
+                                document_policy=document_policy,
                             )
                         except (ValueError, UnicodeError, KeyError, TypeError) as exc:
                             raise _SourceParseError(str(exc)) from exc
@@ -368,6 +371,7 @@ def _prepare_file(
                         record_admission=record_admission,
                         rejected_records=dropped,
                         normalizer_version=normalizer_version,
+                        document_policy=document_policy,
                     )
                 except (ValueError, UnicodeError, KeyError, TypeError) as exc:
                     raise _SourceParseError(str(exc)) from exc
@@ -423,20 +427,12 @@ def _sources_and_rights(
             "canonical_uri": source.canonical_uri,
             "revision": source.revision,
             "license": source.license,
-            "redistribution": source.rights.redistribution_mode
-            if source.rights
-            else source.redistribution,
-            **(
-                {
-                    "license_url": source.license_url,
-                    "rights_policy": source.rights.model_dump(mode="json"),
-                }
-                if source.rights
-                else {}
-            ),
+            "redistribution": source.rights.redistribution_mode,
+            "license_url": source.license_url,
+            "rights_policy": source.rights.model_dump(mode="json"),
             **(
                 {"explicit_training_restriction": source.explicit_training_restriction}
-                if source.schema_version == 3
+                if source.explicit_training_restriction is not None
                 else {}
             ),
             "origin": source.origin,
@@ -473,13 +469,9 @@ def _sources_and_rights(
         expressions[reported_spdx_expression(item, source_spdx[item["source_id"]])] += 1
         modes[rights["redistribution_mode"]] += 1
     rights_report = {
-        "schema_version": project.release.schema_version,
+        "schema_version": 1,
         "publication_mode": project.release.publication_mode,
-        **(
-            {"training_use_policy": project.release.training_use_policy}
-            if project.release.schema_version == 3
-            else {}
-        ),
+        "release_policy": project.release.policy.model_dump(mode="json"),
         "weight_license_status": "separate_analysis_required",
         "sources": sources,
         "files": rights_files,
@@ -538,16 +530,10 @@ def _index_prepared(
     from klab.corpus.split_assignments import split_policy
 
     policy = split_policy(project)
-    rank = {
-        source.id: (
-            0
-            if source.kind in CURATED_SOURCE_KINDS
-            else 1
-            if source.id.startswith("pes2o")
-            else 2
-        )
-        for source in project.sources
-    }
+    from klab.corpus.dedup_policy import source_rank
+
+    rank = {source.id: source_rank(source) for source in project.sources}
+    declared_keys = set(project.release.policy.duplicates.keys)
     total = 0
     for shard in prepared:
         with (
@@ -581,7 +567,11 @@ def _index_prepared(
                 )
                 connection.executemany(
                     "INSERT INTO origins(method,origin,document_number) VALUES (?,?,?)",
-                    ((method, key, number) for method, key in origins),
+                    (
+                        (method, key, number)
+                        for method, key in origins
+                        if method in declared_keys
+                    ),
                 )
                 total += 1
                 progress.update(documents=1)
@@ -596,229 +586,61 @@ def _index_prepared(
     return connection
 
 
-def _contaminated_groups(connection: sqlite3.Connection) -> set[tuple[str, str]]:
-    """Exact-text groups spanning train and exactly one held-out split.
-
-    These are resolved by dropping the train copies; any other cross-split
-    overlap (two held-out splits) remains an error in the caller.
-    """
-    found: set[tuple[str, str]] = set()
-    candidates = connection.execute(
-        "SELECT o.method,o.origin FROM origins o "
-        "JOIN documents d ON d.rowid=o.document_number "
-        "WHERE o.method IN ('raw','normalized') "
-        "GROUP BY o.method,o.origin HAVING COUNT(DISTINCT d.split)>1"
-    ).fetchall()
-    for method, key in candidates:
-        splits = {
-            split
-            for (split,) in connection.execute(
-                "SELECT d.split FROM origins o "
-                "JOIN documents d ON d.rowid=o.document_number "
-                "WHERE o.method=? AND o.origin=?",
-                (method, key),
-            )
-        }
-        if "train" in splits and len(splits - {"train"}) == 1:
-            found.add((method, key))
-    return found
-
-
-def _deduplicate_v2(
-    connection: sqlite3.Connection,
-    groups_path: Path,
-    *,
-    diagnostics: Path,
-    progress: BuildProgress,
-    rejected_path: Path | None = None,
-) -> tuple[int, int]:
-    """Apply the native v2 raw/normalized policy without corpus-sized maps.
-
-    Text shared by train and one held-out split keeps the held-out document and
-    drops the train copies as ``contaminated_heldout``, as the v3 policy does.
-    """
-    connection.execute("UPDATE documents SET representative_id=document_id")
-    contaminated = _contaminated_groups(connection)
-    groups = 0
-    with groups_path.open("wb") as output:
-        for method in ("raw", "normalized"):
-            keys = connection.execute(
-                "SELECT origin FROM origins WHERE method=? GROUP BY origin "
-                "HAVING COUNT(*)>1 ORDER BY origin",
-                (method,),
-            )
-            for (key,) in keys:
-                query = (
-                    "SELECT d.document_id,d.split,d.payload FROM origins o "
-                    "JOIN documents d ON d.rowid=o.document_number "
-                    "WHERE o.method=? AND o.origin=? ORDER BY d.document_id"
-                )
-                first = None
-                splits = set()
-                signature = None
-                incompatible = False
-                count = 0
-                cross = (method, key) in contaminated
-                for identifier, split, payload in connection.execute(
-                    query, (method, key)
-                ):
-                    if not cross or split != "train":
-                        first = first or identifier
-                    splits.add(split)
-                    count += 1
-                    if method == "normalized":
-                        doc = json.loads(payload)
-                        rights = doc["rights"]
-                        current = canonical_json(
-                            {
-                                "license": doc["license"],
-                                "redistribution": doc["redistribution"],
-                                **{
-                                    name: rights[name]
-                                    for name in (
-                                        "training_eligibility",
-                                        "license_references",
-                                        "notices",
-                                        "training_restriction",
-                                    )
-                                },
-                            }
-                        )
-                        if signature is not None and current != signature:
-                            incompatible = True
-                        signature = current
-                # Stream even a single very large duplicate group, in canonical order.
-                output.write(b'{"method":' + canonical_json(method) + b',"origins":[')
-                for index, (identifier, _, _) in enumerate(
-                    connection.execute(query, (method, key))
-                ):
+def _duplicate_diagnostics(
+    groups_path: Path, rejected_path: Path | None, diagnostics: Path, error: str
+) -> None:
+    """Preserve the complete observed groups without loading them."""
+    diagnostics.parent.mkdir(parents=True, exist_ok=True)
+    with diagnostics.open("wb") as report:
+        report.write(b'{"duplicates":[')
+        with groups_path.open("rb") as rows:
+            for index, row in enumerate(rows):
+                if index:
+                    report.write(b",")
+                report.write(row.rstrip(b"\n"))
+        report.write(b'],"error":' + canonical_json(error) + b',"rejected":[')
+        if rejected_path is not None:
+            with rejected_path.open("rb") as rejected:
+                for index, row in enumerate(rejected):
                     if index:
-                        output.write(b",")
-                    output.write(canonical_json(identifier))
-                output.write(
-                    b'],"representative":'
-                    + canonical_json(first)
-                    + b',"sha256":'
-                    + canonical_json(key)
-                    + b',"splits":'
-                    + canonical_json(sorted(splits))
-                    + b"}\n"
-                )
-                error = (
-                    "cross-split exact text overlap"
-                    if len(splits) > 1 and not cross
-                    else "duplicate source text has incompatible rights evidence"
-                    if incompatible
-                    else None
-                )
-                if error:
-                    output.flush()
-                    os.fsync(output.fileno())
-                    # Preserve the complete observed groups without loading them.
-                    diagnostics.parent.mkdir(parents=True, exist_ok=True)
-                    with diagnostics.open("wb") as report:
-                        report.write(b'{"duplicates":[')
-                        with groups_path.open("rb") as rows:
-                            for index, row in enumerate(rows):
-                                if index:
-                                    report.write(b",")
-                                report.write(row.rstrip(b"\n"))
-                        report.write(
-                            b'],"error":' + canonical_json(error) + b',"rejected":['
-                        )
-                        if rejected_path is not None:
-                            with rejected_path.open("rb") as rejected:
-                                for index, row in enumerate(rejected):
-                                    if index:
-                                        report.write(b",")
-                                    report.write(row.rstrip(b"\n"))
-                        report.write(b"]}\n")
-                        report.flush()
-                        os.fsync(report.fileno())
-                    raise ValueError(error)
-                if cross:
-                    # Train copies follow the held-out document unconditionally;
-                    # no held-out link ever points back to a train document.
-                    connection.execute(
-                        "UPDATE documents SET representative_id=? WHERE split='train' "
-                        "AND rowid IN (SELECT document_number FROM origins WHERE method=? AND origin=?)",
-                        (first, method, key),
-                    )
-                connection.execute(
-                    "UPDATE documents SET representative_id=MIN(representative_id,?) "
-                    "WHERE rowid IN (SELECT document_number FROM origins WHERE method=? AND origin=?) "
-                    + ("AND split<>'train'" if cross else ""),
-                    (first, method, key),
-                )
-                groups += 1
-                progress.update(documents=count)
-        output.flush()
-        os.fsync(output.fileno())
-    # Every link decreases lexicographically, so compression terminates without
-    # an in-memory union table and matches the native v2 representative chain.
-    while True:
-        changed = connection.execute(
-            "UPDATE documents SET representative_id=(SELECT p.representative_id "
-            "FROM documents p WHERE p.document_id=documents.representative_id) "
-            "WHERE representative_id<>(SELECT p.representative_id FROM documents p "
-            "WHERE p.document_id=documents.representative_id)"
-        ).rowcount
-        if not changed:
-            break
-    dropped = 0
-    for (
-        number,
-        identifier,
-        representative,
-        payload,
-        split,
-        kept_split,
-    ) in connection.execute(
-        "SELECT d.rowid,d.document_id,d.representative_id,d.payload,d.split,p.split "
-        "FROM documents d JOIN documents p ON p.document_id=d.representative_id "
-        "ORDER BY d.rowid"
-    ):
-        doc = json.loads(payload)
-        reason = (
-            "metadata_only_front_matter"
-            if (doc.get("structure") or {}).get("decision")
-            == "exclude_lm_metadata_only"
-            else "contaminated_heldout"
-            if identifier != representative
-            and split == "train"
-            and kept_split != "train"
-            else "duplicate"
-            if identifier != representative
-            else None
-        )
-        dropped += reason is not None
-        connection.execute(
-            "UPDATE documents SET drop_reason=? WHERE rowid=?", (reason, number)
-        )
-    connection.commit()
-    return groups, dropped
+                        report.write(b",")
+                    report.write(row.rstrip(b"\n"))
+        report.write(b"]}\n")
+        report.flush()
+        os.fsync(report.fileno())
 
 
 def _deduplicate(
     connection: sqlite3.Connection,
     groups_path: Path,
     *,
+    policy: Any,
     diagnostics: Path,
     progress: BuildProgress,
-    schema_version: int = 3,
     rejected_path: Path | None = None,
 ) -> tuple[int, int]:
-    """Apply the declared duplicate policy with disk-backed input joins."""
-    if schema_version == 2:
-        return _deduplicate_v2(
-            connection,
-            groups_path,
-            diagnostics=diagnostics,
-            progress=progress,
-            rejected_path=rejected_path,
-        )
-    if schema_version != 3:
-        raise ValueError("unsupported disk deduplication policy")
+    """Apply `release.policy.duplicates` with disk-backed joins.
+
+    Every group is decided by `dedup_policy.resolve_group`, the same rules the
+    in-memory builder uses; only the way groups are found and applied differs.
+    """
+    from klab.corpus.dedup_policy import (
+        CLEANING_CONFLICT,
+        PAGE_OVERLAP,
+        Member,
+        drop_reason,
+        is_metadata_only,
+        ranked_choice,
+        resolve_group,
+        rights_signature,
+    )
+
+    chain = policy.resolution == "chain_smallest_id"
+    methods = [
+        method
+        for method in ("raw", "normalized", "canonical_origin")
+        if method in policy.keys
+    ]
     total = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
     parents = array("I", range(total + 1))
 
@@ -828,47 +650,50 @@ def _deduplicate(
             number = parents[number]
         return number
 
-    methods = ("raw", "normalized", "canonical_origin")
+    if chain:
+        connection.execute("UPDATE documents SET representative_id=document_id")
+
+    def members_query(with_payload: bool) -> str:
+        return (
+            "SELECT d.rowid,d.document_id,d.split,d.source_rank,d.document_kind,"
+            + ("d.payload" if with_payload else "NULL")
+            + " FROM origins o JOIN documents d ON d.rowid=o.document_number "
+            "WHERE o.method=? AND o.origin=? ORDER BY d.document_id"
+        )
+
     groups = 0
     with groups_path.open("wb") as output:
         for method in methods:
             keys = connection.execute(
-                "SELECT origin FROM origins WHERE method=? GROUP BY origin HAVING COUNT(*)>1 ORDER BY origin",
+                "SELECT origin FROM origins WHERE method=? GROUP BY origin "
+                "HAVING COUNT(*)>1 ORDER BY origin",
                 (method,),
             )
+            needs_rights = method == "normalized" and policy.rights_conflict == "error"
             for (key,) in keys:
-                rows = list(
-                    connection.execute(
-                        """
-                        SELECT d.rowid,d.document_id,d.split,d.source_rank,d.document_kind
-                        FROM origins o JOIN documents d ON d.rowid=o.document_number
-                        WHERE o.method=? AND o.origin=? ORDER BY d.document_id
-                        """,
-                        (method, key),
+                members: list[Member] = []
+                rows: list[tuple[int, str, str]] = []
+                for (
+                    number,
+                    identifier,
+                    split,
+                    rank,
+                    kind,
+                    payload,
+                ) in connection.execute(members_query(needs_rights), (method, key)):
+                    members.append(
+                        Member(
+                            identifier,
+                            split,
+                            rank,
+                            kind,
+                            rights_signature(json.loads(payload))
+                            if needs_rights
+                            else None,
+                        )
                     )
-                )
-                splits = {row[2] for row in rows}
-                heldout = splits - {"train"}
-                if len(heldout) > 1:
-                    _write_json(
-                        diagnostics,
-                        {
-                            "error": "cross-split exact text overlap",
-                            "method": method,
-                            "sha256": canonical_digest(key),
-                        },
-                    )
-                    raise ValueError("cross-split exact text overlap")
-                priority = next(iter(heldout)) if heldout else None
-                selected = min(
-                    rows,
-                    key=lambda row: (
-                        row[2] != priority if priority else False,
-                        row[3],
-                        row[4] != "paper",
-                        row[1],
-                    ),
-                )
+                    rows.append((number, identifier, split))
+                group = resolve_group(method, members, policy)
                 _output(
                     output,
                     {
@@ -879,17 +704,79 @@ def _deduplicate(
                             else key
                         ),
                         "origins": [row[1] for row in rows],
-                        "splits": sorted(splits),
-                        "representative": selected[1],
+                        "splits": group.splits,
+                        "representative": group.representative,
                     },
                 )
-                first = root(rows[0][0])
-                for row in rows[1:]:
-                    parents[root(row[0])] = first
+                if group.error:
+                    output.flush()
+                    os.fsync(output.fileno())
+                    _duplicate_diagnostics(
+                        groups_path, rejected_path, diagnostics, group.error
+                    )
+                    raise ValueError(group.error)
+                if chain:
+                    train = [row[0] for row in rows if row[2] == "train"]
+                    linked = [row[0] for row in rows]
+                    if group.contaminated:
+                        # Train copies follow the held-out document.
+                        connection.executemany(
+                            "UPDATE documents SET representative_id=? WHERE rowid=?",
+                            ((group.representative, number) for number in train),
+                        )
+                        linked = [row[0] for row in rows if row[2] != "train"]
+                    connection.executemany(
+                        "UPDATE documents SET "
+                        "representative_id=MIN(representative_id,?) WHERE rowid=?",
+                        ((group.representative, number) for number in linked),
+                    )
+                else:
+                    first = root(rows[0][0])
+                    for row in rows[1:]:
+                        parents[root(row[0])] = first
                 groups += 1
                 progress.update(documents=len(rows))
         output.flush()
         os.fsync(output.fileno())
+
+    if chain:
+        # Every link decreases lexicographically (train copies link to a held-out
+        # document, which never links back), so compression terminates without an
+        # in-memory union table.
+        while True:
+            changed = connection.execute(
+                "UPDATE documents SET representative_id=(SELECT p.representative_id "
+                "FROM documents p WHERE p.document_id=documents.representative_id) "
+                "WHERE representative_id<>(SELECT p.representative_id FROM documents p "
+                "WHERE p.document_id=documents.representative_id)"
+            ).rowcount
+            if not changed:
+                break
+        dropped = 0
+        for (
+            number,
+            identifier,
+            representative,
+            payload,
+            split,
+            kept_split,
+        ) in connection.execute(
+            "SELECT d.rowid,d.document_id,d.representative_id,d.payload,d.split,"
+            "p.split FROM documents d JOIN documents p "
+            "ON p.document_id=d.representative_id ORDER BY d.rowid"
+        ):
+            reason = drop_reason(
+                metadata_only=is_metadata_only(json.loads(payload)),
+                split=split,
+                is_representative=identifier == representative,
+                representative_split=kept_split,
+            )
+            dropped += reason is not None
+            connection.execute(
+                "UPDATE documents SET drop_reason=? WHERE rowid=?", (reason, number)
+            )
+        connection.commit()
+        return groups, dropped
 
     # A connected component can link distinct raw, normalized and page origins.
     # Whole components select one deterministic representative, preserving the
@@ -904,23 +791,17 @@ def _deduplicate(
         heldout_mask[component] |= (
             1 if split == "validation" else 2 if split == "test" else 0
         )
-        cleaning_mask[component] |= (
-            2
-            if (json.loads(payload).get("structure") or {}).get("decision")
-            == "exclude_lm_metadata_only"
-            else 1
-        )
-    if any(mask == 3 for mask in heldout_mask.values()):
-        _write_json(
-            diagnostics, {"error": "validation/test page or paper origin overlap"}
-        )
-        raise ValueError("validation/test page or paper origin overlap")
-    if any(mask == 3 for mask in cleaning_mask.values()):
-        message = "discordant metadata-only cleaning decisions in duplicate component"
-        _write_json(diagnostics, {"error": message})
-        raise ValueError(message)
-    for number, identifier, split, source_rank, kind in connection.execute(
-        "SELECT rowid,document_id,split,source_rank,document_kind FROM documents ORDER BY rowid"
+        cleaning_mask[component] |= 2 if is_metadata_only(json.loads(payload)) else 1
+    for masks, ok, message in (
+        (heldout_mask, lambda mask: mask != 3, PAGE_OVERLAP),
+        (cleaning_mask, lambda mask: mask != 3, CLEANING_CONFLICT),
+    ):
+        if not all(ok(mask) for mask in masks.values()):
+            _write_json(diagnostics, {"error": message})
+            raise ValueError(message)
+    for number, identifier, split, rank, kind in connection.execute(
+        "SELECT rowid,document_id,split,source_rank,document_kind FROM documents "
+        "ORDER BY rowid"
     ):
         component = root(number)
         preferred_split = (
@@ -930,12 +811,7 @@ def _deduplicate(
             if heldout_mask[component] == 2
             else None
         )
-        choice = (
-            split != preferred_split if preferred_split else False,
-            source_rank,
-            kind != "paper",
-            identifier,
-        )
+        choice = ranked_choice(split, preferred_split, rank, kind, identifier)
         if component not in winner or choice < winner[component][:4]:
             winner[component] = (*choice, identifier, split)
     dropped = 0
@@ -943,17 +819,12 @@ def _deduplicate(
     for number, identifier, split, payload in connection.execute(
         "SELECT rowid,document_id,split,payload FROM documents ORDER BY rowid"
     ):
-        selected = winner[root(number)][4]
-        retained_split = winner[root(number)][5]
-        reason = (
-            "metadata_only_front_matter"
-            if (json.loads(payload).get("structure") or {}).get("decision")
-            == "exclude_lm_metadata_only"
-            else "contaminated_heldout"
-            if selected != identifier and split == "train" and retained_split != "train"
-            else "duplicate"
-            if selected != identifier
-            else None
+        selected, retained_split = winner[root(number)][4:6]
+        reason = drop_reason(
+            metadata_only=is_metadata_only(json.loads(payload)),
+            split=split,
+            is_representative=selected == identifier,
+            representative_split=retained_split,
         )
         dropped += reason is not None
         updates.append((selected, reason, number))
@@ -1250,24 +1121,23 @@ def _emit_build(
     _write_rejected(staging / "rejected.jsonl", source_events)
     warnings = []
     leakage = []
-    if project.release.schema_version == 2:
-        # LM-only lineages have no generated families. Source-family overlap is
-        # descriptive unless that family is the declared split policy unit.
-        for family, splits in ordered_rows.family_splits():
-            leakage.append(
-                {
-                    "family_type": "source_family_ids",
-                    "family_id": family,
-                    "splits": splits,
-                }
+    # LM-only lineages have no generated families. Source-family overlap is
+    # descriptive unless that family is the declared split policy unit.
+    for family, splits in ordered_rows.family_splits():
+        leakage.append(
+            {
+                "family_type": "source_family_ids",
+                "family_id": family,
+                "splits": splits,
+            }
+        )
+        if project.splits.unit in {"source_document_family", "source_repository"}:
+            _write_json(
+                staging.parent / "diagnostics" / f"{build_id}.json",
+                {"error": "shared split policy unit", "leakage": leakage},
             )
-            if project.splits.unit in {"source_document_family", "source_repository"}:
-                _write_json(
-                    staging.parent / "diagnostics" / f"{build_id}.json",
-                    {"error": "shared split policy unit", "leakage": leakage},
-                )
-                raise ValueError(f"split policy unit {family} spans splits")
-            warnings.append(f"source_family_ids {family} overlaps {', '.join(splits)}")
+            raise ValueError(f"split policy unit {family} spans splits")
+        warnings.append(f"source_family_ids {family} overlaps {', '.join(splits)}")
     _write_audit(
         staging / "audit.json",
         groups_path,
@@ -1286,7 +1156,8 @@ def _emit_build(
     }
     generation_statuses = {"oracle_verified": 0}
     report = {
-        "schema_version": project.release.schema_version,
+        "schema_version": 1,
+        "release_policy": project.release.policy.model_dump(mode="json"),
         "corpus_id": project.config.id,
         "requested_mixture": mixture,
         "actual_mixture": {
@@ -1348,13 +1219,10 @@ def _emit_build(
                 "unresolved_rights_files",
                 "weight_license_status",
                 "publication_mode",
-                "training_use_policy",
+                "release_policy",
             }
         },
     }
-    if project.release.schema_version == 2:
-        report.pop("source_scale")
-        report.pop("train_source_scale")
     progress.update(phase="measuring")
     report["measurement"] = (
         summarize_release(staging, release_spec=release_spec, tokenizer=None)
@@ -1450,11 +1318,7 @@ def build_large(
     progress.record("verifying_snapshots")
     for source in sources:
         lock_row = lock["sources"].get(source.id)
-        if (
-            source.redistribution == "rejected"
-            or not lock_row
-            or not lock_row.get("snapshot_path")
-        ):
+        if not lock_row or not lock_row.get("snapshot_path"):
             continue
         snapshot_path = Path(lock_row["snapshot_path"])
         snapshot = verify_snapshot(
@@ -1556,7 +1420,10 @@ def build_large(
                     name,
                     _read_rights_header(path, name),
                     nested_metadata=nested_metadata,
-                    prospective_private_research=source.schema_version == 3,
+                    prospective_private_research=(
+                        project.release.policy.rights.training_use
+                        == "allowed_unless_explicitly_prohibited"
+                    ),
                 )
                 if source.rights
                 else None
@@ -1619,6 +1486,7 @@ def build_large(
                 else None,
                 "normalizer_version": project.release.normalizer
                 or "normalizer-nfc-markdown-v1",
+                "document_policy": project.release.policy.documents,
             }
             if executor is not None and path in eligible_jsonl:
                 pending.append(
@@ -1661,7 +1529,7 @@ def build_large(
                 groups_path,
                 diagnostics=root / "diagnostics" / f"{build_id}.json",
                 progress=progress,
-                schema_version=project.release.schema_version,
+                policy=project.release.policy.duplicates,
                 rejected_path=rejected_path,
             )
             progress.update(phase="writing_views")

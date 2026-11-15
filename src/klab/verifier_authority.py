@@ -287,7 +287,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "corpus.tokenizer_bakeoff",
         "corpus.cli",
-    ): "cc239d6512386c4722891b278a3dc81378ec2f99e017cd3f082187982db38e3e",
+    ): "63b71520476f36e62eae6232c62efb9ca803c348b0e341f1c5b48c57e4b395e8",
     (
         "experiments.artifacts",
         "corpus.acquisition",

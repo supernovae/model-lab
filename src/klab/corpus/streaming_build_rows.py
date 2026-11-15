@@ -399,8 +399,13 @@ class StreamBuildRows:
 
     @classmethod
     def create(cls, stages, prepared, project, *, family_reference=None):
-        if project.release.schema_version != 2:
-            raise ValueError("completed-preparation build requires v2 deduplication")
+        from klab.corpus.dedup_policy import is_strict_chain
+
+        if not is_strict_chain(project.release.policy.duplicates):
+            raise ValueError(
+                "completed-preparation build supports only the strict raw/normalized "
+                "chain duplicate policy"
+            )
         refs = stages.phase(
             "build-document-references", lambda d: _references(d, prepared, project)
         )

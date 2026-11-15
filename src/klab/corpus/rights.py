@@ -678,8 +678,8 @@ def _verify_record_admission_v1(
         source_id = item["source_id"]
         source = sources[source_id]
         snapshot = snapshots[source_id]
-        if source["kind"] != "huggingface_dataset" or source["schema_version"] != 2:
-            raise ValueError("record admission requires v2 bounded HF source")
+        if source["kind"] != "huggingface_dataset":
+            raise ValueError("record admission requires a bounded HF source")
         profile = _admission_profile(source)
         from klab.corpus.row_qualification import (
             RowQualification,
@@ -1052,8 +1052,7 @@ def verify_record_admission(
         source = sources[source_id]
         snapshot = snapshots[source_id]
         if (
-            source["schema_version"] != 2
-            or item["snapshot_sha256"] != snapshot["snapshot_sha256"]
+            item["snapshot_sha256"] != snapshot["snapshot_sha256"]
             or item["source_revision"] != source["revision"]
             or snapshot["declaration"]["id"] != source_id
             or snapshot["declaration"]["revision"] != source["revision"]

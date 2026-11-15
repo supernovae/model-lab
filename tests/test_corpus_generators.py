@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from corpus_fixtures import STRICT_POLICY, fixture_rights
 
 from klab.corpus.acquisition import acquire
 from klab.corpus.pipeline import (
@@ -20,7 +21,7 @@ from klab.corpus.pipeline import (
     _sections,
     build,
 )
-from klab.corpus.project import load_project
+from klab.corpus.project import DocumentPolicy, load_project
 from klab.corpus.release import freeze
 from klab.data.conversations import iter_rendered_conversations
 
@@ -74,13 +75,12 @@ def _replay_project(tmp_path: Path, *, bad_prompt: bool = False):
     (root / "sources/generator-inputs.yaml").write_text(
         yaml.safe_dump(
             {
-                "schema_version": 1,
                 "id": "recordings",
                 "kind": "local",
                 "canonical_uri": "fixture:responses",
                 "revision": "v1",
                 "license": "MIT",
-                "redistribution": "redistributable",
+                "rights": fixture_rights(),
                 "domains": ["technical_docs"],
                 "document_kinds": ["data"],
                 "source_family": "sample_docs_train",
@@ -121,6 +121,9 @@ def _replay_project(tmp_path: Path, *, bad_prompt: bool = False):
     corpus["transforms"] = sorted([*corpus["transforms"], "transforms/inference.yaml"])
     (root / "corpus.yaml").write_text(yaml.safe_dump(corpus))
     return load_project(root / "corpus.yaml"), parent
+
+
+STRICT_DOCS = DocumentPolicy.model_validate(STRICT_POLICY["documents"])
 
 
 def test_scenario_oracle_is_deterministic_without_filesystem_access() -> None:
@@ -320,22 +323,31 @@ def test_markdown_navigation_does_not_leak_across_source_families() -> None:
 def test_cnxml_extracts_prose_skips_local_media_and_rejects_entities_external_media() -> (
     None
 ):
+    from functools import partial
     from types import SimpleNamespace
 
+    records = partial(_records_for_file, document_policy=STRICT_DOCS)
+
     source = SimpleNamespace(
-        schema_version=1,
         id="physics",
         kind="git",
         modality="text",
         revision="a" * 40,
         license="CC-BY-4.0",
-        redistribution="redistributable",
+        rights=SimpleNamespace(
+            redistribution_mode="redistributable_under_source_terms"
+        ),
         domains=("general_education",),
         document_kinds=("prose",),
         source_family="general_train",
     )
     raw = b'<document xmlns="http://cnx.rice.edu/cnxml"><content><section><title>Motion</title><para>Speed is distance divided by time.</para></section></content></document>'
-    rows = _records_for_file(raw, "modules/m54057/index.cnxml", source, "b" * 64)
+    rows = records(
+        raw,
+        "modules/m54057/index.cnxml",
+        source,
+        "b" * 64,
+    )
     doc, span = rows[0]
     assert doc["text"] == "Motion\nSpeed is distance divided by time."
     assert "<para>" not in doc["text"]
@@ -343,7 +355,7 @@ def test_cnxml_extracts_prose_skips_local_media_and_rejects_entities_external_me
     assert doc["metadata"]["normalizer"] == span["normalizer"] == "cnxml-text-v1"
     assert (
         doc["document_id"]
-        != _records_for_file(raw, "modules/m54057/index.cnxml", source, "c" * 64)[0][0][
+        != records(raw, "modules/m54057/index.cnxml", source, "c" * 64)[0][0][
             "document_id"
         ]
     )
@@ -351,23 +363,21 @@ def test_cnxml_extracts_prose_skips_local_media_and_rejects_entities_external_me
         b"</section>",
         b'<figure><media><image src="../../media/photo.jpg"/></media><caption>Third-party caption.</caption></figure></section>',
     )
-    extracted = _records_for_file(
-        local_media, "modules/m54057/index.cnxml", source, "b" * 64
-    )
+    extracted = records(local_media, "modules/m54057/index.cnxml", source, "b" * 64)
     assert extracted[0][0]["text"] == doc["text"]
     safe_escape = raw.replace(b"Speed", b"Distance &amp; speed")
     assert (
         "Distance & speed"
-        in _records_for_file(
-            safe_escape, "modules/m54057/index.cnxml", source, "b" * 64
-        )[0][0]["text"]
+        in records(safe_escape, "modules/m54057/index.cnxml", source, "b" * 64)[0][0][
+            "text"
+        ]
     )
     for invalid in (
         raw.replace(b"Speed", b"&untrusted; Speed"),
         raw.replace(b"</para>", b'<media src="https://example.org/photo.jpg"/></para>'),
     ):
         with pytest.raises(ValueError, match="entities|media"):
-            _records_for_file(invalid, "modules/m54057/index.cnxml", source, "b" * 64)
+            records(invalid, "modules/m54057/index.cnxml", source, "b" * 64)
 
 
 def test_source_qa_export_binds_exact_parent_span_and_keeps_sample(

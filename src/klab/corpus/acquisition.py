@@ -2331,15 +2331,6 @@ def verify_acquisition(
                     raise ValueError("retained origin binding mismatch")
             elif effect is not None and "reuse_origin" in entry:
                 raise ValueError("acquired source claims an undeclared reuse origin")
-            if source.redistribution == "rejected":
-                if (
-                    entry["receipt"]["status"] != "rejected"
-                    or entry["receipt"]["reason"] != source.rejection_reason
-                    or entry["snapshot_path"] is not None
-                    or entry["snapshot_sha256"] is not None
-                ):
-                    raise ValueError("invalid rejected receipt")
-                continue
             snapshot = base / "snapshots" / source.id / entry["snapshot_sha256"]
             if effect is not None:
                 _safe_snapshot_path(snapshot.absolute())
@@ -2516,14 +2507,6 @@ def acquire(
                     "path": str(origin),
                 },
                 "receipt": {"status": "acquired", "retrieval": manifest["retrieval"]},
-            }
-            continue
-        if source.redistribution == "rejected":
-            entries[source.id] = {
-                "declaration_sha256": declared_digest,
-                "snapshot_sha256": None,
-                "snapshot_path": None,
-                "receipt": {"status": "rejected", "reason": source.rejection_reason},
             }
             continue
         # A pre-existing lock is advisory for reuse, but never trusted without verification.

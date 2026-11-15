@@ -107,7 +107,9 @@ def _verified_hf_metadata(
     }
 
 
-def _file_documents(source, file, snapshot_path, snapshot_sha, retrieval, normalizer):
+def _file_documents(
+    source, file, snapshot_path, snapshot_sha, retrieval, normalizer, document_policy
+):
     """Preserve whole-shard document identities while bounding source-text reads."""
     path = snapshot_path / "files" / file["path"]
     if source.kind == "huggingface_dataset" and file["path"].endswith(".jsonl"):
@@ -141,6 +143,7 @@ def _file_documents(source, file, snapshot_path, snapshot_sha, retrieval, normal
                     full_file_sha256=file["sha256"],
                     first_row_index=ordinal,
                     normalizer_version=normalizer,
+                    document_policy=document_policy,
                 ):
                     if document.get("metadata", {}).get("source_row_index") != index:
                         raise ValueError("split inventory document lacks pinned HF row")
@@ -178,6 +181,7 @@ def _file_documents(source, file, snapshot_path, snapshot_sha, retrieval, normal
         snapshot_sha,
         file_rights=rights,
         normalizer_version=normalizer,
+        document_policy=document_policy,
     ):
         index = document.get("metadata", {}).get("source_row_index")
         if source.kind == "huggingface_dataset" and index not in metadata:
@@ -334,6 +338,7 @@ def write_split_inventory_stored(
                             entry["snapshot_sha256"],
                             manifest["retrieval"],
                             normalizer,
+                            project.release.policy.documents,
                         )
                     ) as documents:
                         for document, _, source_metadata in documents:

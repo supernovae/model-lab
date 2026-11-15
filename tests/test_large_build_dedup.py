@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from klab.corpus.large_build import _deduplicate_v2
+from klab.corpus.large_build import _deduplicate
+from klab.corpus.project import DuplicatePolicy
 
 
 class _Progress:
@@ -48,10 +49,25 @@ def _database(documents: list[tuple[str, str, str, str]]) -> sqlite3.Connection:
     return connection
 
 
-def _run(connection: sqlite3.Connection, tmp_path: Path):
-    return _deduplicate_v2(
+CHAIN = DuplicatePolicy(
+    heldout_overlap="drop_train_copy",
+    keys=("raw", "normalized"),
+    resolution="chain_smallest_id",
+    rights_conflict="error",
+)
+RANKED = DuplicatePolicy(
+    heldout_overlap="drop_train_copy",
+    keys=("raw", "normalized"),
+    resolution="component_ranked",
+    rights_conflict="allow",
+)
+
+
+def _run(connection: sqlite3.Connection, tmp_path: Path, policy=CHAIN):
+    return _deduplicate(
         connection,
         tmp_path / "groups.jsonl",
+        policy=policy,
         diagnostics=tmp_path / "diagnostics.json",
         progress=_Progress(),
     )
@@ -101,3 +117,200 @@ def test_text_shared_by_two_held_out_splits_still_fails(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="cross-split exact text overlap"):
         _run(connection, tmp_path)
+
+
+def test_error_policy_rejects_any_cross_split_overlap(tmp_path: Path) -> None:
+    connection = _database(
+        [("a-train", "train", "r1", "n1"), ("b-valid", "validation", "r1", "n1")]
+    )
+    strict = CHAIN.model_copy(update={"heldout_overlap": "error"})
+    with pytest.raises(ValueError, match="cross-split exact text overlap"):
+        _run(connection, tmp_path, strict)
+
+
+def test_chain_and_component_resolution_agree_on_a_simple_corpus(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        ("a-train", "train", "r1", "n1"),
+        ("b-valid", "validation", "r1", "n1"),
+        ("c-train", "train", "r2", "n2"),
+        ("d-train", "train", "r2", "n2"),
+        ("e-train", "train", "r3", "n3"),
+    ]
+    outcomes = []
+    for index, policy in enumerate((CHAIN, RANKED)):
+        directory = tmp_path / str(index)
+        directory.mkdir()
+        connection = _database(rows)
+        _run(connection, directory, policy)
+        outcomes.append(_outcome(connection))
+    assert outcomes[0] == outcomes[1]
+
+
+# --- parity: the in-memory and disk-backed builders must decide identically ---
+
+import itertools
+import random
+
+from klab.corpus.dedup_policy import (
+    DuplicateError,
+    deduplicate_documents,
+    drop_reason,
+    is_metadata_only,
+)
+
+_RIGHTS = {
+    "training_eligibility": "eligible",
+    "license_references": [],
+    "notices": [],
+    "training_restriction": None,
+}
+
+
+def _corpus(seed: int) -> list[dict]:
+    rng = random.Random(seed)
+    spread = 20 + seed * 15  # later seeds collide less, so every outcome occurs
+    docs = []
+    for number in range(40):
+        splits = ["train"] * 8 + ["validation", "test"]
+        docs.append(
+            {
+                "document_id": f"d{number:03}",
+                "split": rng.choice(splits),
+                "source_id": rng.choice(["s0", "s1"]),
+                "document_kind": rng.choice(["prose", "paper"]),
+                "raw_content_sha256": f"r{rng.randrange(spread)}",
+                "content_sha256": f"n{rng.randrange(spread)}",
+                "origin": f"o{rng.randrange(spread)}",
+                "license": "MIT",
+                "redistribution": rng.choice(["open"] * 9 + ["closed"]),
+                "rights": _RIGHTS,
+                "structure": {
+                    "decision": rng.choice(["keep"] * 12 + ["exclude_lm_metadata_only"])
+                },
+            }
+        )
+    return docs
+
+
+def _disk_database(docs: list[dict], keys: tuple[str, ...]) -> sqlite3.Connection:
+    connection = _database([])
+    for doc in docs:
+        payload = json.dumps(
+            {
+                "license": doc["license"],
+                "redistribution": doc["redistribution"],
+                "rights": doc["rights"],
+                "structure": doc["structure"],
+            }
+        ).encode()
+        number = connection.execute(
+            "INSERT INTO documents VALUES (?,?,?,?,?,?,?,?,NULL,NULL)",
+            (
+                doc["document_id"],
+                payload,
+                b"{}",
+                doc["split"],
+                doc["source_id"],
+                "f",
+                doc["document_kind"],
+                {"s0": 0, "s1": 2}[doc["source_id"]],
+            ),
+        ).lastrowid
+        origins = {
+            "raw": doc["raw_content_sha256"],
+            "normalized": doc["content_sha256"],
+            "canonical_origin": doc["origin"],
+        }
+        connection.executemany(
+            "INSERT INTO origins VALUES (?,?,?)",
+            [(method, origins[method], number) for method in keys],
+        )
+    return connection
+
+
+_POLICIES = [
+    DuplicatePolicy(
+        heldout_overlap=overlap,
+        keys=keys,
+        resolution="chain_smallest_id",
+        rights_conflict=conflict,
+    )
+    for overlap, keys, conflict in itertools.product(
+        ("error", "drop_train_copy"),
+        (("raw",), ("raw", "normalized")),
+        ("error", "allow"),
+    )
+] + [
+    DuplicatePolicy(
+        heldout_overlap="drop_train_copy",
+        keys=keys,
+        resolution="component_ranked",
+        rights_conflict="allow",
+    )
+    for keys in (("raw", "normalized"), ("raw", "normalized", "canonical_origin"))
+]
+
+
+@pytest.mark.parametrize(
+    "policy",
+    _POLICIES,
+    ids=lambda p: (
+        f"{p.resolution}-{p.heldout_overlap}-{'+'.join(p.keys)}-{p.rights_conflict}"
+    ),
+)
+def test_memory_and_disk_builders_decide_identically(
+    policy: DuplicatePolicy, tmp_path: Path
+) -> None:
+    ranks = {"s0": 0, "s1": 2}
+    compared = errors = 0
+    for seed in range(40):
+        docs = _corpus(seed)
+        directory = tmp_path / str(seed)
+        directory.mkdir()
+        try:
+            groups, representative = deduplicate_documents(
+                docs, ranks, policy, lambda doc: (doc["origin"],)
+            )
+            memory = {
+                doc["document_id"]: (
+                    representative[doc["document_id"]],
+                    drop_reason(
+                        metadata_only=is_metadata_only(doc),
+                        split=doc["split"],
+                        is_representative=representative[doc["document_id"]]
+                        == doc["document_id"],
+                        representative_split=next(
+                            other["split"]
+                            for other in docs
+                            if other["document_id"]
+                            == representative[doc["document_id"]]
+                        ),
+                    ),
+                )
+                for doc in docs
+            }
+            memory_error = None
+        except DuplicateError as error:
+            memory, memory_error = None, str(error)
+        connection = _disk_database(docs, policy.keys)
+        try:
+            _run(connection, directory, policy)
+            disk, disk_error = _outcome(connection), None
+        except ValueError as error:
+            disk, disk_error = None, str(error)
+        assert memory_error == disk_error, seed
+        if memory_error is None:
+            assert memory == disk, seed
+            on_disk = [
+                json.loads(line)
+                for line in (directory / "groups.jsonl").read_text().splitlines()
+            ]
+            assert on_disk == groups, seed
+            compared += 1
+        else:
+            errors += 1
+    # The corpora exercise both outcomes under every policy.
+    assert compared + errors == 40
+    assert compared >= 1

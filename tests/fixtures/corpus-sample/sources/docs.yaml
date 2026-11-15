@@ -1,11 +1,13 @@
-schema_version: 1
 id: sample_docs
 kind: local
 origin: human_authored
 canonical_uri: klab://corpora/devmind-sample-v0/guide.md
 revision: sample-v0
 license: MIT
-redistribution: redistributable
+rights:
+  training_eligibility: eligible
+  redistribution_mode: redistributable_under_source_terms
+  spdx_expression: MIT
 domains: [technical_docs]
 document_kinds: [markdown]
 source_family: sample_docs_train

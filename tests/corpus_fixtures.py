@@ -4,6 +4,52 @@ from pathlib import Path
 
 from klab.corpus.project import Project
 
+# The explicit release policies tests build on. STRICT is the cautious profile:
+# any cross-split overlap fails and a reviewed admission may be recorded.
+STRICT_POLICY = {
+    "duplicates": {
+        "heldout_overlap": "error",
+        "keys": ["raw", "normalized"],
+        "resolution": "chain_smallest_id",
+        "rights_conflict": "error",
+    },
+    "documents": {
+        "empty_text": "error",
+        "exclusions": "none",
+        "markdown_kind": "first_declared",
+        "row_files": "buffered",
+    },
+    "rights": {"training_use": "explicit_eligibility_required"},
+    "build": {"strategy": "auto"},
+}
+# PRIVATE_RESEARCH drops train copies of held-out text and screens private data.
+PRIVATE_RESEARCH_POLICY = {
+    "duplicates": {
+        "heldout_overlap": "drop_train_copy",
+        "keys": ["raw", "normalized", "canonical_origin"],
+        "resolution": "component_ranked",
+        "rights_conflict": "allow",
+    },
+    "documents": {
+        "empty_text": "skip",
+        "exclusions": "research_privacy",
+        "markdown_kind": "prose_when_declared",
+        "row_files": "streaming",
+    },
+    "rights": {"training_use": "allowed_unless_explicitly_prohibited"},
+    "build": {"strategy": "auto"},
+}
+
+
+def fixture_rights(reference: str = "https://example.org/license") -> dict:
+    """Rights evidence for a synthetic, eligible source."""
+    return {
+        "training_eligibility": "eligible",
+        "redistribution_mode": "redistributable_under_source_terms",
+        "spdx_expression": "MIT",
+        "license_references": [reference],
+    }
+
 
 def neutral_corpus(root: Path) -> Project:
     """Exercise existing source adapters without a personal scientific recipe."""
@@ -11,7 +57,6 @@ def neutral_corpus(root: Path) -> Project:
     def source(identifier: str, kind: str = "prose") -> dict:
         # Prefixes select existing row-screening behavior, not a real dataset pin.
         return {
-            "schema_version": 3,
             "id": identifier,
             "kind": "huggingface_dataset",
             "canonical_uri": "https://huggingface.co/datasets/fixture/neutral",
@@ -111,9 +156,8 @@ def neutral_corpus(root: Path) -> Project:
                 },
             },
             "release": {
-                "schema_version": 3,
                 "publication_mode": "metadata_reconstruction_only",
-                "training_use_policy": "allowed_unless_explicitly_prohibited",
+                "policy": PRIVATE_RESEARCH_POLICY,
                 "mixture": {"fixture": 1.0},
                 "lm": {"selected": True, "training_splits": ["train", "validation"]},
                 "chat": {"selected": False, "training_splits": []},

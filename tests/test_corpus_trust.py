@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from corpus_fixtures import STRICT_POLICY
 from lab_fixtures import write_smoke_inputs
 
 from klab.cli.main import main
@@ -143,7 +144,6 @@ def bakeoff_report(tmp_path_factory: pytest.TempPathFactory) -> Path:
     for family, text in texts.items():
         (project / "sources" / f"{family}.txt").write_text(text, encoding="utf-8")
         source = {
-            "schema_version": 2,
             "id": family,
             "kind": "local",
             "origin": "human_authored",
@@ -181,7 +181,7 @@ def bakeoff_report(tmp_path_factory: pytest.TempPathFactory) -> Path:
             "assignments": {family: family.split("_")[1] for family in texts},
         },
         "release.yaml": {
-            "schema_version": 2,
+            "policy": STRICT_POLICY,
             "mixture": {"prose": 1.0},
             "lm": {"selected": True, "training_splits": ["train", "validation"]},
             "chat": {"selected": False, "training_splits": []},

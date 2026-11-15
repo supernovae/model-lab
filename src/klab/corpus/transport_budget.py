@@ -128,7 +128,7 @@ def _validate_scope(project: Project) -> None:
     for source in project.sources:
         if effects is not None and effects[source.id].effect == "reuse_only":
             continue
-        if source.redistribution == "rejected" or source.kind in {
+        if source.kind in {
             "local",
             "deterministic_generator",
             "inference_generator",
