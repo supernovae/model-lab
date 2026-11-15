@@ -407,6 +407,16 @@ duplicates (refusing cross-split or incompatible-rights duplicates) and writes
 documents, spans, lineage and language-model and chat views. `freeze` publishes
 an immutable release with a content-derived ID.
 
+`freeze` verifies the build, then copies each file once on several threads,
+hashing the bytes as it writes them and refusing any file that differs from the
+build's recorded digest, so a build file that changes after verification is
+never published. It uses a copy-on-write clone where the filesystem supports one
+(Btrfs, XFS) and a plain copy otherwise. It never hard-links: a link would let a
+later write to the build change the release. The published release is then
+verified without hashing those files a second time, and its progress goes to
+`--scratch-dir` like any other verification
+([Verification cost, scratch and receipts](#verification-cost-scratch-and-receipts)).
+
 `release.build.strategy` chooses the builder: `auto` (the default) uses the
 disk-backed builder for a language-model-only release without a `fraction`, so
 peak memory is bounded by individual records and no reviewed admission is
