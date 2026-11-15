@@ -17,6 +17,7 @@ from pathlib import Path
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.bounded_metadata import current_metadata_store
 from klab.result_publication import sync_directory
+from klab.safe_io import symlinked
 from klab.training.manifest import sha256_file
 from klab.verification_proofs import (
     _fingerprint,
@@ -41,7 +42,7 @@ def metadata_sha256(value):
 def capture(paths):
     result = {}
     for path in sorted({Path(p).absolute() for p in paths}):
-        if any(p.is_symlink() for p in (path, *path.parents)):
+        if symlinked(path):
             raise ValueError("unsafe inspection dependency")
         members = [path, *sorted(path.rglob("*"))] if path.is_dir() else [path]
         result[str(path)] = [
@@ -283,7 +284,7 @@ class InspectionCache:
         )
         if len(raw) > limit:
             return  # Cache size is optional; the independently checked result stands.
-        if any(p.is_symlink() for p in (self.directory, *self.directory.parents)):
+        if symlinked(self.directory):
             self._unavailable("untrusted_cache_directory")
             return
         path = self.entry_path(kind, request)

@@ -35,6 +35,7 @@ from klab.documents import read_document
 from klab.engram.packs import _rename_noreplace
 from klab.hf_auth import hub_access_errors, hub_auth_kwargs, raise_for_hub_auth
 from klab.result_publication import sync_directory
+from klab.safe_io import symlinked, write_canonical_json
 from klab.training.manifest import sha256_file
 from klab.verification_proofs import VerificationMode
 
@@ -434,21 +435,14 @@ def lock_source(
             split: str(binding.snapshot_path)
             for split, binding in source.forge_files.items()
         }
-        with output.with_name(output.name + ".locations.json").open("xb") as handle:
-            handle.write(
-                canonical_json(
-                    {"lock_sha256": value["lock_sha256"], "locations": locations}
-                )
-                + b"\n"
-            )
-            handle.flush()
-            os.fsync(handle.fileno())
+        write_canonical_json(
+            output.with_name(output.name + ".locations.json"),
+            {"lock_sha256": value["lock_sha256"], "locations": locations},
+            exclusive=True,
+        )
     # Same-filesystem temporary name is also exclusive; never replace another lock.
     temporary = output.with_name(output.name + ".pending")
-    with temporary.open("xb") as handle:
-        handle.write(canonical_json(value) + b"\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    write_canonical_json(temporary, value, exclusive=True)
     _rename_noreplace(temporary, output)
     sync_directory(output.parent)
     return output
@@ -850,10 +844,8 @@ def snapshot_verification_statistics() -> dict[str, int | float] | None:
 
 
 def _reject_snapshot_symlinks(path: Path) -> None:
-    path = path.absolute()
-    for member in (path, *path.parents):
-        if member.is_symlink():
-            raise ValueError(f"symlink snapshot path component: {member}")
+    if symlinked(path.absolute()):
+        raise ValueError(f"symlink snapshot path component: {path}")
 
 
 def _snapshot_key(path: Path, manifest: dict) -> tuple:

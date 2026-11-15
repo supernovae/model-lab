@@ -20,6 +20,7 @@ from klab.corpus.admission_inspection_cache import capture
 from klab.corpus.mixture_index import MAX_ROW_BYTES, rows
 from klab.corpus.split_runs import write_rows
 from klab.result_publication import sync_directory
+from klab.safe_io import symlinked
 from klab.training.manifest import sha256_file
 
 PREFETCH_BYTES = 128 * 1024**2
@@ -141,7 +142,7 @@ class MixtureFrontier:
     def __init__(self, output, cache, request):
         self.root = output.parent / ("." + output.name + ".assembly")
         self.root.mkdir(exist_ok=True)
-        if any(p.is_symlink() for p in (self.root, *self.root.parents)):
+        if symlinked(self.root):
             raise ValueError("unsafe mixture checkpoint root")
         self.cache = cache
         if cache.proofs is None or not cache.writable:
@@ -300,7 +301,7 @@ def mixture_writer(output):
     import fcntl
 
     output = Path(output).absolute()
-    if any(p.is_symlink() for p in (output, *output.parents)):
+    if symlinked(output):
         raise ValueError("unsafe mixture output path")
     output.parent.mkdir(parents=True, exist_ok=True)
     lock = output.parent / ("." + output.name + ".assembly.lock")

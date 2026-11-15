@@ -37,6 +37,7 @@ from klab.data.row_layout import document_rows
 from klab.data.tokenizer import load_tokenizer, verify_tokenizer_artifact
 from klab.engram.packs import _rename_noreplace
 from klab.result_publication import sync_directory
+from klab.safe_io import write_canonical_json
 from klab.training.manifest import sha256_file
 
 MIXTURE_BATCH_SOURCE_BYTES = 8 * 1024**2
@@ -586,10 +587,7 @@ def _materialize_mixture(
                 "policy": completed["policy"],
                 "verification_scope": "native executed mixture schedule and unique-content counts; no later schedule replay",
             }
-        with (staging / "receipt.json").open("xb") as stream:
-            stream.write(canonical_json(receipt) + b"\n")
-            stream.flush()
-            os.fsync(stream.fileno())
+        write_canonical_json(staging / "receipt.json", receipt, exclusive=True)
         sync_directory(staging)
         _rename_noreplace(staging, output)
         sync_directory(output.parent)

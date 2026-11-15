@@ -18,6 +18,7 @@ from klab.canonical import canonical_digest, canonical_json
 from klab.corpus import acquisition as forge
 from klab.engram.packs import _rename_noreplace
 from klab.result_publication import sync_directory
+from klab.safe_io import write_canonical_json
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
@@ -289,7 +290,7 @@ def write_snapshot(
             "manifest_sha256",
         )
         _admit(work, cache, source, growth=len(canonical_json(manifest)) + 1024)
-        forge._write_json(publication / "manifest.json", manifest)
+        write_canonical_json(publication / "manifest.json", manifest)
         _admit(work, cache, source)
         verify_snapshot(publication / "manifest.json", verification_mode="cold")
         sync_directory(publication)

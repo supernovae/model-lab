@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Literal
 
 from klab.canonical import canonical_digest, canonical_json
+from klab.safe_io import symlinked
 from klab.verifier_authority import (
     AUTHORITY_SCHEMA,
     supports_verifier,
@@ -87,7 +88,7 @@ def _trusted(root: Path, path: Path, *, private: bool = False) -> bool:
         if root == Path(root.anchor) or not path.is_relative_to(root):
             return False
         # Even a root reached through a link is not a registered trust domain.
-        if any(parent.is_symlink() for parent in (root, *root.parents)):
+        if symlinked(root):
             return False
         entries = [root]
         relative = path.relative_to(root)
@@ -384,10 +385,7 @@ class ProofStore:
 
     def _key(self, *, create: bool) -> bytes | None:
         if create:
-            if any(
-                parent.is_symlink()
-                for parent in (self.config_root, *self.config_root.parents)
-            ):
+            if symlinked(self.config_root):
                 return None
             self.config_root.mkdir(parents=True, exist_ok=True, mode=0o700)
             if not _trusted(self.config_root, self.config_root):

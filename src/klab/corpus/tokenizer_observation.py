@@ -15,12 +15,13 @@ from pathlib import Path
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.loading import load_config, load_tokenizer_config
 from klab.corpus.export import _export_binding, _export_request
+from klab.safe_io import symlinked
 
 
 def _read(path: Path, expected: str, *, limit: int = 4 * 1024 * 1024) -> bytes:
     if (
         not path.is_absolute()
-        or any(part.is_symlink() for part in (path, *path.parents))
+        or symlinked(path)
         or not path.is_file()
         or path.stat().st_size > limit
     ):

@@ -9,6 +9,7 @@ from typing import Any
 from klab.config.loading import load_tokenizer_config
 from klab.corpus.release import _verification_operation, verify_release
 from klab.data.tokenizer import verify_tokenizer_artifact
+from klab.safe_io import symlinked
 from klab.training.manifest import sha256_file
 
 
@@ -18,9 +19,8 @@ def _safe_path(path: Path) -> Path:
     if ".." in path.parts:
         raise ValueError(f"parent traversal is not allowed: {path}")
     absolute = path.absolute()
-    for component in (absolute, *absolute.parents):
-        if component.is_symlink():
-            raise ValueError(f"symlinked input or ancestor: {component}")
+    if symlinked(absolute):
+        raise ValueError(f"symlinked input or ancestor: {path}")
     return absolute.resolve()
 
 

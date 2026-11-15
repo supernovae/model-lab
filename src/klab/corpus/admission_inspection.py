@@ -37,6 +37,7 @@ from klab.corpus.project import (
 from klab.corpus.rights import FILE_ADMISSION_KINDS, verify_record_admission
 from klab.corpus.structure_cleaning import clean_structure
 from klab.result_publication import sync_directory
+from klab.safe_io import symlinked
 from klab.training.manifest import sha256_file
 
 _MAX_RECORD_BYTES = 8 * 1024**2
@@ -46,7 +47,7 @@ _MAX_POOL_BYTES = 64 * 1024**2
 
 def _inside(path: Path, root: Path | None = None) -> Path:
     if (
-        any(part.is_symlink() for part in (path, *path.parents))
+        symlinked(path)
         or not path.is_file()
         or (root is not None and not path.resolve().is_relative_to(root))
     ):
@@ -646,9 +647,7 @@ def inspect_admission(
     max_output_bytes: int,
 ) -> dict[str, Any]:
     root = work_root.resolve(strict=True)
-    if any(
-        part.is_symlink() for part in (output, *output.parents)
-    ) or not output.resolve().is_relative_to(root):
+    if symlinked(output) or not output.resolve().is_relative_to(root):
         raise ValueError("inspection requires safe output within work root")
     if output.exists() and (
         not output.is_file() or output.stat().st_size > 4 * 1024**2

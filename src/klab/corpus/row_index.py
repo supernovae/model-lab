@@ -6,6 +6,7 @@ from collections.abc import Mapping, MutableMapping
 from uuid import uuid4
 
 from klab.canonical import canonical_json
+from klab.safe_io import database_byte_cap
 
 
 class RowIndex(Mapping):
@@ -26,20 +27,17 @@ class RowIndex(Mapping):
             f"CREATE TABLE {self.table}(key TEXT PRIMARY KEY, ordinal INTEGER UNIQUE, payload BLOB) WITHOUT ROWID"
         )
         try:
-            for ordinal, row in enumerate(rows):
-                payload = canonical_json(row)
-                if max_record_bytes is not None and len(payload) > max_record_bytes:
-                    raise ValueError("evidence record-byte cap exceeded")
-                connection.execute(
-                    f"INSERT INTO {self.table} VALUES(?,?,?)",
-                    (self.encode(key(row)), ordinal, payload),
-                )
+            with database_byte_cap("evidence database byte cap exceeded"):
+                for ordinal, row in enumerate(rows):
+                    payload = canonical_json(row)
+                    if max_record_bytes is not None and len(payload) > max_record_bytes:
+                        raise ValueError("evidence record-byte cap exceeded")
+                    connection.execute(
+                        f"INSERT INTO {self.table} VALUES(?,?,?)",
+                        (self.encode(key(row)), ordinal, payload),
+                    )
         except sqlite3.IntegrityError as error:
             raise ValueError(duplicate) from error
-        except sqlite3.OperationalError as error:
-            if error.sqlite_errorcode == sqlite3.SQLITE_FULL:
-                raise ValueError("evidence database byte cap exceeded") from error
-            raise
 
     @staticmethod
     def encode(key):
@@ -119,15 +117,11 @@ class ValueMap(MutableMapping):
         payload = canonical_json(value)
         if len(payload) > 8 * 1024**2:
             raise ValueError("evidence record-byte cap exceeded")
-        try:
+        with database_byte_cap("evidence database byte cap exceeded"):
             self.connection.execute(
                 f"INSERT INTO {self.table} VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (RowIndex.encode(key), payload),
             )
-        except sqlite3.OperationalError as error:
-            if error.sqlite_errorcode == sqlite3.SQLITE_FULL:
-                raise ValueError("evidence database byte cap exceeded") from error
-            raise
 
     def __delitem__(self, key):
         if (

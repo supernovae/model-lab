@@ -19,6 +19,7 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from klab.canonical import canonical_json
+from klab.safe_io import database_byte_cap, symlinked
 
 _MAX_INPUT_BYTES = 256 * 1024**2
 _STRING_SPECIAL = re.compile(rb'["\\]')
@@ -44,7 +45,7 @@ def _fingerprint(info):
 
 
 def _input_stat(path):
-    if any(part.is_symlink() for part in (path, *path.parents)) or not path.is_file():
+    if symlinked(path) or not path.is_file():
         raise ValueError("unsafe metadata input")
     return path.stat()
 
@@ -76,7 +77,6 @@ def _metadata_view(value):
     if isinstance(value, DiskRows):
         result = DiskRows(value.store, value.identifier)
         result._length = value._length
-        result._shared = True
         return result
     if isinstance(value, dict):
         return {key: _metadata_view(item) for key, item in value.items()}
@@ -114,7 +114,6 @@ class DiskRows(list):
         self.store = store
         self.identifier = identifier
         self._length = 0
-        self._shared = False
 
     def __len__(self):
         return self._length
@@ -193,7 +192,7 @@ class MetadataStore:
             type(max_database_bytes) is not int or max_database_bytes < 16384
         ):
             raise ValueError("metadata database cap must be at least 16384 bytes")
-        if any(path.is_symlink() for path in (directory, *directory.parents)):
+        if symlinked(directory):
             raise ValueError("metadata scratch directory must not be a symlink")
         directory.mkdir(parents=True, exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(prefix=".metadata-", dir=directory)
@@ -250,18 +249,7 @@ class MetadataStore:
     def append(self, rows, value):
         if rows.store is not self:
             raise ValueError("row collection belongs to another metadata store")
-        try:
-            if rows._shared:
-                # Preserve the owning-store append API without changing another
-                # reader or the cached input. Read-only use never copies rows.
-                detached = self.new_rows()
-                self.connection.execute(
-                    "INSERT INTO rows SELECT ?, ordinal, payload FROM rows "
-                    "WHERE collection=? AND ordinal<?",
-                    (detached.identifier, rows.identifier, rows._length),
-                )
-                rows.identifier = detached.identifier
-                rows._shared = False
+        with database_byte_cap("metadata database byte cap exceeded"):
             self.connection.execute(
                 "INSERT INTO rows VALUES(?,?,?)",
                 (
@@ -270,10 +258,6 @@ class MetadataStore:
                     canonical_json(value),
                 ),
             )
-        except sqlite3.OperationalError as error:
-            if error.sqlite_errorcode == sqlite3.SQLITE_FULL:
-                raise ValueError("metadata database byte cap exceeded") from error
-            raise
         rows._length += 1
 
     def load(
@@ -553,11 +537,8 @@ def metadata_operation(directory: Path, *, max_database_bytes=1024**3):
     with MetadataStore(directory, max_database_bytes=max_database_bytes) as store:
         token = _ACTIVE_STORE.set(store)
         try:
-            yield store
-        except sqlite3.OperationalError as error:
-            if error.sqlite_errorcode == sqlite3.SQLITE_FULL:
-                raise ValueError("metadata database byte cap exceeded") from error
-            raise
+            with database_byte_cap("metadata database byte cap exceeded"):
+                yield store
         finally:
             _ACTIVE_STORE.reset(token)
 
@@ -630,7 +611,7 @@ class DiskDecisions(dict):
             )
         if key in self:
             raise ValueError("duplicate metadata decision index")
-        try:
+        with database_byte_cap("metadata database byte cap exceeded"):
             self.store.connection.execute(
                 "INSERT INTO rows VALUES(?,?,?)",
                 (
@@ -639,10 +620,6 @@ class DiskDecisions(dict):
                     canonical_json(value),
                 ),
             )
-        except sqlite3.OperationalError as error:
-            if error.sqlite_errorcode == sqlite3.SQLITE_FULL:
-                raise ValueError("metadata database byte cap exceeded") from error
-            raise
         self.rows._length += 1
 
     def __eq__(self, other):
