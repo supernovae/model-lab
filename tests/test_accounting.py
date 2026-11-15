@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from klab.address_hash import engram_table_sizes
 from klab.config.loading import load_config
 from klab.config.models import AdafactorConfig, ModelConfig
 from klab.memory import parameter_inventory
@@ -103,6 +104,9 @@ def test_engram_tables_count_as_storage_not_all_active_rows():
                 update={
                     "memory_ngram_orders": (1, 2, 3),
                     "memory_hash_heads": 2,
+                    "memory_table_sizes": engram_table_sizes(
+                        config.model.memory_table_size, 6
+                    ),
                 }
             )
         }
@@ -111,7 +115,10 @@ def test_engram_tables_count_as_storage_not_all_active_rows():
     measured = inspect_model(model)
     assert measured["engram"] == sum(p.numel() for p in model.memory.parameters())
     assert parameter_inventory(config).total == measured["total"]
-    inactive_rows = 6 * (config.model.memory_table_size - 1) * config.model.memory_dim
+    inactive_rows = (
+        sum(size - 1 for size in config.model.memory_table_sizes)
+        * config.model.memory_dim
+    )
     assert measured["total"] - measured["active_per_token"] == inactive_rows
 
 
@@ -167,6 +174,7 @@ def test_memory_injection_diagnostics_and_inspection() -> None:
                 update={
                     "memory": "ngram",
                     "memory_table_size": 31,
+                    "memory_table_sizes": (31,),
                     "memory_ngram_size": 3,
                     "memory_dim": 8,
                 }
@@ -287,7 +295,7 @@ def test_context_memory_inventory_matches_model(kernel: int) -> None:
         assert report[field] == measured[field], field
     assert (
         report["total"] - report["active_per_token"]
-        == 4 * (model.memory_table_size - 1) * model.memory_dim
+        == sum(size - 1 for size in model.memory_table_sizes) * model.memory_dim
     )
     assert report["optimizer_state_bytes"] >= report["trainable"] * 8
 
@@ -351,6 +359,7 @@ def test_token_mapping_buffer_bytes_match_registered_tensor(ports) -> None:
     if ports:
         values.update(memory_injection="after_block", memory_block_indices=ports)
     values["memory_token_mapping"] = mapping
+    values.pop("memory_table_sizes")  # re-expanded for the number of ports
     model_config = ModelConfig.model_validate(values)
     configured = base.model_copy(update={"model": model_config})
     model = DenseLM(model_config, base.attention)
@@ -375,7 +384,6 @@ def test_multiport_inventory_matches_actual_tensors_and_active_rows() -> None:
         memory_ngram_orders=[2, 3],
         memory_hash_heads=1,
         tie_embeddings=True,
-        memory_addressing="prime_xor_v1",
         memory_table_sizes=[97, 101, 103, 107],
         memory_table_size=97,
         memory_conv_kernel_size=3,

@@ -112,7 +112,11 @@ def test_final_memory_injection_preserves_hashes_and_embedding_binds() -> None:
         mode="json"
     )
     legacy["model"].update(
-        memory="ngram", memory_table_size=31, memory_ngram_size=2, memory_dim=8
+        memory="ngram",
+        memory_table_size=31,
+        memory_table_sizes=[31],
+        memory_ngram_size=2,
+        memory_dim=8,
     )
     explicit_final = {
         **legacy,

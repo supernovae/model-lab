@@ -2,7 +2,7 @@
 
 from typing import TYPE_CHECKING
 
-from klab.address_hash import byte_uses_legacy, mixed_byte_address
+from klab.address_hash import BYTE_BASE, validate_byte_table_size
 
 if TYPE_CHECKING:
     from tokenizers import Tokenizer
@@ -38,15 +38,12 @@ def token_bytes(tokenizer: Tokenizer, token_id: int) -> bytes:
         raise ValueError("raw byte addresses require a ByteLevel tokenizer") from error
 
 
-BASE = 257
-
-
 def hash_bytes(value: bytes) -> int:
     """Hash raw bytes with a terminal separator; no normalization is performed."""
     result = 0
     for byte in value:
-        result = result * BASE + byte + 1
-    return result * BASE
+        result = result * BYTE_BASE + byte + 1
+    return result * BYTE_BASE
 
 
 def hash_text(value: str) -> int:
@@ -55,14 +52,5 @@ def hash_text(value: str) -> int:
 
 
 def table_address(value: bytes, table_size: int) -> int:
-    """Row for raw bytes; see ``klab.address_hash`` for the scheme.
-
-    ``hash_bytes`` ends with ``* BASE``, so reducing it modulo a multiple of 257
-    would send every input to row 0. Those table sizes use the mixed v2 scheme;
-    every other size keeps the legacy ``poly257-terminal-v1`` address.
-    """
-    if type(table_size) is not int or table_size <= 0:
-        raise ValueError("table_size must be positive")
-    if not byte_uses_legacy(table_size):
-        return mixed_byte_address(value, table_size)
-    return hash_bytes(value) % table_size
+    """Row for raw bytes; see ``klab.address_hash`` for the scheme."""
+    return hash_bytes(value) % validate_byte_table_size(table_size)

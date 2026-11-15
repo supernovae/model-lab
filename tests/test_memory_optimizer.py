@@ -4,9 +4,9 @@ from itertools import pairwise
 
 import pytest
 import torch
+from test_memory import token_memory
 from torch import nn
 
-from klab.model.memory import TokenNgramMemory
 from klab.training.optimizer import (
     is_ngram_table_parameter,
     learning_rate_for_step,
@@ -17,8 +17,8 @@ from klab.training.optimizer import (
 
 def test_table_multiplier_updates_all_ports_without_changing_projections():
     model = nn.Module()
-    model.memory = TokenNgramMemory(4, 7, 2, 4, hash_heads=2)
-    model.extra_memories = nn.ModuleDict({"3": TokenNgramMemory(4, 7, 2, 4)})
+    model.memory = token_memory(4, 7, 2, 4, hash_heads=2)
+    model.extra_memories = nn.ModuleDict({"3": token_memory(4, 7, 2, 4)})
     model.backbone = nn.Linear(4, 4)
     optimizer = make_optimizer(
         model,

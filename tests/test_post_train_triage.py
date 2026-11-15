@@ -247,7 +247,6 @@ def test_nonobject_manifest_is_local_value_error(tmp_path):
     "field,value",
     [
         ("requested_config", []),
-        ("memory", []),
     ],
 )
 def test_manifest_nested_shape_errors_are_local_value_error(tmp_path, field, value):
@@ -272,9 +271,6 @@ def test_manifest_nested_shape_errors_are_local_value_error(tmp_path, field, val
     data["architecture_sha256"] = architecture_sha256(data["effective_config"])
     if field in {"model", "attention"}:
         data["effective_config"][field] = value
-    elif field == "memory":
-        data["effective_config"]["model"][field] = value
-        data["effective_config"]["model"]["memory_table_size"] = 2
     else:
         data[field] = value
     for config_name in ("requested_config", "effective_config"):

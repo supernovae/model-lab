@@ -423,40 +423,7 @@ def attention_view(
     return {"layers": layers, "note": note}
 
 
-def _single_token_offset(
-    addresses: list[int], ids: list[int], loaded: Any
-) -> int | None:
-    """The offset k when every address is just ``token[p-k] mod rows``.
-
-    An n-gram table whose rows depend on one token only is a unigram table in
-    disguise (e.g. a hash multiplier that is a multiple of the table size).
-    Checked from the observed reads; the hash itself is not re-implemented.
-    """
-    rows = int(getattr(loaded.config.model, "memory_table_size", 0) or 0)
-    if (
-        rows <= 0
-        or len(addresses) < 4
-        or loaded.config.model.memory != "ngram"
-        or loaded.config.model.memory_addressing != "legacy"
-        or loaded.config.model.memory_token_mapping is not None
-    ):
-        return None
-    for offset in range(4):
-        expected = [
-            ids[p - offset] % rows if p >= offset else None
-            for p in range(len(addresses))
-        ]
-        tail = [
-            (a, e) for a, e in zip(addresses, expected, strict=True) if e is not None
-        ]
-        if len(tail) >= 3 and all(a == e for a, e in tail):
-            return offset
-    return None
-
-
-def memory_view(
-    loaded: Any, ids: list[int], captured: Mapping[str, Any]
-) -> dict | None:
+def memory_view(loaded: Any, captured: Mapping[str, Any]) -> dict | None:
     lookups = captured.get("memory") or {}
     if not lookups:
         return None
@@ -473,7 +440,6 @@ def memory_view(
                 "table": name,
                 "addresses": row,
                 "first_seen_at": reuse,
-                "single_token_offset": _single_token_offset(row, ids, loaded),
             }
         )
     gate = captured.get("gate")
@@ -698,7 +664,7 @@ def explore_loaded(
         "activation": forward["activation"],
         "attention": attention_view(arch, forward["attention"]),
         "routing": forward["routing"] or None,
-        "memory": memory_view(loaded, ids, forward),
+        "memory": memory_view(loaded, forward),
         "seconds": round(time.monotonic() - started, 3),
     }
 

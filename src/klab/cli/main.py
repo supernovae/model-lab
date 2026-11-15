@@ -118,16 +118,8 @@ def _engram_export(args: argparse.Namespace) -> None:
     from klab.evaluation.inference import load_run
     from klab.model.memory import ByteAddressMemory
     from klab.model.portable_engram import export_portable_engram
-    from klab.training.manifest import read_manifest, trained_memory_addressing
 
-    # load_run refuses a run trained with pre-fix degenerate addressing; the
-    # scheme exported is the one the hash-verified run manifest recorded at
-    # training time, never one inferred from the table's row count.
     loaded = load_run(args.run_id, Path(args.runs_dir), args.checkpoint, args.backend)
-    verified = read_manifest(Path(args.runs_dir) / args.run_id / "manifest.json")
-    trained = trained_memory_addressing(
-        verified["effective_config"], verified["architecture_sha256"]
-    )
     if loaded.engine is not None:
         raise ValueError(
             "Engram export is unsupported for native MLX runs; MLX supports dense "
@@ -135,14 +127,10 @@ def _engram_export(args: argparse.Namespace) -> None:
         )
     if not isinstance(loaded.model.memory, ByteAddressMemory):
         raise TypeError("Engram export requires a byte-memory run")
-    hashing = trained.get("byte")
-    if not isinstance(hashing, str):
-        raise TypeError("run records no raw-byte memory addressing")
     manifest = export_portable_engram(
         loaded.model.memory.table.weight,
         Path(args.output),
         ngram_size=loaded.config.model.memory_ngram_size,
-        hashing=hashing,
     )
     print(json.dumps(manifest.as_dict(), sort_keys=True))
 

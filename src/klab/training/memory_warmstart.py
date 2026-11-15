@@ -30,7 +30,6 @@ _TOKEN_MEMORY_FIELDS = frozenset(
         "memory_dim",
         "memory_ngram_orders",
         "memory_hash_heads",
-        "memory_addressing",
         "memory_table_sizes",
         "memory_hash_seed",
         "memory_token_mapping",

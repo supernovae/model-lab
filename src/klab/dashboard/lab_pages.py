@@ -1341,16 +1341,6 @@ def _routing(exploration: Mapping[str, Any], tokens: list[dict[str, Any]]) -> No
 def _memory(exploration: Mapping[str, Any], tokens: list[dict[str, Any]]) -> None:
     memory = exploration["memory"]
     st.caption(f"ⓘ {memory['note']}")
-    for stream in memory["streams"]:
-        offset = stream.get("single_token_offset")
-        if offset:  # offset 0 is a legitimate order-1 (unigram) table
-            st.warning(
-                f"▲ Table `{stream['table']}` reads the row of a single token "
-                f"({offset} back), not an "
-                "n-gram: every address equals that token id modulo the table "
-                "size. The hash may be degenerate for this table size (e.g. a "
-                "multiplier that is a multiple of the row count)."
-            )
     st.plotly_chart(xv.memory_address_figure(memory, tokens), use_container_width=True)
     st.caption(
         "Each dot is a recorded lookup. Repeated rows may reflect repeated n-grams or hash "

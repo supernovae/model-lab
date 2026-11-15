@@ -28,7 +28,7 @@ from pydantic import (
 )
 from safetensors import SafetensorError
 
-from klab.address_hash import byte_scheme
+from klab.address_hash import BYTE_HASHING
 from klab.canonical import canonical_digest, canonical_json, reject_duplicate_keys
 from klab.config.models import StrictModel
 from klab.engram.records import (
@@ -175,9 +175,7 @@ class LexicalComponent(StrictModel):
             raise ValueError("unsupported lexical format version")
         if min(self.ngram_size, self.table_size, self.embedding_dim) <= 0:
             raise ValueError("lexical dimensions and ngram_size must be positive")
-        if self.normalization != "raw-utf8-v1" or self.hashing != byte_scheme(
-            self.table_size
-        ):
+        if self.normalization != "raw-utf8-v1" or self.hashing != BYTE_HASHING:
             raise ValueError("unsupported lexical addressing contract")
         _require_sha(self.table_sha256, "table_sha256")
         return self

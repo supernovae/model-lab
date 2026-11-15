@@ -34,7 +34,6 @@ def model_config(tmp_path: Path, mode: str, **changes) -> ModelConfig:
                 "memory_dim": 4,
                 "memory_ngram_orders": (2, 3),
                 "memory_hash_heads": 2,
-                "memory_addressing": "prime_xor_v1",
                 "memory_token_mapping": mapping.to_dict(),
                 "memory_injection": "after_block",
                 "memory_block_index": 0,
