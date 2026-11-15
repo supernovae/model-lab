@@ -393,11 +393,11 @@ def test_cli_export_authenticates_release_once(
     real_files = publication._files
     scans = 0
 
-    def observe_files(root: Path, inventory: dict) -> None:
+    def observe_files(root: Path, inventory: dict, progress=None) -> None:
         nonlocal scans
         if root == release:
             scans += 1
-        real_files(root, inventory)
+        real_files(root, inventory, progress)
 
     monkeypatch.setattr(publication, "_files", observe_files)
     _handle(

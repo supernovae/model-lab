@@ -610,6 +610,44 @@ None of them is a quality score.
 | `klab corpus near-duplicates RELEASE` | MinHash near-duplicate pairs across splits |
 | `klab corpus consumers RELEASE --runs-dir RUNS` | Runs that trained on it |
 
+### Verification cost, scratch and receipts
+
+Every command that reads a release first verifies it, and verification is the
+same cold check wherever it runs: each file's size and SHA-256 against the
+manifest, then every document, span, lineage and view row against the pinned
+source snapshots. It runs on several processes and keeps only identities and
+byte offsets in a disposable index, so memory stays bounded and the index is a
+small fraction of the release, not a copy of it. A language-model-only release
+with a reviewed admission or a `fraction`, and any release with chat views,
+still uses the row-store verifier, whose index can be as large as the release's
+documents.
+
+```sh
+klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
+```
+
+- **`--scratch-dir`** holds the disposable index and the progress journal.
+  Default: `WORK/scratch`. Allow 2-3 times the release size for a release that
+  uses the row-store verifier, and put it on fast storage (NVMe); it is deleted
+  when the command ends.
+- **`--workers`** sets the verification processes (default 8, never more than
+  the CPU count). Use `1` for a single-process run. A release smaller than a few
+  hundred MB is verified in-process.
+- **Progress** goes to stderr and to `scratch/verify-<release>.progress.jsonl`
+  in the builder's progress format: phase, documents and bytes processed,
+  documents and MB per second and an estimated time remaining for the phase.
+  Phases: `hash_files`, `stage_receipts`, `snapshots`, `spans`, `documents`,
+  `raw_replay`, `lineage`, `stage:<id>`, `view:<split>`.
+- **Receipts.** The first successful verification of an immutable release writes
+  a signed receipt under the work directory, bound to the stat fingerprint of
+  every release and snapshot file. `audit`, `describe`, `sources`, `sample`,
+  `review`, `lineage`, `publication`, `near-duplicates`, `export`,
+  `materialize-mixture` and the other release readers reuse it, so a release is
+  verified from its bytes once, not once per command. Any change to a file
+  invalidates the receipt. `--cold` ignores receipts and verifies from the bytes.
+  Receipts need a work directory owned by you and not writable by others, and
+  files with a single hard link.
+
 `near-duplicates` compares every document, including dropped ones, against the
 other splits by three-word shingles and reports pairs at Jaccard 0.65 or more,
 plus identical text. Training documents are compared with validation and test

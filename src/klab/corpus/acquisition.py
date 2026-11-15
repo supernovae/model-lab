@@ -20,6 +20,7 @@ import threading
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +48,7 @@ from klab.corpus.project import (
     safe_name,
     source_declaration_payload,
 )
+from klab.corpus.release_verify import worker_count
 from klab.corpus.transport_budget import (
     PINNED_FILE_KINDS,
     TransportBudget,
@@ -2392,6 +2394,7 @@ def _verify_snapshot_cold(path: Path, *, _staged: bool = False) -> dict[str, Any
         ):
             raise ValueError("snapshot identity mismatch")
         names = set()
+        checks = []
         for entry in manifest["files"]:
             name = safe_name(entry["path"])
             if name in names:
@@ -2399,12 +2402,20 @@ def _verify_snapshot_cold(path: Path, *, _staged: bool = False) -> dict[str, Any
             names.add(name)
             file = path / "files" / name
             _regular(file)
+            checks.append((name, file, entry))
+
+        def check(item) -> None:
+            name, file, entry = item
             if (
                 not file.resolve().is_relative_to((path / "files").resolve())
                 or file.stat().st_size != entry["size"]
                 or sha256_file(file) != entry["sha256"]
             ):
                 raise ValueError(f"snapshot byte mismatch: {name}")
+
+        # Hashing releases the GIL, so threads read and hash files concurrently.
+        with ThreadPoolExecutor(max_workers=worker_count()) as pool:
+            list(pool.map(check, checks))
         actual = {
             p.relative_to(path / "files").as_posix()
             for p in (path / "files").rglob("*")

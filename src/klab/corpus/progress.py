@@ -12,6 +12,7 @@ import resource
 import sys
 import time
 from pathlib import Path
+from typing import TextIO
 
 
 def memory_bytes() -> tuple[int, int, int | None]:
@@ -47,6 +48,7 @@ class BuildProgress:
         interval_documents: int = 10_000,
         interval_input_bytes: int = 64 * 1024 * 1024,
         interval_seconds: float = 30.0,
+        echo: TextIO | None = None,
     ) -> None:
         if min(interval_documents, interval_input_bytes) < 1 or interval_seconds <= 0:
             raise ValueError("progress intervals must be positive")
@@ -56,7 +58,11 @@ class BuildProgress:
         self.interval_documents = interval_documents
         self.interval_input_bytes = interval_input_bytes
         self.interval_seconds = interval_seconds
+        self.echo = echo
         self.started = time.monotonic()
+        self.phase_started = self.started
+        self.phase_documents = 0
+        self.phase_bytes = 0
         self.last_time = self.started
         self.last_documents = 0
         self.last_bytes = 0
@@ -66,6 +72,17 @@ class BuildProgress:
         self.phase = "starting"
         self.attempt = f"{os.getpid()}-{time.time_ns()}"
         self.record("start")
+
+    def start_phase(
+        self, phase: str, *, expected_input_bytes: int | None = None
+    ) -> None:
+        """Begin a phase whose rates and ETA are measured from its own start."""
+        self.phase = phase
+        self.expected_input_bytes = expected_input_bytes
+        self.phase_started = time.monotonic()
+        self.phase_documents = self.documents
+        self.phase_bytes = self.input_bytes
+        self.record("phase")
 
     def update(
         self,
@@ -94,15 +111,18 @@ class BuildProgress:
     def record(self, event: str = "interval") -> None:
         now = time.monotonic()
         elapsed = max(now - self.started, 1e-9)
+        phase_elapsed = max(now - self.phase_started, 1e-9)
+        phase_documents = self.documents - self.phase_documents
+        phase_bytes = self.input_bytes - self.phase_bytes
         rss, peak, available = memory_bytes()
         remaining = (
-            max(self.expected_input_bytes - self.input_bytes, 0)
+            max(self.expected_input_bytes - phase_bytes, 0)
             if self.expected_input_bytes is not None
             else None
         )
         estimate = (
-            remaining * elapsed / self.input_bytes
-            if remaining is not None and self.input_bytes
+            remaining * phase_elapsed / phase_bytes
+            if remaining is not None and phase_bytes
             else None
         )
         row = {
@@ -114,8 +134,8 @@ class BuildProgress:
             "input_bytes_processed": self.input_bytes,
             "output_records_written": self.output_records,
             "elapsed_seconds": round(elapsed, 3),
-            "documents_per_second": round(self.documents / elapsed, 3),
-            "input_bytes_per_second": round(self.input_bytes / elapsed, 3),
+            "documents_per_second": round(phase_documents / phase_elapsed, 3),
+            "input_bytes_per_second": round(phase_bytes / phase_elapsed, 3),
             "estimated_remaining_seconds": round(estimate, 3)
             if estimate is not None
             else None,
@@ -130,6 +150,17 @@ class BuildProgress:
             )
             output.flush()
             os.fsync(output.fileno())
+        if self.echo is not None:
+            eta = row["estimated_remaining_seconds"]
+            print(
+                f"[{row['phase']}] {row['documents_processed']} documents, "
+                f"{row['input_bytes_processed'] / 1e9:.2f} GB, "
+                f"{row['documents_per_second']:.0f} documents/s, "
+                f"{row['input_bytes_per_second'] / 1e6:.0f} MB/s, "
+                f"ETA {'unknown' if eta is None else f'{eta:.0f} s'}",
+                file=self.echo,
+                flush=True,
+            )
         self.last_time = now
         self.last_documents = self.documents
         self.last_bytes = self.input_bytes
