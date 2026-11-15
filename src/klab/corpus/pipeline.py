@@ -111,7 +111,6 @@ class ScenarioRecord(StrictModel):
 
     schema_version: Literal[1]
     generator_id: str
-    generator_version: str
     world_seed: int
     scenario_family_id: str
     generator_world_id: str
@@ -825,7 +824,6 @@ def _path_scenario(seed: int, family: str, stage: str) -> dict[str, Any]:
     result = {
         "schema_version": 1,
         "generator_id": "pathlib_path_suffix_v1",
-        "generator_version": "1",
         "world_seed": seed,
         "scenario_family_id": family,
         "generator_world_id": f"{family}:{seed}",
@@ -1080,7 +1078,6 @@ def _scenario_v2(
     receipt = {
         "schema_version": 1,
         "generator_id": generator,
-        "generator_version": "2",
         "world_id": f"{generator}:{seed}",
         "scenario_family_id": family,
         "template_family_id": template,
@@ -1095,7 +1092,6 @@ def _scenario_v2(
     result = {
         "schema_version": 1,
         "generator_id": generator,
-        "generator_version": "2",
         "world_seed": seed,
         "scenario_family_id": family,
         "generator_world_id": receipt["world_id"],
@@ -1293,7 +1289,6 @@ def _scenario(
     receipt = {
         "schema_version": 1,
         "generator_id": generator,
-        "generator_version": "1",
         "world_id": f"{generator}:{seed}",
         "scenario_family_id": family,
         "template_family_id": template,
@@ -1308,7 +1303,6 @@ def _scenario(
     result = {
         "schema_version": 1,
         "generator_id": generator,
-        "generator_version": "1",
         "world_seed": seed,
         "scenario_family_id": family,
         "generator_world_id": receipt["world_id"],
@@ -1360,10 +1354,7 @@ def _scenario_messages(scenario: dict[str, Any], tool: bool) -> list[dict[str, A
         ):
             raise ValueError("scenario has no complete inert oracle tool receipt")
         name = "declared_world_inspection_v1"
-        arguments = {
-            "world_id": receipt["world_id"],
-            "generator_version": receipt["generator_version"],
-        }
+        arguments = {"world_id": receipt["world_id"]}
         instruction = "Inspect only the inert declared world receipt."
         final = f"Evidence: {receipt['evidence']}. {answer} Verification: {receipt['verification']} Rollback: {receipt['rollback']}"
     return [
@@ -2073,7 +2064,6 @@ def _build_stored(
                     for s in project.sources
                     if s.kind == "deterministic_generator"
                     and s.acquisition.generator == generator
-                    and s.acquisition.generator_version == generator_version
                 ]
                 if generator != "pathlib_path_suffix_v1" and not declared:
                     raise ValueError(
@@ -2132,9 +2122,7 @@ def _build_stored(
                                 or digest([stage_id, "path_suffix_prompt_v1"]),
                             ),
                             "scenario_id": row["scenario_id"],
-                            "generator_identity": digest(
-                                [row["generator_id"], row["generator_version"]]
-                            ),
+                            "generator_identity": digest([row["generator_id"]]),
                             "oracle_identity": digest(
                                 [row["world_state"], row["oracle_answer"]]
                             ),
@@ -2482,12 +2470,7 @@ def _build_stored(
                                 or digest([stage_id, kind]),
                             ),
                             "scenario_id": scenario["scenario_id"],
-                            "generator_identity": digest(
-                                [
-                                    scenario["generator_id"],
-                                    scenario["generator_version"],
-                                ]
-                            ),
+                            "generator_identity": digest([scenario["generator_id"]]),
                             "oracle_identity": digest(
                                 [scenario["world_state"], scenario["oracle_answer"]]
                             ),
@@ -2786,7 +2769,7 @@ def _build_stored(
                         "generator_world_id": scenario["generator_world_id"],
                         "oracle_answer": scenario["oracle_answer"],
                         "oracle_implementation": identity["implementation_sha256"],
-                        "oracle_version": scenario["generator_version"],
+                        "oracle_version": scenario["generator_id"].rsplit("_v", 1)[-1],
                         "interpreter": scenario["interpreter"],
                         "world_state": scenario["world_state"],
                         "actual_result": scenario["oracle_answer"],
