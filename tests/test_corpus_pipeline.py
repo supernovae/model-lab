@@ -19,13 +19,13 @@ from corpus_fixtures import (
 from klab.corpus.acquisition import acquire
 from klab.corpus.pipeline import (
     _records_for_file,
-    _split,
     _uses_disk_lm_builder,
     build,
 )
 from klab.corpus.project import DocumentPolicy, SourceDeclaration, load_project
 from klab.corpus.release import freeze, lineage, review, sample, verify_release
 from klab.corpus.rights import resolve_file_rights
+from klab.corpus.split_assignments import assign_split
 
 STRICT_DOCS = DocumentPolicy.model_validate(STRICT_POLICY["documents"])
 PRIVATE_DOCS = DocumentPolicy.model_validate(PRIVATE_RESEARCH_POLICY["documents"])
@@ -343,12 +343,12 @@ def test_split_requires_complete_consistent_family_assignments() -> None:
         "unit": "source_document_family",
         "assignments": {"docs": "train", "code": "test", "world": "validation"},
     }
-    assert _split({"source_family_ids": ["docs"]}, policy) == "train"
-    assert _split({"scenario_family_id": "world"}, policy) == "validation"
+    assert assign_split({"source_family_ids": ["docs"]}, policy) == "train"
+    assert assign_split({"scenario_family_id": "world"}, policy) == "validation"
     with pytest.raises(ValueError, match="conflicting"):
-        _split({"source_family_ids": ["docs", "code"]}, policy)
+        assign_split({"source_family_ids": ["docs", "code"]}, policy)
     with pytest.raises(ValueError, match="missing"):
-        _split({"source_family_ids": ["unassigned"]}, policy)
+        assign_split({"source_family_ids": ["unassigned"]}, policy)
 
 
 def test_build_freeze_replay_spans_semantics_and_tamper(tmp_path: Path) -> None:

@@ -154,6 +154,14 @@ class DuplicateError(ValueError):
         self.groups = groups
 
 
+def find_root(parents, item):
+    """Union-find root of `item` in a parent array or mapping, compressing the path."""
+    while parents[item] != item:
+        parents[item] = parents[parents[item]]
+        item = parents[item]
+    return item
+
+
 def deduplicate_documents(
     documents: list[dict[str, Any]],
     ranks: dict[str, int],
@@ -235,19 +243,13 @@ def deduplicate_documents(
         # locally chosen representatives would otherwise introduce cycles.
         parents = {identifier: identifier for identifier in by_id}
 
-        def root_of(identifier: str) -> str:
-            while parents[identifier] != identifier:
-                parents[identifier] = parents[parents[identifier]]
-                identifier = parents[identifier]
-            return identifier
-
         for group in groups:
-            first = root_of(group["origins"][0])
+            first = find_root(parents, group["origins"][0])
             for identifier in group["origins"][1:]:
-                parents[root_of(identifier)] = first
+                parents[find_root(parents, identifier)] = first
         components: dict[str, list[str]] = defaultdict(list)
         for identifier in by_id:
-            components[root_of(identifier)].append(identifier)
+            components[find_root(parents, identifier)].append(identifier)
         for ids in components.values():
             heldout = {by_id[i]["split"] for i in ids} - {"train"}
             if len(heldout) > 1:

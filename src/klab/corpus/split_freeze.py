@@ -22,7 +22,12 @@ from klab.corpus.bounded_metadata import (
     read_metadata,
 )
 from klab.corpus.jsonl_records import records_from_path
-from klab.corpus.project import Project, project_path, source_declaration_payload
+from klab.corpus.project import (
+    SPLITS,
+    Project,
+    project_path,
+    source_declaration_payload,
+)
 from klab.corpus.release import verify_release
 from klab.corpus.rights import verify_record_admission
 from klab.corpus.row_index import RowIndex, ValueMap
@@ -32,7 +37,6 @@ from klab.result_publication import sync_directory as _sync_directory
 from klab.training.manifest import sha256_file
 from klab.verification_proofs import verification_options
 
-_SPLITS = ("train", "validation", "test")
 _WEIGHTS = (8, 1, 1)
 _FREEZE_MARKER = b"# klab frozen split bundle; requires matching receipt\n"
 
@@ -111,14 +115,14 @@ def verify_split_bundle(
 def _split_weights(value: object) -> tuple[int, int, int]:
     if (
         not isinstance(value, dict)
-        or set(value) != set(_SPLITS)
-        or any(type(value[key]) is not int or value[key] <= 0 for key in _SPLITS)
+        or set(value) != set(SPLITS)
+        or any(type(value[key]) is not int or value[key] <= 0 for key in SPLITS)
         or sum(value.values()) > 10000
     ):
         raise ValueError(
             "split_weights requires positive integer train/validation/test weights totaling at most 10000"
         )
-    return tuple(value[key] for key in _SPLITS)
+    return tuple(value[key] for key in SPLITS)
 
 
 def _counts(
@@ -206,7 +210,7 @@ def _prior_family_splits(
             or set(row)
             != {"document_id", "family_id", "split", "stratum", "content_sha256"}
             or row["document_id"] in seen
-            or row["split"] not in _SPLITS
+            or row["split"] not in SPLITS
             or not isinstance(row["family_id"], str)
             or not row["family_id"]
         ):
@@ -509,7 +513,7 @@ def _freeze_splits(
                 "test": f"{test}/{name_count}",
             },
         }
-        planned = dict(zip(_SPLITS, (train, validation, test), strict=True))
+        planned = dict(zip(SPLITS, (train, validation, test), strict=True))
         pinned = ValueMap(connection)
         for family in names():
             if family in prior_families:
@@ -518,7 +522,7 @@ def _freeze_splits(
                     raise ValueError("prior family changed token stratum")
         remaining = {
             split: planned[split] - sum(value == split for value in pinned.values())
-            for split in _SPLITS
+            for split in SPLITS
         }
         if any(count < 0 for count in remaining.values()):
             raise ValueError("prior family assignments exceed new split quota")

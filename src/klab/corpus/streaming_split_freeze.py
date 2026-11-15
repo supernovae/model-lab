@@ -19,7 +19,7 @@ import yaml
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.bounded_metadata import _HashedInput, _Reader
 from klab.corpus.jsonl_records import records_from_path
-from klab.corpus.project import project_path, source_declaration_payload
+from klab.corpus.project import SPLITS, project_path, source_declaration_payload
 from klab.corpus.rights import (
     FILE_ADMISSION_KINDS,
     RightsPolicy,
@@ -290,7 +290,7 @@ def _family_phase(directory, joined, seed):
 
 
 def _allocation_phase(directory, family_phase, weights, strata):
-    from klab.corpus.split_freeze import _SPLITS, _counts
+    from klab.corpus.split_freeze import _counts
 
     realized, remaining = {}, {}
     for stratum in sorted(strata):
@@ -305,9 +305,9 @@ def _allocation_phase(directory, family_phase, weights, strata):
         counts = _counts(count, weights)
         realized[stratum] = {
             "families": count,
-            **dict(zip(_SPLITS, counts, strict=True)),
+            **dict(zip(SPLITS, counts, strict=True)),
             "fractions": {
-                s: f"{n}/{count}" for s, n in zip(_SPLITS, counts, strict=True)
+                s: f"{n}/{count}" for s, n in zip(SPLITS, counts, strict=True)
             },
         }
         remaining[stratum] = {
@@ -317,7 +317,7 @@ def _allocation_phase(directory, family_phase, weights, strata):
                 if "prior_counts" in family_phase
                 else pinned.get(split, 0)
             )
-            for split, quota in zip(_SPLITS, counts, strict=True)
+            for split, quota in zip(SPLITS, counts, strict=True)
         }
         if any(count < 0 for count in remaining[stratum].values()):
             raise ValueError("prior family assignments exceed new split quota")

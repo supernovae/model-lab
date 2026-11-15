@@ -158,7 +158,7 @@ def verify_release_review(
     release = locations["release_path"]
     manifest = verify_release(release)
     if build_project is not None:
-        from klab.corpus.project import load_project, release_declaration_payload
+        from klab.corpus.project import declaration_payload, load_project
 
         project = load_project(build_project)
         identity = manifest["build_identity"]
@@ -166,7 +166,7 @@ def verify_release_review(
             identity["project_id"] != project.config.id
             or identity["project"] != project.config.model_dump(mode="json")
             or identity["split"] != project.splits.model_dump(mode="json")
-            or identity["release"] != release_declaration_payload(project.release)
+            or identity["release"] != declaration_payload(project.release)
         ):
             raise ValueError("release review differs from bound build project")
     if (

@@ -17,6 +17,7 @@ from klab.corpus.row_qualification import LEGACY_HF_ROW_URIS, RowQualification
 _ID = re.compile(r"[a-z][a-z0-9_-]*\Z")
 _HEX = re.compile(r"[0-9a-fA-F]{64}\Z")
 _GIT_REV = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
+SPLITS = ("train", "validation", "test")
 
 
 def safe_name(value: str) -> str:
@@ -1023,9 +1024,12 @@ class ReleaseDeclaration(StrictModel):
         return self
 
 
-def release_declaration_payload(release: ReleaseDeclaration) -> dict[str, Any]:
-    result = release.model_dump(mode="json")
-    if release.record_admission is None:
+def declaration_payload(value: Any) -> dict[str, Any]:
+    """A declaration (or plain mapping) as the JSON recorded in build identities."""
+    if not hasattr(value, "model_dump"):
+        return dict(value)
+    result = value.model_dump(mode="json")
+    if isinstance(value, ReleaseDeclaration) and value.record_admission is None:
         result.pop("record_admission")
     return result
 

@@ -86,7 +86,7 @@ class _Parents:
 
 
 def _references(directory, prepared, project):
-    from klab.corpus.pipeline import _split
+    from klab.corpus.split_assignments import assign_split
 
     policy = project.splits.model_dump(mode="json")
     external = policy.get("assignment_file") is not None
@@ -136,7 +136,7 @@ def _references(directory, prepared, project):
                         shard_index,
                         position,
                         len(raw),
-                        None if external else _split(doc, policy),
+                        None if external else assign_split(doc, policy),
                         doc["raw_content_sha256"],
                         doc["content_sha256"],
                         signature,

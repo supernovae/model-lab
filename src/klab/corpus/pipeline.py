@@ -6,7 +6,6 @@ import hashlib
 import io
 import itertools
 import json
-import os
 import re
 import tempfile
 import unicodedata
@@ -20,11 +19,24 @@ from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.models import StrictModel
+from klab.corpus.build_outputs import (
+    Tally,
+    license_metadata_entry,
+    publish_staging,
+    record_overlap,
+    release_report,
+    rights_file_entry,
+    rights_report,
+    source_declarations,
+    stage_declared_inputs,
+    write_json,
+    write_release_files,
+)
 from klab.corpus.project import (
     ROW_SOURCE_KINDS,
+    SPLITS,
     NormalizerOptions,
-    ReleaseDeclaration,
-    release_declaration_payload,
+    declaration_payload,
     source_language,
 )
 from klab.corpus.provenance import (
@@ -42,10 +54,10 @@ from klab.corpus.provenance import (
 from klab.corpus.rights import (
     FILE_ADMISSION_KINDS,
     FileRights,
-    reported_spdx_expression,
     resolve_file_rights,
     verify_record_admission,
 )
+from klab.corpus.split_assignments import assign_split
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
@@ -179,7 +191,6 @@ class RecordedResponses:
         return raw, response
 
 
-SPLITS = ("train", "validation", "test")
 KINDS = frozenset(
     {
         "lm_text",
@@ -206,11 +217,6 @@ def digest(value: Any) -> str:
     return canonical_digest(value)
 
 
-def _json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(canonical_json(value) + b"\n")
-
-
 def _jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as stream:
@@ -227,14 +233,6 @@ def _rows(path: Path) -> list[dict[str, Any]]:
 def _line_count(path: Path) -> int:
     with path.open("rb") as stream:
         return sum(bool(line.strip()) for line in stream)
-
-
-def _model(value: Any) -> dict[str, Any]:
-    if isinstance(value, ReleaseDeclaration):
-        return release_declaration_payload(value)
-    return (
-        value.model_dump(mode="json") if hasattr(value, "model_dump") else dict(value)
-    )
 
 
 def _normalized(text: str) -> str:
@@ -742,36 +740,6 @@ def _records_for_file(
         }
         rows.append((document, evidence))
     return rows
-
-
-def _split(record: dict[str, Any], policy: dict[str, Any]) -> str:
-    unit = policy["unit"]
-    if unit == "document":
-        keys = record.get("parent_document_ids") or [
-            record.get("document_id") or record.get("scenario_family_id")
-        ]
-    elif unit in {"source_repository", "source_document_family"}:
-        keys = record.get("source_family_ids") or [
-            record.get("source_family") or record.get("scenario_family_id")
-        ]
-    else:
-        field = {
-            "scenario_family": "scenario_family_id",
-            "generator_world": "generator_world_id",
-            "template_family": "template_family_id",
-        }[unit]
-        keys = [record.get(field)]
-    keys = [k for k in keys if k]
-    if not keys:
-        raise ValueError(f"missing {unit} split lineage")
-    assignments = policy["assignments"]
-    choices = {assignments[k] for k in keys if k in assignments}
-    if len(choices) != 1 or any(k not in assignments for k in keys):
-        raise ValueError(f"missing/conflicting split assignment: {keys}")
-    choice = choices.pop()
-    if choice not in SPLITS:
-        raise ValueError("invalid split")
-    return choice
 
 
 def _lineage(
@@ -1452,7 +1420,7 @@ def _staged_build(root: Path, build_id: str) -> Iterator[Path]:
                         if name.endswith(".jsonl")
                         else json.loads(source.read_text(encoding="utf-8"))
                     )
-            _json(diagnostic, details)
+            write_json(diagnostic, details)
             raise
 
 
@@ -1550,13 +1518,13 @@ def _build_stored(
     root = Path(work_root) / "corpora" / project.config.id / "builds"
     root.mkdir(parents=True, exist_ok=True)
     transforms = _ordered_transforms(project)
-    stage_specs = [_model(t) for t in transforms]
+    stage_specs = [declaration_payload(t) for t in transforms]
     for t in stage_specs:
         if t["kind"] not in KINDS:
             raise ValueError(f"unregistered transform: {t['kind']}")
     identity = {
         "project_id": project.config.id,
-        "project": _model(project.config),
+        "project": declaration_payload(project.config),
         "lock": {
             key: {
                 "declaration_sha256": value["declaration_sha256"],
@@ -1565,8 +1533,8 @@ def _build_stored(
             for key, value in sorted(lock["sources"].items())
         },
         "transforms": stage_specs,
-        "split": _model(project.splits),
-        "release": _model(project.release),
+        "split": declaration_payload(project.splits),
+        "release": declaration_payload(project.release),
         "implementation_sha256": sha256_file(Path(__file__)),
         "schema_implementation_sha256": sha256_file(
             Path(__file__).with_name("project.py")
@@ -1612,19 +1580,7 @@ def _build_stored(
             admission_path=admission_path,
         )
     with _staged_build(root, build_id) as staging:
-        from klab.corpus.split_assignments import copy_assignments
-
-        copy_assignments(project, staging)
-        if admission_path is not None:
-            import shutil
-
-            destination = staging / "record-admission.json"
-            shutil.copyfile(admission_path, destination)
-            if (
-                sha256_file(destination)
-                != project.release.record_admission.sha256.lower()
-            ):
-                raise ValueError("record admission changed during build")
+        stage_declared_inputs(project, staging, admission_path)
         documents: list[dict[str, Any]] = []
         evidence: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
@@ -1675,15 +1631,12 @@ def _build_stored(
                 name = file["path"]
                 if name == nested_path:
                     rights_files.append(
-                        {
-                            "source_id": source.id,
-                            "path": name,
-                            "sha256": file["sha256"],
-                            "size": file["size"],
-                            "role": "license_metadata",
-                            "canonical_uri": source.canonical_uri,
-                            "revision": source.revision,
-                        }
+                        license_metadata_entry(
+                            source,
+                            path=name,
+                            sha256=file["sha256"],
+                            size=file["size"],
+                        )
                     )
                     continue
                 raw = (Path(entry["snapshot_path"]) / "files" / name).read_bytes()
@@ -1706,35 +1659,17 @@ def _build_stored(
                     decision = admitted["rights"]
                 if decision is not None:
                     rights_files.append(
-                        {
-                            "source_id": source.id,
-                            "path": name,
-                            "sha256": file["sha256"],
-                            "size": file["size"],
-                            "role": "transform_input"
+                        rights_file_entry(
+                            source,
+                            path=name,
+                            sha256=file["sha256"],
+                            size=file["size"],
+                            role="transform_input"
                             if (source.id, name) in auxiliary_files
                             else "document",
-                            "canonical_uri": source.canonical_uri,
-                            "revision": source.revision,
-                            "license_url": source.license_url,
-                            "rights": decision.model_dump(mode="json"),
-                            **(
-                                {
-                                    "admission_policy_id": admitted["policy_id"],
-                                    "admission_policy_sha256": admitted[
-                                        "policy_sha256"
-                                    ],
-                                    "admission_license_label": admitted[
-                                        "license_label"
-                                    ],
-                                    "admission_policy_spdx_expression": admitted[
-                                        "policy_spdx_expression"
-                                    ],
-                                }
-                                if admitted is not None
-                                else {}
-                            ),
-                        }
+                            rights=decision.model_dump(mode="json"),
+                            admitted=admitted,
+                        )
                     )
                     if decision.training_eligibility not in {
                         "eligible",
@@ -1804,7 +1739,7 @@ def _build_stored(
 
         policy = split_policy(project)
         for doc in documents:
-            doc["split"] = _split(doc, policy)
+            doc["split"] = assign_split(doc, policy)
         from klab.corpus.dedup_policy import (
             DuplicateError,
             deduplicate_documents,
@@ -1827,8 +1762,8 @@ def _build_stored(
                 "rejected": rejected,
                 "error": str(error),
             }
-            _json(staging / "audit.json", diagnostic)
-            _json(root / "diagnostics" / f"{build_id}.json", diagnostic)
+            write_json(staging / "audit.json", diagnostic)
+            write_json(root / "diagnostics" / f"{build_id}.json", diagnostic)
             raise
         for doc in documents:
             doc["representative_id"] = representative[doc["document_id"]]
@@ -1850,7 +1785,7 @@ def _build_stored(
         template_splits: dict[str, str] = {}
         world_splits: dict[str, str] = {}
         for transform in transforms:
-            spec = _model(transform)
+            spec = declaration_payload(transform)
             kind, stage_id = spec["kind"], spec["id"]
             params = spec.get("parameters", {})
             inputs = spec.get("inputs", [])
@@ -2072,7 +2007,7 @@ def _build_stored(
                     )
                 ]
                 for row in output:
-                    row["split"] = _split(row, policy)
+                    row["split"] = assign_split(row, policy)
                     if generator != "pathlib_path_suffix_v1":
                         seed = row["world_seed"]
                         expected = (
@@ -2307,7 +2242,7 @@ def _build_stored(
                     try:
                         raw_output, response = replay.generate(request)
                     except ValueError as exc:
-                        _json(
+                        write_json(
                             root / "diagnostics" / f"{build_id}.json",
                             {
                                 "error": str(exc),
@@ -2385,7 +2320,7 @@ def _build_stored(
                         "transform_id": stage_id,
                     }
                     record["record_id"] = digest(record)
-                    record["split"] = _split(
+                    record["split"] = assign_split(
                         _lineage(
                             {"record_id": record["record_id"], "kind": "generation"},
                             parents,
@@ -2426,7 +2361,7 @@ def _build_stored(
             elif kind in {"chat_sft", "tool_episode"}:
                 output = []
                 accepted = set(
-                    _model(project.release).get(
+                    declaration_payload(project.release).get(
                         "accepted_generation_statuses",
                         ["source_entailed", "oracle_verified", "human_reviewed"],
                     )
@@ -2652,7 +2587,7 @@ def _build_stored(
             )
         for item in lineage:
             if "split" not in item:
-                item["split"] = _split(item, policy)
+                item["split"] = assign_split(item, policy)
             for parent in item["parent_document_ids"]:
                 if parent not in by_id:
                     raise ValueError("dangling parent document")
@@ -2838,7 +2773,7 @@ def _build_stored(
         _jsonl(staging / "rejected.jsonl", rejected)
         _jsonl(staging / "chat/records.jsonl", chats)
         ledger_by_id = {item["record_id"]: item for item in lineage}
-        release_spec = _model(project.release)
+        release_spec = declaration_payload(project.release)
         include_shapes = release_spec.get("include_shapes")
         include_origins = release_spec.get("include_origins")
 
@@ -2967,39 +2902,14 @@ def _build_stored(
             for family, assignments in sorted(families.items()):
                 if len(assignments) < 2:
                     continue
-                overlap = {
-                    "family_type": field,
-                    "family_id": family,
-                    "splits": sorted(assignments),
-                }
-                leakage.append(overlap)
-                if (
-                    (policy["unit"] == "document" and field == "parent_document_ids")
-                    or (
-                        policy["unit"]
-                        in {"source_document_family", "source_repository"}
-                        and field == "source_family_ids"
-                    )
-                    or (
-                        policy["unit"] == "scenario_family"
-                        and field == "scenario_family_id"
-                    )
-                    or (
-                        policy["unit"] == "generator_world"
-                        and field == "generator_world_id"
-                    )
-                    or (
-                        policy["unit"] == "template_family"
-                        and field == "template_family_id"
-                    )
-                ):
-                    _json(
-                        root / "diagnostics" / f"{build_id}.json",
-                        {"error": "shared split policy unit", "leakage": leakage},
-                    )
-                    raise ValueError(f"split policy unit {family} spans splits")
-                warnings.append(
-                    f"{field} {family} overlaps {', '.join(sorted(assignments))}"
+                record_overlap(
+                    leakage,
+                    warnings,
+                    unit=policy["unit"],
+                    field=field,
+                    family=family,
+                    splits=assignments,
+                    diagnostics=root / "diagnostics" / f"{build_id}.json",
                 )
         audit = {
             "duplicates": duplicate_groups,
@@ -3008,204 +2918,37 @@ def _build_stored(
             "drop_count": len(documents) - len(kept),
             "leakage": leakage,
         }
-        _json(staging / "audit.json", audit)
-        _json(staging / "splits.json", _model(project.splits))
-        sources = [
-            {
-                "id": s.id,
-                "kind": s.kind,
-                "canonical_uri": s.canonical_uri,
-                "revision": s.revision,
-                "license": s.license,
-                "redistribution": s.rights.redistribution_mode,
-                "license_url": s.license_url,
-                "rights_policy": s.rights.model_dump(mode="json"),
-                **(
-                    {"explicit_training_restriction": s.explicit_training_restriction}
-                    if s.explicit_training_restriction is not None
-                    else {}
-                ),
-                "origin": s.origin,
-                "source_family": s.source_family,
-                "snapshot_sha256": lock["sources"].get(s.id, {}).get("snapshot_sha256"),
-                "reproducibility_class": (
-                    "generator_dependent"
-                    if s.kind == "inference_generator"
-                    else "script_reproducible_not_redistributed"
-                    if s.rights.redistribution_mode
-                    in {
-                        "reference_only",
-                        "derived_only",
-                        "unknown",
-                        "rejected",
-                        "metadata_reconstruction_only",
-                        "not_redistributable",
-                        "review_required",
-                    }
-                    else "fully_reproducible"
-                ),
-            }
-            for s in project.sources
-        ]
-        _json(staging / "sources.json", sources)
-        file_decisions = [item for item in rights_files if item["role"] == "document"]
-        rights_counts = Counter(
-            item["rights"]["training_eligibility"] for item in file_decisions
-        )
-        bytes_by_state: Counter[str] = Counter()
-        spdx_counts: Counter[str] = Counter()
-        modes: Counter[str] = Counter()
-        source_spdx = {s.id: s.rights.spdx_expression for s in project.sources}
-        for item in file_decisions:
-            decision = item["rights"]
-            bytes_by_state[decision["training_eligibility"]] += item["size"]
-            spdx_counts[
-                reported_spdx_expression(item, source_spdx[item["source_id"]])
-            ] += 1
-            modes[decision["redistribution_mode"]] += 1
-        rights_report = {
-            "schema_version": 1,
-            "publication_mode": project.release.publication_mode,
-            "release_policy": project.release.policy.model_dump(mode="json"),
-            "weight_license_status": "separate_analysis_required",
-            "sources": sources,
-            "files": rights_files,
-            "training_eligibility": {
-                state: {
-                    "files": rights_counts[state],
-                    "source_bytes": bytes_by_state[state],
-                    "source_tokens": None,
-                    "token_count_reason": "tokenizer_not_declared",
-                }
-                for state in (
-                    "eligible",
-                    "eligible_with_obligations",
-                    "review_required",
-                    "ineligible",
-                )
-            },
-            "spdx_expressions": dict(spdx_counts),
-            "redistribution_modes": dict(modes),
-            "unresolved_rights_files": rights_counts["review_required"],
-            "advisory": "Source/derived-data rights and model-weight licensing are separate decisions; not a legal conclusion.",
-        }
-        _json(staging / "license-report.json", rights_report)
-        mixture = _model(project.release).get("mixture", {})
-        actual = {
-            domain: {
-                "documents": sum(domain in d["domains"] for d in kept),
-                "utf8_bytes": sum(
-                    len(d["text"].encode()) for d in kept if domain in d["domains"]
-                ),
-                "actual_tokens": None,
-                "token_count_reason": "tokenizer_not_declared",
-            }
-            for domain in sorted(
-                set(mixture) | {domain for d in kept for domain in d["domains"]}
-            )
-        }
-        generation_statuses = Counter(g["validation_status"] for g in generations)
-        generation_statuses["oracle_verified"] += len(scenarios)
-        generation_total = len(generations) + len(scenarios)
-        source_counts = Counter(d["source_id"] for d in kept)
-        source_scale: dict[str, dict[str, dict[str, int]]] = defaultdict(dict)
+        write_json(staging / "audit.json", audit)
+        write_json(staging / "splits.json", declaration_payload(project.splits))
+        sources = source_declarations(project, lock)
+        write_json(staging / "sources.json", sources)
+        rights = rights_report(project, sources, rights_files)
+        write_json(staging / "license-report.json", rights)
+        tally = Tally()
         for doc in kept:
-            split = doc["split"]
-            counts = source_scale[doc["source_id"]].setdefault(
-                split,
-                {
-                    "documents": 0,
-                    "utf8_bytes": 0,
-                    "characters": 0,
-                    "whitespace_words": 0,
-                },
-            )
-            text = doc["text"]
-            counts["documents"] += 1
-            counts["utf8_bytes"] += len(text.encode("utf-8"))
-            counts["characters"] += len(text)
-            counts["whitespace_words"] += len(text.split())
-        report = {
-            "schema_version": 1,
-            "release_policy": project.release.policy.model_dump(mode="json"),
-            "normalizer": project.release.normalizer.model_dump(mode="json"),
-            "corpus_id": project.config.id,
-            "requested_mixture": mixture,
-            "actual_mixture": actual,
-            "document_count": len(documents),
-            "kept_document_count": len(kept),
-            "split_counts": {s: sum(d["split"] == s for d in kept) for s in SPLITS},
-            "view_counts": {
+            tally.add(doc)
+        report = release_report(
+            project,
+            rights,
+            tally,
+            document_count=len(documents),
+            view_counts={
                 view: {
                     split: _line_count(staging / view / f"{split}.jsonl")
                     for split in SPLITS
                 }
                 for view in ("lm", "chat")
             },
-            "source_counts": dict(source_counts),
-            "source_concentration": {
-                source: count / len(kept)
-                for source, count in sorted(source_counts.items())
-            }
-            if kept
-            else {},
-            "kind_counts": dict(Counter(d["document_kind"] for d in kept)),
-            "lexical_count": len(lexical),
-            "semantic_count": len(semantic),
-            "chat_count": len(chats),
-            "generation_statuses": dict(generation_statuses),
-            "generation_validation_ratios": {
-                status: count / generation_total
-                for status, count in sorted(generation_statuses.items())
-            }
-            if generation_total
-            else {},
-            "generator_count": len({g["generator_identity"] for g in generations}),
-            "scenario_count": len(scenarios),
-            "dedupe": {
-                "groups": len(duplicate_groups),
-                "dropped": len(documents) - len(kept),
-            },
-            "warnings": warnings,
-            "token_count_reason": None
-            if fraction is not None
-            else "tokenizer_not_declared",
-        }
-        report["source_scale"] = {
-            source: dict(sorted(splits.items()))
-            for source, splits in sorted(source_scale.items())
-        }
-        train_scale = {
-            key: sum(
-                per_split.get("train", {}).get(key, 0)
-                for per_split in source_scale.values()
-            )
-            for key in ("documents", "utf8_bytes", "characters", "whitespace_words")
-        }
-        report["train_source_scale"] = {
-            **train_scale,
-            "utf8_bytes_div4_proxy": train_scale["utf8_bytes"] // 4,
-            "actual_tokens": None,
-            "token_count_reason": "final_tokenizer_not_fitted",
-            "proxy_warning": (
-                "Whitespace words and UTF-8 bytes/4 are tokenizer-independent "
-                "descriptors, not measured token counts."
-            ),
-        }
-        report["rights"] = {
-            key: value
-            for key, value in rights_report.items()
-            if key
-            in {
-                "training_eligibility",
-                "spdx_expressions",
-                "redistribution_modes",
-                "unresolved_rights_files",
-                "weight_license_status",
-                "publication_mode",
-                "release_policy",
-            }
-        }
+            duplicate_groups=len(duplicate_groups),
+            warnings=warnings,
+            lexical=len(lexical),
+            semantic=len(semantic),
+            chat=len(chats),
+            generation_statuses=Counter(g["validation_status"] for g in generations),
+            generator_count=len({g["generator_identity"] for g in generations}),
+            scenario_count=len(scenarios),
+            tokenized=fraction is not None,
+        )
         from klab.corpus.measurement import summarize_release
 
         report["measurement"] = summarize_release(
@@ -3213,48 +2956,15 @@ def _build_stored(
             release_spec=release_spec,
             tokenizer=tokenizer_path if fraction is not None else None,
         )
-        _json(staging / "report.json", report)
-        (staging / "report.md").write_text(
-            f"# Corpus {project.config.id}\n\nDocuments: {len(kept)} retained / {len(documents)} total.\n\n"
-            + (
-                f"Training tokens: {report['measurement']['training_mixture']['actual_tokens']} with pinned tokenizer {fraction.tokenizer_sha256}.\n"
-                if fraction is not None
-                else "No tokenizer declared; token counts unavailable.\n"
-            ),
-            encoding="utf-8",
+        write_release_files(
+            staging,
+            project,
+            report,
+            build_id=build_id,
+            identity=identity,
+            stages=stages,
+            lock=lock,
+            tokenizer_sha256=fraction.tokenizer_sha256 if fraction else None,
         )
-        _json(
-            staging / "build.json",
-            {
-                "schema_version": 1,
-                "build_id": build_id,
-                "identity": identity,
-                "stages": stages,
-                "files": {
-                    str(p.relative_to(staging)): {
-                        "sha256": sha256_file(p),
-                        "size": p.stat().st_size,
-                    }
-                    for p in sorted(staging.rglob("*"))
-                    if p.is_file()
-                },
-                "snapshots": [
-                    {"source_id": key, "sha256": v["snapshot_sha256"]}
-                    for key, v in sorted(lock["sources"].items())
-                    if v.get("snapshot_path")
-                ],
-            },
-        )
-        from klab.engram.packs import _rename_noreplace
-        from klab.result_publication import sync_directory
-
-        for entry in sorted(staging.rglob("*"), reverse=True):
-            if entry.is_file():
-                with entry.open("rb") as handle:
-                    os.fsync(handle.fileno())
-            elif entry.is_dir():
-                sync_directory(entry)
-        sync_directory(staging)
-        _rename_noreplace(staging, target)
-        sync_directory(root)
+        publish_staging(staging, target)
     return target
