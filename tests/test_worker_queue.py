@@ -200,19 +200,10 @@ def test_recovery_preserves_receipt_and_fences_stale_observations(tmp_path) -> N
     assert "CONFLICT" in conflict["ingestion_error"]
 
 
-def test_old_readonly_queue_projects_null_recovery_without_migrating(tmp_path) -> None:
+def test_queue_store_without_current_columns_is_refused(tmp_path) -> None:
     store = ControllerStore(tmp_path)
     store.enqueue_many([_entry(1)])
     with store.transaction() as con:
         con.execute("ALTER TABLE attempts DROP COLUMN recovery_observation_json")
-    readonly = ControllerStore(tmp_path, read_only=True)
-    assert readonly.attempt_by_run("run-1")["recovery_observation"] is None
-    with readonly.metrics._connect() as con:
-        assert "recovery_observation_json" not in {
-            row[1] for row in con.execute("PRAGMA table_info(attempts)")
-        }
-    ControllerStore(tmp_path)
-    with store.metrics._connect() as con:
-        assert "recovery_observation_json" in {
-            row[1] for row in con.execute("PRAGMA table_info(attempts)")
-        }
+    with pytest.raises(ValueError, match="malformed columns in attempts"):
+        ControllerStore(tmp_path)

@@ -118,17 +118,11 @@ class ControllerStore:
         ]
 
     def attempts(self, statuses: frozenset[str] | None = None) -> list[dict[str, Any]]:
-        with self.metrics._connect() as con:
-            columns = {row[1] for row in con.execute("PRAGMA table_info(attempts)")}
-        recovery = (
-            "a.recovery_observation_json"
-            if "recovery_observation_json" in columns
-            else "NULL"
-        )
         query = (
             "SELECT a.attempt_id,a.experiment_id,a.run_id,a.worker_id,a.status,"
             "a.receipt_json,a.terminal_receipt_json,a.queued_reason,"
-            f"a.ingestion_status,a.ingestion_error,e.specification_json,e.submitted_at,{recovery} "
+            "a.ingestion_status,a.ingestion_error,e.specification_json,e.submitted_at,"
+            "a.recovery_observation_json "
             "FROM attempts a JOIN experiments e ON e.experiment_id=a.experiment_id"
         )
         params: tuple[object, ...] = ()

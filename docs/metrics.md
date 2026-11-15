@@ -66,3 +66,14 @@ counted.
 Each worker keeps its own run database; the controller imports its records in
 order and without duplicates. A disconnected controller can show a stale view
 while the worker continues. See [workers](workers.md).
+
+## The experiment store
+
+Each run root keeps one SQLite database, `experiments.sqlite3`, with one current
+schema (`PRAGMA user_version` is 4). Lab creates it when the root is empty and
+refuses any other version or a store with missing tables or columns; it never
+upgrades or rewrites one in place. To keep records from an older store, leave
+the file where it is (it remains an ordinary SQLite database you can query with
+`sqlite3`) and point the run root at a new directory, or move the file aside so
+Lab creates a fresh one. Run directories, checkpoints and sealed records are
+separate files and are not affected.

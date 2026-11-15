@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 
 import pytest
 
@@ -27,47 +28,54 @@ def test_reopen_keeps_origin_and_exposes_committed_records(tmp_path) -> None:
     assert second["records"][0]["kind"] == "run_created"
 
 
-def test_v2_migrates_with_backup_and_preserves_stage(tmp_path) -> None:
-    path = tmp_path / "experiments.sqlite3"
-    con = sqlite3.connect(path)
-    con.executescript(
-        "CREATE TABLE runs(run_id TEXT PRIMARY KEY,name TEXT,status TEXT,parent_run_id TEXT,created_at TEXT,updated_at TEXT,config_json TEXT,metadata_json TEXT,latest_checkpoint TEXT);"
-        "CREATE TABLE metrics(run_id TEXT,step INTEGER,tokens_seen INTEGER,wall_time REAL,name TEXT,value REAL,PRIMARY KEY(run_id,step,name));"
-        "CREATE TABLE events(id INTEGER PRIMARY KEY,run_id TEXT,step INTEGER,tokens_seen INTEGER,wall_time REAL,kind TEXT,payload_json TEXT);"
-        "CREATE TABLE stage_history(run_id TEXT,sequence INTEGER,stage TEXT,status TEXT,step INTEGER,tokens_seen INTEGER,started_at TEXT,finished_at TEXT,payload_json TEXT,PRIMARY KEY(run_id,sequence));"
-        "INSERT INTO runs VALUES('old','old','complete',NULL,'t','t','{}','{}',NULL);"
-        "INSERT INTO stage_history VALUES('old',1,'TRAINING','COMPLETE',1,2,'t','t','{}');"
-        "PRAGMA user_version=2;"
-    )
-    con.commit()
-    con.close()
-
+def test_new_store_is_created_at_the_current_schema(tmp_path) -> None:
     store = ExperimentStore(tmp_path)
-    assert (tmp_path / "experiments.sqlite3.v2.bak").is_file()
-    assert store.path.exists()
-    with sqlite3.connect(store.path) as migrated:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-        assert (
-            migrated.execute("SELECT stage FROM stage_history").fetchone()[0]
-            == "TRAINING"
-        )
+    with sqlite3.connect(store.path) as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    assert not list(tmp_path.glob("*.bak*"))
 
 
-def test_unknown_schema_and_orphan_legacy_rows_are_rejected(tmp_path) -> None:
+def test_older_store_is_refused_untouched_with_guidance(tmp_path) -> None:
     path = tmp_path / "experiments.sqlite3"
-    with sqlite3.connect(path) as con:
+    with closing(sqlite3.connect(path)) as con:
+        con.executescript(
+            "CREATE TABLE runs(run_id TEXT PRIMARY KEY,name TEXT,status TEXT,"
+            "parent_run_id TEXT,created_at TEXT,updated_at TEXT,config_json TEXT,"
+            "metadata_json TEXT,latest_checkpoint TEXT);"
+            "INSERT INTO runs VALUES('old','old','complete',NULL,'t','t','{}','{}',NULL);"
+            "PRAGMA user_version=2;"
+        )
+    for version in (1, 2, 3):
+        with closing(sqlite3.connect(path)) as con:
+            con.execute(f"PRAGMA user_version={version}")
+        before = path.read_bytes()
+        with pytest.raises(ValueError, match="does not upgrade older stores"):
+            ExperimentStore(tmp_path)
+        assert path.read_bytes() == before
+        assert not list(tmp_path.glob("*.bak*"))
+    with closing(sqlite3.connect(path)) as con:
+        assert con.execute("SELECT run_id FROM runs").fetchone()[0] == "old"
+
+
+def test_unversioned_store_with_tables_and_newer_store_are_refused(tmp_path) -> None:
+    path = tmp_path / "experiments.sqlite3"
+    with closing(sqlite3.connect(path)) as con:
+        con.execute("CREATE TABLE runs(run_id TEXT PRIMARY KEY)")
+    with pytest.raises(ValueError, match="schema version 0"):
+        ExperimentStore(tmp_path)
+    path.unlink()
+    with closing(sqlite3.connect(path)) as con:
         con.execute("PRAGMA user_version=99")
-    with pytest.raises(ValueError, match="unsupported"):
+    with pytest.raises(ValueError, match="schema version 99"):
         ExperimentStore(tmp_path)
 
-    path.unlink()
-    with sqlite3.connect(path) as con:
-        con.executescript(
-            "CREATE TABLE runs(run_id TEXT PRIMARY KEY);"
-            "CREATE TABLE metrics(run_id TEXT);"
-            "INSERT INTO metrics VALUES('missing'); PRAGMA user_version=2;"
-        )
-    with pytest.raises(ValueError, match="orphan"):
+
+def test_current_version_store_missing_current_columns_is_refused(tmp_path) -> None:
+    store = ExperimentStore(tmp_path)
+    with closing(sqlite3.connect(store.path)) as con:
+        con.execute("ALTER TABLE attempts DROP COLUMN recovery_observation_json")
+        con.commit()
+    with pytest.raises(ValueError, match="malformed columns in attempts"):
         ExperimentStore(tmp_path)
 
 
@@ -204,23 +212,6 @@ def test_reopening_rejects_missing_columns_and_sequence_disagreement(tmp_path):
         con.execute("UPDATE store_metadata SET next_sequence=9")
     with pytest.raises(ValueError):
         ExperimentStore(tmp_path / "sequence")
-
-
-def test_v3_migrates_queue_tables_with_backup_and_preserves_history(tmp_path) -> None:
-    source = ExperimentStore(tmp_path)
-    _run(source)
-    with sqlite3.connect(source.path) as con:
-        con.execute("PRAGMA user_version=3")
-        con.execute("DROP TABLE attempts")
-        con.execute("DROP TABLE experiments")
-        con.execute("DROP TABLE workers")
-        con.execute("DROP TABLE runtime_progress_snapshots")
-    migrated = ExperimentStore(tmp_path)
-    assert (tmp_path / "experiments.sqlite3.v3.bak").is_file()
-    with sqlite3.connect(migrated.path) as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-        assert con.execute("SELECT run_id FROM runs").fetchone()[0] == "run"
-        assert con.execute("SELECT COUNT(*) FROM workers").fetchone()[0] == 0
 
 
 def test_runtime_progress_snapshot_replaces_latest_without_outbox_growth(

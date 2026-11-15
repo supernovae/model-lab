@@ -99,7 +99,6 @@ class ExperimentStore:
                 raise ValueError(f"missing or symlinked experiment store: {self.path}")
         else:
             root_dir.mkdir(parents=True, exist_ok=True)
-        self._existed_at_open = self.path.exists()
         if not read_only:
             self._initialize()
 
@@ -146,9 +145,18 @@ class ExperimentStore:
     def _initialize(self) -> None:
         with self._connect() as con:
             version = int(con.execute("PRAGMA user_version").fetchone()[0])
-            if version > SCHEMA_VERSION:
+            tables = {
+                str(row[0])
+                for row in con.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if version != SCHEMA_VERSION and (version != 0 or tables):
                 raise ValueError(
-                    f"unsupported experiment-store schema version: {version}"
+                    f"experiment store {self.path} has schema version {version} "
+                    f"but this Lab requires {SCHEMA_VERSION}. Lab does not "
+                    "upgrade older stores: move the file aside (it stays a "
+                    "readable SQLite database) and let Lab create a fresh store"
                 )
             con.execute("PRAGMA journal_mode=WAL")
             integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
@@ -156,217 +164,90 @@ class ExperimentStore:
                 raise ValueError(
                     f"experiment-store integrity check failed: {integrity}"
                 )
-            if version == SCHEMA_VERSION:
-                # Schema 4 was not published before the controller queue and
-                # runtime snapshot projection landed. Bring earlier local
-                # schema-4 databases forward without changing the public version.
-                con.execute("BEGIN EXCLUSIVE")
-                try:
-                    self._create_v4_tables(con)
-                    self._require_schema(con)
-                    con.commit()
-                except BaseException:
-                    con.rollback()
-                    raise
-                return
             con.execute("BEGIN EXCLUSIVE")
             try:
                 version = int(con.execute("PRAGMA user_version").fetchone()[0])
-                if version == SCHEMA_VERSION:
-                    self._require_schema(con)
-                    con.commit()
-                    return
-                self._backup(con, version)
-                self._assert_no_orphans(con)
-                self._migrate(con, version)
+                if version == 0:
+                    self._create_tables(con)
+                    con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                self._require_schema(con)
                 con.commit()
             except BaseException:
                 con.rollback()
                 raise
 
-    def _backup(self, con: sqlite3.Connection, version: int) -> None:
-        # A migration never mutates the only copy of an existing database.
-        if not self._existed_at_open:
-            return
-        backup = self.path.with_name(f"{self.path.name}.v{version}.bak")
-        if backup.exists():
-            backup = backup.with_name(f"{backup.name}.{uuid.uuid4().hex}")
-        if not con.in_transaction:
-            raise RuntimeError("migration backup requires exclusive writer ownership")
-        temporary = backup.with_name(f".{backup.name}.{uuid.uuid4().hex}.tmp")
-        try:
-            # Backing up the connection holding BEGIN EXCLUSIVE can wait on itself.
-            with (
-                closing(
-                    sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)
-                ) as source,
-                closing(sqlite3.connect(temporary)) as target,
-            ):
-                source.backup(target)
-                if target.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                    raise ValueError("migration backup failed integrity checking")
-            temporary.replace(backup)
-        finally:
-            temporary.unlink(missing_ok=True)
-
-    def _assert_no_orphans(self, con: sqlite3.Connection) -> None:
-        tables = {
-            str(row[0])
-            for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
-        if "runs" not in tables:
-            return
-        for table in (
-            "metrics",
-            "events",
-            "stage_history",
-            "checkpoints",
-            "manifests",
-            "calibration",
-            "runtime_progress_snapshots",
-        ):
-            if table not in tables:
-                continue
-            orphan = con.execute(
-                f"SELECT {table}.run_id FROM {table} "
-                f"LEFT JOIN runs ON runs.run_id={table}.run_id "
-                "WHERE runs.run_id IS NULL LIMIT 1"
-            ).fetchone()
-            if orphan is not None:
-                raise ValueError(f"legacy orphan in {table}: run_id={orphan[0]!r}")
-        foreign_key_errors = con.execute("PRAGMA foreign_key_check").fetchall()
-        if foreign_key_errors:
-            raise ValueError(f"foreign-key check failed: {foreign_key_errors[0]}")
-
-    def _migrate(self, con: sqlite3.Connection, version: int) -> None:
-        # v1 is the historical runs/metrics/events shape; v2 added stages.  A
-        # nominal v2 database is deliberately upgraded to v3 rather than being
-        # treated as if its missing replication tables already existed.
-        if version == 0:
-            self._create_legacy_tables(con)
-            con.execute("PRAGMA user_version=1")
-            version = 1
-        if version == 1:
-            con.execute(
-                "CREATE TABLE IF NOT EXISTS stage_history("
-                "run_id TEXT NOT NULL,sequence INTEGER NOT NULL,stage TEXT NOT NULL,"
-                "status TEXT NOT NULL,step INTEGER NOT NULL,tokens_seen INTEGER NOT NULL,"
-                "started_at TEXT NOT NULL,finished_at TEXT,payload_json TEXT NOT NULL,"
-                "PRIMARY KEY(run_id,sequence),"
-                "FOREIGN KEY(run_id) REFERENCES runs(run_id))"
-            )
-            con.execute("PRAGMA user_version=2")
-            version = 2
-        if version == 2:
-            self._create_v3_tables(con)
-            con.execute("PRAGMA user_version=3")
-            version = 3
-        if version != 3:
-            raise ValueError(
-                f"cannot migrate experiment-store schema version: {version}"
-            )
-        self._create_v4_tables(con)
-        con.execute("PRAGMA user_version=4")
-
-    def _create_legacy_tables(self, con: sqlite3.Connection) -> None:
+    def _create_tables(self, con: sqlite3.Connection) -> None:
+        """Create the one current schema in an empty database."""
         _execute_ddl(
             con,
-            "CREATE TABLE IF NOT EXISTS runs("
+            "CREATE TABLE runs("
             "run_id TEXT PRIMARY KEY,name TEXT NOT NULL,status TEXT NOT NULL,"
             "parent_run_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,"
             "config_json TEXT NOT NULL,metadata_json TEXT NOT NULL,latest_checkpoint TEXT);"
-            "CREATE TABLE IF NOT EXISTS metrics("
+            "CREATE TABLE metrics("
             "run_id TEXT NOT NULL,step INTEGER NOT NULL,tokens_seen INTEGER NOT NULL,"
             "wall_time REAL NOT NULL,name TEXT NOT NULL,value REAL NOT NULL,"
             "PRIMARY KEY(run_id,step,name),"
             "FOREIGN KEY(run_id) REFERENCES runs(run_id));"
-            "CREATE TABLE IF NOT EXISTS events("
+            "CREATE TABLE events("
             "id INTEGER PRIMARY KEY,run_id TEXT NOT NULL,step INTEGER NOT NULL,"
             "tokens_seen INTEGER NOT NULL,wall_time REAL NOT NULL,kind TEXT NOT NULL,"
-            "payload_json TEXT NOT NULL,FOREIGN KEY(run_id) REFERENCES runs(run_id));",
-        )
-
-    def _create_v3_tables(self, con: sqlite3.Connection) -> None:
-        _execute_ddl(
-            con,
-            "CREATE TABLE IF NOT EXISTS manifests("
+            "payload_json TEXT NOT NULL,FOREIGN KEY(run_id) REFERENCES runs(run_id));"
+            "CREATE TABLE stage_history("
+            "run_id TEXT NOT NULL,sequence INTEGER NOT NULL,stage TEXT NOT NULL,"
+            "status TEXT NOT NULL,step INTEGER NOT NULL,tokens_seen INTEGER NOT NULL,"
+            "started_at TEXT NOT NULL,finished_at TEXT,payload_json TEXT NOT NULL,"
+            "PRIMARY KEY(run_id,sequence),"
+            "FOREIGN KEY(run_id) REFERENCES runs(run_id));"
+            "CREATE TABLE manifests("
             "run_id TEXT PRIMARY KEY,digest TEXT NOT NULL,json TEXT NOT NULL,"
             "FOREIGN KEY(run_id) REFERENCES runs(run_id));"
-            "CREATE TABLE IF NOT EXISTS checkpoints("
+            "CREATE TABLE checkpoints("
             "run_id TEXT NOT NULL,checkpoint_id TEXT NOT NULL,relative_path TEXT NOT NULL,"
             "digest TEXT NOT NULL,step INTEGER NOT NULL,tokens_seen INTEGER NOT NULL,"
             "created_at TEXT NOT NULL,size_bytes INTEGER NOT NULL,validation_loss REAL,"
             "verified_at TEXT,verification_status TEXT NOT NULL,resume_level TEXT NOT NULL,"
             "backend TEXT NOT NULL,PRIMARY KEY(run_id,checkpoint_id),"
             "FOREIGN KEY(run_id) REFERENCES runs(run_id));"
-            "CREATE INDEX IF NOT EXISTS checkpoints_run_step ON checkpoints(run_id,step);"
-            "CREATE TABLE IF NOT EXISTS calibration("
+            "CREATE INDEX checkpoints_run_step ON checkpoints(run_id,step);"
+            "CREATE TABLE calibration("
             "key_hash TEXT NOT NULL,run_id TEXT NOT NULL,observation_json TEXT NOT NULL,"
             "PRIMARY KEY(key_hash,run_id),FOREIGN KEY(run_id) REFERENCES runs(run_id));"
-            "CREATE TABLE IF NOT EXISTS store_metadata("
+            "CREATE TABLE store_metadata("
             "singleton INTEGER PRIMARY KEY CHECK(singleton=1),origin_id TEXT NOT NULL,"
             "next_sequence INTEGER NOT NULL CHECK(next_sequence >= 1));"
-            "CREATE TABLE IF NOT EXISTS outbox("
+            "CREATE TABLE outbox("
             "sequence INTEGER PRIMARY KEY,run_id TEXT NOT NULL,record_json TEXT NOT NULL,"
             "record_sha256 TEXT NOT NULL UNIQUE,"
             "FOREIGN KEY(run_id) REFERENCES runs(run_id));"
-            "CREATE TABLE IF NOT EXISTS ingested_records("
+            "CREATE TABLE ingested_records("
             "origin_id TEXT NOT NULL,sequence INTEGER NOT NULL,sha256 TEXT NOT NULL,"
             "PRIMARY KEY(origin_id,sequence));"
-            "CREATE INDEX IF NOT EXISTS ingested_records_origin_sequence "
-            "ON ingested_records(origin_id,sequence);",
-        )
-        metadata = con.execute(
-            "SELECT origin_id,next_sequence FROM store_metadata WHERE singleton=1"
-        ).fetchone()
-        if metadata is None:
-            con.execute(
-                "INSERT INTO store_metadata(singleton,origin_id,next_sequence) VALUES(1,?,1)",
-                (str(uuid.uuid4()),),
-            )
-        elif int(metadata[1]) < 1:
-            raise ValueError("invalid experiment-store sequence metadata")
-
-    def _create_v4_tables(self, con: sqlite3.Connection) -> None:
-        """Create controller queue tables and bounded runtime snapshots.
-
-        These projections are local to the store. Worker receipt evidence and
-        controller ingestion remain separate durable facts; runtime snapshots
-        are replaceable operational state outside the replication outbox.
-        """
-        _execute_ddl(
-            con,
-            "CREATE TABLE IF NOT EXISTS workers("
+            "CREATE INDEX ingested_records_origin_sequence "
+            "ON ingested_records(origin_id,sequence);"
+            "CREATE TABLE workers("
             "worker_id TEXT PRIMARY KEY,record_json TEXT NOT NULL);"
-            "CREATE TABLE IF NOT EXISTS experiments("
+            "CREATE TABLE experiments("
             "experiment_id TEXT PRIMARY KEY,specification_json TEXT NOT NULL,"
             "status TEXT NOT NULL,submitted_at TEXT NOT NULL);"
-            "CREATE TABLE IF NOT EXISTS attempts("
+            "CREATE TABLE attempts("
             "attempt_id TEXT PRIMARY KEY,experiment_id TEXT NOT NULL,"
             "run_id TEXT NOT NULL UNIQUE,worker_id TEXT,status TEXT NOT NULL,"
             "receipt_json TEXT,terminal_receipt_json TEXT,queued_reason TEXT,"
             "ingestion_status TEXT NOT NULL DEFAULT 'PENDING',ingestion_error TEXT,"
+            "recovery_observation_json TEXT,"
             "FOREIGN KEY(experiment_id) REFERENCES experiments(experiment_id));"
-            "CREATE TABLE IF NOT EXISTS runtime_progress_snapshots("
+            "CREATE TABLE runtime_progress_snapshots("
             "run_id TEXT PRIMARY KEY,step INTEGER NOT NULL,tokens_seen INTEGER NOT NULL,"
             "wall_time REAL NOT NULL,payload_json TEXT NOT NULL,"
             "FOREIGN KEY(run_id) REFERENCES runs(run_id));"
-            "CREATE INDEX IF NOT EXISTS attempts_status ON attempts(status);"
-            "CREATE INDEX IF NOT EXISTS attempts_worker_status "
-            "ON attempts(worker_id,status);",
+            "CREATE INDEX attempts_status ON attempts(status);"
+            "CREATE INDEX attempts_worker_status ON attempts(worker_id,status);"
+            "CREATE INDEX attempts_ingestion ON attempts(ingestion_status);",
         )
-        columns = {str(row[1]) for row in con.execute("PRAGMA table_info(attempts)")}
-        for name, definition in (
-            ("terminal_receipt_json", "TEXT"),
-            ("ingestion_status", "TEXT NOT NULL DEFAULT 'PENDING'"),
-            ("ingestion_error", "TEXT"),
-            ("recovery_observation_json", "TEXT"),
-        ):
-            if name not in columns:
-                con.execute(f"ALTER TABLE attempts ADD COLUMN {name} {definition}")
         con.execute(
-            "CREATE INDEX IF NOT EXISTS attempts_ingestion "
-            "ON attempts(ingestion_status)"
+            "INSERT INTO store_metadata(singleton,origin_id,next_sequence) VALUES(1,?,1)",
+            (str(uuid.uuid4()),),
         )
 
     def _require_schema(self, con: sqlite3.Connection) -> None:
@@ -408,7 +289,7 @@ class ExperimentStore:
             "ingested_records": "origin_id sequence sha256",
             "workers": "worker_id record_json",
             "experiments": "experiment_id specification_json status submitted_at",
-            "attempts": "attempt_id experiment_id run_id worker_id status receipt_json terminal_receipt_json queued_reason ingestion_status ingestion_error",
+            "attempts": "attempt_id experiment_id run_id worker_id status receipt_json terminal_receipt_json queued_reason ingestion_status ingestion_error recovery_observation_json",
             "runtime_progress_snapshots": "run_id step tokens_seen wall_time payload_json",
         }
         for table, names in columns.items():
