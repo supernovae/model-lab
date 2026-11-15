@@ -328,7 +328,10 @@ A language-model-only release (schema version 2 or 3, no `fraction`) is built
 with the disk-backed builder, so peak memory is bounded by individual records
 rather than corpus size; no reviewed admission is required. Fractional and
 chat releases still build in memory and need RAM comparable to the corpus.
-The builder's index is rebuildable scratch under `WORK/corpora/<id>/builds/indices`;
+In the disk-backed builder, text shared by train and exactly one held-out split
+keeps the held-out document and drops the train copies as `contaminated_heldout`
+(as the v3 policy does); text shared by two held-out splits, or by documents with
+incompatible rights, still fails the build. The builder's index is rebuildable scratch under `WORK/corpora/<id>/builds/indices`;
 it is I/O-heavy, so point that directory at fast storage (a symlink works) when
 `WORK` is on spinning disks.
 
