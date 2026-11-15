@@ -126,6 +126,99 @@ vector norms. High reuse can come from a small table or repetitive text; it does
 not by itself mean the memory helps. The dashboard's Engram page and
 `klab explore` show the same values.
 
+## Size the tables
+
+A playbook for token n-gram memory. Each recommendation names its basis:
+**paper** (the Engram paper, arXiv 2601.07372, and DeepSeek's reference demo),
+**measured** (`klab data engram-sizing` on real tokens) or **unmeasured** (a
+judgment nothing has tested here).
+
+**When to use it.** Memory pays on text with repeated local patterns and
+facts: the paper's gains concentrate on knowledge and reasoning benchmarks, and
+suppressing the module at inference collapses factual recall to 29-44% of the
+original (paper, Sec. 6.3). It adds parameters, not per-token compute, so the
+cost is mainly training memory and optimizer traffic. For a small
+model on narrow data, `klab try` the arm with `model.memory: none` first.
+
+**Defaults and why.**
+
+| Setting | Recommended | Basis |
+| --- | --- | --- |
+| `memory_ngram_orders` | `[2, 3]`; 4-grams are slightly worse at a fixed budget | paper Sec. 6.2 |
+| `memory_hash_heads` | paper: 8. At fixed total rows, more heads collide more (proxy text, order 3: one head of 2.1M rows clobbers 26% of occurrences; two of 1M, 32%; four of 0.5M, 41%), so add heads only with their own full-size tables | paper Sec. 2.2 for 8; measured for the trade |
+| `memory_variant`, `memory_conv_kernel_size` | `context_key`, `4` (gate on the hidden state, dilated causal convolution) | paper Sec. 2.3-2.4, Table 5 |
+| `memory_block_indices` | an early block, then a mid-depth one; one module is within 0.002 validation loss of two at the same memory budget (1.770 against 1.768, split by lowering the dimension) | paper Sec. 6.2 |
+| `optimizer.memory_table_lr_multiplier`, `memory_table_weight_decay` | `5`, `0` | paper Sec. 4.1, Table 5 |
+| `memory_padding_token_id` | a special token that never occurs in text, such as EOS | paper demo `pad_id`; unmeasured here |
+| `memory_dim` | paper: 80 per stream (1280 over 16 streams); 64 is unmeasured | paper Table 5 |
+| rows per stream | at least 17.5 per vocabulary entry; size by measurement below | paper Table 5; measured |
+
+**What to measure first.** Table size is the setting that decides whether the
+memory can hold anything. The paper trains 2,262,400 rows per stream for a
+129,280-token vocabulary (Engram-27B) and 7,239,680 for Engram-40B, and loss
+falls as a power law in rows up to 10 million per table (Sec. 3.2). It reports
+no collision rates and no table-size ablation beyond that. A third-order
+n-gram space over billions of tokens is far larger than any table, so most
+rows hold many n-grams; what matters is how much of the traffic a row's
+dominant n-grams carry. `klab inspect` prints a note when tables are small for
+the vocabulary and says what it cannot know.
+
+```sh
+klab data engram-sizing "$PREPARED" --config model.yaml --target-tokens 12000000000
+```
+
+The command hashes a sample of the tokens (`--max-tokens`, default 33.5
+million, about 40 bytes per token of memory) with the exact functions the model
+uses. `PREPARED` is a prepared root (`train.npy`), a token store directory, a
+`.npy` file or a raw int32 file. For each site and order it reports:
+
+- distinct n-grams, singletons, top-k mass, the Zipf slope and a Heaps' law
+  projection to `--target-tokens`;
+- per candidate rows per head (`--sizes`, default powers of two from 16,384 to
+  16,777,216): occupancy, the share of occurrences that **share** a row with
+  another n-gram next to the random-hash expectation, and the share
+  **clobbered**, where other n-grams carry over half of the row's traffic,
+  on one head and on every head;
+- the parameter cost of the smallest size meeting `--max-clobbered` (default
+  25% of occurrences clobbered on all heads) and a `memory_table_sizes` list
+  to paste into the config.
+
+Reading it: nearly all occurrences share a row at any affordable size, so
+"shared" alone is not informative; clobbered is. Measured shared fractions
+match the random-hash expectation, so the hash behaves as designed. Heads
+decorrelate less than independence predicts, because rare n-grams lose on every
+head. Frequent n-grams, which carry the learnable signal, are what a larger
+table protects. The default 25% is a starting point, not a measured optimum:
+the paper shows larger is monotonically better, so the real limit is the
+budget.
+
+**Budget.** Tables are `rows x memory_dim` parameters per stream. They train
+with dense gradients and Adam state, about 16 bytes per parameter in fp32
+(`klab inspect` gives the exact estimate), so every million rows at
+`memory_dim: 64` adds roughly 1 GiB of training state. Check that against the
+device before enlarging, and use `klab inspect` for the whole config.
+
+**Failure modes.**
+
+- Tables near the vocabulary size: most of every row's traffic belongs to other
+  n-grams (on 32k-vocabulary proxy text, 65,537 rows clobber 73% of order-3
+  occurrences). Whether that costs quality is unmeasured; compare against
+  `model.memory: none` with `klab try`.
+- Sizing from one corpus and training on another, or from a prefix of an
+  ordered corpus: the command samples blocks across the whole input; pass the
+  tokens you will train on.
+- A padding ID that is a real token merges sequence starts with that token's
+  n-grams; training windows restart at `training.seq_len`, which the command
+  honors from `--config`.
+- Equal primes within a site are refused; use `memory_table_sizes` as printed.
+- Tokenizer folding (`klab tokenizer memory-map`) reduces the effective
+  vocabulary by 23% for a 128k tokenizer (paper Sec. 2.2); its effect at 32k is
+  unmeasured. The paper reports it among the components whose removal costs most.
+
+The sample is a lower bound on collisions for a larger corpus: rerun on the real
+tokens, and with half `--max-tokens` to see whether the clobbered share still
+moves.
+
 ## Byte memory
 
 `model.memory: byte` addresses the table by raw UTF-8 bytes rather than token

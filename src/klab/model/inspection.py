@@ -410,6 +410,71 @@ def parameter_inventory(config: RunConfig) -> ParameterInventory:
     )
 
 
+# Engram paper, Table 5: Engram-27B uses 2,262,400 rows per head for a 129,280
+# token vocabulary (17.5 rows per vocabulary entry); Engram-40B uses 56.
+PAPER_ROWS_PER_VOCABULARY_ENTRY = 17.5
+PAPER_MEMORY_SHARE = 5.7 / 26.7
+
+
+def memory_advisories(config: RunConfig) -> list[dict[str, str]]:
+    """Advice about n-gram memory sizing that needs no corpus statistics.
+
+    Nothing here refuses a config. Each entry states its evidence and what
+    remains unknown, because corpus n-gram statistics are not available to
+    ``inspect``; ``klab data engram-sizing`` measures them.
+    """
+    model = config.model
+    if model.memory != "ngram":
+        return []
+    notes = []
+    smallest = min(model.memory_table_sizes)
+    ratio = smallest / model.vocab_size
+    if ratio < PAPER_ROWS_PER_VOCABULARY_ENTRY:
+        notes.append(
+            {
+                "code": "memory_tables_small_for_vocabulary",
+                "message": (
+                    f"The smallest table has {smallest:,} rows, {ratio:.1f} per "
+                    f"vocabulary entry ({model.vocab_size:,}). The Engram paper's "
+                    "smallest (Engram-27B, Table 5) has 2,262,400 rows per hash "
+                    f"head for 129,280 tokens, {PAPER_ROWS_PER_VOCABULARY_ENTRY} per "
+                    "entry. Order 2 can address vocabulary**2 keys and order 3 "
+                    "vocabulary**3, so small tables mix many n-grams into each row."
+                ),
+            }
+        )
+    inventory = parameter_inventory(config)
+    share = inventory.memory_table / inventory.total
+    notes.append(
+        {
+            "code": "memory_tables_never_measured",
+            "message": (
+                f"The n-gram tables are {share:.1%} of parameters (the paper's "
+                f"Engram-27B: {PAPER_MEMORY_SHARE:.0%} of total, Table 1; that model "
+                "is a mixture of experts, so the figures are not directly "
+                "comparable). inspect does not know your corpus's distinct n-gram "
+                "counts or frequencies, so whether these sizes collide on your data "
+                "is unmeasured. Measure it: klab data engram-sizing PREPARED_ROOT "
+                "--config CONFIG"
+            ),
+        }
+    )
+    if config.optimizer.memory_table_lr_multiplier == 1.0:
+        notes.append(
+            {
+                "code": "memory_table_optimizer_defaults",
+                "message": (
+                    "Tables train at the base learning rate with weight decay. The "
+                    "paper trains its embeddings with Adam at 5x the learning rate "
+                    "and no weight decay (Sec. 4.1, Table 5); see "
+                    "optimizer.memory_table_lr_multiplier and "
+                    "optimizer.memory_table_weight_decay."
+                ),
+            }
+        )
+    return notes
+
+
 def inspection_report(config: RunConfig) -> dict[str, int | str]:
     """Return ``inspect_model``-compatible accounting from shapes alone."""
     from klab.memory import optimizer_state_bytes
