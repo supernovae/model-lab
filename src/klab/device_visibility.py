@@ -24,6 +24,12 @@ import warnings
 from collections.abc import Mapping
 
 VISIBILITY_VARIABLE = {"xpu": "ZE_AFFINITY_MASK"}
+# What a user sets to choose which cards a process sees, by backend.
+SELECTION_VARIABLE = {
+    "xpu": "ZE_AFFINITY_MASK",
+    "cuda": "CUDA_VISIBLE_DEVICES",
+    "rocm": "HIP_VISIBLE_DEVICES",
+}
 # Set by Lab beside the mask: "backend:physical_index".
 MARKER = "KLAB_CONFINED_DEVICE"
 
@@ -117,4 +123,23 @@ def child_environment(
         return environment
     environment[variable] = str(physical_index)
     environment[MARKER] = f"{backend}:{physical_index}"
+    return environment
+
+
+def selected_environment(
+    backend: str, physical_index: int, base: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """The environment for a process that sees only card ``physical_index``.
+
+    The process counts that card as device 0, as when a user selects it with
+    the backend's visibility variable, so one configuration (``device_index``
+    0) runs unchanged on any card. Confinement Lab applied to the calling
+    process is dropped, and any selection already in ``base`` is replaced.
+    """
+    variable = SELECTION_VARIABLE.get(backend)
+    if variable is None:
+        raise ValueError(f"no card selection for backend {backend!r}")
+    environment = dict(os.environ if base is None else base)
+    environment.pop(MARKER, None)
+    environment[variable] = str(physical_index)
     return environment

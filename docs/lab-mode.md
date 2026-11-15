@@ -198,6 +198,25 @@ klab report SWEEP_ID
 - **Seeds.** Without `seeds`, each try uses the baseline's seed. With seeds,
   each point is compared at every seed against the baseline at the same seed.
 - **Paths.** `baseline` and a `config` file resolve from the sweep file.
+- **Devices.** On a host with several identical accelerators, `--devices` runs
+  tries concurrently, one at a time on each listed card, and still writes one
+  record that pools the seeds:
+
+  ```sh
+  klab sweep sweep.yaml --runtime ARC --devices 0,1,2
+  ```
+
+  Each try is an ordinary `klab try` in a process that sees only its card as
+  device 0 (`ZE_AFFINITY_MASK`, `CUDA_VISIBLE_DEVICES` or
+  `HIP_VISIBLE_DEVICES`), so the baseline must be the same on every card:
+  `runtime.backend` is `xpu`, `cuda` or `rocm` (or passed with `--backend`),
+  `runtime.device_index` is 0 and there are no `secondary_device_indices`. The
+  numbers are the host's card numbers and replace any selection already in the
+  environment. A seed's baseline is trained by one try while the other tries at
+  that seed wait for it; different seeds train their baselines at the same time.
+  Every try records its `device`, the process's output is kept in
+  `LAB/sweeps/SWEEP_ID/logs`, and the verdicts equal those of a serial sweep.
+  Memory limits in a resource envelope apply to each process separately.
 
 `report` shows one row per point: the mean change in held-out loss across seeds
 (in bits per byte for a point that changes the tokenizer) with its standard
@@ -209,12 +228,16 @@ result. The sealed record lives in `LAB/sweeps/SWEEP_ID/sweep.json` beside a
 `series.csv` for plotting.
 
 An interrupted try stops the sweep and records how far it got. A failed or not
-comparable try is recorded and the sweep continues. Each try is an ordinary
+comparable try is recorded and the sweep continues. Any other error, including
+one in a device's process, seals the sweep as `failed` with the tries that
+finished and the error text under `failure`, then stops the command; a failed
+sweep has no summary. Each try is an ordinary
 record, so `report`, `probe`, `explore` and `compare` work on any of them.
 
 ## Limits
 
 One seed per arm and one held-out loss make a lab verdict a direction to
 follow up, not a significance test. Confirm a gain with a sweep over paired
-seeds before claiming it. Each try runs in one process on one device; spread
-larger independent runs over [workers](workers.md).
+seeds before claiming it. Each try runs in one process on one device; run several
+tries at once with `sweep --devices` and spread larger independent runs over
+[workers](workers.md).
