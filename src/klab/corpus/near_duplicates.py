@@ -300,3 +300,63 @@ def audit_release(path: Path, **caps: int) -> dict[str, Any]:
                     yield json.loads(line)
 
     return {"release_id": manifest["release_id"], **screen(read, **caps)}
+
+
+DECISION_CHOICES = ("merged", "dropped", "kept")
+
+
+def pair_key(pair: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(sorted((pair["left_document_id"], pair["right_document_id"])))
+
+
+def check_decisions(
+    report: dict[str, Any], report_sha256: str, record: dict[str, Any]
+) -> dict[str, Any]:
+    """Compare a reviewer's decision record with the screen report it decides.
+
+    The record names the report by the SHA-256 of its file and lists one
+    decision per reported pair (`documents: [ID, ID]`, `decision`: one of
+    `merged`, `dropped` or `kept`, and a `reason` for `kept`). Returns the
+    problems found; an empty `problems` list means every pair is decided by a
+    record that was written for this exact report.
+    """
+    problems: list[str] = []
+    if record.get("schema_version") != 1:
+        problems.append("decision record schema_version must be 1")
+    if record.get("report_sha256") != report_sha256:
+        problems.append("decision record was written for a different report")
+    if record.get("release_id") != report.get("release_id"):
+        problems.append("decision record names a different release")
+    for field in ("accepted_by", "accepted_on"):
+        if not str(record.get(field) or "").strip():
+            problems.append(f"decision record lacks {field}")
+    decided: dict[tuple[str, str], str] = {}
+    for item in record.get("decisions") or []:
+        documents = item.get("documents")
+        if (
+            not isinstance(documents, list)
+            or len(documents) != 2
+            or not all(isinstance(value, str) for value in documents)
+        ):
+            problems.append(f"malformed decision entry: {item!r}"[:200])
+            continue
+        key = tuple(sorted(documents))
+        if item.get("decision") not in DECISION_CHOICES:
+            problems.append(f"pair {key[0]} / {key[1]} has no valid decision")
+        elif item["decision"] == "kept" and not str(item.get("reason") or "").strip():
+            problems.append(f"pair {key[0]} / {key[1]} is kept without a reason")
+        elif key in decided:
+            problems.append(f"pair {key[0]} / {key[1]} is decided twice")
+        decided[key] = item.get("decision")
+    reported = {pair_key(pair) for pair in report["candidates"]}
+    undecided = sorted(reported - decided.keys())
+    unknown = sorted(decided.keys() - reported)
+    if unknown:
+        problems.append(f"{len(unknown)} decided pair(s) are not in the report")
+    return {
+        "reported_pairs": len(reported),
+        "decided_pairs": len(reported & decided.keys()),
+        "undecided": [list(pair) for pair in undecided[:20]],
+        "undecided_count": len(undecided),
+        "problems": problems,
+    }

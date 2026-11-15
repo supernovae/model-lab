@@ -398,6 +398,9 @@ def analyze(
             "padding_token_id": setup.padding_token_id,
             "sites": list(setup.sites),
             "memory_dim": setup.memory_dim,
+            "configured_sizes": list(setup.configured_sizes)
+            if setup.configured_sizes
+            else None,
             "mapped": setup.token_mapping is not None,
             "seq_len": setup.seq_len,
         },
@@ -554,6 +557,31 @@ def render(report: dict) -> str:
     return "\n".join(lines)
 
 
+def prepared_binding(tokens: Path) -> dict:
+    """What a sizing result says about its input: the prepared data it measured.
+
+    A prepared root names its manifest digest, which `klab preflight` compares
+    with the prepared data it is checking; any other input is not bindable.
+    """
+    manifest = Path(tokens) / "manifest.json"
+    if not manifest.is_file():
+        return {"prepared_manifest_sha256": None}
+    return {
+        "prepared_manifest_sha256": json.loads(manifest.read_text(encoding="utf-8"))[
+            "manifest_sha256"
+        ]
+    }
+
+
+def write_result(path: Path, report: dict) -> dict:
+    """Seal and write the report so a later gate can read exactly what was measured."""
+    from klab.canonical import canonical_digest, canonical_json
+
+    sealed = {**report, "sha256": canonical_digest(report)}
+    Path(path).write_bytes(canonical_json(sealed) + b"\n")
+    return sealed
+
+
 def _parse_ints(text: str) -> tuple[int, ...]:
     return tuple(int(item) for item in text.split(",") if item)
 
@@ -607,6 +635,9 @@ def _handle(args: argparse.Namespace) -> None:
             max_clobbered=args.max_clobbered,
             target_tokens=args.target_tokens,
         )
+        report["source"] = {"tokens": str(args.tokens), **prepared_binding(args.tokens)}
+        if args.output is not None:
+            write_result(args.output, report)
     except (OSError, ValueError) as error:
         print(f"Engram sizing blocked: {error}", file=sys.stderr)
         raise SystemExit(1) from error
@@ -645,5 +676,10 @@ def register_parser(data_commands: argparse._SubParsersAction) -> None:
         help="training tokens, to project distinct n-grams with a Heaps fit",
     )
     command.add_argument("--max-clobbered", type=float, default=0.25)
+    command.add_argument(
+        "--output",
+        type=Path,
+        help="write the sealed result here; `klab preflight --engram-sizing` binds it",
+    )
     command.add_argument("--json", action="store_true")
     command.set_defaults(handler=_handle)
