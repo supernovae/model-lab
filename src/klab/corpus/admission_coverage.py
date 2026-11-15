@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 from uuid import uuid4
 
+from klab.safe_io import database_byte_cap
+
 
 class AdmissionCoverage:
     """Keep expected/observed identities in the caller's bounded database."""
@@ -26,18 +28,13 @@ class AdmissionCoverage:
     def _add(self, expected, source, path, index, *, unique):
         command = "INSERT" if unique else "INSERT OR IGNORE"
         try:
-            self.connection.execute(
-                f"{command} INTO {self.table} VALUES(?,?,?,?)",
-                (expected, source, path, index),
-            )
+            with database_byte_cap("admission coverage database byte cap exceeded"):
+                self.connection.execute(
+                    f"{command} INTO {self.table} VALUES(?,?,?,?)",
+                    (expected, source, path, index),
+                )
         except sqlite3.IntegrityError as error:
             raise ValueError("duplicate admitted source row") from error
-        except sqlite3.OperationalError as error:
-            if error.sqlite_errorcode == sqlite3.SQLITE_FULL:
-                raise ValueError(
-                    "admission coverage database byte cap exceeded"
-                ) from error
-            raise
 
     def expect(self, source, path, index):
         self._add(1, source, path, index, unique=False)

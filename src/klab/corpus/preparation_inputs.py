@@ -6,6 +6,8 @@ Build/release semantic verification separately authenticates executed completion
 
 from pathlib import Path
 
+from klab.safe_io import symlinked
+
 
 def local_scope(manifest):
     identity = manifest.get("identity", manifest.get("build_identity", {}))
@@ -46,7 +48,7 @@ def local_dependencies(manifest, *, work_root):
         not p.is_absolute()
         or ".." in p.parts
         or not p.is_relative_to(work_root)
-        or any(q.is_symlink() for q in (p, *p.parents))
+        or symlinked(p)
         for p in result
     ):
         raise ValueError("completed preparation dependency escapes its owned work root")

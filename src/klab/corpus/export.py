@@ -15,6 +15,7 @@ import yaml
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.loading import load_config, load_tokenizer_config
 from klab.config.models import DatasetConfig, RunConfig, TokenizerTrainConfig
+from klab.safe_io import write_canonical_json
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
@@ -79,13 +80,6 @@ def _split_stats(path: Path, view: str) -> tuple[int, int]:
             count += 1
             size += len(text.encode("utf-8"))
     return count, size
-
-
-def _write_json(path: Path, value: object) -> None:
-    with path.open("xb") as handle:
-        handle.write(canonical_json(value) + b"\n")
-        handle.flush()
-        os.fsync(handle.fileno())
 
 
 def _write_yaml(path: Path, value: object) -> None:
@@ -267,7 +261,7 @@ def export_release(
         staging = Path(temporary)
         _write_yaml(staging / "tokenizer.yaml", tokenizer)
         _write_yaml(staging / "run.yaml", run_payload)
-        _write_json(staging / "export.json", sidecar)
+        write_canonical_json(staging / "export.json", sidecar, exclusive=True)
         if destination.exists():
             raise FileExistsError(
                 f"corpus export appeared during publication: {destination}"

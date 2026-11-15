@@ -41,6 +41,7 @@ from klab import token_encode_worker
 from klab.canonical import canonical_json
 from klab.data.datasets import local_text_error
 from klab.data.encoding import EncoderPool
+from klab.safe_io import write_canonical_json
 from klab.token_encode_worker import LineError
 
 STORE_VERSION = 1
@@ -53,10 +54,7 @@ _COPY_BYTES = 4 * 1024 * 1024
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     temporary = path.with_name(path.name + ".tmp")
-    with temporary.open("wb") as handle:
-        handle.write(canonical_json(payload) + b"\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    write_canonical_json(temporary, payload)
     temporary.replace(path)
 
 

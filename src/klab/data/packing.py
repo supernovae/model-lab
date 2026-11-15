@@ -66,6 +66,7 @@ from klab.resource_envelope import (
     check_envelope,
     current_process_rss_bytes,
 )
+from klab.safe_io import write_canonical_json
 from klab.training import manifest as manifest_module
 from klab.training.manifest import source_identity
 from klab.verification_proofs import ProofStore, VerificationMode, file_binding
@@ -1743,10 +1744,7 @@ def _prepare_verified_prefix(
     )
     result.pop("manifest_sha256", None)
     result["manifest_sha256"] = hashlib.sha256(canonical_json(result)).hexdigest()
-    with (staged / "manifest.json").open("xb") as handle:
-        handle.write(canonical_json(result) + b"\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    write_canonical_json(staged / "manifest.json", result, exclusive=True)
     fd = os.open(staged, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(fd)
@@ -2025,10 +2023,7 @@ def _prepare_verified_append(
     )
     result.pop("manifest_sha256", None)
     result["manifest_sha256"] = hashlib.sha256(canonical_json(result)).hexdigest()
-    with (staged / "manifest.json").open("xb") as handle:
-        handle.write(canonical_json(result) + b"\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    write_canonical_json(staged / "manifest.json", result, exclusive=True)
     # Tail files are owned scratch, not extra published artifact dependencies.
     del tail
     shutil.rmtree(tail_dir)
@@ -2727,10 +2722,7 @@ def _prepare_data(
         )
     manifest_path = temporary_root / "manifest.json"
     finalize_started = time.monotonic()
-    with manifest_path.open("xb") as handle:
-        handle.write(canonical_json(manifest) + b"\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    write_canonical_json(manifest_path, manifest, exclusive=True)
     staging_fd = os.open(temporary_root, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(staging_fd)

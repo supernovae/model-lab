@@ -13,6 +13,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from klab.canonical import canonical_digest, canonical_json, reject_duplicate_keys
+from klab.safe_io import symlinked
 
 
 class Pin(BaseModel):
@@ -77,7 +78,7 @@ class Preview(BaseModel):
 
 
 def _regular(path: Path) -> Path:
-    if any(p.is_symlink() for p in (path, *path.parents)):
+    if symlinked(path):
         raise ValueError("symlinked preview input or output")
     if not stat.S_ISREG(path.stat().st_mode):
         raise ValueError("preview input must be a regular file")

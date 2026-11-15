@@ -12,6 +12,7 @@ from pathlib import Path
 from klab.canonical import canonical_digest
 from klab.corpus.jsonl_records import records_from_path
 from klab.corpus.split_runs import SplitStages, external_sort, rows
+from klab.safe_io import symlinked
 from klab.training.manifest import sha256_file
 
 
@@ -104,7 +105,7 @@ def prior_indexes(root, binding):
     aliases_path = Path(alias_binding["path"])
     if (
         not aliases_path.is_absolute()
-        or any(p.is_symlink() for p in (aliases_path, *aliases_path.parents))
+        or symlinked(aliases_path)
         or not aliases_path.resolve(strict=True).is_relative_to(root)
         or not aliases_path.is_file()
         or aliases_path.stat().st_size > 4 * 1024**2

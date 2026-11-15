@@ -33,6 +33,7 @@ from klab.data.verification import (
     _fingerprint as _verified_fingerprint,
 )
 from klab.result_publication import sync_directory
+from klab.safe_io import write_canonical_json
 
 _after_sealed_chunk: Callable[[str, int, Path], None] | None = None
 _after_unsealed_chunk_write: Callable[[str, int, Path], None] | None = None
@@ -54,10 +55,7 @@ def _document(path: Path) -> dict[str, object]:
 def _store_document(path: Path, payload: dict[str, object]) -> None:
     complete = {**payload, "checksum": canonical_digest(payload)}
     temporary = path.with_name(path.name + ".tmp")
-    with temporary.open("xb") as output:
-        output.write(canonical_json(complete) + b"\n")
-        output.flush()
-        os.fsync(output.fileno())
+    write_canonical_json(temporary, complete, exclusive=True)
     temporary.replace(path)
     sync_directory(path.parent)
 

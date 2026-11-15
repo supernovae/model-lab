@@ -56,6 +56,7 @@ from klab.corpus.transport_cache import BodyKey, TransportCache, resolve_transpo
 from klab.engram.packs import _rename_noreplace
 from klab.hf_auth import hub_access_errors, hub_auth_kwargs, raise_for_hub_auth
 from klab.result_publication import sync_directory
+from klab.safe_io import symlinked, write_canonical_json
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
@@ -159,7 +160,7 @@ class _AcquisitionResources:
             os.close(descriptor)
             temporary = Path(name)
             try:
-                _write_json(
+                write_canonical_json(
                     temporary,
                     {
                         "schema_version": 1,
@@ -227,16 +228,6 @@ def _reusable_immutable_adapter(
         and actual.get("id") == expected["id"]
         and actual.get("version") == expected["version"]
     )
-
-
-def _write_json(path: Path, value: object, *, max_bytes: int | None = None) -> None:
-    body = canonical_json(value) + b"\n"
-    if max_bytes is not None and len(body) > max_bytes:
-        raise ValueError("acquisition step manifest byte cap exceeded")
-    with path.open("wb") as handle:
-        handle.write(body)
-        handle.flush()
-        os.fsync(handle.fileno())
 
 
 def _copy_stream(
@@ -2459,9 +2450,7 @@ def _project_sha(project: Project) -> str:
 
 def _safe_snapshot_path(path: Path) -> None:
     """Keep cold and proof-backed reuse subject to the same path-security rule."""
-    if not path.is_absolute() or any(
-        item.is_symlink() for item in (path, *path.parents)
-    ):
+    if not path.is_absolute() or symlinked(path):
         raise ValueError(f"unsafe snapshot origin or alias: {path}")
     if path.exists():
         from klab.experiments.artifacts import _safe_path
@@ -2869,11 +2858,12 @@ def acquire(
                 "retrieval": retrieval,
                 "snapshot_sha256": identity,
             }
-            _write_json(
-                staging / "manifest.json",
-                manifest,
-                max_bytes=acquisition_step.MANIFEST_BYTES if step is not None else None,
-            )
+            if (
+                step is not None
+                and len(canonical_json(manifest)) + 1 > acquisition_step.MANIFEST_BYTES
+            ):
+                raise ValueError("acquisition step manifest byte cap exceeded")
+            write_canonical_json(staging / "manifest.json", manifest)
             if verify_snapshot(staging, _staged=True)["snapshot_sha256"] != identity:
                 raise ValueError("staged snapshot identity mismatch")
             destination = parent / identity
