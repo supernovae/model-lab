@@ -631,7 +631,7 @@ _ADMISSION_PRIVATE = re.compile(
 )
 
 
-def _verify_record_admission_v1(
+def _verify_hf_row_admission(
     manifest: Mapping[str, Any],
     sources: Mapping[str, Mapping[str, Any]],
     snapshots: Mapping[str, Mapping[str, Any]],
@@ -640,14 +640,13 @@ def _verify_record_admission_v1(
     _visit=None,
     _max_record_bytes: int | None = None,
 ) -> dict[tuple[str, str], dict[str, Any]]:
-    """Recheck a complete admission inventory against immutable selected HF rows.
+    """Recheck the Hugging Face entries of an admission against immutable selected rows.
 
     The manifest is a release-level review of already acquired rows. It never
     changes the source declaration or its acquisition receipt.
     """
     if (
         set(manifest) != {"schema_version", "policy_id", "policy_sha256", "sources"}
-        or manifest["schema_version"] != 1
         or not isinstance(manifest["policy_id"], str)
         or not manifest["policy_id"].strip()
         or not isinstance(manifest["policy_sha256"], str)
@@ -984,21 +983,11 @@ def verify_record_admission(
     _visit=None,
     _max_record_bytes: int | None = None,
 ) -> dict[tuple[str, str], dict[str, Any]]:
-    """Verify reviewed HF rows and, in v2, each pinned Git file.
+    """Verify reviewed HF rows and each pinned Git file.
 
-    The v1 path is left intact for historical manifests and release identities.
-    A v2 manifest covers every project source; no unreviewed Git file can fall
-    through to a permissive source default.
+    The one admission format covers every project source; no unreviewed Git file
+    can fall through to a permissive source default.
     """
-    if manifest.get("schema_version") == 1:
-        return _verify_record_admission_v1(
-            manifest,
-            sources,
-            snapshots,
-            snapshot_root,
-            _visit=_visit,
-            _max_record_bytes=_max_record_bytes,
-        )
     if (
         set(manifest) != {"schema_version", "policy_id", "policy_sha256", "sources"}
         or manifest.get("schema_version") != 2
@@ -1030,8 +1019,8 @@ def verify_record_admission(
     if len(hf_entries) + len(git_entries) != len(entries):
         raise ValueError("record admission source kind is unsupported")
     hf_ids = {item["source_id"] for item in hf_entries}
-    resolved = _verify_record_admission_v1(
-        {**manifest, "schema_version": 1, "sources": hf_entries},
+    resolved = _verify_hf_row_admission(
+        {**manifest, "sources": hf_entries},
         {key: sources[key] for key in hf_ids},
         {key: snapshots[key] for key in hf_ids},
         snapshot_root,

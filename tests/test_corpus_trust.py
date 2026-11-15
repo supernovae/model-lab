@@ -19,7 +19,12 @@ from klab.corpus.acquisition import acquire
 from klab.corpus.pipeline import build
 from klab.corpus.project import load_project
 from klab.corpus.release import freeze
-from klab.corpus.tokenizer_bakeoff import VOCABS, bakeoff, verify_selection
+from klab.corpus.tokenizer_bakeoff import (
+    VOCABS,
+    bakeoff,
+    load_declaration,
+    verify_selection,
+)
 from klab.data.packing import prepare_data
 from klab.data.tokenizer import load_tokenizer
 from klab.training.manifest import sha256_file
@@ -205,7 +210,6 @@ def bakeoff_report(tmp_path_factory: pytest.TempPathFactory) -> Path:
         declaration.write_text(
             yaml.safe_dump(
                 {
-                    "schema_version": 2,
                     "release_path": str(release),
                     "vocab_sizes": list(VOCABS),
                     "max_fit_bytes": 268435456,
@@ -213,6 +217,7 @@ def bakeoff_report(tmp_path_factory: pytest.TempPathFactory) -> Path:
                     "eval_max_docs_per_group": 200,
                     "groups": ["prose"],
                     "near_best_ratio": 0.98,
+                    "train_token_scope": "all_selected_sources",
                 }
             )
         )
@@ -252,6 +257,49 @@ def test_bakeoff_selection_refuses_a_forged_choice(bakeoff_report: Path) -> None
             verify_selection(bakeoff_report)
     finally:
         bakeoff_report.write_bytes(original)
+
+
+def _declaration(tmp_path: Path, **changes: object) -> Path:
+    body = {
+        "release_path": "release",
+        "vocab_sizes": list(VOCABS),
+        "max_fit_bytes": 268435456,
+        "eval_split": "validation",
+        "eval_max_docs_per_group": 200,
+        "groups": ["prose"],
+        "near_best_ratio": 0.98,
+        "train_token_scope": "grouped_documents",
+    } | changes
+    path = tmp_path / "declaration.yaml"
+    path.write_text(yaml.safe_dump({k: v for k, v in body.items() if v is not None}))
+    return path
+
+
+def test_bakeoff_declaration_records_options_and_has_no_version(
+    tmp_path: Path, bakeoff_report: Path
+) -> None:
+    assert load_declaration(_declaration(tmp_path)).train_token_scope == (
+        "grouped_documents"
+    )
+    recorded = json.loads(bakeoff_report.read_text(encoding="utf-8"))["identity"]
+    assert recorded["declaration"]["train_token_scope"] == "all_selected_sources"
+    assert "schema_version" not in recorded
+    assert "schema_version" not in recorded["declaration"]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"schema_version": 2},
+        {"train_token_scope": None},
+        {"train_token_scope": "everything"},
+    ],
+)
+def test_bakeoff_declaration_refuses_a_version_or_unnamed_option(
+    tmp_path: Path, changes: dict[str, object]
+) -> None:
+    with pytest.raises(ValueError):
+        load_declaration(_declaration(tmp_path, **changes))
 
 
 # Data coverage and budget: only verified prepared data yields a budget.
