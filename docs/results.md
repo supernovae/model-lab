@@ -1,6 +1,7 @@
 # Results
 
-`try`, `probe` and [`bench`](probes.md#code-benchmarks-klab-bench) print a
+`try`, `probe`, [`bench`](probes.md#code-benchmarks-klab-bench) and
+[`speculation`](speculative-decoding.md#measure-drafters) print a
 record ID. Keep it: the everyday commands all accept it.
 
 ```sh
