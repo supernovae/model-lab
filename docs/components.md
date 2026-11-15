@@ -9,7 +9,7 @@ module and a registration, not a change to the block or the model.
 | --- | --- | --- |
 | attention | `attention.kind` | `dense`, `sliding_window`, `mla`, `block_sparse`, `local_selected` |
 | feed-forward | `model.ffn` | `dense`, `moe` |
-| memory | `model.memory` | `none`, `ngram`, `byte`, `portable` |
+| memory | `model.memory` | `none`, `ngram`, `byte` |
 
 ## Choose an architecture by name and size
 

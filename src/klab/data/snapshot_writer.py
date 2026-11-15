@@ -16,9 +16,8 @@ from typing import TYPE_CHECKING
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus import acquisition as forge
-from klab.engram.packs import _rename_noreplace
 from klab.result_publication import sync_directory
-from klab.safe_io import write_canonical_json
+from klab.safe_io import rename_noreplace, write_canonical_json
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
@@ -294,7 +293,7 @@ def write_snapshot(
         _admit(work, cache, source)
         verify_snapshot(publication / "manifest.json", verification_mode="cold")
         sync_directory(publication)
-        _rename_noreplace(publication, output)
+        rename_noreplace(publication, output)
         sync_directory(output.parent)
         return output / "manifest.json"
     finally:

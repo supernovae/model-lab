@@ -32,10 +32,9 @@ from klab.canonical import canonical_digest, canonical_json
 from klab.corpus import acquisition as forge
 from klab.corpus.project import safe_name
 from klab.documents import read_document
-from klab.engram.packs import _rename_noreplace
 from klab.hf_auth import hub_access_errors, hub_auth_kwargs, raise_for_hub_auth
 from klab.result_publication import sync_directory
-from klab.safe_io import symlinked, write_canonical_json
+from klab.safe_io import rename_noreplace, symlinked, write_canonical_json
 from klab.training.manifest import sha256_file
 from klab.verification_proofs import VerificationMode
 
@@ -443,7 +442,7 @@ def lock_source(
     # Same-filesystem temporary name is also exclusive; never replace another lock.
     temporary = output.with_name(output.name + ".pending")
     write_canonical_json(temporary, value, exclusive=True)
-    _rename_noreplace(temporary, output)
+    rename_noreplace(temporary, output)
     sync_directory(output.parent)
     return output
 

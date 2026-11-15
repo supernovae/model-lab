@@ -90,7 +90,7 @@ def probe_model(config: RunConfig, prompt: str) -> dict[str, object]:
 
     memory_address_samples: dict[str, dict[str, object]] = {}
     byte_addresses: Tensor | None = None
-    if config.model.memory in {"byte", "portable"}:
+    if config.model.memory == "byte":
         addresses = _prompt_byte_addresses(
             tokenizer,
             prompt,

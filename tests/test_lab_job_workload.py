@@ -121,7 +121,6 @@ def test_fixed_panels_accept_token_memory(tmp_path):
         memory_table_size=31,
         memory_ngram_size=3,
         memory_dim=8,
-        memory_variant="context_key",
     )
     baseline.write_text(yaml.safe_dump(values))
     actual = load_config(baseline)

@@ -193,22 +193,6 @@ def _path_digest(path: Path) -> str | dict[str, str]:
     return "missing"
 
 
-# External memory artifacts a run loads by path: the portable Engram package
-# (``model.memory_package_path``, a file or folder). Its *contents* are part of
-# what a run trained with.
-MEMORY_PACKAGE_FIELDS = (("model", "memory_package_path"),)
-
-
-def memory_packages(config: Any) -> dict[str, Any]:
-    """Content digests, computed now, of every memory package CONFIG references."""
-    packages: dict[str, Any] = {}
-    for section, field in MEMORY_PACKAGE_FIELDS:
-        value = getattr(getattr(config, section), field, None)
-        if value is not None:
-            packages[f"{section}.{field}"] = _path_digest(Path(value))
-    return packages
-
-
 def frozen_checkpoints(config: Any) -> dict[str, str]:
     """Digest the parent and teacher checkpoints a config starts or learns from."""
     from klab.training.manifest import checkpoint_selection
@@ -227,7 +211,7 @@ def frozen_checkpoints(config: Any) -> dict[str, str]:
 
 
 def current_inputs(config: Any) -> dict[str, Any]:
-    """Hash tokenizer, dataset and memory-package inputs as they are on disk now."""
+    """Hash tokenizer and dataset inputs as they are on disk now."""
     from klab.data.packing import canonical_tokenizer_sha256
     from klab.data.tokenizer import load_tokenizer
 
@@ -249,7 +233,6 @@ def current_inputs(config: Any) -> dict[str, Any]:
         value = getattr(config.dataset, field, None)
         if value is not None:
             inputs["dataset_paths"][field] = _path_digest(Path(value))
-    inputs["memory_packages"] = memory_packages(config)
     checkpoints = frozen_checkpoints(config)
     if checkpoints:
         inputs["checkpoints"] = checkpoints
@@ -448,10 +431,6 @@ def _train_and_score(
     context.row = None
     context.enter(arm, "training")
     context.checkpoint()
-    # The memory this arm trains with, hashed now (a reused baseline's key
-    # already bound the same digests moments ago).
-    packages = memory_packages(config)
-    context.checkpoint()
     if continuation_identity is not None and (
         _sha256_file(continuation.checkpoint / "manifest.json")
         != continuation_identity["checkpoint_manifest_sha256"]
@@ -500,7 +479,6 @@ def _train_and_score(
         "stop_reason": _stop_reason(progress),
         "train_seconds": None if reuse else round(train_seconds, 3),
         "seed": config.seed,
-        "memory_packages": packages,
     }
     context.row = row
     if progress.get("status") != "completed":
@@ -660,9 +638,6 @@ def heldout_checks(
     cand_data = candidate["data"]
     changed = list(changed_variables)
     data_declared = any(name.startswith(("dataset.", "tokenizer.")) for name in changed)
-    memory_declared = any(
-        f"{section}.{field}" in changed for section, field in MEMORY_PACKAGE_FIELDS
-    )
     checks = {
         "validation_distinct_from_train": all(
             data["validation_sha256"] is not None
@@ -681,10 +656,6 @@ def heldout_checks(
             base_data["train_sha256"] == cand_data["train_sha256"]
             and base_data["train_sha256"] is not None
         ),
-        # Both arms trained with the same memory package contents, unless the
-        # delta explicitly changes the package.
-        "same_memory_packages": memory_declared
-        or baseline.get("memory_packages") == candidate.get("memory_packages"),
         "same_eval_protocol": baseline.get("eval_protocol_sha256") is not None
         and baseline.get("eval_protocol_sha256")
         == candidate.get("eval_protocol_sha256"),
@@ -998,8 +969,7 @@ def run_try(
                 ),
             )
             context.check_cancel()
-            # Bind baseline reuse to tokenizer, data and memory-package contents
-            # as they are now; the candidate's identity is hashed the same way.
+            # Bind baseline reuse to tokenizer and data contents as they are now; the candidate's identity is hashed the same way.
             inputs = current_inputs(base_config)
             context.check_cancel()
             cand_inputs = current_inputs(cand_config)
@@ -1039,9 +1009,6 @@ def run_try(
         )
         new_id = f"lab-base-{base_key[:16]}-{try_id}"
         changed_variables = sorted(delta)
-        memory_changed = any(
-            f"{section}.{field}" in delta for section, field in MEMORY_PACKAGE_FIELDS
-        )
         record.update(
             {
                 "question": candidate.question,
@@ -1064,11 +1031,6 @@ def run_try(
                     "baseline": base_config.seed,
                     "candidate": cand_config.seed,
                     "changed_by_delta": "seed" in delta,
-                },
-                "memory_packages": {
-                    "baseline": inputs["memory_packages"],
-                    "candidate": cand_inputs["memory_packages"],
-                    "changed_by_delta": memory_changed,
                 },
                 "baseline_inputs": inputs,
                 "candidate_inputs": cand_inputs,

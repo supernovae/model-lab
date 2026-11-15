@@ -15,7 +15,6 @@ _PATH_KEYS = {
     "cache_dir",
     "root_dir",
     "output_dir",
-    "memory_package_path",
     "train_path",
     "validation_path",
     "prepared_path",

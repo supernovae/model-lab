@@ -74,7 +74,7 @@ candidate minus baseline in the comparison's metric.
 ## Reusing a baseline
 
 A baseline is reused only from an earlier completed try with the same effective
-config, the same Lab source, and the same tokenizer, data files, memory packages
+config, the same Lab source, and the same tokenizer, data files
 and parent or teacher checkpoints, all hashed now. Editing any of them retrains
 it; interrupted and failed tries are never reused. `fresh_baseline: true` always
 retrains.

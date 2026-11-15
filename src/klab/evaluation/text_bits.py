@@ -85,7 +85,7 @@ def score_documents(
     start_token = eot(loaded)
     encoded = [[start_token, *encode(loaded, document)] for document in documents]
     # Byte-address memory needs each sequence's own addresses: score one by one.
-    batched = loaded.config.model.memory not in {"byte", "portable"}
+    batched = loaded.config.model.memory != "byte"
     total = 0.0
     targets = 0
     short = [i for i, ids in enumerate(encoded) if batched and len(ids) <= window + 1]

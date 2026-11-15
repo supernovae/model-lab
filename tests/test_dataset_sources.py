@@ -269,17 +269,17 @@ def test_interruption_replays_committed_prefix(tmp_path, offline, monkeypatch, d
 def test_interrupted_export_replays_without_duplicate_output(
     tmp_path, offline, monkeypatch
 ):
-    original = snapshot_writer._rename_noreplace
+    original = snapshot_writer.rename_noreplace
 
     def fail_publication(source, destination):
         if destination.name == "snapshot":
             raise InterruptedError("export interrupted")
         return original(source, destination)
 
-    monkeypatch.setattr(snapshot_writer, "_rename_noreplace", fail_publication)
+    monkeypatch.setattr(snapshot_writer, "rename_noreplace", fail_publication)
     with pytest.raises(InterruptedError):
         acquire(tmp_path)
-    monkeypatch.setattr(snapshot_writer, "_rename_noreplace", original)
+    monkeypatch.setattr(snapshot_writer, "rename_noreplace", original)
     manifest = acquire(tmp_path, resume=True)
     assert sources.verify_snapshot(manifest)["splits"]["train"]["count"] == 2
 

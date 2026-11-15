@@ -130,7 +130,7 @@ def _load_run_data(
 ) -> PreparedData:
     return load_prepared_data(
         run / "data",
-        byte_enabled=config.model.memory in {"byte", "portable"},
+        byte_enabled=config.model.memory == "byte",
         proof_store=proof_store,
         verification_mode=verification_mode,
     )
@@ -258,17 +258,6 @@ def _copy_artifacts(
             raise ValueError(
                 f"prepared {split} supervision inventory does not match descriptor"
             )
-    package_source = (
-        source_run / "portable_package"
-        if source_run is not None
-        else config.model.memory_package_path
-    )
-    if package_source is not None and package_source.exists():
-        destination = run / "portable_package"
-        if package_source.is_dir():
-            shutil.copytree(package_source, destination)
-        else:
-            shutil.copy2(package_source, destination)
     for path in sorted(
         item
         for item in run.rglob("*")
@@ -924,13 +913,6 @@ def _train_impl(
                     "tokenizer": config.tokenizer.model_copy(
                         update={"path": artifact_source / "tokenizer.json"}
                     ),
-                    "model": config.model.model_copy(
-                        update={
-                            "memory_package_path": artifact_source / "portable_package"
-                            if config.model.memory_package_path is not None
-                            else None,
-                        }
-                    ),
                 }
             )
         _check_startup_cancel(cancel_path)
@@ -954,7 +936,7 @@ def _train_impl(
                     data = _load_inventory_prepared(
                         artifact_source,
                         staged_proofs,
-                        byte_enabled=config.model.memory in {"byte", "portable"},
+                        byte_enabled=config.model.memory == "byte",
                     )
                 else:
                     data = _load_run_data(
@@ -1168,18 +1150,6 @@ def _train_impl(
             "live": None,
             "final_observed": None,
         }
-        if continuation == "RESUMED" and config.model.memory_package_path is not None:
-            assert source_run is not None
-            owned_package = source_run / "portable_package"
-            if not owned_package.exists():
-                raise ValueError("resume run lacks immutable portable package")
-            config = config.model_copy(
-                update={
-                    "model": config.model.model_copy(
-                        update={"memory_package_path": owned_package}
-                    )
-                }
-            )
         initial_weights = snapshot.model if snapshot is not None else None
         first_update_step = (
             snapshot.step + 1

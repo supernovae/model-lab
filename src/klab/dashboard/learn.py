@@ -75,8 +75,7 @@ def learn_page() -> None:
     for lesson in lessons:
         record = _mapping(lesson)
         searchable = " ".join(
-            str(record.get(key, ""))
-            for key in ("id", "title", "summary", "mechanism_kind")
+            str(record.get(key, "")) for key in ("id", "title", "summary")
         ).lower()
         if not search or search in searchable:
             matches.append(record)
@@ -89,10 +88,7 @@ def learn_page() -> None:
         title = str(lesson.get("title", identifier))
         with st.expander(title, expanded=bool(search)):
             st.text(str(lesson.get("summary", "")))
-            st.caption(
-                f"Kind: {lesson.get('mechanism_kind', 'unavailable')} · "
-                f"Scope: {_text_list(lesson.get('benefit_scope'))}"
-            )
+            st.caption(f"Scope: {_text_list(lesson.get('benefit_scope'))}")
             steps = _rows(lesson.get("steps"))
             if steps:
                 st.subheader("Shape walkthrough")

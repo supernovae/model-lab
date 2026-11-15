@@ -237,7 +237,7 @@ def _prepare_file(
     admission_sha256: str | None = None,
 ) -> Path:
     from klab.corpus.pipeline import _records_for_file
-    from klab.engram.packs import _rename_noreplace
+    from klab.safe_io import rename_noreplace
 
     # Internal primitive: callers must first use verify_record_admission against
     # the pinned original rows. The digest binds that complete reviewed artifact,
@@ -419,7 +419,7 @@ def _prepare_file(
         if destination.exists():
             _verify_prepared(destination, identity)
         else:
-            _rename_noreplace(staging, destination)
+            rename_noreplace(staging, destination)
     _verify_prepared(destination, identity)
     return destination
 

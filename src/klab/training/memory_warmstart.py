@@ -23,7 +23,6 @@ _TOKEN_MEMORY_FIELDS = frozenset(
         "memory_injection",
         "memory_block_index",
         "memory_block_indices",
-        "memory_variant",
         "memory_conv_kernel_size",
         "memory_table_size",
         "memory_ngram_size",

@@ -124,7 +124,7 @@ def followup_plan(
         "missing_fields": missing,
         "preparation": (
             "Separate explicit action required: diagnose comparison_failed and repair "
-            "the cause (same data, tokenizer, memory packages and eval protocol for "
+            "the cause (same data, tokenizer and eval protocol for "
             "both arms). Prepare a new klab try from the sealed try request, "
             "try_inputs and try_delta with those repairs explicitly declared. Keep "
             "the saved seed, runtime/backend and resource policy unless a deliberate "

@@ -149,8 +149,7 @@ $$y = \sum_{e \in \operatorname{TopK}(p)} \frac{p_e}{\sum_{j \in \operatorname{T
 
 `model.memory` adds a learned lookup table (Engram memory). `ngram` hashes the
 last few token IDs at each position into the table, `byte` hashes the last few
-UTF-8 bytes, and `portable` attaches a frozen table exported from another run.
-At position `t` the address uses inputs up to `t` only, so it never reads the
+UTF-8 bytes. At position `t` the address uses inputs up to `t` only, so it never reads the
 target. See [Engram memory](engram.md).
 
 ## Combining mechanisms

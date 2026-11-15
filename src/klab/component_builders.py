@@ -113,19 +113,6 @@ def _byte_memory(model, attention, params):
     )
 
 
-def _portable_memory(model, attention, params):
-    from klab.model.portable_engram import PortableEngramAdapter, load_portable_engram
-
-    return PortableEngramAdapter(
-        load_portable_engram(
-            model.memory_package_path,
-            expected_shape=(model.memory_table_size, model.memory_dim),
-            expected_ngram_size=model.memory_ngram_size,
-        ),
-        model.hidden_dim,
-    )
-
-
 Builder = Callable[[Any, Any, Any], Any]
 BUILDERS: Mapping[tuple[str, str], Builder] = {
     ("attention", "dense"): _dense_attention,
@@ -137,7 +124,6 @@ BUILDERS: Mapping[tuple[str, str], Builder] = {
     ("ffn", "moe"): _moe_ffn,
     ("memory", "ngram"): _ngram_memory,
     ("memory", "byte"): _byte_memory,
-    ("memory", "portable"): _portable_memory,
 }
 
 

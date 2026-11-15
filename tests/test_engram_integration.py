@@ -37,7 +37,6 @@ def model_config(tmp_path: Path, mode: str, **changes) -> ModelConfig:
                 "memory_token_mapping": mapping.to_dict(),
                 "memory_injection": "after_block",
                 "memory_block_index": 0,
-                "memory_variant": "context_key",
                 "memory_conv_kernel_size": 4,
                 "memory_independent_init": True,
                 "memory_padding_token_id": 2,

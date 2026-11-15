@@ -226,7 +226,7 @@ def load_frozen_model(
             f"{role} context ({source.model.max_seq_len}) is shorter than "
             f"training.seq_len ({config.training.seq_len})"
         )
-    if source.model.memory in {"byte", "portable"}:
+    if source.model.memory == "byte":
         raise ValueError(
             f"{role} checkpoint needs byte addresses, "
             "which an objective's frozen model does not receive"

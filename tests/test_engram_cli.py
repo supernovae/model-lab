@@ -22,7 +22,6 @@ def test_native_memory_map_binds_complete_validated_config(tmp_path):
         memory_table_size=31,
         memory_dim=4,
         memory_ngram_size=3,
-        memory_variant="context_key",
         memory_table_sizes=[31],
     )
     source = tmp_path / "base.yaml"

@@ -2049,15 +2049,15 @@ def _freeze(
             _domain_cold=True,
             _hashed=frozenset(payload["files"]),
         )
-        from klab.engram.packs import _rename_noreplace
         from klab.result_publication import sync_directory
+        from klab.safe_io import rename_noreplace
 
         for entry in sorted(staging.rglob("*"), reverse=True):
             if entry.is_dir():
                 sync_directory(entry)
         sync_directory(staging)
         try:
-            _rename_noreplace(staging, destination)
+            rename_noreplace(staging, destination)
             sync_directory(destination.parent)
         except FileExistsError:
             verify_release(

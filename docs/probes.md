@@ -5,7 +5,7 @@ seconds to minutes, whether an idea is worth a longer run. It scores supported n
 checkpoints, optionally against a baseline checkpoint, and ends with a machine-readable
 verdict and a recommended next action.
 
-MLX checkpoints and attached semantic packs are currently refused; text-level
+MLX checkpoints are currently refused; text-level
 reference models have a separate full-tier path described below.
 
 **Probes screen; they do not prove usefulness.** A pass means "nothing obvious

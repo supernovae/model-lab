@@ -105,7 +105,6 @@ def test_unpadded_native_train_resume(tmp_path, multiport, width):
 
         raw["model"].update(
             num_layers=2,
-            memory_variant="context_key",
             memory_injection="after_block",
             memory_block_indices=[0, 1],
             memory_conv_kernel_size=4,

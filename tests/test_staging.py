@@ -5,7 +5,6 @@ import shutil
 from pathlib import Path
 
 import pytest
-import torch
 from test_training import config as training_config
 from test_training import equal
 
@@ -14,7 +13,6 @@ from klab.config.models import RunConfig
 from klab.data.packing import prepare_data
 from klab.data.tokenizer import load_tokenizer
 from klab.experiments.artifacts import Artifact, verify_artifact
-from klab.model.portable_engram import export_portable_engram
 from klab.resource_envelope import ResourceEnvelope
 from klab.staging import _read_sealed, stage
 from klab.training import manifest as manifest_module
@@ -430,42 +428,6 @@ def test_over_budget_staging_writes_proposal_without_mutating_config(
     assert (output / "proposal.yaml").is_file()
     assert _read_sealed(output / "stage.json")["status"] == "failed"
     assert not (output / "bundle.json").exists()
-
-
-@pytest.mark.parametrize("package_ngram", [2, 3])
-def test_portable_file_bundle_validates_config_and_survives_source_removal(
-    tmp_path, package_ngram
-):
-    base = _config(tmp_path)
-    package = tmp_path / "memory.engram"
-    table = torch.arange(136, dtype=torch.float32).reshape(17, 8) / 136
-    export_portable_engram(table, package, ngram_size=package_ngram)
-    payload = base.model_dump(mode="json")
-    payload["model"].update(
-        memory="portable",
-        memory_table_size=17,
-        memory_dim=8,
-        memory_ngram_size=2,
-        memory_package_path=str(package),
-    )
-    config = RunConfig.model_validate(payload)
-    output = tmp_path / "portable-stage"
-    if package_ngram != 2:
-        with pytest.raises(ValueError):
-            stage(config, output, through="validate")
-        assert _read_sealed(output / "stage.json")["status"] == "failed"
-        assert not (output / "bundle.json").exists()
-        return
-    stage(config, output, through="validate")
-    assert (output / "assets" / "portable_package").is_file()
-    package.unlink()
-    config.tokenizer.path.unlink()
-    shutil.rmtree(config.dataset.cache_dir)
-    run_id = train(config, run_id="portable-bundled", stage_bundle=output)
-    run = config.logging.root_dir / run_id
-    snapshot = CheckpointManager(run).load(run / "checkpoints" / "latest.json")
-    assert (snapshot.step, snapshot.tokens_seen) == (3, 48)
-    assert torch.equal(snapshot.model["memory.embedding.weight"], table)
 
 
 def test_stage_history_allows_repeated_evaluation_checkpoint_boundaries() -> None:

@@ -29,7 +29,6 @@ _MACHINE_LOCAL_PATH_KEYS = frozenset(
         "cache_dir",
         "root_dir",
         "output_dir",
-        "memory_package_path",
         "train_path",
         "validation_path",
         "prepared_path",
@@ -69,7 +68,7 @@ def _without_default_injection(model: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def architecture_sha256(config: Mapping[str, Any]) -> str:
-    """Digest model semantics, excluding the separately inventoried package location.
+    """Digest model semantics.
 
     Token n-gram memory also binds its address scheme and multipliers
     (``klab.address_hash``).
@@ -81,7 +80,6 @@ def architecture_sha256(config: Mapping[str, Any]) -> str:
     if not isinstance(attention, Mapping):
         raise TypeError("architecture identity requires a mapping-valued attention")
     model_identity = _without_default_injection(model)
-    model_identity.pop("memory_package_path", None)
     identity: dict[str, object] = {
         "identity_version": IDENTITY_VERSION,
         "architecture_version": config.get(

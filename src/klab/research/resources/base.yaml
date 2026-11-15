@@ -20,7 +20,6 @@ model:
   memory_table_size: 0
   memory_ngram_size: 0
   memory_dim: 0
-  memory_package_path: null
   memory_ngram_orders: []
   memory_hash_heads: 1
 attention:

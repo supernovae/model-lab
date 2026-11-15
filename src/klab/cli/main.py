@@ -114,151 +114,6 @@ def _workspace_cleanup_apply(args: argparse.Namespace) -> None:
     print(json.dumps(apply_cleanup(Path(args.plan)), sort_keys=True))
 
 
-def _engram_export(args: argparse.Namespace) -> None:
-    from klab.evaluation.inference import load_run
-    from klab.model.memory import ByteAddressMemory
-    from klab.model.portable_engram import export_portable_engram
-
-    loaded = load_run(args.run_id, Path(args.runs_dir), args.checkpoint, args.backend)
-    if loaded.engine is not None:
-        raise ValueError(
-            "Engram export is unsupported for native MLX runs; MLX supports dense "
-            "and block-sparse attention only"
-        )
-    if not isinstance(loaded.model.memory, ByteAddressMemory):
-        raise TypeError("Engram export requires a byte-memory run")
-    manifest = export_portable_engram(
-        loaded.model.memory.table.weight,
-        Path(args.output),
-        ngram_size=loaded.config.model.memory_ngram_size,
-    )
-    print(json.dumps(manifest.as_dict(), sort_keys=True))
-
-
-def _engram_inspect(args: argparse.Namespace) -> None:
-    from klab.model.portable_engram import load_portable_engram
-
-    package = load_portable_engram(Path(args.path))
-    print(json.dumps(package.manifest.as_dict(), sort_keys=True))
-
-
-def _engram_pack_compile(args: argparse.Namespace) -> None:
-    from pickle import UnpicklingError
-
-    from pyarrow import ArrowException
-    from safetensors import SafetensorError
-
-    from klab.engram.packs import compile_pack
-
-    try:
-        manifest = compile_pack(
-            Path(args.source),
-            Path(args.output),
-            name=args.name,
-            namespace=args.namespace,
-            default_license=args.license,
-            source_name=args.source_name,
-            source_revision=args.source_revision,
-            created_at=args.created_at,
-            lexical_package=Path(args.lexical_package)
-            if args.lexical_package
-            else None,
-            semantic_keys=Path(args.semantic_keys) if args.semantic_keys else None,
-            semantic_values=Path(args.semantic_values)
-            if args.semantic_values
-            else None,
-            semantic_metadata=Path(args.semantic_metadata)
-            if args.semantic_metadata
-            else None,
-        )
-    except (
-        OSError,
-        RuntimeError,
-        TypeError,
-        ValueError,
-        KeyError,
-        EOFError,
-        UnpicklingError,
-        ArrowException,
-        SafetensorError,
-    ) as error:
-        payload = {
-            "valid": False,
-            "errors": [{"field": "compile", "reason": str(error)}],
-        }
-        print(json.dumps(payload, sort_keys=True))
-        raise SystemExit(1) from None
-    print(
-        json.dumps(
-            {
-                "pack_id": manifest.pack_id,
-                "output": str(args.output),
-                "record_count": manifest.record_count,
-                "lexical_count": manifest.lexical.table_size
-                if manifest.lexical is not None
-                else 0,
-                "semantic_count": manifest.semantic.entry_count
-                if manifest.semantic is not None
-                else 0,
-            },
-            sort_keys=True,
-        )
-    )
-
-
-def _engram_pack_inspect(args: argparse.Namespace) -> None:
-    from klab.engram.packs import inspect_pack
-
-    try:
-        payload = inspect_pack(Path(args.path))
-    except (OSError, RuntimeError, TypeError, ValueError, KeyError) as error:
-        print(
-            json.dumps(
-                {
-                    "valid": False,
-                    "errors": [{"field": "inspect", "reason": str(error)}],
-                },
-                sort_keys=True,
-            )
-        )
-        raise SystemExit(1) from None
-    print(json.dumps(payload, sort_keys=True))
-
-
-def _engram_pack_verify(args: argparse.Namespace) -> None:
-    from klab.engram.packs import verify_pack
-
-    try:
-        report = verify_pack(Path(args.path), expected_pack_id=args.expected_pack_id)
-    except (OSError, RuntimeError, TypeError, ValueError, KeyError) as error:
-        payload = {
-            "valid": False,
-            "pack_id": None,
-            "errors": [{"field": "verify", "reason": str(error)}],
-            "files": [],
-        }
-        print(json.dumps(payload, sort_keys=True))
-        raise SystemExit(1) from None
-    payload = {
-        "valid": report.valid,
-        "pack_id": report.pack_id,
-        "errors": [
-            {"field": item.field, "reason": item.reason} for item in report.errors
-        ],
-        "files": [
-            {
-                "relative_path": item.relative_path,
-                "sha256": item.sha256,
-                "size_bytes": item.size_bytes,
-            }
-            for item in report.files
-        ],
-    }
-    print(json.dumps(payload, sort_keys=True))
-    if not report.valid:
-        raise SystemExit(1)
-
-
 def _config_compose(args: argparse.Namespace) -> None:
     """Publish one run config assembled from several declaration files."""
     try:
@@ -1258,7 +1113,6 @@ def _learn_scaffold(args: argparse.Namespace) -> None:
         scale=args.scale,
         data=args.data,
         backend=args.backend,
-        memory_package=Path(args.memory_package) if args.memory_package else None,
     )
     print(path)
 
@@ -2045,7 +1899,6 @@ _FALLBACK_HELP = {
     "runtime": "Runtime probes and status",
     "tokenizer": "Train or verify a tokenizer on your data",
     "data": "Prepare, verify and inspect training data (data prepare CONFIG)",
-    "engram": "Export, inspect and pack Engram memory",
     "stage": "Pilot a config through staged gates",
     "batch": "Calibrate micro-batch size",
 }
@@ -2657,47 +2510,6 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     data_tokens.add_argument("config")
     data_tokens.add_argument("--json", action="store_true")
     data_tokens.set_defaults(handler=_data_tokens)
-    engram = commands.add_parser("engram")
-    engram_commands = engram.add_subparsers(dest="engram_command", required=True)
-    engram_export = engram_commands.add_parser("export")
-    engram_export.add_argument("run_id")
-    engram_export.add_argument("--output", required=True)
-    engram_export.add_argument(
-        "--runs-dir",
-        default=runs_dir_default,
-        help="Run directory (default: selected persistent state root/runs)",
-    )
-    engram_export.add_argument("--checkpoint")
-    engram_export.add_argument(
-        "--backend", choices=("auto", "metal", "mps", "cuda", "rocm", "xpu", "cpu")
-    )
-    engram_export.set_defaults(handler=_engram_export)
-    engram_inspect = engram_commands.add_parser("inspect")
-    engram_inspect.add_argument("path")
-    engram_inspect.set_defaults(handler=_engram_inspect)
-    pack = engram_commands.add_parser("pack")
-    pack_commands = pack.add_subparsers(dest="engram_pack_command", required=True)
-    pack_compile = pack_commands.add_parser("compile")
-    pack_compile.add_argument("source")
-    pack_compile.add_argument("--output", required=True)
-    pack_compile.add_argument("--name", required=True)
-    pack_compile.add_argument("--namespace", required=True)
-    pack_compile.add_argument("--license")
-    pack_compile.add_argument("--source-name")
-    pack_compile.add_argument("--source-revision")
-    pack_compile.add_argument("--created-at")
-    pack_compile.add_argument("--lexical-package")
-    pack_compile.add_argument("--semantic-keys")
-    pack_compile.add_argument("--semantic-values")
-    pack_compile.add_argument("--semantic-metadata")
-    pack_compile.set_defaults(handler=_engram_pack_compile)
-    pack_inspect = pack_commands.add_parser("inspect")
-    pack_inspect.add_argument("path")
-    pack_inspect.set_defaults(handler=_engram_pack_inspect)
-    pack_verify = pack_commands.add_parser("verify")
-    pack_verify.add_argument("path")
-    pack_verify.add_argument("--expected-pack-id")
-    pack_verify.set_defaults(handler=_engram_pack_verify)
     staging = commands.add_parser("stage")
     staging.add_argument("config")
     staging.add_argument(
@@ -2896,7 +2708,6 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     learn_scaffold.add_argument(
         "--backend", choices=("cpu", "mps", "cuda", "rocm", "xpu"), default="cpu"
     )
-    learn_scaffold.add_argument("--memory-package")
     learn_scaffold.set_defaults(handler=_learn_scaffold)
     learn_probe = learn_commands.add_parser("probe")
     learn_probe.add_argument("config")

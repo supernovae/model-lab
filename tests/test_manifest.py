@@ -75,7 +75,6 @@ def _config(root: Path) -> dict[str, object]:
         "model": {
             "vocab_size": 512,
             "hidden_dim": 16,
-            "memory_package_path": str(root / "package"),
         },
         "attention": {"kind": "dense", "rope_base": 10000.0},
         "tokenizer": {"path": str(root / "tokenizer.json")},

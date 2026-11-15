@@ -1594,7 +1594,7 @@ def _prepare_verified_prefix(
     if (
         config.dataset.source != "local_text"
         or config.dataset.corpus_release_path is not None
-        or config.model.memory in {"byte", "portable"}
+        or config.model.memory == "byte"
     ):
         raise ValueError("prepared prefix requires plain all-token local_text")
     parent_manifest = json.loads((request.root / "manifest.json").read_text())
@@ -1788,7 +1788,7 @@ def _prepare_verified_append(
     if (
         config.dataset.source != "local_text"
         or config.dataset.corpus_release_path is not None
-        or config.model.memory in {"byte", "portable"}
+        or config.model.memory == "byte"
     ):
         raise ValueError("prepared append requires plain all-token local_text")
     parent = load_prepared_data(request.root, byte_enabled=False)
@@ -2093,7 +2093,7 @@ def _prepare_data(
     if config.dataset.source == "local_token_mixture":
         from klab.corpus.mixture import verify_mixture_dataset
 
-        if config.model.memory in {"byte", "portable"}:
+        if config.model.memory == "byte":
             raise ValueError("token-ID mixture has no verified byte-address sidecar")
         token_mixture = verify_mixture_dataset(
             config.dataset, config.tokenizer.path, config.model.vocab_size
@@ -2230,7 +2230,7 @@ def _prepare_data(
         root / "train_supervision.npy",
         root / "validation_supervision.npy",
     )
-    byte_enabled = config.model.memory in {"byte", "portable"}
+    byte_enabled = config.model.memory == "byte"
     _train_byte_path, _validation_byte_path = (
         root / "train_byte_addresses.npy",
         root / "validation_byte_addresses.npy",

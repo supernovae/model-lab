@@ -1,11 +1,13 @@
 # Engram memory
 
-An Engram memory is a learned lookup table added to the decoder. At each
-position the model hashes the most recent tokens (or bytes) into the table,
-reads a vector, projects it to the model width and adds it to the hidden state
-through a learned gate:
+An Engram memory, from DeepSeek's [Conditional Memory via Scalable Lookup](https://arxiv.org/abs/2601.07372),
+is a learned lookup table added to the decoder. At each position the model
+hashes the most recent tokens into the table, reads a vector, and adds it to the
+hidden state through a learned gate. A key projected from the retrieved vector is
+compared with the hidden state to set the gate, so the memory decides how much
+of what it found to use:
 
-$$h'_t = h_t + \sigma(g(h_t))\,A\,M[a(x_{\leq t})]$$
+$$h'_t = h_t + \sigma\!\left(\frac{\mathrm{RMSNorm}(h_t)\cdot\mathrm{RMSNorm}(W_K e_t)}{\sqrt{d}}\right) W_V e_t,\qquad e_t = M[a(x_{\leq t})]$$
 
 The address $a$ uses inputs up to position $t$ only, so the table never sees the
 token being predicted. The table is ordinary model state: it is trained with the
@@ -16,7 +18,6 @@ it; training does.
 | --- | --- |
 | `ngram` | The last `memory_ngram_size` token IDs. |
 | `byte` | The last `memory_ngram_size` raw UTF-8 bytes, prepared beside the token IDs. |
-| `portable` | A frozen byte-addressed table exported from another run, attached with a new projection and gate. |
 
 ```sh
 klab train configs/smoke_memory_cpu.yaml --run-id token-memory
@@ -33,18 +34,10 @@ Set `model.memory: ngram` with:
 
 Optional fields add lookup streams. `memory_ngram_orders` (for example `[2, 3]`)
 looks up several n-gram lengths, and `memory_hash_heads` hashes each one several
-ways. Every stream has its own table.
-
-### Combining streams
-
-`memory_variant` chooses how streams combine:
-
-- `hidden_gate` (default): average the projected streams, gate on the hidden
-  state alone.
-- `context_key`: concatenate the streams, project separate keys and values, and
-  gate on the similarity between the normalized hidden state and the key.
-  `memory_gate_transform: signed_sqrt` applies a signed square root to that
-  similarity before the sigmoid; `identity` (default) does not.
+ways. Every stream has its own table. The streams are concatenated, and one
+value projection and one key projection read the result.
+`memory_gate_transform: signed_sqrt` applies a signed square root to the
+key-hidden similarity before the sigmoid; `identity` (default) does not.
 
 `memory_conv_kernel_size: 4` refines the gated values with a normalized,
 depthwise causal convolution whose dilation is the longest n-gram order; `0`
@@ -222,7 +215,8 @@ moves.
 ## Byte memory
 
 `model.memory: byte` addresses the table by raw UTF-8 bytes rather than token
-IDs. Data preparation writes one address per token beside the token arrays; each
+IDs. It has a single stream, no key projection and a plain linear gate on the
+hidden state. Data preparation writes one address per token beside the token arrays; each
 hashes the bytes up to that token's exact byte boundary. Text is not normalized,
 case-folded or escaped. EOS gets address zero. When a character spans several
 tokens, each token contributes only the bytes it actually covers, and
@@ -232,55 +226,10 @@ The hash is a polynomial over 257, so `memory_table_size` must not be a
 multiple of 257. Equal byte spans produce equal addresses regardless of how a
 tokenizer splits them.
 
-## Portable tables
-
-A byte-addressed table can be exported from one run and attached to another
-model with a different tokenizer or width:
-
-```sh
-klab engram export RUN_ID --runs-dir "$RUNS" --output "$WORK/memory.engram"
-klab engram inspect "$WORK/memory.engram"
-```
-
-The package holds the table and a manifest of its hashing, n-gram size, shape
-and digest; it has no projection or gate. A target config with
-`model.memory: portable` and `model.memory_package_path` freezes the table and
-trains only a new projection and gate.
-
-## Engram packs
-
-An Engram pack is a separate, versioned archive of knowledge records. Each
-record has an `id`, a license and either a `subject`/`relation`/`value` triple,
-`text`, or both:
-
-```json
-{"id":"blorvia-capital","subject":"Blorvia","relation":"capital","value":"Zanther","aliases":["Zanther City"],"license":"CC0-1.0"}
-```
-
-```sh
-klab engram pack compile records.jsonl --output "$WORK/geography.enpack" \
-  --name geography --namespace synthetic --created-at 2026-09-23T00:00:00Z
-klab engram pack inspect "$WORK/geography.enpack"
-klab engram pack verify "$WORK/geography.enpack"
-```
-
-- **`compile`** reads JSONL or Parquet, refuses an existing output and never
-  guesses a missing license; `--license`, `--source-name` and
-  `--source-revision` supply defaults explicitly.
-- **`inspect`** reads the manifest without hashing the payload. **`verify`**
-  checks every member, hash and record; `--expected-pack-id` pins a revision.
-- **Optional assets:** `--lexical-package FILE` embeds a portable table.
-  `--semantic-keys`, `--semantic-values` and `--semantic-metadata` together add
-  FP32 key and value matrices for a subset of records, with the encoders named
-  in the metadata.
-
-A pack's ID proves its bytes, not that its facts are right or that a model can
-use them.
-
 ## Learn the mechanism
 
-`klab learn describe lexical-engram`, `byte-engram`, `portable-engram` and
-`engrampack` walk through each part with tensor shapes; see
+`klab learn describe lexical-engram` and `byte-engram` walk through each part
+with tensor shapes; see
 [architecture](architecture.md#explore-a-mechanism-before-training). To use
 n-gram repeats to speed up generation instead, see
 [speculative decoding](speculative-decoding.md).

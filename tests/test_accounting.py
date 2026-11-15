@@ -269,7 +269,6 @@ def test_context_memory_inventory_matches_model(kernel: int) -> None:
     model = ModelConfig.model_validate(
         {
             **base.model.model_dump(mode="json"),
-            "memory_variant": "context_key",
             "memory_injection": "after_block",
             "memory_block_index": 0,
             "memory_conv_kernel_size": kernel,
@@ -318,7 +317,6 @@ def test_independent_memory_initialization_preserves_trunk_and_future_rng(
         memory_ngram_orders=[2, 3],
         memory_hash_heads=2,
         memory_dim=4,
-        memory_variant="context_key",
         memory_conv_kernel_size=kernel,
         memory_independent_init=True,
     )
@@ -380,7 +378,6 @@ def test_multiport_inventory_matches_actual_tensors_and_active_rows() -> None:
         num_layers=3,
         memory_injection="after_block",
         memory_block_indices=[0, 2],
-        memory_variant="context_key",
         memory_ngram_orders=[2, 3],
         memory_hash_heads=1,
         tie_embeddings=True,
