@@ -427,7 +427,11 @@ def _inspect(args: argparse.Namespace) -> None:
         plan_memory,
         write_resource_proposal,
     )
-    from klab.model.inspection import inspection_report, parameter_inventory
+    from klab.model.inspection import (
+        inspection_report,
+        memory_advisories,
+        parameter_inventory,
+    )
     from klab.staging import inspect_runtime
 
     if args.estimate_runtime and args.write_proposal:
@@ -447,6 +451,7 @@ def _inspect(args: argparse.Namespace) -> None:
         "parameter_inventory": inventory.__dict__,
         "memory_estimate": estimate.__dict__,
         "runtime": runtime.as_dict(),
+        "advisories": memory_advisories(config),
     }
     proposal = plan_memory(config, runtime, estimate)
     values["resource_proposal"] = asdict(proposal)
@@ -487,6 +492,10 @@ def _inspect(args: argparse.Namespace) -> None:
     print(f"Result: {estimate.result}")
     for assumption in estimate.assumptions:
         print(f"  {assumption}")
+    if values["advisories"]:
+        print("Notes")
+        for note in values["advisories"]:
+            print(f"  [{note['code']}] {note['message']}")
 
 
 def _runtime_status(args: argparse.Namespace) -> None:
@@ -2637,6 +2646,9 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
 
     register_dataset_sources(data_commands)
     register_coverage(data_commands)
+    from klab.data.engram_sizing import register_parser as register_engram_sizing
+
+    register_engram_sizing(data_commands)
     data_prepare.set_defaults(handler=_data_prepare)
     data_tokens = data_commands.add_parser(
         "tokens",
@@ -3279,7 +3291,7 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
 def _read_only_command(args: argparse.Namespace) -> bool:
     if args.command == "tokenizer" and args.tokenizer_command == "verify":
         return True
-    if args.command == "data" and args.data_command == "coverage":
+    if args.command == "data" and args.data_command in {"coverage", "engram-sizing"}:
         return True
     if args.command == "data" and args.data_command == "prepared-inputs":
         return args.inputs_command == "verify"

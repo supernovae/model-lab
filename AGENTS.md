@@ -201,3 +201,12 @@ Report status with its observation time, and say idle or completed when nothing
 is verified to be training. Never restart training to make the dashboard look
 active. Keep training progress separate from benchmark results for a particular
 checkpoint.
+
+## 10. Guidance
+
+Playbooks for choices that are easy to get wrong. Read the one for your topic
+before changing its settings.
+
+| Topic | File | Read when |
+| --- | --- | --- |
+| Engram memory | [docs/engram.md](docs/engram.md#size-the-tables) | adding n-gram memory or choosing its table sizes, heads or optimizer settings |
