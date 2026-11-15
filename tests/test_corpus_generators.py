@@ -21,7 +21,7 @@ from klab.corpus.pipeline import (
     _sections,
     build,
 )
-from klab.corpus.project import DocumentPolicy, load_project
+from klab.corpus.project import DocumentPolicy, SourceDeclaration, load_project
 from klab.corpus.release import freeze
 from klab.data.conversations import iter_rendered_conversations
 
@@ -555,13 +555,13 @@ def test_v2_world_facts_are_independent_and_inert(
             "stage",
         )
         assert row["oracle_receipt"]["world_facts"] == row["world_state"]
-        assert row["oracle_receipt"]["generator_version"] == "2"
         assert (
-            _scenario_messages(row, True)[1]["tool_calls"][0]["arguments"][
-                "generator_version"
-            ]
-            == "2"
+            "generator_version" not in row
+            and "generator_version" not in (row["oracle_receipt"])
         )
+        assert _scenario_messages(row, True)[1]["tool_calls"][0]["arguments"] == {
+            "world_id": row["oracle_receipt"]["world_id"]
+        }
 
 
 def test_v2_filesystem_oracle_precedence() -> None:
@@ -605,7 +605,6 @@ def test_v2_compact_build_binds_generator_version_and_world_facts(
     source_path = root / "sources/scenarios.yaml"
     source = yaml.safe_load(source_path.read_text())
     source["acquisition"]["generator"] = generator
-    source["acquisition"]["generator_version"] = "2"
     source["canonical_uri"] = f"klab://generators/{generator}"
     source_path.write_text(yaml.safe_dump(source))
     transform_path = root / "transforms/scenarios.yaml"
@@ -645,7 +644,11 @@ def test_v2_compact_build_binds_generator_version_and_world_facts(
         for row in map(json.loads, (built / "lineage.jsonl").read_text().splitlines())
     }
     for row in scenarios:
-        assert row["oracle_receipt"]["generator_version"] == "2"
+        assert "generator_version" not in row["oracle_receipt"]
+        assert (
+            lineage[row["scenario_id"]]["verification"]["evidence"]["oracle_version"]
+            == "2"
+        )
         assert (
             lineage[row["scenario_id"]]["verification"]["evidence"]["receipt"][
                 "world_facts"
@@ -653,3 +656,12 @@ def test_v2_compact_build_binds_generator_version_and_world_facts(
             == row["world_state"]
         )
     freeze(built, work)
+
+
+def test_generator_source_declares_no_separate_version() -> None:
+    source = yaml.safe_load((PROJECT / "sources/scenarios.yaml").read_text())
+    assert "generator_version" not in source["acquisition"]
+    SourceDeclaration.model_validate(source)
+    source["acquisition"]["generator_version"] = "1"
+    with pytest.raises(ValueError, match="generator_version"):
+        SourceDeclaration.model_validate(source)

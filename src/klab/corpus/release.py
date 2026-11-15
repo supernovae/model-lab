@@ -1216,7 +1216,8 @@ def _validate_rows_stored(
                     or evidence["oracle_identity"]
                     != canonical_digest([world, scenario["oracle_answer"]])
                     or evidence["world_state"] != world
-                    or evidence["oracle_version"] != scenario["generator_version"]
+                    or scenario["generator_id"].rsplit("_v", 1)[-1]
+                    != evidence["oracle_version"]
                     or evidence["oracle_implementation"] != implementation
                     or evidence["interpreter"] != scenario["interpreter"]
                     or evidence["actual_result"] != expected_result
@@ -1377,7 +1378,7 @@ def _validate_rows_stored(
             elif kind == "scenario":
                 scenario = scenarios.get(row["record_id"])
                 if scenario != payload or canonical_digest(
-                    [scenario["generator_id"], scenario["generator_version"]]
+                    [scenario["generator_id"]]
                 ) != row.get("generator_identity"):
                     raise ValueError("scenario generator identity mismatch")
             elif kind in {"chat_sft", "tool_episode"}:
@@ -1396,7 +1397,7 @@ def _validate_rows_stored(
                 elif scenario_id := row.get("scenario_id"):
                     source = scenarios.get(scenario_id)
                     if source is None or canonical_digest(
-                        [source["generator_id"], source["generator_version"]]
+                        [source["generator_id"]]
                     ) != row.get("generator_identity"):
                         raise ValueError("chat scenario identity mismatch")
                 elif semantic_id := row.get("semantic_id"):

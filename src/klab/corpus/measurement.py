@@ -351,7 +351,6 @@ def _measure_views(
                 elif scenario:
                     record["generator"] = {
                         "adapter_id": scenario["generator_id"],
-                        "generator_version": scenario["generator_version"],
                     }
                 elif record.get("semantic_id"):
                     record["generator"] = {"generator_version": "semantic_chat_v1"}

@@ -528,6 +528,9 @@ Each transform file in the project names one `kind`:
 - `manual_semantic`: hand-written records from a snapshotted file.
 - `inference_qa`: recorded model responses, replayed, never generated live.
 - `deterministic_scenarios`: worlds from a registered generator and its oracle.
+  The generator ID carries its version (`platform_fault_v2`); a source
+  declares `acquisition.generator` only, and the transform `version` must equal
+  the ID's suffix.
 - `chat_sft`, `tool_episode`: chat and tool-trace views of the records above.
 
 `release.normalizer` is required and chooses the text cleaning by named options

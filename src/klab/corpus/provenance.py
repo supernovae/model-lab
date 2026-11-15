@@ -291,8 +291,10 @@ def validate_verification(
         if receipt is not None and (
             not isinstance(receipt, dict)
             or receipt.get("schema_version") != 1
-            or receipt.get("generator_version") not in {"1", "2"}
-            or receipt["generator_version"] != evidence["oracle_version"]
+            or evidence["oracle_version"] not in {"1", "2"}
+            or not str(receipt.get("generator_id", "")).endswith(
+                "_v" + evidence["oracle_version"]
+            )
             or receipt.get("world_id") != evidence["generator_world_id"]
             or receipt.get("world_facts") != world
             or receipt.get("judgment") not in {"proceed", "inspect", "ask", "stop"}
