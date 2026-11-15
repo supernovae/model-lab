@@ -65,6 +65,9 @@ per source and then an acquisition lock binding them.
   under a budget but not metered by it: Git fetches the repository itself, and
   only the snapshot's own `max_bytes` bounds what is kept. List exact blobs
   (`bounded_blobs`) to have the ledger charge each file.
+- **Transport cache.** `--transport-cache DIR` or `KLAB_TRANSPORT_CACHE` keeps
+  raw downloads so that a declaration edit does not re-download; see
+  [transport cache](#transport-cache).
 - **Initial feasibility gate.** A budget may set `initial_body_bytes` below
   `max_total_body_bytes`. Acquisition stops at the initial cap until
   `corpus budget-release-gate PROJECT --report REPORT --review REVIEW` records
@@ -96,6 +99,88 @@ per source and then an acquisition lock binding them.
 - **Preview.** `corpus preview DECLARATION --input-root INPUTS --output NEW_DIR`
   shows seeded sample excerpts from acquired JSONL in place, without copying or
   admitting anything.
+
+### Transport cache
+
+Editing a source declaration (even a note) changes its declaration hash, so the
+snapshot no longer matches and acquisition downloads it again. A transport cache
+keeps the raw downloaded bodies, keyed by what was requested rather than by the
+declaration, so a re-acquire after any declaration edit makes no request.
+
+It is a host setting, never recipe content: no recipe field names it. Choose the
+directory per command or per host, in this order, and without one nothing is
+cached:
+
+```sh
+klab --work-dir WORK corpus acquire PROJECT --transport-cache /pool/klab-transport
+export KLAB_TRANSPORT_CACHE=/pool/klab-transport
+```
+
+It may live on a different disk from the work root (bodies are copied into
+snapshot staging, which stays in the work root). Pre-fill it in the background,
+with no snapshots written:
+
+```sh
+klab --work-dir WORK corpus cache-fill PROJECT --transport-cache /pool/klab-transport
+klab corpus cache-fill PROJECT --source-id SOURCE_ID
+klab corpus cache-list --verify
+klab corpus cache-prune
+```
+
+`cache-fill` makes the same requests acquisition would and charges the
+project's transport ledger the same way; a body already cached is re-hashed, not
+fetched. `cache-list --verify` re-hashes every entry. `cache-prune` removes
+entries that no longer verify, bodies no entry refers to (only after an hour, so
+a concurrent writer is safe) and stale scratch. It never removes a valid entry;
+delete cold storage you no longer want yourself. Copying a cache directory
+between hosts seeds the other host, because nothing in it is trusted.
+
+**What is stored.** Exactly the bytes acquisition downloads, and nothing it
+derives: Hugging Face shard files (`bounded_shards`), archives, PDF files,
+MediaWiki and Wikimedia dumps, an HTTP document, each GitHub blob of a
+`bounded_blobs` Git source, and a bare Git repository for a Git source selected
+by `include` patterns. Layout:
+
+```text
+bodies/<aa>/<sha256>      raw body, read-only, named by its own SHA-256
+keys/<key-digest>.json    the request (kind, URL, revision, pinned SHA-256,
+                          SHA-1 or Git blob id) and the body it resolved to
+git/<key-digest>.git      bare repository for a pattern-selected Git source
+tmp/                      private staging; bodies are published by atomic rename
+```
+
+The key digest covers the request only, so two requests that differ in kind,
+URL, revision or pin never share an entry. Not cached, and why: a Hugging Face
+source that selects files by `include` pattern (`snapshot_download` resolves the
+file list over the network and has no pinned body), `retained_subset` (derived
+offline from an existing snapshot), `local` files and generators (no network).
+
+**Never trusted.** Every use re-hashes the body while copying it into snapshot
+staging and checks the entry against the request and its pins (the declared
+SHA-256, Git blob id or SHA-1). A truncated, altered or mismatched entry is
+reported on stderr and downloaded again, replacing it. A Git repository is
+reused only when `git fsck` re-hashes all of its objects and the pinned commit
+is reachable, and each selected blob is checked against its object id. A body
+is stored only after it matched its pin, so bytes from a server that miss the
+pin are never cached. Writes are atomic and concurrent acquires and fills may
+share one directory.
+
+**Budget and receipts.** A hit reserves nothing and charges the ledger zero
+body and zero metadata bytes. It also skips the pinned metadata cross-checks
+(Hugging Face `paths-info` and splits, GitHub commit and tree), because the
+cached bytes are verified against the pins in the declaration itself. A miss
+downloads, charges as before and fills the cache. The acquisition lock records
+each body under `transport_cache` for its source: `served_from` (`cache` or
+`network`), `cache_key`, `sha256` and `bytes`. It sits outside the snapshot
+identity, so the same bytes give the same snapshot whichever served them; an
+HTTP document's recorded ETag and dates replay the original retrieval.
+
+**Rights.** The cache is operator-local cold storage of exactly the bytes you
+were entitled to fetch. Treat it with the source's license and access terms:
+a hit does not recheck that access to a gated or private dataset still holds,
+the files are as readable as the directory permissions make them, and it is
+never published or committed. Declared rights, licenses and release policy are
+applied to snapshots as always, not to the cache.
 
 ### Source kinds
 

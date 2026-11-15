@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import subprocess
 import threading
 import urllib.request
@@ -1178,3 +1179,362 @@ def test_a_transport_budget_admits_a_git_source_selected_by_pattern(
     lock = acquire(project, tmp_path)
     assert set(lock["sources"]) == {"one", "two"}
     assert TransportBudget(ledger, project).receipt()["source_charged"] == len(body)
+
+
+# -- operator-local transport cache -------------------------------------------
+
+
+def _edit_source(recipe: Path, **fields: object) -> None:
+    path = recipe.parent / "sources/one.yaml"
+    source = yaml.safe_load(path.read_text())
+    source.update(fields)
+    _yaml(path, source)
+
+
+def _snapshot_payload(lock: dict) -> tuple[dict, dict[str, bytes]]:
+    path = Path(lock["sources"]["one"]["snapshot_path"])
+    manifest = verify_snapshot(path)
+    return manifest, {
+        item["path"]: (path / "files" / item["path"]).read_bytes()
+        for item in manifest["files"]
+    }
+
+
+def _cache_files(cache: Path) -> list[Path]:
+    return sorted(p for p in (cache / "bodies").rglob("*") if p.is_file())
+
+
+def test_cache_serves_a_declaration_edit_without_network_and_charges_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = b"# Pinned text\n"
+    recipe, oid = _bounded_git_fixture(tmp_path, content)
+    cache = tmp_path / "cold"
+    root = tmp_path / "work"
+    ledger = root / "corpora/example/transport-budget.sqlite"
+    TransportBudget.initialize(ledger, load_project(recipe))
+    _mock_bounded_git_http(monkeypatch, content, oid)
+    first = acquire(load_project(recipe), root, transport_cache=cache)
+    charged = TransportBudget(ledger, load_project(recipe)).receipt()
+    assert charged["source_actual"] == len(content)
+    assert first["sources"]["one"]["transport_cache"][0]["served_from"] == "network"
+
+    # A note changes the declaration hash but not what was asked of the network.
+    _edit_source(recipe, notes="reviewed by hand")
+    project = load_project(recipe)
+    assert (
+        declaration_sha256(project.sources[0])
+        != (first["sources"]["one"]["declaration_sha256"])
+    )
+
+    def no_network(*_args: object) -> None:
+        raise AssertionError("a cache hit must make no request")
+
+    monkeypatch.setattr(urllib.request, "build_opener", no_network)
+    second = acquire(project, root, transport_cache=cache)
+    after = TransportBudget(ledger, project).receipt()
+    assert (after["source_actual"], after["metadata_actual"], after["transfers"]) == (
+        charged["source_actual"],
+        charged["metadata_actual"],
+        charged["transfers"],
+    )
+    (hit,) = second["sources"]["one"]["transport_cache"]
+    assert hit["served_from"] == "cache"
+    assert hit["sha256"] == hashlib.sha256(content).hexdigest()
+    assert (
+        hit["cache_key"] == first["sources"]["one"]["transport_cache"][0]["cache_key"]
+    )
+
+    manifest_one, files_one = _snapshot_payload(first)
+    manifest_two, files_two = _snapshot_payload(second)
+    assert files_one == files_two
+    assert manifest_one["files"] == manifest_two["files"]
+    assert manifest_one["retrieval"]["commit"] == manifest_two["retrieval"]["commit"]
+    assert manifest_one["declaration_sha256"] != manifest_two["declaration_sha256"]
+
+    # A different work root with a fresh ledger is served too, and charged nothing.
+    other = tmp_path / "other-work"
+    TransportBudget.initialize(
+        other / "corpora/example/transport-budget.sqlite", project
+    )
+    acquire(project, other, transport_cache=cache)
+    fresh = TransportBudget(other / "corpora/example/transport-budget.sqlite", project)
+    assert fresh.receipt()["source_charged"] == 0
+    assert fresh.receipt()["metadata_charged"] == 0
+
+
+def test_cache_hit_needs_the_cache_host_setting_and_never_a_recipe_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = b'{"text":"one"}\n'
+    recipe = _bounded_hf_fixture(tmp_path, content, "default/train/data.jsonl", rows=1)
+    cache = tmp_path / "cold"
+    monkeypatch.setenv("KLAB_TRANSPORT_CACHE", str(cache))
+    calls = _mock_hf_stream(monkeypatch, content)
+    first = acquire(load_project(recipe), tmp_path / "work")
+    _edit_source(recipe, notes="edited")
+    second = acquire(load_project(recipe), tmp_path / "work")
+    assert len(calls) == 1
+    assert _snapshot_payload(first)[1] == _snapshot_payload(second)[1]
+    assert second["sources"]["one"]["transport_cache"][0]["served_from"] == "cache"
+    monkeypatch.delenv("KLAB_TRANSPORT_CACHE")
+    _edit_source(recipe, notes="edited again")
+    acquire(load_project(recipe), tmp_path / "work")
+    assert len(calls) == 2  # no setting, no cache
+    with pytest.raises(ValueError, match="extra|Extra|permitted"):
+        _edit_source(recipe, transport_cache=str(cache))
+        load_project(recipe)
+
+
+@pytest.mark.parametrize("damage", ["truncate", "flip", "wrong_entry"])
+def test_damaged_cache_entry_is_detected_and_refetched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    damage: str,
+) -> None:
+    from klab.corpus.transport_cache import TransportCache
+
+    content = b'{"text":"one"}\n{"text":"two"}\n'
+    recipe = _bounded_hf_fixture(tmp_path, content, "default/train/data.jsonl", rows=2)
+    cache = tmp_path / "cold"
+    calls = _mock_hf_stream(monkeypatch, content)
+    acquire(load_project(recipe), tmp_path / "work", transport_cache=cache)
+    (body,) = _cache_files(cache)
+    body.chmod(0o644)
+    if damage == "truncate":
+        body.write_bytes(content[:-3])
+    elif damage == "flip":
+        body.write_bytes(bytes([content[0] ^ 1]) + content[1:])
+    else:
+        (key,) = (cache / "keys").glob("*.json")
+        entry = json.loads(key.read_text())
+        entry["key"]["url"] += "x"  # an entry that answers a different request
+        key.write_text(json.dumps(entry))
+    capsys.readouterr()
+    _edit_source(recipe, notes=damage)
+    again = acquire(load_project(recipe), tmp_path / "work", transport_cache=cache)
+    assert len(calls) == 2
+    assert "rejected" in capsys.readouterr().err
+    assert _snapshot_payload(again)[1]["default/train/data.jsonl.sample.jsonl"]
+    assert body.read_bytes() == content
+    assert {r["status"] for r in TransportCache(cache).entries(verify=True)} == {"ok"}
+
+
+def test_server_bytes_that_miss_the_pin_are_never_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pinned = b'{"text":"one"}\n'
+    recipe = _bounded_hf_fixture(tmp_path, pinned, "default/train/data.jsonl", rows=1)
+    cache = tmp_path / "cold"
+    _mock_hf_stream(monkeypatch, b'{"text":"two"}\n')
+    with pytest.raises(ValueError, match="SHA-256 mismatch|Content-Length|exceeds"):
+        acquire(load_project(recipe), tmp_path / "work", transport_cache=cache)
+    assert not _cache_files(cache)
+    assert not list((cache / "keys").glob("*.json"))
+
+
+def test_pinned_downloads_and_http_documents_are_cached_by_what_was_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = _tar_gz([("rfc1.txt", b"Request for Comments 1 " * 3, None)])
+    recipe = _archive_recipe(tmp_path, body, budget=True)
+    cache = tmp_path / "cold"
+    calls = _serve_pinned(monkeypatch, {_RFC_URL: body})
+    project = load_project(recipe)
+    TransportBudget.initialize(
+        tmp_path / "w1/corpora/example/transport-budget.sqlite", project
+    )
+    acquire(project, tmp_path / "w1", transport_cache=cache)
+    assert len(calls) == 1
+    # A new work root and ledger, and an edited declaration: still no request.
+    _edit_source(recipe, notes="again")
+    project = load_project(recipe)
+    ledger = tmp_path / "w2/corpora/example/transport-budget.sqlite"
+    TransportBudget.initialize(ledger, project)
+    second = acquire(project, tmp_path / "w2", transport_cache=cache)
+    assert len(calls) == 1
+    assert TransportBudget(ledger, project).receipt()["source_charged"] == 0
+    assert second["sources"]["one"]["transport_cache"][0]["served_from"] == "cache"
+
+
+def test_http_document_cache_replays_the_recorded_retrieval(
+    tmp_path: Path,
+) -> None:
+    class Handler(BaseHTTPRequestHandler):
+        calls = 0
+
+        def do_GET(self) -> None:
+            Handler.calls += 1
+            self.send_response(200)
+            self.send_header("ETag", "tag-1")
+            self.end_headers()
+            self.wfile.write(b"# bounded document\n")
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        recipe = _fixture(
+            tmp_path,
+            kind="http_document",
+            acquisition={
+                "expected_sha256": hashlib.sha256(b"# bounded document\n").hexdigest(),
+                "max_bytes": 100,
+            },
+            uri=f"http://127.0.0.1:{server.server_port}/manual.md",
+        )
+        cache = tmp_path / "cold"
+        first = acquire(load_project(recipe), tmp_path / "work", transport_cache=cache)
+        _edit_source(recipe, notes="edited")
+        second = acquire(load_project(recipe), tmp_path / "work", transport_cache=cache)
+        assert Handler.calls == 1
+        assert _snapshot_payload(first)[1] == _snapshot_payload(second)[1]
+        assert second["sources"]["one"]["receipt"]["retrieval"]["etag"] == "tag-1"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_pattern_selected_git_repository_is_reused_and_rebuilt_when_damaged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from klab.corpus import acquisition
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.test")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "docs").mkdir()
+    (repo / "docs/guide.md").write_text("first\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "first")
+    recipe = _fixture(
+        tmp_path,
+        kind="git",
+        acquisition={"include": ["docs/*.md"], "max_bytes": 1024},
+        revision=_git(repo, "rev-parse", "HEAD"),
+        uri=str(repo),
+    )
+    cache = tmp_path / "cold"
+    fetches = []
+    real = acquisition._git
+
+    def watch(args: list[str], **options: object) -> bytes:
+        if "fetch" in args:
+            fetches.append(args)
+        return real(args, **options)
+
+    monkeypatch.setattr(acquisition, "_git", watch)
+    first = acquire(load_project(recipe), tmp_path / "w1", transport_cache=cache)
+    assert len(fetches) == 1
+    _edit_source(recipe, notes="edited")
+    second = acquire(load_project(recipe), tmp_path / "w2", transport_cache=cache)
+    assert len(fetches) == 1
+    assert second["sources"]["one"]["transport_cache"][0]["served_from"] == "cache"
+    assert _snapshot_payload(first)[1] == _snapshot_payload(second)[1]
+
+    (repository,) = (cache / "git").iterdir()
+    for obj in repository.glob("objects/??/*"):
+        obj.chmod(0o644)
+        obj.write_bytes(b"garbage")
+    _edit_source(recipe, notes="after damage")
+    third = acquire(load_project(recipe), tmp_path / "w3", transport_cache=cache)
+    assert len(fetches) == 2
+    assert third["sources"]["one"]["transport_cache"][0]["served_from"] == "network"
+    assert _snapshot_payload(first)[1] == _snapshot_payload(third)[1]
+
+
+def test_concurrent_writers_and_readers_leave_one_valid_entry(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from klab.corpus.transport_cache import BodyKey, TransportCache
+
+    body = b"x" * 3_000_000
+    source = tmp_path / "download"
+    source.write_bytes(body)
+    key = BodyKey(
+        "archive",
+        "https://example.test/a.tar.gz",
+        sha256=hashlib.sha256(body).hexdigest(),
+    )
+    root = tmp_path / "cold"
+
+    def work(index: int) -> str:
+        cache = TransportCache(root)
+        if index % 2:
+            cache.store(key, source)
+            return "stored"
+        served = cache.lookup(key, tmp_path / f"copy-{index}")
+        if served is not None:
+            assert (tmp_path / f"copy-{index}").read_bytes() == body
+        return "hit" if served else "miss"  # never a torn read
+
+    with ThreadPoolExecutor(8) as pool:
+        outcomes = list(pool.map(work, range(16)))
+    assert outcomes.count("stored") == 8
+    cache = TransportCache(root)
+    assert [r["status"] for r in cache.entries(verify=True)] == ["ok"]
+    assert len(_cache_files(root)) == 1
+    assert not list((root / "tmp").iterdir())
+
+
+def test_cache_fill_downloads_bodies_but_makes_no_snapshot_then_acquire_is_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from klab.cli.main import build_parser
+    from klab.corpus.cli import _handle
+
+    content = b'{"text":"one"}\n'
+    recipe = _bounded_hf_fixture(tmp_path, content, "default/train/data.jsonl", rows=1)
+    cache, root = tmp_path / "cold", tmp_path / "work"
+    calls = _mock_hf_stream(monkeypatch, content)
+
+    def run(*arguments: str) -> object:
+        _handle(
+            build_parser().parse_args(
+                [
+                    "--work-dir",
+                    str(root),
+                    "corpus",
+                    *arguments,
+                    "--transport-cache",
+                    str(cache),
+                ]
+            )
+        )
+        return json.loads(capsys.readouterr().out)
+
+    filled = run("cache-fill", str(recipe))
+    assert filled["sources"][0]["bodies"][0]["served_from"] == "network"
+    assert len(calls) == 1
+    assert not list((root / "corpora/example/snapshots").rglob("manifest.json"))
+    assert not (root / "corpora/example/acquisition.json").exists()
+    assert (
+        run("cache-fill", str(recipe))["sources"][0]["bodies"][0]["served_from"]
+        == "cache"
+    )
+    assert len(calls) == 1
+    (entry,) = run("cache-list", "--verify")
+    assert entry["status"] == "ok" and entry["kind"] == "huggingface_shard"
+
+    acquire(load_project(recipe), root, transport_cache=cache)
+    assert len(calls) == 1
+
+    # Prune removes what is unusable and keeps every valid entry.
+    (body,) = _cache_files(cache)
+    orphan = body.parent / ("0" * 64)
+    orphan.write_bytes(b"orphan")
+    old = 1.0
+    os.utime(orphan, (old, old))
+    (cache / "keys" / ("1" * 64 + ".json")).write_text("not json")
+    removed = run("cache-prune")
+    assert removed["bodies"] == ["0" * 64]
+    assert removed["entries"] == ["1" * 64]
+    assert len(run("cache-list")) == 1
+    assert body.exists()

@@ -19,8 +19,8 @@ import tempfile
 import threading
 import urllib.request
 import xml.etree.ElementTree as ET
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -52,6 +52,7 @@ from klab.corpus.transport_budget import (
     TransportBudget,
     source_file_name,
 )
+from klab.corpus.transport_cache import BodyKey, TransportCache, resolve_transport_cache
 from klab.engram.packs import _rename_noreplace
 from klab.hf_auth import hub_access_errors, hub_auth_kwargs, raise_for_hub_auth
 from klab.result_publication import sync_directory
@@ -295,12 +296,59 @@ def _git(args: list[str], *, cwd: Path | None = None) -> bytes:
     ).stdout
 
 
+def _ensure_git_repository(
+    source: SourceDeclaration, cache_root: Path, transport: TransportCache | None
+) -> tuple[Path, str]:
+    """A bare repository holding the pinned commit, and that commit.
+
+    With a transport cache the repository is reused, without any request, when
+    `git fsck` re-hashes every object and the pinned commit is reachable;
+    otherwise it is rebuilt from the network.
+    """
+    key = BodyKey("git_repository", source.canonical_uri, revision=source.revision)
+    present = False
+    with transport.git_lock(key) if transport is not None else nullcontext():
+        if transport is not None:
+            present = transport.git_has_commit(key)
+            repository = transport.git_repository(key, fresh=not present)
+        else:
+            cache_root.mkdir(parents=True, exist_ok=True)
+            repository = cache_root / canonical_digest(
+                {"uri": source.canonical_uri, "revision": source.revision}
+            )
+            if not repository.exists():
+                repository.mkdir()
+                _git(["init", "--bare", str(repository)])
+        if not present:
+            _git(
+                [
+                    "--git-dir",
+                    str(repository),
+                    "fetch",
+                    "--depth=1",
+                    "--no-tags",
+                    source.canonical_uri,
+                    source.revision,
+                ]
+            )
+        revision = f"{source.revision}^{{commit}}" if present else "FETCH_HEAD^{commit}"
+        commit = (
+            _git(["--git-dir", str(repository), "rev-parse", revision]).decode().strip()
+        )
+        if commit.lower() != source.revision.lower():
+            raise ValueError("Git fetched commit differs from pinned revision")
+        if transport is not None:
+            transport.note_git(key, served_from="cache" if present else "network")
+    return repository, commit
+
+
 def _acquire_git(
     source: SourceDeclaration,
     staging: Path,
     cache_root: Path,
     offline: bool,
     budget: TransportBudget | None = None,
+    transport: TransportCache | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if offline:
         raise ValueError("offline acquisition cannot fetch Git")
@@ -309,33 +357,9 @@ def _acquire_git(
     if spec.bounded_blobs is not None:
         if budget is None:
             raise ValueError("bounded Git acquisition requires a transport ledger")
-        return _bounded_git_acquire(source, spec, staging, budget)
-    cache_root.mkdir(parents=True, exist_ok=True)
-    cache = cache_root / canonical_digest(
-        {"uri": source.canonical_uri, "revision": source.revision}
-    )
-    if not cache.exists():
-        cache.mkdir()
-        _git(["init", "--bare", str(cache)])
-    _git(
-        [
-            "--git-dir",
-            str(cache),
-            "fetch",
-            "--depth=1",
-            "--no-tags",
-            source.canonical_uri,
-            source.revision,
-        ]
-    )
-    commit = (
-        _git(["--git-dir", str(cache), "rev-parse", "FETCH_HEAD^{commit}"])
-        .decode()
-        .strip()
-    )
-    if commit.lower() != source.revision.lower():
-        raise ValueError("Git fetched commit differs from pinned revision")
-    tree = _git(["--git-dir", str(cache), "ls-tree", "-rz", "--full-tree", commit])
+        return _bounded_git_acquire(source, spec, staging, budget, transport)
+    repository, commit = _ensure_git_repository(source, cache_root, transport)
+    tree = _git(["--git-dir", str(repository), "ls-tree", "-rz", "--full-tree", commit])
     inventory = []
     total = 0
     selected = set()
@@ -363,12 +387,12 @@ def _acquire_git(
             metadata_seen = True
         else:
             selected.add(path)
-        size = int(_git(["--git-dir", str(cache), "cat-file", "-s", blob]))
+        size = int(_git(["--git-dir", str(repository), "cat-file", "-s", blob]))
         if size > spec.max_bytes - total:
             raise ValueError("Git selection exceeds max_bytes")
         target = staging / "files" / path
         with subprocess.Popen(
-            ["git", "--git-dir", str(cache), "cat-file", "blob", blob],
+            ["git", "--git-dir", str(repository), "cat-file", "blob", blob],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         ) as process:
@@ -378,6 +402,14 @@ def _acquire_git(
             )
             if process.wait() != 0 or copied != size:
                 raise ValueError(f"Git blob read failed: {path}")
+        if transport is not None:
+            # A cached repository is trusted no further than its object ids.
+            git_hasher = hashlib.sha1(f"blob {copied}\0".encode())
+            with target.open("rb") as copied_blob:
+                for chunk in iter(lambda: copied_blob.read(1024 * 1024), b""):
+                    git_hasher.update(chunk)
+            if git_hasher.hexdigest() != blob:
+                raise ValueError(f"cached Git blob differs from its object id: {path}")
         total += copied
         inventory.append(
             {"path": path, "sha256": digest, "size": copied, "git_blob_id": blob}
@@ -389,12 +421,13 @@ def _acquire_git(
     return sorted(inventory, key=lambda item: item["path"]), {"commit": commit}
 
 
-def _bounded_git_acquire(
-    source: SourceDeclaration,
-    spec: GitAcquisition,
-    staging: Path,
-    budget: TransportBudget,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+_GIT_HEADERS = {
+    "User-Agent": "KybernModelLab-Corpus-Forge/1",
+    "Accept": "application/vnd.github+json",
+}
+
+
+def _github_origin(source: SourceDeclaration) -> tuple[str, str]:
     origin = urlparse(source.canonical_uri)
     parts = origin.path.strip("/").removesuffix(".git").split("/")
     if (
@@ -411,17 +444,23 @@ def _bounded_git_acquire(
         for part in parts
     ):
         raise ValueError("bounded Git repository path is unsafe")
+    return owner, repository
+
+
+def _check_git_metadata(
+    source: SourceDeclaration,
+    spec: GitAcquisition,
+    owner: str,
+    repository: str,
+    budget: TransportBudget,
+) -> None:
     api = f"https://api.github.com/repos/{owner}/{repository}/git"
-    headers = {
-        "User-Agent": "KybernModelLab-Corpus-Forge/1",
-        "Accept": "application/vnd.github+json",
-    }
     metadata = []
     for url in (
         f"{api}/commits/{source.revision}",
         f"{api}/trees/{spec.tree_oid}?recursive=1",
     ):
-        response, _ = _open_accounted(url, headers, budget)
+        response, _ = _open_accounted(url, dict(_GIT_HEADERS), budget)
         with response:
             if urlparse(response.url).hostname != "api.github.com":
                 raise ValueError("pinned Git metadata changed origin")
@@ -455,49 +494,118 @@ def _bounded_git_acquire(
             or matches[0].get("size") != blob.max_bytes
         ):
             raise ValueError(f"pinned Git blob missing or ambiguous: {blob.path}")
+
+
+def _git_blob_body(
+    source: SourceDeclaration,
+    blob: Any,
+    url: str,
+    target: Path,
+    budget: TransportBudget,
+    resources: _AcquisitionResources,
+    cache: TransportCache | None,
+    ensure_metadata: Callable[[], None],
+    *,
+    verify_only: bool = False,
+) -> tuple[str, int, str]:
+    """One pinned blob as (SHA-256, size, Git blob id): cached, else downloaded.
+
+    A hit makes no request at all, not even the commit and tree metadata check:
+    the cached bytes are re-hashed against the pinned Git blob id.
+    """
+    key = BodyKey(
+        "git_blob", url, revision=source.revision, git_blob_oid=blob.git_blob_oid
+    )
+    if cache is not None:
+        served = cache.lookup(
+            key,
+            None if verify_only else target,
+            limit=blob.max_bytes,
+            observe=resources.observe,
+        )
+        if served is not None:
+            return served.sha256, served.size, blob.git_blob_oid.lower()
+    ensure_metadata()
+    budget.assert_transfer_available(
+        source.id, blob.path, blob.max_bytes, allow_verified_retry=True
+    )
+    transfer_index = budget.reserve_transfer(
+        source.id, blob.path, blob.max_bytes, allow_verified_retry=True
+    )
+    resources.index = transfer_index
+    resources.expanded = None  # raw Git blobs have no expansion phase
+    resources.observe()
+    try:
+        response, _ = _open_accounted(url, dict(_GIT_HEADERS), budget)
+        with response:
+            if _response_length(response) != blob.max_bytes:
+                raise ValueError("pinned Git blob Content-Length mismatch")
+            digest, copied = _copy_hf_body(
+                response, target, blob.max_bytes, budget, transfer_index, resources
+            )
+        git_hasher = hashlib.sha1(f"blob {copied}\0".encode())
+        with target.open("rb") as copied_blob:
+            for chunk in iter(lambda: copied_blob.read(1024 * 1024), b""):
+                git_hasher.update(chunk)
+        git_digest = git_hasher.hexdigest()
+        if git_digest.lower() != blob.git_blob_oid.lower():
+            raise ValueError(f"pinned Git blob SHA-1 mismatch: {blob.path}")
+        budget.finish_transfer(transfer_index, success=True)
+    except OSError, TimeoutError, EOFError:
+        budget.finish_transfer(transfer_index, success=False, interrupted=True)
+        raise
+    except Exception:
+        budget.finish_transfer(transfer_index, success=False)
+        raise
+    except BaseException:
+        budget.finish_transfer(transfer_index, success=False, interrupted=True)
+        raise
+    if cache is not None:
+        cache.store(key, target)
+    return digest, copied, git_digest
+
+
+def _git_blob_url(
+    source: SourceDeclaration, owner: str, repository: str, path: str
+) -> str:
+    return (
+        f"https://raw.githubusercontent.com/{owner}/{repository}/"
+        f"{source.revision}/{quote(path, safe='/')}"
+    )
+
+
+def _bounded_git_acquire(
+    source: SourceDeclaration,
+    spec: GitAcquisition,
+    staging: Path,
+    budget: TransportBudget,
+    cache: TransportCache | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    owner, repository = _github_origin(source)
+    checked = False
+
+    def ensure_metadata() -> None:
+        nonlocal checked
+        if not checked:
+            _check_git_metadata(source, spec, owner, repository, budget)
+            checked = True
+
+    if cache is None:
+        ensure_metadata()
     budget.check_disk(staging, budget.projected_disk_bytes())
     files = []
     for blob in spec.bounded_blobs:
         resources = _AcquisitionResources(staging, budget)
-        budget.assert_transfer_available(
-            source.id, blob.path, blob.max_bytes, allow_verified_retry=True
+        digest, copied, git_digest = _git_blob_body(
+            source,
+            blob,
+            _git_blob_url(source, owner, repository, blob.path),
+            staging / "files" / blob.path,
+            budget,
+            resources,
+            cache,
+            ensure_metadata,
         )
-        transfer_index = budget.reserve_transfer(
-            source.id, blob.path, blob.max_bytes, allow_verified_retry=True
-        )
-        resources.index = transfer_index
-        resources.expanded = None  # raw Git blobs have no expansion phase
-        resources.observe()
-        url = (
-            f"https://raw.githubusercontent.com/{owner}/{repository}/"
-            f"{source.revision}/{quote(blob.path, safe='/')}"
-        )
-        target = staging / "files" / blob.path
-        try:
-            response, _ = _open_accounted(url, headers, budget)
-            with response:
-                if _response_length(response) != blob.max_bytes:
-                    raise ValueError("pinned Git blob Content-Length mismatch")
-                digest, copied = _copy_hf_body(
-                    response, target, blob.max_bytes, budget, transfer_index, resources
-                )
-            git_hasher = hashlib.sha1(f"blob {copied}\0".encode())
-            with target.open("rb") as copied_blob:
-                for chunk in iter(lambda: copied_blob.read(1024 * 1024), b""):
-                    git_hasher.update(chunk)
-            git_digest = git_hasher.hexdigest()
-            if git_digest.lower() != blob.git_blob_oid.lower():
-                raise ValueError(f"pinned Git blob SHA-1 mismatch: {blob.path}")
-            budget.finish_transfer(transfer_index, success=True)
-        except OSError, TimeoutError, EOFError:
-            budget.finish_transfer(transfer_index, success=False, interrupted=True)
-            raise
-        except Exception:
-            budget.finish_transfer(transfer_index, success=False)
-            raise
-        except BaseException:
-            budget.finish_transfer(transfer_index, success=False, interrupted=True)
-            raise
         files.append(
             {
                 "path": blob.path,
@@ -835,7 +943,12 @@ def _copy_hf_body(
 
 
 def _acquire_http(
-    source: SourceDeclaration, staging: Path, offline: bool
+    source: SourceDeclaration,
+    staging: Path,
+    offline: bool,
+    cache: TransportCache | None = None,
+    *,
+    verify_only: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if offline:
         raise ValueError("offline acquisition cannot fetch HTTP")
@@ -847,6 +960,18 @@ def _acquire_http(
     if suffix not in (".txt", ".md", ".markdown"):
         raise ValueError("HTTP source must explicitly name a text/Markdown document")
     name = "document" + suffix
+    key = BodyKey("http_document", source.canonical_uri, sha256=spec.expected_sha256)
+    if cache is not None:
+        served = cache.lookup(
+            key,
+            None if verify_only else staging / "files" / name,
+            limit=spec.max_bytes,
+        )
+        if served is not None and served.meta is not None:
+            # The recorded headers describe the original retrieval.
+            return [
+                {"path": name, "sha256": served.sha256, "size": served.size}
+            ], served.meta
     headers = {"User-Agent": "KybernModelLab-Corpus-Forge/1"}
     origin = urlparse(source.canonical_uri)
     if origin.scheme == "https" and origin.hostname == "huggingface.co":
@@ -874,6 +999,8 @@ def _acquire_http(
         raise
     if digest != spec.expected_sha256:
         raise ValueError("HTTP expected SHA-256 mismatch")
+    if cache is not None:
+        cache.store(key, staging / "files" / name, meta=retrieval)
     return [{"path": name, "sha256": digest, "size": size}], retrieval
 
 
@@ -980,17 +1107,117 @@ def _bounded_hf_rows(
                 raise ValueError(f"malformed HF JSONL row {index}") from error
 
 
+def _hf_shard_body(
+    source: SourceDeclaration,
+    spec: HuggingFaceAcquisition,
+    shard: Any,
+    input_path: Path,
+    budget: TransportBudget | None,
+    resources: _AcquisitionResources,
+    cache: TransportCache | None,
+    *,
+    verify_only: bool = False,
+) -> tuple[str, int]:
+    """One pinned shard body: from the cache when it verifies, else downloaded.
+
+    A hit makes no request, reserves nothing and charges the ledger nothing.
+    """
+    from huggingface_hub import hf_hub_url
+
+    repo_id = source.canonical_uri.removeprefix("https://huggingface.co/datasets/")
+    auth = hub_auth_kwargs()
+    url = hf_hub_url(
+        repo_id=repo_id,
+        filename=shard.path,
+        repo_type="dataset",
+        revision=source.revision,
+    )
+    if urlparse(url).scheme != "https" or urlparse(url).hostname != "huggingface.co":
+        raise ValueError("HF shard URL must point to the Hugging Face Hub")
+    headers = {"User-Agent": "KybernModelLab-Corpus-Forge/1"}
+    if auth.get("token"):
+        headers["Authorization"] = f"Bearer {auth['token']}"
+    request = urllib.request.Request(url, headers=headers)
+    key = BodyKey(
+        "huggingface_shard",
+        url,
+        revision=source.revision,
+        sha256=shard.expected_sha256,
+    )
+    if cache is not None:
+        served = cache.lookup(
+            key,
+            None if verify_only else input_path,
+            limit=shard.max_shard_bytes,
+            observe=resources.observe,
+        )
+        if served is not None:
+            return served.sha256, served.size
+    transfer_index = None
+    try:
+        if budget is not None:
+            budget.assert_transfer_available(
+                source.id, shard.path, shard.max_shard_bytes
+            )
+            projected = budget.projected_disk_bytes(source_id=budget.selected_source_id)
+            budget.check_disk(resources.root, projected)
+            _hf_pinned_metadata(source, spec, shard, headers, budget)
+            transfer_index = budget.reserve_transfer(
+                source.id, shard.path, shard.max_shard_bytes
+            )
+            resources.index = transfer_index
+            resources.persist()
+            response, _ = _open_accounted(url, headers.copy(), budget)
+        else:
+            response = urllib.request.build_opener(_PrivateHubRedirect()).open(
+                request, timeout=30
+            )
+        with response:
+            if urlparse(response.url).scheme != "https":
+                raise ValueError("HF shard redirect must use HTTPS")
+            digest, input_bytes = _copy_hf_body(
+                response,
+                input_path,
+                shard.max_shard_bytes,
+                budget,
+                transfer_index,
+                resources,
+            )
+    except (*hub_access_errors(), HTTPError) as error:
+        if budget is not None and transfer_index is not None:
+            budget.finish_transfer(transfer_index, success=False, interrupted=False)
+        raise_for_hub_auth(error, credential_supplied=bool(auth.get("token")))
+    except OSError, TimeoutError, EOFError:
+        if budget is not None and transfer_index is not None:
+            budget.finish_transfer(transfer_index, success=False, interrupted=True)
+        raise
+    except Exception:
+        if budget is not None and transfer_index is not None:
+            budget.finish_transfer(transfer_index, success=False, interrupted=False)
+        raise
+    except BaseException:
+        if budget is not None and transfer_index is not None:
+            budget.finish_transfer(transfer_index, success=False, interrupted=True)
+        raise
+    if digest != shard.expected_sha256.lower():
+        if budget is not None and transfer_index is not None:
+            budget.finish_transfer(transfer_index, success=False)
+        raise ValueError(f"HF shard SHA-256 mismatch: {shard.path}")
+    if budget is not None and transfer_index is not None:
+        budget.finish_transfer(transfer_index, success=True)
+    if cache is not None:
+        cache.store(key, input_path)
+    return digest, input_bytes
+
+
 def _bounded_hf_acquire(
     source: SourceDeclaration,
     spec: HuggingFaceAcquisition,
     staging: Path,
     budget: TransportBudget | None = None,
+    cache: TransportCache | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    from huggingface_hub import hf_hub_url
-
     assert spec.bounded_shards is not None
-    repo_id = source.canonical_uri.removeprefix("https://huggingface.co/datasets/")
-    auth = hub_auth_kwargs()
     inventory: list[dict[str, Any]] = []
     receipts: list[dict[str, Any]] = []
     total_bytes = 0
@@ -1007,84 +1234,10 @@ def _bounded_hf_acquire(
                 raise ValueError(
                     "explicit HF shard metadata requires a transport budget"
                 )
-            url = hf_hub_url(
-                repo_id=repo_id,
-                filename=shard.path,
-                repo_type="dataset",
-                revision=source.revision,
-            )
-            if (
-                urlparse(url).scheme != "https"
-                or urlparse(url).hostname != "huggingface.co"
-            ):
-                raise ValueError("HF shard URL must point to the Hugging Face Hub")
-            headers = {"User-Agent": "KybernModelLab-Corpus-Forge/1"}
-            if auth.get("token"):
-                headers["Authorization"] = f"Bearer {auth['token']}"
-            request = urllib.request.Request(url, headers=headers)
             input_path = staging / "hf-input" / shard.path
-            transfer_index = None
-            try:
-                if budget is not None:
-                    budget.assert_transfer_available(
-                        source.id, shard.path, shard.max_shard_bytes
-                    )
-                    projected = budget.projected_disk_bytes(
-                        source_id=budget.selected_source_id
-                    )
-                    budget.check_disk(staging, projected)
-                    _hf_pinned_metadata(source, spec, shard, headers, budget)
-                    transfer_index = budget.reserve_transfer(
-                        source.id, shard.path, shard.max_shard_bytes
-                    )
-                    resources.index = transfer_index
-                    resources.persist()
-                    response, _ = _open_accounted(url, headers.copy(), budget)
-                else:
-                    response = urllib.request.build_opener(_PrivateHubRedirect()).open(
-                        request, timeout=30
-                    )
-                with response:
-                    if urlparse(response.url).scheme != "https":
-                        raise ValueError("HF shard redirect must use HTTPS")
-                    digest, input_bytes = _copy_hf_body(
-                        response,
-                        input_path,
-                        shard.max_shard_bytes,
-                        budget,
-                        transfer_index,
-                        resources,
-                    )
-            except (*hub_access_errors(), HTTPError) as error:
-                if budget is not None and transfer_index is not None:
-                    budget.finish_transfer(
-                        transfer_index, success=False, interrupted=False
-                    )
-                raise_for_hub_auth(error, credential_supplied=bool(auth.get("token")))
-            except OSError, TimeoutError, EOFError:
-                if budget is not None and transfer_index is not None:
-                    budget.finish_transfer(
-                        transfer_index, success=False, interrupted=True
-                    )
-                raise
-            except Exception:
-                if budget is not None and transfer_index is not None:
-                    budget.finish_transfer(
-                        transfer_index, success=False, interrupted=False
-                    )
-                raise
-            except BaseException:
-                if budget is not None and transfer_index is not None:
-                    budget.finish_transfer(
-                        transfer_index, success=False, interrupted=True
-                    )
-                raise
-            if digest != shard.expected_sha256.lower():
-                if budget is not None and transfer_index is not None:
-                    budget.finish_transfer(transfer_index, success=False)
-                raise ValueError(f"HF shard SHA-256 mismatch: {shard.path}")
-            if budget is not None and transfer_index is not None:
-                budget.finish_transfer(transfer_index, success=True)
+            digest, input_bytes = _hf_shard_body(
+                source, spec, shard, input_path, budget, resources, cache
+            )
 
             output_name = shard.path + ".sample.jsonl"
             target = staging / "files" / output_name
@@ -1221,6 +1374,7 @@ def _acquire_hf(
     cache_root: Path,
     offline: bool,
     budget: TransportBudget | None = None,
+    cache: TransportCache | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if offline:
         raise ValueError("offline acquisition cannot fetch Hugging Face")
@@ -1232,7 +1386,7 @@ def _acquire_hf(
 
         return derive_subset(source, staging=staging, scratch_directory=staging)
     if spec.bounded_shards is not None:
-        return _bounded_hf_acquire(source, spec, staging, budget)
+        return _bounded_hf_acquire(source, spec, staging, budget, cache)
     assert isinstance(spec, HuggingFaceAcquisition)
     auth = hub_auth_kwargs()
     try:
@@ -1510,18 +1664,32 @@ def _wiki_jsonl(
     return rows, scanned, emitted, guarded.size
 
 
-def _acquire_wikimedia(
+def _wikimedia_body(
     source: SourceDeclaration,
-    staging: Path,
-    offline: bool,
-    resources: _AcquisitionResources | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    if offline:
-        raise ValueError("offline acquisition cannot fetch Wikimedia dump")
-    spec = source.acquisition
-    assert isinstance(spec, WikimediaDumpAcquisition)
-    resources = resources or _AcquisitionResources(staging)
-    resources.observe()
+    spec: WikimediaDumpAcquisition,
+    compressed: Path,
+    resources: _AcquisitionResources,
+    cache: TransportCache | None,
+    *,
+    verify_only: bool = False,
+) -> tuple[str, int]:
+    """The compressed dump: from the cache when it verifies, else downloaded."""
+    name = Path(urlparse(source.canonical_uri).path).name
+    key = BodyKey(
+        "wikimedia_dump",
+        source.canonical_uri,
+        sha256=spec.expected_sha256 or None,
+        sha1=spec.expected_sha1,
+    )
+    if cache is not None:
+        served = cache.lookup(
+            key,
+            None if verify_only else compressed,
+            limit=spec.max_compressed_bytes,
+            observe=resources.observe,
+        )
+        if served is not None:
+            return served.sha256, served.size
     opener = urllib.request.build_opener()
     headers = {
         "User-Agent": (
@@ -1536,7 +1704,6 @@ def _acquire_wikimedia(
         checksum = response.read(4_194_305)
     if len(checksum) > 4_194_304:
         raise ValueError("Wikimedia checksum manifest exceeds limit")
-    name = Path(urlparse(source.canonical_uri).path).name
     matches = [
         line.split()
         for line in checksum.decode("ascii").splitlines()
@@ -1544,7 +1711,6 @@ def _acquire_wikimedia(
     ]
     if len(matches) != 1 or matches[0][0].lower() != spec.expected_sha1.lower():
         raise ValueError("Wikimedia official SHA-1 manifest mismatch")
-    compressed = staging / "wikimedia-input" / name
     with opener.open(
         urllib.request.Request(source.canonical_uri, headers=headers), timeout=60
     ) as response:
@@ -1562,6 +1728,29 @@ def _acquire_wikimedia(
             source_sha1.update(chunk)
     if source_sha1.hexdigest() != spec.expected_sha1.lower():
         raise ValueError("Wikimedia compressed SHA-1 mismatch")
+    if cache is not None:
+        cache.store(key, compressed)
+    return digest, compressed_bytes
+
+
+def _acquire_wikimedia(
+    source: SourceDeclaration,
+    staging: Path,
+    offline: bool,
+    resources: _AcquisitionResources | None = None,
+    cache: TransportCache | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if offline:
+        raise ValueError("offline acquisition cannot fetch Wikimedia dump")
+    spec = source.acquisition
+    assert isinstance(spec, WikimediaDumpAcquisition)
+    resources = resources or _AcquisitionResources(staging)
+    resources.observe()
+    name = Path(urlparse(source.canonical_uri).path).name
+    compressed = staging / "wikimedia-input" / name
+    digest, compressed_bytes = _wikimedia_body(
+        source, spec, compressed, resources, cache
+    )
     output_name = name + ".sample.jsonl"
     output_path = staging / "files" / output_name
     with bz2.open(compressed, "rb") as decompressed:
@@ -1594,6 +1783,41 @@ _USER_AGENT = {"User-Agent": "KybernModelLab-Corpus-Forge/1"}
 def _fetch_pinned(
     source: SourceDeclaration,
     url: str,
+    key_name: str,
+    expected_sha256: str,
+    limit: int,
+    target: Path,
+    budget: TransportBudget | None,
+    resources: _AcquisitionResources,
+    cache: TransportCache | None = None,
+    *,
+    verify_only: bool = False,
+) -> int:
+    """One content-pinned body: from the cache when it verifies, else downloaded.
+
+    A download charges the ledger when one is declared; a hit charges nothing.
+    """
+    key = BodyKey(source.kind, url, sha256=expected_sha256)
+    if cache is not None:
+        served = cache.lookup(
+            key,
+            None if verify_only else target,
+            limit=limit,
+            observe=resources.observe,
+        )
+        if served is not None:
+            return served.size
+    size = _download_pinned(
+        source, url, key_name, expected_sha256, limit, target, budget, resources
+    )
+    if cache is not None:
+        cache.store(key, target)
+    return size
+
+
+def _download_pinned(
+    source: SourceDeclaration,
+    url: str,
     key: str,
     expected_sha256: str,
     limit: int,
@@ -1601,7 +1825,6 @@ def _fetch_pinned(
     budget: TransportBudget | None,
     resources: _AcquisitionResources,
 ) -> int:
-    """Download one content-pinned body, charging the ledger when one is declared."""
     if budget is None:
         request = urllib.request.Request(url, headers=_USER_AGENT)
         with urllib.request.build_opener().open(request, timeout=60) as response:
@@ -1672,6 +1895,7 @@ def _acquire_archive(
     staging: Path,
     budget: TransportBudget | None,
     resources: _AcquisitionResources,
+    cache: TransportCache | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     import tarfile
     import zipfile
@@ -1693,6 +1917,7 @@ def _acquire_archive(
         body,
         budget,
         resources,
+        cache,
     )
     inventory: list[dict[str, Any]] = []
     names: set[str] = set()
@@ -1868,6 +2093,7 @@ def _acquire_pdf(
     staging: Path,
     budget: TransportBudget | None,
     resources: _AcquisitionResources,
+    cache: TransportCache | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     spec = source.acquisition
     assert isinstance(spec, PdfAcquisition)
@@ -1890,6 +2116,7 @@ def _acquire_pdf(
             pinned,
             budget,
             resources,
+            cache,
         )
         text, pages = _pdf_text(pinned, spec, document.name)
         text_bytes += len(text)
@@ -1973,6 +2200,7 @@ def _acquire_mediawiki(
     staging: Path,
     budget: TransportBudget | None,
     resources: _AcquisitionResources,
+    cache: TransportCache | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     spec = source.acquisition
     assert isinstance(spec, MediaWikiDumpAcquisition)
@@ -1990,6 +2218,7 @@ def _acquire_mediawiki(
         body,
         budget,
         resources,
+        cache,
     )
     output_name = name + ".sample.jsonl"
     output_path = staging / "files" / output_name
@@ -2368,8 +2597,13 @@ def acquire(
     min_free_bytes: int | None = None,
     plan_only: bool = False,
     require_existing: bool = False,
+    transport_cache: Path | str | None = None,
 ) -> dict[str, Any]:
-    """Publish verified snapshots independently; replace the active lock only on success."""
+    """Publish verified snapshots independently; replace the active lock only on success.
+
+    `transport_cache` (else `KLAB_TRANSPORT_CACHE`) names operator-local cold
+    storage for raw transport bodies; see `klab.corpus.transport_cache`.
+    """
     if require_existing and (offline or source_id is not None or plan_only):
         raise ValueError(
             "existing-snapshot finalization requires the full project without --offline or a source step"
@@ -2447,6 +2681,8 @@ def acquire(
                 )
     snapshot_root = base / "snapshots"
     snapshot_root.mkdir(parents=True, exist_ok=True)
+    cache_root = resolve_transport_cache(transport_cache)
+    cache = TransportCache(cache_root) if cache_root is not None else None
     budget = step_budget or (
         TransportBudget(base / "transport-budget.sqlite", project)
         if project.config.transport_budget is not None
@@ -2583,23 +2819,29 @@ def acquire(
                 files, retrieval = _acquire_local(source, project.root, staging)
             elif source.kind == "git":
                 files, retrieval = _acquire_git(
-                    source, staging, base / "git-cache", False, budget
+                    source, staging, base / "git-cache", False, budget, cache
                 )
             elif source.kind == "http_document":
-                files, retrieval = _acquire_http(source, staging, False)
+                files, retrieval = _acquire_http(source, staging, False, cache)
             elif source.kind == "huggingface_dataset":
                 files, retrieval = _acquire_hf(
-                    source, staging, base / "hf-cache", False, budget
+                    source, staging, base / "hf-cache", False, budget, cache
                 )
             elif source.kind == "wikimedia_dump":
-                files, retrieval = _acquire_wikimedia(source, staging, False, resources)
+                files, retrieval = _acquire_wikimedia(
+                    source, staging, False, resources, cache
+                )
             elif source.kind == "archive":
-                files, retrieval = _acquire_archive(source, staging, budget, resources)
+                files, retrieval = _acquire_archive(
+                    source, staging, budget, resources, cache
+                )
             elif source.kind == "pdf_documents":
-                files, retrieval = _acquire_pdf(source, staging, budget, resources)
+                files, retrieval = _acquire_pdf(
+                    source, staging, budget, resources, cache
+                )
             elif source.kind == "mediawiki_dump":
                 files, retrieval = _acquire_mediawiki(
-                    source, staging, budget, resources
+                    source, staging, budget, resources, cache
                 )
             else:
                 files = []
@@ -2665,6 +2907,10 @@ def acquire(
                     "retrieval": retrieval,
                 },
             }
+            if cache is not None and (evidence := cache.take_evidence()):
+                # Provenance of the bytes, outside the snapshot identity: the
+                # same snapshot is reached whether the network or the cache served it.
+                entries[source.id]["transport_cache"] = evidence
         except BaseException as error:
             if resources is not None:
                 resources.status = (
@@ -2709,7 +2955,13 @@ def acquire(
             "admission": step,
             "source": {
                 key: entry[key]
-                for key in ("declaration_sha256", "snapshot_sha256", "snapshot_path")
+                for key in (
+                    "declaration_sha256",
+                    "snapshot_sha256",
+                    "snapshot_path",
+                    "transport_cache",
+                )
+                if key in entry
             },
         }
     lock = {
@@ -2740,3 +2992,170 @@ def acquire(
     return verify_acquisition(
         project, work_root, proof_store=proof_store, verification_mode=verification_mode
     )
+
+
+def _fill_source(
+    source: SourceDeclaration,
+    base: Path,
+    staging: Path,
+    cache: TransportCache,
+    budget: TransportBudget | None,
+) -> str | None:
+    """Put one source's declared bodies in the cache; the reason it cannot, if so."""
+    resources = _AcquisitionResources(staging, budget)
+    spec = source.acquisition
+    kind = source.kind
+    if kind == "huggingface_dataset":
+        if spec.retained_subset is not None:
+            return "derived offline from an existing snapshot"
+        if spec.bounded_shards is None:
+            return "snapshot_download selects files by pattern; no pinned body"
+        for shard in spec.bounded_shards:
+            if shard.declared_config is not None and budget is None:
+                raise ValueError(
+                    "explicit HF shard metadata requires a transport budget"
+                )
+            _hf_shard_body(
+                source,
+                spec,
+                shard,
+                staging / "hf-input" / shard.path,
+                budget,
+                resources,
+                cache,
+                verify_only=True,
+            )
+    elif kind == "git":
+        if spec.bounded_blobs is None:
+            _ensure_git_repository(source, base / "git-cache", cache)
+            return None
+        if budget is None:
+            raise ValueError("bounded Git acquisition requires a transport ledger")
+        owner, repository = _github_origin(source)
+        checked = False
+
+        def ensure_metadata() -> None:
+            nonlocal checked
+            if not checked:
+                _check_git_metadata(source, spec, owner, repository, budget)
+                checked = True
+
+        for blob in spec.bounded_blobs:
+            _git_blob_body(
+                source,
+                blob,
+                _git_blob_url(source, owner, repository, blob.path),
+                staging / "files" / blob.path,
+                budget,
+                _AcquisitionResources(staging, budget),
+                cache,
+                ensure_metadata,
+                verify_only=True,
+            )
+    elif kind == "http_document":
+        _acquire_http(source, staging, False, cache, verify_only=True)
+    elif kind == "wikimedia_dump":
+        _wikimedia_body(
+            source,
+            spec,
+            staging
+            / "wikimedia-input"
+            / Path(urlparse(source.canonical_uri).path).name,
+            resources,
+            cache,
+            verify_only=True,
+        )
+    elif kind in {"archive", "mediawiki_dump"}:
+        name = source_file_name(source.canonical_uri)
+        limit = (
+            spec.max_archive_bytes if kind == "archive" else spec.max_compressed_bytes
+        )
+        _fetch_pinned(
+            source,
+            source.canonical_uri,
+            name,
+            spec.expected_sha256,
+            limit,
+            staging / "pinned" / name,
+            budget,
+            resources,
+            cache,
+            verify_only=True,
+        )
+    elif kind == "pdf_documents":
+        for document in spec.documents:
+            _fetch_pinned(
+                source,
+                document.url,
+                document.name,
+                document.expected_sha256,
+                document.max_bytes,
+                staging / "pinned" / _pinned_pdf_path(document.name),
+                budget,
+                resources,
+                cache,
+                verify_only=True,
+            )
+    else:
+        return "no network transport"
+    return None
+
+
+def fill_transport_cache(
+    project: Project,
+    work_root: Path | str,
+    *,
+    transport_cache: Path | str | None = None,
+    source_id: str | None = None,
+) -> dict[str, Any]:
+    """Download every declared body into the transport cache; make no snapshot.
+
+    Bodies already cached are re-hashed, not fetched. Downloads are charged to
+    the project's transport ledger exactly as acquisition would charge them.
+    """
+    root = resolve_transport_cache(transport_cache)
+    if root is None:
+        raise ValueError(
+            "no transport cache: pass --transport-cache or set KLAB_TRANSPORT_CACHE"
+        )
+    sources = [s for s in project.sources if source_id in (None, s.id)]
+    if not sources:
+        raise ValueError(f"unknown source: {source_id}")
+    base = Path(work_root) / "corpora" / project.config.id
+    cache = TransportCache(root)
+    effects = (
+        {item.source_id: item for item in project.config.source_effects}
+        if project.config.source_effects is not None
+        else {}
+    )
+    budget = (
+        TransportBudget(base / "transport-budget.sqlite", project)
+        if project.config.transport_budget is not None
+        else None
+    )
+    report = []
+    for source in sources:
+        if (
+            effects.get(source.id) is not None
+            and effects[source.id].effect == "reuse_only"
+        ):
+            report.append(
+                {"source_id": source.id, "skipped": "reuses a retained snapshot"}
+            )
+            continue
+        staging = Path(tempfile.mkdtemp(prefix="fill-", dir=root / "tmp"))
+        try:
+            reason = _fill_source(source, base, staging, cache, budget)
+        except BaseException as error:
+            if budget is not None:
+                budget.record_failure(source.id, error)
+            raise
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        evidence = cache.take_evidence()
+        report.append(
+            {"source_id": source.id, "skipped": reason}
+            if reason is not None
+            else {"source_id": source.id, "bodies": evidence}
+        )
+    return {"transport_cache": str(root), "sources": report}
