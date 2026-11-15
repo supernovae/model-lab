@@ -58,7 +58,7 @@ def test_local_corpus_builds_a_model_with_only_build_commands(
     assert text.startswith("The baker counts")
 
 
-def test_a_smaller_run_drafts_for_generate_without_changing_its_tokens(
+def test_drafters_for_generate_never_change_its_tokens(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -95,3 +95,29 @@ def test_a_smaller_run_drafts_for_generate_without_changing_its_tokens(
     assert report["draft_model_calls"] > 0 and report["wall_seconds"] > 0
     with pytest.raises(ValueError, match="choose one drafter"):
         klab(*request, "--draft-run", "draft", "--prompt-lookup", "2")
+
+    table = tmp_path / "table"
+    built = json.loads(
+        klab(
+            "data",
+            "ngram-table",
+            "target",
+            "--output",
+            str(table),
+            "--runs-dir",
+            "work/runs",
+            "--order",
+            "1",
+        )
+    )
+    assert built["source"]["run_id"] == "target" and built["filled_slots"] > 0
+    tabled = json.loads(klab(*request, "--ngram-table", str(table)))
+    assert tabled["response"] == plain["response"]
+    assert tabled["speculation"]["drafter"] == "corpus_ngram"
+    assert (
+        tabled["speculation"]["table_identity"]["manifest_sha256"]
+        == built["manifest_sha256"]
+    )
+    assert tabled["speculation"]["drafted_tokens"] > 0
+    with pytest.raises(ValueError, match="choose one drafter"):
+        klab(*request, "--ngram-table", str(table), "--draft-run", "draft")
