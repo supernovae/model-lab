@@ -722,7 +722,10 @@ klab corpus audit-protected-lineage --prior-release PRIOR --candidate-release RE
 
 - **`finalize-family-inventory`** writes one row per kept document of a
   verified release (`document_id`, `family_id`, `split`, `stratum`,
-  `content_sha256`) from the frozen splits it was built with. It refuses a split
+  `content_sha256`) from the reviewed, frozen splits it was built with. For a
+  release built with declared splits use `derive-family-inventory` (see
+  [Materialize a mixture](#materialize-a-mixture)); `finalize-family-inventory`
+  refuses it. It refuses a split
   file that differs from the release's and never overwrites an output.
 - **`audit-protected-lineage`** verifies both releases and both inventories.
   The profile (`loss_slices`) and suite (`items`, `chunks`) name the protected
@@ -796,6 +799,38 @@ unique tokens only, or 2), the tokenizer and optional
 token stream (`train.tokens.ids`) and a small record file; a run then uses it
 through `dataset.source: local_token_mixture`. Nothing is published until every
 quota and floor is met; a shortfall is reported per stratum.
+
+**Family inventory.** The declaration's `family_inventory` is a JSONL file with
+one row per kept document (`document_id`, `family_id`, `split`, `stratum`,
+`content_sha256`). Materialization checks it against the verified release:
+it must cover every kept document exactly once, agree with the release on
+split and content, put each source in its mapped stratum (which must be one of
+the document's `domains`), and keep every family and every identical content
+inside one split. Which command writes it depends on how the release was split.
+
+- **Reviewed splits** (`freeze-splits`): `finalize-family-inventory` exports the
+  reviewed families.
+- **Declared splits** (`unit: source_document_family` or `source_repository`
+  with inline `assignments`, as a project's `splits.yaml` writes them): there is
+  no reviewed freeze, so
+  `klab corpus derive-family-inventory DECLARATION` reads the declaration's
+  `release_path` and `source_strata` and writes the declaration's
+  `family_inventory`. A document's family is its `source_family`, the unit the
+  release assigned to a split, so isolation is whatever the source assignment
+  says; the mixture re-checks that no family spans splits. The command refuses
+  a release split by reviewed assignment files, a document whose source is
+  unmapped, or one whose `domains` omit its stratum, and never overwrites. It
+  streams the release once and holds no rows in memory; it needs the verified
+  release, not a rebuild. Several declarations over one release (for example
+  a long-context mixture) share the one inventory.
+
+The family does not choose what a quota takes: documents of a stratum are
+ranked individually by a seeded hash and taken in rank order, so a stratum of
+several sources is drawn across all of them in proportion to their documents,
+never source by source. The family only salts that hash and is the unit of the
+isolation check, and the receipt's `eligible_train_families` counts families,
+so with declared splits it counts sources. A declared split does not review
+repositories or near-copies; screen those separately.
 
 Strata are written in name order and documents in seeded rank order within a
 stratum. By default (`packing: contiguous`) the records follow each other and
