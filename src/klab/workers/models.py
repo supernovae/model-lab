@@ -51,7 +51,7 @@ def current_required_versions() -> dict[str, object]:
         "checkpoint": [2],
         "bundle": [1],
         "architecture": ["klab-decoder-v1"],
-        "state_codecs": {"pytorch_native": [2], "mlx_native": [MLX_CODEC_VERSION]},
+        "state_codecs": {"pytorch_native": 2, "mlx_native": MLX_CODEC_VERSION},
     }
 
 
@@ -82,14 +82,10 @@ def _closed_required_versions(required: Mapping[str, object]) -> dict[str, objec
         "mlx_native",
     }:
         raise ValueError("required_versions.state_codecs must name supported codecs")
-    for name, versions in codecs.items():
-        if (
-            not isinstance(versions, (list, tuple))
-            or not versions
-            or any(type(item) is not int or item < 1 for item in versions)
-        ):
+    for name, codec_version in codecs.items():
+        if type(codec_version) is not int or codec_version < 1:
             raise ValueError(
-                f"required_versions.state_codecs.{name} must be nonempty integer versions"
+                f"required_versions.state_codecs.{name} must be one positive integer version"
             )
     normalized = {
         key: list(value[key])
@@ -103,7 +99,7 @@ def _closed_required_versions(required: Mapping[str, object]) -> dict[str, objec
         )
     }
     normalized["state_codecs"] = {
-        name: list(codecs[name]) for name in ("pytorch_native", "mlx_native")
+        name: codecs[name] for name in ("pytorch_native", "mlx_native")
     }
     return normalized
 
@@ -130,9 +126,7 @@ def validate_required_versions(
         "checkpoint": list(advertised.checkpoint_versions),
         "bundle": list(advertised.bundle_versions),
         "architecture": list(advertised.architecture_versions),
-        "state_codecs": {
-            name: list(versions) for name, versions in advertised.state_codecs.items()
-        },
+        "state_codecs": dict(advertised.state_codecs),
     }
     for key in (
         "protocol",
@@ -144,10 +138,14 @@ def validate_required_versions(
     ):
         if not set(normalized[key]).issubset(advertised_versions[key]):
             raise ValueError(f"worker does not support required {key} versions")
-    for codec, versions in normalized["state_codecs"].items():
-        available = advertised_versions["state_codecs"].get(codec, [])
-        if not set(versions).issubset(available):
-            raise ValueError(f"worker does not support required {codec} codec versions")
+    for codec, required_version in normalized["state_codecs"].items():
+        advertised_version = advertised_versions["state_codecs"].get(codec)
+        if advertised_version != required_version:
+            raise ValueError(
+                f"worker advertises {codec} state codec version "
+                f"{advertised_version!r}; this controller requires exactly "
+                f"{required_version}; upgrade or replace the worker"
+            )
 
 
 def _identifier(value: str, field: str) -> str:
@@ -241,13 +239,11 @@ class WorkerModel(StrictModel):
                 if (
                     name == "state_codecs"
                     and isinstance(item, Mapping)
-                    and any(
-                        not isinstance(versions, (list, tuple))
-                        or any(type(version) is not int for version in versions)
-                        for versions in item.values()
-                    )
+                    and any(type(version) is not int for version in item.values())
                 ):
-                    raise ValueError("state_codecs must contain integer versions")
+                    raise ValueError(
+                        "state_codecs must map codec names to one integer version"
+                    )
         return value
 
     @field_validator("*")
@@ -428,7 +424,7 @@ class WorkerCapabilities(WorkerDefinition):
     manifest_versions: tuple[int, ...]
     checkpoint_versions: tuple[int, ...]
     bundle_versions: tuple[int, ...]
-    state_codecs: dict[str, tuple[int, ...]] = Field(default_factory=dict)
+    state_codecs: dict[str, int] = Field(default_factory=dict)
 
     @field_validator("runtime")
     @classmethod
@@ -465,17 +461,17 @@ class WorkerCapabilities(WorkerDefinition):
 
     @field_validator("state_codecs")
     @classmethod
-    def codec_versions(
-        cls, value: dict[str, tuple[int, ...]]
-    ) -> dict[str, tuple[int, ...]]:
+    def codec_versions(cls, value: dict[str, int]) -> dict[str, int]:
         if not isinstance(value, dict) or any(
             not isinstance(name, str)
             or not name
-            or not versions
-            or any(type(version) is not int or version < 1 for version in versions)
-            for name, versions in value.items()
+            or type(version) is not int
+            or version < 1
+            for name, version in value.items()
         ):
-            raise ValueError("state codecs must map names to nonempty integer versions")
+            raise ValueError(
+                "state codecs must map names to one positive integer version"
+            )
         return value
 
 
