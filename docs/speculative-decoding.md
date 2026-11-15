@@ -85,6 +85,26 @@ tokenizer is a new table; nothing upgrades an old one. Drafting looks the last
 slot or after an end-of-sequence token. Building holds one count per distinct
 (context slot, continuation) pair of the split in memory.
 
+## Train a draft model
+
+A draft model is an ordinary run trained on the same tokenizer and data as the
+target. The `draft` architecture preset is a shallow, narrow dense decoder; scale
+it to a fraction of the target and derive its config from the target's, so the
+vocabulary and context length stay the target's:
+
+```sh
+klab architecture derive draft --params 15M \
+  --base TARGET_CONFIG.yaml --output draft.yaml
+klab train draft.yaml --run-id DRAFT_RUN_ID
+klab generate TARGET_RUN_ID --prompt "$PROMPT" --draft-run DRAFT_RUN_ID --json
+```
+
+Only `model` and `attention` differ from the target's config, so the draft sees
+the same data and tokenizer; `--draft-run` refuses a run whose tokenizer differs.
+Pick `--params` from the cost of a draft forward against the target's: drafting
+pays off when the draft costs a small fraction of a target forward and agrees
+with it often. Measure acceptance and wall time rather than assuming either.
+
 ## Scope
 
 - Drafts run only while the prompt and completion fit in `max_seq_len`; see

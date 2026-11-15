@@ -1,0 +1,11 @@
+description: Shallow, narrow dense decoder sized to draft for a larger target of the same tokenizer.
+model:
+  vocab_size: 32000
+  hidden_dim: 256
+  num_layers: 4
+  num_heads: 4
+  ffn_dim: 704
+  max_seq_len: 2048
+attention:
+  kind: dense
+  implementation: sdpa
