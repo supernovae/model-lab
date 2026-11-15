@@ -56,8 +56,9 @@ from klab.lab_records import (
     write_sealed,
 )
 
-DELTA_VERSION = 1
-_DELTA_KEYS = {"lab_delta_version", "question", "set"}
+CANDIDATE_KINDS = ("delta", "run_config")
+_DELTA_KEYS = {"kind", "question", "set"}
+_RUN_CONFIG_KEYS = {"kind", "config"}
 EXIT_NOT_COMPARABLE = 3
 EXIT_INTERRUPTED = 130
 _LIMIT_SEED = "single local comparison with one seed per arm; not a significance test"
@@ -70,7 +71,7 @@ _LIMIT_SCOPE = (
 class Candidate:
     """A candidate arm: either a delta over the baseline or a full config."""
 
-    kind: str  # "delta" or "config"
+    kind: str  # "delta" or "run_config"
     source: Path
     settings: dict[str, Any]
     question: str | None
@@ -82,23 +83,43 @@ def lab_root(work_dir: Path, override: Path | None = None) -> Path:
 
 
 def read_candidate(path: Path) -> Candidate:
-    """Classify CANDIDATE as a lab delta document or a full RunConfig."""
+    """Read a candidate document; its required ``kind`` says what it is.
+
+    ``kind: delta`` carries ``set`` (dotted fields) and an optional
+    ``question``. ``kind: run_config`` names a whole RunConfig file in
+    ``config``, relative to the candidate document.
+    """
     from klab.derivation import _settings
     from klab.documents import read_document
 
     path = Path(path).absolute()
     document = read_document(path)
-    if "schema_version" in document:
-        return Candidate("config", path, {}, None)
+    kind = document.get("kind")
+    if kind is None:
+        raise ValueError(
+            f"candidate {path} has no 'kind'; declare 'kind: delta' (with 'set') "
+            "or 'kind: run_config' (with 'config: PATH')"
+        )
+    if kind not in CANDIDATE_KINDS:
+        raise ValueError(
+            f"unsupported candidate kind {kind!r}; expected one of "
+            f"{', '.join(CANDIDATE_KINDS)}"
+        )
+    if kind == "run_config":
+        unknown = set(document) - _RUN_CONFIG_KEYS
+        if unknown or not isinstance(document.get("config"), str):
+            raise ValueError(
+                "kind: run_config accepts only kind and config (a path to a "
+                "RunConfig file)"
+                + (f"; unexpected: {', '.join(sorted(unknown))}" if unknown else "")
+            )
+        return Candidate("run_config", (path.parent / document["config"]), {}, None)
     unknown = set(document) - _DELTA_KEYS
     if unknown:
         raise ValueError(
-            "lab delta accepts only lab_delta_version, question and set; "
+            "lab delta accepts only kind, question and set; "
             f"unexpected: {', '.join(sorted(unknown))}"
         )
-    version = document.get("lab_delta_version", DELTA_VERSION)
-    if version != DELTA_VERSION or type(version) is not int:
-        raise ValueError(f"unsupported lab_delta_version: {version!r}")
     settings = document.get("set")
     if not isinstance(settings, dict) or not settings:
         raise ValueError("lab delta requires a nonempty 'set' mapping of dotted fields")
@@ -856,11 +877,15 @@ def run_try(
         if not isinstance(document, dict):
             continue
         try:
-            if "seed" in document and (
-                not is_candidate or "schema_version" in document
-            ):
+            is_run_config = is_candidate and document.get("kind") == "run_config"
+            if is_run_config:
+                # The seed lives in the RunConfig file the candidate names.
+                document = read_document(
+                    Path(path).absolute().parent / str(document.get("config"))
+                )
+            if "seed" in document and (not is_candidate or is_run_config):
                 seed_adapter.validate_python(document["seed"])
-            if is_candidate and "schema_version" not in document and seed is None:
+            if is_candidate and document.get("kind") == "delta" and seed is None:
                 settings = document.get("set")
                 if isinstance(settings, dict) and "seed" in settings:
                     seed_adapter.validate_python(settings["seed"])

@@ -71,6 +71,7 @@ Write the change as a small file and compare it with a baseline:
 
 ```sh
 cat > wider-ffn.yaml <<'YAML'
+kind: delta
 question: Does a wider feed-forward help at the same token budget?
 set:
   model.ffn_dim: 384

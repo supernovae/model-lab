@@ -413,7 +413,9 @@ def test_try_bracket_append_uses_same_parent_and_target_groups(
     baseline.write_text(yaml.safe_dump(target.model_dump(mode="json")))
     delta = tmp_path / "runtime-delta.yaml"
     delta.write_text(
-        yaml.safe_dump({"set": {"training.matched_stories.padding_multiple": 64}})
+        yaml.safe_dump(
+            {"kind": "delta", "set": {"training.matched_stories.padding_multiple": 64}}
+        )
     )
     record, _ = run_try(
         delta,
@@ -456,7 +458,9 @@ def test_try_nonterminal_checkpoint_bracket_preserves_consumed_prefix(
     baseline.write_text(yaml.safe_dump(target.model_dump(mode="json")))
     delta = tmp_path / "bounded-delta.yaml"
     delta.write_text(
-        yaml.safe_dump({"set": {"training.matched_stories.padding_multiple": 64}})
+        yaml.safe_dump(
+            {"kind": "delta", "set": {"training.matched_stories.padding_multiple": 64}}
+        )
     )
     record, _ = run_try(
         delta,

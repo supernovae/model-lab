@@ -96,6 +96,7 @@ in the commands below.
 
 ```sh
 cat > wider-ffn.yaml <<'YAML'
+kind: delta
 question: Does a wider FFN lower held-out loss at 49M tokens?
 set:
   model.ffn_dim: 1536

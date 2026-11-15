@@ -214,6 +214,7 @@ Both arms of a try start from the parent the baseline names:
 
 ```yaml
 # gentler.yaml
+kind: delta
 question: Does a tighter hold on the parent keep more of the chosen replies' likelihood?
 set:
   training.objective.params.beta: 3.0

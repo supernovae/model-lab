@@ -1,3 +1,4 @@
+kind: delta
 question: Does FFN width change held-out loss after the same tiny training budget?
 set:
   model.ffn_dim: 48
