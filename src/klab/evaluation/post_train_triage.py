@@ -28,7 +28,7 @@ from klab.evaluation.inference import load_run
 from klab.model.inspection import parameter_inventory
 from klab.runtime_profile import RuntimeAuthorization
 from klab.training.checkpoints import CheckpointManager
-from klab.training.manifest import IDENTITY_VERSION, read_manifest, sha256_file
+from klab.training.manifest import read_manifest, sha256_file
 
 # Short continuation prompts for the post-training generation check.
 PROMPTS: tuple[tuple[str, str], ...] = (
@@ -1451,24 +1451,23 @@ def _triage_manifest(path: Path) -> dict[str, Any]:
     still propagates after these explicit artifact shape checks.
     """
     data = _json(path)
-    if data.get("identity_version") == IDENTITY_VERSION:
-        requested, effective = (
-            data.get("requested_config"),
-            data.get("effective_config"),
+    requested, effective = (
+        data.get("requested_config"),
+        data.get("effective_config"),
+    )
+    if not isinstance(requested, dict) or not isinstance(effective, dict):
+        raise ValueError("post-train triage manifest requires config mappings")  # noqa: TRY004 - invalid serialized schema
+    model = effective.get("model", effective)
+    if not isinstance(model, dict) or not isinstance(
+        effective.get("attention", {}), dict
+    ):
+        raise ValueError(  # noqa: TRY004 - invalid serialized schema
+            "post-train triage manifest requires model/attention mappings"
         )
-        if not isinstance(requested, dict) or not isinstance(effective, dict):
-            raise ValueError("post-train triage manifest requires config mappings")
-        model = effective.get("model", effective)
-        if not isinstance(model, dict) or not isinstance(
-            effective.get("attention", {}), dict
-        ):
-            raise ValueError(
-                "post-train triage manifest requires model/attention mappings"
-            )
-        if not isinstance(model.get("memory", "none"), str):
-            raise ValueError("post-train triage manifest requires a memory kind string")
-        if not isinstance(data.get("artifacts"), list):
-            raise ValueError("post-train triage manifest artifacts must be an array")
+    if not isinstance(model.get("memory", "none"), str):
+        raise ValueError("post-train triage manifest requires a memory kind string")  # noqa: TRY004 - invalid serialized schema
+    if not isinstance(data.get("artifacts"), list):
+        raise ValueError("post-train triage manifest artifacts must be an array")  # noqa: TRY004 - invalid serialized schema
     return read_manifest(path)
 
 
