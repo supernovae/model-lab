@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import sqlite3
 import tempfile
 from collections import Counter
@@ -19,6 +18,7 @@ from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.bounded_metadata import metadata_operation, read_metadata
 from klab.corpus.jsonl_records import iter_rows, read_rows
 from klab.corpus.project import NormalizerOptions
+from klab.corpus.release_copy import copy_inventory
 from klab.corpus.release_verify import (
     chunk_ranges,
     current_settings,
@@ -99,7 +99,10 @@ def _safe(root: Path, relative: str) -> Path:
 
 
 def _files(
-    root: Path, inventory: dict[str, Any], progress: BuildProgress | None = None
+    root: Path,
+    inventory: dict[str, Any],
+    progress: BuildProgress | None = None,
+    hashed: frozenset[str] = frozenset(),
 ) -> None:
     if not isinstance(inventory, dict):
         raise TypeError("missing artifact inventory")
@@ -115,7 +118,7 @@ def _files(
             "hash_files",
             expected_input_bytes=sum(entry["size"] for entry in inventory.values()),
         )
-    hash_inventory(root, inventory, _safe, progress)
+    hash_inventory(root, inventory, _safe, progress, skip=hashed)
 
 
 def _verify_rights_files(
@@ -1973,6 +1976,18 @@ def freeze(
         from klab.corpus.completed_release import freeze_retained
 
         return freeze_retained(build_dir, work_root)
+    # One operation, so a snapshot authenticated for the build is not hashed again
+    # when the staged release is verified.
+    with _verification_operation():
+        return _freeze(build_dir, work_root, proof_store, verification_mode)
+
+
+def _freeze(
+    build_dir: Path,
+    work_root: Path,
+    proof_store: ProofStore | None,
+    verification_mode: VerificationMode,
+) -> Path:
     build = verify_build(
         build_dir, proof_store=proof_store, verification_mode=verification_mode
     )
@@ -2009,29 +2024,36 @@ def freeze(
         prefix=".release-", dir=destination.parent
     ) as temporary:
         staging = Path(temporary)
-        for name in payload["files"]:
-            source = _safe(build_dir, name)
-            target = _safe(staging, name)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
-        (staging / "manifest.json").write_bytes(
-            canonical_json({**payload, "release_id": release_id}) + b"\n"
+        progress = open_progress(release_id)
+        progress.start_phase(
+            "copy",
+            expected_input_bytes=sum(
+                item["size"] for item in payload["files"].values()
+            ),
         )
+        # One read of each build file: the bytes are hashed as they are written and
+        # must match the digests verify_build just checked, so publication cannot
+        # carry a file that changed in between.
+        copy_inventory(build_dir, staging, payload["files"], _safe, progress)
+        progress.close()
+        manifest_path = staging / "manifest.json"
+        with manifest_path.open("xb") as stream:
+            stream.write(canonical_json({**payload, "release_id": release_id}) + b"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
         verify_release(
             staging,
             expected_id=release_id,
             proof_store=proof_store,
             verification_mode=verification_mode,
             _domain_cold=True,
+            _hashed=frozenset(payload["files"]),
         )
         from klab.engram.packs import _rename_noreplace
         from klab.result_publication import sync_directory
 
         for entry in sorted(staging.rglob("*"), reverse=True):
-            if entry.is_file():
-                with entry.open("rb") as handle:
-                    os.fsync(handle.fileno())
-            elif entry.is_dir():
+            if entry.is_dir():
                 sync_directory(entry)
         sync_directory(staging)
         try:
@@ -2053,6 +2075,7 @@ def verify_release(
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode | None = None,
     _domain_cold: bool = False,
+    _hashed: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Verify a release, reusing a signed receipt when the caller or operator allows.
 
@@ -2099,6 +2122,7 @@ def verify_release(
             expected_id=expected_id,
             proof_store=proof_store,
             verification_mode=verification_mode,
+            hashed=_hashed,
         )
 
 
@@ -2134,8 +2158,14 @@ def _verify_release_cold(
     expected_id: str | None = None,
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
+    hashed: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
-    """Verify the complete release including snapshotted source and lineage evidence."""
+    """Verify the complete release including snapshotted source and lineage evidence.
+
+    `hashed` names files whose bytes the caller already hashed and matched
+    against the manifest while writing them; only their presence and size are
+    rechecked here.
+    """
     path = Path(path).resolve()
     proofs = _verified_releases.get()
     if proofs is not None and path in proofs:
@@ -2188,6 +2218,7 @@ def _verify_release_cold(
             },
         },
         progress,
+        hashed,
     )
     progress.start_phase("stage_receipts")
     _verify_stages(path, manifest["stages"], manifest["build_identity"], progress)
