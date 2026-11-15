@@ -66,6 +66,14 @@ if TYPE_CHECKING:
     from klab.verification_proofs import ProofStore, VerificationMode
 
 
+class EmptyDocumentError(ValueError):
+    """An empty or non-text passage under `documents.empty_text: error`.
+
+    The policy says such a passage fails the build, so builders must not turn it
+    into the quiet rejection of the file that contains it.
+    """
+
+
 class NormalizedDocument(StrictModel):
     """Versioned document retaining source attribution and raw evidence identity."""
 
@@ -620,7 +628,7 @@ def _records_for_file(
         raw_content = content
         if not isinstance(content, str) or not content.strip():
             if document_policy.empty_text == "error":
-                raise ValueError("empty/nontext document")
+                raise EmptyDocumentError("empty/nontext document")
             reason = "empty_or_nontext"
         else:
             reason = (
@@ -1703,6 +1711,8 @@ def _build_stored(
                     )
                     documents.extend(doc for doc, _ in pairs)
                     evidence.extend(span for _, span in pairs)
+                except EmptyDocumentError:
+                    raise
                 except (ValueError, UnicodeError, KeyError, TypeError) as exc:
                     rejected.append(
                         {
