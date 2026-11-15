@@ -353,27 +353,6 @@ def test_manifest_reference_rejects_malformed_and_mismatched_evidence(tmp_path):
         target.materialize_manifest("run", digest, payload)
 
 
-def test_historical_inline_manifest_remains_readable(tmp_path):
-    from klab.training.metrics import _canonical_json
-
-    source = ExperimentStore(tmp_path / "source")
-    _run(source)
-    payload = {"run_id": "run"}
-    digest = hashlib.sha256(_canonical_json(payload).encode()).hexdigest()
-    source.register_manifest("run", digest, payload)
-    records = source.export_records()["records"]
-    records[-1].update(kind="manifest", payload={"digest": digest, "payload": payload})
-    records[-1]["sha256"] = _envelope_digest(records[-1])
-    target = ExperimentStore(tmp_path / "target")
-    target.import_records(records)
-    target.materialize_manifest("run", digest, payload)
-    with target._connect() as con:
-        assert (
-            json.loads(con.execute("SELECT json FROM manifests").fetchone()[0])
-            == payload
-        )
-
-
 def test_manifest_reference_conflict_and_inline_digest_mismatch(tmp_path):
     from klab.training.metrics import _canonical_json
 

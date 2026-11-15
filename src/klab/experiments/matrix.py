@@ -12,13 +12,7 @@ import yaml
 from klab.canonical import canonical_json
 from klab.config.loading import load_config
 from klab.config.models import RunConfig
-from klab.experiments.compiler import (
-    apply_patch as _apply_patch,
-)
-from klab.experiments.compiler import (
-    axis_options,
-    expand_axes,
-)
+from klab.experiments.compiler import axis_options, expand_axes
 from klab.training.manifest import config_sha256
 from klab.workers.models import SchedulingRequirements
 
@@ -193,10 +187,3 @@ def expand(path: Path, max_runs: int = 1000) -> list[ExpandedExperiment]:
             )
         )
     return expanded
-
-
-def apply_patch(
-    config: Mapping[str, object], patch: Mapping[str, object]
-) -> dict[str, object]:
-    """Legacy entry point for canonical checked dotted config updates."""
-    return _apply_patch(config, patch, source="matrix")

@@ -186,7 +186,7 @@ def runtime_optimization_transition(
         for part in path[:-1]:
             old, new = old[part], new[part]
         key = path[-1]
-        # Default-valued fields are intentionally omitted from historical identities.
+        # Default-valued fields are omitted from serialized configs.
         default = defaults.get(path, False)
         previous, requested = old.get(key, default), new.get(key, default)
         if previous != requested:
@@ -288,7 +288,7 @@ def target_group_transition(
         "new_max_steps": target.training.max_steps,
         "optimizer_state": "preserved; one Adam step per new effective group",
         "schedule": "existing absolute-step floor; no warmup restart or LR scaling",
-        "cursor": "preserve historical group prefix; verify against prepared stream",
+        "cursor": "preserve the consumed group prefix; verify against prepared stream",
         "resume_level": "changed_optimizer_trajectory",
     }
 
@@ -507,7 +507,7 @@ def _verify_artifacts(root: Path, manifest: dict[str, Any], *, resume: bool) -> 
     if not required <= names:
         raise ValueError(
             f"run lacks bound continuation artifacts: {sorted(required - names)}; "
-            "use compatible weight promotion for historical incomplete state"
+            "use weight promotion to start from its weights"
         )
 
 

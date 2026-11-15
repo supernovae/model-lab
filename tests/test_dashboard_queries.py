@@ -10,7 +10,7 @@ from klab.dashboard.queries import snapshot
 from klab.training.metrics import ExperimentStore
 
 
-def _legacy_store(tmp_path) -> sqlite3.Connection:
+def _old_schema_store(tmp_path) -> sqlite3.Connection:
     path = tmp_path / "experiments.sqlite3"
     connection = sqlite3.connect(path)
     connection.executescript(
@@ -29,18 +29,12 @@ def _legacy_store(tmp_path) -> sqlite3.Connection:
     return connection
 
 
-def test_dashboard_snapshot_reads_legacy_store_without_migration(tmp_path) -> None:
-    connection = _legacy_store(tmp_path)
+def test_dashboard_snapshot_refuses_other_store_schema(tmp_path) -> None:
+    connection = _old_schema_store(tmp_path)
     connection.close()
 
-    view = snapshot(tmp_path)
-
-    assert [record.run_id for record in view.runs] == ["legacy"]
-    assert view.stages == ()
-    assert view.checkpoints == ()
-    assert view.manifests == {}
-    with sqlite3.connect(tmp_path / "experiments.sqlite3") as check:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 1
+    with pytest.raises(ValueError, match="unsupported experiment-store schema"):
+        snapshot(tmp_path)
 
 
 def test_dashboard_snapshot_fails_read_only_for_missing_projection(tmp_path) -> None:

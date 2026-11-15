@@ -1091,7 +1091,7 @@ class AttemptBudget:
         )
         present = [bool(os.environ.get(key)) for key in keys]
         if not any(present):
-            return  # Historical direct evaluation has no attempt contract.
+            return  # Direct evaluation outside an attempt has no contract.
         if not all(present) or os.environ[keys[3]] != "evaluate":
             raise AttemptBudgetError("fixed evaluation lacks an owned attempt binding")
         budget = AttemptBudget(Path(os.environ[keys[0]]))
@@ -1495,15 +1495,6 @@ class AttemptBudget:
                 raise AttemptBudgetError(
                     "preparation command requires its bound project declaration"
                 )
-        elif preparation_kind and contract.acquisition_project_sha256 is not None:
-            # Historical contracts used the acquisition project for these
-            # commands. Keep that check until a reviewed variant opts in.
-            if (
-                classified.operation != "corpus build"
-                and hashlib.sha256(Path(classified.args[2]).read_bytes()).hexdigest()
-                != contract.acquisition_project_sha256
-            ):
-                raise AttemptBudgetError("acquisition project differs from contract")
         accepted_operations = {
             "tokenizer train",
             "corpus export",

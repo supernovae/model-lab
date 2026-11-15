@@ -51,8 +51,8 @@ def _connect(root: Path) -> Iterator[sqlite3.Connection]:
         connection.execute("PRAGMA query_only=ON")
         connection.execute("PRAGMA busy_timeout=1000")
         connection.execute("BEGIN")
-        if connection.execute("PRAGMA user_version").fetchone()[0] > SCHEMA_VERSION:
-            raise ValueError("unsupported newer experiment-store schema")
+        if connection.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+            raise ValueError("unsupported experiment-store schema")
         yield connection
 
 
@@ -78,11 +78,9 @@ def _object(value: object) -> dict[str, object]:
 def _run_rows(connection: sqlite3.Connection) -> tuple[RunRecord, ...]:
     if "runs" not in _tables(connection):
         return ()
-    columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(runs)")}
-    metadata_column = "metadata_json" if "metadata_json" in columns else "NULL"
     rows = connection.execute(
         "SELECT run_id,name,status,parent_run_id,updated_at,config_json,"
-        f"{metadata_column} FROM runs ORDER BY updated_at DESC"
+        "metadata_json FROM runs ORDER BY updated_at DESC"
     ).fetchall()
     records: list[RunRecord] = []
     for row in rows:
