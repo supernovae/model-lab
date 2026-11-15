@@ -14,10 +14,14 @@ from __future__ import annotations
 
 import csv
 import itertools
+import json
 import math
 import secrets
 import statistics
-from collections.abc import Callable, Mapping
+import subprocess
+import sys
+import threading
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -321,6 +325,161 @@ def _write_series(path: Path, summary: list[Mapping[str, Any]]) -> None:
         writer.writerows(summary)
 
 
+class _Unit:
+    """One try to run: a point at a seed."""
+
+    __slots__ = ("delta", "index", "order", "seed", "settings")
+
+    def __init__(
+        self,
+        order: tuple[int, int],
+        index: int,
+        settings: Mapping[str, Any],
+        seed: int | None,
+        delta: Path,
+    ) -> None:
+        self.order = order
+        self.index = index
+        self.settings = settings
+        self.seed = seed
+        self.delta = delta
+
+
+class _Plan:
+    """Which try may start next; shared by every worker.
+
+    Tries are handed out in declaration order. A seed's baseline is trained by
+    the first try at that seed, and only reused by the tries after it, so the
+    others wait until that first try has completed (a failed first try hands
+    the role to the next one). Seeds do not wait for each other.
+    """
+
+    def __init__(self, units: list[_Unit], *, share_baseline: bool) -> None:
+        self._condition = threading.Condition()
+        self._pending = list(units)
+        self._state = {
+            unit.order[0]: "untrained" if share_baseline else "ready" for unit in units
+        }
+        self.stopped = False
+
+    def acquire(self) -> _Unit | None:
+        """The next try this worker may run, waiting for one; None when done."""
+        with self._condition:
+            while not self.stopped and self._pending:
+                for position, unit in enumerate(self._pending):
+                    state = self._state[unit.order[0]]
+                    if state == "training":
+                        continue
+                    if state == "untrained":
+                        self._state[unit.order[0]] = "training"
+                    del self._pending[position]
+                    return unit
+                self._condition.wait()
+            return None
+
+    def release(self, unit: _Unit, *, completed: bool) -> None:
+        with self._condition:
+            if self._state[unit.order[0]] == "training":
+                self._state[unit.order[0]] = "ready" if completed else "untrained"
+            self._condition.notify_all()
+
+    def stop(self) -> None:
+        with self._condition:
+            self.stopped = True
+            self._condition.notify_all()
+
+
+def _device_try(
+    *,
+    folder: Path,
+    policy: Any,
+    root: Path,
+    seeds: list[int | None],
+    device_backend: str,
+    runtime_id: str | None,
+) -> Callable[..., tuple[dict[str, Any], Path]]:
+    """A ``try_fn`` that runs ``klab try`` in a process confined to one device.
+
+    A process fixes the devices it sees when its device runtime first
+    enumerates them, so a try on another device needs a process of its own.
+    The configured ``runtime.device_index`` stays what the baseline declares
+    (0) and the process sees its card as that device, which keeps the
+    baseline's identity the same on every device.
+    """
+    from klab.device_visibility import selected_environment
+
+    policies = folder / "policies"
+    policies.mkdir()
+    logs = folder / "logs"
+    logs.mkdir()
+    files: dict[int | None, Path] = {}
+    for seed in seeds:
+        update = {"lab_dir": root} | ({} if seed is None else {"seed": seed})
+        path = policies / f"seed-{seed if seed is not None else 'default'}.yaml"
+        body = policy.model_copy(update=update).model_dump(mode="json")
+        path.write_text(yaml.safe_dump(body, sort_keys=False), encoding="utf-8")
+        files[seed] = path
+
+    def run(
+        delta: Path,
+        baseline: Path,
+        *,
+        device: int,
+        work_dir: Path,
+        seed: int | None,
+        backend: str | None,
+        request: Mapping[str, Any],
+        **_authorized_by_the_child: Any,
+    ) -> tuple[dict[str, Any], Path]:
+        command = [
+            sys.executable,
+            "-m",
+            "klab",
+            "--work-dir",
+            str(work_dir),
+            "try",
+            str(delta),
+            "--vs",
+            str(baseline),
+            "--config",
+            str(files[seed]),
+            "--sweep-id",
+            str(request["sweep_id"]),
+            "--sweep-point",
+            str(request["point"]),
+            "--json",
+        ]
+        if backend is not None:
+            command += ["--backend", backend]
+        if runtime_id is not None:
+            command += ["--runtime", runtime_id]
+        log = logs / f"{delta.stem}-seed-{seed}-device-{device}.log"
+        with log.open("wb") as stderr:
+            process = subprocess.run(
+                command,
+                env=selected_environment(device_backend, device),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=stderr,
+                check=False,
+            )
+        try:
+            record = json.loads(process.stdout)
+            path = Path(record.pop("record"))
+        except ValueError, KeyError, TypeError:
+            lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+            last = lines[-1] if lines else ""
+            if last.startswith("klab try: "):
+                raise ValueError(last.removeprefix("klab try: ")) from None
+            raise RuntimeError(
+                f"klab try exited {process.returncode} on device {device} "
+                f"without a record; see {log}"
+            ) from None
+        return record, path
+
+    return run
+
+
 def run_sweep(
     declaration: Path,
     *,
@@ -332,8 +491,16 @@ def run_sweep(
     request: Mapping[str, Any] | None = None,
     try_fn: Callable[..., tuple[dict[str, Any], Path]] | None = None,
     now: Callable[[], datetime] | None = None,
+    devices: Sequence[int] | None = None,
+    runtime_id: str | None = None,
 ) -> tuple[dict[str, Any], Path]:
-    """Run every point at every seed as a try; write one sealed sweep record."""
+    """Run every point at every seed as a try; write one sealed sweep record.
+
+    With ``devices`` the tries run concurrently, one at a time per device, each
+    in a process confined to its device; ``try_fn`` then also receives
+    ``device``. An unexpected exception seals the record ``failed``, keeping
+    the finished tries and the error, and is raised again.
+    """
     from klab.lab_mode import lab_root, run_try
     from klab.try_config import load_try_config
 
@@ -342,7 +509,11 @@ def run_sweep(
     policy = load_try_config(config.config)
     if policy.seed is not None and config.seeds is not None:
         raise ValueError("set seeds in the sweep or in its try config, not both")
-    try_fn = try_fn or run_try
+    device_backend = (
+        require_devices(devices, config.baseline, backend)
+        if devices is not None
+        else None
+    )
     root = lab_root(work_dir, policy.lab_dir or lab_dir)
     started_at = (now or (lambda: datetime.now(UTC)))()
     sweep_id = f"sweep-{started_at:%Y%m%dT%H%M%SZ}-{secrets.token_hex(4)}"
@@ -351,6 +522,19 @@ def run_sweep(
     record_path = folder / KINDS["sweep"][2]
     grid = points(config)
     seeds: list[int | None] = list(config.seeds) if config.seeds else [policy.seed]
+    if try_fn is None:
+        try_fn = (
+            run_try
+            if devices is None
+            else _device_try(
+                folder=folder,
+                policy=policy,
+                root=root,
+                seeds=seeds,
+                device_backend=device_backend,
+                runtime_id=runtime_id,
+            )
+        )
     deltas = folder / "deltas"
     deltas.mkdir()
     delta_paths = []
@@ -372,6 +556,7 @@ def run_sweep(
         },
         "baseline": str(config.baseline),
         "seeds": seeds,
+        "devices": None if devices is None else list(devices),
         "points": [
             {"point": index, "label": label(settings), "set": settings}
             for index, settings in enumerate(grid)
@@ -382,43 +567,124 @@ def run_sweep(
     if request is not None:
         record["request"] = dict(request)
 
+    write_sealed(record_path, record)
+    results: list[tuple[tuple[int, int], dict[str, Any]]] = []
+    try:
+        interrupted = _run_tries(
+            config=config,
+            policy=policy,
+            grid=grid,
+            seeds=seeds,
+            delta_paths=delta_paths,
+            results=results,
+            try_fn=try_fn,
+            devices=devices,
+            sweep_id=sweep_id,
+            work_dir=work_dir,
+            root=root,
+            backend=backend,
+            authorization=authorization,
+            resource_envelope=resource_envelope,
+        )
+        record["tries"] = [entry for _, entry in sorted(results, key=_by_order)]
+        sealed = _seal_finished(record, grid, interrupted, folder, record_path)
+    except Exception as error:
+        record["tries"] = [entry for _, entry in sorted(results, key=_by_order)]
+        record.update(
+            status="failed",
+            exit_status=1,
+            failure=f"{type(error).__name__}: {error}",
+        )
+        try:
+            write_sealed(record_path, record, may_replace=_own_started(sweep_id))
+        except Exception as sealing:  # noqa: BLE001 - the original error is raised
+            error.add_note(f"the sweep record could not be sealed as failed: {sealing}")
+        raise
+    return sealed, record_path
+
+
+def _own_started(sweep_id: str) -> Callable[[Path], bool]:
     def own_started(existing: Path) -> bool:
         current = read_lab_record(existing, "sweep")[1]
         return (
             current.get("status") == "started" and current.get("sweep_id") == sweep_id
         )
 
-    write_sealed(record_path, record)
-    interrupted = False
+    return own_started
+
+
+def _by_order(item: tuple[tuple[int, int], Any]) -> tuple[int, int]:
+    return item[0]
+
+
+def _run_tries(
+    *,
+    config: SweepConfig,
+    policy: Any,
+    grid: list[dict[str, Any]],
+    seeds: list[int | None],
+    delta_paths: list[Path],
+    results: list[tuple[tuple[int, int], dict[str, Any]]],
+    try_fn: Callable[..., tuple[dict[str, Any], Path]],
+    devices: Sequence[int] | None,
+    sweep_id: str,
+    work_dir: Path,
+    root: Path,
+    backend: str | None,
+    authorization: Any,
+    resource_envelope: Any,
+) -> bool:
+    """Run the tries, adding each finished one to ``results``; True if interrupted."""
     try:
         own = _baseline_values(
             config.baseline, sorted({field for point in grid for field in point})
         )
     except ValueError, OSError:
         own = {}
-    for seed in seeds:
+    units: list[_Unit] = []
+    for seed_index, seed in enumerate(seeds):
         for index, (settings, delta) in enumerate(zip(grid, delta_paths, strict=True)):
+            order = (seed_index, index)
             if _is_baseline(settings, own):
                 # The baseline itself: nothing to train, by definition no change.
-                record["tries"].append(
-                    {
-                        "point": index,
-                        "label": label(settings),
-                        "set": dict(settings),
-                        "seed": seed,
-                        "status": "baseline",
-                        "verdict": "BASELINE",
-                        "heldout_delta": 0.0,
-                    }
+                results.append(
+                    (
+                        order,
+                        {
+                            "point": index,
+                            "label": label(settings),
+                            "set": dict(settings),
+                            "seed": seed,
+                            "status": "baseline",
+                            "verdict": "BASELINE",
+                            "heldout_delta": 0.0,
+                        },
+                    )
                 )
-                continue
+            else:
+                units.append(_Unit(order, index, settings, seed, delta))
+    plan = _Plan(
+        units,
+        share_baseline=not (
+            policy.fresh_baseline
+            or policy.repeat_baseline
+            or policy.continuation is not None
+        ),
+    )
+    lock = threading.Lock()
+    state: dict[str, Any] = {"interrupted": False, "error": None}
+
+    def work(device: int | None) -> None:
+        while (unit := plan.acquire()) is not None:
+            completed = False
             try:
+                extra = {} if device is None else {"device": device}
                 result, path = try_fn(
-                    delta,
+                    unit.delta,
                     config.baseline,
                     work_dir=work_dir,
                     lab_dir=root,
-                    seed=seed,
+                    seed=unit.seed,
                     backend=backend,
                     authorization=authorization,
                     resource_envelope=resource_envelope,
@@ -431,29 +697,68 @@ def run_sweep(
                     request={
                         **policy.model_dump(mode="json"),
                         "sweep_id": sweep_id,
-                        "point": index,
+                        "point": unit.index,
                         "baseline": str(config.baseline),
                         "backend_override": backend,
                     },
+                    **extra,
                 )
+                entry = _entry(unit.index, unit.settings, unit.seed, result, path)
+                completed = result.get("status") == "completed"
+                if result.get("exit_status") == EXIT_INTERRUPTED:
+                    state["interrupted"] = True
+                    plan.stop()
             except (ValueError, OSError) as error:
-                record["tries"].append(
-                    {
-                        "point": index,
-                        "label": label(settings),
-                        "set": dict(settings),
-                        "seed": seed,
-                        "status": "failed",
-                        "failure": f"{type(error).__name__}: {error}",
-                    }
-                )
-                continue
-            record["tries"].append(_entry(index, settings, seed, result, path))
-            if result.get("exit_status") == EXIT_INTERRUPTED:
-                interrupted = True
-                break
-        if interrupted:
-            break
+                entry = {
+                    "point": unit.index,
+                    "label": label(unit.settings),
+                    "set": dict(unit.settings),
+                    "seed": unit.seed,
+                    "status": "failed",
+                    "failure": f"{type(error).__name__}: {error}",
+                }
+            except Exception as error:  # noqa: BLE001 - re-raised by run_sweep
+                with lock:
+                    state["error"] = state["error"] or error
+                plan.stop()
+                plan.release(unit, completed=False)
+                return
+            if device is not None:
+                entry["device"] = device
+            with lock:
+                results.append((unit.order, entry))
+            plan.release(unit, completed=completed)
+
+    if devices is None:
+        work(None)
+    else:
+        threads = [
+            threading.Thread(target=work, args=(device,), name=f"sweep-device-{device}")
+            for device in devices
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            while thread.is_alive():
+                try:
+                    thread.join()
+                except KeyboardInterrupt:
+                    # The terminal signalled every try's process too; let the
+                    # running ones record how far they got.
+                    state["interrupted"] = True
+                    plan.stop()
+    if state["error"] is not None:
+        raise state["error"]
+    return state["interrupted"]
+
+
+def _seal_finished(
+    record: dict[str, Any],
+    grid: list[dict[str, Any]],
+    interrupted: bool,
+    folder: Path,
+    record_path: Path,
+) -> dict[str, Any]:
     by_point: dict[int, list[dict[str, Any]]] = {}
     for entry in record["tries"]:
         by_point.setdefault(entry["point"], []).append(entry)
@@ -482,8 +787,32 @@ def run_sweep(
     )
     record["exit_status"] = EXIT_INTERRUPTED if interrupted else 1 if failed else 0
     _write_series(folder / "series.csv", record["summary"])
-    sealed = write_sealed(record_path, record, may_replace=own_started)
-    return sealed, record_path
+    return write_sealed(
+        record_path, record, may_replace=_own_started(record["sweep_id"])
+    )
+
+
+def require_devices(devices: Sequence[int], baseline: Path, backend: str | None) -> str:
+    """The backend the devices belong to, refusing a baseline they cannot serve."""
+    from klab.config.loading import load_config
+    from klab.device_visibility import SELECTION_VARIABLE
+
+    if not devices or len(set(devices)) != len(devices) or min(devices) < 0:
+        raise ValueError("--devices needs distinct device indices, such as 0,1,2")
+    runtime = load_config(baseline).runtime
+    name = backend or runtime.backend
+    if name not in SELECTION_VARIABLE:
+        raise ValueError(
+            f"--devices selects accelerator cards on xpu, cuda and rocm; the "
+            f"baseline's backend is {name!r} (set runtime.backend or pass --backend)"
+        )
+    if runtime.device_index != 0 or runtime.secondary_device_indices:
+        raise ValueError(
+            "--devices gives each try one card that it sees as device 0; the "
+            "baseline must set runtime.device_index 0 and no "
+            "secondary_device_indices"
+        )
+    return name
 
 
 def _number(value: Any, digits: int = 4) -> str:
@@ -503,6 +832,14 @@ def summarize_sweep(record: Mapping[str, Any], path: Path | None = None) -> str:
         f"  baseline: {record['baseline']}",
         f"  seeds: {shown_seeds}",
     ]
+    if record.get("devices"):
+        lines.append("  devices: " + ", ".join(str(d) for d in record["devices"]))
+    if record.get("failure"):
+        lines.append(f"  failure: {record['failure']}")
+        lines.append(
+            "  The sweep stopped before it finished: no summary, only the tries "
+            "that completed are listed below."
+        )
     question = (record.get("declaration") or {}).get("question")
     if question:
         lines.append(f"  question: {question}")
@@ -540,8 +877,10 @@ def summarize_sweep(record: Mapping[str, Any], path: Path | None = None) -> str:
     for entry in record.get("tries") or []:
         seed = "baseline" if entry.get("seed") is None else entry["seed"]
         status = entry.get("verdict") or entry.get("status")
+        device = f"  device {entry['device']}" if "device" in entry else ""
         lines.append(
-            f"  {entry.get('try_id') or '-'}  {entry['label']}  seed {seed}  {status}"
+            f"  {entry.get('try_id') or '-'}  {entry['label']}  seed {seed}  "
+            f"{status}{device}"
         )
     if path is not None:
         lines.append(f"  record: {path}")

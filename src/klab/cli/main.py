@@ -1497,6 +1497,11 @@ def _try(args: argparse.Namespace) -> None:
                 "baseline": args.vs,
                 "backend_override": args.backend,
                 "runtime_id": args.runtime,
+                **(
+                    {"sweep_id": args.sweep_id, "point": args.sweep_point}
+                    if args.sweep_id is not None
+                    else {}
+                ),
                 "runtime_profile_path": str(args.try_config_loaded.runtime_profile)
                 if args.try_config_loaded.runtime_profile is not None
                 else None,
@@ -1525,6 +1530,15 @@ def _try(args: argparse.Namespace) -> None:
         raise SystemExit(record["exit_status"])
 
 
+def _device_list(text: str) -> list[int]:
+    try:
+        return [int(part) for part in text.split(",")]
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected card numbers such as 0,1,2, got {text!r}"
+        ) from None
+
+
 def _sweep(args: argparse.Namespace) -> None:
     """Run a sweep declaration as a series of tries and summarize it."""
     from klab.sweep import run_sweep, summarize_sweep
@@ -1542,6 +1556,8 @@ def _sweep(args: argparse.Namespace) -> None:
                 "backend_override": args.backend,
                 "runtime_id": args.runtime,
             },
+            devices=args.devices,
+            runtime_id=args.runtime,
         )
     except (ValueError, OSError) as error:
         raise SystemExit(f"klab sweep: {error}") from None
@@ -1983,6 +1999,9 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         "--backend", choices=("auto", "mps", "cuda", "rocm", "xpu", "cpu")
     )
     lab_try.add_argument("--runtime", metavar="ID")
+    # Set by `klab sweep` so the dashboard can place a try on its sweep's curve.
+    lab_try.add_argument("--sweep-id", help=argparse.SUPPRESS)
+    lab_try.add_argument("--sweep-point", type=int, help=argparse.SUPPRESS)
     lab_try.add_argument("--json", action="store_true")
     lab_try.set_defaults(handler=_try)
     lab_sweep = commands.add_parser(
@@ -1999,6 +2018,15 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         "--backend", choices=("auto", "mps", "cuda", "rocm", "xpu", "cpu")
     )
     lab_sweep.add_argument("--runtime", metavar="ID")
+    lab_sweep.add_argument(
+        "--devices",
+        type=_device_list,
+        metavar="N,N,...",
+        help=(
+            "Run tries concurrently, one at a time on each of these cards "
+            "(xpu, cuda or rocm), each in a process that sees only its card"
+        ),
+    )
     lab_sweep.add_argument("--json", action="store_true")
     lab_sweep.set_defaults(handler=_sweep)
     lab_report = commands.add_parser(
