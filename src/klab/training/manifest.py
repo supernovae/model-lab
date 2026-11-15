@@ -253,6 +253,8 @@ class RunManifest:
     resource_decisions: tuple[dict[str, object], ...] = ()
     stage_bundle_sha256: str | None = None
     pilot_reports: tuple[dict[str, object], ...] = ()
+    # `klab preflight` report digest, or the recorded waiver, for pretraining.
+    preflight: dict[str, object] | None = None
 
     def payload(self) -> dict[str, object]:
         if self.manifest_version != MANIFEST_VERSION:

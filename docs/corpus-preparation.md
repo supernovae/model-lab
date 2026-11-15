@@ -43,7 +43,9 @@ klab attempt status --ledger "$LEDGER"
 `phase-command` prints a phase's exact command without running it; `run-phase`
 runs it under the monitor policy and charges the ledger. `attempt
 bind-artifact` records an artifact produced outside the attempt. The commands
-below are what the phases run.
+below are what the phases run. Before a long pretraining run, finish with
+[`klab preflight`](pretraining-preflight.md), which checks that the phases'
+outputs agree with each other.
 
 ## Acquire
 
@@ -729,7 +731,8 @@ decisions:
 ```
 
 A record is complete when every listed pair has a decision, `kept` pairs give a
-reason, and the report is not truncated.
+reason, and the report is not truncated. [`klab preflight`](pretraining-preflight.md)
+checks all three, and that the screen covered every document of this release.
 
 ## Guard held-out data across releases
 

@@ -52,6 +52,7 @@ only read records. A run ID names weights; a try or probe ID names a result. Use
 | Page | Covers |
 | --- | --- |
 | [Training](training.md) | The trainer, smoke runs, multi-GPU replicas and keeping accelerators busy |
+| [Pretraining preflight](pretraining-preflight.md) | The sealed check that the data, tokenizer, mixture, prepared arrays, config and warmup agree, and the gate `klab train` applies |
 | [Checkpoints](checkpointing.md) | Resume, recover, extend, promote, import weights and retention |
 | [Memory](memory.md) | The memory estimate, accumulation, recomputation and offload |
 | [Post-training](post-training.md) | Instruction tuning, distillation, preference optimization, chat templates, export and weight quantization |

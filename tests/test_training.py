@@ -1639,3 +1639,18 @@ def test_background_checkpoint_without_host_memory_is_written_inline_and_recorde
             "AND kind = 'checkpoint_background_skipped'"
         ).fetchone()[0]
     assert skipped > 0
+
+
+def test_pretraining_needs_a_preflight_or_a_recorded_waiver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configured = config(tmp_path)
+    monkeypatch.setattr(
+        "klab.training.trainer.requires_preflight", lambda *a, **k: True
+    )
+    with pytest.raises(ValueError, match="needs a preflight"):
+        train(configured, run_id="ungated")
+    assert not (configured.logging.root_dir / "ungated").exists()
+    run_id = train(configured, run_id="waived", preflight="waive:owner accepts")
+    manifest = read_manifest(configured.logging.root_dir / run_id / "manifest.json")
+    assert manifest["preflight"] == {"waived": "owner accepts"}
