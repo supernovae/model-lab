@@ -83,7 +83,9 @@ user's own repository, not in Lab.
 - **One current path.** Each operation has one public command and one schema.
   Change a format by updating it and every caller in the same pull request, and
   say what must be rebuilt. Do not add compatibility readers, version adapters,
-  aliases or a second runner to keep old artifacts working.
+  aliases or a second runner to keep old artifacts working. This includes the
+  SQLite experiment store: it has one schema, and opening any other version is
+  refused. There are no in-place migrations and no exceptions.
 - **Options, not versions.** New behaviour arrives as a named, recorded option
   (for example `release.policy.duplicates.heldout_overlap`), never as a new
   `schema_version` that bundles unrelated choices. A schema version describes a
