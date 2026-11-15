@@ -71,6 +71,16 @@ def records_from_bytes(raw: bytes, *, source: str) -> Iterator[JSONLRecord]:
     return iter_jsonl_records(io.BytesIO(raw), source=source)
 
 
+def iter_rows(path: Path) -> Iterator[Any]:
+    """Yield each nonblank JSON value of a file."""
+    for record in records_from_path(path):
+        yield record.value
+
+
+def read_rows(path: Path) -> list[Any]:
+    return list(iter_rows(path))
+
+
 class _HashingLines:
     def __init__(self, stream):
         self.stream = stream

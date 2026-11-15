@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.bounded_metadata import metadata_operation, read_metadata
+from klab.corpus.jsonl_records import iter_rows, read_rows
 from klab.corpus.project import NormalizerOptions
 from klab.corpus.release_verify import (
     chunk_ranges,
@@ -85,12 +86,6 @@ def _verified_snapshot(
 
 def _load(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _rows(path: Path) -> list[dict[str, Any]]:
-    from klab.corpus.jsonl_records import records_from_path
-
-    return [record.value for record in records_from_path(path)]
 
 
 def _safe(root: Path, relative: str) -> Path:
@@ -267,13 +262,6 @@ def _verify_rights_files(
     return indexed
 
 
-def _iter_rows(path: Path):
-    from klab.corpus.jsonl_records import records_from_path
-
-    for record in records_from_path(path):
-        yield record.value
-
-
 def _release_normalizer(identity: dict[str, Any]) -> NormalizerOptions:
     return NormalizerOptions.model_validate(identity["release"]["normalizer"])
 
@@ -308,6 +296,55 @@ def _verify_cleaning_decision(doc: dict[str, Any], options: NormalizerOptions) -
     )
     if (doc.get("drop_reason") == "metadata_only_front_matter") != excluded:
         raise ValueError("metadata-only cleaning decision mismatch")
+
+
+def _verify_source_snapshots(
+    root: Path,
+    sources: dict[str, dict[str, Any]],
+    *,
+    proof_store: ProofStore | None,
+    verification_mode: VerificationMode,
+) -> dict[str, dict[str, Any]]:
+    """Authenticate each source's snapshot and bind the source row to its declaration."""
+    snapshots: dict[str, dict[str, Any]] = {}
+    for source in sources.values():
+        snapshot_id = source["snapshot_sha256"]
+        if not snapshot_id:
+            continue
+        snapshot = _verified_snapshot(
+            root.parent.parent / "snapshots" / source["id"] / snapshot_id,
+            proof_store=proof_store,
+            verification_mode=verification_mode,
+        )
+        snapshots[source["id"]] = snapshot
+        declaration = snapshot["declaration"]
+        if any(
+            source[key] != declaration[key]
+            for key in (
+                "id",
+                "kind",
+                "canonical_uri",
+                "revision",
+                "license",
+                "source_family",
+            )
+        ) or source.get("origin", "primary_source") != declaration.get(
+            "origin", "primary_source"
+        ):
+            raise ValueError("source declaration attribution mismatch")
+        if (
+            source["rights_policy"] != declaration["rights"]
+            or source["license_url"] != declaration["license_url"]
+            or source["redistribution"] != declaration["rights"]["redistribution_mode"]
+        ):
+            raise ValueError("prospective source rights declaration mismatch")
+        if source.get("explicit_training_restriction") != declaration.get(
+            "explicit_training_restriction"
+        ):
+            raise ValueError(
+                "source training restriction state differs from declaration"
+            )
+    return snapshots
 
 
 def _streaming_rows(identity: dict[str, Any]) -> bool:
@@ -735,40 +772,9 @@ def _validate_rows_streaming(
         if source["snapshot_sha256"]
     }:
         raise ValueError("source snapshot inventory mismatch")
-    snapshots = {}
-    for source in source_rows:
-        snapshot_id = source["snapshot_sha256"]
-        if not snapshot_id:
-            continue
-        snapshot = _verified_snapshot(
-            root.parent.parent / "snapshots" / source["id"] / snapshot_id,
-            proof_store=proof_store,
-            verification_mode=verification_mode,
-        )
-        snapshots[source["id"]] = snapshot
-        declaration = snapshot["declaration"]
-        if any(
-            source[key] != declaration[key]
-            for key in (
-                "id",
-                "kind",
-                "canonical_uri",
-                "revision",
-                "license",
-                "source_family",
-            )
-        ) or source.get("origin", "primary_source") != declaration.get(
-            "origin", "primary_source"
-        ):
-            raise ValueError("source declaration attribution mismatch")
-        if (
-            source["rights_policy"] != declaration["rights"]
-            or source["license_url"] != declaration["license_url"]
-            or source["redistribution"] != declaration["rights"]["redistribution_mode"]
-            or source.get("explicit_training_restriction")
-            != declaration.get("explicit_training_restriction")
-        ):
-            raise ValueError("prospective source rights declaration mismatch")
+    snapshots = _verify_source_snapshots(
+        root, sources, proof_store=proof_store, verification_mode=verification_mode
+    )
     rights = _verify_rights_files(root, sources, snapshots)
     options = _release_normalizer(identity)
     origins = {
@@ -1165,44 +1171,9 @@ def _validate_rows_stored(
         key: value.get("origin", "primary_source") for key, value in sources.items()
     }
 
-    snapshots: dict[str, dict[str, Any]] = {}
-    for source in sources.values():
-        snapshot_id = source["snapshot_sha256"]
-        if not snapshot_id:
-            continue
-        snapshot = _verified_snapshot(
-            root.parent.parent / "snapshots" / source["id"] / snapshot_id,
-            proof_store=proof_store,
-            verification_mode=verification_mode,
-        )
-        snapshots[source["id"]] = snapshot
-        declaration = snapshot["declaration"]
-        if any(
-            source[key] != declaration[key]
-            for key in (
-                "id",
-                "kind",
-                "canonical_uri",
-                "revision",
-                "license",
-                "source_family",
-            )
-        ) or source.get("origin", "primary_source") != declaration.get(
-            "origin", "primary_source"
-        ):
-            raise ValueError("source declaration attribution mismatch")
-        if (
-            source["rights_policy"] != declaration["rights"]
-            or source["license_url"] != declaration["license_url"]
-            or source["redistribution"] != declaration["rights"]["redistribution_mode"]
-        ):
-            raise ValueError("prospective source rights declaration mismatch")
-        if source.get("explicit_training_restriction") != declaration.get(
-            "explicit_training_restriction"
-        ):
-            raise ValueError(
-                "source training restriction state differs from declaration"
-            )
+    snapshots = _verify_source_snapshots(
+        root, sources, proof_store=proof_store, verification_mode=verification_mode
+    )
     rights_files = _verify_rights_files(root, sources, snapshots)
     if not spans.same_keys(document_map):
         raise ValueError("document evidence span inventory mismatch")
@@ -1969,7 +1940,7 @@ def _verify_build_cold(
     progress.start_phase("document_assignments")
     with metadata_operation(scratch_root(), max_database_bytes=None):
         verify_document_assignments(
-            path, manifest["identity"], _iter_rows(path / "documents.jsonl")
+            path, manifest["identity"], iter_rows(path / "documents.jsonl")
         )
     progress.close()
     return manifest
@@ -2247,7 +2218,7 @@ def _verify_release_cold(
     progress.start_phase("document_assignments")
     with metadata_operation(scratch_root(), max_database_bytes=None):
         verify_document_assignments(
-            path, manifest["build_identity"], _iter_rows(path / "documents.jsonl")
+            path, manifest["build_identity"], iter_rows(path / "documents.jsonl")
         )
     progress.close()
     if proofs is not None:
@@ -2328,9 +2299,9 @@ def sample(
     if limit == 0:
         return {"records": []}
     root = Path(path)
-    documents = {row["document_id"]: row for row in _rows(root / "documents.jsonl")}
+    documents = {row["document_id"]: row for row in read_rows(root / "documents.jsonl")}
     result = []
-    for row in _rows(root / "lineage.jsonl"):
+    for row in read_rows(root / "lineage.jsonl"):
         if kind and row["record_kind"] not in (
             {"chat_sft", "tool_episode"} if kind == "chat" else {kind}
         ):
@@ -2360,10 +2331,12 @@ def review(path: Path, **filters: Any) -> dict[str, Any]:
 def lineage(path: Path, record_id: str) -> dict[str, Any]:
     verify_release(path)
     root = Path(path)
-    document_map = {row["document_id"]: row for row in _rows(root / "documents.jsonl")}
-    spans = {row["record_id"]: row for row in _rows(root / "spans.jsonl")}
+    document_map = {
+        row["document_id"]: row for row in read_rows(root / "documents.jsonl")
+    }
+    spans = {row["record_id"]: row for row in read_rows(root / "spans.jsonl")}
     sources_map = {row["id"]: row for row in _load(root / "sources.json")}
-    for row in _rows(root / "lineage.jsonl"):
+    for row in read_rows(root / "lineage.jsonl"):
         if row["record_id"] == record_id:
             parents = [
                 {
@@ -2377,13 +2350,13 @@ def lineage(path: Path, record_id: str) -> dict[str, Any]:
             if scenario_id := row.get("scenario_id"):
                 result["scenario"] = next(
                     item
-                    for item in _rows(root / "scenarios.jsonl")
+                    for item in read_rows(root / "scenarios.jsonl")
                     if item["scenario_id"] == scenario_id
                 )
             if generation_id := row.get("generation_id"):
                 result["generation"] = next(
                     item
-                    for item in _rows(root / "generations.jsonl")
+                    for item in read_rows(root / "generations.jsonl")
                     if item["record_id"] == generation_id
                 )
             return result
