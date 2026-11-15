@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
 import pytest
+from corpus_fixtures import edit_declared_source as _sources
+from corpus_fixtures import forge_release as forge
 from corpus_fixtures import write_prose_project
 
-from klab.canonical import canonical_digest, canonical_json
+from klab.canonical import canonical_json
 from klab.corpus import release as release_module
 from klab.corpus import release_verify
 from klab.corpus.acquisition import acquire
@@ -17,7 +18,6 @@ from klab.corpus.pipeline import build
 from klab.corpus.project import load_project
 from klab.corpus.release import audit, freeze, verify_release
 from klab.corpus.release_verify import verification_settings
-from klab.training.manifest import sha256_file
 
 TEXTS = {
     "prose_train": [f"training document number {n} with words\n" for n in range(6)],
@@ -40,33 +40,6 @@ def _lines(path: Path) -> list[dict]:
 
 def _write(path: Path, rows: list[dict]) -> None:
     path.write_bytes(b"".join(canonical_json(row) + b"\n" for row in rows))
-
-
-def forge(release: Path, edit) -> Path:
-    """Copy a release, edit its rows, and re-seal digests and identity consistently.
-
-    A forger who can rewrite every digest still must not get past the row checks.
-    """
-    scratch = release.parent / "forged"
-    scratch.mkdir(exist_ok=True)
-    staged = scratch / "staging"
-    shutil.rmtree(staged, ignore_errors=True)
-    shutil.copytree(release, staged)
-    edit(staged)
-    manifest = json.loads((staged / "manifest.json").read_text())
-    for name in manifest["files"]:
-        path = staged / name
-        manifest["files"][name] = {
-            "sha256": sha256_file(path),
-            "size": path.stat().st_size,
-        }
-    manifest.pop("release_id")
-    manifest["release_id"] = canonical_digest(manifest)
-    (staged / "manifest.json").write_bytes(canonical_json(manifest) + b"\n")
-    target = release.parent / manifest["release_id"]
-    shutil.rmtree(target, ignore_errors=True)
-    staged.rename(target)
-    return target
 
 
 def _documents(edit):
@@ -112,34 +85,6 @@ def _edit_stage_output(root: Path) -> None:
     rows = _lines(path)
     rows[0]["text"] += "edited"
     _write(path, rows)
-
-
-def _sources(edit, *, identity: bool = False):
-    """Edit a declared source in sources.json and the license report together.
-
-    With `identity`, also edit the build identity the release carries.
-    """
-
-    def apply(root: Path) -> None:
-        rows = _lines_or_list(root / "sources.json")
-        edit(rows[0])
-        (root / "sources.json").write_bytes(canonical_json(rows) + b"\n")
-        report = json.loads((root / "license-report.json").read_text())
-        report["sources"] = rows
-        (root / "license-report.json").write_bytes(canonical_json(report) + b"\n")
-        if identity:
-            manifest = json.loads((root / "manifest.json").read_text())
-            declared = manifest["build_identity"]["sources"][rows[0]["id"]]
-            declared["license"] = rows[0]["license"]
-            declared["license_url"] = rows[0]["license_url"]
-            declared["rights"] = rows[0]["rights_policy"]
-            (root / "manifest.json").write_bytes(canonical_json(manifest) + b"\n")
-
-    return apply
-
-
-def _lines_or_list(path: Path) -> list[dict]:
-    return json.loads(path.read_text())
 
 
 def _relicense(row):

@@ -143,6 +143,10 @@ or evaluation settings within a comparison; `try` refuses that as
   Prefer checks on identities, counters and refusals over wall-clock timing.
 - **Corpus preparation changes** keep a connected test that renders the
   checked-in templates and reaches a prepared bundle on tiny fixtures.
+  `tests/test_corpus_recipe_shape.py` does it with the shape of a real recipe
+  (a dozen sources of several kinds across five strata, a held-out source per
+  stratum, the release policy a recipe declares): when a failure that only a
+  full recipe shows escapes, extend `tests/recipe_fixtures.py` so it cannot again.
 - **Docs.** A change to a command, config field or default updates its page in
   the same pull request. Each subject has one page, listed in
   [docs/README.md](docs/README.md). `tests/test_docs.py` checks links, the index

@@ -1,10 +1,15 @@
 """Synthetic metadata for corpus engine tests; never acquired or published."""
 
+import json
+import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 import yaml
 
+from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.project import NormalizerOptions, Project
+from klab.training.manifest import sha256_file
 
 # The explicit release policies tests build on. STRICT is the cautious profile:
 # any cross-split overlap fails and a reviewed admission may be recorded.
@@ -247,3 +252,61 @@ def write_prose_project(
     for name, value in documents.items():
         (project / name).write_text(yaml.safe_dump(value))
     return project
+
+
+def forge_release(release: Path, edit: Callable[[Path], None]) -> Path:
+    """Copy a release, edit its rows, and re-seal digests and identity consistently.
+
+    A forger who can rewrite every digest still must not get past the row checks.
+    """
+    scratch = release.parent / "forged"
+    scratch.mkdir(exist_ok=True)
+    staged = scratch / "staging"
+    shutil.rmtree(staged, ignore_errors=True)
+    shutil.copytree(release, staged)
+    edit(staged)
+    manifest = json.loads((staged / "manifest.json").read_text())
+    for name in manifest["files"]:
+        path = staged / name
+        manifest["files"][name] = {
+            "sha256": sha256_file(path),
+            "size": path.stat().st_size,
+        }
+    manifest.pop("release_id")
+    manifest["release_id"] = canonical_digest(manifest)
+    (staged / "manifest.json").write_bytes(canonical_json(manifest) + b"\n")
+    target = release.parent / manifest["release_id"]
+    shutil.rmtree(target, ignore_errors=True)
+    staged.rename(target)
+    return target
+
+
+def edit_declared_source(
+    edit: Callable[[dict], None],
+    *,
+    identity: bool = False,
+    source_id: str | None = None,
+) -> Callable[[Path], None]:
+    """Edit a declared source in sources.json and the license report together.
+
+    The first source is edited unless `source_id` names one. With `identity`,
+    also edit the build identity the release carries.
+    """
+
+    def apply(root: Path) -> None:
+        rows = json.loads((root / "sources.json").read_text())
+        row = next(item for item in rows if source_id in (None, item["id"]))
+        edit(row)
+        (root / "sources.json").write_bytes(canonical_json(rows) + b"\n")
+        report = json.loads((root / "license-report.json").read_text())
+        report["sources"] = rows
+        (root / "license-report.json").write_bytes(canonical_json(report) + b"\n")
+        if identity:
+            manifest = json.loads((root / "manifest.json").read_text())
+            declared = manifest["build_identity"]["sources"][row["id"]]
+            declared["license"] = row["license"]
+            declared["license_url"] = row["license_url"]
+            declared["rights"] = row["rights_policy"]
+            (root / "manifest.json").write_bytes(canonical_json(manifest) + b"\n")
+
+    return apply
