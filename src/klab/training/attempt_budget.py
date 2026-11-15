@@ -30,6 +30,7 @@ from pydantic import (
     model_validator,
 )
 
+from klab.corpus.project import NormalizerOptions
 from klab.training.attempt_commands import AttemptCommand, classify_attempt_command
 
 if TYPE_CHECKING:
@@ -69,9 +70,9 @@ class AttemptContract(BaseModel):
     preparation_acquisition_identity_sha256: str | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
-    preparation_normalizer: (
-        Literal["normalizer-structure-v2", "normalizer-structure-v3"] | None
-    ) = Field(default=None, exclude_if=lambda value: value is None)
+    preparation_normalizer: NormalizerOptions | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     admission_lock_sha256: str | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -317,7 +318,9 @@ def _verify_admission_contract_binding(
         inspection.get("acquisition_lock_sha256") != contract.admission_lock_sha256
         or inspection.get("policy_sha256") != contract.admission_policy_sha256
         or inspection.get("selection_sha256") != contract.admission_selection_sha256
-        or inspection.get("normalizer") != contract.preparation_normalizer
+        or contract.preparation_normalizer is None
+        or inspection.get("normalizer")
+        != contract.preparation_normalizer.model_dump(mode="json")
     ):
         raise AttemptBudgetError("inspected admission differs from contract identities")
 

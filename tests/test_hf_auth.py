@@ -14,7 +14,7 @@ from pathlib import Path
 import huggingface_hub
 import pytest
 import yaml
-from corpus_fixtures import STRICT_POLICY, fixture_rights
+from corpus_fixtures import PLAIN_NORMALIZER, STRICT_POLICY, fixture_rights
 from huggingface_hub.errors import HfHubHTTPError
 from requests import Response
 
@@ -57,6 +57,7 @@ def test_hub_token_authorizes_without_changing_frozen_source_identity(
         },
         "release.yaml": {
             "publication_mode": "metadata_reconstruction_only",
+            "normalizer": PLAIN_NORMALIZER,
             "policy": STRICT_POLICY,
             "mixture": {"technical_docs": 1},
             "lm": {"selected": False, "training_splits": []},

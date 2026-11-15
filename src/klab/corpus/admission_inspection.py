@@ -28,13 +28,14 @@ from klab.corpus.bounded_metadata import (
     read_metadata,
 )
 from klab.corpus.jsonl_records import records_from_bytes
-from klab.corpus.project import Project, load_project, source_declaration_payload
-from klab.corpus.rights import FILE_ADMISSION_KINDS, verify_record_admission
-from klab.corpus.structure_cleaning import (
-    NORMALIZER_V2,
-    NORMALIZER_V3,
-    clean_structure,
+from klab.corpus.project import (
+    NormalizerOptions,
+    Project,
+    load_project,
+    source_declaration_payload,
 )
+from klab.corpus.rights import FILE_ADMISSION_KINDS, verify_record_admission
+from klab.corpus.structure_cleaning import clean_structure
 from klab.result_publication import sync_directory
 from klab.training.manifest import sha256_file
 
@@ -64,11 +65,15 @@ def _selection(path: Path, root: Path, source_ids: set[str]) -> dict[str, Any]:
         or value["format"] != "klab-admission-inspection-selection-v1"
         or not isinstance(value["seed"], str)
         or not 1 <= len(value["seed"]) <= 128
-        or value["normalizer"] not in {NORMALIZER_V2, NORMALIZER_V3}
         or not isinstance(value["sources"], list)
         or len(value["sources"]) != len(source_ids)
     ):
         raise ValueError("invalid admission inspection selection")
+    value["normalizer"] = NormalizerOptions.model_validate(value["normalizer"])
+    if not value["normalizer"].structure_cleaning:
+        raise ValueError("admission inspection needs structure cleaning")
+    if value["normalizer"].source_ids() - source_ids:
+        raise ValueError("admission inspection normalizer names unknown sources")
     seen: set[str] = set()
     for source in value["sources"]:
         if (
@@ -257,10 +262,10 @@ def _clip(value: str, limit: int) -> tuple[str, bool]:
 
 
 def _display(
-    row: dict[str, Any], *, normalizer: str, max_excerpt_bytes: int
+    row: dict[str, Any], *, normalizer: NormalizerOptions, max_excerpt_bytes: int
 ) -> dict[str, Any]:
     cleaned = clean_structure(
-        row["raw"], source_id=row["source_id"], normalizer=normalizer
+        row["raw"], source_id=row["source_id"], options=normalizer
     )
     raw_excerpt, raw_truncated = _clip(row["raw"], max_excerpt_bytes)
     clean_excerpt, clean_truncated = _clip(cleaned["text"], max_excerpt_bytes)
@@ -516,7 +521,7 @@ def _inspect_stored(
             "snapshot": lock["sources"][source.id]["snapshot_sha256"],
             "selection": specs[source.id],
             "seed": selection["seed"],
-            "normalizer": selection["normalizer"],
+            "normalizer": selection["normalizer"].model_dump(mode="json"),
             "excerpt": limits["max_excerpt_bytes"],
             "record_cap": _MAX_RECORD_BYTES,
             "file_cap": _MAX_FILE_BYTES,
@@ -536,7 +541,7 @@ def _inspect_stored(
                         clean_structure(
                             row["raw"],
                             source_id=source_id,
-                            normalizer=selection["normalizer"],
+                            options=selection["normalizer"],
                         )["text"].encode("utf-8")
                     )
                     if row["decision"] == "qualify"
@@ -608,7 +613,7 @@ def _inspect_stored(
         "policy_sha256": sha256_file(policy),
         "selection_path": str(selection_path.resolve()),
         "selection_sha256": sha256_file(selection_path),
-        "normalizer": selection["normalizer"],
+        "normalizer": selection["normalizer"].model_dump(mode="json"),
         "normalizer_source_sha256": sha256_file(
             Path(__file__).with_name("structure_cleaning.py")
         ),

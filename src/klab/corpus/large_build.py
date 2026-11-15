@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.progress import BuildProgress
-from klab.corpus.project import ROW_SOURCE_KINDS
+from klab.corpus.project import ROW_SOURCE_KINDS, NormalizerOptions
 from klab.corpus.provenance import (
     HUMAN_ORIGIN,
     SOURCE_ORIGIN,
@@ -224,7 +224,7 @@ def _prepare_file(
     source_path: Path,
     decision: Any,
     progress: BuildProgress,
-    normalizer_version: str = "normalizer-nfc-markdown-v1",
+    normalizer_options: NormalizerOptions,
     document_policy: Any,
     record_admission: dict[str, Any] | None = None,
     admission_sha256: str | None = None,
@@ -254,7 +254,7 @@ def _prepare_file(
         if decision != record_admission["rights"]:
             raise ValueError("admitted shard file rights differ from verified policy")
     identity = _receipt_identity(build_id, source, snapshot_sha, file)
-    identity["normalizer_version"] = normalizer_version
+    identity["normalizer"] = normalizer_options.model_dump(mode="json")
     identity["document_policy"] = document_policy.model_dump(mode="json")
     identity["rights"] = decision.model_dump(mode="json")
     if record_admission is not None:
@@ -326,7 +326,7 @@ def _prepare_file(
                                 rejected_records=dropped,
                                 full_file_sha256=file["sha256"],
                                 first_row_index=index,
-                                normalizer_version=normalizer_version,
+                                normalizer_options=normalizer_options,
                                 document_policy=document_policy,
                             )
                         except (ValueError, UnicodeError, KeyError, TypeError) as exc:
@@ -370,7 +370,7 @@ def _prepare_file(
                         file_rights=decision,
                         record_admission=record_admission,
                         rejected_records=dropped,
-                        normalizer_version=normalizer_version,
+                        normalizer_options=normalizer_options,
                         document_policy=document_policy,
                     )
                 except (ValueError, UnicodeError, KeyError, TypeError) as exc:
@@ -866,16 +866,14 @@ def _write_audit(
 
 
 def _document_lineage(
-    doc: dict[str, Any], source_origins: dict[str, str]
+    doc: dict[str, Any], source_origins: dict[str, str], normalizer: str
 ) -> dict[str, Any]:
     record_id = doc["document_id"]
     representative = doc["representative_id"]
     row = {
         "record_id": record_id,
         "record_kind": "document",
-        "transform_id": doc.get("metadata", {}).get(
-            "normalizer", "normalizer-nfc-markdown-v1"
-        ),
+        "transform_id": doc.get("metadata", {}).get("normalizer", normalizer),
         "parent_document_ids": [record_id],
         "original_parent_document_ids": [record_id],
         "representative_id": representative,
@@ -899,7 +897,7 @@ def _document_lineage(
         ),
         "verification": verification(
             "schema_validated",
-            doc.get("metadata", {}).get("normalizer", "normalizer_v1"),
+            doc.get("metadata", {}).get("normalizer", normalizer),
             {"schema_id": "normalized_document_v1"},
         ),
         "validation_status": "schema_validated",
@@ -1034,7 +1032,12 @@ def _emit_build(
             doc["representative_id"] = representative
             doc["drop_reason"] = reason
             _output(documents, doc)
-            _output(lineage, _document_lineage(doc, source_origins))
+            _output(
+                lineage,
+                _document_lineage(
+                    doc, source_origins, project.release.normalizer.identity
+                ),
+            )
             count += 1
             record_id = doc["document_id"]
             origin = (
@@ -1158,6 +1161,7 @@ def _emit_build(
     report = {
         "schema_version": 1,
         "release_policy": project.release.policy.model_dump(mode="json"),
+        "normalizer": project.release.normalizer.model_dump(mode="json"),
         "corpus_id": project.config.id,
         "requested_mixture": mixture,
         "actual_mixture": {
@@ -1484,8 +1488,7 @@ def build_large(
                 "admission_sha256": project.release.record_admission.sha256.lower()
                 if admitted is not None
                 else None,
-                "normalizer_version": project.release.normalizer
-                or "normalizer-nfc-markdown-v1",
+                "normalizer_options": project.release.normalizer,
                 "document_policy": project.release.policy.documents,
             }
             if executor is not None and path in eligible_jsonl:

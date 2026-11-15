@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from corpus_fixtures import STRICT_POLICY, fixture_rights
+from corpus_fixtures import PLAIN_NORMALIZER, STRICT_POLICY, fixture_rights
 
 from klab.corpus.acquisition import (
     acquire,
@@ -63,6 +63,7 @@ def _fixture(
         "lm": {"selected": True, "training_splits": ["train", "validation"]},
         "chat": {"selected": False, "training_splits": []},
         "publication_mode": "metadata_reconstruction_only",
+        "normalizer": PLAIN_NORMALIZER,
         "policy": STRICT_POLICY,
     }
     rights = rights or {**fixture_rights(), "spdx_expression": license}
@@ -1140,6 +1141,7 @@ def test_mediawiki_dump_of_any_site_yields_one_row_per_article(
         name,
         project.sources[0],
         snapshot.name,
+        normalizer_options=project.release.normalizer,
         document_policy=project.release.policy.documents,
     )
     assert [document["language"] for document, _ in documents] == [language]

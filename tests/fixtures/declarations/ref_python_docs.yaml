@@ -1,0 +1,25 @@
+id: ref_python_docs
+kind: git
+canonical_uri: https://github.com/python/cpython
+revision: 78a70f862e3b7f28c62bd9352af83920678f399a
+license: PSF-2.0
+license_url: https://github.com/python/cpython/blob/78a70f862e3b7f28c62bd9352af83920678f399a/LICENSE
+rights:
+  training_eligibility: eligible_with_obligations
+  redistribution_mode: metadata_reconstruction_only
+  weight_license_status: separate_analysis_required
+  spdx_expression: PSF-2.0
+  license_references:
+  - https://github.com/python/cpython/blob/78a70f862e3b7f28c62bd9352af83920678f399a/LICENSE
+  notices:
+  - Attribute in the model card.
+  - 'License as stated upstream: PSF-2.0; examples 0BSD.'
+domains:
+- reference
+document_kinds:
+- markdown
+source_family: ref_python_docs
+acquisition:
+  include:
+  - Doc/*.rst
+  max_bytes: 1073741824

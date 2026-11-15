@@ -2,10 +2,23 @@
 
 from pathlib import Path
 
-from klab.corpus.project import Project
+from klab.corpus.project import NormalizerOptions, Project
 
 # The explicit release policies tests build on. STRICT is the cautious profile:
 # any cross-split overlap fails and a reviewed admission may be recorded.
+PLAIN_NORMALIZER = {
+    "structure_cleaning": False,
+    "front_matter_extra_keys": {},
+    "gutenberg_boilerplate": [],
+}
+STRUCTURED_NORMALIZER = {
+    "structure_cleaning": True,
+    "front_matter_extra_keys": {},
+    "gutenberg_boilerplate": [],
+}
+
+PLAIN_OPTIONS = NormalizerOptions.model_validate(PLAIN_NORMALIZER)
+
 STRICT_POLICY = {
     "duplicates": {
         "heldout_overlap": "error",
@@ -162,6 +175,7 @@ def neutral_corpus(root: Path) -> Project:
                 "lm": {"selected": True, "training_splits": ["train", "validation"]},
                 "chat": {"selected": False, "training_splits": []},
                 "keep_nonredistributable_local": True,
+                "normalizer": PLAIN_NORMALIZER,
             },
         }
     )

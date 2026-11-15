@@ -142,7 +142,7 @@ def _file_documents(
                     file_rights=rights,
                     full_file_sha256=file["sha256"],
                     first_row_index=ordinal,
-                    normalizer_version=normalizer,
+                    normalizer_options=normalizer,
                     document_policy=document_policy,
                 ):
                     if document.get("metadata", {}).get("source_row_index") != index:
@@ -180,7 +180,7 @@ def _file_documents(
         source,
         snapshot_sha,
         file_rights=rights,
-        normalizer_version=normalizer,
+        normalizer_options=normalizer,
         document_policy=document_policy,
     ):
         index = document.get("metadata", {}).get("source_row_index")
@@ -326,10 +326,7 @@ def write_split_inventory_stored(
                     path = file["path"]
                     if source.rights and path == source.rights.nested_metadata_path:
                         continue
-                    normalizer = (
-                        getattr(getattr(project, "release", None), "normalizer", None)
-                        or "normalizer-nfc-markdown-v1"
-                    )
+                    normalizer = project.release.normalizer
                     with closing(
                         _file_documents(
                             source,

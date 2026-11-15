@@ -27,3 +27,7 @@ chat:
   selected: true
   training_splits: [train, validation]
 keep_nonredistributable_local: true
+normalizer:
+  structure_cleaning: false
+  front_matter_extra_keys: {}
+  gutenberg_boilerplate: []

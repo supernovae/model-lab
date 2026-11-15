@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from corpus_fixtures import PLAIN_OPTIONS
 
 from klab.canonical import canonical_json
 from klab.corpus import split_freeze
@@ -40,10 +41,11 @@ def _fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, family_count=10):
         config=SimpleNamespace(id="freeze-fixture"),
         root=project_root,
         release=SimpleNamespace(
+            normalizer=PLAIN_OPTIONS,
             record_admission=SimpleNamespace(
                 path="admission.json",
                 sha256=hashlib.sha256(admission_bytes).hexdigest(),
-            )
+            ),
         ),
         sources=sources,
     )

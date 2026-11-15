@@ -1,0 +1,79 @@
+id: code_python
+kind: huggingface_dataset
+canonical_uri: https://huggingface.co/datasets/common-pile/stackv2_edu_filtered
+revision: c354dbe88469a1153e97c6a63ac50591849654de
+license: Per-file permissive licenses (Blue Oak approved); no dataset-level license
+license_url: https://huggingface.co/datasets/common-pile/stackv2_edu_filtered/blob/c354dbe88469a1153e97c6a63ac50591849654de/README.md
+rights:
+  training_eligibility: eligible_with_obligations
+  redistribution_mode: metadata_reconstruction_only
+  weight_license_status: separate_analysis_required
+  license_references:
+  - https://huggingface.co/datasets/common-pile/stackv2_edu_filtered/blob/c354dbe88469a1153e97c6a63ac50591849654de/README.md
+  notices:
+  - Per-file licenses are recorded in metadata.license; keep attribution for every repository used.
+  - License detection upstream can be wrong; rows with unmapped or combined labels are quarantined.
+domains:
+- code
+document_kinds:
+- code
+source_family: code_python
+acquisition:
+  config: default
+  split: train
+  text_field: text
+  max_rows: 100000000
+  max_bytes: 32212254720
+  bounded_shards:
+  - path: stack-edu-0073.json.gz
+    expected_sha256: b04f81e60a5397b1ade2099e1640ef5c1b105abfeb61c57e6b2e7c4dacef836e
+    max_shard_bytes: 976494926
+    max_scanned_rows: 50000000
+    hash_modulus: 1
+    hash_remainders:
+    - 0
+    declared_config: default
+    declared_split: train
+  - path: stack-edu-0074.json.gz
+    expected_sha256: bb655343ccf1200b022e8e7d118a41cdc22b6c0c66ea664e849d3c1e64af4018
+    max_shard_bytes: 974511426
+    max_scanned_rows: 50000000
+    hash_modulus: 1
+    hash_remainders:
+    - 0
+    declared_config: default
+    declared_split: train
+  - path: stack-edu-0075.json.gz
+    expected_sha256: b59b65a638bb26fffc45db87f8da363a36435c80f6d8276b37fc81c9fe53e5a4
+    max_shard_bytes: 977861558
+    max_scanned_rows: 50000000
+    hash_modulus: 1
+    hash_remainders:
+    - 0
+    declared_config: default
+    declared_split: train
+  - path: stack-edu-0076.json.gz
+    expected_sha256: 3e48dfa8ef1cf594b1a7042f66862b8946477eeb284d24b158e1d822bf765ffe
+    max_shard_bytes: 976451737
+    max_scanned_rows: 50000000
+    hash_modulus: 1
+    hash_remainders:
+    - 0
+    declared_config: default
+    declared_split: train
+  qualification:
+    profile: code
+    family_fields:
+    - metadata.repo_name
+    language_field: metadata.language
+    allowed_languages:
+    - Python
+    license_field: metadata.license
+    license_labels:
+      MIT: MIT
+      Apache-2.0: Apache-2.0
+      BSD-2-Clause: BSD-2-Clause
+      BSD-3-Clause: BSD-3-Clause
+      ISC: ISC
+    repository_field: metadata.repo_name
+    path_field: metadata.path
