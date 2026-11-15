@@ -378,6 +378,11 @@ policy:
   private-research training unless a prohibition is recorded; every source then
   declares `explicit_training_restriction`.
 
+A record admission manifest has one format (`schema_version: 2`): it lists
+every project source, with reviewed rows for Hugging Face sources and a
+per-file decision for pinned Git sources. The earlier Hugging Face-only format
+is no longer read; redraft such a manifest with `klab corpus admission-draft`.
+
 The reviewed-admission and completed-preparation builds implement only the
 strict policy (`heldout_overlap: error`, `keys: [raw, normalized]`,
 `resolution: chain_smallest_id`, `rights_conflict: error`) and refuse any other.
@@ -568,6 +573,16 @@ validation or test document is used.
 `klab corpus tokenizer-bakeoff DECLARATION --output DIR` instead fits several
 vocabulary sizes on one training sample, scores them on held-out families and
 selects the smallest within `near_best_ratio` of the best.
+
+A declaration has no schema version. Its fields are the options, all required
+and recorded in the report's `identity.declaration`, so a selection states what
+produced it: `groups` (the ordered measured groups; a group with both train and
+validation documents may not be left out), `eval_split`, `max_fit_bytes`,
+`eval_max_docs_per_group`, `near_best_ratio`, and `train_token_scope`
+(`grouped_documents` counts train tokens only in the measured groups;
+`all_selected_sources` counts every selected normalized source, including kinds
+outside the nine groups). The report also lists unmeasured groups and
+unclassified source kinds.
 
 ## Materialize a mixture
 

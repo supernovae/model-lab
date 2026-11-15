@@ -49,7 +49,6 @@ _EXTENSIONS = {
 class Declaration(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1, 2]
     release_path: str
     vocab_sizes: tuple[int, int, int]
     max_fit_bytes: int = Field(gt=0)
@@ -57,6 +56,9 @@ class Declaration(BaseModel):
     eval_max_docs_per_group: int = Field(gt=0)
     groups: tuple[str, ...]
     near_best_ratio: float = Field(gt=0, le=1)
+    # Which train documents the reported token counts cover: only those in the
+    # measured groups, or every normalized train source in the selected view.
+    train_token_scope: Literal["grouped_documents", "all_selected_sources"]
 
 
 def load_declaration(path: Path) -> Declaration:
@@ -66,7 +68,6 @@ def load_declaration(path: Path) -> Declaration:
         or any(
             type(raw.get(key)) is not expected
             for key, expected in {
-                "schema_version": int,
                 "release_path": str,
                 "vocab_sizes": list,
                 "max_fit_bytes": int,
@@ -74,6 +75,7 @@ def load_declaration(path: Path) -> Declaration:
                 "eval_max_docs_per_group": int,
                 "groups": list,
                 "near_best_ratio": float,
+                "train_token_scope": str,
             }.items()
         )
         or any(type(v) is not int for v in raw["vocab_sizes"])
@@ -90,7 +92,6 @@ def load_declaration(path: Path) -> Declaration:
         or not spec.groups
         or len(set(spec.groups)) != len(spec.groups)
         or tuple(g for g in GROUPS if g in spec.groups) != spec.groups
-        or (spec.schema_version == 1 and spec.groups != GROUPS)
     ):
         raise ValueError(
             "tokenizer bakeoff requires approved candidates, ordered groups and budgets"
@@ -147,14 +148,11 @@ def _selection(release: Path, spec: Declaration):
         raise ValueError(
             f"missing required train/validation document groups: {missing}"
         )
-    if spec.schema_version == 2:
-        unreported = [
-            g for g in GROUPS if g not in spec.groups and train[g] and validation[g]
-        ]
-        if unreported:
-            raise ValueError(
-                f"measurable source groups omitted from pilot bakeoff: {unreported}"
-            )
+    unreported = [
+        g for g in GROUPS if g not in spec.groups and train[g] and validation[g]
+    ]
+    if unreported:
+        raise ValueError(f"measurable source groups omitted from bakeoff: {unreported}")
     train_families = {doc["source_family"] for rows in train.values() for doc in rows}
     val_families = {
         doc["source_family"] for rows in validation.values() for doc in rows
@@ -196,15 +194,15 @@ def _selection(release: Path, spec: Declaration):
 def _train_token_counts(
     release: Path,
     train: dict[str, list[dict[str, Any]]],
-    schema_version: int,
+    train_token_scope: str,
     model: Any,
 ) -> dict[str, int]:
     """Count source and ordered-view tokens without retaining duplicate text maps."""
-    # Historical v1 counted only its nine approved fit kinds. Pilot v2 must
-    # count every selected normalized source, including an unpaired C/code kind.
+    # grouped_documents counts only the approved fit kinds; all_selected_sources
+    # counts every selected normalized source, including an unpaired C/code kind.
     documents = (
         _source_documents(release, "train")
-        if schema_version == 2
+        if train_token_scope == "all_selected_sources"
         else (doc for rows in train.values() for doc in rows)
     )
     seen: set[str] = set()
@@ -484,7 +482,6 @@ def bakeoff(declaration: Path, output: Path, *, work_root: Path | None = None) -
     selected, heldout, train = _selection(release, spec)
     receipt = _receipt(selected, heldout, train, spec)
     identity = {
-        "schema_version": spec.schema_version,
         "release_path": str(release),
         "release_id": manifest["release_id"],
         "declaration_sha256": sha256_file(declaration),
@@ -552,41 +549,32 @@ def bakeoff(declaration: Path, output: Path, *, work_root: Path | None = None) -
     chosen = choose_candidate(candidates, spec.near_best_ratio)
     selected_path = output / "candidates" / str(chosen) / "tokenizer.json"
     model = load_tokenizer(selected_path)
-    token_counts = _train_token_counts(release, train, spec.schema_version, model)
+    token_counts = _train_token_counts(release, train, spec.train_token_scope, model)
     unclassified_documents: Counter[str] = Counter()
     unclassified_bytes: Counter[str] = Counter()
-    if spec.schema_version == 2:
-        for doc in _source_documents(release, "train"):
-            if _group(doc) is None:
-                kind = doc["document_kind"]
-                unclassified_documents[kind] += 1
-                unclassified_bytes[kind] += len(doc["text"].encode("utf-8"))
+    for doc in _source_documents(release, "train"):
+        if _group(doc) is None:
+            kind = doc["document_kind"]
+            unclassified_documents[kind] += 1
+            unclassified_bytes[kind] += len(doc["text"].encode("utf-8"))
     report = {
-        **(
-            {
-                "unmeasured_source_groups": {
-                    g: {
-                        "train_documents": len(train[g]),
-                        "train_bytes": sum(
-                            len(d["text"].encode("utf-8")) for d in train[g]
-                        ),
-                        "reason": "no paired independent train/validation family",
-                    }
-                    for g in GROUPS
-                    if g not in spec.groups
-                },
-                "unclassified_source_kinds": {
-                    kind: {
-                        "train_documents": unclassified_documents[kind],
-                        "train_bytes": unclassified_bytes[kind],
-                        "reason": "not in the frozen nine tokenizer groups",
-                    }
-                    for kind in sorted(unclassified_documents)
-                },
+        "unmeasured_source_groups": {
+            g: {
+                "train_documents": len(train[g]),
+                "train_bytes": sum(len(d["text"].encode("utf-8")) for d in train[g]),
+                "reason": "no paired independent train/validation family",
             }
-            if spec.schema_version == 2
-            else {}
-        ),
+            for g in GROUPS
+            if g not in spec.groups
+        },
+        "unclassified_source_kinds": {
+            kind: {
+                "train_documents": unclassified_documents[kind],
+                "train_bytes": unclassified_bytes[kind],
+                "reason": "not in the frozen nine tokenizer groups",
+            }
+            for kind in sorted(unclassified_documents)
+        },
         "identity": identity,
         "sample_receipt": receipt,
         "fit_sample_sha256": sha256_file(sample),
