@@ -237,7 +237,7 @@ def _prepare_file(
     record_admission: dict[str, Any] | None = None,
     admission_sha256: str | None = None,
 ) -> Path:
-    from klab.corpus.pipeline import _records_for_file
+    from klab.corpus.pipeline import EmptyDocumentError, _records_for_file
     from klab.safe_io import rename_noreplace
 
     # Internal primitive: callers must first use verify_record_admission against
@@ -337,6 +337,8 @@ def _prepare_file(
                                 normalizer_options=normalizer_options,
                                 document_policy=document_policy,
                             )
+                        except EmptyDocumentError:
+                            raise
                         except (ValueError, UnicodeError, KeyError, TypeError) as exc:
                             raise _SourceParseError(str(exc)) from exc
                         for doc, span in rows:
@@ -381,6 +383,8 @@ def _prepare_file(
                         normalizer_options=normalizer_options,
                         document_policy=document_policy,
                     )
+                except EmptyDocumentError:
+                    raise
                 except (ValueError, UnicodeError, KeyError, TypeError) as exc:
                     raise _SourceParseError(str(exc)) from exc
                 for doc, span in rows:
