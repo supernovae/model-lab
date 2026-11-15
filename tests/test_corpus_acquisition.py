@@ -22,7 +22,7 @@ from klab.corpus.acquisition import (
     verify_acquisition,
     verify_snapshot,
 )
-from klab.corpus.project import load_project, source_declaration_payload
+from klab.corpus.project import acquisition_identity_payload, load_project
 from klab.corpus.transport_budget import TransportBudget
 
 
@@ -243,11 +243,16 @@ def test_git_v2_acquires_pinned_nested_license_metadata(tmp_path: Path) -> None:
     _yaml(release_path, release)
     lock = acquire(load_project(recipe), tmp_path / "work")
     source = load_project(recipe).sources[0]
-    legacy_payload = source.model_dump(mode="json")
-    assert "explicit_training_restriction" not in legacy_payload
-    legacy_payload["acquisition"].pop("tree_oid")
-    legacy_payload["acquisition"].pop("bounded_blobs")
-    assert source_declaration_payload(source) == legacy_payload
+    full = source.model_dump(mode="json")
+    identity = {
+        key: full[key] for key in ("id", "kind", "canonical_uri", "revision")
+    } | {
+        "acquisition": full["acquisition"],
+        "nested_metadata_path": "license-metadata.json",
+    }
+    identity["acquisition"].pop("tree_oid")
+    identity["acquisition"].pop("bounded_blobs")
+    assert acquisition_identity_payload(source) == identity
     snapshot = verify_snapshot(Path(lock["sources"]["one"]["snapshot_path"]))
     assert {item["path"] for item in snapshot["files"]} == {
         "docs/guide.md",
@@ -257,6 +262,113 @@ def test_git_v2_acquires_pinned_nested_license_metadata(tmp_path: Path) -> None:
         Path(lock["sources"]["one"]["snapshot_path"]) / "files/license-metadata.json"
     ).read_text() == json.dumps(metadata)
     assert acquire(load_project(recipe), tmp_path / "work", offline=True) == lock
+
+
+def _identity_repo(tmp_path: Path) -> tuple[Path, Path]:
+    repo = tmp_path / "upstream"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.test")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "docs").mkdir()
+    (repo / "docs/guide.md").write_text("# Guide\nText.\n")
+    (repo / "license-metadata.json").write_text("{}")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "pinned")
+    recipe = _fixture(
+        tmp_path,
+        kind="git",
+        acquisition={"include": ["docs/*.md"], "max_bytes": 4096},
+        revision=_git(repo, "rev-parse", "HEAD"),
+        uri=str(repo),
+    )
+    return repo, recipe
+
+
+def _declare(recipe: Path, edit) -> None:
+    path = recipe.parent / "sources/one.yaml"
+    source = yaml.safe_load(path.read_text())
+    edit(source)
+    _yaml(path, source)
+
+
+_BUILD_ONLY_EDITS = {
+    "license": lambda s: (
+        s.update(license="Apache-2.0")
+        or s["rights"].update(spdx_expression="Apache-2.0")
+    ),
+    "license_url": lambda s: s.update(license_url="https://example.org/other"),
+    "notes": lambda s: s.update(notes="reviewed by hand"),
+    "rights": lambda s: s["rights"].update(
+        training_eligibility="eligible_with_obligations",
+        redistribution_mode="metadata_reconstruction_only",
+        allowed_boundary_paths=["docs/guide.md"],
+        license_references=["https://example.org/license", "https://example.org/2"],
+    ),
+    "domains": lambda s: s.update(domains=["technical_docs", "reference"]),
+    "document_kinds": lambda s: s.update(document_kinds=["markdown", "text"]),
+    "source_family": lambda s: s.update(source_family="other_docs"),
+    "origin": lambda s: s.update(origin="human_authored"),
+    "markdown_documents": lambda s: s.update(markdown_documents="files"),
+}
+
+
+@pytest.mark.parametrize("field", sorted(_BUILD_ONLY_EDITS) + ["restriction"])
+def test_build_only_declaration_edits_keep_the_acquisition_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    from klab.corpus import acquisition
+
+    _, recipe = _identity_repo(tmp_path)
+    work = tmp_path / "work"
+    first = acquire(load_project(recipe), work)
+    before = declaration_sha256(load_project(recipe).sources[0])
+    if field == "restriction":
+        _declare(recipe, lambda s: s.update(explicit_training_restriction="none_found"))
+        release = yaml.safe_load((recipe.parent / "release.yaml").read_text())
+        release["policy"]["rights"]["training_use"] = (
+            "allowed_unless_explicitly_prohibited"
+        )
+        _yaml(recipe.parent / "release.yaml", release)
+    else:
+        _declare(recipe, _BUILD_ONLY_EDITS[field])
+    project = load_project(recipe)
+    assert declaration_sha256(project.sources[0]) == before
+    monkeypatch.setattr(
+        acquisition,
+        "_acquire_git",
+        lambda *_a, **_k: pytest.fail("a build-only edit re-acquired the source"),
+    )
+    second = acquire(project, work)
+    assert second == first
+    verify_acquisition(project, work)
+    assert len(list((work / "corpora/example/snapshots/one").iterdir())) == 1
+    assert (
+        "rights"
+        not in verify_snapshot(first["sources"]["one"]["snapshot_path"])["declaration"]
+    )
+
+
+_IDENTITY_EDITS = {
+    "revision": lambda s: s.update(revision="b" * 40),
+    "canonical_uri": lambda s: s.update(canonical_uri=s["canonical_uri"] + "-mirror"),
+    "max_bytes": lambda s: s["acquisition"].update(max_bytes=4097),
+    "include": lambda s: s["acquisition"].update(include=["docs/*.md", "*.txt"]),
+    "exclude": lambda s: s["acquisition"].update(exclude=["docs/x.md"]),
+    "nested_metadata_path": lambda s: s["rights"].update(
+        nested_metadata_path="license-metadata.json"
+    ),
+}
+
+
+@pytest.mark.parametrize("field", sorted(_IDENTITY_EDITS))
+def test_edits_that_change_acquired_bytes_change_the_acquisition_identity(
+    tmp_path: Path, field: str
+) -> None:
+    _, recipe = _identity_repo(tmp_path)
+    before = declaration_sha256(load_project(recipe).sources[0])
+    _declare(recipe, _IDENTITY_EDITS[field])
+    assert declaration_sha256(load_project(recipe).sources[0]) != before
 
 
 def test_http_hash_bound_and_offline(tmp_path: Path) -> None:
@@ -463,14 +575,17 @@ def test_hf_declaration_hash_and_receipt_reuse(
     recipe = _bounded_hf_fixture(tmp_path, content, "default/train/data.jsonl", rows=1)
     project = load_project(recipe)
     source = project.sources[0]
-    expected = source.model_dump(mode="json")
-    assert "explicit_training_restriction" not in expected
+    full = source.model_dump(mode="json")
+    expected = {
+        key: full[key]
+        for key in ("id", "kind", "canonical_uri", "revision", "acquisition")
+    }
     expected["acquisition"].pop("include")
     expected["acquisition"].pop("max_decompressed_bytes")
     for shard in expected["acquisition"]["bounded_shards"]:
         shard.pop("declared_config")
         shard.pop("declared_split")
-    assert source_declaration_payload(source) == expected
+    assert acquisition_identity_payload(source) == expected
     assert (
         declaration_sha256(source)
         == hashlib.sha256(
@@ -886,10 +1001,7 @@ def test_archive_plan_step_snapshot_and_reviewed_release(
         for name, data in included.items()
     ]
     assert manifest["retrieval"]["archive_sha256"] == hashlib.sha256(body).hexdigest()
-    assert manifest["declaration"]["rights"] == {
-        **project.sources[0].rights.model_dump(mode="json"),
-        **_ARCHIVE_RIGHTS,
-    }
+    assert "rights" not in manifest["declaration"]
     assert TransportBudget(ledger, project).receipt()["source_charged"] == len(body)
     assert acquire(project, root, offline=True) == lock
 
@@ -1193,6 +1305,14 @@ def _edit_source(recipe: Path, **fields: object) -> None:
     _yaml(path, source)
 
 
+def _widen_cap(recipe: Path) -> None:
+    """An acquisition edit that changes the identity but not one requested byte."""
+    path = recipe.parent / "sources/one.yaml"
+    source = yaml.safe_load(path.read_text())
+    source["acquisition"]["max_bytes"] += 1
+    _yaml(path, source)
+
+
 def _snapshot_payload(lock: dict) -> tuple[dict, dict[str, bytes]]:
     path = Path(lock["sources"]["one"]["snapshot_path"])
     manifest = verify_snapshot(path)
@@ -1221,8 +1341,8 @@ def test_cache_serves_a_declaration_edit_without_network_and_charges_nothing(
     assert charged["source_actual"] == len(content)
     assert first["sources"]["one"]["transport_cache"][0]["served_from"] == "network"
 
-    # A note changes the declaration hash but not what was asked of the network.
-    _edit_source(recipe, notes="reviewed by hand")
+    # A wider byte cap changes the identity but not what is asked of the network.
+    _widen_cap(recipe)
     project = load_project(recipe)
     assert (
         declaration_sha256(project.sources[0])
@@ -1274,13 +1394,13 @@ def test_cache_hit_needs_the_cache_host_setting_and_never_a_recipe_path(
     monkeypatch.setenv("KLAB_TRANSPORT_CACHE", str(cache))
     calls = _mock_hf_stream(monkeypatch, content)
     first = acquire(load_project(recipe), tmp_path / "work")
-    _edit_source(recipe, notes="edited")
+    _widen_cap(recipe)
     second = acquire(load_project(recipe), tmp_path / "work")
     assert len(calls) == 1
     assert _snapshot_payload(first)[1] == _snapshot_payload(second)[1]
     assert second["sources"]["one"]["transport_cache"][0]["served_from"] == "cache"
     monkeypatch.delenv("KLAB_TRANSPORT_CACHE")
-    _edit_source(recipe, notes="edited again")
+    _widen_cap(recipe)
     acquire(load_project(recipe), tmp_path / "work")
     assert len(calls) == 2  # no setting, no cache
     with pytest.raises(ValueError, match="extra|Extra|permitted"):
@@ -1314,7 +1434,7 @@ def test_damaged_cache_entry_is_detected_and_refetched(
         entry["key"]["url"] += "x"  # an entry that answers a different request
         key.write_text(json.dumps(entry))
     capsys.readouterr()
-    _edit_source(recipe, notes=damage)
+    _widen_cap(recipe)
     again = acquire(load_project(recipe), tmp_path / "work", transport_cache=cache)
     assert len(calls) == 2
     assert "rejected" in capsys.readouterr().err
@@ -1350,7 +1470,7 @@ def test_pinned_downloads_and_http_documents_are_cached_by_what_was_asked(
     acquire(project, tmp_path / "w1", transport_cache=cache)
     assert len(calls) == 1
     # A new work root and ledger, and an edited declaration: still no request.
-    _edit_source(recipe, notes="again")
+    _widen_cap(recipe)
     project = load_project(recipe)
     ledger = tmp_path / "w2/corpora/example/transport-budget.sqlite"
     TransportBudget.initialize(ledger, project)
@@ -1391,7 +1511,7 @@ def test_http_document_cache_replays_the_recorded_retrieval(
         )
         cache = tmp_path / "cold"
         first = acquire(load_project(recipe), tmp_path / "work", transport_cache=cache)
-        _edit_source(recipe, notes="edited")
+        _widen_cap(recipe)
         second = acquire(load_project(recipe), tmp_path / "work", transport_cache=cache)
         assert Handler.calls == 1
         assert _snapshot_payload(first)[1] == _snapshot_payload(second)[1]
@@ -1435,7 +1555,7 @@ def test_pattern_selected_git_repository_is_reused_and_rebuilt_when_damaged(
     monkeypatch.setattr(acquisition, "_git", watch)
     first = acquire(load_project(recipe), tmp_path / "w1", transport_cache=cache)
     assert len(fetches) == 1
-    _edit_source(recipe, notes="edited")
+    _widen_cap(recipe)
     second = acquire(load_project(recipe), tmp_path / "w2", transport_cache=cache)
     assert len(fetches) == 1
     assert second["sources"]["one"]["transport_cache"][0]["served_from"] == "cache"
@@ -1445,7 +1565,7 @@ def test_pattern_selected_git_repository_is_reused_and_rebuilt_when_damaged(
     for obj in repository.glob("objects/??/*"):
         obj.chmod(0o644)
         obj.write_bytes(b"garbage")
-    _edit_source(recipe, notes="after damage")
+    _widen_cap(recipe)
     third = acquire(load_project(recipe), tmp_path / "w3", transport_cache=cache)
     assert len(fetches) == 2
     assert third["sources"]["one"]["transport_cache"][0]["served_from"] == "network"

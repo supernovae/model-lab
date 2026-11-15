@@ -487,20 +487,35 @@ _ACQUISITION = {
 }
 
 
+SourceKind = Literal[
+    "git",
+    "http_document",
+    "huggingface_dataset",
+    "wikimedia_dump",
+    "archive",
+    "pdf_documents",
+    "mediawiki_dump",
+    "local",
+    "deterministic_generator",
+    "inference_generator",
+]
+AcquisitionSpec = (
+    GitAcquisition
+    | HttpAcquisition
+    | HuggingFaceAcquisition
+    | WikimediaDumpAcquisition
+    | ArchiveAcquisition
+    | PdfAcquisition
+    | MediaWikiDumpAcquisition
+    | LocalAcquisition
+    | DeterministicAcquisition
+    | InferenceAcquisition
+)
+
+
 class SourceDeclaration(StrictModel):
     id: str
-    kind: Literal[
-        "git",
-        "http_document",
-        "huggingface_dataset",
-        "wikimedia_dump",
-        "archive",
-        "pdf_documents",
-        "mediawiki_dump",
-        "local",
-        "deterministic_generator",
-        "inference_generator",
-    ]
+    kind: SourceKind
     origin: Literal["primary_source", "human_authored"] = "primary_source"
     modality: Literal["text"] = "text"
     canonical_uri: str
@@ -516,18 +531,7 @@ class SourceDeclaration(StrictModel):
     domains: tuple[str, ...]
     document_kinds: tuple[str, ...]
     source_family: str
-    acquisition: (
-        GitAcquisition
-        | HttpAcquisition
-        | HuggingFaceAcquisition
-        | WikimediaDumpAcquisition
-        | ArchiveAcquisition
-        | PdfAcquisition
-        | MediaWikiDumpAcquisition
-        | LocalAcquisition
-        | DeterministicAcquisition
-        | InferenceAcquisition
-    )
+    acquisition: AcquisitionSpec
     # Markdown files become one document per heading section by default;
     # "files" keeps each file whole, for long-context documents.
     markdown_documents: Literal["sections", "files"] = Field(
@@ -670,24 +674,107 @@ def source_language(source: Any) -> str:
     return getattr(getattr(source, "acquisition", None), "language", None) or "en"
 
 
-def source_declaration_payload(source: SourceDeclaration) -> dict[str, Any]:
-    """Canonical declaration; optional fields that are unset stay out of the hash."""
-    result = source.model_dump(mode="json")
-    if source.kind == "git" and source.acquisition.bounded_blobs is None:
-        result["acquisition"].pop("tree_oid")
-        result["acquisition"].pop("bounded_blobs")
-    if source.kind == "huggingface_dataset":
-        if source.acquisition.max_decompressed_bytes is None:
-            result["acquisition"].pop("max_decompressed_bytes")
-        if source.acquisition.bounded_shards is None:
-            result["acquisition"].pop("bounded_shards")
+def _pruned(payload: dict[str, Any], kind: str, acquisition: Any) -> dict[str, Any]:
+    """Optional acquisition fields that are unset stay out of the recorded payload."""
+    if kind == "git" and acquisition.bounded_blobs is None:
+        payload["acquisition"].pop("tree_oid")
+        payload["acquisition"].pop("bounded_blobs")
+    if kind == "huggingface_dataset":
+        if acquisition.max_decompressed_bytes is None:
+            payload["acquisition"].pop("max_decompressed_bytes")
+        if acquisition.bounded_shards is None:
+            payload["acquisition"].pop("bounded_shards")
         else:
-            result["acquisition"].pop("include")
-            for shard in result["acquisition"]["bounded_shards"]:
+            payload["acquisition"].pop("include")
+            for shard in payload["acquisition"]["bounded_shards"]:
                 if shard["declared_config"] is None:
                     shard.pop("declared_config")
                     shard.pop("declared_split")
-    return result
+    return payload
+
+
+def source_declaration_payload(source: SourceDeclaration) -> dict[str, Any]:
+    """The whole declaration, recorded in build identities.
+
+    Rights, licenses, notes, domains, document kinds, source family, origin,
+    restriction state and Markdown handling are build inputs. They are bound by
+    the build identity, never by an acquisition.
+    """
+    return _pruned(source.model_dump(mode="json"), source.kind, source.acquisition)
+
+
+class AcquisitionIdentity(StrictModel):
+    """What identifies an acquisition: exactly the fields that decide its bytes.
+
+    Per field of a source declaration:
+
+    * `id`, `kind`, `canonical_uri`, `revision` and the whole `acquisition`
+      block (git patterns, pinned blobs, HF shards, row qualification, archive,
+      PDF, MediaWiki and Wikimedia pins and bounds, local file names,
+      generators) choose what is fetched, selected and retained.
+    * `rights.nested_metadata_path` is the one rights field that changes the
+      bytes: an unbounded Git acquisition retains that file even when no
+      include pattern selects it (and refuses a snapshot without it).
+      `rights.allowed_boundary_paths`, licenses, redistribution and training
+      eligibility only classify files after acquisition.
+    * Everything else (`license`, `license_url`, `notes`, `rights`,
+      `explicit_training_restriction`, `domains`, `document_kinds`,
+      `source_family`, `origin`, `modality`, `markdown_documents`) is read only
+      by builds and releases, which bind it through the build identity.
+    """
+
+    id: str
+    kind: SourceKind
+    canonical_uri: str
+    revision: str
+    acquisition: AcquisitionSpec
+    nested_metadata_path: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @model_validator(mode="after")
+    def kind_matches(self) -> AcquisitionIdentity:
+        if type(self.acquisition) is not _ACQUISITION[self.kind]:
+            raise ValueError("acquisition does not match source kind")
+        if self.nested_metadata_path is not None and (
+            self.kind != "git" or self.acquisition.bounded_blobs is not None
+        ):
+            raise ValueError("nested metadata path requires unbounded Git acquisition")
+        return self
+
+
+def acquisition_identity(
+    source: SourceDeclaration | AcquisitionIdentity,
+) -> AcquisitionIdentity:
+    """The bytes-determining subset of a declaration."""
+    if isinstance(source, AcquisitionIdentity):
+        return source
+    nested = None
+    if source.kind == "git" and source.acquisition.bounded_blobs is None:
+        nested = source.rights.nested_metadata_path
+    return AcquisitionIdentity(
+        id=source.id,
+        kind=source.kind,
+        canonical_uri=source.canonical_uri,
+        revision=source.revision,
+        acquisition=source.acquisition,
+        nested_metadata_path=nested,
+    )
+
+
+def acquisition_identity_payload(
+    source: SourceDeclaration | AcquisitionIdentity,
+) -> dict[str, Any]:
+    """Canonical acquisition identity; unset optional fields stay out of the hash."""
+    identity = acquisition_identity(source)
+    return _pruned(
+        identity.model_dump(mode="json"), identity.kind, identity.acquisition
+    )
+
+
+def source_build_declarations(sources: Any) -> dict[str, dict[str, Any]]:
+    """Every source's full declaration, as the build identity records it."""
+    return {source.id: source_declaration_payload(source) for source in sources}
 
 
 class TransformDeclaration(StrictModel):

@@ -159,7 +159,8 @@ def prepare(
             manifest = native.verify_snapshot(candidate, verification_mode="cold")
             if (
                 manifest["declaration_sha256"] == native.declaration_sha256(source)
-                and manifest["declaration"] == native.source_declaration_payload(source)
+                and manifest["declaration"]
+                == native.acquisition_identity_payload(source)
                 and native._reusable_immutable_adapter(source, manifest)
                 and (source_id not in retained or manifest == retained[source_id][1])
             ):

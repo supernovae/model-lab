@@ -114,6 +114,50 @@ def _edit_stage_output(root: Path) -> None:
     _write(path, rows)
 
 
+def _sources(edit, *, identity: bool = False):
+    """Edit a declared source in sources.json and the license report together.
+
+    With `identity`, also edit the build identity the release carries.
+    """
+
+    def apply(root: Path) -> None:
+        rows = _lines_or_list(root / "sources.json")
+        edit(rows[0])
+        (root / "sources.json").write_bytes(canonical_json(rows) + b"\n")
+        report = json.loads((root / "license-report.json").read_text())
+        report["sources"] = rows
+        (root / "license-report.json").write_bytes(canonical_json(report) + b"\n")
+        if identity:
+            manifest = json.loads((root / "manifest.json").read_text())
+            declared = manifest["build_identity"]["sources"][rows[0]["id"]]
+            declared["license"] = rows[0]["license"]
+            declared["license_url"] = rows[0]["license_url"]
+            declared["rights"] = rows[0]["rights_policy"]
+            (root / "manifest.json").write_bytes(canonical_json(manifest) + b"\n")
+
+    return apply
+
+
+def _lines_or_list(path: Path) -> list[dict]:
+    return json.loads(path.read_text())
+
+
+def _relicense(row):
+    row["license"] = "Apache-2.0"
+
+
+def _new_license_url(row):
+    row["license_url"] = "https://example.org/other-license"
+
+
+def _looser_rights(row):
+    row["rights_policy"]["training_eligibility"] = "eligible_with_obligations"
+
+
+def _claim_no_restriction(row):
+    row["explicit_training_restriction"] = "none_found"
+
+
 def _stale_text(rows):
     rows[0]["text"] += "edited"
 
@@ -146,6 +190,26 @@ FORGERIES = {
     "document rights differ from the pinned file": (
         _documents(_foreign_license),
         "document rights attribution mismatch",
+    ),
+    "source license edited after the build": (
+        _sources(_relicense),
+        "differs from its build identity declaration",
+    ),
+    "source license URL edited after the build": (
+        _sources(_new_license_url),
+        "differs from its build identity declaration",
+    ),
+    "source rights edited after the build": (
+        _sources(_looser_rights),
+        "differs from its build identity declaration",
+    ),
+    "source restriction state added after the build": (
+        _sources(_claim_no_restriction),
+        "differs from its build identity declaration",
+    ),
+    "source rights re-declared in the carried build identity": (
+        _sources(_looser_rights, identity=True),
+        "release build identity differs from its build",
     ),
     "document claims to duplicate itself": (
         _documents(_self_duplicate),

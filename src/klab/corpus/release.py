@@ -166,7 +166,7 @@ def _verify_rights_files(
             raise ValueError("record admission reference differs from frozen bytes")
         admission = verify_record_admission(
             read_metadata(admission_path),
-            {source_id: snapshots[source_id]["declaration"] for source_id in sources},
+            {source_id: identity["sources"][source_id] for source_id in sources},
             snapshots,
             root.parent.parent / "snapshots",
         )
@@ -304,13 +304,30 @@ def _verify_cleaning_decision(doc: dict[str, Any], options: NormalizerOptions) -
 def _verify_source_snapshots(
     root: Path,
     sources: dict[str, dict[str, Any]],
+    identity: dict[str, Any],
     *,
     proof_store: ProofStore | None,
     verification_mode: VerificationMode,
 ) -> dict[str, dict[str, Any]]:
-    """Authenticate each source's snapshot and bind the source row to its declaration."""
+    """Bind each source row to the build identity, and the identity to its snapshot.
+
+    Rights, licenses and restriction state are build inputs: the build identity
+    records every source's full declaration, and a source row must be exactly
+    the row derived from it. A snapshot records only the acquisition identity,
+    which must match that declaration and the identity's lock.
+    """
+    from klab.corpus.acquisition import declaration_sha256
+    from klab.corpus.build_outputs import source_row
+    from klab.corpus.project import SourceDeclaration, acquisition_identity_payload
+
+    declared = identity["sources"]
+    if set(declared) != set(sources):
+        raise ValueError("source inventory differs from build identity")
     snapshots: dict[str, dict[str, Any]] = {}
     for source in sources.values():
+        declaration = declared[source["id"]]
+        if source != source_row(declaration, source["snapshot_sha256"]):
+            raise ValueError("source row differs from its build identity declaration")
         snapshot_id = source["snapshot_sha256"]
         if not snapshot_id:
             continue
@@ -320,33 +337,14 @@ def _verify_source_snapshots(
             verification_mode=verification_mode,
         )
         snapshots[source["id"]] = snapshot
-        declaration = snapshot["declaration"]
-        if any(
-            source[key] != declaration[key]
-            for key in (
-                "id",
-                "kind",
-                "canonical_uri",
-                "revision",
-                "license",
-                "source_family",
-            )
-        ) or source.get("origin", "primary_source") != declaration.get(
-            "origin", "primary_source"
-        ):
-            raise ValueError("source declaration attribution mismatch")
+        declared_source = SourceDeclaration.model_validate(declaration)
         if (
-            source["rights_policy"] != declaration["rights"]
-            or source["license_url"] != declaration["license_url"]
-            or source["redistribution"] != declaration["rights"]["redistribution_mode"]
+            snapshot["declaration"] != acquisition_identity_payload(declared_source)
+            or snapshot["declaration_sha256"] != declaration_sha256(declared_source)
+            or identity["lock"][source["id"]]["declaration_sha256"]
+            != snapshot["declaration_sha256"]
         ):
-            raise ValueError("prospective source rights declaration mismatch")
-        if source.get("explicit_training_restriction") != declaration.get(
-            "explicit_training_restriction"
-        ):
-            raise ValueError(
-                "source training restriction state differs from declaration"
-            )
+            raise ValueError("source acquisition differs from build identity")
     return snapshots
 
 
@@ -784,7 +782,11 @@ def _validate_rows_streaming(
     }:
         raise ValueError("source snapshot inventory mismatch")
     snapshots = _verify_source_snapshots(
-        root, sources, proof_store=proof_store, verification_mode=verification_mode
+        root,
+        sources,
+        identity,
+        proof_store=proof_store,
+        verification_mode=verification_mode,
     )
     rights = _verify_rights_files(root, sources, snapshots)
     options = _release_normalizer(identity)
@@ -1190,7 +1192,11 @@ def _validate_rows_stored(
     }
 
     snapshots = _verify_source_snapshots(
-        root, sources, proof_store=proof_store, verification_mode=verification_mode
+        root,
+        sources,
+        identity,
+        proof_store=proof_store,
+        verification_mode=verification_mode,
     )
     rights_files = _verify_rights_files(root, sources, snapshots)
     if not spans.same_keys(document_map):
@@ -2221,6 +2227,8 @@ def _verify_release_cold(
         != release_id
     ):
         raise ValueError("release manifest identity mismatch")
+    if canonical_digest(manifest["build_identity"]) != manifest["build_id"]:
+        raise ValueError("release build identity differs from its build")
     closure_key = _release_closure_key(path, manifest) if proofs is not None else None
     progress = open_progress(release_id)
     _files(

@@ -8,7 +8,7 @@ from pathlib import Path
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.bounded_metadata import metadata_operation
 from klab.corpus.jsonl_records import records_from_path
-from klab.corpus.project import SourceDeclaration, source_declaration_payload
+from klab.corpus.project import AcquisitionIdentity, acquisition_identity_payload
 from klab.training.manifest import sha256_file
 
 
@@ -41,7 +41,7 @@ def derive_subset(source, *, scratch_directory, staging=None):
         header = read_metadata(parent / "manifest.json")
         if header["declaration"]["acquisition"].get("retained_subset") is not None:
             raise ValueError("nested retained subsets are unsupported")
-        parent_source = SourceDeclaration.model_validate(header["declaration"])
+        parent_source = AcquisitionIdentity.model_validate(header["declaration"])
         if (
             parent_source.kind != "huggingface_dataset"
             or len(header["files"]) != 1
@@ -54,9 +54,9 @@ def derive_subset(source, *, scratch_directory, staging=None):
         manifest = verify_snapshot(parent)
         if manifest["snapshot_sha256"] != spec.snapshot_sha256:
             raise ValueError("retained parent snapshot identity mismatch")
-        original = SourceDeclaration.model_validate(manifest["declaration"])
-        expected = source_declaration_payload(original)
-        actual = source_declaration_payload(source)
+        original = AcquisitionIdentity.model_validate(manifest["declaration"])
+        expected = acquisition_identity_payload(original)
+        actual = acquisition_identity_payload(source)
         actual["acquisition"].pop("retained_subset")
         for field in ("max_rows", "max_bytes"):
             actual["acquisition"][field] = expected["acquisition"][field]

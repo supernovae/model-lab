@@ -37,6 +37,7 @@ from klab.corpus.project import (
     SPLITS,
     NormalizerOptions,
     declaration_payload,
+    source_build_declarations,
     source_language,
 )
 from klab.corpus.provenance import (
@@ -1494,7 +1495,7 @@ def _build_stored(
     record_admission: dict[tuple[str, str], dict[str, Any]] = {}
     admission_path: Path | None = None
     if project.release.record_admission is not None:
-        from klab.corpus.project import project_path, source_declaration_payload
+        from klab.corpus.project import project_path
 
         reference = project.release.record_admission
         admission_path = project_path(project.root, reference.path)
@@ -1505,10 +1506,7 @@ def _build_stored(
         admission_manifest = read_metadata(admission_path)
         record_admission = verify_record_admission(
             admission_manifest,
-            {
-                source.id: source_declaration_payload(source)
-                for source in project.sources
-            },
+            source_build_declarations(project.sources),
             {
                 source_id: read_metadata(Path(row["snapshot_path"]) / "manifest.json")
                 for source_id, row in lock["sources"].items()
@@ -1532,6 +1530,7 @@ def _build_stored(
             }
             for key, value in sorted(lock["sources"].items())
         },
+        "sources": source_build_declarations(project.sources),
         "transforms": stage_specs,
         "split": declaration_payload(project.splits),
         "release": declaration_payload(project.release),

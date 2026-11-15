@@ -1,9 +1,9 @@
 """Acquired snapshots are keyed on `declaration_sha256`; it must not drift.
 
 The fixtures are two real source declarations (one Hugging Face dataset, one
-pinned Git repository). Their digests were recorded from the code before the
-normalizer options and the removal of `generator_version`; a change to a source
-model that moves them would orphan every snapshot acquired under the old digest.
+pinned Git repository). Their digests cover only the acquisition identity; a
+change to a source model or to the identity definition that moves them would
+orphan every snapshot acquired under the old digest.
 """
 
 from pathlib import Path
@@ -15,8 +15,8 @@ from klab.corpus.acquisition import declaration_sha256
 from klab.corpus.project import SourceDeclaration
 
 PINNED = {
-    "code_python": "4da756eca7abe707de55a903bace022b786bfffbb85f7e9c88b84f14694fb6c4",
-    "ref_python_docs": "ddce7d3134ba386e0f1937d2604f5de1664f8507d11929495224a585c5078d15",
+    "code_python": "2df39f7b43dbea9b7b62a1d345b81044035183e0328c57ef68914982c64186e5",
+    "ref_python_docs": "f0bda185e284c5fc485eb7e5528670db56a4f83575b3a62180c95f11f3dfa74b",
 }
 
 

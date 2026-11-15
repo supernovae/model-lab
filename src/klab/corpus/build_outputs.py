@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from klab.canonical import canonical_json
-from klab.corpus.project import declaration_payload
+from klab.corpus.project import declaration_payload, source_declaration_payload
 from klab.corpus.rights import reported_spdx_expression
 from klab.corpus.split_assignments import SPLITS, UNIT_FIELDS, copy_assignments
 from klab.training.manifest import sha256_file
@@ -91,35 +91,50 @@ def publish_staging(staging: Path, target: Path) -> None:
     sync_directory(target.parent)
 
 
+def source_row(declaration: Mapping[str, Any], snapshot_sha256: str | None) -> dict:
+    """The sources.json row of one source, derived only from its full declaration.
+
+    Release verification derives the same row from the declaration recorded in
+    the build identity, so an edited row cannot be re-sealed.
+    """
+    rights = declaration["rights"]
+    return {
+        "id": declaration["id"],
+        "kind": declaration["kind"],
+        "canonical_uri": declaration["canonical_uri"],
+        "revision": declaration["revision"],
+        "license": declaration["license"],
+        "redistribution": rights["redistribution_mode"],
+        "license_url": declaration["license_url"],
+        "rights_policy": rights,
+        **(
+            {
+                "explicit_training_restriction": declaration[
+                    "explicit_training_restriction"
+                ]
+            }
+            if declaration.get("explicit_training_restriction") is not None
+            else {}
+        ),
+        "origin": declaration["origin"],
+        "source_family": declaration["source_family"],
+        "snapshot_sha256": snapshot_sha256,
+        "reproducibility_class": (
+            "generator_dependent"
+            if declaration["kind"] == "inference_generator"
+            else "script_reproducible_not_redistributed"
+            if rights["redistribution_mode"] in _UNREPRODUCIBLE_MODES
+            else "fully_reproducible"
+        ),
+    }
+
+
 def source_declarations(project: Any, lock: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [
-        {
-            "id": source.id,
-            "kind": source.kind,
-            "canonical_uri": source.canonical_uri,
-            "revision": source.revision,
-            "license": source.license,
-            "redistribution": source.rights.redistribution_mode,
-            "license_url": source.license_url,
-            "rights_policy": source.rights.model_dump(mode="json"),
-            **(
-                {"explicit_training_restriction": source.explicit_training_restriction}
-                if source.explicit_training_restriction is not None
-                else {}
-            ),
-            "origin": source.origin,
-            "source_family": source.source_family,
-            "snapshot_sha256": lock["sources"]
-            .get(source.id, {})
-            .get("snapshot_sha256"),
-            "reproducibility_class": (
-                "generator_dependent"
-                if source.kind == "inference_generator"
-                else "script_reproducible_not_redistributed"
-                if source.rights.redistribution_mode in _UNREPRODUCIBLE_MODES
-                else "fully_reproducible"
-            ),
-        }
+        source_row(
+            source_declaration_payload(source),
+            lock["sources"].get(source.id, {}).get("snapshot_sha256"),
+        )
         for source in project.sources
     ]
 
