@@ -616,6 +616,12 @@ rights:
   and SPDX expressions. `klab corpus publication RELEASE` emits a metadata
   manifest (source URIs, revisions, file paths and hashes) for sharing what was
   used without the text. `corpus export` is never a publication.
+- **Per-source ledger.** `report.json` (`source_ledger`) and `report.md` list
+  every declared source with the files seen, the files and records set aside
+  with their most common reasons (rights decisions, path boundaries,
+  unreadable or empty input), the documents the duplicate policy dropped by
+  reason, and the documents retained. A source that retained nothing is named
+  at the top of `report.md`.
 
 ### Lineage
 

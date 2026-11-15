@@ -30,6 +30,7 @@ from klab.corpus.build_outputs import (
     rights_file_entry,
     rights_report,
     source_declarations,
+    source_ledger,
     stage_declared_inputs,
     write_json,
     write_release_files,
@@ -985,6 +986,7 @@ def _emit_build(
                 else SOURCE_ORIGIN
             )
             if reason is not None:
+                tally.add_dropped(doc)
                 continue
             tally.add(doc)
             text = doc["text"]
@@ -1068,10 +1070,15 @@ def _emit_build(
     write_json(staging / "sources.json", sources)
     write_json(staging / "license-report.json", rights)
 
+    with (staging / "rejected.jsonl").open("rb") as rejected_rows:
+        ledger = source_ledger(
+            project, rights_files, (json.loads(line) for line in rejected_rows), tally
+        )
     report = release_report(
         project,
         rights,
         tally,
+        ledger,
         document_count=count,
         view_counts={
             "lm": {split: lm_counts[split] for split in SPLITS},
