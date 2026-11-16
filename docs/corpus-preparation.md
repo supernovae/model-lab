@@ -825,9 +825,10 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   | --- | --- |
   | `release verification` | shardable: byte ranges of the release files |
   | `tokenizer sampling: TRAIN lineage` | shardable: byte ranges of the lineage view |
-  | `tokenizer sampling: documents scan` | shardable: byte ranges of `documents.jsonl`, merged in file order |
   | `family inventory` | shardable: byte ranges of `documents.jsonl`, written in file order |
   | `export split statistics` | shardable: byte ranges of each exported view file |
+  | `tokenizer sampling: rank histogram` | shardable: byte ranges of `documents.jsonl`; bytes per stratum and hash bucket are summed |
+  | `tokenizer sampling: candidates` | shardable: byte ranges of `documents.jsonl`; each keeps only the documents in the lowest hash buckets of their stratum |
   | `tokenizer fit` | single process: the Hugging Face BPE trainer is multithreaded natively and selects merges sequentially |
 
 - **Progress** goes to stderr and to `scratch/verify-<release>.progress.jsonl`
@@ -1060,17 +1061,39 @@ sampling:
   source_strata: {web_shard_000: real_english, synthetic_shard_000: synthetic, code_shard_000: code}
   byte_weights: {real_english: 60, synthetic: 20, code: 20}
   max_fit_bytes: 536870912
+  seed: 20260101
   audit_documents_per_stratum: 1000
   max_audit_bytes: 67108864
 ```
 
-`klab tokenizer train` takes whole training documents in release order until
-each stratum's byte cap is filled. This is a deterministic prefix, not a random
-sample. The scan of `documents.jsonl` runs on `--workers` processes over
-line-aligned byte ranges and merges their candidates in file order, so the
-selected documents and the sampling digest do not depend on the worker count. It then audits different training documents for round-trip failures,
-unknown tokens and bytes per token, and refuses to publish on a failure. No
-validation or test document is used.
+`klab tokenizer train` orders each stratum's training documents by a hash of
+`sampling.seed` and the document's content digest, and takes whole documents in
+that order until the stratum's byte quota is full (it stops at the first document
+that no longer fits). The fit is a uniform random subset of each stratum: it does
+not depend on where a document sits in `documents.jsonl`, so no source or region
+of the release is favoured, and a smaller quota selects a prefix of a larger
+quota's sample. Repeated content counts once within a stratum. The seed and the
+order are recorded in the sampling block of the tokenizer manifest and in its
+selection identity, so `klab tokenizer verify` binds them; a different seed
+or release is a different tokenizer. There is no release-order option: a prefix
+of the release is biased toward whatever comes first, so a tokenizer fitted that
+way must be fitted again (the manifest of an older one has no `seed` and does not
+verify).
+
+The scan runs on `--workers` processes over line-aligned byte ranges in bounded
+memory. A histogram pass sums bytes per stratum and hash bucket; a candidate
+pass keeps only each stratum's documents in the lowest buckets, about twice its
+quota; the coordinator orders them, drops repeated content and fills the quota.
+This equals sorting every document and filling the quota whenever the walk stops
+inside the candidates, because every document ranked before that point is among
+them; when it does not (repeated content made the cut too tight) the stratum's
+cut doubles and the candidate pass runs again. The selected documents and the
+sampling digest therefore do not depend on the worker count. Pass
+`--scratch-dir` so the fit, the replay and the audit share the stored shards.
+The audit then takes the documents that follow the fit in the same order,
+different from the fit, and checks round-trip failures, unknown tokens and bytes
+per token; it refuses to publish on a failure. No validation or test document is
+used.
 
 `klab corpus tokenizer-bakeoff DECLARATION --output DIR` instead fits several
 vocabulary sizes on one training sample, scores them on held-out families and

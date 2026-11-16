@@ -162,6 +162,13 @@ Avoid overlapping jobs on one device. Keep commits narrow. Publishing, history
 rewriting and remote deletion need the user's authorization. Proposed code work
 goes in GitHub issues; keep `ROADMAP.md` short and directional.
 
+Decisions and concerns that a PR or a helper's report raises for the owner go in
+the pinned **Rolling backlog** issue (label `backlog`) before the PR merges, so
+they outlive it. Add each with its source and your recommendation; a concern
+stays *unvalidated* until checked, then moves to *tracked* (link the issue or
+PR) or *invalidated* (say why); an answered decision moves to the decided log.
+Do not close or drop an item silently.
+
 ## 8. Avoid sprawl
 
 - **Reuse shared primitives.** Hash JSON with `canonical_digest`, encode with
@@ -216,3 +223,4 @@ before changing its settings.
 | Engram memory | [docs/engram.md](docs/engram.md#size-the-tables) | adding n-gram memory or choosing its table sizes, heads or optimizer settings |
 | Pretraining preflight | [docs/pretraining-preflight.md](docs/pretraining-preflight.md) | starting a multi-day pretraining run, or when `klab preflight` fails or `klab train` asks for `--preflight` |
 | Near-duplicate screen | [docs/corpus-preparation.md](docs/corpus-preparation.md#template-aware-screening) | a screen lists thousands of pairs that share issue templates or bot text; never drop documents for sharing a template |
+| Tokenizer sampling | [docs/corpus-preparation.md](docs/corpus-preparation.md#fitting-a-tokenizer-on-a-byte-sample) | choosing or changing `sampling` for `klab tokenizer train`: the sample is a seeded hash, never a prefix of the release, and a changed sampling means fitting the tokenizer again |
