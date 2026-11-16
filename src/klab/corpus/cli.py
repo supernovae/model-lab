@@ -525,7 +525,12 @@ def _run(args: argparse.Namespace) -> None:
             )
             if value is not None
         }
-        result = audit_release(release, **caps)
+        result = audit_release(
+            release,
+            checkpoint_dir=(args.scratch_dir or root / "scratch") / "near-duplicates",
+            checkpoint_every=args.checkpoint_every,
+            **caps,
+        )
     else:
         result = publication.consumers(release, args.runs_dir)
     print(json.dumps(result, sort_keys=True))
@@ -851,4 +856,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
                 "max-candidates",
             ):
                 command.add_argument("--" + flag, type=int)
+            command.add_argument(
+                "--checkpoint-every",
+                type=int,
+                default=200_000,
+                metavar="N",
+                help="Save progress every N training documents to SCRATCH/near-duplicates so a killed run resumes",
+            )
         command.set_defaults(handler=_handle)

@@ -396,3 +396,61 @@ def test_a_default_decision_accepts_a_class_and_exceptions_override_it() -> None
         result = check_decisions(report, "h", {**base, "default": bad})
         assert "default decision must be `kept` with a reason" in result["problems"]
         assert result["undecided_count"] == 3
+
+
+def test_a_killed_near_duplicate_screen_resumes_to_the_same_report(
+    planted_release: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from klab.corpus import near_duplicates
+
+    calls = {"count": 0, "kill_at": None}
+    real = near_duplicates._band_keys
+
+    def counted(shingles):
+        calls["count"] += 1
+        if calls["count"] == calls["kill_at"]:
+            raise KeyboardInterrupt
+        return real(shingles)
+
+    monkeypatch.setattr(near_duplicates, "_band_keys", counted)
+    whole = near_duplicates.audit_release(planted_release)
+    trained = sum(
+        row["documents"] for row in whole["coverage"] if row["split"] == "train"
+    )
+    held = calls["count"] - trained
+    assert trained >= 3
+
+    checkpoints = tmp_path / "checkpoints"
+    calls.update(count=0, kill_at=held + 2)
+    with pytest.raises(KeyboardInterrupt):
+        near_duplicates.audit_release(
+            planted_release, checkpoint_dir=checkpoints, checkpoint_every=1
+        )
+    (saved,) = checkpoints.glob("near-duplicates-*.json")
+
+    calls.update(count=0, kill_at=None)
+    resumed = near_duplicates.audit_release(
+        planted_release, checkpoint_dir=checkpoints, checkpoint_every=1
+    )
+    assert resumed == whole
+    # The held-out side is indexed again, but only the unfinished training
+    # documents are screened.
+    assert calls["count"] == held + trained - 1
+    assert not saved.exists()
+
+    # A checkpoint that does not verify is ignored, not trusted.
+    calls.update(count=0, kill_at=held + 2)
+    with pytest.raises(KeyboardInterrupt):
+        near_duplicates.audit_release(
+            planted_release, checkpoint_dir=checkpoints, checkpoint_every=1
+        )
+    (saved,) = checkpoints.glob("near-duplicates-*.json")
+    saved.write_bytes(saved.read_bytes().replace(b'"trained":1', b'"trained":2'))
+    calls.update(count=0, kill_at=None)
+    assert (
+        near_duplicates.audit_release(
+            planted_release, checkpoint_dir=checkpoints, checkpoint_every=1
+        )
+        == whole
+    )
+    assert calls["count"] == held + trained
