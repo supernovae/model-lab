@@ -778,7 +778,7 @@ None of them is a quality score.
 
 | Command | Shows |
 | --- | --- |
-| `klab corpus describe RELEASE [--tokenizer PATH]` | Record counts by origin, verification and shape; token counts with a tokenizer |
+| `klab corpus describe RELEASE [--tokenizer PATH]` | Record counts by origin, verification and shape; token counts with a tokenizer. Runs on `--workers` processes and keeps each finished run under `WORK/cache/describe`, so a stopped or repeated describe measures only what is missing |
 | `klab corpus sources RELEASE` | Sources and their rights |
 | `klab corpus audit RELEASE` | The build audit |
 | `klab corpus sample RELEASE --limit N` | Sample records, filterable by domain, kind and status |
@@ -827,6 +827,10 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   | `tokenizer sampling: TRAIN lineage` | shardable: byte ranges of the lineage view |
   | `family inventory` | shardable: byte ranges of `documents.jsonl`, written in file order |
   | `export split statistics` | shardable: byte ranges of each exported view file |
+  | `describe: lineage index` | shardable: byte ranges of `lineage.jsonl`, merged into one sorted index of row positions |
+  | `describe: view lines` | shardable: byte ranges of each view file, counting rows |
+  | `describe: view rows` | shardable: runs of consecutive view rows, merged by sums and set unions |
+  | `describe: source rights` | shardable: byte ranges of `documents.jsonl`, merged in file order |
   | `tokenizer sampling: rank histogram` | shardable: byte ranges of `documents.jsonl`; bytes per stratum and hash bucket are summed |
   | `tokenizer sampling: candidates` | shardable: byte ranges of `documents.jsonl`; each keeps only the documents in the lowest hash buckets of their stratum |
   | `tokenizer fit` | single process: the Hugging Face BPE trainer is multithreaded natively and selects merges sequentially |

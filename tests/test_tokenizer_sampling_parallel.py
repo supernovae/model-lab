@@ -306,6 +306,7 @@ def test_every_declared_stage_is_shardable_or_gives_a_reason_and_is_documented()
 ):
     import klab.corpus.declared_family_inventory
     import klab.corpus.export
+    import klab.corpus.measurement
     import klab.data.tokenizer  # noqa: F401  (each declares its stage on import)
 
     with pytest.raises(ValueError, match="say why"):
