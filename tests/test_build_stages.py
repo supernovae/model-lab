@@ -111,7 +111,7 @@ def test_a_stage_that_does_not_verify_is_rebuilt_and_leftovers_are_ignored(
     calls.fail = "emit"
     with pytest.raises(OSError, match="injected failure"):
         lab.run("corpus", "build", project, "--offline")
-    dedup = next(lab.work.glob("corpora/*/builds/stages/dedup/*/documents.sqlite"))
+    dedup = next(lab.work.glob("corpora/*/builds/stages/dedup/*/dedup.sqlite"))
     stages = dedup.parents[2]
     # A same-size flipped byte, an incomplete directory and an unreceipted
     # directory under an arbitrary name must not become inputs.

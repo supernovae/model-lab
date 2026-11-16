@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from klab.corpus.large_build import _deduplicate
+from klab.corpus.large_build import INDEX_SCHEMA, _deduplicate, insert_indexed
 from klab.corpus.project import DuplicatePolicy
 
 
@@ -18,16 +18,7 @@ class _Progress:
 def _database(documents: list[tuple[str, str, str, str]]) -> sqlite3.Connection:
     """(document_id, split, raw_sha, normalized_sha) rows."""
     connection = sqlite3.connect(":memory:")
-    connection.executescript(
-        """
-        CREATE TABLE documents (document_id TEXT NOT NULL UNIQUE, payload BLOB NOT NULL,
-            span BLOB NOT NULL, split TEXT NOT NULL, source_id TEXT NOT NULL,
-            source_family TEXT NOT NULL, document_kind TEXT NOT NULL,
-            source_rank INTEGER NOT NULL, representative_id TEXT, drop_reason TEXT);
-        CREATE TABLE origins (method TEXT NOT NULL, origin TEXT NOT NULL,
-            document_number INTEGER NOT NULL);
-        """
-    )
+    connection.executescript(INDEX_SCHEMA)
     rights = {
         "training_eligibility": "eligible",
         "license_references": [],
@@ -35,16 +26,23 @@ def _database(documents: list[tuple[str, str, str, str]]) -> sqlite3.Connection:
         "training_restriction": None,
     }
     for identifier, split, raw, normalized in documents:
-        payload = json.dumps(
-            {"license": "MIT", "redistribution": "open", "rights": rights}
-        ).encode()
-        number = connection.execute(
-            "INSERT INTO documents VALUES (?,?,?,?,?,?,?,?,NULL,NULL)",
-            (identifier, payload, b"{}", split, "s", "f", "prose", 2),
-        ).lastrowid
-        connection.executemany(
-            "INSERT INTO origins VALUES (?,?,?)",
-            [("raw", raw, number), ("normalized", normalized, number)],
+        doc = {
+            "document_id": identifier,
+            "source_id": "s",
+            "source_family": "f",
+            "document_kind": "prose",
+            "license": "MIT",
+            "redistribution": "open",
+            "rights": rights,
+        }
+        insert_indexed(
+            connection,
+            doc,
+            json.dumps(doc).encode(),
+            b"{}",
+            split,
+            2,
+            [("raw", raw), ("normalized", normalized)],
         )
     return connection
 
@@ -77,7 +75,7 @@ def _outcome(connection: sqlite3.Connection) -> dict[str, tuple[str, str | None]
     return {
         identifier: (representative, reason)
         for identifier, representative, reason in connection.execute(
-            "SELECT document_id,representative_id,drop_reason FROM documents"
+            "SELECT document_id,representative_id,drop_reason FROM dedup"
         )
     }
 
@@ -200,35 +198,30 @@ def _corpus(seed: int) -> list[dict]:
 def _disk_database(docs: list[dict], keys: tuple[str, ...]) -> sqlite3.Connection:
     connection = _database([])
     for doc in docs:
-        payload = json.dumps(
-            {
-                "license": doc["license"],
-                "redistribution": doc["redistribution"],
-                "rights": doc["rights"],
-                "structure": doc["structure"],
-            }
-        ).encode()
-        number = connection.execute(
-            "INSERT INTO documents VALUES (?,?,?,?,?,?,?,?,NULL,NULL)",
-            (
-                doc["document_id"],
-                payload,
-                b"{}",
-                doc["split"],
-                doc["source_id"],
-                "f",
-                doc["document_kind"],
-                {"s0": 0, "s1": 2}[doc["source_id"]],
-            ),
-        ).lastrowid
+        record = {
+            **doc,
+            "source_family": "f",
+        }
         origins = {
             "raw": doc["raw_content_sha256"],
             "normalized": doc["content_sha256"],
             "canonical_origin": doc["origin"],
         }
-        connection.executemany(
-            "INSERT INTO origins VALUES (?,?,?)",
-            [(method, origins[method], number) for method in keys],
+        insert_indexed(
+            connection,
+            record,
+            json.dumps(
+                {
+                    "license": doc["license"],
+                    "redistribution": doc["redistribution"],
+                    "rights": doc["rights"],
+                    "structure": doc["structure"],
+                }
+            ).encode(),
+            b"{}",
+            doc["split"],
+            {"s0": 0, "s1": 2}[doc["source_id"]],
+            [(method, origins[method]) for method in keys],
         )
     return connection
 
@@ -348,3 +341,42 @@ def test_a_declared_source_without_documents_fails_the_build() -> None:
     assert "release.policy.rights.training_use" in message
     complete = SimpleNamespace(sources=[SimpleNamespace(id="s")])
     _require_every_source_has_documents(connection, complete, events)
+
+
+def test_deduplication_never_reads_a_payload(
+    tmp_path: Path,
+) -> None:
+    connection = _database(
+        [
+            ("a-train", "train", "r1", "n1"),
+            ("b-valid", "validation", "r1", "n1"),
+            ("c-train", "train", "r2", "n2"),
+            ("d-train", "train", "r2", "n2"),
+        ]
+    )
+    read: list[str] = []
+
+    def authorizer(action, table, column, *_):
+        if action == sqlite3.SQLITE_READ and table == "documents":
+            read.append(column)
+        return sqlite3.SQLITE_OK
+
+    class Phases:
+        def __init__(self) -> None:
+            self.phases: list[str] = []
+
+        def update(self, **values: object) -> None:
+            if "phase" in values:
+                self.phases.append(str(values["phase"]))
+
+    progress = Phases()
+    connection.set_authorizer(authorizer)
+    _deduplicate(
+        connection,
+        tmp_path / "groups.jsonl",
+        policy=CHAIN,
+        diagnostics=tmp_path / "diagnostics.json",
+        progress=progress,
+    )
+    assert "payload" not in read
+    assert progress.phases == ["dedup_groups", "dedup_compress", "dedup_reasons"]

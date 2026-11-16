@@ -11,11 +11,11 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import sqlite3
 import tempfile
 from array import array
 from collections import Counter, defaultdict, deque
+from collections.abc import Iterable
 from concurrent.futures import Future, ProcessPoolExecutor
 from contextlib import ExitStack, closing, nullcontext
 from dataclasses import dataclass
@@ -499,39 +499,128 @@ def _require_every_source_has_documents(
     )
 
 
-def _index_prepared(
-    database: Path, prepared: list[Path], project: Any, progress: BuildProgress
-) -> sqlite3.Connection:
-    from klab.corpus.pipeline import _origin_keys
-    from klab.corpus.split_assignments import assign_split
+WIDE_SCHEMA = """
+CREATE TABLE documents (
+    document_id TEXT NOT NULL UNIQUE,
+    payload BLOB NOT NULL,
+    span BLOB NOT NULL,
+    split TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    source_family TEXT NOT NULL,
+    document_kind TEXT NOT NULL,
+    source_rank INTEGER NOT NULL
+);
+CREATE TABLE origins (
+    method TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    document_number INTEGER NOT NULL
+);
+"""
+DEDUP_SCHEMA = """
+CREATE TABLE dedup (
+    document_number INTEGER PRIMARY KEY,
+    document_id TEXT NOT NULL UNIQUE,
+    split TEXT NOT NULL,
+    source_rank INTEGER NOT NULL,
+    document_kind TEXT NOT NULL,
+    metadata_only INTEGER NOT NULL,
+    rights_signature BLOB NOT NULL,
+    representative_id TEXT,
+    drop_reason TEXT
+);
+"""
+INDEX_SCHEMA = WIDE_SCHEMA + DEDUP_SCHEMA
+# `documents` and `origins` hold the wide, immutable records. `dedup` holds only
+# what the duplicate passes read and write, so those passes never touch a
+# payload; the metadata-only flag and the rights signature are computed once, at
+# index time, from the payload. The index stage keeps them in two files so the narrow table is
+# contiguous on disk: `documents.sqlite` and `narrow.sqlite`.
 
-    connection = sqlite3.connect(database)
+
+def insert_indexed(
+    connection: sqlite3.Connection,
+    doc: dict[str, Any],
+    raw_doc: bytes,
+    raw_span: bytes,
+    split: str,
+    rank: int,
+    origins: Iterable[tuple[str, str]],
+) -> int:
+    """Add one prepared record to the index; return its document number."""
+    from klab.corpus.dedup_policy import is_metadata_only, rights_signature
+
+    number = connection.execute(
+        "INSERT INTO documents (document_id,payload,span,split,source_id,"
+        "source_family,document_kind,source_rank) VALUES (?,?,?,?,?,?,?,?)",
+        (
+            doc["document_id"],
+            raw_doc,
+            raw_span,
+            split,
+            doc["source_id"],
+            doc["source_family"],
+            doc["document_kind"],
+            rank,
+        ),
+    ).lastrowid
+    connection.execute(
+        "INSERT INTO dedup (document_number,document_id,split,source_rank,"
+        "document_kind,metadata_only,rights_signature) VALUES (?,?,?,?,?,?,?)",
+        (
+            number,
+            doc["document_id"],
+            split,
+            rank,
+            doc["document_kind"],
+            int(is_metadata_only(doc)),
+            rights_signature(doc),
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO origins(method,origin,document_number) VALUES (?,?,?)",
+        ((method, key, number) for method, key in origins),
+    )
+    return number
+
+
+def create_index(directory: Path) -> sqlite3.Connection:
+    """An empty index in `directory`: `narrow.sqlite` with `documents.sqlite` attached."""
+    wide = sqlite3.connect(directory / "documents.sqlite")
+    wide.executescript(WIDE_SCHEMA)
+    wide.close()
+    connection = sqlite3.connect(directory / "narrow.sqlite")
     connection.execute("PRAGMA cache_size=-16384")
     connection.execute("PRAGMA temp_store=FILE")
-    connection.execute("PRAGMA synchronous=FULL")
-    connection.executescript(
-        """
-        CREATE TABLE documents (
-            document_id TEXT NOT NULL UNIQUE,
-            payload BLOB NOT NULL,
-            span BLOB NOT NULL,
-            split TEXT NOT NULL,
-            source_id TEXT NOT NULL,
-            source_family TEXT NOT NULL,
-            document_kind TEXT NOT NULL,
-            source_rank INTEGER NOT NULL,
-            representative_id TEXT,
-            drop_reason TEXT
-        );
-        CREATE TABLE origins (
-            method TEXT NOT NULL,
-            origin TEXT NOT NULL,
-            document_number INTEGER NOT NULL
-        );
-        """
+    # The files are private to a staging directory that is discarded on failure
+    # and published only whole, so they need no journal.
+    connection.execute("PRAGMA synchronous=OFF")
+    connection.execute("PRAGMA journal_mode=OFF")
+    connection.execute(
+        "ATTACH DATABASE ? AS wide", (str(directory / "documents.sqlite"),)
     )
-    from klab.corpus.split_assignments import split_policy
+    connection.execute("PRAGMA wide.synchronous=OFF")
+    connection.execute("PRAGMA wide.journal_mode=OFF")
+    connection.executescript(DEDUP_SCHEMA)
+    return connection
 
+
+def finish_index(connection: sqlite3.Connection, schema: str = "wide") -> None:
+    connection.execute(
+        f"CREATE INDEX {schema}.origins_by_key ON origins(method,origin,document_number)"
+    )
+    connection.execute(
+        f"CREATE INDEX {schema}.documents_source ON documents(source_id)"
+    )
+    connection.commit()
+
+
+def _index_prepared(
+    directory: Path, prepared: list[Path], project: Any, progress: BuildProgress
+) -> sqlite3.Connection:
+    from klab.corpus.pipeline import _origin_keys
+    from klab.corpus.split_assignments import assign_split, split_policy
+
+    connection = create_index(directory)
     policy = split_policy(project)
     from klab.corpus.dedup_policy import source_rank
 
@@ -548,43 +637,58 @@ def _index_prepared(
                 span = json.loads(raw_span)
                 if doc["document_id"] != span["record_id"]:
                     raise ValueError("prepared document/span identity mismatch")
-                split = assign_split(doc, policy)
-                cursor = connection.execute(
-                    "INSERT INTO documents (document_id,payload,span,split,source_id,source_family,document_kind,source_rank) VALUES (?,?,?,?,?,?,?,?)",
-                    (
-                        doc["document_id"],
-                        raw_doc.rstrip(b"\n"),
-                        raw_span.rstrip(b"\n"),
-                        split,
-                        doc["source_id"],
-                        doc["source_family"],
-                        doc["document_kind"],
-                        rank[doc["source_id"]],
-                    ),
-                )
-                number = cursor.lastrowid
                 origins = (
                     ("raw", doc["raw_content_sha256"]),
                     ("normalized", doc["content_sha256"]),
                     *(("canonical_origin", value) for value in _origin_keys(doc)),
                 )
-                connection.executemany(
-                    "INSERT INTO origins(method,origin,document_number) VALUES (?,?,?)",
-                    (
-                        (method, key, number)
+                insert_indexed(
+                    connection,
+                    doc,
+                    raw_doc.rstrip(b"\n"),
+                    raw_span.rstrip(b"\n"),
+                    assign_split(doc, policy),
+                    rank[doc["source_id"]],
+                    [
+                        (method, key)
                         for method, key in origins
                         if method in declared_keys
-                    ),
+                    ],
                 )
                 total += 1
                 progress.update(documents=1)
                 if total % 10_000 == 0:
                     connection.commit()
     connection.commit()
-    connection.execute(
-        "CREATE INDEX origins_by_key ON origins(method,origin,document_number)"
+    finish_index(connection)
+    return connection
+
+
+def open_dedup(index: Path, database: Path) -> sqlite3.Connection:
+    """A new decisions database over a read-only index, ready for `_deduplicate`.
+
+    `dedup`, the narrow table the passes read and write, lives in `database`;
+    `documents` and `origins` are read from the attached index, which is never
+    changed.
+    """
+    connection = sqlite3.connect(f"file:{quote(str(database))}", uri=True)
+    connection.execute("PRAGMA synchronous=OFF")
+    connection.execute("PRAGMA journal_mode=OFF")
+    connection.execute("PRAGMA temp_store=FILE")
+    connection.execute("PRAGMA cache_size=-65536")
+    for name, file in (("wide", "documents.sqlite"), ("narrow", "narrow.sqlite")):
+        connection.execute(
+            f"ATTACH DATABASE ? AS {name}",
+            (f"file:{quote(str(index / file))}?mode=ro",),
+        )
+    connection.executescript(
+        DEDUP_SCHEMA
+        + "INSERT INTO main.dedup (document_number,document_id,split,source_rank,"
+        "document_kind,metadata_only,rights_signature) SELECT document_number,"
+        "document_id,split,source_rank,document_kind,metadata_only,rights_signature "
+        "FROM narrow.dedup "
+        "ORDER BY document_number;"
     )
-    connection.execute("CREATE INDEX documents_source ON documents(source_id)")
     connection.commit()
     return connection
 
@@ -634,10 +738,8 @@ def _deduplicate(
         describe_failure,
         drop_reason,
         find_root,
-        is_metadata_only,
         ranked_choice,
         resolve_group,
-        rights_signature,
     )
 
     chain = policy.resolution == "chain_smallest_id"
@@ -646,18 +748,19 @@ def _deduplicate(
         for method in ("raw", "normalized", "canonical_origin")
         if method in policy.keys
     ]
-    total = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+    total = connection.execute("SELECT COUNT(*) FROM dedup").fetchone()[0]
     parents = array("I", range(total + 1))
+    progress.update(phase="dedup_groups")
 
     if chain:
-        connection.execute("UPDATE documents SET representative_id=document_id")
+        connection.execute("UPDATE dedup SET representative_id=document_id")
 
-    def members_query(with_payload: bool) -> str:
+    def members_query() -> str:
         return (
-            "SELECT d.rowid,d.document_id,d.split,d.source_rank,d.document_kind,"
-            + ("d.payload" if with_payload else "NULL")
-            + " FROM origins o JOIN documents d ON d.rowid=o.document_number "
-            "WHERE o.method=? AND o.origin=? ORDER BY d.document_id"
+            "SELECT x.document_number,x.document_id,x.split,x.source_rank,"
+            "x.document_kind,x.rights_signature FROM origins o "
+            "JOIN dedup x ON x.document_number=o.document_number "
+            "WHERE o.method=? AND o.origin=? ORDER BY x.document_id"
         )
 
     groups = 0
@@ -678,17 +781,15 @@ def _deduplicate(
                     split,
                     rank,
                     kind,
-                    payload,
-                ) in connection.execute(members_query(needs_rights), (method, key)):
+                    signature,
+                ) in connection.execute(members_query(), (method, key)):
                     members.append(
                         Member(
                             identifier,
                             split,
                             rank,
                             kind,
-                            rights_signature(json.loads(payload))
-                            if needs_rights
-                            else None,
+                            signature if needs_rights else None,
                         )
                     )
                     rows.append((number, identifier, split))
@@ -728,13 +829,13 @@ def _deduplicate(
                     if group.contaminated:
                         # Train copies follow the held-out document.
                         connection.executemany(
-                            "UPDATE documents SET representative_id=? WHERE rowid=?",
+                            "UPDATE dedup SET representative_id=? WHERE document_number=?",
                             ((group.representative, number) for number in train),
                         )
                         linked = [row[0] for row in rows if row[2] != "train"]
                     connection.executemany(
-                        "UPDATE documents SET "
-                        "representative_id=MIN(representative_id,?) WHERE rowid=?",
+                        "UPDATE dedup SET "
+                        "representative_id=MIN(representative_id,?) WHERE document_number=?",
                         ((group.representative, number) for number in linked),
                     )
                 else:
@@ -747,41 +848,52 @@ def _deduplicate(
         os.fsync(output.fileno())
 
     if chain:
+        connection.commit()
+        progress.update(phase="dedup_compress")
         # Every link decreases lexicographically (train copies link to a held-out
         # document, which never links back), so compression terminates without an
-        # in-memory union table.
+        # in-memory union table. Only documents that point elsewhere are touched.
         while True:
             changed = connection.execute(
-                "UPDATE documents SET representative_id=(SELECT p.representative_id "
-                "FROM documents p WHERE p.document_id=documents.representative_id) "
-                "WHERE representative_id<>(SELECT p.representative_id FROM documents p "
-                "WHERE p.document_id=documents.representative_id)"
+                "UPDATE dedup SET representative_id=(SELECT p.representative_id "
+                "FROM dedup p WHERE p.document_id=dedup.representative_id) "
+                "WHERE document_id<>representative_id AND representative_id<>"
+                "(SELECT p.representative_id FROM dedup p "
+                "WHERE p.document_id=dedup.representative_id)"
             ).rowcount
+            progress.update(documents=changed)
             if not changed:
                 break
+        connection.commit()
+        progress.update(phase="dedup_reasons")
+        # Only a metadata-only document or one that is not its own representative
+        # can have a drop reason; every other row stays NULL and is not written.
         dropped = 0
-        for (
-            number,
-            identifier,
-            representative,
-            payload,
-            split,
-            kept_split,
-        ) in connection.execute(
-            "SELECT d.rowid,d.document_id,d.representative_id,d.payload,d.split,"
-            "p.split FROM documents d JOIN documents p "
-            "ON p.document_id=d.representative_id ORDER BY d.rowid"
-        ):
-            reason = drop_reason(
-                metadata_only=is_metadata_only(json.loads(payload)),
-                split=split,
-                is_representative=identifier == representative,
-                representative_split=kept_split,
+        last = 0
+        while rows := connection.execute(
+            "SELECT x.document_number,x.metadata_only,x.split,x.document_id,"
+            "x.representative_id,p.split FROM dedup x JOIN dedup p "
+            "ON p.document_id=x.representative_id WHERE x.document_number>? "
+            "AND (x.metadata_only=1 OR x.document_id<>x.representative_id) "
+            "ORDER BY x.document_number LIMIT 100000",
+            (last,),
+        ).fetchall():
+            updates = []
+            for number, metadata_only, split, identifier, representative, kept in rows:
+                reason = drop_reason(
+                    metadata_only=bool(metadata_only),
+                    split=split,
+                    is_representative=identifier == representative,
+                    representative_split=kept,
+                )
+                if reason is not None:
+                    updates.append((reason, number))
+            connection.executemany(
+                "UPDATE dedup SET drop_reason=? WHERE document_number=?", updates
             )
-            dropped += reason is not None
-            connection.execute(
-                "UPDATE documents SET drop_reason=? WHERE rowid=?", (reason, number)
-            )
+            dropped += len(updates)
+            last = rows[-1][0]
+            progress.update(documents=len(rows))
         connection.commit()
         return groups, dropped
 
@@ -791,14 +903,15 @@ def _deduplicate(
     winner: dict[int, tuple[Any, ...]] = {}
     heldout_mask: dict[int, int] = defaultdict(int)
     cleaning_mask: dict[int, int] = defaultdict(int)
-    for number, split, payload in connection.execute(
-        "SELECT rowid,split,payload FROM documents ORDER BY rowid"
+    progress.update(phase="dedup_components")
+    for number, split, metadata_only in connection.execute(
+        "SELECT document_number,split,metadata_only FROM dedup ORDER BY document_number"
     ):
         component = find_root(parents, number)
         heldout_mask[component] |= (
             1 if split == "validation" else 2 if split == "test" else 0
         )
-        cleaning_mask[component] |= 2 if is_metadata_only(json.loads(payload)) else 1
+        cleaning_mask[component] |= 2 if metadata_only else 1
     for masks, ok, message in (
         (heldout_mask, lambda mask: mask != 3, PAGE_OVERLAP),
         (cleaning_mask, lambda mask: mask != 3, CLEANING_CONFLICT),
@@ -808,7 +921,8 @@ def _deduplicate(
             members = [
                 (identifier, split)
                 for number, identifier, split in connection.execute(
-                    "SELECT rowid,document_id,split FROM documents ORDER BY rowid"
+                    "SELECT document_number,document_id,split FROM dedup "
+                    "ORDER BY document_number"
                 )
                 if find_root(parents, number) == bad
             ]
@@ -822,8 +936,8 @@ def _deduplicate(
             write_json(diagnostics, {"error": text})
             raise ValueError(text)
     for number, identifier, split, rank, kind in connection.execute(
-        "SELECT rowid,document_id,split,source_rank,document_kind FROM documents "
-        "ORDER BY rowid"
+        "SELECT document_number,document_id,split,source_rank,document_kind "
+        "FROM dedup ORDER BY document_number"
     ):
         component = find_root(parents, number)
         preferred_split = (
@@ -838,12 +952,13 @@ def _deduplicate(
             winner[component] = (*choice, identifier, split)
     dropped = 0
     updates = []
-    for number, identifier, split, payload in connection.execute(
-        "SELECT rowid,document_id,split,payload FROM documents ORDER BY rowid"
+    for number, identifier, split, metadata_only in connection.execute(
+        "SELECT document_number,document_id,split,metadata_only FROM dedup "
+        "ORDER BY document_number"
     ):
         selected, retained_split = winner[find_root(parents, number)][4:6]
         reason = drop_reason(
-            metadata_only=is_metadata_only(json.loads(payload)),
+            metadata_only=bool(metadata_only),
             split=split,
             is_representative=selected == identifier,
             representative_split=retained_split,
@@ -852,14 +967,16 @@ def _deduplicate(
         updates.append((selected, reason, number))
         if len(updates) >= 10_000:
             connection.executemany(
-                "UPDATE documents SET representative_id=?,drop_reason=? WHERE rowid=?",
+                "UPDATE dedup SET representative_id=?,drop_reason=? "
+                "WHERE document_number=?",
                 updates,
             )
             connection.commit()
             updates.clear()
     if updates:
         connection.executemany(
-            "UPDATE documents SET representative_id=?,drop_reason=? WHERE rowid=?",
+            "UPDATE dedup SET representative_id=?,drop_reason=? "
+            "WHERE document_number=?",
             updates,
         )
         connection.commit()
@@ -956,7 +1073,9 @@ class _SQLBuildRows:
 
     def documents(self):
         yield from self.connection.execute(
-            "SELECT payload,split,representative_id,drop_reason FROM documents ORDER BY document_id"
+            "SELECT d.payload,d.split,x.representative_id,x.drop_reason "
+            "FROM documents d JOIN dedup x ON x.document_number=d.rowid "
+            "ORDER BY d.document_id"
         )
 
     def family_splits(self):
@@ -1213,6 +1332,18 @@ _PRUNE_ON_PUBLISH = 2
 
 def _open_read_only(database: Path):
     return closing(sqlite3.connect(f"file:{quote(str(database))}?mode=ro", uri=True))
+
+
+def _open_decided(index_dir: Path, dedup_dir: Path):
+    """Read-only view of the index joined to its deduplication decisions."""
+    connection = sqlite3.connect(
+        f"file:{quote(str(dedup_dir / 'dedup.sqlite'))}?mode=ro", uri=True
+    )
+    connection.execute(
+        "ATTACH DATABASE ? AS indexed",
+        (f"file:{quote(str(index_dir / 'documents.sqlite'))}?mode=ro",),
+    )
+    return closing(connection)
 
 
 def _stage_inputs(project: Any, prepared: list[Path]) -> dict[str, dict[str, Any]]:
@@ -1502,9 +1633,7 @@ def build_large(
     progress.update(phase="indexing")
 
     def index_stage(staging: Path, result: dict[str, Any]) -> None:
-        connection = _index_prepared(
-            staging / "documents.sqlite", prepared, project, progress
-        )
+        connection = _index_prepared(staging, prepared, project, progress)
         try:
             result["documents"] = connection.execute(
                 "SELECT COUNT(*) FROM documents"
@@ -1539,8 +1668,8 @@ def build_large(
     dedup_inputs = {**stage_inputs["dedup"], "index": index_dir.name}
 
     def dedup_stage(staging: Path, result: dict[str, Any]) -> None:
-        shutil.copyfile(index_dir / "documents.sqlite", staging / "documents.sqlite")
-        connection = sqlite3.connect(staging / "documents.sqlite")
+        # The decisions are a narrow table beside the index, not a copy of it.
+        connection = open_dedup(index_dir, staging / "dedup.sqlite")
         try:
             with tempfile.TemporaryDirectory(prefix=".rejected-", dir=root) as scratch:
                 rejected_path = Path(scratch) / "rejected.jsonl"
@@ -1566,7 +1695,7 @@ def build_large(
     stages.prune("dedup", keep=_PRUNE_ON_PUBLISH, protect=dedup_dir.name)
     progress.update(phase="writing_views")
     with (
-        _open_read_only(dedup_dir / "documents.sqlite") as connection,
+        _open_decided(index_dir, dedup_dir) as connection,
         tempfile.TemporaryDirectory(prefix=".build-", dir=root) as temporary,
     ):
         staging = Path(temporary)
