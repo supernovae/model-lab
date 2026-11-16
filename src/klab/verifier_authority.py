@@ -85,11 +85,6 @@ _CLOSURES: dict[str, tuple[str, ...]] = {
         "config.models",
     ),
     "source_snapshot": _ARTIFACT + _CORPUS,
-    "corpus_build": _ARTIFACT + _CORPUS,
-    "corpus_release": _ARTIFACT + _CORPUS,
-    "corpus_export": _ARTIFACT
-    + _CORPUS
-    + ("corpus.export", "config.loading", "data.tokenizer"),
     "tokenizer": _ARTIFACT
     + _CORPUS
     + (
@@ -214,7 +209,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "experiments.artifacts",
         "data.sources",
-    ): "9354fdbb38a405e6230e9fe5142fca72dcfa3f448abefc4de158fa3e193557e4",
+    ): "27a9d26b825f48657ee046a98ff97dcd694dc5ca33d4e8064221ebbb44b3a06d",
     (
         "data.packing",
         "corpus.mixture",
@@ -290,15 +285,15 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "experiments.artifacts",
         "corpus.acquisition",
-    ): "b180e30b88fbee9d9304009a57f499a6ff2f6eb760a5ea171131038b9092f3db",
+    ): "3369670fe918831ba9d99fb4a2d084a9ea9fc55d0469ee862062a7d47c699c48",
     (
         "experiments.artifacts",
         "corpus.export",
-    ): "65f10b6fecfccd25dae0cf40a12705242de6d71ffb18710c639d713a026037dd",
+    ): "9b66ea978d6e70a0916337303e2380c80fee858efd7a0fdb03a5c451299d68a1",
     (
         "experiments.artifacts",
         "corpus.release",
-    ): "0b73a1e79b98751471fe107adbb9b770e7500210911e2eeb214b9814acd2949e",
+    ): "d1a440ca462daeea513b392ca8ba5c22b02fc909a312530a843cd5c60d6af15e",
     (
         "experiments.artifacts",
         "data.packing",
@@ -306,15 +301,15 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "experiments.artifacts",
         "data.tokenizer",
-    ): "ca3d690025dcc61773bc027ab652a774db7803b409d82565799d4b53de33271b",
+    ): "d4a677814e588009561ea71e58f5e12399f5a2129017877a6175203301b8469f",
     (
         "experiments.artifacts",
         "staging",
-    ): "1251f82759d06e3151e6ac8a10341451fde9d112da98ab235035b1d7df5d05c0",
+    ): "87f613c76beb38d9252ac36ed7dc49817b461886865981a7dd71e85dd5ef2e28",
     (
         "experiments.artifacts",
         "training.checkpoints",
-    ): "86d8022b8d245568476766a0128d631528c069e210823c35e28f04c7e996d563",
+    ): "2d33655ebbf040bc6d43cf5568a4f9360d86b7448d1658b328a9c97b06fd3ad3",
     (
         "training.manifest",
         "runtime",
@@ -322,7 +317,7 @@ _EXCLUSION_SIGNATURES: dict[tuple[str, str], str] = {
     (
         "verification_proofs",
         "experiments.artifacts",
-    ): "3d50379d29878ab1369778d31ff3f5ec2b118f0f3f53c6d30dc5b71703abdcfb",
+    ): "854afced9305af4bdfcb6ee443aa849e659af72ae4ab5d3fd9c0ce5f3e0d9782",
 }
 
 
