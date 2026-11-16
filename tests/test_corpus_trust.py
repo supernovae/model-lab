@@ -353,3 +353,46 @@ def test_coverage_refuses_a_config_that_did_not_prepare_the_data(
     with pytest.raises(SystemExit):
         main()
     assert json.loads(capsys.readouterr().out)["status"] == "blocked"
+
+
+def test_a_default_decision_accepts_a_class_and_exceptions_override_it() -> None:
+    from klab.corpus.near_duplicates import check_decisions
+
+    def pair(left: str, right: str) -> dict:
+        return {"left_document_id": left, "right_document_id": right}
+
+    report = {
+        "release_id": "r",
+        "candidates": [pair("a", "b"), pair("c", "d"), pair("e", "f")],
+    }
+    base = {
+        "schema_version": 1,
+        "release_id": "r",
+        "report_sha256": "h",
+        "accepted_by": "reviewer",
+        "accepted_on": "2026-11-16",
+    }
+    # Without a default, unlisted pairs are undecided.
+    assert check_decisions(report, "h", base)["undecided_count"] == 3
+    default = {"decision": "kept", "reason": "templated boilerplate"}
+    result = check_decisions(
+        report,
+        "h",
+        {
+            **base,
+            "default": default,
+            "decisions": [{"documents": ["c", "d"], "decision": "dropped"}],
+        },
+    )
+    assert result["problems"] == []
+    assert (result["reported_pairs"], result["decided_pairs"]) == (3, 3)
+    assert (result["defaulted_pairs"], result["undecided_count"]) == (2, 0)
+    # A default must be `kept` with a reason, and does not hide bad entries.
+    for bad in (
+        {"decision": "dropped", "reason": "x"},
+        {"decision": "kept"},
+        {"decision": "kept", "reason": "  "},
+    ):
+        result = check_decisions(report, "h", {**base, "default": bad})
+        assert "default decision must be `kept` with a reason" in result["problems"]
+        assert result["undecided_count"] == 3
