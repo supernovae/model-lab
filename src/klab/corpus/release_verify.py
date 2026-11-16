@@ -121,13 +121,8 @@ def hash_inventory(
     inventory: dict[str, Any],
     resolve: Callable[[Path, str], Path],
     progress: BuildProgress | None = None,
-    skip: frozenset[str] = frozenset(),
 ) -> None:
-    """Check every inventoried file's size and SHA-256, concurrently.
-
-    Files in `skip` were hashed by the caller while writing them, so only their
-    presence and size are rechecked.
-    """
+    """Check every inventoried file's size and SHA-256, concurrently."""
 
     lock = threading.Lock()
 
@@ -141,9 +136,6 @@ def hash_inventory(
         entry = inventory[name]
         if not path.is_file() or path.stat().st_size != entry["size"]:
             raise ValueError(f"tampered artifact: {name}")
-        if name in skip:
-            advance(entry["size"])
-            return
         # sha256_file has no byte callback; a multi-gigabyte file must not go
         # minutes without a progress line.
         digest = hashlib.sha256()

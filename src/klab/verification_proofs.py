@@ -16,6 +16,7 @@ import pwd
 import secrets
 import stat
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -604,45 +605,87 @@ class ProofStore:
                     break
             return
         try:
-            key = self._key(create=True)
-            if key is None:
-                self.record_event(binding, "key_publication_unavailable")
-                return
-            self.directory.parent.mkdir(mode=0o700, exist_ok=True)
-            if not _trusted(self.root, self.directory.parent):
-                return
-            self.directory.mkdir(mode=0o700, exist_ok=True)
-            if not _trusted(self.root, self.directory, private=True):
-                return
-            # Authority was computed before any publication or key creation.
-            receipt = self.receipt_path(binding)
-            temporary = self.directory / (".proof-" + secrets.token_hex(16))
-            try:
-                with temporary.open("xb") as stream:
-                    os.chmod(temporary, 0o600)
-                    stream.write(
-                        canonical_json(
-                            {
-                                "proof": payload,
-                                "hmac": hmac.new(
-                                    key, canonical_json(payload), hashlib.sha256
-                                ).hexdigest(),
-                            }
-                        )
-                        + b"\n"
-                    )
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                if not self._safe_binding(binding):
-                    raise ValueError("artifact changed during proof publication")
-                os.replace(temporary, receipt)
-                _sync(self.directory)
-                self.recorded += 1
-            finally:
-                temporary.unlink(missing_ok=True)
+            self.publish(
+                self.receipt_path(binding),
+                payload,
+                before_replace=lambda: self._safe_binding(binding),
+                event=binding,
+            )
         except OSError:
             # Operational cache unavailable: independently cold-verified result stands.
             return
+
+    def publish(
+        self,
+        receipt: Path,
+        payload: dict[str, object],
+        *,
+        before_replace: Callable[[], bool] = lambda: True,
+        event: dict[str, object] | None = None,
+    ) -> bool:
+        """Sign `payload` and atomically store it as `receipt` under the trusted store.
+
+        `before_replace` runs after the file is durable and before it becomes
+        visible; returning False (the checked artifact moved) abandons it. Returns
+        whether a receipt was published, and records why not against `event`.
+        """
+        if self.read_only:
+            return False
+        key = self._key(create=True)
+        if key is None:
+            self.record_event(event or {}, "key_publication_unavailable")
+            return False
+        self.directory.parent.mkdir(mode=0o700, exist_ok=True)
+        if not _trusted(self.root, self.directory.parent):
+            return False
+        self.directory.mkdir(mode=0o700, exist_ok=True)
+        if not _trusted(self.root, self.directory, private=True):
+            return False
+        temporary = self.directory / (".proof-" + secrets.token_hex(16))
+        try:
+            with temporary.open("xb") as stream:
+                os.chmod(temporary, 0o600)
+                stream.write(
+                    canonical_json(
+                        {
+                            "proof": payload,
+                            "hmac": hmac.new(
+                                key, canonical_json(payload), hashlib.sha256
+                            ).hexdigest(),
+                        }
+                    )
+                    + b"\n"
+                )
+                stream.flush()
+                os.fsync(stream.fileno())
+            if not before_replace():
+                raise ValueError("artifact changed during proof publication")
+            os.replace(temporary, receipt)
+            _sync(self.directory)
+            self.recorded += 1
+            return True
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def load(self, receipt: Path) -> dict[str, object] | None:
+        """The signed payload stored at `receipt`, or None when absent, untrusted or forged."""
+        try:
+            if not _trusted(self.root, self.directory, private=True):
+                return None
+            if not _trusted(self.root, receipt, private=True):
+                return None
+            key = self._key(create=False)
+            if key is None or receipt.stat().st_size > 16 * 1024 * 1024:
+                return None
+            raw = json.loads(receipt.read_bytes())
+            proof = raw.get("proof") if isinstance(raw, dict) else None
+            if isinstance(proof, dict) and isinstance(raw.get("hmac"), str):
+                expected = hmac.new(key, canonical_json(proof), hashlib.sha256)
+                if hmac.compare_digest(raw["hmac"], expected.hexdigest()):
+                    return proof
+        except OSError, ValueError, TypeError:
+            pass
+        return None
 
 
 def _sync(path: Path) -> None:
@@ -656,9 +699,10 @@ def _sync(path: Path) -> None:
 def verification_options(
     root: Path, *, cold: bool = False, read_only: bool = False
 ) -> dict[str, object]:
-    if cold or not _trusted(Path(root), Path(root)):
+    """Receipt placement for a command: reuse them, or with `cold` re-verify and refresh them."""
+    if not _trusted(Path(root), Path(root)):
         return {"proof_store": None, "verification_mode": "cold"}
     return {
         "proof_store": ProofStore(root, read_only=read_only),
-        "verification_mode": "verified_reuse",
+        "verification_mode": "cold" if cold else "verified_reuse",
     }

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -16,7 +20,14 @@ from klab.corpus import release_verify
 from klab.corpus.acquisition import acquire
 from klab.corpus.pipeline import build
 from klab.corpus.project import load_project
-from klab.corpus.release import audit, freeze, verify_release
+from klab.corpus.release import (
+    audit,
+    describe,
+    freeze,
+    sample,
+    sources,
+    verify_release,
+)
 from klab.corpus.release_verify import verification_settings
 
 TEXTS = {
@@ -229,40 +240,129 @@ def test_scratch_and_progress_live_where_the_operator_points(
     assert not list(scratch.glob(".verify-corpus-*"))
 
 
-def test_receipt_is_reused_until_the_release_changes(
-    release: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from klab.verification_proofs import verification_options
-
-    work = release.parents[3]
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "settings"))
-    cold_runs = []
+@pytest.fixture
+def cold_runs(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Every full verification of a release, so a test can count what was re-read."""
+    runs: list[Path] = []
     original = release_module._verify_release_cold
     monkeypatch.setattr(
         release_module,
         "_verify_release_cold",
-        lambda *args, **kwargs: (cold_runs.append(args[0]), original(*args, **kwargs))[
-            1
-        ],
+        lambda *args, **kwargs: (runs.append(args[0]), original(*args, **kwargs))[1],
     )
+    return runs
+
+
+@pytest.fixture
+def receipts(
+    release: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Path]:
+    """The release's work root with a private proof store, and its receipt files."""
+    work = release.parents[3]
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "settings"))
     work.chmod(0o700)
-    with verification_settings(**verification_options(work)):
-        assert audit(release) == audit(release)
-    assert len(cold_runs) == 1, "the second audit must reuse the signed receipt"
-    with verification_settings(**verification_options(work, cold=True)):
+    yield work
+    shutil.rmtree(work / "cache", ignore_errors=True)
+
+
+def _release_receipts(work: Path) -> list[Path]:
+    return sorted((work / "cache/verification-v1").glob("release-*.json"))
+
+
+def test_one_verification_serves_every_later_command(
+    release: Path, receipts: Path, cold_runs: list[Path], capsys
+) -> None:
+    from klab.verification_proofs import verification_options
+
+    with verification_settings(echo=sys.stderr, **verification_options(receipts)):
+        first = audit(release)
+        assert len(cold_runs) == 1 and len(_release_receipts(receipts)) == 1
+        assert sources(release) and sample(release) and describe(release)
+        assert audit(release) == first
+    assert len(cold_runs) == 1, "later commands must verify by receipt"
+    assert capsys.readouterr().err.count("verified by receipt") == 4
+    with verification_settings(**verification_options(receipts, cold=True)):
         audit(release)
     assert len(cold_runs) == 2, "--cold ignores receipts"
+
+
+@pytest.mark.parametrize("cause", ["rewritten", "forged", "verifier changed"])
+def test_receipt_is_refused_when_its_cause_no_longer_holds(
+    release: Path,
+    receipts: Path,
+    cold_runs: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+    cause: str,
+) -> None:
+    from klab.corpus import release_receipt
+    from klab.verification_proofs import verification_options
+
+    with verification_settings(**verification_options(receipts)):
+        audit(release)
+        victim = release / "report.md"
+        if cause == "rewritten":
+            # Same bytes, same size: only the inode metadata says it was touched.
+            victim.write_bytes(victim.read_bytes())
+        elif cause == "forged":
+            path = _release_receipts(receipts)[0]
+            path.write_bytes(path.read_bytes().replace(b'"id"', b'"ID"'))
+        else:
+            monkeypatch.setattr(
+                release_receipt, "verifier_digest", lambda kind: "0" * 64
+            )
+        audit(release)
+    assert len(cold_runs) == 2
+
+
+def test_tampered_file_is_found_through_a_receipt(
+    release: Path, receipts: Path, cold_runs: list[Path]
+) -> None:
+    from klab.verification_proofs import verification_options
+
     victim = release / "report.md"
-    original_bytes = victim.read_bytes()
+    original = victim.read_bytes()
+    with verification_settings(**verification_options(receipts)):
+        audit(release)
+        try:
+            victim.write_bytes(original + b"x")
+            with pytest.raises(ValueError, match="tampered"):
+                audit(release)
+        finally:
+            victim.write_bytes(original)
+        # Restoring the bytes is a change too: verified again, never trusted blind.
+        audit(release)
+    assert len(cold_runs) == 3
+
+
+def test_files_a_receipt_cannot_vouch_for_are_verified_every_time(
+    release: Path, receipts: Path, cold_runs: list[Path], capsys
+) -> None:
+    from klab.verification_proofs import verification_options
+
+    link = release / "linked.tmp"
+    os.link(release / "report.md", link)
     try:
-        victim.write_bytes(original_bytes + b"x")
         with (
-            verification_settings(**verification_options(work)),
-            pytest.raises(ValueError, match="tampered"),
+            verification_settings(echo=sys.stderr, **verification_options(receipts)),
+            pytest.raises(ValueError),
         ):
             audit(release)
     finally:
-        victim.write_bytes(original_bytes)
+        link.unlink()
+    assert not _release_receipts(receipts)
+    assert "another hard link" in capsys.readouterr().err
+
+
+def test_receipt_survives_changes_to_code_that_does_not_verify() -> None:
+    from klab.corpus.release_receipt import NOT_VERIFICATION
+    from klab.verifier_authority import local_import_closure
+
+    closure = local_import_closure(
+        ("corpus.release",), within="corpus", exclude=NOT_VERIFICATION
+    )
+    assert "corpus.release_verify" in closure and "corpus.acquisition" in closure
+    for unrelated in ("near_duplicates", "export", "cli", "mixture", "measurement"):
+        assert f"corpus.{unrelated}" not in closure
 
 
 def test_audit_command_reports_progress_and_honours_scratch(

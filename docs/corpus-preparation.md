@@ -438,10 +438,12 @@ hashing the bytes as it writes them and refusing any file that differs from the
 build's recorded digest, so a build file that changes after verification is
 never published. It uses a copy-on-write clone where the filesystem supports one
 (Btrfs, XFS) and a plain copy otherwise. It never hard-links: a link would let a
-later write to the build change the release. The published release is then
-verified without hashing those files a second time, and its progress goes to
-`--scratch-dir` like any other verification
-([Verification cost, scratch and receipts](#verification-cost-scratch-and-receipts)).
+later write to the build change the release. The release is not verified a
+second time: it is the verified build's files, each hashed against the build as
+it was copied, plus a manifest, so `freeze` records the release's receipt and
+every later command reuses it ([Verification cost, scratch and
+receipts](#verification-cost-scratch-and-receipts)). Progress goes to
+`--scratch-dir`.
 
 `release.build.strategy` chooses the builder: `auto` (the default) uses the
 disk-backed builder for a language-model-only release without a `fraction`, so
@@ -784,15 +786,16 @@ None of them is a quality score.
 
 ### Verification cost, scratch and receipts
 
-Every command that reads a release first verifies it, and verification is the
-same cold check wherever it runs: each file's size and SHA-256 against the
-manifest, then every document, span, lineage and view row against the pinned
-source snapshots. It runs on several processes and keeps only identities and
-byte offsets in a disposable index, so memory stays bounded and the index is a
-small fraction of the release, not a copy of it. A language-model-only release
-with a reviewed admission or a `fraction`, and any release with chat views,
-still uses the row-store verifier, whose index can be as large as the release's
-documents.
+A release is verified from its bytes once. Every command that reads a release
+then checks a signed receipt instead: `freeze` records one, and so does any
+verification that had none. A verification checks each file's size and SHA-256
+against the manifest, then every stage output, document, span, lineage and view
+row against the pinned source snapshots. It runs on several processes and keeps
+only identities and byte offsets in a disposable index, so memory stays bounded
+and the index is a small fraction of the release, not a copy of it. A
+language-model-only release with a reviewed admission or a `fraction`, and any
+release with chat views, still uses the row-store verifier, whose index can be as
+large as the release's documents.
 
 ```sh
 klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
@@ -810,18 +813,35 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   documents and MB per second and an estimated time remaining for the phase.
   Phases: `hash_files`, `stage_receipts`, `snapshots`, `spans`, `documents`,
   `raw_replay`, `lineage`, `stage:<id>`, `view:<split>`.
-- **Receipts.** The first successful verification of an immutable release writes
-  a signed receipt under the work directory, bound to the stat fingerprint of
-  every release and snapshot file. `audit`, `describe`, `sources`, `sample`,
-  `review`, `lineage`, `publication`, `near-duplicates`, `export`,
-  `materialize-mixture` and the other release readers reuse it, as do `acquire` and `build` for the source
-  snapshots they read, so a rebuild or a resumed build does not hash an
-  unchanged snapshot again and a release is verified from its bytes once, not
-  once per command. Any change to a file invalidates the receipt: a snapshot
-  with one changed byte is hashed and refused. `--cold` (also on `acquire` and
-  `build`) ignores receipts and verifies from the bytes.
+- **Receipts.** The receipt names the release ID, the verifier that accepted
+  it and a digest of the stat index (device, inode, mode, size, mtime and ctime)
+  of every file in the release and in the snapshots it cites. A command that
+  finds a matching receipt makes one `lstat` call per file and reads no bytes:
+  tens of thousands of files take seconds, however large the release. `audit`,
+  `describe`, `sources`, `sample`, `review`, `lineage`, `publication`,
+  `near-duplicates`, `export`, `derive-family-inventory`, `materialize-mixture`,
+  `verify-mixture`, `preflight` and the training gate all use it, and each prints
+  `release ID: verified by receipt` or `verified from the bytes in N s`. `build`
+  and `export` have receipts of their own.
+  The receipt is refused, and the release verified from its bytes and a new
+  receipt recorded, when any file was written, replaced, added or removed (an
+  edit that restores the modification time still changes ctime), when the
+  verifier changed, when the receipt does not carry this host's key, or when a
+  file has another hard link or is writable by others. The verifier is the code
+  in `corpus.release` and what it imports within the corpus package (not the
+  command line, the near-duplicate screen, the exporter, the measurement
+  or the trainer), so editing those does not unverify a release.
+  Receipts trust the filesystem's own metadata and the key under your
+  configuration directory: they are not protection against an account that can
+  write both. `--cold` (also on `acquire` and `build`) ignores receipts, verifies
+  every byte and refreshes the receipt; use it on `audit` after copying or
+  restoring a release, or when you want an independent deep check.
   Receipts need a work directory owned by you and not writable by others, and
-  files with a single hard link.
+  files with a single hard link; when they cannot be recorded the command says
+  why and verifies every time.
+
+`audit` verifies exactly what `freeze` did and nothing more; it prints the build
+audit that was written with the release. Run it for that audit, not to verify.
 
 `near-duplicates` compares every document, including dropped ones, against the
 other splits by three-word shingles and reports pairs at Jaccard 0.65 or more,
@@ -897,8 +917,8 @@ checks all three, and that the screen covered every document of this release.
 | `build` normalize | yes: per-file receipted shards | files being written |
 | `build` index, dedup | yes: receipted stage outputs ([resume](#resume-a-failed-build)) | the stage that was running |
 | `build` views and publish | no: one pass, published by one rename | that pass (about 25 min at 6.7M documents) |
-| `freeze` | no: copies into a staging directory, then renames | the copy and its verification |
-| `audit`, `describe`, `sources`, release readers | no, but a successful verification is a receipt that later commands reuse | one cold verification |
+| `freeze` | no: copies into a staging directory, then renames | the copy |
+| `audit`, `describe`, `sources`, release readers | no, but a successful verification is a receipt that later commands reuse | one verification from the bytes |
 | `export` | no: staged, then renamed | the export |
 | `near-duplicates` | yes, by training-document offset | the documents since the last checkpoint |
 | `materialize-mixture` | yes: committed segments | the segment in progress |

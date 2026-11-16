@@ -19,6 +19,7 @@ from klab.corpus.bounded_metadata import metadata_operation, read_metadata
 from klab.corpus.jsonl_records import iter_rows, read_rows
 from klab.corpus.project import NormalizerOptions
 from klab.corpus.release_copy import copy_inventory
+from klab.corpus.release_receipt import receipt_first
 from klab.corpus.release_verify import (
     chunk_ranges,
     current_settings,
@@ -29,6 +30,7 @@ from klab.corpus.release_verify import (
     run_tasks,
     scratch_root,
 )
+from klab.experiments.artifacts import snapshot_dependencies
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
@@ -38,10 +40,10 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class _VerifiedRelease:
-    """Declared-policy proof valid only while its typed closure is unchanged."""
+    """A release verified in this operation and the stat fingerprint it was verified at."""
 
     manifest: dict[str, Any]
-    closure_key: tuple[object, ...]
+    fingerprint: str
 
 
 _verified_releases: ContextVar[dict[Path, _VerifiedRelease] | None] = ContextVar(
@@ -55,9 +57,15 @@ def _verification_operation():
     if _verified_releases.get() is not None:
         yield
         return
-    token, snapshots = _verified_releases.set({}), _snapshot_receipts.set({})
+    from klab.corpus.release_receipt import fingerprint
+
+    verified: dict[Path, _VerifiedRelease] = {}
+    token, snapshots = _verified_releases.set(verified), _snapshot_receipts.set({})
     try:
         yield
+        for path, proof in verified.items():
+            if fingerprint(path) != proof.fingerprint:
+                raise ValueError("release changed during verification operation")
     finally:
         _snapshot_receipts.reset(snapshots)
         _verified_releases.reset(token)
@@ -102,7 +110,6 @@ def _files(
     root: Path,
     inventory: dict[str, Any],
     progress: BuildProgress | None = None,
-    hashed: frozenset[str] = frozenset(),
 ) -> None:
     if not isinstance(inventory, dict):
         raise TypeError("missing artifact inventory")
@@ -118,7 +125,7 @@ def _files(
             "hash_files",
             expected_input_bytes=sum(entry["size"] for entry in inventory.values()),
         )
-    hash_inventory(root, inventory, _safe, progress, skip=hashed)
+    hash_inventory(root, inventory, _safe, progress)
 
 
 def _verify_rights_files(
@@ -1867,38 +1874,24 @@ def verify_build(
     *,
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
-    _domain_cold: bool = False,
 ) -> dict[str, Any]:
-    """Verify staged build and its pinned snapshots."""
+    """Verify staged build and its pinned snapshots, by receipt when one still holds."""
     path = Path(path).resolve()
     with _verification_operation():
-        if (
-            not _domain_cold
-            and proof_store is not None
-            and verification_mode == "verified_reuse"
-        ):
-            from klab.experiments.artifacts import Artifact, verify_artifact
-
-            manifest = _load(path / "build.json")
-            verify_artifact(
-                Artifact(
-                    kind="corpus_build",
-                    version=manifest["schema_version"],
-                    producer="klab",
-                    identifier=manifest["build_id"],
-                    sha256=manifest["build_id"],
-                    path=str(path),
-                ),
-                path / "build.json",
-                proof_store=proof_store,
-                verification_mode=verification_mode,
-            )
-            return manifest
-        return _verify_build_cold(
+        manifest = _load(path / "build.json")
+        verified, _ = receipt_first(
+            "build",
             path,
-            proof_store=proof_store,
-            verification_mode=verification_mode,
+            manifest["build_id"],
+            list(snapshot_dependencies(path, "build.json")),
+            proof_store,
+            verification_mode,
+            lambda: _verify_build_cold(
+                path, proof_store=proof_store, verification_mode=verification_mode
+            ),
+            lambda: manifest,
         )
+        return verified
 
 
 def _verify_build_cold(
@@ -1997,8 +1990,7 @@ def freeze(
         from klab.corpus.completed_release import freeze_retained
 
         return freeze_retained(build_dir, work_root)
-    # One operation, so a snapshot authenticated for the build is not hashed again
-    # when the staged release is verified.
+    # One operation, so a snapshot authenticated for the build is hashed once.
     with _verification_operation():
         return _freeze(build_dir, work_root, proof_store, verification_mode)
 
@@ -2062,14 +2054,6 @@ def _freeze(
             stream.write(canonical_json({**payload, "release_id": release_id}) + b"\n")
             stream.flush()
             os.fsync(stream.fileno())
-        verify_release(
-            staging,
-            expected_id=release_id,
-            proof_store=proof_store,
-            verification_mode=verification_mode,
-            _domain_cold=True,
-            _hashed=frozenset(payload["files"]),
-        )
         from klab.result_publication import sync_directory
         from klab.safe_io import rename_noreplace
 
@@ -2086,7 +2070,34 @@ def _freeze(
                 proof_store=proof_store,
                 verification_mode=verification_mode,
             )
+        else:
+            _record_frozen(destination, release_id, proof_store)
     return destination
+
+
+def _record_frozen(
+    release: Path,
+    release_id: str,
+    proof_store: ProofStore | None,
+) -> None:
+    """Receipt a release published from a build that was verified, without verifying it again.
+
+    The published files are the build's inventory, each hashed against it as it
+    was copied, plus the manifest this function's caller just wrote, so there is
+    nothing left to check that verifying the build did not.
+    """
+    if proof_store is None:
+        return
+    from klab.corpus import release_receipt
+    from klab.experiments.artifacts import snapshot_dependencies
+
+    release_receipt.record(
+        proof_store,
+        "release",
+        release,
+        release_id,
+        list(snapshot_dependencies(release, "manifest.json")),
+    )
 
 
 def verify_release(
@@ -2095,14 +2106,12 @@ def verify_release(
     expected_id: str | None = None,
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode | None = None,
-    _domain_cold: bool = False,
-    _hashed: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
-    """Verify a release, reusing a signed receipt when the caller or operator allows.
+    """Verify a release, by signed receipt when one still holds and the mode allows.
 
     A caller passing `verification_mode` decides for itself. Otherwise the
     receipt store chosen by `verification_settings` applies, which is how every
-    command that reads a release shares one cold verification.
+    command that reads a release shares one verification.
     """
     if verification_mode is None:
         ambient = current_settings()
@@ -2112,57 +2121,31 @@ def verify_release(
         )
     path = Path(path).resolve()
     with _verification_operation():
-        if (
-            not _domain_cold
-            and proof_store is not None
-            and verification_mode == "verified_reuse"
-        ):
-            from klab.experiments.artifacts import Artifact, verify_artifact
-
-            manifest = _load(path / "manifest.json")
-            if manifest["release_id"] != _release_location_id(
-                path, manifest, expected_id
-            ):
-                raise ValueError("release directory identity mismatch")
-            verify_artifact(
-                Artifact(
-                    kind="corpus_release",
-                    version=manifest["schema_version"],
-                    producer="klab",
-                    identifier=manifest["release_id"],
-                    sha256=manifest["release_id"],
-                    path=str(path),
-                ),
-                path / "manifest.json",
+        proofs = _verified_releases.get()
+        assert proofs is not None
+        if path in proofs:
+            return proofs[path].manifest
+        manifest = _load(path / "manifest.json")
+        identity = manifest["release_id"]
+        if identity != _release_location_id(path, manifest, expected_id):
+            raise ValueError("release directory identity mismatch")
+        manifest, fingerprint = receipt_first(
+            "release",
+            path,
+            identity,
+            list(snapshot_dependencies(path, "manifest.json")),
+            proof_store,
+            verification_mode,
+            lambda: _verify_release_cold(
+                path,
+                expected_id=expected_id,
                 proof_store=proof_store,
                 verification_mode=verification_mode,
-            )
-            return manifest
-        return _verify_release_cold(
-            path,
-            expected_id=expected_id,
-            proof_store=proof_store,
-            verification_mode=verification_mode,
-            hashed=_hashed,
+            ),
+            lambda: manifest,
         )
-
-
-def _release_closure_key(path: Path, manifest: dict[str, Any]) -> tuple[object, ...]:
-    """Use the artifact verifier's typed inventory and external snapshot binding."""
-    from klab.experiments.artifacts import Artifact, _artifact_key
-
-    release_id = manifest["release_id"]
-    return _artifact_key(
-        Artifact(
-            kind="corpus_release",
-            version=manifest["schema_version"],
-            producer="klab",
-            identifier=release_id,
-            sha256=release_id,
-            path=str(path),
-        ),
-        path,
-    )
+        proofs[path] = _VerifiedRelease(manifest, fingerprint)
+        return manifest
 
 
 def _release_location_id(path, manifest, expected_id):
@@ -2179,25 +2162,9 @@ def _verify_release_cold(
     expected_id: str | None = None,
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
-    hashed: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
-    """Verify the complete release including snapshotted source and lineage evidence.
-
-    `hashed` names files whose bytes the caller already hashed and matched
-    against the manifest while writing them; only their presence and size are
-    rechecked here.
-    """
+    """Verify the complete release including snapshotted source and lineage evidence."""
     path = Path(path).resolve()
-    proofs = _verified_releases.get()
-    if proofs is not None and path in proofs:
-        proof = proofs[path]
-        if proof.closure_key != _release_closure_key(
-            path, proof.manifest
-        ) or proof.manifest["release_id"] != _release_location_id(
-            path, proof.manifest, expected_id
-        ):
-            raise ValueError("release changed within verification operation")
-        return proof.manifest
     manifest = _load(path / "manifest.json")
     from klab.corpus.completed_preparation import (
         local_scope,
@@ -2212,10 +2179,6 @@ def _verify_release_cold(
             if in_place(path, manifest)
             else verify_completed_release(path, manifest, expected_id=expected_id)
         )
-        if proofs is not None:
-            proofs[path] = _VerifiedRelease(
-                manifest, _release_closure_key(path, manifest)
-            )
         return manifest
     release_id = manifest.get("release_id")
     if release_id != (expected_id or path.name) or len(release_id) != 64:
@@ -2229,7 +2192,6 @@ def _verify_release_cold(
         raise ValueError("release manifest identity mismatch")
     if canonical_digest(manifest["build_identity"]) != manifest["build_id"]:
         raise ValueError("release build identity differs from its build")
-    closure_key = _release_closure_key(path, manifest) if proofs is not None else None
     progress = open_progress(release_id)
     _files(
         path,
@@ -2241,7 +2203,6 @@ def _verify_release_cold(
             },
         },
         progress,
-        hashed,
     )
     progress.start_phase("stage_receipts")
     _verify_stages(path, manifest["stages"], manifest["build_identity"], progress)
@@ -2275,10 +2236,6 @@ def _verify_release_cold(
             path, manifest["build_identity"], iter_rows(path / "documents.jsonl")
         )
     progress.close()
-    if proofs is not None:
-        if closure_key != _release_closure_key(path, manifest):
-            raise ValueError("release changed during verification operation")
-        proofs[path] = _VerifiedRelease(manifest, closure_key)
     return manifest
 
 

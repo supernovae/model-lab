@@ -844,6 +844,7 @@ def _preflight(args: argparse.Namespace) -> None:
 
 
 def _train(args: argparse.Namespace) -> None:
+    from klab.corpus.release_verify import verification_settings
     from klab.training.spot_safety import load_spot_policy
     from klab.training.trainer import train
 
@@ -862,29 +863,35 @@ def _train(args: argparse.Namespace) -> None:
                 "runtime": config.runtime.model_copy(update={"backend": args.backend})
             }
         )
-    run_id = train(
-        config,
-        spot_policy=load_spot_policy(args.spot_policy) if args.spot_policy else None,
-        resume=Path(args.resume) if args.resume else None,
-        extend_budget=Path(args.extend_budget) if args.extend_budget else None,
-        promote=Path(args.promote) if args.promote else None,
-        add_ngram_memory=args.add_ngram_memory,
-        extend_context=args.extend_context,
-        append_data=args.append_data,
-        append_from_checkpoint=args.append_from_checkpoint,
-        recover=Path(args.recover) if args.recover else None,
-        run_id=args.run_id,
-        stop_after_step=args.stop_after_step,
-        allow_runtime_drift=args.allow_runtime_drift,
-        allow_runtime_optimization=args.allow_runtime_optimization,
-        stage_bundle=Path(args.stage_bundle) if args.stage_bundle else None,
-        authorization=args.runtime_authorization,
-        resource_envelope=args.resource_envelope_value,
-        tokenizer_batch_documents=args.tokenizer_batch_documents,
-        tokenizer_batch_source_bytes=args.tokenizer_batch_source_bytes,
-        require_prepared=args.require_prepared,
-        preflight=args.preflight,
-    )
+    # The corpus gate reuses the release's signed receipt instead of re-hashing it.
+    with verification_settings(
+        echo=sys.stderr, **verification_options(resolve_work_dir(args.work_dir))
+    ):
+        run_id = train(
+            config,
+            spot_policy=load_spot_policy(args.spot_policy)
+            if args.spot_policy
+            else None,
+            resume=Path(args.resume) if args.resume else None,
+            extend_budget=Path(args.extend_budget) if args.extend_budget else None,
+            promote=Path(args.promote) if args.promote else None,
+            add_ngram_memory=args.add_ngram_memory,
+            extend_context=args.extend_context,
+            append_data=args.append_data,
+            append_from_checkpoint=args.append_from_checkpoint,
+            recover=Path(args.recover) if args.recover else None,
+            run_id=args.run_id,
+            stop_after_step=args.stop_after_step,
+            allow_runtime_drift=args.allow_runtime_drift,
+            allow_runtime_optimization=args.allow_runtime_optimization,
+            stage_bundle=Path(args.stage_bundle) if args.stage_bundle else None,
+            authorization=args.runtime_authorization,
+            resource_envelope=args.resource_envelope_value,
+            tokenizer_batch_documents=args.tokenizer_batch_documents,
+            tokenizer_batch_source_bytes=args.tokenizer_batch_source_bytes,
+            require_prepared=args.require_prepared,
+            preflight=args.preflight,
+        )
     print(run_id)
     progress = config.logging.root_dir / run_id / "progress.json"
     try:

@@ -45,7 +45,7 @@ def _verification_flags(command: argparse.ArgumentParser) -> None:
     command.add_argument(
         "--cold",
         action="store_true",
-        help="Verify from the bytes instead of reusing a signed receipt",
+        help="Verify every byte instead of reusing a signed receipt, then refresh the receipt",
     )
 
 

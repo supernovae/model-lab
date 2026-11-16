@@ -161,9 +161,9 @@ def export_release(
     manifest = _release(
         release_dir, proof_store=proof_store, verification_mode=verification_mode
     )
-    from klab.corpus.release import _release_closure_key
+    from klab.corpus.release_receipt import fingerprint
 
-    release_key = _release_closure_key(release_dir, manifest)
+    release_key = fingerprint(release_dir)
     base = load_config(Path(base_run_config))
     base_digest = sha256_file(Path(base_run_config))
     release_id = str(manifest["release_id"])
@@ -251,7 +251,7 @@ def export_release(
             or (destination / "tokenizer.yaml").read_bytes() != tokenizer_bytes
         ):
             raise ValueError("existing corpus export has changed")
-        if _release_closure_key(release_dir, manifest) != release_key:
+        if fingerprint(release_dir) != release_key:
             raise ValueError("release changed during export creation")
         return destination
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -266,10 +266,10 @@ def export_release(
             raise FileExistsError(
                 f"corpus export appeared during publication: {destination}"
             )
-        if _release_closure_key(release_dir, manifest) != release_key:
+        if fingerprint(release_dir) != release_key:
             raise ValueError("release changed during export creation")
         staging.rename(destination)
-    if _release_closure_key(release_dir, manifest) != release_key:
+    if fingerprint(release_dir) != release_key:
         raise ValueError("release changed during export creation")
     return destination
 
@@ -278,47 +278,50 @@ def verify_release_export(
     dataset: DatasetConfig,
     *,
     proof_store: ProofStore | None = None,
-    verification_mode: VerificationMode = "cold",
-    _domain_cold: bool = False,
+    verification_mode: VerificationMode | None = None,
 ) -> dict[str, object]:
-    """Verify an export; typed reuse is restricted to its complete trusted closure."""
+    """Verify an export and its release, by signed receipt when one still holds.
+
+    Without a `verification_mode` the receipt store chosen by
+    `verification_settings` applies, as it does for `verify_release`.
+    """
     from klab.corpus.release import _verification_operation
+    from klab.corpus.release_receipt import receipt_first
+    from klab.corpus.release_verify import current_settings
+    from klab.experiments.artifacts import snapshot_dependencies
+
+    if dataset.corpus_export_path is None or dataset.corpus_release_path is None:
+        raise ValueError("dataset does not reference a frozen corpus export")
+    if verification_mode is None:
+        ambient = current_settings()
+        proof_store, verification_mode = (
+            ambient.proof_store,
+            ambient.verification_mode,
+        )
+    export_dir, release_dir = dataset.corpus_export_path, dataset.corpus_release_path
+
+    def reused() -> dict[str, object]:
+        # A receipt vouches for the export directory, not for a caller's dataset.
+        if load_config(export_dir / "run.yaml").dataset != dataset:
+            raise ValueError("corpus export generated dataset mismatch")
+        return _export_binding(
+            json.loads((export_dir / "export.json").read_text(encoding="utf-8"))
+        )
 
     with _verification_operation():
-        if (
-            not _domain_cold
-            and proof_store is not None
-            and verification_mode == "verified_reuse"
-            and dataset.corpus_export_path is not None
-        ):
-            from klab.experiments.artifacts import Artifact, verify_artifact
-
-            path = dataset.corpus_export_path
-            export = json.loads((path / "export.json").read_text(encoding="utf-8"))
-            verify_artifact(
-                Artifact(
-                    kind="corpus_export",
-                    version=export["schema_version"],
-                    producer="klab",
-                    identifier=path.name,
-                    sha256=path.name,
-                    path=str(path),
-                ),
-                path / "export.json",
-                proof_store=proof_store,
-                verification_mode=verification_mode,
-            )
-            # A signed export receipt authenticates its on-disk run configuration,
-            # not an arbitrary caller's dataset object.
-            run = load_config(path / "run.yaml")
-            if run.dataset != dataset:
-                raise ValueError("corpus export generated dataset mismatch")
-            return _export_binding(export)
-        return _verify_release_export_cold(
-            dataset,
-            proof_store=proof_store,
-            verification_mode=verification_mode,
+        binding, _ = receipt_first(
+            "export",
+            export_dir,
+            export_dir.name,
+            [release_dir, *snapshot_dependencies(release_dir, "manifest.json")],
+            proof_store,
+            verification_mode,
+            lambda: _verify_release_export_cold(
+                dataset, proof_store=proof_store, verification_mode=verification_mode
+            ),
+            reused,
         )
+        return binding
 
 
 def _export_binding(export: dict[str, object]) -> dict[str, object]:
@@ -338,8 +341,8 @@ def _export_binding(export: dict[str, object]) -> dict[str, object]:
 def _verify_release_export_cold(
     dataset: DatasetConfig,
     *,
-    proof_store: ProofStore | None = None,
-    verification_mode: VerificationMode = "cold",
+    proof_store: ProofStore | None,
+    verification_mode: VerificationMode,
 ) -> dict[str, object]:
     """Verify the release, export request, and exact bytes selected by dataset."""
     if dataset.corpus_release_path is None or dataset.corpus_export_path is None:
