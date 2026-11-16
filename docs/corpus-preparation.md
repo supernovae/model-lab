@@ -805,8 +805,8 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
 - **`--workers`** sets the worker processes for every parallel pass over corpus
   files (default: half the CPU count; never more than the CPU count). Use `1` for
   a single-process run. A file smaller than a few hundred MB is read in-process.
-  The same option is accepted by `klab tokenizer train` and `klab tokenizer
-  verify`. Each parallel stage prints `STAGE: N shards, up to W workers` when it
+  The same option is accepted by `klab tokenizer train`, `klab tokenizer verify`,
+  `klab corpus export` and `klab corpus derive-family-inventory`. Each parallel stage prints `STAGE: N shards, up to W workers` when it
   starts and `STAGE: S s wall, C s cpu, K cores used, reused R/N` when it ends,
   where cores used is CPU seconds over wall seconds.
 - **Shards.** A parallel stage cuts its file into line-aligned byte ranges
@@ -820,6 +820,8 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   | `release verification` | shardable: byte ranges of the release files |
   | `tokenizer sampling: TRAIN lineage` | shardable: byte ranges of the lineage view |
   | `tokenizer sampling: documents scan` | shardable: byte ranges of `documents.jsonl`, merged in file order |
+  | `family inventory` | shardable: byte ranges of `documents.jsonl`, written in file order |
+  | `export split statistics` | shardable: byte ranges of each exported view file |
   | `tokenizer fit` | single process: the Hugging Face BPE trainer is multithreaded natively and selects merges sequentially |
 
 - **Progress** goes to stderr and to `scratch/verify-<release>.progress.jsonl`
