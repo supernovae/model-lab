@@ -161,6 +161,7 @@ def test_commands_shown_in_current_pages_exist() -> None:
     problems = [
         problem
         for page in _pages()
+        if page.parts[:2] != ("docs", "design")  # proposals show commands not built yet
         for problem in command_problems(page, (ROOT / page).read_text(encoding="utf-8"))
     ]
     assert not problems, problems
