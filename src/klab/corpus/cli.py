@@ -11,6 +11,7 @@ from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
 
+from klab.corpus.release_verify import add_workers_flag
 from klab.verification_proofs import verification_options
 from klab.workdir import resolve_work_dir
 
@@ -31,8 +32,6 @@ def _release_path(value: str, work_root: Path) -> Path:
 
 
 def _verification_flags(command: argparse.ArgumentParser) -> None:
-    from klab.corpus.release_verify import add_workers_flag
-
     command.add_argument(
         "--scratch-dir",
         type=Path,
@@ -520,6 +519,10 @@ def _run(args: argparse.Namespace) -> None:
                 ("max_heldout_documents", args.max_heldout_documents),
                 ("max_heldout_shingles", args.max_heldout_shingles),
                 ("max_candidates", args.max_candidates),
+                ("boilerplate_heldout_documents", args.boilerplate_heldout_documents),
+                ("boilerplate_sample_documents", args.boilerplate_sample_documents),
+                ("boilerplate_sample_stride", args.boilerplate_sample_stride),
+                ("boilerplate_min_share", args.boilerplate_min_share),
             )
             if value is not None
         }
@@ -527,6 +530,9 @@ def _run(args: argparse.Namespace) -> None:
             release,
             checkpoint_dir=(args.scratch_dir or root / "scratch") / "near-duplicates",
             checkpoint_every=args.checkpoint_every,
+            workers=min(args.workers or 8, os.cpu_count() or 1),
+            shard_bytes=args.shard_bytes,
+            template_aware=args.template_aware,
             **caps,
         )
     else:
@@ -735,6 +741,7 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     )
     command.add_argument("mixture")
     command.add_argument("--json", action="store_true")
+    add_workers_flag(command)
     command.set_defaults(handler=_handle)
     command = sub.add_parser(
         "audit-protected-lineage",
@@ -852,8 +859,27 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
                 "max-heldout-documents",
                 "max-heldout-shingles",
                 "max-candidates",
+                "boilerplate-heldout-documents",
+                "boilerplate-sample-documents",
+                "boilerplate-sample-stride",
             ):
                 command.add_argument("--" + flag, type=int)
+            command.add_argument(
+                "--boilerplate-min-share",
+                type=float,
+                help="Share of a pair's shared shingles that must be boilerplate to class it template_only",
+            )
+            command.add_argument(
+                "--template-aware",
+                action="store_true",
+                help="Set aside boilerplate shingles and report pairs similar only through them as template_only",
+            )
+            command.add_argument(
+                "--shard-bytes",
+                type=int,
+                default=256 << 20,
+                help="Approximate size of a shard, the unit of parallel work and of resuming",
+            )
             command.add_argument(
                 "--checkpoint-every",
                 type=int,

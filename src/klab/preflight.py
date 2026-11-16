@@ -397,15 +397,27 @@ def check_near_duplicates(ev: Evidence) -> Check:
         "documents_screened": report.get("document_count"),
         "candidate_count": report.get("candidate_count"),
         "identical_text_count": report.get("identical_text_count"),
+        # Pairs similar only through boilerplate need no decision, but are shown.
+        "template_aware": report.get("parameters", {}).get("template_aware", False),
+        "template_only_count": report.get("template_only_count", 0),
+        "template_only_documents": report.get("template_only_document_count", 0),
         **result,
         "problems": problems,
     }
     if problems:
         return Check("near_duplicates", FAIL, "; ".join(problems[:3]), evidence)
+    templated = (
+        f"; {evidence['template_only_count']} template-only pair(s) on "
+        f"{evidence['template_only_documents']} held-out document(s) counted, "
+        "not decided"
+        if evidence["template_only_count"]
+        else ""
+    )
     return Check(
         "near_duplicates",
         PASS,
-        f"every document screened; all {result['reported_pairs']} reported pairs decided",
+        f"every document screened; all {result['reported_pairs']} reported pairs "
+        f"decided{templated}",
         evidence,
     )
 

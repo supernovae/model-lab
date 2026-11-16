@@ -177,6 +177,9 @@ def build(tmp: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         "identical_text_count": 0,
         "candidates_truncated": False,
         "candidates": [{"left_document_id": "a", "right_document_id": "b"}],
+        "parameters": {"template_aware": True},
+        "template_only_count": 7,
+        "template_only_document_count": 2,
     }
     report_path.write_text(json.dumps(near))
     decisions = tmp / "decisions.yaml"
