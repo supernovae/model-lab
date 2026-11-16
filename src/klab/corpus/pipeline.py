@@ -631,7 +631,11 @@ def _records_for_file(
         raw_content = content
         if not isinstance(content, str) or not content.strip():
             if document_policy.empty_text == "error":
-                raise EmptyDocumentError("empty/nontext document")
+                raise EmptyDocumentError(
+                    f"empty/nontext document in source {source.id}, file {name}, "
+                    f"row or line {start}; "
+                    "release.policy.documents.empty_text: skip records and drops it"
+                )
             reason = "empty_or_nontext"
         else:
             reason = (
@@ -1454,9 +1458,17 @@ def _uses_disk_lm_builder(project: Any, transforms: list[Any]) -> bool:
         )
     )
     if strategy == "disk" and not eligible:
+        other = [
+            source.id
+            for source in project.sources
+            if source.kind not in {"huggingface_dataset", *FILE_ADMISSION_KINDS}
+        ]
         raise ValueError(
-            "build.strategy disk needs a language-model-only release without a "
-            "fraction and sources of Hugging Face or file-admitted kinds"
+            "release.policy.build.strategy is disk, which needs a language-model-only "
+            "release without a fraction and sources of Hugging Face or file-admitted "
+            "kinds"
+            + (f" (not eligible: {', '.join(other)})" if other else "")
+            + "; set build.strategy to auto or memory"
         )
     return eligible
 
@@ -1522,7 +1534,10 @@ def _build_stored(
         reference = project.release.record_admission
         admission_path = project_path(project.root, reference.path)
         if sha256_file(admission_path) != reference.sha256.lower():
-            raise ValueError("record admission SHA-256 mismatch")
+            raise ValueError(
+                f"record admission {admission_path} does not match "
+                "release.record_admission.sha256"
+            )
         from klab.corpus.bounded_metadata import read_metadata
 
         admission_manifest = read_metadata(admission_path)

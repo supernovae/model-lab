@@ -60,6 +60,8 @@ def test_canary_surfaces_the_strict_policy_and_empty_document_failures(
     assert builds(lab) == []
 
     lab, project = acquire(tmp_path / "empty", monkeypatch, capsys, empty_document=True)
-    with pytest.raises(EmptyDocumentError, match="empty/nontext"):
+    with pytest.raises(
+        EmptyDocumentError, match=r"source web_fineweb, file .*row or line .*empty_text"
+    ):
         lab.run("corpus", "build", project, "--offline", "--canary")
     assert builds(lab) == []

@@ -124,8 +124,11 @@ def test_error_policy_rejects_any_cross_split_overlap(tmp_path: Path) -> None:
         [("a-train", "train", "r1", "n1"), ("b-valid", "validation", "r1", "n1")]
     )
     strict = CHAIN.model_copy(update={"heldout_overlap": "error"})
-    with pytest.raises(ValueError, match="cross-split exact text overlap"):
+    with pytest.raises(ValueError, match="cross-split exact text overlap") as failure:
         _run(connection, tmp_path, strict)
+    # The failure names the group's documents and the option that changes it.
+    assert "a-train, b-valid" in str(failure.value)
+    assert "release.policy.duplicates.heldout_overlap" in str(failure.value)
 
 
 def test_chain_and_component_resolution_agree_on_a_simple_corpus(
@@ -328,7 +331,20 @@ def test_a_declared_source_without_documents_fails_the_build() -> None:
     declared = SimpleNamespace(
         sources=[SimpleNamespace(id="s"), SimpleNamespace(id="code_python")]
     )
-    with pytest.raises(ValueError, match="produced no documents: code_python"):
-        _require_every_source_has_documents(connection, declared)
+    events = [
+        {
+            "source_id": "code_python",
+            "path": "a.py",
+            "reason": "rights unknown: no license evidence",
+        }
+    ]
+    with pytest.raises(
+        ValueError, match="produced no documents: code_python"
+    ) as failure:
+        _require_every_source_has_documents(connection, declared, events)
+    message = str(failure.value)
+    assert "file a.py" in message
+    assert "rights unknown: no license evidence" in message
+    assert "release.policy.rights.training_use" in message
     complete = SimpleNamespace(sources=[SimpleNamespace(id="s")])
-    _require_every_source_has_documents(connection, complete)
+    _require_every_source_has_documents(connection, complete, events)

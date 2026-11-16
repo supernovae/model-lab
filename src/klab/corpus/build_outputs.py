@@ -74,7 +74,10 @@ def stage_declared_inputs(
     copy = staging / ADMISSION_COPY
     shutil.copyfile(admission_path, copy)
     if sha256_file(copy) != project.release.record_admission.sha256.lower():
-        raise ValueError("record admission changed during build")
+        raise ValueError(
+            f"record admission {admission_path} changed during build; it no longer "
+            "matches release.record_admission.sha256"
+        )
 
 
 def publish_staging(staging: Path, target: Path) -> None:
@@ -246,7 +249,11 @@ def record_overlap(
         write_json(
             diagnostics, {"error": "shared split policy unit", "leakage": leakage}
         )
-        raise ValueError(f"split policy unit {family} spans splits")
+        raise ValueError(
+            f"split policy unit {family} ({field}) spans splits {', '.join(splits)}: "
+            "assign every document of one unit to one split (splits.assignments, "
+            "splits.family_key) or choose another splits.unit"
+        )
     warnings.append(f"{field} {family} overlaps {', '.join(splits)}")
 
 

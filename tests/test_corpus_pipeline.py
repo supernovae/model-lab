@@ -503,7 +503,7 @@ def test_a_fractional_release_keeps_the_in_memory_builder_under_auto():
 
 def test_the_build_strategy_can_force_either_builder():
     assert not _uses_disk_lm_builder(*_disk_builder_project(strategy="memory"))
-    with pytest.raises(ValueError, match="build.strategy disk"):
+    with pytest.raises(ValueError, match="build.strategy is disk"):
         _uses_disk_lm_builder(*_disk_builder_project(strategy="disk", fraction=0.5))
 
 
