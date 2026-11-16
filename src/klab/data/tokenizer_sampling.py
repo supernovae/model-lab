@@ -1,12 +1,32 @@
-"""Whole-document TRAIN byte quotas and disjoint TRAIN tokenizer audits.
+"""Whole-document TRAIN byte quotas by seeded hash, and disjoint TRAIN audits.
 
-Release verification belongs to the caller. Selection follows the immutable
-release document order; no validation/test text is selected or scored.
+Release verification belongs to the caller. Inside each stratum the TRAIN
+documents are ordered by a hash of (`sampling.seed`, content digest), and the fit
+takes the longest prefix of that order that fits the stratum's byte quota. The
+sample is therefore a uniform random subset, independent of where a document sits
+in `documents.jsonl`, and a smaller quota selects a prefix of a larger quota's
+sample. The audit takes the documents that follow the fit in the same order. No
+validation/test text is selected or scored.
+
+The scan is parallel and keeps bounded memory:
+
+1. A histogram pass sums each stratum's bytes per rank bucket (the top 12 bits of
+   the rank), and reports any document that breaks a rule.
+2. A candidate pass keeps, per stratum, only the documents in the lowest buckets
+   holding about twice the quota in bytes (and enough documents after the fit for
+   the audit).
+3. The coordinator orders the candidates, drops repeated content within a
+   stratum and fills the quota. The result is exact when the walk overflowed the
+   quota (or reached the end of a stratum) inside the candidates, because every
+   document ranked before that point is then among them. If it did not (for
+   example repeated content made the threshold too tight) the stratum's
+   threshold doubles and only the candidate pass runs again.
 """
 
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
 
@@ -18,6 +38,10 @@ from klab.corpus.mixture import _source_rights
 from klab.corpus.mixture_index import MAX_ROW_BYTES
 from klab.corpus.release_verify import range_records, read_at
 from klab.corpus.shards import declare_stage, plan_ranges, run_sharded
+
+BUCKET_BITS = 12
+BUCKETS = 1 << BUCKET_BITS
+OVERSAMPLE = 2
 
 
 def quotas(config: TokenizerTrainConfig) -> dict[str, int]:
@@ -38,7 +62,8 @@ def quotas(config: TokenizerTrainConfig) -> dict[str, int]:
 
 
 LINEAGE_STAGE = declare_stage("tokenizer sampling: TRAIN lineage")
-SCAN_STAGE = declare_stage("tokenizer sampling: documents scan")
+HISTOGRAM_STAGE = declare_stage("tokenizer sampling: rank histogram")
+CANDIDATE_STAGE = declare_stage("tokenizer sampling: candidates")
 _ELIGIBLE = frozenset({"eligible", "eligible_with_obligations"})
 
 
@@ -51,22 +76,35 @@ class _Candidate(NamedTuple):
     size: int
     offset: int
     length: int
-    problem: str | None
+    rank: int
+
+    @property
+    def order(self) -> tuple[int, str, int]:
+        return self.rank, self.content_sha256, self.offset
+
+
+class Selection(NamedTuple):
+    """The fit and the audit reserve of each stratum, both in hash order."""
+
+    fit: dict[str, list[_Candidate]]
+    reserve: dict[str, list[_Candidate]]
+    train_documents: int
+
+
+def rank(seed: int, content_sha256: str) -> int:
+    """The 64-bit position of a document in its stratum's sampling order."""
+    digest = hashlib.sha256(f"{seed}:{content_sha256}".encode()).digest()
+    return int.from_bytes(digest[:8], "big")
 
 
 def _lineage_ids(path: str, start: int, end: int) -> list[str]:
     return [row["record_id"] for row, _, _ in range_records(Path(path), start, end)]
 
 
-def _scan_range(
-    path: str, start: int, end: int, source_strata: dict[str, str]
-) -> list[tuple]:
-    """Select one byte range's undropped TRAIN documents, in file order.
-
-    A document that violates a rule is returned with its `problem`, so the merge
-    raises it at the position a serial scan would have reached it.
-    """
-    found = []
+def _train_documents(
+    path: str, start: int, end: int, source_strata: dict[str, str], seed: int
+) -> Iterator[tuple[_Candidate, str | None]]:
+    """One byte range's undropped TRAIN documents, with the rule each breaks."""
     for row, offset, length in range_records(Path(path), start, end):
         if length > MAX_ROW_BYTES:
             raise ValueError("mixture record-byte cap exceeded")
@@ -80,65 +118,191 @@ def _scan_range(
             problem = "source"
         elif stratum not in row["domains"]:
             problem = "domains"
-        found.append(
-            (
+        yield (
+            _Candidate(
                 row["document_id"],
                 row["content_sha256"],
                 stratum or row["source_id"],
                 len(row["text"].encode("utf-8")),
                 offset,
                 length,
-                problem,
-            )
+                rank(seed, row["content_sha256"]),
+            ),
+            problem,
         )
+
+
+def _histogram_range(
+    path: str, start: int, end: int, source_strata: dict[str, str], seed: int
+) -> dict:
+    """Bytes per stratum and rank bucket, and the documents that break a rule."""
+    histogram: dict[str, dict[int, list[int]]] = {}
+    problems = []
+    for candidate, problem in _train_documents(path, start, end, source_strata, seed):
+        if problem is not None:
+            problems.append([candidate.document_id, problem, candidate.stratum])
+        elif candidate.size:
+            buckets = histogram.setdefault(candidate.stratum, {})
+            bucket = candidate.rank >> (64 - BUCKET_BITS)
+            counted = buckets.setdefault(bucket, [0, 0])
+            counted[0] += candidate.size
+            counted[1] += 1
+    return {
+        "histogram": {
+            stratum: [[bucket, *counted] for bucket, counted in sorted(buckets.items())]
+            for stratum, buckets in histogram.items()
+        },
+        "problems": problems,
+    }
+
+
+def _candidate_range(
+    path: str,
+    start: int,
+    end: int,
+    source_strata: dict[str, str],
+    seed: int,
+    limits: dict[str, int],
+) -> list[list]:
+    """The range's documents whose rank bucket is within their stratum's limit."""
+    found = []
+    for candidate, problem in _train_documents(path, start, end, source_strata, seed):
+        if (
+            problem is None
+            and candidate.size
+            and candidate.rank >> (64 - BUCKET_BITS) <= limits[candidate.stratum]
+        ):
+            found.append(list(candidate))
     return found
 
 
-def _train_rows(config: TokenizerTrainConfig):
-    """Yield the TRAIN documents of the frozen release in document order.
+def _limit(buckets: list[list[int]], cap: int, depth: int, factor: int) -> int:
+    """The last bucket holding `factor` times the quota's bytes and its documents.
 
-    Byte ranges of `documents.jsonl` are scanned by worker processes and merged in
-    range order, so the stream, and everything selected from it, is exactly what
-    a serial scan would produce.
+    The document target is the quota's documents at the stratum's mean size plus
+    the audit depth. The final bucket is returned if the stratum never gets there.
     """
+    size = sum(row[0] for row in buckets)
+    count = sum(row[1] for row in buckets)
+    if not count:
+        return BUCKETS - 1
+    wanted_documents = factor * (cap * count // size + depth)
+    total = documents = 0
+    for bucket, (nbytes, ndocs) in enumerate(buckets):
+        total += nbytes
+        documents += ndocs
+        if total >= factor * cap and documents >= wanted_documents:
+            return bucket
+    return BUCKETS - 1
+
+
+def _fill(
+    ordered: list[_Candidate], cap: int
+) -> tuple[list[_Candidate], list[_Candidate], bool]:
+    """The longest prefix within `cap`, the rest, and whether the cap stopped it."""
+    used = 0
+    for index, candidate in enumerate(ordered):
+        if used + candidate.size > cap:
+            return ordered[:index], ordered[index:], True
+        used += candidate.size
+    return ordered, [], False
+
+
+def _unique(found: list[_Candidate]) -> list[_Candidate]:
+    """Hash order with repeated content kept once, at its first file position."""
+    unique, seen = [], set()
+    for candidate in sorted(found, key=lambda item: item.order):
+        if candidate.content_sha256 not in seen:
+            seen.add(candidate.content_sha256)
+            unique.append(candidate)
+    return unique
+
+
+def select_documents(
+    config: TokenizerTrainConfig, caps: dict[str, int] | None = None
+) -> Selection:
+    """Choose each stratum's fit prefix and audit reserve from the frozen release."""
     spec = config.sampling
     assert spec is not None
     release = config.dataset.corpus_release_path
     assert release is not None
+    caps = quotas(config) if caps is None else caps
     _source_rights(release, spec.source_strata)
-    lineage = release / "lm/train.lineage.jsonl"
     selected: set[str] = set()
+    lineage = release / "lm/train.lineage.jsonl"
     for ids in run_sharded(plan_ranges(LINEAGE_STAGE, lineage), _lineage_ids):
         selected.update(ids)
+    if len(selected) > config.max_documents:
+        raise ValueError(
+            "tokenizer seeded sampling needs every TRAIN document: "
+            f"max_documents {config.max_documents} is below {len(selected)}"
+        )
     documents_path = release / "documents.jsonl"
-    seen = 0
+    totals = {stratum: [[0, 0] for _ in range(BUCKETS)] for stratum in caps}
     results = run_sharded(
-        plan_ranges(SCAN_STAGE, documents_path, spec.source_strata),
-        _scan_range,
+        plan_ranges(HISTOGRAM_STAGE, documents_path, spec.source_strata, spec.seed),
+        _histogram_range,
         ordered=True,
     )
     try:
-        for found in results:
-            for fields in found:
-                if fields[0] not in selected:
+        for result in results:
+            for document_id, problem, stratum in result["problems"]:
+                if document_id not in selected:
                     continue
-                if seen >= config.max_documents:
-                    return
-                candidate = _Candidate(*fields)
-                seen += 1
-                if candidate.problem == "ineligible":
+                if problem == "ineligible":
                     raise ValueError(
                         "tokenizer sampling encountered ineligible TRAIN document"
                     )
-                if candidate.problem == "source":
-                    raise KeyError(candidate.stratum)
-                if candidate.problem == "domains":
-                    raise ValueError(
-                        "tokenizer stratum disagrees with authenticated document domains"
-                    )
-                yield candidate, candidate.stratum
+                if problem == "source":
+                    raise KeyError(stratum)
+                raise ValueError(
+                    "tokenizer stratum disagrees with authenticated document domains"
+                )
+            for stratum, buckets in result["histogram"].items():
+                for bucket, nbytes, ndocs in buckets:
+                    totals[stratum][bucket][0] += nbytes
+                    totals[stratum][bucket][1] += ndocs
     finally:
         results.close()
+    oversample = dict.fromkeys(caps, OVERSAMPLE)
+    chosen: dict[str, tuple[list[_Candidate], list[_Candidate]]] = {}
+    pending = set(caps)
+    while pending:
+        limits = {
+            stratum: _limit(
+                totals[stratum],
+                caps[stratum],
+                spec.audit_documents_per_stratum,
+                oversample[stratum],
+            )
+            for stratum in caps
+        }
+        found: dict[str, list[_Candidate]] = {stratum: [] for stratum in caps}
+        for rows in run_sharded(
+            plan_ranges(
+                CANDIDATE_STAGE, documents_path, spec.source_strata, spec.seed, limits
+            ),
+            _candidate_range,
+        ):
+            for row in rows:
+                if row[0] in selected:
+                    candidate = _Candidate(*row)
+                    found[candidate.stratum].append(candidate)
+        for stratum in sorted(pending):
+            fit, rest, full = _fill(_unique(found[stratum]), caps[stratum])
+            exact = limits[stratum] == BUCKETS - 1 or (
+                full and len(rest) >= spec.audit_documents_per_stratum
+            )
+            if exact:
+                chosen[stratum] = fit, rest
+                pending.discard(stratum)
+            else:
+                oversample[stratum] *= 2
+    return Selection(
+        {stratum: chosen[stratum][0] for stratum in caps},
+        {stratum: chosen[stratum][1] for stratum in caps},
+        len(selected),
+    )
 
 
 def _text(release: Path, candidate: _Candidate) -> str:
@@ -150,54 +314,48 @@ def _text(release: Path, candidate: _Candidate) -> str:
 def documents(
     config: TokenizerTrainConfig, stats: dict, selected_hashes: set[str] | None = None
 ):
+    spec = config.sampling
+    assert spec is not None
     caps = quotas(config)
-    used = dict.fromkeys(caps, 0)
-    counts = dict.fromkeys(caps, 0)
-    acquired = 0
-    seen_content: set[str] = set()
-    digest = hashlib.sha256()
-    identities = hashlib.sha256()
-    release = config.dataset.corpus_release_path
-    assert release is not None
-    for row, stratum in _train_rows(config):
-        acquired += 1
-        if row.content_sha256 in seen_content:
-            continue
-        size = row.size
-        if not size or used[stratum] + size > caps[stratum]:
-            continue
-        seen_content.add(row.content_sha256)
-        used[stratum] += size
-        counts[stratum] += 1
-        text = _text(release, row)
-        digest.update(text.encode("utf-8") + b"\0")
-        identities.update(
-            canonical_json([row.document_id, stratum, row.content_sha256]) + b"\n"
-        )
-        if selected_hashes is not None:
-            selected_hashes.add(row.content_sha256)
-        yield text
+    selection = select_documents(config, caps)
+    used = {key: sum(c.size for c in selection.fit[key]) for key in caps}
+    counts = {key: len(selection.fit[key]) for key in caps}
     missing = [key for key, count in counts.items() if not count]
     if missing:
         raise ValueError(
             "tokenizer byte sampling has no fitting TRAIN document in strata: "
             + ", ".join(sorted(missing))
         )
+    digest = hashlib.sha256()
+    identities = hashlib.sha256()
+    release = config.dataset.corpus_release_path
+    assert release is not None
+    for stratum in caps:
+        for row in selection.fit[stratum]:
+            text = _text(release, row)
+            digest.update(text.encode("utf-8") + b"\0")
+            identities.update(
+                canonical_json([row.document_id, stratum, row.content_sha256]) + b"\n"
+            )
+            if selected_hashes is not None:
+                selected_hashes.add(row.content_sha256)
+            yield text
     stats.update(
-        acquired=acquired,
+        acquired=selection.train_documents,
         selected=sum(counts.values()),
         bytes=sum(used.values()),
         digest=digest.hexdigest(),
-        stop_reason="bounded_stratified_scan",
+        stop_reason="seeded_hash_prefix",
         sampling={
-            "order": "frozen-release-document-order-v1",
+            "order": "seeded_hash",
+            "seed": spec.seed,
             "split": "train",
             "requested_bytes": caps,
             "selected_bytes": used,
             "selected_documents": counts,
             "unfilled_bytes": {key: caps[key] - used[key] for key in caps},
             "selected_identity_sha256": identities.hexdigest(),
-            "scan_document_limit": config.max_documents,
+            "train_documents": selection.train_documents,
         },
     )
 
@@ -209,10 +367,8 @@ def audit(config: TokenizerTrainConfig, tokenizer) -> dict:
     tokenizer.encode_special_tokens = True
     spec = config.sampling
     assert spec is not None
-    selected: set[str] = set()
-    fit_stats = {}
-    for _ in documents(config, fit_stats, selected):
-        pass
+    selection = select_documents(config)
+    fit_hashes = {row.content_sha256 for rows in selection.fit.values() for row in rows}
     groups = {
         key: {
             "documents": 0,
@@ -228,28 +384,31 @@ def audit(config: TokenizerTrainConfig, tokenizer) -> dict:
     unknown = tokenizer.token_to_id("<unk>")
     release = config.dataset.corpus_release_path
     assert release is not None
-    for row, stratum in _train_rows(config):
-        group = groups[stratum]
-        if (
-            row.content_sha256 in selected
-            or group["documents"] >= spec.audit_documents_per_stratum
-        ):
-            continue
-        size = row.size
-        if not size or total_bytes + size > spec.max_audit_bytes:
-            continue
-        selected.add(row.content_sha256)
-        text = _text(release, row)
-        ids = tokenizer.encode(text).ids
-        group["documents"] += 1
-        group["bytes"] += size
-        group["tokens"] += len(ids)
-        group["unknown_tokens"] += ids.count(unknown)
-        group["roundtrip_failures"] += int(
-            tokenizer.decode(ids, skip_special_tokens=False) != text
-        )
-        total_bytes += size
-        digest.update(canonical_json([row.document_id, row.content_sha256]) + b"\n")
+    # The documents after each stratum's fit, one stratum at a time in turn, so
+    # the byte cap is shared evenly and the choice never depends on the scan.
+    depth = spec.audit_documents_per_stratum
+    for position in range(depth):
+        for stratum, reserve in selection.reserve.items():
+            if position >= len(reserve):
+                continue
+            row = reserve[position]
+            if row.content_sha256 in fit_hashes or total_bytes + row.size > (
+                spec.max_audit_bytes
+            ):
+                continue
+            fit_hashes.add(row.content_sha256)
+            group = groups[stratum]
+            text = _text(release, row)
+            ids = tokenizer.encode(text).ids
+            group["documents"] += 1
+            group["bytes"] += row.size
+            group["tokens"] += len(ids)
+            group["unknown_tokens"] += ids.count(unknown)
+            group["roundtrip_failures"] += int(
+                tokenizer.decode(ids, skip_special_tokens=False) != text
+            )
+            total_bytes += row.size
+            digest.update(canonical_json([row.document_id, row.content_sha256]) + b"\n")
     for group in groups.values():
         group["bytes_per_token"] = (
             group["bytes"] / group["tokens"] if group["tokens"] else None

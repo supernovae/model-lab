@@ -165,10 +165,7 @@ def _verify_domain(
             raise ValueError("build format version mismatch")
         _check_snapshot_paths(path, manifest)
         verified = verify_build(
-            path,
-            proof_store=proof_store,
-            verification_mode=verification_mode,
-            _domain_cold=True,
+            path, proof_store=proof_store, verification_mode=verification_mode
         )
         _identity(artifact, verified["build_id"], verified["build_id"])
     elif kind == "corpus_release":
@@ -179,10 +176,7 @@ def _verify_domain(
             raise ValueError("release format version mismatch")
         _check_snapshot_paths(path, manifest)
         verified = verify_release(
-            path,
-            proof_store=proof_store,
-            verification_mode=verification_mode,
-            _domain_cold=True,
+            path, proof_store=proof_store, verification_mode=verification_mode
         )
         _identity(artifact, verified["release_id"], verified["release_id"])
     elif kind == "corpus_export":
@@ -203,10 +197,7 @@ def _verify_domain(
             raise ValueError("export lacks a pinned release")
         _safe_path(str(run.dataset.corpus_release_path), path)
         verified = verify_release_export(
-            run.dataset,
-            proof_store=proof_store,
-            verification_mode=verification_mode,
-            _domain_cold=True,
+            run.dataset, proof_store=proof_store, verification_mode=verification_mode
         )
         _identity(artifact, path.name, path.name)
         if verified["export_sha256"] != sha256_file(path / "export.json"):
@@ -406,7 +397,7 @@ def _fingerprint(path: Path) -> tuple[tuple[str, int, int, int, int, int, int], 
     return tuple(result)
 
 
-def _snapshot_dependencies(path: Path, manifest_name: str) -> tuple[Path, ...]:
+def snapshot_dependencies(path: Path, manifest_name: str) -> tuple[Path, ...]:
     manifest = _json_file(path / manifest_name)
     from klab.corpus.preparation_inputs import (
         corpus_work_root,
@@ -455,16 +446,16 @@ def _dependent_paths(artifact: Artifact, path: Path) -> tuple[Path, ...]:
             release = Path(run["dataset"]["corpus_release_path"])
         if release is not None:
             paths.append(release)
-            paths.extend(_snapshot_dependencies(release, "manifest.json"))
+            paths.extend(snapshot_dependencies(release, "manifest.json"))
         return tuple(paths)
     if artifact.kind in {"corpus_build", "corpus_release"}:
-        return _snapshot_dependencies(
+        return snapshot_dependencies(
             path, "build.json" if artifact.kind == "corpus_build" else "manifest.json"
         )
     if artifact.kind == "corpus_export":
         run = yaml.safe_load((path / "run.yaml").read_text(encoding="utf-8"))
         release = Path(run["dataset"]["corpus_release_path"])
-        return (release, *_snapshot_dependencies(release, "manifest.json"))
+        return (release, *snapshot_dependencies(release, "manifest.json"))
     return ()
 
 
@@ -597,6 +588,23 @@ def verify_artifact(
     validate_mode(verification_mode)
     try:
         path = _safe_path(artifact.path, source)
+        if artifact.kind in {"corpus_build", "corpus_release", "corpus_export"}:
+            # Builds, releases and exports are trusted through their own receipt,
+            # which costs a stat walk; a second per-artifact receipt would only
+            # re-hash their manifests.
+            _verify_domain(
+                artifact,
+                path,
+                proof_store=proof_store,
+                verification_mode=verification_mode,
+            )
+            return {
+                "kind": artifact.kind,
+                "version": artifact.version,
+                "identifier": artifact.identifier,
+                "sha256": artifact.sha256,
+                "path": str(path),
+            }
         key = _artifact_key(artifact, path, dataset)
         cached = memo.get(key) if memo is not None else None
         if (

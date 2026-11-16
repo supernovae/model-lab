@@ -68,7 +68,13 @@ def _release(root: Path, *, ineligible_from: int | None = None) -> Path:
     return release
 
 
-def _config(release: Path, max_documents: int) -> TokenizerTrainConfig:
+def _config(
+    release: Path,
+    max_documents: int = 10**6,
+    *,
+    max_fit_bytes: int = 1200,
+    seed: int = 11,
+) -> TokenizerTrainConfig:
     return TokenizerTrainConfig.model_validate(
         {
             "schema_version": 1,
@@ -93,52 +99,80 @@ def _config(release: Path, max_documents: int) -> TokenizerTrainConfig:
             "sampling": {
                 "source_strata": STRATA,
                 "byte_weights": WEIGHTS,
-                "max_fit_bytes": 1200,
+                "max_fit_bytes": max_fit_bytes,
+                "seed": seed,
+                "audit_documents_per_stratum": 3,
             },
         }
     )
 
 
 def _serial(config: TokenizerTrainConfig) -> dict:
-    """The selection rule written out as one plain loop over the file."""
+    """The selection rule written out naively: sort every document, fill each quota."""
     caps = tokenizer_sampling.quotas(config)
     release = config.dataset.corpus_release_path
     lineage = {
         json.loads(line)["record_id"]
         for line in (release / "lm/train.lineage.jsonl").read_text().splitlines()
     }
-    used, seen_content, chosen, seen = dict.fromkeys(caps, 0), set(), [], 0
-    for line in (release / "documents.jsonl").read_text().splitlines():
-        row = json.loads(line)
-        if (
-            row["drop_reason"] is not None
-            or row["split"] != "train"
-            or row["document_id"] not in lineage
-        ):
-            continue
-        if seen >= config.max_documents:
-            break
-        seen += 1
-        if row["rights"]["training_eligibility"] != "eligible":
-            raise ValueError("ineligible")
-        stratum = STRATA[row["source_id"]]
-        size = len(row["text"].encode())
-        if (
-            row["content_sha256"] in seen_content
-            or used[stratum] + size > caps[stratum]
-        ):
-            continue
-        seen_content.add(row["content_sha256"])
-        used[stratum] += size
-        chosen.append(row["text"])
-    return {"acquired": seen, "texts": chosen, "bytes": sum(used.values())}
+    rows = [
+        json.loads(line)
+        for line in (release / "documents.jsonl").read_text().splitlines()
+    ]
+    train = [
+        row
+        for row in rows
+        if row["drop_reason"] is None
+        and row["split"] == "train"
+        and row["document_id"] in lineage
+    ]
+    seed = config.sampling.seed
+    texts, selected, reserve = [], {}, {}
+    for stratum in caps:
+        ordered = sorted(
+            (row for row in train if STRATA[row["source_id"]] == stratum),
+            key=lambda row: (
+                int.from_bytes(
+                    hashlib.sha256(f"{seed}:{row['content_sha256']}".encode()).digest()[
+                        :8
+                    ],
+                    "big",
+                ),
+                row["content_sha256"],
+                row["document_id"],
+            ),
+        )
+        seen, unique = set(), []
+        for row in ordered:
+            if row["content_sha256"] not in seen:
+                seen.add(row["content_sha256"])
+                unique.append(row)
+        used = 0
+        for index, row in enumerate(unique):
+            size = len(row["text"].encode())
+            if used + size > caps[stratum]:
+                break
+            used += size
+        else:
+            index = len(unique)
+        selected[stratum] = [row["document_id"] for row in unique[:index]]
+        reserve[stratum] = [row["document_id"] for row in unique[index:]]
+        texts += [row["text"] for row in unique[:index]]
+    return {"texts": texts, "ids": selected, "reserve": reserve}
 
 
 def _sampled(config: TokenizerTrainConfig, workers: int) -> dict:
     stats: dict = {}
     with verification_settings(workers=workers):
         texts = list(tokenizer_sampling.documents(config, stats))
-    return {"acquired": stats["acquired"], "texts": texts, "bytes": stats["bytes"]}
+        selection = tokenizer_sampling.select_documents(config)
+    return {
+        "texts": texts,
+        "ids": {k: [c.document_id for c in v] for k, v in selection.fit.items()},
+        "reserve": {
+            k: [c.document_id for c in v] for k, v in selection.reserve.items()
+        },
+    }
 
 
 @pytest.fixture
@@ -148,60 +182,123 @@ def split_scan(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shards, "CHUNK_BYTES", 700)
 
 
-@pytest.mark.parametrize("max_documents", [10**6, 90])
-def test_parallel_scan_selects_exactly_what_the_serial_loop_selects(
-    tmp_path: Path, split_scan: None, max_documents: int
-) -> None:
-    config = _config(_release(tmp_path), max_documents)
+def _expected(config: TokenizerTrainConfig) -> dict:
     expected = _serial(config)
-    assert len(expected["texts"]) > 20
-    assert _sampled(config, workers=3) == expected
-    assert _sampled(config, workers=1) == expected
+    return {**expected, "reserve": {k: v[:3] for k, v in expected["reserve"].items()}}
 
 
-def test_ineligible_document_is_refused_only_when_the_scan_reaches_it(
+def _trim(sampled: dict) -> dict:
+    return {**sampled, "reserve": {k: v[:3] for k, v in sampled["reserve"].items()}}
+
+
+@pytest.mark.parametrize(
+    "max_fit_bytes, seed",
+    [(1200, 11), (1200, 12), (200, 11), (10**5, 11)],
+    ids=["quota", "other-seed", "tight-quota", "quota-above-every-stratum"],
+)
+def test_parallel_selection_equals_the_naive_sort_and_fill_whatever_the_workers(
+    tmp_path: Path, split_scan: None, max_fit_bytes: int, seed: int
+) -> None:
+    config = _config(_release(tmp_path), max_fit_bytes=max_fit_bytes, seed=seed)
+    expected = _expected(config)
+    assert all(expected["ids"].values())
+    assert _trim(_sampled(config, workers=3)) == expected
+    assert _trim(_sampled(config, workers=1)) == expected
+
+
+def test_a_smaller_quota_selects_a_prefix_of_a_larger_quotas_sample(
+    tmp_path: Path, split_scan: None
+) -> None:
+    release = _release(tmp_path)
+    small = _sampled(_config(release, max_fit_bytes=400), workers=2)["ids"]
+    large = _sampled(_config(release, max_fit_bytes=1600), workers=2)["ids"]
+    for stratum, ids in small.items():
+        assert ids and ids == large[stratum][: len(ids)]
+        assert len(large[stratum]) > len(ids)
+
+
+def test_the_sample_fills_each_quota_and_states_how_it_was_chosen(
+    tmp_path: Path, split_scan: None
+) -> None:
+    config = _config(_release(tmp_path))
+    stats: dict = {}
+    with verification_settings(workers=2):
+        list(tokenizer_sampling.documents(config, stats))
+    result = stats["sampling"]
+    assert (result["order"], result["seed"]) == ("seeded_hash", 11)
+    for stratum, cap in result["requested_bytes"].items():
+        assert 0 <= result["unfilled_bytes"][stratum] < 60
+        assert (
+            result["selected_bytes"][stratum] + result["unfilled_bytes"][stratum] == cap
+        )
+    other: dict = {}
+    with verification_settings(workers=2):
+        list(
+            tokenizer_sampling.documents(
+                _config(config.dataset.corpus_release_path, seed=12), other
+            )
+        )
+    assert other["digest"] != stats["digest"]
+
+
+def test_a_too_tight_threshold_rescans_and_still_selects_exactly(
+    tmp_path: Path, split_scan: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tokenizer_sampling, "OVERSAMPLE", 1)
+    config = _config(_release(tmp_path))
+    echo = io.StringIO()
+    with verification_settings(workers=2, echo=echo):
+        sampled = _sampled(config, workers=2)
+    assert _trim(sampled) == _expected(config)
+    assert echo.getvalue().count("sampling: candidates: 0 shards") == 0
+    assert echo.getvalue().count("sampling: candidates:") > 2
+
+
+def test_a_document_over_the_cap_ends_the_prefix_and_an_ineligible_one_is_refused(
     tmp_path: Path, split_scan: None
 ) -> None:
     release = _release(tmp_path, ineligible_from=250)
     with pytest.raises(ValueError, match="ineligible TRAIN document"):
-        _sampled(_config(release, 10**6), workers=3)
-    assert _sampled(_config(release, 60), workers=3)["acquired"] == 60
+        _sampled(_config(release), workers=3)
+    with pytest.raises(ValueError, match="needs every TRAIN document"):
+        _sampled(_config(_release(tmp_path / "two"), max_documents=60), workers=3)
 
 
 def test_scan_states_its_workers_and_cores_used(
     tmp_path: Path, split_scan: None
 ) -> None:
     echo = io.StringIO()
-    config = _config(_release(tmp_path), 10**6)
+    config = _config(_release(tmp_path))
     with verification_settings(workers=3, echo=echo):
         for _ in tokenizer_sampling.documents(config, {}):
             pass
-    assert re.search(r"documents scan: \d+ shards, up to 3 workers", echo.getvalue())
+    assert re.search(r"rank histogram: \d+ shards, up to 3 workers", echo.getvalue())
     assert "cores used" in echo.getvalue()
 
 
 def test_killed_scan_resumes_from_its_stored_shards_to_the_same_selection(
     tmp_path: Path, split_scan: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    config = _config(_release(tmp_path), 10**6)
-    expected = _serial(config)
+    config = _config(_release(tmp_path))
+    expected = _expected(config)
     scratch = tmp_path / "scratch"
-    stage = tokenizer_sampling.SCAN_STAGE
 
     def run(echo: io.StringIO) -> dict:
-        stats: dict = {}
         with verification_settings(workers=2, scratch_dir=scratch, echo=echo):
-            texts = list(tokenizer_sampling.documents(config, stats))
-        return {"acquired": stats["acquired"], "texts": texts, "bytes": stats["bytes"]}
+            return _trim(_sampled(config, workers=2))
 
-    monkeypatch.setenv("KLAB_FAULT", f"{stage}:3")
+    monkeypatch.setenv("KLAB_FAULT", f"{tokenizer_sampling.CANDIDATE_STAGE}:3")
     with pytest.raises(RuntimeError, match="KLAB_FAULT"):
         run(io.StringIO())
     monkeypatch.delenv("KLAB_FAULT")
     echo = io.StringIO()
     assert run(echo) == expected
-    reused = [line for line in echo.getvalue().splitlines() if "documents scan" in line]
-    assert any("reused 3/" in line for line in reused)
+    lines = [line for line in echo.getvalue().splitlines() if "candidates" in line]
+    assert any("reused 3/" in line for line in lines)
+    assert any(
+        "rank histogram" in line and "reused 3/" not in line
+        for line in echo.getvalue().splitlines()
+    )
 
 
 def test_every_declared_stage_is_shardable_or_gives_a_reason_and_is_documented() -> (

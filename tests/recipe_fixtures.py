@@ -871,6 +871,7 @@ def write_training_files(recipe: Recipe, *, vocab_size: int) -> None:
                 stratum: int(share * 100) for stratum, share in STRATA.items()
             },
             "max_fit_bytes": 2000,
+            "seed": 0,
             "audit_documents_per_stratum": 2,
             "max_audit_bytes": 65536,
         },
