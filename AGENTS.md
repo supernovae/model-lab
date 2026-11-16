@@ -216,3 +216,4 @@ before changing its settings.
 | Engram memory | [docs/engram.md](docs/engram.md#size-the-tables) | adding n-gram memory or choosing its table sizes, heads or optimizer settings |
 | Pretraining preflight | [docs/pretraining-preflight.md](docs/pretraining-preflight.md) | starting a multi-day pretraining run, or when `klab preflight` fails or `klab train` asks for `--preflight` |
 | Near-duplicate screen | [docs/corpus-preparation.md](docs/corpus-preparation.md#template-aware-screening) | a screen lists thousands of pairs that share issue templates or bot text; never drop documents for sharing a template |
+| Tokenizer sampling | [docs/corpus-preparation.md](docs/corpus-preparation.md#fitting-a-tokenizer-on-a-byte-sample) | choosing or changing `sampling` for `klab tokenizer train`: the sample is a seeded hash, never a prefix of the release, and a changed sampling means fitting the tokenizer again |

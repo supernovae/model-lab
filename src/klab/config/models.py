@@ -1600,11 +1600,15 @@ class RunConfig(StrictModel):
 
 
 class TokenizerSampling(StrictModel):
-    """Deterministic whole-document byte quotas over an authenticated TRAIN view."""
+    """Seeded-hash whole-document byte quotas over an authenticated TRAIN view."""
 
     source_strata: dict[str, str]
     byte_weights: dict[str, Annotated[int, Field(strict=True, gt=0)]]
     max_fit_bytes: int = Field(strict=True, gt=0, le=512 * 1024 * 1024)
+    # Within a stratum, documents are taken in increasing order of a hash of
+    # (seed, content digest) until its byte quota is full. Changing the seed
+    # changes which documents are chosen, so it is part of the tokenizer's identity.
+    seed: int = Field(strict=True, ge=0)
     audit_documents_per_stratum: int = Field(default=1000, strict=True, gt=0, le=10000)
     max_audit_bytes: int = Field(
         default=64 * 1024 * 1024, strict=True, gt=0, le=512 * 1024 * 1024
