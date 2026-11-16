@@ -101,6 +101,35 @@ def test_near_duplicates_reports_a_planted_cross_split_pair(
     assert report["candidates_truncated"] is False
 
 
+def test_template_aware_near_duplicates_keeps_the_planted_pair_on_the_cli(
+    planted_release: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    strict = _klab(
+        monkeypatch, capsys, "corpus", "near-duplicates", str(planted_release)
+    )
+    aware = _klab(
+        monkeypatch,
+        capsys,
+        "corpus",
+        "near-duplicates",
+        str(planted_release),
+        "--template-aware",
+        "--workers",
+        "2",
+        "--shard-bytes",
+        "2048",
+    )
+    assert aware["parameters"]["template_aware"] is True
+    [pair] = aware["candidates"]
+    assert pair["class"] == "leak" and pair["content_jaccard"] >= 0.65
+    assert aware["class_counts"]["template_only"] == 0
+    [same] = strict["candidates"]
+    assert (pair["left_document_id"], pair["right_document_id"]) == (
+        same["left_document_id"],
+        same["right_document_id"],
+    )
+
+
 def test_decision_record_must_decide_every_pair_of_this_report() -> None:
     from klab.corpus.near_duplicates import check_decisions
 

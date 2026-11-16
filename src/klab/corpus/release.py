@@ -21,15 +21,14 @@ from klab.corpus.project import NormalizerOptions
 from klab.corpus.release_copy import copy_inventory
 from klab.corpus.release_receipt import receipt_first
 from klab.corpus.release_verify import (
-    chunk_ranges,
     current_settings,
     hash_inventory,
     line_boundaries,
     open_progress,
     range_records,
-    run_tasks,
     scratch_root,
 )
+from klab.corpus.shards import chunk_ranges, run_tasks
 from klab.experiments.artifacts import snapshot_dependencies
 from klab.training.manifest import sha256_file
 
