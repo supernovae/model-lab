@@ -511,6 +511,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         command.add_argument("project")
         command.add_argument("--offline", action="store_true")
         command.add_argument("--transport-cache", type=Path, help=_CACHE_HELP)
+        command.add_argument(
+            "--cold",
+            action="store_true",
+            help="Hash every snapshot from its bytes instead of reusing a signed receipt",
+        )
         if name == "build":
             command.add_argument(
                 "--reuse-completed-preparation",

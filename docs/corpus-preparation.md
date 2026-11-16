@@ -745,9 +745,12 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   a signed receipt under the work directory, bound to the stat fingerprint of
   every release and snapshot file. `audit`, `describe`, `sources`, `sample`,
   `review`, `lineage`, `publication`, `near-duplicates`, `export`,
-  `materialize-mixture` and the other release readers reuse it, so a release is
-  verified from its bytes once, not once per command. Any change to a file
-  invalidates the receipt. `--cold` ignores receipts and verifies from the bytes.
+  `materialize-mixture` and the other release readers reuse it, as do `acquire` and `build` for the source
+  snapshots they read, so a rebuild or a resumed build does not hash an
+  unchanged snapshot again and a release is verified from its bytes once, not
+  once per command. Any change to a file invalidates the receipt: a snapshot
+  with one changed byte is hashed and refused. `--cold` (also on `acquire` and
+  `build`) ignores receipts and verifies from the bytes.
   Receipts need a work directory owned by you and not writable by others, and
   files with a single hard link.
 
