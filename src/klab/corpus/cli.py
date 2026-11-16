@@ -8,6 +8,7 @@ import os
 import re
 import sys
 from contextlib import nullcontext
+from dataclasses import asdict
 from pathlib import Path
 
 from klab.verification_proofs import verification_options
@@ -46,6 +47,27 @@ def _verification_flags(command: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Verify from the bytes instead of reusing a signed receipt",
     )
+
+
+def _canary_sample(args: argparse.Namespace):
+    from klab.corpus.large_build import CanarySample
+
+    sizes = {
+        name: value
+        for name, value in (
+            ("files_per_source", args.canary_files),
+            ("rows_per_file", args.canary_rows),
+            ("bytes_per_source", args.canary_bytes),
+        )
+        if value is not None
+    }
+    if not args.canary:
+        if sizes:
+            raise ValueError(
+                "--canary-files, --canary-rows and --canary-bytes need --canary"
+            )
+        return None
+    return CanarySample(**sizes)
 
 
 def _handle(args: argparse.Namespace) -> None:
@@ -342,16 +364,31 @@ def _run(args: argparse.Namespace) -> None:
         )
         project = load_project(Path(args.project), verify_inputs=not reuse)
         if command == "build":
-            print(
-                build(
-                    project,
-                    root,
-                    offline=args.offline,
-                    reuse_completed_preparation=reuse,
-                    keep_stages=args.keep_stages,
-                    **verification,
-                )
+            canary = _canary_sample(args)
+            built = build(
+                project,
+                root,
+                offline=args.offline,
+                reuse_completed_preparation=reuse,
+                keep_stages=args.keep_stages,
+                canary=canary,
+                **verification,
             )
+            if canary is None:
+                print(built)
+            else:
+                report = json.loads((built / "report.json").read_text())
+                print(
+                    json.dumps(
+                        {
+                            "canary": "passed",
+                            "build": str(built),
+                            "sample": asdict(canary),
+                            "source_ledger": report["source_ledger"],
+                        },
+                        sort_keys=True,
+                    )
+                )
             return
         from klab.corpus.bounded_metadata import metadata_operation
 
@@ -522,6 +559,23 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
                 action="store_true",
                 help="Reuse completed local preparation and record deferred source re-audit",
             )
+            command.add_argument(
+                "--canary",
+                action="store_true",
+                help="Run the whole pipeline on a small deterministic sample into "
+                "WORK/scratch/canary, never into builds, to surface policy and data failures early",
+            )
+            for flag, meaning in (
+                ("canary-files", "rights-eligible files per source"),
+                ("canary-rows", "rows of each JSONL file"),
+                ("canary-bytes", "bytes of files per source"),
+            ):
+                command.add_argument(
+                    f"--{flag}",
+                    type=int,
+                    metavar="N",
+                    help=f"With --canary: sample at most N {meaning}",
+                )
             command.add_argument(
                 "--keep-stages",
                 type=int,

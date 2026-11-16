@@ -324,13 +324,16 @@ def _heldout_shard(
     return Shard(path, rows), len(picked)
 
 
-def write_recipe(root: Path, *, strict_rights: bool = False) -> Recipe:
+def write_recipe(
+    root: Path, *, strict_rights: bool = False, empty_document: bool = False
+) -> Recipe:
     """Write the miniature recipe under `root` and return it with its mock hub.
 
     By default the release allows training unless a restriction is recorded, as
     a private-research recipe does. `strict_rights` requires explicit
     eligibility evidence instead, which Hugging Face shards with per-row
-    licenses and no file-level SPDX expression cannot give.
+    licenses and no file-level SPDX expression cannot give. `empty_document`
+    gives one web row an empty text, which `documents.empty_text: error` refuses.
     """
     rng = random.Random(20260101)
     hub = MockHub()
@@ -449,6 +452,8 @@ def write_recipe(root: Path, *, strict_rights: bool = False) -> Recipe:
     # two documents. The release declares no canonical_origin duplicate key, so
     # both stay, and verification must not demand they share a representative.
     web[1] = {**web_row(1, "web", _WORDS["web"]), "url": web[0]["url"]}
+    if empty_document:
+        web[2] = {**web[2], "text": ""}
     hf_source(
         "web_fineweb",
         "fixture/web-corpus",

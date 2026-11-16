@@ -512,6 +512,41 @@ symlink works). Cleanup rules:
 
 Run one build of a project at a time.
 
+### Try the build first: the canary
+
+```sh
+klab --work-dir WORK corpus build PROJECT --canary
+```
+
+runs the whole disk pipeline (rights decisions, normalize, index, deduplication,
+views, the per-source ledger, the empty-source check and publishing) with the
+full release policy on a deterministic sample of the acquired snapshots, in
+minutes. It publishes into `WORK/scratch/canary/<id>/builds`, which each canary
+run replaces, and never writes to `WORK/corpora/<id>/builds`. It prints the
+sample and the source ledger; a failure stops with the same message the full
+build would give.
+
+The sample is, per source, the first 3 rights-eligible files in path order
+(until 64 MiB of files are covered; the first file is always taken) and the
+first 1000 rows of each JSONL file. Change it with `--canary-files`,
+`--canary-rows` and `--canary-bytes`. Every file's rights decision is still
+made, so a source whose files are all set aside fails the canary exactly as it
+would fail the build.
+
+What a canary can show: recipe and policy failures (a strict rights policy that
+sets aside whole sources, an unknown domain or stratum, a source that yields no
+documents), data-shape failures in the sampled files and rows
+(`documents.empty_text: error` on an empty passage, unreadable rows), and
+rights conflicts or held-out overlaps among duplicates that are both in the
+sample. What it cannot show: a rare bad row or file past the sample, a
+duplicate group whose members are in different, unsampled files, a rights
+conflict between files outside the sample, the real size of any stage or the
+disk it needs, and anything that depends on the whole corpus (token counts,
+mixture proportions, sources that are only empty after deduplication). Its
+counts are the sample's; do not read them as the release's. A canary refuses a
+release with `release.record_admission` (every reviewed row must be present) and
+a release the memory builder would build.
+
 ### Release policy
 
 Behaviour is chosen by named options in `release.policy` and `release.normalizer`, never by a version
