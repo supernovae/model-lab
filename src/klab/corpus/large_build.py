@@ -457,7 +457,9 @@ def _prepare_file(
 
 
 def _require_every_source_has_documents(
-    connection: sqlite3.Connection, project: Any
+    connection: sqlite3.Connection,
+    project: Any,
+    source_events: list[Path | dict[str, Any]],
 ) -> None:
     """Fail when a declared source contributed no document at all.
 
@@ -472,11 +474,29 @@ def _require_every_source_has_documents(
         )
     }
     empty = sorted(source.id for source in project.sources if source.id not in present)
-    if empty:
-        raise ValueError(
-            f"declared source(s) produced no documents: {', '.join(empty)}; "
-            "every file was set aside (see rejected.jsonl and license-report.json)"
+    if not empty:
+        return
+    reasons: dict[str, Counter[str]] = defaultdict(Counter)
+    examples: dict[str, str] = {}
+    for event in source_events:
+        if isinstance(event, dict) and event["source_id"] in empty:
+            reasons[event["source_id"]][event["reason"][:120]] += 1
+            examples.setdefault(event["source_id"], event["path"])
+    details = "; ".join(
+        f"{source} (e.g. file {examples.get(source, 'none seen')}: "
+        + (
+            ", ".join(f"{n} x {why}" for why, n in reasons[source].most_common(3))
+            or "no file reached the normalizer"
         )
+        + ")"
+        for source in empty
+    )
+    raise ValueError(
+        f"declared source(s) produced no documents: {details}. Every file was set "
+        "aside (see rejected.jsonl and license-report.json); the options that "
+        "decide this are release.policy.rights.training_use (rights evidence), "
+        "release.policy.documents.empty_text and the source's own rights block"
+    )
 
 
 def _index_prepared(
@@ -611,6 +631,7 @@ def _deduplicate(
         CLEANING_CONFLICT,
         PAGE_OVERLAP,
         Member,
+        describe_failure,
         drop_reason,
         find_root,
         is_metadata_only,
@@ -692,7 +713,15 @@ def _deduplicate(
                     _duplicate_diagnostics(
                         groups_path, rejected_path, diagnostics, group.error
                     )
-                    raise ValueError(group.error)
+                    raise ValueError(
+                        describe_failure(
+                            group.error,
+                            method,
+                            key,
+                            [row[1] for row in rows],
+                            group.splits,
+                        )
+                    )
                 if chain:
                     train = [row[0] for row in rows if row[2] == "train"]
                     linked = [row[0] for row in rows]
@@ -774,9 +803,24 @@ def _deduplicate(
         (heldout_mask, lambda mask: mask != 3, PAGE_OVERLAP),
         (cleaning_mask, lambda mask: mask != 3, CLEANING_CONFLICT),
     ):
-        if not all(ok(mask) for mask in masks.values()):
-            write_json(diagnostics, {"error": message})
-            raise ValueError(message)
+        bad = next((root for root, mask in masks.items() if not ok(mask)), None)
+        if bad is not None:
+            members = [
+                (identifier, split)
+                for number, identifier, split in connection.execute(
+                    "SELECT rowid,document_id,split FROM documents ORDER BY rowid"
+                )
+                if find_root(parents, number) == bad
+            ]
+            text = describe_failure(
+                message,
+                "component",
+                members[0][0],
+                [item[0] for item in members],
+                {item[1] for item in members},
+            )
+            write_json(diagnostics, {"error": text})
+            raise ValueError(text)
     for number, identifier, split, rank, kind in connection.execute(
         "SELECT rowid,document_id,split,source_rank,document_kind FROM documents "
         "ORDER BY rowid"
@@ -1477,7 +1521,7 @@ def build_large(
     )
     stages.prune("index", keep=_PRUNE_ON_PUBLISH, protect=index_dir.name)
     with _open_read_only(index_dir / "documents.sqlite") as connection:
-        _require_every_source_has_documents(connection, project)
+        _require_every_source_has_documents(connection, project, source_events)
     if record_admission:
         # The coverage check writes a table, so it runs in a scratch database
         # that reads the checkpointed index and never changes it.

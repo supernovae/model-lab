@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -146,6 +146,39 @@ def drop_reason(
     return "duplicate"
 
 
+_OPTIONS = {
+    CROSS_SPLIT_OVERLAP: (
+        "release.policy.duplicates.heldout_overlap: drop_train_copy drops the train "
+        "copy of text shared by train and one held-out split (text shared by two "
+        "held-out splits is always an error: fix the split assignments)"
+    ),
+    RIGHTS_CONFLICT: (
+        "release.policy.duplicates.rights_conflict: allow keeps one copy whatever "
+        "the copies' rights evidence says (or make the sources' rights agree)"
+    ),
+    PAGE_OVERLAP: (
+        "no option allows validation and test to share a page or paper: fix the "
+        "split assignments, or remove canonical_origin from "
+        "release.policy.duplicates.keys"
+    ),
+    CLEANING_CONFLICT: (
+        "no option allows it: the same text is metadata-only in one document and "
+        "not in another; fix the sources' cleaning or the document kinds"
+    ),
+}
+
+
+def describe_failure(
+    error: str, method: str, key: str, ids: Sequence[str], splits: Iterable[str]
+) -> str:
+    """A duplicate-policy failure with its group and the option that changes it."""
+    listed = ", ".join(ids[:5]) + (f" and {len(ids) - 5} more" if len(ids) > 5 else "")
+    return (
+        f"{error}: {method} duplicate group {key[:16]} has {len(ids)} documents "
+        f"({listed}) in splits {', '.join(sorted(splits))}; change {_OPTIONS[error]}"
+    )
+
+
 class DuplicateError(ValueError):
     """A duplicate policy violation, with the groups observed before it."""
 
@@ -228,7 +261,12 @@ def deduplicate_documents(
                 }
             )
             if group.error:
-                raise DuplicateError(group.error, groups)
+                raise DuplicateError(
+                    describe_failure(
+                        group.error, method, content_id, ids, group.splits
+                    ),
+                    groups,
+                )
             if policy.resolution == "chain_smallest_id":
                 for i in ids:
                     if group.contaminated and by_id[i]["split"] == "train":
@@ -253,9 +291,27 @@ def deduplicate_documents(
         for ids in components.values():
             heldout = {by_id[i]["split"] for i in ids} - {"train"}
             if len(heldout) > 1:
-                raise DuplicateError(PAGE_OVERLAP, groups)
+                raise DuplicateError(
+                    describe_failure(
+                        PAGE_OVERLAP,
+                        "component",
+                        ids[0],
+                        sorted(ids),
+                        {by_id[i]["split"] for i in ids},
+                    ),
+                    groups,
+                )
             if len({is_metadata_only(by_id[i]) for i in ids}) > 1:
-                raise DuplicateError(CLEANING_CONFLICT, groups)
+                raise DuplicateError(
+                    describe_failure(
+                        CLEANING_CONFLICT,
+                        "component",
+                        ids[0],
+                        sorted(ids),
+                        {by_id[i]["split"] for i in ids},
+                    ),
+                    groups,
+                )
             priority = next(iter(heldout)) if heldout else None
             selected = min(
                 ids,

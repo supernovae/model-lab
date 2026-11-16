@@ -512,6 +512,36 @@ symlink works). Cleanup rules:
 
 Run one build of a project at a time.
 
+### When a build fails
+
+A failure that stops a build is one of three kinds, and its message says which
+by naming where it happened and what would change it:
+
+1. **Fatal recipe error.** The declaration cannot be built whatever the data
+   is: an unregistered transform, `release.policy.build.strategy: disk` with a
+   source kind the disk builder cannot read, an admission file that no longer
+   matches `release.record_admission.sha256`. The message names the field.
+   Fix the recipe.
+2. **Data-dependent condition, decided by a policy option.** The data meets a
+   rule the recipe chose. The message names the source, file, row or
+   duplicate group and the option:
+
+   | Condition | Where it is named | Option |
+   | --- | --- | --- |
+   | an empty or non-text passage | source, file, row or line | `release.policy.documents.empty_text` (`error` or `skip`) |
+   | a file without training eligibility | source and file, in `rejected.jsonl` and `license-report.json` | `release.policy.rights.training_use` and the source's `rights` |
+   | a source with no document left | the source, an example file and its top reasons | the two options above |
+   | text shared across splits | duplicate group (method, key, document IDs, splits) | `release.policy.duplicates.heldout_overlap` |
+   | duplicate text with different rights evidence | duplicate group | `release.policy.duplicates.rights_conflict` |
+   | validation and test sharing a page or paper, or discordant metadata-only cleaning, in one component | component (a document ID and its members) | no option allows it; `duplicates.keys` and the split assignments decide whether it arises |
+   | a split unit in several splits | the unit and its splits | `splits.unit`, `splits.assignments` |
+
+   `klab corpus build --canary` finds these on a sample first.
+3. **Internal error.** A prepared shard, stage output or receipt that does not
+   verify, or an invariant of the builder. These are never caused by a policy
+   option; a stage output that fails its receipt is rebuilt, and an error that
+   remains is a bug to report with the build ID.
+
 ### Try the build first: the canary
 
 ```sh
