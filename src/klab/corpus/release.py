@@ -20,15 +20,14 @@ from klab.corpus.jsonl_records import iter_rows, read_rows
 from klab.corpus.project import NormalizerOptions
 from klab.corpus.release_copy import copy_inventory
 from klab.corpus.release_verify import (
-    chunk_ranges,
     current_settings,
     hash_inventory,
     line_boundaries,
     open_progress,
     range_records,
-    run_tasks,
     scratch_root,
 )
+from klab.corpus.shards import chunk_ranges, run_tasks
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:

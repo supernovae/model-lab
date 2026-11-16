@@ -12,7 +12,7 @@ from corpus_fixtures import write_prose_project
 
 from klab.canonical import canonical_json
 from klab.corpus import release as release_module
-from klab.corpus import release_verify
+from klab.corpus import shards
 from klab.corpus.acquisition import acquire
 from klab.corpus.pipeline import build
 from klab.corpus.project import load_project
@@ -189,8 +189,8 @@ FORGERIES = {
 def execution(request, monkeypatch: pytest.MonkeyPatch) -> str:
     """Run once in-process and once through worker processes over tiny chunks."""
     if request.param == "parallel":
-        monkeypatch.setattr(release_verify, "PARALLEL_MIN_BYTES", 0)
-        monkeypatch.setattr(release_verify, "CHUNK_BYTES", 400)
+        monkeypatch.setattr(shards, "PARALLEL_MIN_BYTES", 0)
+        monkeypatch.setattr(shards, "CHUNK_BYTES", 400)
         monkeypatch.setattr(release_module, "VIEW_LINES", 2)
     return request.param
 

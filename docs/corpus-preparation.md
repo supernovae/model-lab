@@ -802,9 +802,26 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   Default: `WORK/scratch`. Allow 2-3 times the release size for a release that
   uses the row-store verifier, and put it on fast storage (NVMe); it is deleted
   when the command ends.
-- **`--workers`** sets the verification processes (default 8, never more than
-  the CPU count). Use `1` for a single-process run. A release smaller than a few
-  hundred MB is verified in-process.
+- **`--workers`** sets the worker processes for every parallel pass over corpus
+  files (default: half the CPU count; never more than the CPU count). Use `1` for
+  a single-process run. A file smaller than a few hundred MB is read in-process.
+  The same option is accepted by `klab tokenizer train` and `klab tokenizer
+  verify`. Each parallel stage prints `STAGE: N shards, up to W workers` when it
+  starts and `STAGE: S s wall, C s cpu, K cores used, reused R/N` when it ends,
+  where cores used is CPU seconds over wall seconds.
+- **Shards.** A parallel stage cuts its file into line-aligned byte ranges
+  (shards), runs them on the worker pool and merges results in file order, so the
+  output never depends on `--workers`. With `--scratch-dir`, the stage also keeps
+  each finished shard under `SCRATCH/shards`, so a killed run reuses them. Every
+  stage is either sharded or states why one process is the limit:
+
+  | Stage | Parallelism |
+  | --- | --- |
+  | `release verification` | shardable: byte ranges of the release files |
+  | `tokenizer sampling: TRAIN lineage` | shardable: byte ranges of the lineage view |
+  | `tokenizer sampling: documents scan` | shardable: byte ranges of `documents.jsonl`, merged in file order |
+  | `tokenizer fit` | single process: the Hugging Face BPE trainer is multithreaded natively and selects merges sequentially |
+
 - **Progress** goes to stderr and to `scratch/verify-<release>.progress.jsonl`
   in the builder's progress format: phase, documents and bytes processed,
   documents and MB per second and an estimated time remaining for the phase.
@@ -968,7 +985,9 @@ sampling:
 
 `klab tokenizer train` takes whole training documents in release order until
 each stratum's byte cap is filled. This is a deterministic prefix, not a random
-sample. It then audits different training documents for round-trip failures,
+sample. The scan of `documents.jsonl` runs on `--workers` processes over
+line-aligned byte ranges and merges their candidates in file order, so the
+selected documents and the sampling digest do not depend on the worker count. It then audits different training documents for round-trip failures,
 unknown tokens and bytes per token, and refuses to publish on a failure. No
 validation or test document is used.
 
