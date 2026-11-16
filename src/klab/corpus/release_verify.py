@@ -10,21 +10,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import multiprocessing
 import os
-import sys
 import tempfile
 import threading
-from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import (
-    FIRST_COMPLETED,
-    ProcessPoolExecutor,
-    ThreadPoolExecutor,
-    wait,
-)
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
 
@@ -33,10 +26,10 @@ from klab.corpus.progress import BuildProgress
 if TYPE_CHECKING:
     from klab.verification_proofs import ProofStore, VerificationMode
 
-CHUNK_BYTES = 64 * 1024**2
-# Below this much row data a worker pool costs more than it saves.
-PARALLEL_MIN_BYTES = 256 * 1024**2
-DEFAULT_WORKERS = 8
+
+def default_workers() -> int:
+    """Half the cores: corpus stages share the host with whatever else it runs."""
+    return max(1, (os.cpu_count() or 1) // 2)
 
 
 @dataclass(frozen=True)
@@ -44,7 +37,7 @@ class VerificationSettings:
     """Operator choices that change speed and placement, never the verdict."""
 
     scratch_dir: Path | None = None
-    workers: int = DEFAULT_WORKERS
+    workers: int = field(default_factory=default_workers)
     echo: TextIO | None = None
     proof_store: ProofStore | None = None
     verification_mode: VerificationMode = "cold"
@@ -99,6 +92,16 @@ def scratch_root() -> Path:
     root = chosen if chosen is not None else Path(tempfile.gettempdir())
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def add_workers_flag(command: Any) -> None:
+    """Give a command the one `--workers` option every parallel corpus pass honours."""
+    command.add_argument(
+        "--workers",
+        type=int,
+        help="Worker processes for parallel passes over corpus files (default: "
+        f"half the CPU count, {default_workers()} here; 1 runs in one process)",
+    )
 
 
 def worker_count() -> int:
@@ -159,21 +162,6 @@ def hash_inventory(
         list(pool.map(check, names))
 
 
-def chunk_ranges(path: Path) -> list[tuple[int, int]]:
-    """Split a file into byte ranges that each start and end on a line boundary."""
-    target_bytes = CHUNK_BYTES
-    size = path.stat().st_size
-    ranges, start = [], 0
-    with path.open("rb") as stream:
-        while start < size:
-            stream.seek(min(start + target_bytes, size))
-            stream.readline()
-            end = stream.tell()
-            ranges.append((start, end))
-            start = end
-    return ranges
-
-
 def range_records(path: Path, start: int, end: int) -> Iterator[tuple[Any, int, int]]:
     """Yield (value, byte offset, byte length) for each nonblank JSON line in a range."""
     with path.open("rb") as stream:
@@ -229,66 +217,3 @@ def line_boundaries(path: Path, every: int) -> tuple[list[int], int]:
     if starts[-1] >= position:
         starts.pop()
     return starts, lines
-
-
-@contextmanager
-def _workers_without_main():
-    """Start workers without re-running the caller's `__main__` script.
-
-    Spawned workers only need this package's importable functions. Re-running an
-    unguarded script (or a test runner's bootstrap file) in each worker would
-    repeat its work or fail, so the main module is hidden while the pool lives.
-    """
-    main = sys.modules.get("__main__")
-    file, spec = getattr(main, "__file__", None), getattr(main, "__spec__", None)
-    main.__spec__ = None
-    if file is not None:
-        del main.__file__
-    try:
-        yield
-    finally:
-        main.__spec__ = spec
-        if file is not None:
-            main.__file__ = file
-
-
-def run_tasks(
-    function: Callable[..., Any],
-    tasks: Iterable[tuple],
-    consume: Callable[[Any], None],
-    *,
-    total_bytes: int,
-) -> None:
-    """Run tasks inline or in a bounded process pool, consuming results as they land.
-
-    The pool holds at most two tasks per worker in flight so result memory stays
-    bounded, and any failure cancels the rest.
-    """
-    workers = worker_count()
-    if workers == 1 or total_bytes < PARALLEL_MIN_BYTES:
-        for task in tasks:
-            consume(function(*task))
-        return
-    pending: set = set()
-    iterator = iter(tasks)
-    context = multiprocessing.get_context("spawn")
-    with (
-        _workers_without_main(),
-        ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool,
-    ):
-        try:
-            while True:
-                while len(pending) < workers * 2:
-                    task = next(iterator, None)
-                    if task is None:
-                        break
-                    pending.add(pool.submit(function, *task))
-                if not pending:
-                    return
-                done, pending = wait(pending, return_when=FIRST_COMPLETED)
-                for future in done:
-                    consume(future.result())
-        except BaseException:
-            for future in pending:
-                future.cancel()
-            raise

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from klab.config.loading import load_config
+from klab.corpus.release_verify import add_workers_flag
 from klab.training.manifest import sha256_file
 
 
@@ -81,7 +83,10 @@ def verify_configured_tokenizer(config_path: Path) -> dict[str, object]:
 
 
 def _verify(args: argparse.Namespace) -> None:
-    result = verify_configured_tokenizer(Path(args.config))
+    from klab.corpus.release_verify import verification_settings
+
+    with verification_settings(workers=args.workers, echo=sys.stderr):
+        result = verify_configured_tokenizer(Path(args.config))
     print(json.dumps(result, indent=None if args.json else 2, sort_keys=True))
 
 
@@ -93,6 +98,7 @@ def register_verify_parser(commands: argparse._SubParsersAction) -> None:
         "config", help="RunConfig binding tokenizer, dataset and vocabulary"
     )
     command.add_argument("--json", action="store_true")
+    add_workers_flag(command)
     command.set_defaults(handler=_verify)
 
 

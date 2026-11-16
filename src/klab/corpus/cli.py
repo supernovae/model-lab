@@ -31,17 +31,15 @@ def _release_path(value: str, work_root: Path) -> Path:
 
 
 def _verification_flags(command: argparse.ArgumentParser) -> None:
+    from klab.corpus.release_verify import add_workers_flag
+
     command.add_argument(
         "--scratch-dir",
         type=Path,
         help="Directory for disposable verification state; default is WORK/scratch. "
         "Allow 2-3x the release size on fast storage",
     )
-    command.add_argument(
-        "--workers",
-        type=int,
-        help="Verification worker processes (default 8, at most the CPU count)",
-    )
+    add_workers_flag(command)
     command.add_argument(
         "--cold",
         action="store_true",
