@@ -205,6 +205,34 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     } == {"cache"}
 
 
+def test_freeze_refuses_a_mixture_a_stratum_cannot_supply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    # The budget asks systems_code for 330 tokens; its kept TRAIN bytes give
+    # about 157 unique tokens at the conservative 3 bytes per token, 314 over
+    # two exposures. No tokenizer is needed to know this.
+    (tmp_path / "short").mkdir()
+    (tmp_path / "fixed").mkdir()
+    with pytest.raises(ValueError, match="cannot be supplied") as failure:
+        prepare(tmp_path / "short", monkeypatch, capsys, total_tokens=2200)
+    message = str(failure.value)
+    assert "systems_code: kept TRAIN documents hold 472 bytes" in message
+    assert "314 with max_exposures=2, but 330 are requested" in message
+    assert "Lower the quota and weight together" in message
+    assert message.count("kept TRAIN documents hold") == 1
+
+    # The fix: a smaller budget. The verdict and its numbers are in the report.
+    fixed = prepare(tmp_path / "fixed", monkeypatch, capsys, total_tokens=2000)
+    supply = json.loads((fixed.release / "report.json").read_text())["mixture_supply"]
+    assert supply["feasible"]
+    assert supply["strata"]["systems_code"] == {
+        "requested_tokens": 300,
+        "train_utf8_bytes": 472,
+        "estimated_unique_tokens": 157,
+        "supply_tokens": 314,
+    }
+
+
 def test_strict_eligibility_fails_the_build_instead_of_dropping_sources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
@@ -302,6 +330,26 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         }
 
     assert all(tokens("train")[stratum] > 0 for stratum in STRATA)
+
+    # The exact check runs here, before near-duplicates, export of the mixture
+    # and the family inventory: the template's quotas against real tokens,
+    # worded as materialize-mixture words it. The template may still hold
+    # placeholders.
+    template_path = recipe.corpus / "mixture.template.yaml"
+    lab.json(
+        "corpus", "describe", str(release),
+        "--tokenizer", str(tokenizer_json), "--mixture", str(template_path),
+    )  # fmt: skip
+    inflated = yaml.safe_load(template_path.read_text())
+    inflated["target_quotas"]["web"] = 10**6
+    inflated_path = tmp_path / "inflated.template.yaml"
+    inflated_path.write_text(yaml.safe_dump(inflated))
+    with pytest.raises(ValueError, match="required quota impossible for web: ") as bad:
+        lab.run(
+            "corpus", "describe", str(release),
+            "--tokenizer", str(tokenizer_json), "--mixture", str(inflated_path),
+        )  # fmt: skip
+    assert "1000000 required, max_exposures=2, shortfall=" in str(bad.value)
     assert set(tokens("validation")) == {SOURCE_STRATA[name] for name in HELDOUT}
     assert all(tokens("validation").values())
 

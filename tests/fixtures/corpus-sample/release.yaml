@@ -14,6 +14,9 @@ policy:
     training_use: explicit_eligibility_required
   build:
     strategy: auto
+  mixture:
+    total_tokens: 1
+    max_exposures: 1
 mixture:
   technical_docs: 0.4
   code: 0.2

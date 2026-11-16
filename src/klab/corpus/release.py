@@ -18,6 +18,7 @@ from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.bounded_metadata import metadata_operation, read_metadata
 from klab.corpus.jsonl_records import iter_rows, read_rows
 from klab.corpus.project import NormalizerOptions
+from klab.corpus.quota import require_estimated_supply
 from klab.corpus.release_receipt import receipt_first
 from klab.corpus.release_verify import (
     current_settings,
@@ -2059,6 +2060,7 @@ def _freeze(
                     chunk.strip() for chunk in iter(lambda: stream.read(64 * 1024), b"")
                 ):
                     raise ValueError(f"selected {view}/{split} training view is empty")
+    require_estimated_supply(_load(build_dir / "report.json"))
     payload = _manifest_payload(build)
     release_id = canonical_digest(payload)
     destination = releases / release_id
@@ -2313,7 +2315,11 @@ def _verify_release_cold(
     return manifest
 
 
-def describe(path: Path, *, tokenizer: Path | None = None) -> dict[str, Any]:
+def describe(
+    path: Path, *, tokenizer: Path | None = None, mixture: Path | None = None
+) -> dict[str, Any]:
+    if mixture is not None and tokenizer is None:
+        raise ValueError("--mixture needs --tokenizer to count tokens")
     manifest = verify_release(path)
     report = _load(Path(path) / "report.json")
     from klab.corpus.measurement import measure_views
@@ -2368,6 +2374,16 @@ def describe(path: Path, *, tokenizer: Path | None = None) -> dict[str, Any]:
             for view, splits in measured["views"].items()
             for split, item in splits.items()
         }
+    if mixture is not None:
+        from klab.corpus.quota import require_supply, template_requirements
+
+        quotas, exposures = template_requirements(mixture)
+        domains = measured["views"]["lm"]["train"]["dimensions"]["source_domain"]
+        require_supply(
+            {stratum: row["actual_tokens"] for stratum, row in domains.items()},
+            quotas,
+            exposures,
+        )
     return result
 
 

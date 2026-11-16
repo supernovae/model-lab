@@ -32,6 +32,7 @@ from klab.corpus.mixture_index import (
     MixtureIndex,
     rows,
 )
+from klab.corpus.quota import shortfall_message
 from klab.corpus.release import _verification_operation, verify_release
 from klab.data.row_layout import document_rows
 from klab.data.tokenizer import load_tokenizer, verify_tokenizer_artifact
@@ -1052,12 +1053,8 @@ def _schedule(
                     f"{available_content[stratum]} available, "
                     f"{spec.unique_train_content_floors[stratum]} required (EOS excluded)"
                 )
-            if available * exposures < quota:
-                raise ValueError(
-                    f"required quota impossible for {stratum}: {available} unique, "
-                    f"{quota} required, max_exposures={exposures}, "
-                    f"shortfall={quota - available * exposures}"
-                )
+            if message := shortfall_message(stratum, available, quota, exposures):
+                raise ValueError(message)
             available_unique[stratum] = available
             eligible_families[stratum] = index.family_count(stratum)
             if not direct:
