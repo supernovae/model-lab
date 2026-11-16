@@ -1607,8 +1607,10 @@ def _build_stored(
     build_id = digest(identity)
     target = root / build_id
     if target.exists() and canary is None:
-        from klab.corpus.release import verify_build
+        from klab.corpus.release import consumed_release, verify_build
 
+        if consumed_release(target) is not None:
+            return target
         verify_build(
             target, proof_store=proof_store, verification_mode=verification_mode
         )

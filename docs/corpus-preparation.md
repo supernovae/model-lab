@@ -433,15 +433,18 @@ duplicates (refusing cross-split or incompatible-rights duplicates) and writes
 documents, spans, lineage and language-model and chat views. `freeze` publishes
 an immutable release with a content-derived ID.
 
-`freeze` verifies the build, then copies each file once on several threads,
-hashing the bytes as it writes them and refusing any file that differs from the
-build's recorded digest, so a build file that changes after verification is
-never published. It uses a copy-on-write clone where the filesystem supports one
-(Btrfs, XFS) and a plain copy otherwise. It never hard-links: a link would let a
-later write to the build change the release. The release is not verified a
-second time: it is the verified build's files, each hashed against the build as
-it was copied, plus a manifest, so `freeze` records the release's receipt and
-every later command reuses it ([Verification cost, scratch and
+`freeze` verifies the build (by its receipt if it has one), then publishes it in
+place: the build directory is renamed to the release ID, `manifest.json` takes
+the place of `build.json`, and no file is copied, so a release costs no extra
+disk and no time proportional to its size. The build is consumed: its path keeps
+only `build.json` and `consumed.json` naming the release, `freeze BUILD` again
+returns that release, and `build` of the same project returns the consumed
+build. A build file written while `freeze` was verifying is refused, so a
+change after verification is never published. A `freeze` that was stopped part
+way leaves `releases/.freezing-BUILD_ID`; run `freeze BUILD` again and it
+verifies the staged files from their bytes before publishing them. The release
+is not verified a second time: `freeze` records its receipt, and every later
+command reuses it ([Verification cost, scratch and
 receipts](#verification-cost-scratch-and-receipts)). Progress goes to
 `--scratch-dir`.
 
@@ -917,7 +920,7 @@ checks all three, and that the screen covered every document of this release.
 | `build` normalize | yes: per-file receipted shards | files being written |
 | `build` index, dedup | yes: receipted stage outputs ([resume](#resume-a-failed-build)) | the stage that was running |
 | `build` views and publish | no: one pass, published by one rename | that pass (about 25 min at 6.7M documents) |
-| `freeze` | no: copies into a staging directory, then renames | the copy |
+| `freeze` | yes: rerun it; a stopped freeze is finished after verifying the staged files | the rename, or a verification from the bytes after a stop |
 | `audit`, `describe`, `sources`, release readers | no, but a successful verification is a receipt that later commands reuse | one verification from the bytes |
 | `export` | no: staged, then renamed | the export |
 | `near-duplicates` | yes, by training-document offset | the documents since the last checkpoint |
