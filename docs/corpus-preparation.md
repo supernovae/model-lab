@@ -458,8 +458,8 @@ only the stage that was running:
 | Stage | Output under `WORK/corpora/<id>/builds` | Reused when |
 | --- | --- | --- |
 | normalize | `prepared/normalized-source-v2/<source>/<digest>`, one shard per source file | the shard's receipt and three output hashes verify |
-| index | `stages/index/<key>/documents.sqlite` | its receipt verifies; key below |
-| dedup | `stages/dedup/<key>/documents.sqlite`, `groups.jsonl` | its receipt verifies; key below |
+| index | `stages/index/<key>/documents.sqlite`, `narrow.sqlite` | its receipt verifies; key below |
+| dedup | `stages/dedup/<key>/dedup.sqlite`, `groups.jsonl` | its receipt verifies; key below |
 | views and publish | the build directory itself, renamed into place atomically | the build exists and verifies |
 
 The key of a stage is the SHA-256 of exactly the inputs it depends on, recorded
@@ -495,12 +495,16 @@ have to be serialized and the output files truncated to a verified offset, which
 would add a second code path to a release whose bytes must not depend on how
 often it was interrupted. A failure there repeats only that pass.
 
-**Disk cost.** The index holds every prepared record (about as large as the
-prepared shards), and deduplication works on a copy of it, so a build needs up
-to twice the index size under `stages/` while deduplicating; the copy is a
-copy-on-write clone where the filesystem supports one. The checkpoints are
-I/O-heavy, so point `WORK/corpora/<id>/builds/stages` at fast storage (a
-symlink works). Cleanup rules:
+**Disk cost.** The index holds every prepared record, so it is about as large
+as the prepared shards plus their spans (`documents.sqlite`), with a small
+narrow table beside it (`narrow.sqlite`: ID, split, rank, kind, a metadata-only
+flag and a rights signature per document, computed once while indexing).
+Deduplication reads and writes only that narrow table, never a payload, and
+stores its decisions in `dedup.sqlite` (a few bytes per document) next to
+`groups.jsonl`; it does not copy the index. Its time therefore does not grow
+with document size, and it reports progress per pass (`dedup_groups`,
+`dedup_compress`, `dedup_reasons`). The checkpoints are I/O-heavy, so point
+`WORK/corpora/<id>/builds/stages` at fast storage (a symlink works). Cleanup rules:
 
 - Publishing a stage output removes incomplete directories and every older
   output of that stage except the newest one, so at most two of each remain
