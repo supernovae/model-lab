@@ -43,6 +43,11 @@ def test_consistent_artifacts_give_a_sealed_report_the_trainer_accepts(setup, tm
     # Unmeasured engram tables and an unrecorded recipe are warnings, not failures.
     assert {k: v for k, v in statuses.items() if v == "FAIL"} == {}
     assert statuses["warmup"] == statuses["quotas"] == statuses["sources"] == "PASS"
+    near = next(c for c in report["checks"] if c["id"] == "near_duplicates")
+    # Template-only pairs are shown in the report but need no decision.
+    assert near["evidence"]["template_only_count"] == 7
+    assert near["evidence"]["undecided_count"] == 0
+    assert "7 template-only pair(s) on 2 held-out document(s)" in near["summary"]
     assert report["subject"]["prepared_manifest_sha256"] == "p1"
     assert report["subject"]["stage_bundle_sha256"] == "s" * 64
     warmup = next(c for c in report["checks"] if c["id"] == "warmup")["evidence"]
