@@ -11,6 +11,7 @@ from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
 
+from klab.corpus.release_verify import add_workers_flag
 from klab.verification_proofs import verification_options
 from klab.workdir import resolve_work_dir
 
@@ -31,8 +32,6 @@ def _release_path(value: str, work_root: Path) -> Path:
 
 
 def _verification_flags(command: argparse.ArgumentParser) -> None:
-    from klab.corpus.release_verify import add_workers_flag
-
     command.add_argument(
         "--scratch-dir",
         type=Path,
@@ -735,6 +734,7 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     )
     command.add_argument("mixture")
     command.add_argument("--json", action="store_true")
+    add_workers_flag(command)
     command.set_defaults(handler=_handle)
     command = sub.add_parser(
         "audit-protected-lineage",
