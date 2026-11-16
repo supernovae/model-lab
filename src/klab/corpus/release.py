@@ -2286,13 +2286,24 @@ def describe(path: Path, *, tokenizer: Path | None = None) -> dict[str, Any]:
     report = _load(Path(path) / "report.json")
     from klab.corpus.measurement import measure_views
 
+    # Finished runs are kept with the proof store, so a rerun or a describe that
+    # was stopped measures only what is missing.
+    store = current_settings().proof_store
+    cache = (
+        None
+        if store is None
+        else store.root / "cache" / "describe" / manifest["release_id"]
+    )
     measured = measure_views(
-        Path(path), tokenizer, release_spec=manifest["build_identity"]["release"]
+        Path(path),
+        tokenizer,
+        release_spec=manifest["build_identity"]["release"],
+        cache=cache,
     )
     if tokenizer is not None:
         from klab.corpus.measurement import measure_source_rights
 
-        counted = measure_source_rights(Path(path), tokenizer)
+        counted = measure_source_rights(Path(path), tokenizer, cache=cache)
         rights = report["rights"]
         report = {
             **report,

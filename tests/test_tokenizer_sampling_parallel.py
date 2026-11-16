@@ -207,6 +207,7 @@ def test_killed_scan_resumes_from_its_stored_shards_to_the_same_selection(
 def test_every_declared_stage_is_shardable_or_gives_a_reason_and_is_documented() -> (
     None
 ):
+    import klab.corpus.measurement
     import klab.data.tokenizer  # noqa: F401  (declares its stage on import)
 
     with pytest.raises(ValueError, match="say why"):

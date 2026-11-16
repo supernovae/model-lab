@@ -1,0 +1,265 @@
+"""Describe measures view runs in parallel and merges to exactly the serial answer."""
+
+from __future__ import annotations
+
+import io
+import json
+import random
+from pathlib import Path
+
+import pytest
+from measurement_oracle import measure_source_rights as serial_source_rights
+from measurement_oracle import measure_views as serial_measure_views
+
+from klab.corpus import measurement, shards
+from klab.corpus.measurement import measure_source_rights, measure_views
+from klab.corpus.release_verify import verification_settings
+
+RELEASE_SPEC = {
+    "lm": {"selected": True, "training_splits": ["train", "validation"]},
+    "chat": {"selected": True, "training_splits": ["train"]},
+}
+
+
+def _write(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def _texts(generator: random.Random, count: int) -> list[str]:
+    words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"]
+    texts = []
+    for _ in range(count):
+        texts.append(" ".join(generator.choices(words, k=generator.randint(5, 40))))
+    # Exact repeats, newline-normalised repeats, and a shared 32-character prefix.
+    if count > 8:
+        texts[3] = texts[2]
+        texts[5] = texts[4].replace(" ", "\r\n", 1)
+        texts[7] = "the shared prefix of at least thirty-two characters: one"
+        texts[8] = "the shared prefix of at least thirty-two characters: two"
+    return texts
+
+
+@pytest.fixture
+def release(tmp_path: Path) -> Path:
+    """A release directory with LM and chat views, shared parents and generators."""
+    generator = random.Random(11)
+    root = tmp_path / "release"
+    lineage, ids = [], {}
+    for index in range(90):
+        record_id = f"record-{index:03d}"
+        row = {
+            "record_id": record_id,
+            "origin": ["primary_source", "synthetic"][index % 2],
+            "validation_status": "unverified",
+            "shape": {"id": f"shape-{index % 3}", "attributes": {"size": "s"}},
+            "domains": ["code", "prose"][: 1 + index % 2],
+            "modalities": ["text"],
+            "parent_document_ids": [f"parent-{index % 40}"],
+            "source_family_ids": [f"family-{index % 4}"],
+            "template_family_id": f"template-{index % 2}",
+        }
+        if index % 7 == 0:
+            row["generation_id"] = f"gen-{index}"
+        elif index % 7 == 1:
+            row["scenario_id"] = f"scenario-{index}"
+        elif index % 7 == 2:
+            row["semantic_id"] = "semantic"
+        lineage.append(row)
+        ids[index] = record_id
+    generator.shuffle(lineage)
+    _write(root / "lineage.jsonl", lineage)
+    _write(
+        root / "generations.jsonl",
+        [
+            {
+                "record_id": f"gen-{i}",
+                "generator": {"provider": "p", "model": f"m{i % 2}"},
+            }
+            for i in range(0, 90, 7)
+        ],
+    )
+    _write(
+        root / "scenarios.jsonl",
+        [
+            {"scenario_id": f"scenario-{i}", "generator_id": "g"}
+            for i in range(1, 90, 7)
+        ],
+    )
+    cursor = 0
+    for view, splits in (
+        ("lm", {"train": 40, "validation": 8, "test": 0}),
+        ("chat", {"train": 24, "validation": 6, "test": 0}),
+    ):
+        for split, count in splits.items():
+            chosen = [ids[cursor + k] for k in range(count)]
+            cursor += count
+            texts = _texts(generator, count) if count else []
+            if view == "lm":
+                payload = [{"text": text} for text in texts]
+            else:
+                payload = [
+                    {
+                        "messages": [
+                            {"role": "user", "content": text},
+                            {"role": "assistant", "content": text[::-1] + " ok"},
+                        ]
+                    }
+                    for text in texts
+                ]
+            _write(root / view / f"{split}.jsonl", payload)
+            _write(
+                root / view / f"{split}.lineage.jsonl",
+                [{"record_id": record_id, "split": split} for record_id in chosen],
+            )
+    return root
+
+
+@pytest.fixture(params=["single run", "many runs"])
+def runs(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Whole files as one shard, or tiny byte ranges so many shards merge."""
+    if request.param == "many runs":
+        monkeypatch.setattr(shards, "CHUNK_BYTES", 700)
+        monkeypatch.setattr(measurement, "_LINK_STRIDE", 4)
+    return request.param
+
+
+@pytest.fixture(params=["inside the n-gram bound", "beyond the n-gram bound"])
+def bound(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    if request.param.startswith("beyond"):
+        monkeypatch.setattr(measurement, "_NGRAM_CHARS", 900)
+    return request.param
+
+
+@pytest.fixture(scope="module")
+def tokenizer(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    from tokenizers import Tokenizer, models, pre_tokenizers
+
+    vocab = {
+        "[UNK]": 0,
+        **{
+            word: i + 1
+            for i, word in enumerate(
+                [
+                    "alpha",
+                    "beta",
+                    "gamma",
+                    "delta",
+                    "epsilon",
+                    "zeta",
+                    "eta",
+                    "theta",
+                    "ok",
+                ]
+            )
+        },
+    }
+    model = Tokenizer(models.WordLevel(vocab, unk_token="[UNK]"))
+    model.pre_tokenizer = pre_tokenizers.Whitespace()
+    path = tmp_path_factory.mktemp("tokenizer") / "tokenizer.json"
+    model.save(str(path))
+    return path
+
+
+@pytest.mark.parametrize("counted", [False, True])
+def test_sharded_measurement_equals_the_serial_pass(
+    release: Path, runs: str, bound: str, counted: bool, tokenizer: Path
+) -> None:
+    chosen = tokenizer if counted else None
+    expected = serial_measure_views(release, chosen, release_spec=RELEASE_SPEC)
+    with verification_settings(workers=1):
+        assert measure_views(release, chosen, release_spec=RELEASE_SPEC) == expected
+    assert expected["views"]["lm"]["train"]["records"] == 40
+    assert bool(
+        expected["views"]["chat"]["train"]["concentration"].get("ngram_count_reason")
+    ) == bound.startswith("beyond")
+
+
+def test_worker_processes_give_the_same_answer(
+    release: Path, monkeypatch: pytest.MonkeyPatch, tokenizer: Path
+) -> None:
+    monkeypatch.setattr(shards, "CHUNK_BYTES", 700)
+    monkeypatch.setattr(shards, "PARALLEL_MIN_BYTES", 0)
+    expected = serial_measure_views(release, tokenizer, release_spec=RELEASE_SPEC)
+    with verification_settings(workers=3):
+        assert measure_views(release, tokenizer, release_spec=RELEASE_SPEC) == expected
+
+
+def test_a_killed_describe_reuses_its_finished_runs(
+    release: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(shards, "CHUNK_BYTES", 700)
+    cache = tmp_path / "cache"
+    expected = serial_measure_views(release, None, release_spec=RELEASE_SPEC)
+    monkeypatch.setenv("KLAB_FAULT", f"{measurement.VIEW_STAGE}:3")
+    with (
+        verification_settings(workers=1),
+        pytest.raises(RuntimeError, match="KLAB_FAULT"),
+    ):
+        measure_views(release, release_spec=RELEASE_SPEC, cache=cache)
+    monkeypatch.delenv("KLAB_FAULT")
+    echo = io.StringIO()
+    with verification_settings(workers=1, echo=echo):
+        assert (
+            measure_views(release, release_spec=RELEASE_SPEC, cache=cache) == expected
+        )
+        assert (
+            measure_views(release, release_spec=RELEASE_SPEC, cache=cache) == expected
+        )
+    reused = [
+        line
+        for line in echo.getvalue().splitlines()
+        if "view rows" in line and "reused" in line
+    ]
+    assert "reused 3/" in reused[0], reused
+    total = reused[1].rsplit("/", 1)[1]
+    assert f"reused {total}/{total}" in reused[1], "a second run measures nothing"
+
+
+def test_a_lineage_link_to_no_record_is_refused(release: Path) -> None:
+    links = release / "lm/train.lineage.jsonl"
+    rows = [json.loads(line) for line in links.read_text().splitlines()]
+    rows[0]["record_id"] = "no-such-record"
+    _write(links, rows)
+    with (
+        verification_settings(workers=1),
+        pytest.raises(ValueError, match="reference mismatch"),
+    ):
+        measure_views(release, release_spec=RELEASE_SPEC)
+
+
+def test_source_rights_count_each_passage_once_whichever_run_holds_it(
+    release: Path, tokenizer: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generator = random.Random(5)
+    rows = []
+    for index in range(60):
+        words = " ".join(generator.choices(["alpha", "beta", "gamma"], k=6))
+        rows.append(
+            {
+                "split": ["train", "validation"][index % 5 == 0],
+                "drop_reason": "duplicate" if index % 11 == 0 else None,
+                "rights": {
+                    "training_eligibility": ["eligible", "eligible_with_obligations"][
+                        index % 3 == 0
+                    ]
+                },
+                "content_sha256": f"{index % 25:064x}",
+                "text": words if index % 25 else "alpha beta " + str(index),
+            }
+        )
+    rows[7].pop("rights")
+    _write(release / "documents.jsonl", rows)
+    monkeypatch.setattr(shards, "CHUNK_BYTES", 900)
+    expected = serial_source_rights(release, tokenizer)
+    with verification_settings(workers=1):
+        assert measure_source_rights(release, tokenizer) == expected
+    assert expected["eligible"]["documents"] > 1
+    rows[1]["rights"]["training_eligibility"] = "ineligible"
+    rows[1]["split"], rows[1]["drop_reason"] = "train", None
+    _write(release / "documents.jsonl", rows)
+    with (
+        verification_settings(workers=1),
+        pytest.raises(ValueError, match="ineligible"),
+    ):
+        measure_source_rights(release, tokenizer)
