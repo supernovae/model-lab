@@ -18,6 +18,7 @@ from array import array
 from collections import Counter, defaultdict, deque
 from concurrent.futures import Future, ProcessPoolExecutor
 from contextlib import ExitStack, closing, nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -61,6 +62,24 @@ from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
     from klab.verification_proofs import ProofStore, VerificationMode
+
+
+@dataclass(frozen=True)
+class CanarySample:
+    """A deterministic slice of the acquired data for a canary build.
+
+    Per source, the first `files_per_source` rights-eligible files in path order
+    until `bytes_per_source` bytes are covered (the first file is always taken),
+    and the first `rows_per_file` rows of each JSONL file.
+    """
+
+    files_per_source: int = 3
+    rows_per_file: int = 1000
+    bytes_per_source: int = 64 * 1024**2
+
+    def __post_init__(self) -> None:
+        if min(self.files_per_source, self.rows_per_file, self.bytes_per_source) < 1:
+            raise ValueError("canary sample sizes must be at least 1")
 
 
 _PREPARED_FILES = ("docs.jsonl", "spans.jsonl", "rejected.jsonl")
@@ -239,6 +258,7 @@ def _prepare_file(
     document_policy: Any,
     record_admission: dict[str, Any] | None = None,
     admission_sha256: str | None = None,
+    row_limit: int | None = None,
 ) -> Path:
     from klab.corpus.pipeline import EmptyDocumentError, _records_for_file
     from klab.safe_io import rename_noreplace
@@ -268,6 +288,8 @@ def _prepare_file(
     identity["normalizer"] = normalizer_options.model_dump(mode="json")
     identity["document_policy"] = document_policy.model_dump(mode="json")
     identity["rights"] = decision.model_dump(mode="json")
+    if row_limit is not None:
+        identity["row_limit"] = row_limit
     if record_admission is not None:
         # Bind only this verified file's decisions, not the admission plan for
         # unrelated sources. Stream disk-backed decisions without materializing.
@@ -322,6 +344,8 @@ def _prepare_file(
                             progress.update(input_bytes=len(raw))
                             continue
                         index += 1
+                        if row_limit is not None and index > row_limit:
+                            break
                         if index > source.acquisition.max_rows:
                             progress.update(input_bytes=len(raw))
                             continue
@@ -406,7 +430,7 @@ def _prepare_file(
             for output in (docs, spans, rejected):
                 output.flush()
                 os.fsync(output.fileno())
-        if counts["input_bytes"] != file["size"]:
+        if row_limit is None and counts["input_bytes"] != file["size"]:
             raise ValueError(
                 "prepared source shard input size differs from acquisition"
             )
@@ -1187,6 +1211,25 @@ def _stage_inputs(project: Any, prepared: list[Path]) -> dict[str, dict[str, Any
     }
 
 
+def _sample_file(
+    canary: CanarySample,
+    taken: dict[str, tuple[int, int]],
+    source_id: str,
+    file: dict[str, Any],
+) -> bool:
+    """Whether the canary sample includes this eligible file; records it if so.
+
+    `taken` maps a source to the number of files and bytes already sampled.
+    """
+    files, covered = taken.get(source_id, (0, 0))
+    if files and (
+        files >= canary.files_per_source or covered >= canary.bytes_per_source
+    ):
+        return False
+    taken[source_id] = (files + 1, covered + min(file["size"], canary.bytes_per_source))
+    return True
+
+
 def build_large(
     project: Any,
     workspace: Path,
@@ -1201,9 +1244,15 @@ def build_large(
     record_admission: dict | None = None,
     admission_path: Path | None = None,
     keep_stages: int = 0,
+    canary: CanarySample | None = None,
 ) -> Path:
     """Build LM-only v2/v3 inputs using their declared admission/dedup policies."""
     record_admission = record_admission or {}
+    if canary is not None and record_admission:
+        raise ValueError(
+            "a canary build cannot sample rows under release.record_admission: "
+            "every reviewed row must be present; build without --canary"
+        )
     from klab.corpus.acquisition import verify_snapshot
 
     root = workspace / "builds"
@@ -1271,6 +1320,7 @@ def build_large(
     pool = (
         ProcessPoolExecutor(max_workers=workers) if workers > 1 else nullcontext(None)
     )
+    sampled: dict[str, tuple[int, int]] = {}
     pending: deque[
         tuple[Future[tuple[Path, int, int, int, bool]], Any, dict[str, Any]]
     ] = deque()
@@ -1327,6 +1377,16 @@ def build_large(
             admitted = record_admission.get((source.id, name))
             if admitted is not None:
                 decision = admitted["rights"]
+            if (
+                canary is not None
+                and (
+                    decision is None
+                    or decision.training_eligibility
+                    in {"eligible", "eligible_with_obligations"}
+                )
+                and not _sample_file(canary, sampled, source.id, file)
+            ):
+                continue
             if decision:
                 rights_files.append(
                     rights_file_entry(
@@ -1368,6 +1428,7 @@ def build_large(
                 else None,
                 "normalizer_options": project.release.normalizer,
                 "document_policy": project.release.policy.documents,
+                "row_limit": canary.rows_per_file if canary is not None else None,
             }
             if executor is not None and path in eligible_jsonl:
                 pending.append(

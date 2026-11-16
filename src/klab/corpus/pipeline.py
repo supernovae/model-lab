@@ -7,12 +7,14 @@ import io
 import itertools
 import json
 import re
+import shutil
 import tempfile
 import unicodedata
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
@@ -63,6 +65,7 @@ from klab.corpus.split_assignments import assign_split
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
+    from klab.corpus.large_build import CanarySample
     from klab.verification_proofs import ProofStore, VerificationMode
 
 
@@ -1467,8 +1470,13 @@ def build(
     verification_mode: VerificationMode = "cold",
     reuse_completed_preparation: bool = False,
     keep_stages: int = 0,
+    canary: CanarySample | None = None,
 ) -> Path:
     """Keep bounded metadata alive through native admission and build consumers."""
+    if reuse_completed_preparation and canary is not None:
+        raise ValueError(
+            "--canary and --reuse-completed-preparation exclude each other"
+        )
     if reuse_completed_preparation:
         from klab.corpus.completed_preparation import build_completed
 
@@ -1486,6 +1494,7 @@ def build(
             proof_store=proof_store,
             verification_mode=verification_mode,
             keep_stages=keep_stages,
+            canary=canary,
         )
 
 
@@ -1497,6 +1506,7 @@ def _build_stored(
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
     keep_stages: int = 0,
+    canary: CanarySample | None = None,
 ) -> Path:
     """Build an immutable derived inventory from the exact acquisition lock."""
     from klab.corpus.acquisition import verify_acquisition
@@ -1525,7 +1535,17 @@ def _build_stored(
             },
             Path(work_root) / "corpora" / project.config.id / "snapshots",
         )
-    root = Path(work_root) / "corpora" / project.config.id / "builds"
+    corpus_root = Path(work_root) / "corpora" / project.config.id
+    # A canary never touches the real builds directory: it publishes into a
+    # disposable workspace that each canary run replaces.
+    workspace = (
+        Path(work_root) / "scratch" / "canary" / project.config.id
+        if canary is not None
+        else corpus_root
+    )
+    if canary is not None:
+        shutil.rmtree(workspace, ignore_errors=True)
+    root = workspace / "builds"
     root.mkdir(parents=True, exist_ok=True)
     transforms = _ordered_transforms(project)
     stage_specs = [declaration_payload(t) for t in transforms]
@@ -1562,9 +1582,16 @@ def _build_stored(
         identity["large_builder_implementation_sha256"] = sha256_file(
             Path(__file__).with_name("large_build.py")
         )
+    if canary is not None:
+        if not large_lm_build:
+            raise ValueError(
+                "--canary runs the disk builder, which this release does not use "
+                "(release.policy.build.strategy, lm-only release without a fraction)"
+            )
+        identity["canary"] = asdict(canary)
     build_id = digest(identity)
     target = root / build_id
-    if target.exists():
+    if target.exists() and canary is None:
         from klab.corpus.release import verify_build
 
         verify_build(
@@ -1575,7 +1602,6 @@ def _build_stored(
         from klab.corpus.large_build import build_large
         from klab.corpus.progress import BuildProgress
 
-        workspace = Path(work_root) / "corpora" / project.config.id
         progress = BuildProgress(workspace / "progress" / f"{build_id}.jsonl", build_id)
         return build_large(
             project,
@@ -1590,6 +1616,7 @@ def _build_stored(
             record_admission=record_admission,
             admission_path=admission_path,
             keep_stages=keep_stages,
+            canary=canary,
         )
     with _staged_build(root, build_id) as staging:
         stage_declared_inputs(project, staging, admission_path)
