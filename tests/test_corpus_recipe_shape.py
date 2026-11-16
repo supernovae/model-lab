@@ -12,7 +12,6 @@ stage, the properties those failures violated.
 from __future__ import annotations
 
 import json
-import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,13 +23,13 @@ from recipe_fixtures import (
     HELDOUT,
     SOURCE_STRATA,
     STRATA,
+    Lab,
     Recipe,
     write_recipe,
     write_training_files,
 )
 
 from klab.canonical import canonical_json
-from klab.cli.main import main
 from klab.corpus import release as release_module
 
 VOCAB_SIZE = 300
@@ -42,31 +41,6 @@ CODE_SOURCES = {
     "code_shell",
     "code_systems_heldout",
 }
-
-
-class Lab:
-    """Runs `klab` commands in this process against one isolated work root."""
-
-    def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-        self.root = root
-        self.work = root / "work"
-        self.work.mkdir(mode=0o700)
-        self.monkeypatch = monkeypatch
-        self.capsys = capsys
-        monkeypatch.setenv("KLAB_WORK_DIR", str(self.work))
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(root / "settings"))
-
-    def run(self, *argv: str) -> str:
-        """The command's last line of standard output."""
-        self.monkeypatch.setattr(
-            sys, "argv", ["klab", "--work-dir", str(self.work), *argv]
-        )
-        main()
-        lines = self.capsys.readouterr().out.strip().splitlines()
-        return lines[-1] if lines else ""
-
-    def json(self, *argv: str) -> dict:
-        return json.loads(self.run(*argv))
 
 
 @dataclass

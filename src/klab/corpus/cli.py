@@ -348,6 +348,7 @@ def _run(args: argparse.Namespace) -> None:
                     root,
                     offline=args.offline,
                     reuse_completed_preparation=reuse,
+                    keep_stages=args.keep_stages,
                     **verification,
                 )
             )
@@ -515,6 +516,13 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
                 "--reuse-completed-preparation",
                 action="store_true",
                 help="Reuse completed local preparation and record deferred source re-audit",
+            )
+            command.add_argument(
+                "--keep-stages",
+                type=int,
+                default=0,
+                metavar="N",
+                help="Keep the newest N index and dedup checkpoints after a successful build (default 0)",
             )
         if name == "acquire":
             command.add_argument(

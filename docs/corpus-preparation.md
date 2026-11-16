@@ -447,10 +447,70 @@ verified without hashing those files a second time, and its progress goes to
 disk-backed builder for a language-model-only release without a `fraction`, so
 peak memory is bounded by individual records and no reviewed admission is
 needed; `memory` holds the corpus in RAM and `disk` fails if the release needs
-the in-memory builder. The disk builder's index is rebuildable scratch under
-`WORK/corpora/<id>/builds/indices`; it is I/O-heavy, so point that directory at
-fast storage (a symlink works) when `WORK` is on spinning disks. Both builders
-decide every duplicate group with the same code (`dedup_policy.py`).
+the in-memory builder. Both builders decide every duplicate group with the same code
+(`dedup_policy.py`).
+
+### Resume a failed build
+
+The disk builder checkpoints every long stage, so a failure or a kill repeats
+only the stage that was running:
+
+| Stage | Output under `WORK/corpora/<id>/builds` | Reused when |
+| --- | --- | --- |
+| normalize | `prepared/normalized-source-v2/<source>/<digest>`, one shard per source file | the shard's receipt and three output hashes verify |
+| index | `stages/index/<key>/documents.sqlite` | its receipt verifies; key below |
+| dedup | `stages/dedup/<key>/documents.sqlite`, `groups.jsonl` | its receipt verifies; key below |
+| views and publish | the build directory itself, renamed into place atomically | the build exists and verifies |
+
+The key of a stage is the SHA-256 of exactly the inputs it depends on, recorded
+in its `receipt.json` next to the SHA-256 and size of every output file:
+
+- **index**: the receipt digest of every prepared shard in order (which bind the
+  source bytes, rights decision, normalizer options and document policy), the
+  split declaration (with the digest of its assignment file), the declared
+  duplicate keys, every source's rank, and the digests of the implementation
+  files `large_build.py`, `pipeline.py`, `split_assignments.py` and
+  `dedup_policy.py`.
+- **dedup**: the index key, the whole `release.policy.duplicates` section and
+  the digests of `large_build.py` and `dedup_policy.py`.
+
+A stage output is trusted only after its receipt verifies: the recorded key is
+the digest of the recorded inputs, the directory holds exactly the receipted
+files, and every size and hash matches. File names and modification times prove
+nothing. An output that fails is deleted and rebuilt, incomplete
+(`.incomplete-*`) directories are never inputs, and an output appears by one
+atomic rename. Changing only a duplicate option (for example
+`duplicates.rights_conflict` after a failure in deduplication) reuses the index
+and reruns only deduplication; changing a source, split or normalizer option
+changes the shard receipts and so reruns the index.
+
+The checks that fail fast, such as the empty-source check and the admitted
+inventory check, run on every start against the verified index, so a fix to the
+recipe is judged in seconds, not after the stage that produced the data.
+
+Writing views is one pass over the deduplicated index with a running tally, a
+running stage digest and one release writer; it takes about 25 minutes at 6.7
+million documents. It is not resumable mid-pass: the tally and digests would
+have to be serialized and the output files truncated to a verified offset, which
+would add a second code path to a release whose bytes must not depend on how
+often it was interrupted. A failure there repeats only that pass.
+
+**Disk cost.** The index holds every prepared record (about as large as the
+prepared shards), and deduplication works on a copy of it, so a build needs up
+to twice the index size under `stages/` while deduplicating; the copy is a
+copy-on-write clone where the filesystem supports one. The checkpoints are
+I/O-heavy, so point `WORK/corpora/<id>/builds/stages` at fast storage (a
+symlink works). Cleanup rules:
+
+- Publishing a stage output removes incomplete directories and every older
+  output of that stage except the newest one, so at most two of each remain
+  while a build is failing and being retried.
+- A successful build removes all index and dedup outputs. `--keep-stages N`
+  keeps the newest N of each, for example to try several duplicate policies
+  against one index.
+- Prepared shards are kept; they are the normalize checkpoint.
+
+Run one build of a project at a time.
 
 ### Release policy
 

@@ -1466,6 +1466,7 @@ def build(
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
     reuse_completed_preparation: bool = False,
+    keep_stages: int = 0,
 ) -> Path:
     """Keep bounded metadata alive through native admission and build consumers."""
     if reuse_completed_preparation:
@@ -1484,6 +1485,7 @@ def build(
             offline,
             proof_store=proof_store,
             verification_mode=verification_mode,
+            keep_stages=keep_stages,
         )
 
 
@@ -1494,6 +1496,7 @@ def _build_stored(
     *,
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
+    keep_stages: int = 0,
 ) -> Path:
     """Build an immutable derived inventory from the exact acquisition lock."""
     from klab.corpus.acquisition import verify_acquisition
@@ -1586,6 +1589,7 @@ def _build_stored(
             verification_mode=verification_mode,
             record_admission=record_admission,
             admission_path=admission_path,
+            keep_stages=keep_stages,
         )
     with _staged_build(root, build_id) as staging:
         stage_declared_inputs(project, staging, admission_path)

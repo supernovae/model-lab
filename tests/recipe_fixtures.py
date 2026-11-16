@@ -19,6 +19,7 @@ import io
 import json
 import random
 import subprocess
+import sys
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
@@ -29,6 +30,7 @@ import yaml
 from huggingface_hub import hf_hub_url
 
 from klab.canonical import canonical_json
+from klab.cli.main import main
 
 RELEASE_POLICY = {
     "duplicates": {
@@ -884,3 +886,28 @@ def write_training_files(recipe: Recipe, *, vocab_size: int) -> None:
             "tokenizer_origin_release_id": "${RELEASE_ID}",
         },
     )
+
+
+class Lab:
+    """Runs `klab` commands in this process against one isolated work root."""
+
+    def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+        self.root = root
+        self.work = root / "work"
+        self.work.mkdir(mode=0o700)
+        self.monkeypatch = monkeypatch
+        self.capsys = capsys
+        monkeypatch.setenv("KLAB_WORK_DIR", str(self.work))
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(root / "settings"))
+
+    def run(self, *argv: str) -> str:
+        """The command's last line of standard output."""
+        self.monkeypatch.setattr(
+            sys, "argv", ["klab", "--work-dir", str(self.work), *argv]
+        )
+        main()
+        lines = self.capsys.readouterr().out.strip().splitlines()
+        return lines[-1] if lines else ""
+
+    def json(self, *argv: str) -> dict:
+        return json.loads(self.run(*argv))

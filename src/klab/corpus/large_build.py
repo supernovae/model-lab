@@ -11,14 +11,16 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import tempfile
 from array import array
 from collections import Counter, defaultdict, deque
 from concurrent.futures import Future, ProcessPoolExecutor
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, closing, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.build_outputs import (
@@ -35,6 +37,7 @@ from klab.corpus.build_outputs import (
     write_json,
     write_release_files,
 )
+from klab.corpus.build_stages import StageStore, implementation_digests, run_stage
 from klab.corpus.progress import BuildProgress
 from klab.corpus.project import (
     ROW_SOURCE_KINDS,
@@ -1135,6 +1138,55 @@ def _verify_admitted_inventory(
         coverage.verify()
 
 
+# While a build runs, a newly published stage output evicts all but the newest
+# earlier one, so a failed attempt and the one before it stay available.
+_PRUNE_ON_PUBLISH = 2
+
+
+def _open_read_only(database: Path):
+    return closing(sqlite3.connect(f"file:{quote(str(database))}?mode=ro", uri=True))
+
+
+def _stage_inputs(project: Any, prepared: list[Path]) -> dict[str, dict[str, Any]]:
+    """Exactly what each checkpointed stage depends on.
+
+    The index follows the receipts of the prepared shards (which bind the
+    source bytes, rights, normalizer and document policy), the split
+    declaration, the declared duplicate keys and the source ranks. Deduplication
+    adds the full duplicate policy to the index it reads.
+    """
+    from klab.corpus.dedup_policy import source_rank
+
+    index = {
+        "shards": [
+            {
+                "source": shard.parent.name,
+                "receipt_sha256": sha256_file(shard / "receipt.json"),
+            }
+            for shard in prepared
+        ],
+        "split": project.splits.model_dump(mode="json"),
+        "duplicate_keys": sorted(project.release.policy.duplicates.keys),
+        "source_rank": {
+            source.id: source_rank(source)
+            for source in sorted(project.sources, key=lambda item: item.id)
+        },
+        "implementation": implementation_digests(
+            "large_build.py", "pipeline.py", "split_assignments.py", "dedup_policy.py"
+        ),
+    }
+    return {
+        "index": {"stage": "index", **index},
+        "dedup": {
+            "stage": "dedup",
+            "duplicates": project.release.policy.duplicates.model_dump(mode="json"),
+            "implementation": implementation_digests(
+                "large_build.py", "dedup_policy.py"
+            ),
+        },
+    }
+
+
 def build_large(
     project: Any,
     workspace: Path,
@@ -1148,6 +1200,7 @@ def build_large(
     verification_mode: VerificationMode = "cold",
     record_admission: dict | None = None,
     admission_path: Path | None = None,
+    keep_stages: int = 0,
 ) -> Path:
     """Build LM-only v2/v3 inputs using their declared admission/dedup policies."""
     record_admission = record_admission or {}
@@ -1339,51 +1392,99 @@ def build_large(
         while pending:
             finish_one()
 
+    stages = StageStore(root / "stages")
+    stage_inputs = _stage_inputs(project, prepared)
     progress.update(phase="indexing")
-    index_root = root / "indices" / build_id
-    index_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="index-", dir=index_root) as index_dir:
+
+    def index_stage(staging: Path, result: dict[str, Any]) -> None:
         connection = _index_prepared(
-            Path(index_dir) / "documents.sqlite", prepared, project, progress
+            staging / "documents.sqlite", prepared, project, progress
         )
         try:
-            _require_every_source_has_documents(connection, project)
-            _verify_admitted_inventory(connection, record_admission)
-            progress.update(phase="deduplicating")
-            groups_path = Path(index_dir) / "groups.jsonl"
-            rejected_path = Path(index_dir) / "rejected.jsonl"
-            _write_rejected(rejected_path, source_events)
-            group_count, dropped = _deduplicate(
-                connection,
-                groups_path,
-                diagnostics=root / "diagnostics" / f"{build_id}.json",
-                progress=progress,
-                policy=project.release.policy.duplicates,
-                rejected_path=rejected_path,
-            )
-            progress.update(phase="writing_views")
-            with tempfile.TemporaryDirectory(prefix=".build-", dir=root) as temporary:
-                staging = Path(temporary)
-                stage_declared_inputs(project, staging, admission_path)
-                _emit_build(
-                    connection=connection,
-                    staging=staging,
-                    project=project,
-                    lock=lock,
-                    identity=identity,
-                    build_id=build_id,
-                    transform=transform,
-                    prepared=prepared,
-                    rights_files=rights_files,
-                    source_events=source_events,
-                    groups_path=groups_path,
-                    group_count=group_count,
-                    dropped=dropped,
-                    progress=progress,
-                )
-                progress.update(phase="publishing")
-                publish_staging(staging, target)
+            result["documents"] = connection.execute(
+                "SELECT COUNT(*) FROM documents"
+            ).fetchone()[0]
         finally:
             connection.close()
+
+    index_dir, _ = run_stage(
+        stages,
+        "index",
+        stage_inputs["index"],
+        index_stage,
+        on_reuse=lambda: progress.record("reused_index_stage"),
+    )
+    stages.prune("index", keep=_PRUNE_ON_PUBLISH, protect=index_dir.name)
+    with _open_read_only(index_dir / "documents.sqlite") as connection:
+        _require_every_source_has_documents(connection, project)
+    if record_admission:
+        # The coverage check writes a table, so it runs in a scratch database
+        # that reads the checkpointed index and never changes it.
+        with tempfile.TemporaryDirectory(prefix=".coverage-", dir=root) as scratch:
+            scratch_database = quote(str(Path(scratch) / "coverage.sqlite"))
+            with closing(
+                sqlite3.connect(f"file:{scratch_database}", uri=True)
+            ) as connection:
+                connection.execute(
+                    "ATTACH DATABASE ? AS indexed",
+                    (f"file:{quote(str(index_dir / 'documents.sqlite'))}?mode=ro",),
+                )
+                _verify_admitted_inventory(connection, record_admission)
+    progress.update(phase="deduplicating")
+    dedup_inputs = {**stage_inputs["dedup"], "index": index_dir.name}
+
+    def dedup_stage(staging: Path, result: dict[str, Any]) -> None:
+        shutil.copyfile(index_dir / "documents.sqlite", staging / "documents.sqlite")
+        connection = sqlite3.connect(staging / "documents.sqlite")
+        try:
+            with tempfile.TemporaryDirectory(prefix=".rejected-", dir=root) as scratch:
+                rejected_path = Path(scratch) / "rejected.jsonl"
+                _write_rejected(rejected_path, source_events)
+                result["groups"], result["dropped"] = _deduplicate(
+                    connection,
+                    staging / "groups.jsonl",
+                    diagnostics=root / "diagnostics" / f"{build_id}.json",
+                    progress=progress,
+                    policy=project.release.policy.duplicates,
+                    rejected_path=rejected_path,
+                )
+        finally:
+            connection.close()
+
+    dedup_dir, dedup_result = run_stage(
+        stages,
+        "dedup",
+        dedup_inputs,
+        dedup_stage,
+        on_reuse=lambda: progress.record("reused_dedup_stage"),
+    )
+    stages.prune("dedup", keep=_PRUNE_ON_PUBLISH, protect=dedup_dir.name)
+    progress.update(phase="writing_views")
+    with (
+        _open_read_only(dedup_dir / "documents.sqlite") as connection,
+        tempfile.TemporaryDirectory(prefix=".build-", dir=root) as temporary,
+    ):
+        staging = Path(temporary)
+        stage_declared_inputs(project, staging, admission_path)
+        _emit_build(
+            connection=connection,
+            staging=staging,
+            project=project,
+            lock=lock,
+            identity=identity,
+            build_id=build_id,
+            transform=transform,
+            prepared=prepared,
+            rights_files=rights_files,
+            source_events=source_events,
+            groups_path=dedup_dir / "groups.jsonl",
+            group_count=dedup_result["groups"],
+            dropped=dedup_result["dropped"],
+            progress=progress,
+        )
+        progress.update(phase="publishing")
+        publish_staging(staging, target)
+    for stage in ("dedup", "index"):
+        stages.prune(stage, keep=keep_stages)
     progress.record("complete")
     return target
