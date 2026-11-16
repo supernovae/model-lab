@@ -418,8 +418,13 @@ batch construction (#459 principle 5).
 ### 4.2 Registration and recording
 
 ```python
-@operator(kind="annotate", name="boilerplate", impl_version=1, scope="text",
-          params=BoilerplateParams)
+@operator(
+    kind="annotate",
+    name="boilerplate",
+    impl_version=1,
+    scope="text",
+    params=BoilerplateParams,
+)
 def boilerplate(shard: Shard, params: BoilerplateParams) -> Arrow: ...
 ```
 
