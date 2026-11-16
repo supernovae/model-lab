@@ -50,6 +50,7 @@ RELEASE_POLICY = {
 }
 STRICT_ELIGIBILITY = "explicit_eligibility_required"
 
+MIXTURE_TOKENS = 1000
 # stratum -> release share; the mixture template quotas follow these shares.
 STRATA = {
     "web": 0.40,
@@ -325,7 +326,11 @@ def _heldout_shard(
 
 
 def write_recipe(
-    root: Path, *, strict_rights: bool = False, empty_document: bool = False
+    root: Path,
+    *,
+    strict_rights: bool = False,
+    empty_document: bool = False,
+    total_tokens: int = MIXTURE_TOKENS,
 ) -> Recipe:
     """Write the miniature recipe under `root` and return it with its mock hub.
 
@@ -334,6 +339,8 @@ def write_recipe(
     eligibility evidence instead, which Hugging Face shards with per-row
     licenses and no file-level SPDX expression cannot give. `empty_document`
     gives one web row an empty text, which `documents.empty_text: error` refuses.
+    `total_tokens` is the budget the release's mixture weights divide; the
+    mixture template's quotas are always `MIXTURE_TOKENS`.
     """
     rng = random.Random(20260101)
     hub = MockHub()
@@ -696,6 +703,7 @@ def write_recipe(
         )
     )
     policy = copy.deepcopy(RELEASE_POLICY)
+    policy["mixture"] = {"total_tokens": total_tokens, "max_exposures": 2}
     if strict_rights:
         policy["rights"]["training_use"] = STRICT_ELIGIBILITY
     (corpus / "release.yaml").write_text(
@@ -885,7 +893,8 @@ def write_training_files(recipe: Recipe, *, vocab_size: int) -> None:
             "family_inventory": "${FAMILY_INVENTORY}",
             "source_strata": dict(SOURCE_STRATA),
             "target_quotas": {
-                stratum: int(share * 1000) for stratum, share in STRATA.items()
+                stratum: int(share * MIXTURE_TOKENS)
+                for stratum, share in STRATA.items()
             },
             "seed": 42,
             "max_exposures": 2,

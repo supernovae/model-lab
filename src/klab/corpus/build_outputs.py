@@ -17,6 +17,7 @@ from typing import Any
 
 from klab.canonical import canonical_json
 from klab.corpus.project import declaration_payload, source_declaration_payload
+from klab.corpus.quota import estimate_supply
 from klab.corpus.rights import reported_spdx_expression
 from klab.corpus.split_assignments import SPLITS, UNIT_FIELDS, copy_assignments
 from klab.training.manifest import sha256_file
@@ -265,7 +266,7 @@ class Tally:
         self.by_source: Counter[str] = Counter()
         self.by_kind: Counter[str] = Counter()
         self.by_domain: dict[str, dict[str, int]] = defaultdict(
-            lambda: {"documents": 0, "utf8_bytes": 0}
+            lambda: {"documents": 0, "utf8_bytes": 0, "train_utf8_bytes": 0}
         )
         self.source_scale: dict[str, dict[str, dict[str, int]]] = defaultdict(dict)
         self.dedup_dropped: dict[str, Counter[str]] = defaultdict(Counter)
@@ -284,6 +285,8 @@ class Tally:
         for domain in doc["domains"]:
             self.by_domain[domain]["documents"] += 1
             self.by_domain[domain]["utf8_bytes"] += size
+            if split == "train":
+                self.by_domain[domain]["train_utf8_bytes"] += size
         counts = self.source_scale[doc["source_id"]].setdefault(
             split, dict.fromkeys(_SCALE_KEYS, 0)
         )
@@ -419,6 +422,11 @@ def release_report(
         "normalizer": project.release.normalizer.model_dump(mode="json"),
         "corpus_id": project.config.id,
         "requested_mixture": mixture,
+        "mixture_supply": estimate_supply(
+            project.release.policy.mixture,
+            mixture,
+            {d: row["train_utf8_bytes"] for d, row in tally.by_domain.items()},
+        ),
         "actual_mixture": {
             domain: {
                 "documents": tally.by_domain[domain]["documents"],

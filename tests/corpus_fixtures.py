@@ -41,6 +41,7 @@ STRICT_POLICY = {
     },
     "rights": {"training_use": "explicit_eligibility_required"},
     "build": {"strategy": "auto"},
+    "mixture": {"total_tokens": 1, "max_exposures": 2},
 }
 # PRIVATE_RESEARCH drops train copies of held-out text and screens private data.
 PRIVATE_RESEARCH_POLICY = {
@@ -58,6 +59,7 @@ PRIVATE_RESEARCH_POLICY = {
     },
     "rights": {"training_use": "allowed_unless_explicitly_prohibited"},
     "build": {"strategy": "auto"},
+    "mixture": {"total_tokens": 1, "max_exposures": 2},
 }
 
 

@@ -8,7 +8,14 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 import yaml
-from pydantic import Field, field_validator, model_serializer, model_validator
+from pydantic import (
+    Field,
+    PositiveFloat,
+    PositiveInt,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from klab.config.models import StrictModel
 from klab.corpus.rights import RightsPolicy
@@ -1049,8 +1056,24 @@ class NormalizerOptions(StrictModel):
         return set(self.front_matter_extra_keys) | set(self.gutenberg_boilerplate)
 
 
+class MixturePolicy(StrictModel):
+    """The token budget the release's `mixture` weights divide.
+
+    Freeze refuses a build whose kept TRAIN documents cannot supply a stratum's
+    share of `total_tokens` at `max_exposures` uses of each unique token, using
+    `bytes_per_token` to turn bytes into tokens before any tokenizer exists.
+    """
+
+    total_tokens: PositiveInt
+    max_exposures: PositiveInt
+    # A lower bound, so the estimate over-counts tokens' cost and under-counts
+    # supply. The DevMind tokenizer audit measured 2.47 (Python) to 4.41 (web).
+    bytes_per_token: PositiveFloat = 3.0
+
+
 class ReleasePolicy(StrictModel):
     duplicates: DuplicatePolicy
+    mixture: MixturePolicy
     documents: DocumentPolicy
     rights: ReleaseRightsPolicy
     build: BuildPolicy

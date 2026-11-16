@@ -501,7 +501,9 @@ def _run(args: argparse.Namespace) -> None:
     elif command == "lineage":
         result = publication.lineage(release, args.record_id)
     elif command == "describe":
-        result = publication.describe(release, tokenizer=args.tokenizer)
+        result = publication.describe(
+            release, tokenizer=args.tokenizer, mixture=args.mixture
+        )
     elif command == "publication":
         from klab.corpus.publication import publication_manifest
 
@@ -847,6 +849,7 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
             command.add_argument("record_id")
         if name == "describe":
             command.add_argument("--tokenizer", type=Path)
+            command.add_argument("--mixture", type=Path)
         if name == "consumers":
             command.add_argument("--runs-dir", required=True, type=Path)
         if name == "export":

@@ -609,6 +609,10 @@ policy:
     # or allowed_unless_explicitly_prohibited
   build:
     strategy: auto                  # or disk, memory
+  mixture:
+    total_tokens: 12000000000       # the budget the release's mixture weights divide
+    max_exposures: 2                # uses of each unique token
+    bytes_per_token: 3.0            # optional; the default is shown
 ```
 
 - **`heldout_overlap`.** `error` fails the build on any text shared across
@@ -632,6 +636,22 @@ policy:
   `record_admission`. `allowed_unless_explicitly_prohibited` allows
   private-research training unless a prohibition is recorded; every source then
   declares `explicit_training_restriction`.
+
+- **`mixture`.** The release's `mixture` weights are shares of
+  `total_tokens`, so a stratum is asked for `weight * total_tokens` tokens and
+  can supply at most its unique tokens times `max_exposures`. Freeze refuses a
+  build where a stratum's kept TRAIN bytes, divided by `bytes_per_token`, times
+  `max_exposures`, is below its request. It names the stratum, the supply and
+  the request; fix it by lowering the quota and weight together, giving the
+  difference to a larger stratum, raising `max_exposures` or adding sources.
+  Quotas are part of the release identity, so this is the cheapest point to
+  learn it. `bytes_per_token` should be a lower bound so the check errs toward
+  refusing: 3.0 is below English prose and code; the DevMind tokenizer audit
+  measured 2.47 (Python) to 4.41 (web), and a recipe whose strata sit near the
+  bound should set it from its own audit. The estimate and verdict are recorded
+  in `report.json` as `mixture_supply`. Keep the mixture template's
+  `target_quotas` and `max_exposures` equal to the same budget; the exact
+  check against real tokens is `describe --mixture`, below.
 
 ### Normalizer options
 
@@ -778,7 +798,7 @@ None of them is a quality score.
 
 | Command | Shows |
 | --- | --- |
-| `klab corpus describe RELEASE [--tokenizer PATH]` | Record counts by origin, verification and shape; token counts with a tokenizer. Runs on `--workers` processes and keeps each finished run under `WORK/cache/describe`, so a stopped or repeated describe measures only what is missing |
+| `klab corpus describe RELEASE [--tokenizer PATH [--mixture TEMPLATE]]` | Record counts by origin, verification and shape; token counts with a tokenizer. `--mixture` also checks the mixture template's `target_quotas` against the measured TRAIN tokens per stratum at its `max_exposures` (and `strata` overrides), failing with `required quota impossible for STRATUM`, as `materialize-mixture` does, for every short stratum. Runs on `--workers` processes and keeps each finished run under `WORK/cache/describe`, so a stopped or repeated describe measures only what is missing |
 | `klab corpus sources RELEASE` | Sources and their rights |
 | `klab corpus audit RELEASE` | The build audit |
 | `klab corpus sample RELEASE --limit N` | Sample records, filterable by domain, kind and status |
@@ -1119,6 +1139,15 @@ unclassified source kinds.
 klab corpus materialize-mixture DECLARATION --output OUTPUT
 klab corpus verify-mixture DECLARATION --output OUTPUT
 ```
+
+Run `klab corpus describe RELEASE --tokenizer TOKENIZER --mixture TEMPLATE`
+first: it needs only the release and the fitted tokenizer, not the family
+inventory, and is the gate before near-duplicates, the mixture export and the
+family inventory. It counts tokens before cross-document deduplication, so it
+can pass what `materialize-mixture` still refuses by a little, never the
+reverse by much. A quota failure there means the release must be rebuilt with
+corrected `mixture` weights and `policy.mixture`, so check it as soon as a
+tokenizer exists.
 
 A mixture declaration sets per-stratum token quotas, `max_exposures` (1 for
 unique tokens only, or 2), the tokenizer and optional
