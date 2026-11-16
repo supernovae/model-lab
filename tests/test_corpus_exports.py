@@ -425,3 +425,25 @@ def test_cli_export_authenticates_release_once(
         == release.name
     )
     assert scans == 1
+
+
+def test_sharded_split_statistics_match_a_single_pass_and_name_the_bad_line(
+    tmp_path, monkeypatch
+) -> None:
+    from klab.corpus import export, shards
+    from klab.corpus.release_verify import verification_settings
+
+    rows = [json.dumps({"text": f"line {n} é"}).encode() for n in range(200)]
+    path = tmp_path / "train.jsonl"
+    path.write_bytes(b"\n".join(rows) + b"\n")
+    monkeypatch.setattr(shards, "PARALLEL_MIN_BYTES", 0)
+    monkeypatch.setattr(shards, "CHUNK_BYTES", 500)
+    with verification_settings(workers=3):
+        assert export._split_stats(path, "lm") == (
+            200,
+            sum(len(f"line {n} é".encode()) for n in range(200)),
+        )
+        rows[137] = b'{"text": " "}'
+        path.write_bytes(b"\n".join(rows) + b"\n")
+        with pytest.raises(ValueError, match=r"invalid LM record at .*:138"):
+            export._split_stats(path, "lm")

@@ -808,9 +808,28 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   Default: `WORK/scratch`. Allow 2-3 times the release size for a release that
   uses the row-store verifier, and put it on fast storage (NVMe); it is deleted
   when the command ends.
-- **`--workers`** sets the verification processes (default 8, never more than
-  the CPU count). Use `1` for a single-process run. A release smaller than a few
-  hundred MB is verified in-process.
+- **`--workers`** sets the worker processes for every parallel pass over corpus
+  files (default: half the CPU count; never more than the CPU count). Use `1` for
+  a single-process run. A file smaller than a few hundred MB is read in-process.
+  The same option is accepted by `klab tokenizer train`, `klab tokenizer verify`,
+  `klab corpus export` and `klab corpus derive-family-inventory`. Each parallel stage prints `STAGE: N shards, up to W workers` when it
+  starts and `STAGE: S s wall, C s cpu, K cores used, reused R/N` when it ends,
+  where cores used is CPU seconds over wall seconds.
+- **Shards.** A parallel stage cuts its file into line-aligned byte ranges
+  (shards), runs them on the worker pool and merges results in file order, so the
+  output never depends on `--workers`. With `--scratch-dir`, the stage also keeps
+  each finished shard under `SCRATCH/shards`, so a killed run reuses them. Every
+  stage is either sharded or states why one process is the limit:
+
+  | Stage | Parallelism |
+  | --- | --- |
+  | `release verification` | shardable: byte ranges of the release files |
+  | `tokenizer sampling: TRAIN lineage` | shardable: byte ranges of the lineage view |
+  | `tokenizer sampling: documents scan` | shardable: byte ranges of `documents.jsonl`, merged in file order |
+  | `family inventory` | shardable: byte ranges of `documents.jsonl`, written in file order |
+  | `export split statistics` | shardable: byte ranges of each exported view file |
+  | `tokenizer fit` | single process: the Hugging Face BPE trainer is multithreaded natively and selects merges sequentially |
+
 - **Progress** goes to stderr and to `scratch/verify-<release>.progress.jsonl`
   in the builder's progress format: phase, documents and bytes processed,
   documents and MB per second and an estimated time remaining for the phase.
@@ -855,19 +874,27 @@ banding (16 bands of 4 hashes) finds a pair at Jaccard 0.65 about 96% of the
 time, at 0.7 about 99%, and above 0.8 almost always.
 
 It indexes the validation and test documents, then streams the training split
-past that index in a second read of `documents.jsonl`. Memory grows with the
-held-out side, not the corpus: about 8 bytes per held-out shingle plus about
-4 KB per held-out document, so about 6 GB at the default bounds. The training
-split adds only its longest document. Measured throughput is about 2 million words per second on one core,
-so a 12-billion-token release takes one to two hours after verification.
+past that index. Memory grows with the held-out side, not the corpus: about 8
+bytes per held-out shingle plus about 4 KB per held-out document, so about 6 GB
+at the default bounds. The training split adds only its longest document.
+`documents.jsonl` is cut into line-aligned shards of about `--shard-bytes`
+(default 256 MiB) and both reads run on `--workers` processes (default 8, at
+most the CPU count). The workers are forked, so they share the held-out index
+read-only rather than each building it; a worker's private memory is the
+shard it reads, plus the index pages it touches. The shards merge in a fixed
+order and the report is the same for any number of workers. Throughput is
+about 2 million words per second per core, so the speedup is limited by the
+read bandwidth of the disk, by the cores and by the held-out index.
 A killed screen resumes: every `--checkpoint-every` training documents (default
-200,000) it saves its accumulators and the byte offset in `documents.jsonl` to
-`SCRATCH/near-duplicates/near-duplicates-<key>.json`. The key names the release,
-the algorithm, the implementation and every cap, and the file carries its own
-digest; a checkpoint that does not match is ignored and the screen starts over.
-A resumed run indexes the held-out side again (one read of the file) and then
-screens only the remaining training documents; its report equals an
-uninterrupted run's. The checkpoint is removed when the report is complete.
+200,000) a shard saves its accumulators and its byte offset in
+`documents.jsonl` to `SCRATCH/near-duplicates/near-duplicates-<key>-shard-<n>.json`,
+and a finished shard saves its result. The key names the release, the
+algorithm, the implementation, every option and the shard plan (not
+`--workers`), and each file carries its own digest; a checkpoint that does not
+match is ignored and that shard starts over. A resumed run indexes the held-out
+side again (one parallel read of the file), takes finished shards from their
+checkpoints and screens only the rest; its report equals an uninterrupted
+run's. The checkpoints are removed when the report is complete.
 `--max-heldout-documents` (default 1,000,000) and `--max-heldout-shingles`
 (default 200,000,000) bound the index; passing one stops the command with no
 report, because every document is screened or none is.
@@ -877,6 +904,54 @@ words (matched by identical text only) for each split and source.
 `candidate_count` counts every pair found. `--max-candidates` (default 20,000)
 limits only how many are listed, in document-ID order, and
 `candidates_truncated` says when the list is shorter than the count.
+
+#### Template-aware screening
+
+Threads, issues and pull requests of well-run projects repeat issue templates,
+bot comments and CI notices, so a plain screen lists thousands of pairs that
+share a template and nothing else, which hides the few that share content.
+`--template-aware` scores each pair a second time over its content, and drops
+nothing from the corpus:
+
+```sh
+klab corpus near-duplicates RELEASE --template-aware > near-duplicates.json
+```
+
+A shingle is boilerplate in a source when at least
+`--boilerplate-heldout-documents` (default 20) held-out documents of that
+source contain it, or when at least `--boilerplate-sample-documents` (default 4)
+of the training documents sampled one in `--boilerplate-sample-stride` (default
+256, chosen by document ID) do. The held-out counts are exact. The training
+sample is counted in a fixed 256 MB sketch, and the held-out side is read
+before the training split is screened, so no extra pass over the corpus is
+needed. A pair whose raw Jaccard reaches the threshold is classed:
+
+| Class | Meaning | Needs a decision |
+| --- | --- | --- |
+| `leak` | content Jaccard (over the non-boilerplate shingles) reaches the threshold, or the text is identical | yes, listed in `candidates` |
+| `content_too_short` | no non-boilerplate shingle on either side, so content cannot tell the documents apart | yes, listed in `candidates` |
+| `partly_template` | raw Jaccard reaches the threshold, content Jaccard does not, but boilerplate is under `--boilerplate-min-share` (default 0.5) of what the two share | yes, listed in `candidates`: the match is mostly content that falls just under the threshold |
+| `template_only` | raw Jaccard reaches the threshold, content Jaccard does not, and boilerplate is at least that share | no: counted, summarized per held-out document in `template_only` |
+
+Each candidate carries `jaccard` (raw), `content_jaccard` and
+`boilerplate_share` (the share of its shared shingles that are boilerplate).
+Each `template_only` entry gives the held-out document, its number of pairs, the
+highest raw Jaccard, the lowest boilerplate share, and its closest partner by
+content Jaccard, so a reviewer can spot-check the pairs nearest the line.
+`class_counts`, `template_only_count` and `template_only_document_count` count
+everything, listed or not, and [`klab preflight`](pretraining-preflight.md)
+prints them. Because a `template_only` pair is not a candidate, no decision
+record is needed for it; the strict screen (the default) lists every pair.
+LSH also proposes pairs from the content shingles, so the same text inside two
+different templates is found. This doubles the hashing of documents that
+contain boilerplate.
+
+It can miss in one direction that matters: text that many documents repeat is
+taken for template, so a held-out document whose content is also repeated by 20
+or more held-out documents of its source (or by roughly a thousand training
+documents) can be called `template_only` against a training copy. A template
+used by only a few documents is not recognised, and its pairs stay candidates.
+Raise `--boilerplate-heldout-documents` to be stricter.
 
 Save the report to a file and decide every listed pair in a decision record
 that names the report by the SHA-256 of that file, so a record cannot be reused
@@ -923,7 +998,7 @@ checks all three, and that the screen covered every document of this release.
 | `freeze` | yes: rerun it; a stopped freeze is finished after verifying the staged files | the rename, or a verification from the bytes after a stop |
 | `audit`, `describe`, `sources`, release readers | no, but a successful verification is a receipt that later commands reuse | one verification from the bytes |
 | `export` | no: staged, then renamed | the export |
-| `near-duplicates` | yes, by training-document offset | the documents since the last checkpoint |
+| `near-duplicates` | yes, per shard by training-document offset | the documents since each shard's last checkpoint |
 | `materialize-mixture` | yes: committed segments | the segment in progress |
 | `verify-mixture` | no | one verification pass |
 | `tokenizer` fit and `corpus tokenizer-bakeoff` | no | the fit |
@@ -991,7 +1066,9 @@ sampling:
 
 `klab tokenizer train` takes whole training documents in release order until
 each stratum's byte cap is filled. This is a deterministic prefix, not a random
-sample. It then audits different training documents for round-trip failures,
+sample. The scan of `documents.jsonl` runs on `--workers` processes over
+line-aligned byte ranges and merges their candidates in file order, so the
+selected documents and the sampling digest do not depend on the worker count. It then audits different training documents for round-trip failures,
 unknown tokens and bytes per token, and refuses to publish on a failure. No
 validation or test document is used.
 

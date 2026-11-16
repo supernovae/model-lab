@@ -155,3 +155,23 @@ def test_derived_inventory_requires_stratum_in_domains_and_never_overwrites(
     declared_family_inventory.derive_family_inventory(declaration)
     with pytest.raises(ValueError, match="already exists"):
         declared_family_inventory.derive_family_inventory(declaration)
+
+
+def test_sharded_inventory_is_byte_identical_to_the_single_process_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from klab.corpus import shards
+    from klab.corpus.release_verify import verification_settings
+
+    _, declaration = _release(tmp_path, monkeypatch, _split())
+    output = Path(yaml.safe_load(declaration.read_text())["family_inventory"]).resolve()
+    with verification_settings(workers=1):
+        single = declared_family_inventory.derive_family_inventory(declaration)
+    expected = output.read_bytes()
+    output.unlink()
+    monkeypatch.setattr(shards, "PARALLEL_MIN_BYTES", 0)
+    monkeypatch.setattr(shards, "CHUNK_BYTES", 3000)
+    with verification_settings(workers=3):
+        sharded = declared_family_inventory.derive_family_inventory(declaration)
+    assert output.read_bytes() == expected
+    assert sharded == single

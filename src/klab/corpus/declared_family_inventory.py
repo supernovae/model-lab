@@ -18,13 +18,48 @@ from typing import Any
 import yaml
 
 from klab.canonical import canonical_json
-from klab.corpus.jsonl_records import iter_rows
 from klab.corpus.mixture import MixtureDeclaration
 from klab.corpus.release import verify_release
+from klab.corpus.release_verify import range_records
+from klab.corpus.shards import declare_stage, plan_ranges, run_sharded
 from klab.corpus.split_freeze import _publish_new
 from klab.training.manifest import sha256_file
 
 DECLARED_UNITS = ("source_document_family", "source_repository")
+
+
+INVENTORY_STAGE = declare_stage("family inventory")
+
+
+def _inventory_range(
+    path: str, start: int, end: int, strata: dict[str, str]
+) -> tuple[bytes, int]:
+    """The inventory lines of one byte range of documents, in file order."""
+    lines = []
+    for doc, _, _ in range_records(Path(path), start, end):
+        if doc["drop_reason"] is not None:
+            continue
+        stratum = strata.get(doc["source_id"])
+        if stratum is None:
+            raise ValueError(f"source {doc['source_id']} has no stratum in the mixture")
+        if stratum not in doc["domains"]:
+            raise ValueError(
+                f"source {doc['source_id']} declares domains {doc['domains']}, "
+                f"which do not include its mixture stratum {stratum}"
+            )
+        lines.append(
+            canonical_json(
+                {
+                    "document_id": doc["document_id"],
+                    "family_id": doc["source_family"],
+                    "split": doc["split"],
+                    "stratum": stratum,
+                    "content_sha256": doc["content_sha256"],
+                }
+            )
+            + b"\n"
+        )
+    return b"".join(lines), len(lines)
 
 
 def derive_family_inventory(declaration: Path) -> dict[str, Any]:
@@ -48,33 +83,11 @@ def derive_family_inventory(declaration: Path) -> dict[str, Any]:
     kept = 0
     with tempfile.TemporaryDirectory(dir=output.parent, prefix=".family-") as scratch:
         payload = Path(scratch) / "family-inventory.jsonl"
+        plan = plan_ranges(INVENTORY_STAGE, release / "documents.jsonl", strata)
         with payload.open("xb") as stream:
-            for doc in iter_rows(release / "documents.jsonl"):
-                if doc["drop_reason"] is not None:
-                    continue
-                stratum = strata.get(doc["source_id"])
-                if stratum is None:
-                    raise ValueError(
-                        f"source {doc['source_id']} has no stratum in the mixture"
-                    )
-                if stratum not in doc["domains"]:
-                    raise ValueError(
-                        f"source {doc['source_id']} declares domains {doc['domains']}, "
-                        f"which do not include its mixture stratum {stratum}"
-                    )
-                stream.write(
-                    canonical_json(
-                        {
-                            "document_id": doc["document_id"],
-                            "family_id": doc["source_family"],
-                            "split": doc["split"],
-                            "stratum": stratum,
-                            "content_sha256": doc["content_sha256"],
-                        }
-                    )
-                    + b"\n"
-                )
-                kept += 1
+            for blob, count in run_sharded(plan, _inventory_range, ordered=True):
+                stream.write(blob)
+                kept += count
         _publish_new(output, payload)
     return {
         "schema_version": 1,

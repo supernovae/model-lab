@@ -15,6 +15,7 @@ import yaml
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.loading import load_config, load_tokenizer_config
 from klab.config.models import DatasetConfig, RunConfig, TokenizerTrainConfig
+from klab.corpus.shards import declare_stage, plan_ranges, run_sharded
 from klab.safe_io import write_canonical_json
 from klab.training.manifest import sha256_file
 
@@ -55,24 +56,51 @@ def _licenses(release_dir: Path) -> str:
     return "; ".join(sorted(names))
 
 
+SPLIT_STATS_STAGE = declare_stage("export split statistics")
+
+
+def _lm_range_stats(
+    path: str, start: int, end: int
+) -> tuple[int, int, int, int | None]:
+    """Lines, valid records and rendered bytes of one range, and its first bad line."""
+    lines = count = size = 0
+    with Path(path).open("rb") as stream:
+        stream.seek(start)
+        offset = start
+        for raw in stream:
+            if offset >= end:
+                break
+            offset += len(raw)
+            lines += 1
+            try:
+                record = json.loads(raw.decode("utf-8"))
+            except ValueError:
+                return lines, count, size, lines
+            if (
+                not isinstance(record, dict)
+                or set(record) != {"text"}
+                or not isinstance(record["text"], str)
+                or not record["text"].strip()
+            ):
+                return lines, count, size, lines
+            count += 1
+            size += len(record["text"].encode("utf-8"))
+    return lines, count, size, None
+
+
 def _split_stats(path: Path, view: str) -> tuple[int, int]:
     count = size = 0
     if view == "lm":
-        with path.open(encoding="utf-8") as handle:
-            for number, line in enumerate(handle, 1):
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError as error:
-                    raise ValueError(f"invalid LM record at {path}:{number}") from error
-                if (
-                    not isinstance(record, dict)
-                    or set(record) != {"text"}
-                    or not isinstance(record["text"], str)
-                    or not record["text"].strip()
-                ):
-                    raise ValueError(f"invalid LM record at {path}:{number}")
-                count += 1
-                size += len(record["text"].encode("utf-8"))
+        before = 0
+        plan = plan_ranges(SPLIT_STATS_STAGE, path)
+        for lines, kept, rendered, bad in run_sharded(
+            plan, _lm_range_stats, ordered=True
+        ):
+            if bad is not None:
+                raise ValueError(f"invalid LM record at {path}:{before + bad}")
+            before += lines
+            count += kept
+            size += rendered
     else:
         from klab.data.conversations import iter_conversations
 

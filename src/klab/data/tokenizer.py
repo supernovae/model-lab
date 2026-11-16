@@ -17,9 +17,17 @@ from tokenizers.trainers import BpeTrainer
 
 from klab.config.models import DatasetConfig, RunConfig, TokenizerTrainConfig
 from klab.corpus.export import verify_release_export
+from klab.corpus.shards import Single, declare_stage
 from klab.data.datasets import iter_documents
 from klab.data.sources import verify_snapshot
 from klab.progress import progress_phase
+
+FIT_STAGE = declare_stage(
+    "tokenizer fit",
+    Single(
+        "the Hugging Face BPE trainer is multithreaded natively and selects merges sequentially"
+    ),
+)
 
 if TYPE_CHECKING:
     from klab.verification_proofs import ProofStore, VerificationMode
