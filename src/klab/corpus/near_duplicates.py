@@ -19,13 +19,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import tempfile
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from klab.canonical import canonical_digest, canonical_json
 
 _SPLITS = ("train", "validation", "test")
 _HELD_OUT = ("validation", "test")
@@ -122,18 +126,68 @@ def _coverage_key(row: dict[str, Any]) -> tuple[str, str]:
     return row["split"], str(row.get("source_id"))
 
 
+class Checkpoint:
+    """Progress of the training-split pass, saved so a killed screen resumes.
+
+    A file is trusted only when its digest verifies and its key equals the key
+    of this exact screen (release, algorithm and every parameter); anything else
+    is ignored and the screen starts over. The state is every accumulator, so a
+    resumed screen reports exactly what an uninterrupted one would.
+    """
+
+    def __init__(self, path: Path, key: str, every: int = 200_000) -> None:
+        if every < 1:
+            raise ValueError("checkpoint interval must be at least 1 document")
+        self.path, self.key, self.every = Path(path), key, every
+
+    def load(self) -> dict[str, Any] | None:
+        try:
+            saved = json.loads(self.path.read_text(encoding="utf-8"))
+            body = saved["state"]
+            if (
+                saved["key"] != self.key
+                or saved["sha256"] != canonical_digest(body)
+                or body["key"] != self.key
+            ):
+                return None
+            return body
+        except OSError, ValueError, KeyError, TypeError:
+            return None
+
+    def save(self, state: dict[str, Any]) -> None:
+        state = {"key": self.key, **state}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "wb", dir=self.path.parent, prefix=".checkpoint-", delete=False
+        ) as handle:
+            handle.write(
+                canonical_json(
+                    {"key": self.key, "sha256": canonical_digest(state), "state": state}
+                )
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(handle.name, self.path)
+
+    def clear(self) -> None:
+        self.path.unlink(missing_ok=True)
+
+
 def screen(
-    read: Callable[[], Iterable[dict[str, Any]]],
+    read: Callable[[int], Iterable[tuple[int, dict[str, Any]]]],
     *,
     max_heldout_documents: int = 1_000_000,
     max_heldout_shingles: int = 200_000_000,
     max_candidates: int = 20_000,
     min_jaccard: float = 0.65,
+    checkpoint: Checkpoint | None = None,
 ) -> dict[str, Any]:
     """Screen every normalized document, including excluded or duplicate records.
 
-    ``read`` returns a fresh pass over the documents; it is called twice. The
-    first pass indexes the held-out splits and refuses past
+    ``read(offset)`` returns a pass over the documents as ``(end offset, row)``
+    pairs from byte ``offset`` (0 for a whole pass); it is called twice. With a
+    ``checkpoint`` the second pass saves its progress and a later call resumes
+    from it. The first pass indexes the held-out splits and refuses past
     ``max_heldout_documents`` or ``max_heldout_shingles``: the index is
     about 8 bytes per held-out shingle plus about 4 KB per held-out document.
     The second pass streams the training split. Every candidate is counted;
@@ -205,7 +259,7 @@ def screen(
         if not len(shingles):
             without_words[key] += 1
 
-    for row in read():
+    for _, row in read(0):
         if row["split"] not in _SPLITS:
             raise ValueError("near-duplicate invalid document split")
         if row["split"] == "train":
@@ -235,7 +289,25 @@ def screen(
             buckets[key].append(index)
         account(row, shingles)
 
-    for row in read():
+    offset = 0
+    trained = 0
+    saved = checkpoint.load() if checkpoint is not None else None
+    if saved is not None:
+        offset, trained = saved["offset"], saved["trained"]
+        found[:] = saved["found"]
+        candidate_count, identical_count, comparisons = (
+            saved["candidate_count"],
+            saved["identical_count"],
+            saved["comparisons"],
+        )
+        for counter, name in (
+            (documents, "documents"),
+            (text_bytes, "text_bytes"),
+            (without_words, "without_words"),
+        ):
+            counter.clear()
+            counter.update({(a, b): n for a, b, n in saved[name]})
+    for end, row in read(offset):
         if row["split"] != "train":
             continue
         if row["document_id"] in seen_ids:
@@ -245,6 +317,30 @@ def screen(
         for other in sorted(proposals(row["content_sha256"], keys)):
             compare(row, shingles, other)
         account(row, shingles)
+        trained += 1
+        if checkpoint is not None and trained % checkpoint.every == 0:
+            # Truncating early never drops a pair the final listing would keep.
+            keep_listed()
+            checkpoint.save(
+                {
+                    "offset": end,
+                    "trained": trained,
+                    "found": found,
+                    "candidate_count": candidate_count,
+                    "identical_count": identical_count,
+                    "comparisons": comparisons,
+                    **{
+                        name: [[a, b, n] for (a, b), n in sorted(counter.items())]
+                        for name, counter in (
+                            ("documents", documents),
+                            ("text_bytes", text_bytes),
+                            ("without_words", without_words),
+                        )
+                    },
+                }
+            )
+    if checkpoint is not None:
+        checkpoint.clear()
 
     keep_listed()
     coverage = [
@@ -286,20 +382,52 @@ def screen(
     }
 
 
-def audit_release(path: Path, **caps: int) -> dict[str, Any]:
-    """Verify the immutable release, then screen its original normalized text."""
+def audit_release(
+    path: Path,
+    *,
+    checkpoint_dir: Path | None = None,
+    checkpoint_every: int = 200_000,
+    **caps: Any,
+) -> dict[str, Any]:
+    """Verify the immutable release, then screen its original normalized text.
+
+    With `checkpoint_dir` the screen saves its progress there and a killed run
+    resumes from it; the checkpoint is named by the release and every parameter.
+    """
     from klab.corpus.release import verify_release
 
     manifest = verify_release(path)
     documents = Path(path) / "documents.jsonl"
 
-    def read() -> Iterable[dict[str, Any]]:
-        with documents.open(encoding="utf-8") as handle:
-            for line in handle:
+    def read(offset: int) -> Iterable[tuple[int, dict[str, Any]]]:
+        with documents.open("rb") as handle:
+            handle.seek(offset)
+            for line in iter(handle.readline, b""):
+                offset += len(line)
                 if line.strip():
-                    yield json.loads(line)
+                    yield offset, json.loads(line)
 
-    return {"release_id": manifest["release_id"], **screen(read, **caps)}
+    checkpoint = None
+    if checkpoint_dir is not None:
+        key = canonical_digest(
+            {
+                "release_id": manifest["release_id"],
+                "algorithm": "word_shingle_minhash_lsh_v2",
+                "caps": caps,
+                "implementation": hashlib.sha256(
+                    Path(__file__).read_bytes()
+                ).hexdigest(),
+            }
+        )
+        checkpoint = Checkpoint(
+            Path(checkpoint_dir) / f"near-duplicates-{key[:16]}.json",
+            key,
+            checkpoint_every,
+        )
+    return {
+        "release_id": manifest["release_id"],
+        **screen(read, checkpoint=checkpoint, **caps),
+    }
 
 
 DECISION_CHOICES = ("merged", "dropped", "kept")

@@ -837,6 +837,14 @@ held-out side, not the corpus: about 8 bytes per held-out shingle plus about
 4 KB per held-out document, so about 6 GB at the default bounds. The training
 split adds only its longest document. Measured throughput is about 2 million words per second on one core,
 so a 12-billion-token release takes one to two hours after verification.
+A killed screen resumes: every `--checkpoint-every` training documents (default
+200,000) it saves its accumulators and the byte offset in `documents.jsonl` to
+`SCRATCH/near-duplicates/near-duplicates-<key>.json`. The key names the release,
+the algorithm, the implementation and every cap, and the file carries its own
+digest; a checkpoint that does not match is ignored and the screen starts over.
+A resumed run indexes the held-out side again (one read of the file) and then
+screens only the remaining training documents; its report equals an
+uninterrupted run's. The checkpoint is removed when the report is complete.
 `--max-heldout-documents` (default 1,000,000) and `--max-heldout-shingles`
 (default 200,000,000) bound the index; passing one stops the command with no
 report, because every document is screened or none is.
@@ -880,6 +888,24 @@ decisions:
 A record is complete when every listed pair has a decision (its own or the
 default), `kept` pairs give a reason, and the report is not truncated. [`klab preflight`](pretraining-preflight.md)
 checks all three, and that the screen covered every document of this release.
+
+## Long steps and what a failure costs
+
+| Step | Resumable after a kill? | A failure at the end costs |
+| --- | --- | --- |
+| `acquire` | yes: verified snapshots and the transport cache are reused | the unfinished source |
+| `build` normalize | yes: per-file receipted shards | files being written |
+| `build` index, dedup | yes: receipted stage outputs ([resume](#resume-a-failed-build)) | the stage that was running |
+| `build` views and publish | no: one pass, published by one rename | that pass (about 25 min at 6.7M documents) |
+| `freeze` | no: copies into a staging directory, then renames | the copy and its verification |
+| `audit`, `describe`, `sources`, release readers | no, but a successful verification is a receipt that later commands reuse | one cold verification |
+| `export` | no: staged, then renamed | the export |
+| `near-duplicates` | yes, by training-document offset | the documents since the last checkpoint |
+| `materialize-mixture` | yes: committed segments | the segment in progress |
+| `verify-mixture` | no | one verification pass |
+| `tokenizer` fit and `corpus tokenizer-bakeoff` | no | the fit |
+| `klab data prepare` | yes: receipted chunks | the chunk in progress |
+| `klab stage ... --through warmup` | no, but short | the pilot |
 
 ## Guard held-out data across releases
 
