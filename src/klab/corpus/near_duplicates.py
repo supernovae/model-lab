@@ -314,11 +314,14 @@ def check_decisions(
 ) -> dict[str, Any]:
     """Compare a reviewer's decision record with the screen report it decides.
 
-    The record names the report by the SHA-256 of its file and lists one
-    decision per reported pair (`documents: [ID, ID]`, `decision`: one of
-    `merged`, `dropped` or `kept`, and a `reason` for `kept`). Returns the
-    problems found; an empty `problems` list means every pair is decided by a
-    record that was written for this exact report.
+    The record names the report by the SHA-256 of its file and lists decisions
+    per reported pair (`documents: [ID, ID]`, `decision`: one of `merged`,
+    `dropped` or `kept`, and a `reason` for `kept`). It may also carry a
+    `default` (`decision: kept` and a `reason`) that decides every reported pair
+    not listed individually, so a large report of templated or boilerplate
+    matches is accepted as a class and only the exceptions are listed. Returns
+    the problems found; an empty `problems` list means every pair is decided by
+    a record that was written for this exact report.
     """
     problems: list[str] = []
     if record.get("schema_version") != 1:
@@ -348,14 +351,24 @@ def check_decisions(
         elif key in decided:
             problems.append(f"pair {key[0]} / {key[1]} is decided twice")
         decided[key] = item.get("decision")
+    default = record.get("default")
+    if default is not None and not (
+        isinstance(default, dict)
+        and default.get("decision") == "kept"
+        and str(default.get("reason") or "").strip()
+    ):
+        problems.append("default decision must be `kept` with a reason")
+        default = None
     reported = {pair_key(pair) for pair in report["candidates"]}
-    undecided = sorted(reported - decided.keys())
+    explicit = reported & decided.keys()
+    undecided = sorted(reported - decided.keys()) if default is None else []
     unknown = sorted(decided.keys() - reported)
     if unknown:
         problems.append(f"{len(unknown)} decided pair(s) are not in the report")
     return {
         "reported_pairs": len(reported),
-        "decided_pairs": len(reported & decided.keys()),
+        "decided_pairs": len(explicit) if default is None else len(reported),
+        "defaulted_pairs": len(reported) - len(explicit) if default else 0,
         "undecided": [list(pair) for pair in undecided[:20]],
         "undecided_count": len(undecided),
         "problems": problems,

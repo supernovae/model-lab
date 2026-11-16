@@ -862,8 +862,23 @@ decisions:
     decision: merged   # merged, dropped, or kept (kept needs a reason:)
 ```
 
-A record is complete when every listed pair has a decision, `kept` pairs give a
-reason, and the report is not truncated. [`klab preflight`](pretraining-preflight.md)
+When a report is dominated by one kind of match (for example thousands of
+GitHub threads that share issue templates and bot comments), accept that class
+once and list only the exceptions. A `default` decides every listed pair that has
+no entry of its own; it can only be `kept` and needs a reason, and the record's
+`accepted_by` and `accepted_on` still name who accepted it:
+
+```yaml
+default:
+  decision: kept
+  reason: Matches are templated or boilerplate text, not shared content.
+decisions:
+  - documents: [DOCUMENT_ID, DOCUMENT_ID]
+    decision: dropped   # an exception to the default
+```
+
+A record is complete when every listed pair has a decision (its own or the
+default), `kept` pairs give a reason, and the report is not truncated. [`klab preflight`](pretraining-preflight.md)
 checks all three, and that the screen covered every document of this release.
 
 ## Guard held-out data across releases
