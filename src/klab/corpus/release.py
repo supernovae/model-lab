@@ -18,7 +18,6 @@ from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.bounded_metadata import metadata_operation, read_metadata
 from klab.corpus.jsonl_records import iter_rows, read_rows
 from klab.corpus.project import NormalizerOptions
-from klab.corpus.release_copy import copy_inventory
 from klab.corpus.release_receipt import receipt_first
 from klab.corpus.release_verify import (
     current_settings,
@@ -1876,6 +1875,10 @@ def verify_build(
 ) -> dict[str, Any]:
     """Verify staged build and its pinned snapshots, by receipt when one still holds."""
     path = Path(path).resolve()
+    if (released := consumed_release(path)) is not None:
+        raise ValueError(
+            f"build was frozen in place into release {released}; verify the release"
+        )
     with _verification_operation():
         manifest = _load(path / "build.json")
         verified, _ = receipt_first(
@@ -1994,12 +1997,52 @@ def freeze(
         return _freeze(build_dir, work_root, proof_store, verification_mode)
 
 
+CONSUMED = "consumed.json"
+
+
+def consumed_release(build_dir: Path) -> str | None:
+    """The release a build was frozen into, or None if the build still holds its files."""
+    marker = Path(build_dir) / CONSUMED
+    return _load(marker)["release_id"] if marker.is_file() else None
+
+
 def _freeze(
     build_dir: Path,
     work_root: Path,
     proof_store: ProofStore | None,
     verification_mode: VerificationMode,
 ) -> Path:
+    """Publish the verified build directory as the release by renaming it.
+
+    The payload is never copied. The build directory is renamed to a hidden
+    staging name next to the release, `manifest.json` replaces `build.json`
+    there, and one more rename publishes it under the release ID. The build's
+    path is left as a small tombstone (its `build.json` and a `consumed.json`
+    naming the release): the build is consumed, so its files exist once. A
+    freeze that stopped part way finds the staging directory on the next run and
+    finishes it after verifying the staged files from their bytes.
+    """
+    from klab.corpus.release_receipt import fingerprint
+
+    releases = Path(work_root) / "corpora" / build_dir.parent.parent.name / "releases"
+    staging = releases / f".freezing-{build_dir.name}"
+    # Between the first rename and the tombstone the build is only in staging.
+    manifest = _load(
+        build_dir / "build.json"
+        if not staging.exists()
+        else _resume_source(staging, build_dir)
+    )
+    if staging.exists():
+        return _publish(
+            staging, build_dir, manifest, releases, proof_store, verified=False
+        )
+    if (released := consumed_release(build_dir)) is not None:
+        destination = releases / released
+        verify_release(
+            destination, proof_store=proof_store, verification_mode=verification_mode
+        )
+        return destination
+    before = fingerprint(build_dir, "build.json")
     build = verify_build(
         build_dir, proof_store=proof_store, verification_mode=verification_mode
     )
@@ -2018,9 +2061,7 @@ def _freeze(
                     raise ValueError(f"selected {view}/{split} training view is empty")
     payload = _manifest_payload(build)
     release_id = canonical_digest(payload)
-    destination = (
-        Path(work_root) / "corpora" / payload["corpus_id"] / "releases" / release_id
-    )
+    destination = releases / release_id
     if destination.exists():
         verify_release(
             destination, proof_store=proof_store, verification_mode=verification_mode
@@ -2031,64 +2072,98 @@ def _freeze(
         }:
             raise ValueError("existing release has different identity")
         return destination
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(
-        prefix=".release-", dir=destination.parent
-    ) as temporary:
-        staging = Path(temporary)
-        progress = open_progress(release_id)
-        progress.start_phase(
-            "copy",
-            expected_input_bytes=sum(
-                item["size"] for item in payload["files"].values()
-            ),
-        )
-        # One read of each build file: the bytes are hashed as they are written and
-        # must match the digests verify_build just checked, so publication cannot
-        # carry a file that changed in between.
-        copy_inventory(build_dir, staging, payload["files"], _safe, progress)
-        progress.close()
-        manifest_path = staging / "manifest.json"
-        with manifest_path.open("xb") as stream:
-            stream.write(canonical_json({**payload, "release_id": release_id}) + b"\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        from klab.result_publication import sync_directory
-        from klab.safe_io import rename_noreplace
+    # A file written between verifying the build and renaming it would be
+    # published unverified; the stat index is what notices.
+    if fingerprint(build_dir, "build.json") != before:
+        raise ValueError("build changed while it was being verified")
+    releases.mkdir(parents=True, exist_ok=True)
+    from klab.safe_io import rename_noreplace
 
-        for entry in sorted(staging.rglob("*"), reverse=True):
-            if entry.is_dir():
-                sync_directory(entry)
-        sync_directory(staging)
-        try:
-            rename_noreplace(staging, destination)
-            sync_directory(destination.parent)
-        except FileExistsError:
-            verify_release(
-                destination,
-                proof_store=proof_store,
-                verification_mode=verification_mode,
-            )
-        else:
-            _record_frozen(destination, release_id, proof_store)
+    rename_noreplace(build_dir, staging)
+    return _publish(staging, build_dir, build, releases, proof_store, verified=True)
+
+
+def _publish(
+    staging: Path,
+    build_dir: Path,
+    build: dict[str, Any],
+    releases: Path,
+    proof_store: ProofStore | None,
+    *,
+    verified: bool,
+) -> Path:
+    """Finish a freeze from the renamed build: tombstone, manifest, one rename.
+
+    `verified` says the staged files are the ones just verified. A resumed freeze
+    cannot say so and verifies them from their bytes before publishing.
+    """
+    from klab.result_publication import sync_directory
+    from klab.safe_io import rename_noreplace
+
+    payload = _manifest_payload(build)
+    release_id = canonical_digest(payload)
+    destination = releases / release_id
+    if destination.exists():
+        raise ValueError(
+            f"release {release_id} exists and so does {staging.name}; "
+            "the earlier freeze finished, remove the staging directory"
+        )
+    sealed = canonical_json({**payload, "release_id": release_id}) + b"\n"
+    tombstone_json = staging / "build.json"
+    if tombstone_json.is_file():
+        build_dir.mkdir(exist_ok=True)
+        if not (build_dir / "build.json").exists():
+            _write_durably(build_dir / "build.json", tombstone_json.read_bytes())
+    marker = canonical_json({"release_id": release_id}) + b"\n"
+    if not (build_dir / CONSUMED).exists():
+        _write_durably(build_dir / CONSUMED, marker)
+    sync_directory(build_dir)
+    manifest_path = staging / "manifest.json"
+    if manifest_path.exists():
+        if manifest_path.read_bytes() != sealed:
+            raise ValueError("staged release manifest differs from its build")
+    else:
+        _write_durably(manifest_path, sealed)
+    tombstone_json.unlink(missing_ok=True)
+    if not verified:
+        _verify_release_cold(staging, expected_id=release_id, verification_mode="cold")
+    for entry in sorted(staging.rglob("*"), reverse=True):
+        if entry.is_dir():
+            sync_directory(entry)
+    sync_directory(staging)
+    rename_noreplace(staging, destination)
+    sync_directory(releases)
+    # The files are the verified build's, unchanged; record that for the release.
+    _record_frozen(destination, release_id, proof_store)
     return destination
 
 
-def _record_frozen(
-    release: Path,
-    release_id: str,
-    proof_store: ProofStore | None,
-) -> None:
-    """Receipt a release published from a build that was verified, without verifying it again.
+def _resume_source(staging: Path, build_dir: Path) -> Path:
+    """Where an interrupted freeze can still read the build's `build.json`."""
+    return (
+        staging / "build.json"
+        if (staging / "build.json").is_file()
+        else build_dir / "build.json"
+    )
 
-    The published files are the build's inventory, each hashed against it as it
-    was copied, plus the manifest this function's caller just wrote, so there is
-    nothing left to check that verifying the build did not.
-    """
+
+def _write_durably(path: Path, content: bytes) -> None:
+    """Write a file that is either absent or complete, even if the process is killed."""
+    partial = path.with_name(f".{path.name}.partial")
+    with partial.open("wb") as stream:
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+    partial.replace(path)
+
+
+def _record_frozen(
+    release: Path, release_id: str, proof_store: ProofStore | None
+) -> None:
+    """Receipt a release whose files were verified as the build it was renamed from."""
     if proof_store is None:
         return
     from klab.corpus import release_receipt
-    from klab.experiments.artifacts import snapshot_dependencies
 
     release_receipt.record(
         proof_store,
