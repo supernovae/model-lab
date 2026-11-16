@@ -65,6 +65,7 @@ def observed_tokenizer(root):
         "source_strata": {"tiny": "text"},
         "byte_weights": {"text": 1},
         "max_fit_bytes": 8,
+        "seed": 0,
     }
     tokenizer_config = {
         "schema_version": 1,
