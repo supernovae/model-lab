@@ -267,29 +267,17 @@ def merge_replica_outputs(
     return totals
 
 
-def build_replica(
-    config: RunConfig, device: torch.device, state: dict[str, torch.Tensor]
-) -> SecondaryReplica:
-    """Build the replica the primary's model would be on ``device``."""
-    from klab.engines.pytorch import (
-        apply_recomputation_strategy,
-        output_projection_cross_entropy,
-    )
-    from klab.model.rope import RoPE
-    from klab.training.trainable import apply_trainable_parameter_filter
+def compile_training_kernels(
+    model: DenseLM, config: RunConfig, device: torch.device
+) -> Any:
+    """Compile the blocks in place and return the compiled output head loss, if asked.
 
-    model = DenseLM(config.model, config.attention).to(device)
-    model.load_state_dict(state)
-    apply_trainable_parameter_filter(model, config)
-    apply_recomputation_strategy(model, config)
-    compiled_loss = None
+    Compile before sharding: FSDP's hooks must stay outside the compiled region.
+    """
+    from klab.engines.pytorch import output_projection_cross_entropy
+    from klab.model.rope import RoPE
+
     runtime = config.runtime
-    if runtime.compile_output_head_loss:
-        compiled_loss = torch.compile(
-            output_projection_cross_entropy,
-            dynamic=runtime.compile_dynamic_shapes,
-            fullgraph=runtime.compile_dynamic_shapes,
-        )
     if runtime.compile_transformer_blocks:
         if runtime.compile_dynamic_shapes:
             for module in model.modules():
@@ -301,6 +289,27 @@ def build_replica(
                 dynamic=runtime.compile_dynamic_shapes,
                 fullgraph=runtime.compile_dynamic_shapes,
             )
+    if not runtime.compile_output_head_loss:
+        return None
+    return torch.compile(
+        output_projection_cross_entropy,
+        dynamic=runtime.compile_dynamic_shapes,
+        fullgraph=runtime.compile_dynamic_shapes,
+    )
+
+
+def build_replica(
+    config: RunConfig, device: torch.device, state: dict[str, torch.Tensor]
+) -> SecondaryReplica:
+    """Build the replica the primary's model would be on ``device``."""
+    from klab.engines.pytorch import apply_recomputation_strategy
+    from klab.training.trainable import apply_trainable_parameter_filter
+
+    model = DenseLM(config.model, config.attention).to(device)
+    model.load_state_dict(state)
+    apply_trainable_parameter_filter(model, config)
+    apply_recomputation_strategy(model, config)
+    compiled_loss = compile_training_kernels(model, config, device)
     return SecondaryReplica(
         device=device, model=model, compiled_output_head_loss=compiled_loss
     )

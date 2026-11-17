@@ -137,6 +137,7 @@ class ShardedRank:
         init_method: str,
         model: DenseLM,
         device: torch.device,
+        compiled_output_head_loss: Any = None,
     ) -> None:
         self.config = config
         self.mode = config.runtime.parallel.mode
@@ -162,7 +163,12 @@ class ShardedRank:
         }
         self.model = shard_model(model, self.mode)
         self.optimizer = build_optimizer(self.model, config)
-        self.replica = SecondaryReplica(device, self.model, sharded=True)
+        self.replica = SecondaryReplica(
+            device,
+            self.model,
+            compiled_output_head_loss=compiled_output_head_loss,
+            sharded=True,
+        )
 
     def release(self) -> None:
         """Free parameters a mode keeps gathered between collectives."""
@@ -337,11 +343,18 @@ def _shard_worker_main(
     """A non-primary rank: build its shard of the model, then obey commands."""
     try:
         device = torch_device_for(backend, device_index)
-        model = build_replica(config, device, state).model
+        replica = build_replica(config, device, state)
         del state
         connection.send(("built", None))
         worker = ShardedRank(
-            config, backend, rank, world_size, init_method, model, device
+            config,
+            backend,
+            rank,
+            world_size,
+            init_method,
+            replica.model,
+            device,
+            replica.compiled_output_head_loss,
         )
         connection.send(("ready", None))
     except Exception:  # noqa: BLE001 - the primary reports the rank's error
@@ -396,6 +409,7 @@ class ShardGroup:
         backend: str,
         model: DenseLM,
         device: torch.device,
+        compiled_output_head_loss: Any = None,
     ) -> None:
         indices = config.runtime.secondary_device_indices
         self.world_size = 1 + len(indices)
@@ -429,7 +443,14 @@ class ShardGroup:
             for replica in self.replicas:
                 replica.receive(timeout=_READY_SECONDS)
             self.rank = ShardedRank(
-                config, backend, 0, self.world_size, init_method, model, device
+                config,
+                backend,
+                0,
+                self.world_size,
+                init_method,
+                model,
+                device,
+                compiled_output_head_loss,
             )
             for replica in self.replicas:
                 replica.receive(timeout=_READY_SECONDS)

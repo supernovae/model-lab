@@ -1034,19 +1034,6 @@ class RuntimeConfig(StrictModel):
                     f"runtime.parallel.mode={self.parallel.mode} shards across the "
                     "devices of runtime.secondary_device_indices; list at least one"
                 )
-            if self.precision == "fp16" or self.memory.activation_offload.enabled:
-                raise ValueError(
-                    "runtime.parallel sharded modes require bf16 or fp32 without "
-                    "activation offload"
-                )
-            if (
-                self.compile_transformer_blocks
-                or self.compile_output_head_loss
-                or self.compile_dynamic_shapes
-            ):
-                raise ValueError(
-                    "runtime.parallel sharded modes do not support compiled kernels"
-                )
         return self
 
 

@@ -742,7 +742,7 @@ def _assert_same_training(
 @pytest.mark.parametrize(
     ("mode", "options"),
     [
-        ("zero1", {}),
+        ("zero1", {"compile_transformer_blocks": True}),
         (
             "zero2",
             {
@@ -825,12 +825,6 @@ def test_sharded_modes_refuse_what_they_cannot_shard(tmp_path: Path) -> None:
     with pytest.raises(ValidationError, match="shards across the devices"):
         RuntimeConfig(backend="cpu", parallel=ParallelConfig(mode="fsdp"))
     sharded = {"backend": "cpu", "secondary_device_indices": (0,)}
-    with pytest.raises(ValidationError, match="compiled kernels"):
-        RuntimeConfig(
-            **sharded,
-            parallel=ParallelConfig(mode="zero2"),
-            compile_transformer_blocks=True,
-        )
     config = _make_run_config(tmp_path)
     with pytest.raises(ValidationError, match="require AdamW"):
         RunConfig.model_validate(

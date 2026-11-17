@@ -28,6 +28,7 @@ from klab.engines.base import (
 from klab.engines.multi_device import (
     ReplicaPool,
     accumulate_microbatch_diagnostics,
+    compile_training_kernels,
     merge_replica_outputs,
     microbatch_position_mask,
 )
@@ -522,6 +523,9 @@ class PyTorchEngine:
             model.load_state_dict(initial_weights)  # type: ignore[arg-type]
         trainable_parameters = apply_trainable_parameter_filter(model, config)
         apply_recomputation_strategy(model, config)
+        self._compiled_output_head_loss = compile_training_kernels(
+            model, config, device
+        )
         if self._shard is not None:
             self._shard.close()
             self._shard = None
@@ -531,7 +535,13 @@ class PyTorchEngine:
         with pilot_phase("optimizer_initialization"):
             if config.runtime.parallel.sharded:
                 # The group shards the model, so it also builds the optimizer.
-                self._shard = ShardGroup(config, runtime.backend, model, device)
+                self._shard = ShardGroup(
+                    config,
+                    runtime.backend,
+                    model,
+                    device,
+                    self._compiled_output_head_loss,
+                )
                 model, optimizer = self._shard.model, self._shard.optimizer
             else:
                 optimizer = build_optimizer(model, config)
@@ -554,25 +564,6 @@ class PyTorchEngine:
         self.config, self.runtime, self.device = config, runtime, device
         self.model, self.optimizer = model, optimizer
         self._initialize_objective(config, device, runtime.backend)
-        if config.runtime.compile_output_head_loss:
-            self._compiled_output_head_loss = torch.compile(
-                output_projection_cross_entropy,
-                dynamic=config.runtime.compile_dynamic_shapes,
-                fullgraph=config.runtime.compile_dynamic_shapes,
-            )
-        if config.runtime.compile_transformer_blocks:
-            if config.runtime.compile_dynamic_shapes:
-                from klab.model.rope import RoPE
-
-                for module in model.modules():
-                    if isinstance(module, RoPE):
-                        module.reserve(config.model.max_seq_len, device)
-            for block in model.blocks:
-                block.forward_with_aux = torch.compile(
-                    block.forward_with_aux,
-                    dynamic=config.runtime.compile_dynamic_shapes,
-                    fullgraph=config.runtime.compile_dynamic_shapes,
-                )
         self._last_gradient_parameter_names = ()
         self._last_update_parameter_names = ()
         self.scaler = make_grad_scaler(config, device)
