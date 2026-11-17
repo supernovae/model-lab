@@ -1230,9 +1230,15 @@ carries a loss mask; `document_start` is the mixture's way to give long
 documents their own rows.
 
 - **Resume.** An interrupted run resumes from its last committed segment in
-  `.OUTPUT.assembly`; keep that directory and the output parent's `cache`.
-  Once the output is published, the segments and commit markers are removed;
-  `progress.json` stays.
+  `.OUTPUT.assembly-ID`, where `ID` names the declaration, release manifest,
+  family inventory, tokenizer and Lab source the checkpoint was written for;
+  keep that directory and the output parent's `cache`. Another declaration,
+  release, inventory, tokenizer or Lab revision beside the same output starts
+  its own checkpoint, and the command lists the others at once (delete the ones
+  you will not resume). A checkpoint whose `request.json` disagrees with its
+  name is refused before any verification, sampling or indexing, naming the
+  directory to delete. Once the output is published, the segments and commit
+  markers are removed; `progress.json` stays.
   `KLAB_MIXTURE_COMMIT_CANDIDATES=N` sets how often it commits (default 4096
   candidates, 64 MiB or 30 seconds).
 - **Workers.** Encoding uses the shared [encoder pool](token-store.md#one-encoder)
@@ -1240,7 +1246,7 @@ documents their own rows.
   rebuilding a mixture does not tokenize unchanged documents again.
   `KLAB_MIXTURE_WORKERS=N` caps the worker plan; by default it follows physical
   cores and memory.
-- **Progress.** `.OUTPUT.assembly/progress.json` reports per-stratum counts,
+- **Progress.** `.OUTPUT.assembly-ID/progress.json` reports per-stratum counts,
   queue peaks, worker utilization and memory.
 - **Verify.** `verify-mixture` checks the recorded completion and current
   inputs without rerunning; `--audit` reproduces the whole schedule without the
