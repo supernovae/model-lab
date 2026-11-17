@@ -805,6 +805,7 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         command.add_argument("declaration")
         command.add_argument("--output", required=True)
         command.add_argument("--json", action="store_true")
+        _verification_flags(command)
         if name == "verify-mixture":
             command.add_argument(
                 "--audit",

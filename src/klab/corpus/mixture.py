@@ -23,7 +23,7 @@ import numpy as np
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from klab.canonical import canonical_digest, canonical_json
+from klab.canonical import canonical_json
 from klab.config.loading import load_tokenizer_config
 from klab.config.models import DatasetConfig
 from klab.corpus.mixture_index import (
@@ -358,16 +358,6 @@ def _tokenizer(spec: MixtureDeclaration, release: Path, release_id: str):
     return load_tokenizer(path), digest
 
 
-def _rank(
-    seed: int, stratum: str, family: str, doc_id: str, order_policy: str | None = None
-) -> str:
-    if order_policy == "kml-card03-v1":
-        return hashlib.sha256(
-            f"kml-card03-v1 | {stratum} | {doc_id}".encode()
-        ).hexdigest()
-    return canonical_digest([seed, stratum, family, doc_id])
-
-
 def materialize_mixture(declaration: Path, output: Path) -> dict:
     """Publish exact token IDs only after all quotas and closure checks pass."""
     from klab.corpus.mixture_pipeline import mixture_writer
@@ -490,9 +480,11 @@ def _materialize_mixture(
                 if reuse_tokens:
                     preflight = MixturePreflight(
                         checkpoint_cache,
-                        checkpoint_request,
                         release,
                         spec.family_inventory,
+                        seed=spec.seed,
+                        order_policy=spec.order_policy,
+                        strata=spec.source_strata,
                     )
                 index = MixtureIndex(
                     Path(scratch),
@@ -515,13 +507,8 @@ def _materialize_mixture(
                     index.inventory(
                         spec.family_inventory,
                         spec.source_strata,
-                        lambda row: _rank(
-                            spec.seed,
-                            row["stratum"],
-                            row["family_id"],
-                            row["document_id"],
-                            spec.order_policy,
-                        ),
+                        spec.seed,
+                        spec.order_policy,
                     )
                     index.select(release / "lm/train.lineage.jsonl")
                     if preflight is not None:

@@ -11,7 +11,7 @@ import os
 import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
 
@@ -317,9 +317,14 @@ def mixture_writer(output):
 
 
 class MixturePreflight:
-    """Reuse a verified ordinary input index; mutable schedule SQL is never proof."""
+    """Reuse a verified selection index of one release, inventory, seed and order policy.
 
-    def __init__(self, cache, request, release, inventory):
+    The key is what the index is computed from, not the mixture declaration:
+    changing a quota, the tokenizer or the output keeps the index. Mutable
+    schedule state is never part of it.
+    """
+
+    def __init__(self, cache, release, inventory, *, seed, order_policy, strata):
         self.cache = cache
         self.inputs = {
             path: sha256_file(path)
@@ -330,25 +335,27 @@ class MixturePreflight:
             )
         }
         self.request = {
-            **request,
             "inputs": {str(p): digest for p, digest in self.inputs.items()},
+            "seed": seed,
+            "order_policy": order_policy,
+            "source_strata": strata,
         }
         prior = cache.load("mixture-preflight", self.request, limit=4 * 1024**2)
         self.snapshot = prior[0]["snapshot"] if prior is not None else None
 
     def publish(self, index):
-        import sqlite3
+        import shutil
         from uuid import uuid4
 
         directory = self.cache.root / "cache" / "mixture-preflight"
         directory.mkdir(parents=True, exist_ok=True)
-        path = directory / (uuid4().hex + ".sqlite")
+        path = directory / uuid4().hex
         index.verify_inputs()
-        index.db.commit()
-        with closing(sqlite3.connect(path)) as target:
-            index.db.backup(target)
-        with path.open("rb") as stream:
-            os.fsync(stream.fileno())
+        shutil.copytree(index.selection.directory, path)
+        for member in path.iterdir():
+            with member.open("rb") as stream:
+                os.fsync(stream.fileno())
+        sync_directory(path)
         sync_directory(directory)
         self.cache.publish(
             "mixture-preflight",

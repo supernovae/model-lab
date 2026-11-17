@@ -15,6 +15,7 @@ from klab.canonical import canonical_json
 from klab.config.loading import load_config
 from klab.config.models import DatasetConfig
 from klab.corpus import mixture
+from klab.corpus.mixture_index import document_rank
 from klab.data.packing import TokenBlockDataset, _collect_token_mixture
 
 
@@ -166,11 +167,11 @@ def _scheduled(output: Path) -> list[dict]:
 def test_card03_order_policy_uses_contract_document_hash() -> None:
     expected = hashlib.sha256(b"kml-card03-v1 | incident | document-1").hexdigest()
     assert (
-        mixture._rank(17, "incident", "family-a", "document-1", "kml-card03-v1")
+        document_rank(17, "incident", "family-a", "document-1", "kml-card03-v1")
         == expected
     )
     assert (
-        mixture._rank(17, "incident", "family-b", "document-1", "kml-card03-v1")
+        document_rank(17, "incident", "family-b", "document-1", "kml-card03-v1")
         == expected
     )
 
@@ -1114,9 +1115,7 @@ def test_mixture_frontier_resumes_without_committed_candidate_replay(
     def unexpected_inventory_replay(*args):
         raise AssertionError("authenticated preflight must bypass inventory replay")
 
-    monkeypatch.setattr(
-        mixture.MixtureIndex, "_load_documents", unexpected_inventory_replay
-    )
+    monkeypatch.setattr(mixture.MixtureIndex, "inventory", unexpected_inventory_replay)
     monkeypatch.setenv("KLAB_MIXTURE_WORKERS", "8")
     actual = mixture.materialize_mixture(declaration, output)
     assert actual == expected
