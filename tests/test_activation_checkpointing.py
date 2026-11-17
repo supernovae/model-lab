@@ -213,3 +213,15 @@ def test_context_memory_checkpointed_gradients_and_update(kernel: int) -> None:
         torch.testing.assert_close(left[2][name], right[2][name])
     for name, value in plain.state_dict().items():
         torch.testing.assert_close(value, checkpointed.state_dict()[name])
+
+
+def test_block_compilation_accepts_recomputation_and_refuses_offload() -> None:
+    from klab.config.models import RuntimeConfig
+
+    recompute = {"activation_checkpointing": {"enabled": True}}
+    RuntimeConfig(compile_transformer_blocks=True, memory=recompute)
+    with pytest.raises(ValueError, match="without activation offload"):
+        RuntimeConfig(
+            compile_transformer_blocks=True,
+            memory={"activation_offload": {"enabled": True}},
+        )

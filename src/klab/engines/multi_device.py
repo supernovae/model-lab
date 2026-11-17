@@ -209,9 +209,9 @@ def build_replica(
     """Build the replica the primary's model would be on ``device``."""
     from klab.engines.pytorch import (
         apply_recomputation_strategy,
+        compile_transformer_blocks,
         output_projection_cross_entropy,
     )
-    from klab.model.rope import RoPE
     from klab.training.trainable import apply_trainable_parameter_filter
 
     model = DenseLM(config.model, config.attention).to(device)
@@ -227,16 +227,7 @@ def build_replica(
             fullgraph=runtime.compile_dynamic_shapes,
         )
     if runtime.compile_transformer_blocks:
-        if runtime.compile_dynamic_shapes:
-            for module in model.modules():
-                if isinstance(module, RoPE):
-                    module.reserve(config.model.max_seq_len, device)
-        for block in model.blocks:
-            block.forward_with_aux = torch.compile(
-                block.forward_with_aux,
-                dynamic=runtime.compile_dynamic_shapes,
-                fullgraph=runtime.compile_dynamic_shapes,
-            )
+        compile_transformer_blocks(model, config, device)
     return SecondaryReplica(
         device=device, model=model, compiled_output_head_loss=compiled_loss
     )
