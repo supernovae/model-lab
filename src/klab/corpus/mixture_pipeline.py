@@ -139,8 +139,8 @@ class MixtureFrontier:
     Uncommitted segment directories are ignored and retained for diagnosis.
     """
 
-    def __init__(self, output, cache, request):
-        self.root = output.parent / ("." + output.name + ".assembly")
+    def __init__(self, root, cache, request):
+        self.root = root
         self.root.mkdir(exist_ok=True)
         if symlinked(self.root):
             raise ValueError("unsafe mixture checkpoint root")
@@ -152,7 +152,8 @@ class MixtureFrontier:
         if binding.exists():
             if json.loads(binding.read_bytes()) != request:
                 raise ValueError(
-                    "mixture checkpoint identity mismatch; use a new output"
+                    f"mixture checkpoint {self.root} was written for another "
+                    "request; delete that directory or use a new output"
                 )
         else:
             write_rows(binding, [request])
@@ -268,7 +269,8 @@ class MixtureFrontier:
             self.event_file.close()
 
 
-def pipeline_request(request, index):
+def producer_digests():
+    """Digests of the source that produces a mixture; a changed producer is a new checkpoint."""
     producer = {
         name: sha256_file(Path(__file__).with_name(name))
         for name in (
@@ -287,6 +289,51 @@ def pipeline_request(request, index):
     producer["token_encode_worker.py"] = sha256_file(
         Path(__file__).parents[1] / "token_encode_worker.py"
     )
+    return producer
+
+
+def claim_assembly(output, request):
+    """The checkpoint directory for exactly this request, checked before any work.
+
+    The directory is named by the request and the producer's source, so another
+    release, declaration, inventory, tokenizer or code revision never meets an
+    unrelated checkpoint. Assemblies of other requests beside the same output are
+    reported so the operator can delete the ones they will not resume.
+    """
+    output = Path(output).absolute()
+    request = {**request, "producer": producer_digests()}
+    prefix = "." + output.name + ".assembly"
+    root = output.parent / f"{prefix}-{canonical_digest(request)[:16]}"
+    if symlinked(root):
+        raise ValueError(f"unsafe mixture checkpoint root {root}")
+    binding = root / "request.json"
+    if binding.exists():
+        stored = json.loads(binding.read_bytes())
+        if any(stored.get(key) != value for key, value in request.items()):
+            raise ValueError(
+                f"mixture checkpoint {root} was written for another request; "
+                "delete that directory or use a new output"
+            )
+    others = sorted(
+        path.name
+        for path in output.parent.glob(prefix + "*")
+        if path.is_dir() and path != root
+    )
+    if others:
+        import sys
+
+        print(
+            f"mixture: {len(others)} checkpoint(s) beside {output.name} belong to "
+            f"other requests and will not be resumed ({', '.join(others)}); "
+            "delete the ones you no longer need",
+            file=sys.stderr,
+            flush=True,
+        )
+    return root
+
+
+def pipeline_request(request, index):
+    producer = producer_digests()
     return {
         **request,
         "producer": producer,
