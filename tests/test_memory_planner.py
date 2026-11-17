@@ -9,7 +9,7 @@ import pytest
 
 import klab.memory as memory_module
 from klab.config.loading import load_config
-from klab.config.models import ParallelConfig
+from klab.config.models import ParallelConfig, RunConfig
 from klab.memory import (
     MemoryMonitor,
     calibrated_estimate,
@@ -17,6 +17,7 @@ from klab.memory import (
     calibration_multiplier,
     compare_parallel_modes,
     estimate_memory,
+    explain_levers,
     parameter_inventory,
     plan_memory,
     registered_runtime_buffers_bytes,
@@ -538,9 +539,7 @@ def test_sdpa_buffer_estimate_matches_registered_runtime_allocations():
     assert registered_runtime_buffers_bytes(config) == actual
 
 
-def test_constrained_plan_keeps_compiled_blocks_without_activation_checkpointing() -> (
-    None
-):
+def test_constrained_plan_recomputes_compiled_blocks() -> None:
     config = load_config(Path("configs/smoke_cpu.yaml"))
     runtime_config = config.runtime.model_copy(
         update={
@@ -550,21 +549,9 @@ def test_constrained_plan_keeps_compiled_blocks_without_activation_checkpointing
     )
     compiled = config.model_copy(update={"runtime": runtime_config})
     estimate = estimate_memory(compiled, _runtime(), parameter_inventory(compiled))
-    # Block compilation excludes activation checkpointing, so the planner
-    # records that it was not applied instead of proposing an invalid config.
     proposal = plan_memory(compiled, _runtime(), estimate)
     assert proposal.config["runtime"]["compile_transformer_blocks"] is True
-    assert not proposal.config["runtime"]["memory"]["activation_checkpointing"][
-        "enabled"
-    ]
-    assert {
-        "requested": "activation_checkpointing",
-        "effective": False,
-    }.items() <= next(
-        decision
-        for decision in proposal.decisions
-        if decision.get("requested") == "activation_checkpointing"
-    ).items()
+    assert proposal.config["runtime"]["memory"]["activation_checkpointing"]["enabled"]
 
 
 def test_dense_32k_preset_fits_an_accelerator_and_not_a_cpu() -> None:
@@ -586,6 +573,34 @@ def test_dense_32k_preset_fits_an_accelerator_and_not_a_cpu() -> None:
         update={"runtime": config.runtime.model_copy(update={"backend": "cpu"})}
     )
     assert estimate_memory(cpu, _runtime(), inventory).peak_bytes > 100 * 2**30
+
+
+def test_explained_levers_stack_to_what_the_planner_proposes() -> None:
+    base = load_config(Path("configs/smoke_cpu.yaml")).model_dump(mode="json")
+    base["model"].update(
+        hidden_dim=1024, num_heads=8, ffn_dim=4096, num_layers=4, max_seq_len=4096
+    )
+    base["training"].update(micro_batch_size=4, seq_len=4096)
+    base["runtime"].update(backend="xpu")
+    base["runtime"]["memory"].update(policy="max_fit", budget_bytes=1)
+    config = RunConfig.model_validate(base)
+    runtime = _runtime(backend="xpu", device_total=2**40, device_free=2**40)
+    estimate = estimate_memory(config, runtime, parameter_inventory(config))
+    explained = explain_levers(config, runtime, estimate)
+    alone = {row["lever"]: row for row in explained["alone"]}
+    assert all(row["applicable"] for row in alone.values())
+    assert alone["activation_checkpointing"]["delta_bytes"] < 0
+    assert alone["optimizer_state_offload"]["host_optimizer_bytes"] > 0
+    assert alone["adafactor"]["changes_numerics"]
+    # The stack is the planner's own sequence of exact levers, not a second model.
+    proposal = plan_memory(config, runtime, estimate)
+    stacked = {row["lever"] for row in explained["stacked"]}
+    assert stacked == {
+        decision["requested"]
+        for decision in proposal.decisions
+        if decision.get("after_peak_bytes", 0) < decision.get("before_peak_bytes", 0)
+    }
+    assert explained["stacked"][-1]["peak_bytes"] == proposal.estimate.peak_bytes
 
 
 def _sharded(config, mode: str, devices: int = 4, **runtime):

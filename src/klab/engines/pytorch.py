@@ -59,6 +59,7 @@ from klab.training.optimizer import (
     set_optimizer_learning_rate,
 )
 from klab.training.pilot_progress import current_pilot_progress, pilot_phase
+from klab.training.reduced_precision import Bf16GradientBuffers
 from klab.training.trainable import apply_trainable_parameter_filter
 
 
@@ -154,6 +155,28 @@ def apply_recomputation_strategy(model: DenseLM, config: RunConfig) -> None:
     for module in model.modules():
         if hasattr(module, "recompute_chunks"):
             module.recompute_chunks = chunks
+
+
+def compile_transformer_blocks(
+    model: DenseLM, config: RunConfig, device: torch.device
+) -> None:
+    """Compile each block's forward, which activation recomputation may then rerun.
+
+    The RoPE tables are built to ``max_seq_len`` first, so a block compiles once
+    against its final buffers. A table that grew during the first forward would
+    give the forward and its recomputation different graphs, and recomputation
+    refuses saved tensors that differ from the forward's.
+    """
+    from klab.model.rope import RoPE
+
+    for module in model.modules():
+        if isinstance(module, RoPE):
+            module.reserve(config.model.max_seq_len, device)
+    dynamic = config.runtime.compile_dynamic_shapes
+    for block in model.blocks:
+        block.forward_with_aux = torch.compile(
+            block.forward_with_aux, dynamic=dynamic, fullgraph=dynamic
+        )
 
 
 def _cap_allocator(device: torch.device, spill_limits: SpillLimits | None) -> bool:
@@ -501,6 +524,7 @@ class PyTorchEngine:
         self._last_update_parameter_names: tuple[str, ...] = ()
         self._replicas: ReplicaPool | None = None
         self._shard: ShardGroup | None = None
+        self.gradient_buffers: Bf16GradientBuffers | None = None
 
     def validate(
         self, config: RunConfig, *, authorization: RuntimeAuthorization | None = None
@@ -559,6 +583,13 @@ class PyTorchEngine:
         self.state_offload = (
             OptimizerStateOffload(optimizer, device)
             if config.optimizer.state_offload
+            else None
+        )
+        self.gradient_buffers = (
+            Bf16GradientBuffers(
+                (parameter for _, parameter in trainable_parameters), config.seed
+            )
+            if config.runtime.gradient_dtype == "bf16"
             else None
         )
         self.config, self.runtime, self.device = config, runtime, device
@@ -719,6 +750,8 @@ class PyTorchEngine:
         if self.offload is not None and not self.offload.reset():
             raise RuntimeError("previous update retained offloaded activation storage")
         optimizer.zero_grad(set_to_none=True)
+        if self.gradient_buffers is not None:
+            self.gradient_buffers.begin_update(update_index)
         language_sum = torch.zeros((), device=device)
         aux_sum = torch.zeros((), device=device)
         diagnostic_sums: dict[str, torch.Tensor] = {}
@@ -1019,6 +1052,8 @@ class PyTorchEngine:
             norm = torch.tensor(sharded_norm)
             self._last_gradient_parameter_names = gradient_names
         else:
+            if self.gradient_buffers is not None:
+                self.gradient_buffers.publish()
             if self.scaler is not None:
                 self.scaler.unscale_(optimizer)
             named_parameters = dict(model.named_parameters())
@@ -1037,12 +1072,17 @@ class PyTorchEngine:
                         f"{sorted(unexpected_gradients)}"
                     )
             self._last_gradient_parameter_names = gradient_names
-            norm = torch.nn.utils.clip_grad_norm_(
-                model.parameters(),
-                config.training.grad_clip_norm,
-                error_if_nonfinite=False,
-                foreach=False,
-            )
+            if self.gradient_buffers is not None:
+                norm = self.gradient_buffers.clip_(
+                    config.training.grad_clip_norm, update_index
+                )
+            else:
+                norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    config.training.grad_clip_norm,
+                    error_if_nonfinite=False,
+                    foreach=False,
+                )
             gradients_finite = torch.isfinite(norm) if self.scaler is None else None
             # One pre-step boundary checks the accumulated loss and gradients before
             # optimizer mutation. No diagnostic scalar is read per microbatch.

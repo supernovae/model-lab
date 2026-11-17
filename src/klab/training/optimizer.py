@@ -7,6 +7,7 @@ import torch
 from torch import nn
 
 from klab.config.models import AdamWConfig, RunConfig
+from klab.training.reduced_precision import ReducedPrecision, ReducedPrecisionAdamW
 
 
 def learning_rate_for_step(
@@ -88,6 +89,7 @@ def make_optimizer(
     *,
     memory_table_lr_multiplier: float = 1.0,
     memory_table_weight_decay: float | None = None,
+    reduced_precision: ReducedPrecision | None = None,
 ) -> torch.optim.AdamW:
     from klab.model.memory import TokenNgramMemory
 
@@ -134,6 +136,15 @@ def make_optimizer(
                 "lr": learning_rate * memory_table_lr_multiplier,
             }
         )
+    if reduced_precision is not None:
+        return ReducedPrecisionAdamW(
+            groups,
+            state_dtype=reduced_precision.state_dtype,
+            seed=reduced_precision.seed,
+            lr=learning_rate,
+            betas=betas,
+            eps=eps,
+        )
     return torch.optim.AdamW(
         groups,
         lr=learning_rate,
@@ -155,6 +166,7 @@ def build_optimizer(model: nn.Module, config: RunConfig) -> torch.optim.Optimize
             optimizer.eps,
             memory_table_lr_multiplier=optimizer.memory_table_lr_multiplier,
             memory_table_weight_decay=optimizer.memory_table_weight_decay,
+            reduced_precision=ReducedPrecision.from_config(config),
         )
     return make_adafactor(
         model,

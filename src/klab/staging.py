@@ -1147,7 +1147,7 @@ def stage(
                     if effective["runtime"]["precision"] == "auto":
                         effective["runtime"]["precision"] = "fp32"
                     if (
-                        runtime.backend == "cuda"
+                        runtime.backend in {"cuda", "xpu"}
                         and config.attention_kinds == {"dense"}
                         and (
                             config.model.num_kv_heads is None
@@ -1157,6 +1157,18 @@ def stage(
                         report["attention_probe"] = attention_probe(
                             config, authorization=authorization
                         )
+                        if (
+                            report["attention_probe"]["score_memory"].get(
+                                "estimate_assumption"
+                            )
+                            == "contradicted"
+                        ):
+                            _LOGGER.warning(
+                                "SDPA keeps a [T, T] score matrix on this device, "
+                                "which the memory estimate does not charge; set "
+                                "attention.implementation: reference to charge it "
+                                "(see klab runtime attention)"
+                            )
                     report["effective_config"] = effective
                     if estimate.result == "LIKELY_TO_EXCEED":
                         if config.runtime.memory.estimate_policy == "enforce":

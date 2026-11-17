@@ -1,10 +1,13 @@
 """Disposable evidence for the configured PyTorch SDPA execution path."""
 
+import math
 from typing import Any
 
 import torch
+from torch.nn import functional
 
 from klab.config.models import RunConfig
+from klab.memory import assumes_fused_scores
 from klab.model.attention.dense import DenseAttention
 from klab.runtime import (
     capture_rng_state,
@@ -16,9 +19,10 @@ from klab.runtime import (
 )
 from klab.runtime_profile import RuntimeAuthorization, require_authorization
 
-_ATTENTION_PROBE_VERSION = 1
+_ATTENTION_PROBE_VERSION = 2
 _CANDIDATES = (
     ("MATH", "MATH"),
+    ("OVERRIDEABLE", "OVERRIDEABLE"),
     ("EFFICIENT_ATTENTION", "EFFICIENT_ATTENTION"),
     ("FLASH_ATTENTION", "FLASH_ATTENTION"),
     ("CUDNN_ATTENTION", "CUDNN_ATTENTION"),
@@ -42,6 +46,8 @@ def _operators(events: Any) -> list[str]:
 
 def _selected_backend(operators: list[str]) -> str | None:
     joined = " ".join(operators).lower()
+    if "overrideable" in joined:
+        return "OVERRIDEABLE"
     if "flash" in joined:
         return "FLASH_ATTENTION"
     if "efficient" in joined:
@@ -170,6 +176,118 @@ def _restore_training_state(state: dict[str, object]) -> None:
     torch.backends.cudnn.deterministic = bool(state["cudnn_deterministic"])
 
 
+# The probe's own lengths, plus the configured one. Linear growth in tokens
+# means the kernel keeps no [T, T] scores; quadratic growth means it does.
+_SCORE_LENGTHS = (1024, 2048, 4096)
+# Above this exponent between the shortest and longest length, extra memory is
+# growing with T^2 (2.0) rather than T (1.0).
+_QUADRATIC_EXPONENT = 1.5
+# A score matrix is never allocated if it would take more than this share of
+# the device's free memory.
+_SCORE_FREE_SHARE = 0.25
+
+
+def retains_scores(measurements: list[dict[str, float]]) -> bool:
+    """Whether peak extra memory scales with T^2, from at least two lengths.
+
+    ``peak_extra_bytes`` is the largest allocation above the inputs during one
+    forward and backward. A kernel that keeps scores grows four-fold when the
+    length doubles; a fused one doubles.
+    """
+    if len(measurements) < 2:
+        raise ValueError("score scaling needs at least two sequence lengths")
+    short, long = measurements[0], measurements[-1]
+    exponent = math.log(
+        long["peak_extra_bytes"] / short["peak_extra_bytes"]
+    ) / math.log(long["sequence_length"] / short["sequence_length"])
+    return exponent > _QUADRATIC_EXPONENT
+
+
+def _score_memory(config: RunConfig, device: torch.device) -> dict[str, object]:
+    """Measure whether SDPA keeps a [T, T] score matrix for this attention shape.
+
+    Runs the same causal ``scaled_dot_product_attention`` call training makes,
+    forward and backward, at several lengths and records the peak device memory
+    above the q, k, v tensors. Lengths whose score matrix alone would not fit
+    comfortably are skipped, not run.
+    """
+    api = getattr(torch, device.type, None)
+    if device.type not in {"cuda", "xpu"} or not hasattr(api, "max_memory_allocated"):
+        return {
+            "status": "UNMEASURED",
+            "reason": f"{device.type} exposes no peak device memory counter",
+        }
+    model, training = config.model, config.training
+    heads, head_dim = model.num_heads, model.hidden_dim // model.num_heads
+    precision = config.runtime.precision
+    dtype = (
+        torch.bfloat16
+        if precision == "bf16"
+        else (torch.float16 if precision == "fp16" else torch.float32)
+    )
+    itemsize = torch.empty((), dtype=dtype).element_size()
+    free = api.mem_get_info(device)[0] if hasattr(api, "mem_get_info") else None
+    lengths = sorted({*_SCORE_LENGTHS, training.seq_len})
+    measurements: list[dict[str, float]] = []
+    skipped: list[int] = []
+    for length in lengths:
+        score_bytes = training.micro_batch_size * heads * length * length * itemsize
+        if free is not None and score_bytes > _SCORE_FREE_SHARE * free:
+            skipped.append(length)
+            continue
+        shape = (training.micro_batch_size, heads, length, head_dim)
+        query, key, value = (
+            torch.randn(shape, device=device, dtype=dtype, requires_grad=True)
+            for _ in range(3)
+        )
+        api.synchronize(device)
+        baseline = api.memory_allocated(device)
+        api.reset_peak_memory_stats(device)
+        output = functional.scaled_dot_product_attention(
+            query, key, value, dropout_p=0.0, is_causal=True
+        )
+        output.float().square().mean().backward()
+        api.synchronize(device)
+        peak = api.max_memory_allocated(device) - baseline
+        del query, key, value, output
+        measurements.append(
+            {
+                "sequence_length": length,
+                "peak_extra_bytes": peak,
+                "score_matrix_bytes": score_bytes,
+                "extra_over_score": peak / score_bytes,
+            }
+        )
+    if len(measurements) < 2:
+        return {
+            "status": "UNMEASURED",
+            "reason": "fewer than two sequence lengths fit beside a score matrix",
+            "skipped_sequence_lengths": skipped,
+        }
+    keeps = retains_scores(measurements)
+    assumed = assumes_fused_scores(config, config.attention)
+    return {
+        "status": "MEASURED",
+        "shape": {
+            "micro_batch_size": training.micro_batch_size,
+            "num_heads": heads,
+            "head_dim": head_dim,
+            "dtype": str(dtype).removeprefix("torch."),
+        },
+        "measurements": measurements,
+        "skipped_sequence_lengths": skipped,
+        "retains_score_matrix": keeps,
+        # The estimate charges no [T, T] scores for fused SDPA on CUDA and XPU.
+        "estimate_assumption": (
+            "not_applicable"
+            if not assumed
+            else "contradicted"
+            if keeps
+            else "confirmed"
+        ),
+    }
+
+
 def attention_probe(
     config: RunConfig, *, authorization: RuntimeAuthorization | None = None
 ) -> dict[str, object]:
@@ -261,6 +379,7 @@ def attention_probe(
             "observed_operators": observed_operators,
             "selected_backend": _selected_backend(observed_operators),
             "candidates": candidates,
+            "score_memory": _score_memory(config, device),
             "recommendations": _recommendations(runtime, candidates),
         }
     finally:

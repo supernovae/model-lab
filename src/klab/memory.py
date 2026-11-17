@@ -7,6 +7,7 @@ import json
 import math
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -158,8 +159,27 @@ def optimizer_state_bytes(
                 trainable_parameters=config.training.trainable_parameters,
             ).values()
         )
-        return (inventory or parameter_inventory(config)).trainable * 8 + steps * 4
+        moment_bytes = 2 if config.optimizer_state_dtype == "bf16" else 4
+        return (
+            inventory or parameter_inventory(config)
+        ).trainable * 2 * moment_bytes + steps * 4
     return _adafactor_state_bytes(config)
+
+
+def _largest_trainable_parameter_bytes(config: RunConfig) -> int:
+    """FP32 bytes of the largest trainable tensor, which is streamed or staged alone."""
+    return max(
+        (
+            4 * spec.numel
+            for spec in named_tensor_inventory(
+                config.model,
+                config.attention,
+                trainable_parameters=config.training.trainable_parameters,
+            ).values()
+            if spec.trainable and spec.alias_of is None
+        ),
+        default=0,
+    )
 
 
 def registered_runtime_buffers_bytes(config: RunConfig) -> int:
@@ -175,6 +195,15 @@ def registered_runtime_buffers_bytes(config: RunConfig) -> int:
         else 0
     )
     return layers * rope + mapping_bytes
+
+
+def assumes_fused_scores(config: RunConfig, attention: AttentionConfig) -> bool:
+    """Whether the estimate charges no [T, T] scores because SDPA is fused here."""
+    return (
+        attention.implementation == "sdpa"
+        and attention.kind in {"dense", "mla"}
+        and config.runtime.backend in {"cuda", "xpu"}
+    )
 
 
 def _attention_reach(
@@ -214,17 +243,14 @@ def _attention_reach(
             0,
             "sliding-window attention scores at most two windows of keys per query",
         )
-    if (
-        attention.implementation == "sdpa"
-        and attention.kind in {"dense", "mla"}
-        and config.runtime.backend in {"cuda", "xpu"}
-    ):
+    if assumes_fused_scores(config, attention):
         return (
             0,
             0,
             (
                 "fused scaled-dot-product attention on CUDA/XPU is assumed not to "
-                "retain a [T, T] score matrix; verify with a measured warmup"
+                "retain a [T, T] score matrix; verify with klab runtime attention "
+                "or a measured warmup"
             ),
         )
     from klab.components import is_builtin
@@ -358,22 +384,12 @@ def estimate_memory(
     model = config.model
     weights = inventory.total * 4
     buffers = registered_runtime_buffers_bytes(config)
-    gradients = inventory.trainable * 4
+    bf16_gradients = config.runtime.gradient_dtype == "bf16"
+    gradients = inventory.trainable * (2 if bf16_gradients else 4)
     optimizer = optimizer_state_bytes(config, inventory)
+    largest = _largest_trainable_parameter_bytes(config)
     offloaded_optimizer = 0
     if config.optimizer.state_offload:
-        largest = max(
-            (
-                4 * spec.numel
-                for spec in named_tensor_inventory(
-                    config.model,
-                    config.attention,
-                    trainable_parameters=config.training.trainable_parameters,
-                ).values()
-                if spec.trainable and spec.alias_of is None
-            ),
-            default=0,
-        )
         # The full state waits in host memory; one bucket is on the device.
         offloaded_optimizer = optimizer
         optimizer = offloaded_state_device_bytes(optimizer, largest)
@@ -490,8 +506,23 @@ def estimate_memory(
     else:
         assert ceiling is not None
         result = "LIKELY_TO_FIT" if peak <= ceiling else "LIKELY_TO_EXCEED"
+    narrowed = [
+        what
+        for what, on in (
+            ("gradients", bf16_gradients),
+            ("AdamW moments", config.optimizer_state_dtype == "bf16"),
+        )
+        if on
+    ]
     assumptions = [
-        "reference-v2: FP32 master parameters and gradients; autocast does not reduce resident model or optimizer state",
+        "reference-v2: FP32 master parameters"
+        + (
+            f"; bf16 {' and '.join(narrowed)} (stochastic rounding, one FP32 "
+            "parameter's temporaries charged to workspace)"
+            if narrowed
+            else " and gradients"
+        )
+        + "; autocast does not reduce resident model or optimizer state",
         "categories are disjoint: registered buffers, retained activations, attention working tensors, workspace, and headroom",
         *attention_notes,
     ]
@@ -783,14 +814,223 @@ def compare_parallel_modes(
     return rows
 
 
-def plan_memory(
-    config: RunConfig, runtime_info: RuntimeInfo, estimate: MemoryEstimate
-) -> ResourceProposal:
-    """Produce an explicit policy-ordered proposal, retaining measured baseline correction."""
-    candidate, current = config, estimate
-    decisions: list[dict[str, object]] = []
-    policy = config.runtime.memory.policy
+def _with_activation_checkpointing(config: RunConfig, enabled: bool) -> RunConfig:
+    memory = config.runtime.memory.model_copy(
+        update={
+            "activation_checkpointing": config.runtime.memory.activation_checkpointing.model_copy(
+                update={"enabled": enabled}
+            ),
+        }
+    )
+    return config.model_copy(
+        update={"runtime": config.runtime.model_copy(update={"memory": memory})}
+    )
+
+
+def _with_optimizer_state_offload(config: RunConfig) -> RunConfig:
+    return config.model_copy(
+        update={
+            "optimizer": config.optimizer.model_copy(update={"state_offload": True})
+        }
+    )
+
+
+def _with_optimizer(config: RunConfig, name: str) -> RunConfig:
+    """The config with another optimizer, keeping the settings both share."""
+    payload = config.model_dump(mode="json")
+    payload["optimizer"] = {
+        "name": name,
+        **{
+            field: getattr(config.optimizer, field)
+            for field in (
+                "peak",
+                "floor",
+                "warmup_steps",
+                "weight_decay",
+                "state_offload",
+            )
+        },
+    }
+    return RunConfig.model_validate(payload)
+
+
+# Positions the output head scores at a time when chunking is proposed.
+PROPOSED_HEAD_CHUNK_TOKENS = 2048
+
+
+def _with_head_chunking(config: RunConfig) -> RunConfig | str:
+    """Chunk the output head, or say why it cannot help or is not available."""
+    from klab.objectives import DEFAULT_KIND
+
+    tokens = config.training.micro_batch_size * config.training.seq_len
+    if config.runtime.output_head_chunk_tokens is not None:
+        return "already chunked"
+    if config.runtime.engine != "pytorch":
+        return "needs the PyTorch engine"
+    if config.training.objective.kind != DEFAULT_KIND:
+        return "applies to the default next-token objective only"
+    if tokens <= PROPOSED_HEAD_CHUNK_TOKENS:
+        return f"a microbatch is {tokens} tokens, within one chunk already"
+    # Chunking replaces the compiled output head, which it cannot be combined with.
+    return config.model_copy(
+        update={
+            "runtime": config.runtime.model_copy(
+                update={
+                    "output_head_chunk_tokens": PROPOSED_HEAD_CHUNK_TOKENS,
+                    "compile_output_head_loss": False,
+                }
+            )
+        }
+    )
+
+
+@dataclass(frozen=True)
+class MemoryLever:
+    """One setting that trades memory for something, as a config transform.
+
+    ``apply`` returns the changed config, or the reason the lever does nothing
+    here. The proposal planner and ``klab inspect --explain`` share these.
+    """
+
+    name: str
+    setting: str
+    cost: str
+    changes_numerics: bool
+    apply: Callable[[RunConfig, RuntimeInfo], RunConfig | str]
+
+
+def _micro_batch_lever(config: RunConfig, runtime_info: RuntimeInfo) -> RunConfig | str:
+    if config.training.micro_batch_size == 1:
+        return "micro_batch_size is already 1"
     effective = config.training.micro_batch_size * config.training.gradient_accumulation
+    return _replace_microbatch(config, 1, effective)
+
+
+def _checkpointing_lever(
+    config: RunConfig, runtime_info: RuntimeInfo
+) -> RunConfig | str:
+    if config.runtime.memory.activation_checkpointing.enabled:
+        return "already on"
+    if (
+        runtime_info.engine != "pytorch"
+        and "activation_checkpointing" not in runtime_info.tested_features
+    ):
+        return "unsupported engine"
+    return _with_activation_checkpointing(config, True)
+
+
+def _head_chunking_lever(
+    config: RunConfig, runtime_info: RuntimeInfo
+) -> RunConfig | str:
+    return _with_head_chunking(config)
+
+
+def _offload_lever(config: RunConfig, runtime_info: RuntimeInfo) -> RunConfig | str:
+    if config.optimizer.state_offload:
+        return "already on"
+    if runtime_info.engine != "pytorch" or runtime_info.backend == "cpu":
+        return "needs PyTorch on an accelerator"
+    return _with_optimizer_state_offload(config)
+
+
+def _adafactor_lever(config: RunConfig, runtime_info: RuntimeInfo) -> RunConfig | str:
+    if config.optimizer.name == "adafactor":
+        return "already Adafactor"
+    if runtime_info.engine != "pytorch":
+        return "needs the PyTorch engine"
+    return _with_optimizer(config, "adafactor")
+
+
+def _bf16_gradients_lever(
+    config: RunConfig, runtime_info: RuntimeInfo
+) -> RunConfig | str:
+    runtime = config.runtime
+    if runtime.gradient_dtype == "bf16":
+        return "already bf16"
+    if runtime_info.engine != "pytorch":
+        return "needs the PyTorch engine"
+    if config.optimizer.name != "adamw":
+        return "needs AdamW"
+    if runtime.precision == "fp16" or runtime.secondary_device_indices:
+        return "not available with fp16 loss scaling or secondary devices"
+    return config.model_copy(
+        update={"runtime": runtime.model_copy(update={"gradient_dtype": "bf16"})}
+    )
+
+
+def _bf16_optimizer_state_lever(
+    config: RunConfig, runtime_info: RuntimeInfo
+) -> RunConfig | str:
+    if config.optimizer.name != "adamw":
+        return "only AdamW keeps full moments"
+    if config.optimizer.state_dtype == "bf16":
+        return "already bf16"
+    if runtime_info.engine != "pytorch":
+        return "needs the PyTorch engine"
+    return config.model_copy(
+        update={
+            "optimizer": config.optimizer.model_copy(update={"state_dtype": "bf16"})
+        }
+    )
+
+
+MEMORY_LEVERS: tuple[MemoryLever, ...] = (
+    MemoryLever(
+        "micro_batch_size",
+        "training.micro_batch_size: 1, gradient_accumulation raised to keep the batch",
+        "more passes per update",
+        False,
+        _micro_batch_lever,
+    ),
+    MemoryLever(
+        "activation_checkpointing",
+        "runtime.memory.activation_checkpointing.enabled: true",
+        "one extra forward per block in backward",
+        False,
+        _checkpointing_lever,
+    ),
+    MemoryLever(
+        "output_head_chunk_tokens",
+        f"runtime.output_head_chunk_tokens: {PROPOSED_HEAD_CHUNK_TOKENS}",
+        "output head computed twice, and not compiled (the two exclude each other)",
+        False,
+        _head_chunking_lever,
+    ),
+    MemoryLever(
+        "optimizer_state_offload",
+        "optimizer.state_offload: true",
+        "optimizer state crosses the host link every update",
+        False,
+        _offload_lever,
+    ),
+    MemoryLever(
+        "bf16_gradients",
+        "runtime.gradient_dtype: bf16 (FP32 master weights)",
+        "gradients accumulate with stochastic rounding: a numerics change",
+        True,
+        _bf16_gradients_lever,
+    ),
+    MemoryLever(
+        "bf16_optimizer_state",
+        "optimizer.state_dtype: bf16",
+        "moments stored with stochastic rounding: a numerics change",
+        True,
+        _bf16_optimizer_state_lever,
+    ),
+    MemoryLever(
+        "adafactor",
+        "optimizer.name: adafactor",
+        "a different optimizer: a new experiment",
+        True,
+        _adafactor_lever,
+    ),
+)
+
+
+def _margin_estimator(
+    runtime_info: RuntimeInfo, estimate: MemoryEstimate, config: RunConfig
+) -> Callable[[RunConfig], MemoryEstimate]:
+    """Estimate a changed config, keeping the baseline's measured extra margin."""
     reference = estimate_memory(config, runtime_info, parameter_inventory(config))
     inherited_margin = max(0, estimate.peak_bytes - reference.peak_bytes)
 
@@ -818,6 +1058,102 @@ def plan_memory(
                 ),
             ),
         )
+
+    return candidate_estimate
+
+
+_CATEGORIES = (
+    "resident_weights_bytes",
+    "runtime_buffers_bytes",
+    "gradients_bytes",
+    "optimizer_bytes",
+    "activations_bytes",
+    "attention_working_bytes",
+    "workspace_bytes",
+    "headroom_bytes",
+)
+
+
+def explain_levers(
+    config: RunConfig, runtime_info: RuntimeInfo, estimate: MemoryEstimate
+) -> dict[str, object]:
+    """What each memory lever buys for this config, alone and stacked.
+
+    ``alone`` applies one lever to the config and re-estimates it. ``stacked``
+    applies, in order, every lever that changes results nothing (the others are
+    new experiments) and still lowers the estimate, so the running peak shows
+    where a combination lands. Both keep the baseline's calibration margin.
+    """
+    candidate_estimate = _margin_estimator(runtime_info, estimate, config)
+
+    def entry(
+        lever: MemoryLever, base: RunConfig, before: MemoryEstimate
+    ) -> tuple[dict[str, object], RunConfig | None, MemoryEstimate | None]:
+        changed = lever.apply(base, runtime_info)
+        row: dict[str, object] = {
+            "lever": lever.name,
+            "setting": lever.setting,
+            "cost": lever.cost,
+            "changes_numerics": lever.changes_numerics,
+        }
+        if isinstance(changed, str):
+            return {**row, "applicable": False, "reason": changed}, None, None
+        after = candidate_estimate(
+            RunConfig.model_validate(changed.model_dump(mode="json"))
+        )
+        return (
+            {
+                **row,
+                "applicable": True,
+                "peak_bytes": after.peak_bytes,
+                "delta_bytes": after.peak_bytes - before.peak_bytes,
+                "result": after.result,
+                "category_delta_bytes": {
+                    name: getattr(after, name) - getattr(before, name)
+                    for name in _CATEGORIES
+                    if getattr(after, name) != getattr(before, name)
+                },
+                "host_optimizer_bytes": after.host_optimizer_bytes,
+            },
+            changed,
+            after,
+        )
+
+    alone = [entry(lever, config, estimate)[0] for lever in MEMORY_LEVERS]
+    stacked: list[dict[str, object]] = []
+    current_config, current = config, estimate
+    for lever in MEMORY_LEVERS:
+        if lever.changes_numerics:
+            continue
+        _, changed, after = entry(lever, current_config, current)
+        if changed is None or after is None or after.peak_bytes >= current.peak_bytes:
+            continue
+        stacked.append(
+            {
+                "lever": lever.name,
+                "peak_bytes": after.peak_bytes,
+                "delta_bytes": after.peak_bytes - current.peak_bytes,
+                "result": after.result,
+            }
+        )
+        current_config, current = changed, after
+    return {
+        "baseline_peak_bytes": estimate.peak_bytes,
+        "capacity_ceiling_bytes": estimate.capacity_ceiling_bytes,
+        "alone": alone,
+        "stacked": stacked,
+    }
+
+
+def plan_memory(
+    config: RunConfig, runtime_info: RuntimeInfo, estimate: MemoryEstimate
+) -> ResourceProposal:
+    """Produce an explicit policy-ordered proposal, retaining measured baseline correction."""
+    candidate, current = config, estimate
+    decisions: list[dict[str, object]] = []
+    policy = config.runtime.memory.policy
+    effective = config.training.micro_batch_size * config.training.gradient_accumulation
+    candidate_estimate = _margin_estimator(runtime_info, estimate, config)
 
     def consider(
         name: str, proposed: RunConfig, reason: str, **details: object
@@ -854,30 +1190,9 @@ def plan_memory(
                 }
             )
             return
-        if enabled and candidate.runtime.compile_transformer_blocks:
-            decisions.append(
-                {
-                    "requested": "activation_checkpointing",
-                    "effective": False,
-                    "reason": "compiled transformer blocks exclude activation "
-                    "checkpointing; no saving was assumed",
-                }
-            )
-            return
-        memory = candidate.runtime.memory.model_copy(
-            update={
-                "activation_checkpointing": candidate.runtime.memory.activation_checkpointing.model_copy(
-                    update={"enabled": enabled}
-                ),
-            }
-        )
         consider(
             "activation_checkpointing",
-            candidate.model_copy(
-                update={
-                    "runtime": candidate.runtime.model_copy(update={"memory": memory})
-                }
-            ),
+            _with_activation_checkpointing(candidate, enabled),
             "trade backward recomputation against retained activations",
             effective=enabled,
         )
@@ -994,6 +1309,16 @@ def plan_memory(
                     break
             if policy == "low_memory" or current.result != "LIKELY_TO_FIT":
                 checkpointing(True)
+            if policy == "low_memory" or current.result != "LIKELY_TO_FIT":
+                chunked = _with_head_chunking(candidate)
+                if not isinstance(chunked, str):
+                    consider(
+                        "output_head_chunk_tokens",
+                        chunked,
+                        "score the output head in chunks; the loss is the same "
+                        "up to summation order",
+                        effective=PROPOSED_HEAD_CHUNK_TOKENS,
+                    )
 
         if policy == "max_fit" and current.result != "LIKELY_TO_FIT":
             decisions.append(
@@ -1046,17 +1371,34 @@ def plan_memory(
         ):
             consider(
                 "optimizer_state_offload",
-                candidate.model_copy(
-                    update={
-                        "optimizer": candidate.optimizer.model_copy(
-                            update={"state_offload": True}
-                        )
-                    }
-                ),
+                _with_optimizer_state_offload(candidate),
                 "keep optimizer state in host memory and stream it per bucket; "
                 "the update is unchanged",
                 effective=True,
             )
+        if policy == "max_fit" and current.result != "LIKELY_TO_FIT":
+            precision_levers = {
+                lever.name: lever
+                for lever in MEMORY_LEVERS
+                if lever.name in {"bf16_gradients", "bf16_optimizer_state"}
+            }
+            for option in config.runtime.memory.allowed_low_precision:
+                if current.result == "LIKELY_TO_FIT":
+                    break
+                changed = precision_levers[option].apply(candidate, runtime_info)
+                if isinstance(changed, str):
+                    decisions.append(
+                        {"requested": option, "effective": False, "reason": changed}
+                    )
+                    continue
+                consider(
+                    option,
+                    changed,
+                    "explicitly allowed reduced-precision storage changes numerics "
+                    "(FP32 master weights stay)",
+                    effective=True,
+                    scientifically_significant=True,
+                )
         if policy == "max_fit" and current.result != "LIKELY_TO_FIT":
             for optimizer in config.runtime.memory.allowed_optimizers:
                 if optimizer == candidate.optimizer.name:
@@ -1071,21 +1413,7 @@ def plan_memory(
                         }
                     )
                     continue
-                payload = candidate.model_dump(mode="json")
-                payload["optimizer"] = {
-                    "name": optimizer,
-                    **{
-                        name: getattr(candidate.optimizer, name)
-                        for name in (
-                            "peak",
-                            "floor",
-                            "warmup_steps",
-                            "weight_decay",
-                            "state_offload",
-                        )
-                    },
-                }
-                proposed = RunConfig.model_validate(payload)
+                proposed = _with_optimizer(candidate, optimizer)
                 after = candidate_estimate(proposed)
                 if after.peak_bytes >= current.peak_bytes:
                     continue

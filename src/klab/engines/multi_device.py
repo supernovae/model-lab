@@ -274,21 +274,14 @@ def compile_training_kernels(
 
     Compile before sharding: FSDP's hooks must stay outside the compiled region.
     """
-    from klab.engines.pytorch import output_projection_cross_entropy
-    from klab.model.rope import RoPE
+    from klab.engines.pytorch import (
+        compile_transformer_blocks,
+        output_projection_cross_entropy,
+    )
 
     runtime = config.runtime
     if runtime.compile_transformer_blocks:
-        if runtime.compile_dynamic_shapes:
-            for module in model.modules():
-                if isinstance(module, RoPE):
-                    module.reserve(config.model.max_seq_len, device)
-        for block in model.blocks:
-            block.forward_with_aux = torch.compile(
-                block.forward_with_aux,
-                dynamic=runtime.compile_dynamic_shapes,
-                fullgraph=runtime.compile_dynamic_shapes,
-            )
+        compile_transformer_blocks(model, config, device)
     if not runtime.compile_output_head_loss:
         return None
     return torch.compile(

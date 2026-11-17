@@ -280,6 +280,7 @@ def _inspect(args: argparse.Namespace) -> None:
         calibrated_estimate,
         calibration_key,
         compare_parallel_modes,
+        explain_levers,
         plan_memory,
         write_resource_proposal,
     )
@@ -312,6 +313,8 @@ def _inspect(args: argparse.Namespace) -> None:
     }
     proposal = plan_memory(config, runtime, estimate)
     values["resource_proposal"] = asdict(proposal)
+    if args.explain:
+        values["memory_levers"] = explain_levers(config, runtime, estimate)
     if args.write_proposal:
         paths = write_resource_proposal(proposal, Path(args.write_proposal))
         values["proposal_paths"] = [str(path) for path in paths]
@@ -363,10 +366,43 @@ def _inspect(args: argparse.Namespace) -> None:
     print(f"Result: {estimate.result}")
     for assumption in estimate.assumptions:
         print(f"  {assumption}")
+    if args.explain:
+        _print_levers(values["memory_levers"])
     if values["advisories"]:
         print("Notes")
         for note in values["advisories"]:
             print(f"  [{note['code']}] {note['message']}")
+
+
+def _print_levers(levers: dict[str, Any]) -> None:
+    gib = 1024**3
+    print("Memory levers, each applied alone to this config")
+    print(f"  baseline estimate: {levers['baseline_peak_bytes'] / gib:.2f} GiB")
+    for row in levers["alone"]:
+        if not row["applicable"]:
+            print(f"  {row['lever']}: no change ({row['reason']})")
+            continue
+        flag = "; changes results" if row["changes_numerics"] else ""
+        print(
+            f"  {row['lever']}: {row['delta_bytes'] / gib:+.2f} GiB to "
+            f"{row['peak_bytes'] / gib:.2f} GiB, {row['result']}"
+            f" [{row['setting']}] costs: {row['cost']}{flag}"
+        )
+        moved = ", ".join(
+            f"{name.removesuffix('_bytes')} {value / gib:+.2f}"
+            for name, value in row["category_delta_bytes"].items()
+        )
+        host = row["host_optimizer_bytes"]
+        print(
+            f"    by category (GiB): {moved}"
+            + (f"; {host / gib:.2f} GiB moves to host" if host else "")
+        )
+    print("Stacked in order (levers that do not change results)")
+    for row in levers["stacked"]:
+        print(
+            f"  + {row['lever']}: {row['peak_bytes'] / gib:.2f} GiB "
+            f"({row['delta_bytes'] / gib:+.2f}), {row['result']}"
+        )
 
 
 def _runtime_status(args: argparse.Namespace) -> None:
@@ -2438,6 +2474,11 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     inspect.add_argument("config")
     inspect.add_argument("--json", action="store_true")
     inspect.add_argument("--write-proposal")
+    inspect.add_argument(
+        "--explain",
+        action="store_true",
+        help="show the estimated peak change of each memory lever for this config",
+    )
     inspect.add_argument(
         "--estimate-runtime",
         action="store_true",

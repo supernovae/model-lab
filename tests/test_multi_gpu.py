@@ -821,9 +821,10 @@ def _assert_sharded_matches_one_device(
         (
             "zero2",
             {
+                "compile_transformer_blocks": True,
                 "memory": MemoryConfig(
                     activation_checkpointing=ActivationCheckpointingConfig(enabled=True)
-                )
+                ),
             },
         ),
         ("fsdp", {"output_head_chunk_tokens": 8}),
