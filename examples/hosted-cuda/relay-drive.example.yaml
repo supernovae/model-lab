@@ -1,7 +1,7 @@
 # Copy outside the checkout and replace only local config-path references.
 # Credential contents never belong in this profile or in a run declaration.
 relay_version: 1
-namespace: hosted-tinystories
+namespace: hosted-cuda
 controller:
   kind: rclone
   root: labdrive:Model Lab

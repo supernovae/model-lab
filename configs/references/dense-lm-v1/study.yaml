@@ -1,8 +1,0 @@
-study_version: 1
-name: dense-lm-v1-learning-reference
-matrix: matrix.yaml
-cards:
-  - chat-alias-retention-v1
-  - chat-alias-recall-v1
-  - chat-context-override-v1
-comparisons: []

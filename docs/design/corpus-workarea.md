@@ -10,7 +10,7 @@ user of the machinery.
 
 Marking: **Decided** means the evidence is strong enough that the design
 commits to it unless the owner objects. **Owner decides** points to section 9.
-Numbers tagged **[M]** were measured in the DevMind run (6.7M, then 20.9M
+Numbers tagged **[M]** were measured in a 12B-token run (6.7M, then 20.9M
 documents, 48 cores, NVMe, hashing about 3.5 GB/s). Numbers tagged **[E]** are
 estimates from those measurements and from reading the code; they carry roughly
 a factor of two of uncertainty and are the first thing each PR must replace
@@ -43,7 +43,7 @@ with a measurement.
 5. Annotations are sidecars; boilerplate is annotated and content similarity is
    scored on text with the boilerplate removed, so well-run projects keep their
    issue templates and license headers while a held-out copy is still caught.
-6. Expected effect at DevMind scale **[E]**: a build that takes 4.5 h plus 92
+6. Expected effect at 12B-token scale **[E]**: a build that takes 4.5 h plus 92
    min freeze plus 41 min audit plus 162 min near-duplicate screen plus 114
    min tokenizer scan (about 11 h of wall time, and about 1.3 TB of disk in total) becomes roughly 30 to 45 minutes of wall time and about 0.4 TB. A
    second project over the same data costs minutes and almost no disk.
@@ -58,7 +58,7 @@ with a measurement.
   `corpora/<id>/builds/prepared/normalized-source-v2/`, stage outputs are
   `corpora/<id>/builds/stages/`. The only cross-project mechanism is a snapshot
   alias (a symlink with a cold readback) and `retained_subset`. A recipe that
-  uses 10 of DevMind's 33 sources under another project id re-acquires,
+  uses 10 of the run's 33 sources under another project id re-acquires,
   re-verifies and re-normalizes them.
 - **Identities are stronger than the reuse they allow, and in one place
   stronger than necessary.** The snapshot key
@@ -79,7 +79,7 @@ with a measurement.
   digest([snapshot_id, location, raw_sha, normalizer.identity])`
   (`pipeline.py`). This answers #459's open question (section 5).
 - **The release is a copy of a build, and the build holds the text three
-  times.** Disk at DevMind scale **[M]**: acquired 108 GB, prepared 108 GB,
+  times.** Disk at 12B-token scale **[M]**: acquired 108 GB, prepared 108 GB,
   index 227 GB, build 365 GB (`documents.jsonl` 188 GB plus `lm/*.jsonl` views, spans and lineage; the
   split of the remaining 177 GB is inferred from the writer, not measured), release 374 GB, mixture 48 GB, per-run prepared
   copy about 48 GB. About 1.3 TB for 108 GB of source information. The release
@@ -132,7 +132,7 @@ WORK/
 | L0 transport body | request (kind, URL, revision, pin) -> body SHA-256 | any project on the host; copyable between hosts (nothing in it is trusted) | cold storage; `cache-prune` removes only unverifiable | nothing (re-hashed at use) |
 | L1 snapshot | `snapshot_sha256`: id, kind, canonical URI, revision, acquisition block, file digests | any project declaring the same source | kept while any release references it; the bulk of "what you paid to fetch" | an acquisition-field change makes a new snapshot; the old stays until pruned |
 | L2 normalized shard | one input file range (`file_sha256`, byte range) + normalizer options digest + the per-file **resolved** rights decision + the document-policy fields that change text (`markdown_kind`, `row_files`) + operator `impl_version` of `normalize` | any project with the same normalizer and rights decision | kept; second largest layer | a normalizer option, a changed rights decision for that file, or a bump of `impl_version` |
-| L3 annotation shard | L2 `shard_key` + annotator name + annotator `impl_version` + resolved parameters (+ keys of annotations it reads) | any project; text-scoped annotators also memoized by content (section 5) | kept; small (about 5 GB for the DevMind set **[E]**) | a new L2 key, parameters, `impl_version` |
+| L3 annotation shard | L2 `shard_key` + annotator name + annotator `impl_version` + resolved parameters (+ keys of annotations it reads) | any project; text-scoped annotators also memoized by content (section 5) | kept; small (about 5 GB for the 12B-token set **[E]**) | a new L2 key, parameters, `impl_version` |
 | L4 dedupe decisions | the sorted set of L2 keys **in scope** + dedupe operator + parameters + L3 keys it reads + split declaration + source ranks | same scope only (decisions are relative to the corpus) | newest N per scope; tiny (a few bytes per document) | any change of scope, parameters, splits or ranks; costs minutes (section 6) |
 | L5 selection | L4 key + `select` operators + parameters + L3 keys they read | same scope | with its release | as L4 |
 | L6 release | manifest digest over L5 key, split declaration, source declarations (rights, licenses), normalizer identity, publication mode, resolved operator list | the project; others read it by id | kept while any mixture or run references it | never mutated; a new input is a new release |
@@ -188,7 +188,7 @@ way to drop the 188 GB text duplicate and the 227 GB wide index.
 
 ### 1.4 What "second project" looks like
 
-DevMind-S: 10 of the 33 source files, `dedupe: component_ranked` plus MinHash,
+The 10-source variant: 10 of the 33 source files, `dedupe: component_ranked` plus MinHash,
 a 16k tokenizer, different stratum weights, in the same work root:
 
 | Step | Work | Cost **[E]** |
@@ -199,7 +199,7 @@ a 16k tokenizer, different stratum weights, in the same work root:
 | dedupe | new scope -> new L4 key; narrow keys only, in memory | under 1 min |
 | select / release | keep-lists plus manifest | seconds |
 | tokenizer | new SHA; sampling is a seeded-hash pass over the narrow table | about 5 min fit |
-| tokens / mixture | L8 is keyed by tokenizer: miss for the 16k tokenizer, encode the selected documents once (1B tokens: minutes on 48 cores; the 12B DevMind set about 15 to 25 min); the weights change nothing in L8 | minutes |
+| tokens / mixture | L8 is keyed by tokenizer: miss for the 16k tokenizer, encode the selected documents once (1B tokens: minutes on 48 cores; the 12B-token set about 15 to 25 min); the weights change nothing in L8 | minutes |
 | disk | about 3 to 5 GB of new bytes except the new token arrays | |
 
 **Scale up** (add sources): `corpus acquire` fetches only the source whose
@@ -216,9 +216,9 @@ remain for the case where the snapshot itself should be small (a held-out
 source), and the recipe doc says which to use: shrink the snapshot only when
 the full snapshot would be unwanted storage; shrink the selection otherwise.
 
-### 1.5 The TinyStories test
+### 1.5 The small-dataset test
 
-TinyStories uses `klab data snapshot` + `tokenizer` + `data prepare` (3.5 GB
+A small dataset uses `klab data snapshot` + `tokenizer` + `data prepare` (3.5 GB
 snapshot, 1.6 GB tokens, 93 minutes of training), not the corpus pipeline. The
 design must not make that heavier, so:
 
@@ -231,7 +231,7 @@ design must not make that heavier, so:
   (no annotators, `rights` plus `exact` dedupe), and `ShardRunner` runs inline
   below a size threshold (`PARALLEL_MIN_BYTES`, as `run_tasks` does), so a
   small corpus pays no pool start-up.
-- A TinyStories user who later wants a mixture can declare the snapshot as a
+- A small-dataset user who later wants a mixture can declare the snapshot as a
   `kind: local` source; the design adds no step for that.
 - Check: a 3.5 GB corpus runs through the work area in one shard-sized pass;
   receipts cost one JSON per layer. Disk overhead is the narrow table and
@@ -269,7 +269,7 @@ Behavior, all in one place:
    `line_boundaries` in `release_verify.py` already do this for verification);
    shards are submitted largest-first. This removes the straggler where a
    single multi-GB JSONL is one shard (the build today only parallelizes files
-   of at least 32 MiB, one worker per file, and the DevMind build sat at a load
+   of at least 32 MiB, one worker per file, and that build sat at a load
    average of 2.5 to 6).
 2. **Skip.** A shard whose receipt verifies (key = stage inputs + shard
    descriptor) is reused and counted as `reused`.
@@ -311,7 +311,7 @@ tagged **[M]**.
 | Stage | Today | Shard (unit and checkpoint) | Cores achievable | Shared bottleneck | Target **[E]** |
 | --- | --- | --- | --- | --- | --- |
 | download body | network | one request/body; verified atomic cache entry | N transfers, budget-bounded | network, ledger | network-bound |
-| acquisition row selection (HF qualification) | 73 min, 1 core **[M]** | one parquet file (44 for DevMind) or row group; part file + receipt | about 44 | pyarrow decode, Python row logic (vectorize with Arrow compute); read of 44 GB cache is 15 s | 3 to 6 min |
+| acquisition row selection (HF qualification) | 73 min, 1 core **[M]** | one parquet file (44 for that run) or row group; part file + receipt | about 44 | pyarrow decode, Python row logic (vectorize with Arrow compute); read of 44 GB cache is 15 s | 3 to 6 min |
 | snapshot verify | 15 min cold **[M]** | one snapshot file range | 48 | disk read | cold 108 GB: 35 s; warm: receipt, about 1 s |
 | normalize | 25 to 40 min **[M]** | file range (cut at 256 MB) -> L2 shard + narrow rows | about 40 | CPU (cleaning) then NVMe write of 108 GB | 4 to 8 min |
 | index (wide SQLite) | 26 min **[M]**, 227 GB | **removed**: the narrow row (id, split, rank, kind, flags, rights signature, raw/normalized/origin hashes, shard, offset) is emitted by normalize | n/a | n/a | merge 2.4 GB of narrow rows: under 1 min, memory-bound |
@@ -469,7 +469,7 @@ embedded Python. Anything more elaborate is an annotator, which keeps the
 selection reviewable as data. The existing `release.policy` sections become
 the parameters of the `rights`, `exact` and `exclude` operators with the same
 names and values (no alias is kept; recipes are edited in the same PR and
-Workshop's DevMind recipe follows).
+downstream recipes follow).
 
 ### 4.3 Swapping and re-parameterizing
 
@@ -594,7 +594,7 @@ same `@operator` interface.
 ### 5.3 Template-aware near-duplicates
 
 The problem (README of the Workshop screen, `near-duplicate-screen.md`): the
-cross-split screen on DevMind lists "thousands of GitHub threads that share
+cross-split screen on that run lists "thousands of GitHub threads that share
 issue templates and bot comments", and the reviewer's remedy is a hand-written
 `default: kept`. Dropping them would delete the best-maintained projects'
 material; keeping all of them hides real leakage in the same list.
@@ -632,7 +632,7 @@ from leaks at the pair level, so reviewers had to accept them wholesale; the
 new classes make the human decision about `leak` pairs only. **Uncertainty:**
 the quality of the frequent-line criterion (short boilerplate lines vs
 distinctive but common code lines such as `import numpy as np`) is not
-measured. PR 9 starts with a measurement on the existing DevMind report
+measured. PR 9 starts with a measurement on the existing report of that run
 (owner has it): sample 200 pairs per class, hand label, report precision of
 `template_only` (false "template" calls would silently keep a leak). The
 `min_line_chars` and multi-family conditions exist for that reason, and the
@@ -681,7 +681,7 @@ default of this feature stays `report`, not `drop`, until measured (D7).
 | **cold build to a tokenized mixture** | about 11 h wall | **about 45 to 70 min** | |
 | **warm (everything cached), new mixture weights** | | **under 3 min** | |
 
-### 6.3 Disk accounting (DevMind scale)
+### 6.3 Disk accounting (12B-token scale)
 
 | Layer | Today **[M]** | Proposed **[E]** |
 | --- | --- | --- |
@@ -736,7 +736,7 @@ prints both totals with transfer times at a stated bandwidth.
 - **A playbook per operator** in one page, `docs/corpus-operators.md`, linked
   from the AGENTS.md section 10 table: what it protects against, parameters,
   the layer a change invalidates, when to use `annotate` instead of `select`,
-  measured cost per GB, and the DevMind value used and why. This is how the
+  measured cost per GB, and the value for that run used and why. This is how the
   boilerplate rule teaches that good projects' templates are kept.
 - **Defaults are guidance:** `build.strategy: disk` default, workers `auto`,
   `--scratch-dir` on the fastest volume with a printed warning when it is on
@@ -749,15 +749,15 @@ prints both totals with transfer times at a stated bandwidth.
 AGENTS.md forbids readers for old formats. So, per change in section 8.2,
 the PR description names what to rebuild. The expensive rebuilds are
 acquisition's parts (PR 4; the transport cache absorbs the download) and
-normalization (PR 7 changes the shard key and layout, once). DevMind's current
+normalization (PR 7 changes the shard key and layout, once). The run's current
 run keeps working on the Lab revision it started on; the PRs below are merged
 in an order such that the layout change (PR 7) lands **before** the next
-DevMind-scale run, so that run is built once in its final shape (D6).
+12B-token-scale run, so that run is built once in its final shape (D6).
 
 ### 8.2 PR series
 
 Each PR is independently green, small, ordered by value for the next
-DevMind-scale run. Efforts are agent-days **[E]**, test and docs included.
+12B-token-scale run. Efforts are agent-days **[E]**, test and docs included.
 
 | # | PR | Delivers | Effort | Rebuild |
 | --- | --- | --- | --- | --- |
@@ -804,7 +804,7 @@ A DAG or workflow engine; user-defined stage ordering; a schema or version per
 model type; new `schema_version` values to carry policy (AGENTS.md); entry
 point plugins now; reading old layouts or aliases; deduplicating by
 paraphrase/embedding (an annotator someone may write, not core); making
-TinyStories-scale users use the work area; automatic deletion of acquired data;
+Small-dataset users use the work area; automatic deletion of acquired data;
 changing the license/rights model; unifying `klab data snapshot` with the
 corpus pipeline; hosted/shared multi-user stores with access control (the store
 is single-user per host); sandboxing user code.
@@ -818,13 +818,13 @@ is single-user per host); sandboxing user code.
 | D3 | Operator identity by declared `impl_version` + golden test vs source-file digests | Declared version | File digests: every Lab upgrade invalidates the work area (a re-normalize each time, 4 to 8 min compute but also the downstream annotations). Declared: a missed bump yields stale reuse until the golden test catches it |
 | D4 | Extension: repo registry + `command`; no entry points | As stated | Later adding entry points is cheap. Wrong the other way: a plugin ecosystem with unpinned code identities |
 | D5 | Default verification: sampled replay (full with `--audit`) vs full replay | Sampled replay, seeded and recorded | Full: 3 to 6 min extra per audit, acceptable. Sampled: a rare corrupted row escapes until `--audit`; mitigated by the shard hash |
-| D6 | Land PR 5 to 7 before the next DevMind-scale run? | Yes; the run is then built once in the final layout | If not: a second rebuild later (the 4.5 h cost of today, or 45 min after the PRs) |
+| D6 | Land PR 5 to 7 before the next 12B-token-scale run? | Yes; the run is then built once in the final layout | If not: a second rebuild later (the 4.5 h cost of today, or 45 min after the PRs) |
 | D7 | Template classes: default `report` vs `drop_train_copy` for `leak`; thresholds | `report` until the measurement in PR 9 | `drop` too early: lost good material (the owner's stated worry). `report` too long: manual review remains |
-| D8 | Tokenizer sampling `seeded_hash` by default (a prefix of release order is biased toward early sources) | Yes | The DevMind tokenizer changes; the 32k tokenizer was fitted on the prefix, so any model trained on it needs the comparison noted |
+| D8 | Tokenizer sampling `seeded_hash` by default (a prefix of release order is biased toward early sources) | Yes | The run's tokenizer changes; the 32k tokenizer was fitted on the prefix, so any model trained on it needs the comparison noted |
 | D9 | uint16 token arrays when the vocabulary is at most 65,536; per-run prepared copy by indirection | uint16 yes (halves L8 and L10); indirection later | Format change to L8/L10 (rebuild); indirection risks loader throughput on rented disks |
 | D10 | Retention: explicit `prune` only, never automatic beyond incomplete/superseded | Explicit | Automatic deletion could destroy an hours-long build; none leaves disks full (report warns) |
 | D11 | Single-core exceptions: allowed with a written reason, reviewed | Yes | Strict "never" would force bad designs for BPE fit |
-| D12 | Keep TinyStories on `klab data` and out of the work area | Yes | Unifying doubles the surface for little gain |
+| D12 | Keep small datasets on `klab data` and out of the work area | Yes | Unifying doubles the surface for little gain |
 
 ## 10. Evidence index
 
@@ -839,6 +839,6 @@ reflink fallback), `corpus/release_verify.py` (`run_tasks`, `chunk_ranges`),
 snapshot paths, alias), `corpus/near_duplicates.py`, `data/tokenizer_sampling.py`
 (prefix selection in release order), `data/token_store.py` (`TokenStore`,
 `ContentTokens`), `verification_proofs.py`, `docs/checkpointing.md`. Workshop:
-`experiments/devmind/corpus/*`, `experiments/tinystories`. Measurements are the
-owner's DevMind run as quoted in the task; nothing here was run against that
+Workshop recipes. Measurements are the
+owner's 12B-token run as quoted in the task; nothing here was run against that
 data.

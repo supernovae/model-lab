@@ -18,7 +18,7 @@ Inspect every config before you run it. Do not infer a parameter count or a
 scientific equivalence from a filename:
 
 ```sh
-klab inspect configs/dense_10m.yaml --json
+klab inspect configs/first_model_20m_cpu.yaml --json
 ```
 
 ## Matrices

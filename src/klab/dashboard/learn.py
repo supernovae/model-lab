@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from klab.research.catalog import list_lessons
+from klab.research.catalog import list_lessons, load_datasets
 
 
 def _plain(value: object) -> object:
@@ -62,7 +62,9 @@ def learn_page() -> None:
     scale = controls[0].selectbox(
         "Scale", ("smoke", "nano", "micro", "tiny"), key="lesson_scale"
     )
-    data = controls[1].selectbox("Data", ("offline", "tinystories"), key="lesson_data")
+    data = controls[1].selectbox(
+        "Data", tuple(load_datasets().datasets), key="lesson_data"
+    )
     search = st.text_input("Search lessons", key="lesson_search").strip().lower()
 
     try:

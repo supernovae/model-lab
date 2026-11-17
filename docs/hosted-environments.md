@@ -43,7 +43,7 @@ H100/H800 CUDA >=12.3 build.
 ## Prepare locally on CPU
 
 The declarations are in [`examples/hosted-cuda/`](../examples/hosted-cuda/),
-whose README describes each file: a pinned TinyStories source, a 2,048-token
+whose README describes each file: a pinned WikiText-2 source, a 2,048-token
 tokenizer, a 20-update CUDA FP16 run (`run-t4.yaml`) and two one-factor pilot
 matrices.
 

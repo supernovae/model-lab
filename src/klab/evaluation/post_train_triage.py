@@ -675,7 +675,7 @@ def _probe(
             "no frozen prompt fits the full requested completion in context"
         )
     result["substantive_behavior_applicability"] = (
-        "UNKNOWN: frozen TinyStories prompts can be out of domain"
+        "UNKNOWN: frozen story prompts can be out of domain"
     )
     if config.attention.kind == "mla":
         cache: dict[str, object] = {
