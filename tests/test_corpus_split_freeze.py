@@ -13,7 +13,6 @@ from corpus_fixtures import PLAIN_OPTIONS
 
 from klab.canonical import canonical_json
 from klab.corpus import split_freeze
-from klab.corpus.mixture import _rank
 from klab.corpus.mixture_index import MixtureIndex
 from klab.corpus.project import SplitDeclaration
 from klab.training.manifest import sha256_file
@@ -463,15 +462,9 @@ def test_finalized_family_inventory_matches_kept_release_documents(
     scratch = tmp_path / "mixture-index"
     scratch.mkdir()
     with MixtureIndex(scratch, release / "documents.jsonl") as index:
-        index.inventory(
-            final,
-            {v: k for k, v in source_by_stratum.items()},
-            lambda row: _rank(42, row["stratum"], row["family_id"], row["document_id"]),
-        )
-        assert {
-            row[0]
-            for row in index.db.execute("SELECT id FROM docs WHERE inventoried=1")
-        } == set(kept)
+        assert index.inventory(
+            final, {v: k for k, v in source_by_stratum.items()}, 42
+        ) == len(kept)
 
 
 def test_freeze_splits_stops_on_missing_decision_unresolved_family_and_duplicate(

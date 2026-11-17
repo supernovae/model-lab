@@ -11,7 +11,6 @@ import yaml
 
 from klab.canonical import canonical_json
 from klab.corpus import declared_family_inventory, split_freeze
-from klab.corpus.mixture import _rank
 from klab.corpus.mixture_index import MixtureIndex
 
 TRAIN_SOURCES = {"ref_a": 400, "ref_b": 40, "ref_c": 10}
@@ -99,7 +98,7 @@ def test_derived_inventory_fills_a_multi_source_stratum_without_dropping_sources
         index.inventory(
             output,
             STRATA | {"ref_held": "reference"},
-            lambda row: _rank(42, row["stratum"], row["family_id"], row["document_id"]),
+            42,
         )
         index.select(release / "train.lineage.jsonl")
         taken = Counter()
