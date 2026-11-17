@@ -26,7 +26,7 @@ from klab.corpus.admission_inspection_cache import (
 )
 from klab.corpus.completed_preparation import _producer
 from klab.corpus.completed_release import verify_retained_release
-from klab.corpus.mixture_index import MAX_ROW_BYTES, MixtureIndex
+from klab.corpus.mixture_index import MAX_ROW_BYTES, MixtureIndex, document_rank
 from klab.corpus.split_runs import (
     SplitStages,
     _stamp,
@@ -288,7 +288,6 @@ def _cross_release_isolation(directory, cohorts):
 
 def _ranked(directory, cohorts, seed, strata, order_policy=None):
     """Sort kept TRAIN offsets from prior native metadata, not document bodies."""
-    from klab.corpus.mixture import _rank
 
     def candidates():
         for cohort_index, cohort in enumerate(cohorts):
@@ -326,7 +325,7 @@ def _ranked(directory, cohorts, seed, strata, order_policy=None):
                             raise ValueError("retained source stratum differs")
                         yield [
                             stratum,
-                            _rank(seed, stratum, family, doc_id, order_policy),
+                            document_rank(seed, stratum, family, doc_id, order_policy),
                             doc_id,
                             cohort_index,
                             shard,

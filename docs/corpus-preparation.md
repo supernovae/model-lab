@@ -832,7 +832,7 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   files (default: half the CPU count; never more than the CPU count). Use `1` for
   a single-process run. A file smaller than a few hundred MB is read in-process.
   The same option is accepted by `klab tokenizer train`, `klab tokenizer verify`,
-  `klab corpus export` and `klab corpus derive-family-inventory`. Each parallel stage prints `STAGE: N shards, up to W workers` when it
+  `klab corpus export`, `klab corpus derive-family-inventory`, `klab corpus materialize-mixture` and `klab corpus verify-mixture`. Each parallel stage prints `STAGE: N shards, up to W workers` when it
   starts and `STAGE: S s wall, C s cpu, K cores used, reused R/N` when it ends,
   where cores used is CPU seconds over wall seconds.
 - **Shards.** A parallel stage cuts its file into line-aligned byte ranges
@@ -853,6 +853,9 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   | `describe: source rights` | shardable: byte ranges of `documents.jsonl`, merged in file order |
   | `tokenizer sampling: rank histogram` | shardable: byte ranges of `documents.jsonl`; bytes per stratum and hash bucket are summed |
   | `tokenizer sampling: candidates` | shardable: byte ranges of `documents.jsonl`; each keeps only the documents in the lowest hash buckets of their stratum |
+  | `mixture index: documents` | shardable: byte ranges of `documents.jsonl`; kept documents merged in file order |
+  | `mixture index: family inventory` | shardable: byte ranges of the family inventory, each row ranked; joined to the documents after the merge |
+  | `mixture index: TRAIN lineage` | shardable: byte ranges of `lm/train.lineage.jsonl`; distinct record IDs, joined after the merge |
   | `tokenizer fit` | single process: the Hugging Face BPE trainer is multithreaded natively and selects merges sequentially |
 
 - **Progress** goes to stderr and to `scratch/verify-<release>.progress.jsonl`
@@ -1155,6 +1158,23 @@ unique tokens only, or 2), the tokenizer and optional
 token stream (`train.tokens.ids`) and a small record file; a run then uses it
 through `dataset.source: local_token_mixture`. Nothing is published until every
 quota and floor is met; a shortfall is reported per stratum.
+
+**Selection index.** Before encoding, `materialize-mixture` builds an index of
+the train documents it may draw from: sorted by stratum and rank, with each
+document's byte offset in `documents.jsonl`, as flat memory-mapped columns
+(about 200 bytes per document, no database). Three sharded passes build it
+(`mixture index: documents`, `mixture index: family inventory` and
+`mixture index: TRAIN lineage`, see [Verification cost, scratch and
+receipts](#verification-cost-scratch-and-receipts)) and check the family
+inventory against the verified release. They take `--workers` and, with
+`--scratch-dir`, keep each finished shard, so a killed run resumes; the index
+is the same on any worker count. Document IDs and content digests longer than
+255 bytes are refused. The finished index is kept under `WORK/cache/mixture-preflight`
+and reused by any later mixture over the same documents, family inventory, TRAIN
+lineage, `seed`, `order_policy` and `source_strata`, whatever its quotas,
+tokenizer or output. The digests of `documents.jsonl` and the TRAIN lineage come
+from the release manifest, not from rereading the files; the run refuses if an
+input file's inode, size or times change while it runs.
 
 **Family inventory.** The declaration's `family_inventory` is a JSONL file with
 one row per kept document (`document_id`, `family_id`, `split`, `stratum`,
