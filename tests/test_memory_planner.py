@@ -9,11 +9,13 @@ import pytest
 
 import klab.memory as memory_module
 from klab.config.loading import load_config
+from klab.config.models import ParallelConfig
 from klab.memory import (
     MemoryMonitor,
     calibrated_estimate,
     calibration_key,
     calibration_multiplier,
+    compare_parallel_modes,
     estimate_memory,
     parameter_inventory,
     plan_memory,
@@ -584,3 +586,82 @@ def test_dense_32k_preset_fits_an_accelerator_and_not_a_cpu() -> None:
         update={"runtime": config.runtime.model_copy(update={"backend": "cpu"})}
     )
     assert estimate_memory(cpu, _runtime(), inventory).peak_bytes > 100 * 2**30
+
+
+def _sharded(config, mode: str, devices: int = 4, **runtime):
+    return config.model_copy(
+        update={
+            "runtime": config.runtime.model_copy(
+                update={
+                    "secondary_device_indices": tuple(range(1, devices)),
+                    "parallel": ParallelConfig(mode=mode),
+                    **runtime,
+                }
+            )
+        }
+    )
+
+
+def test_each_parallel_mode_shards_what_it_says_and_the_proposal_offers_it() -> None:
+    config = load_config(Path("configs/smoke_mla_cpu.yaml"))
+    config = config.model_validate(
+        {
+            **config.model_dump(mode="json"),
+            "model": {**config.model.model_dump(mode="json"), "num_layers": 24},
+        }
+    )
+    rows = {
+        row["mode"]: row
+        for row in compare_parallel_modes(
+            _sharded(config, "replicated"), _runtime(), parameter_inventory(config)
+        )
+    }
+    replicated, zero1, zero2, fsdp = (
+        rows[mode] for mode in ("replicated", "zero1", "zero2", "fsdp")
+    )
+    # Each mode holds less than the one before; only fsdp gathers parameters.
+    assert zero1["optimizer_bytes"] * 4 >= replicated["optimizer_bytes"]
+    assert (
+        zero1["optimizer_bytes"] == zero2["optimizer_bytes"] == fsdp["optimizer_bytes"]
+    )
+    assert zero1["optimizer_bytes"] < replicated["optimizer_bytes"]
+    assert zero2["gradients_bytes"] < zero1["gradients_bytes"]
+    assert fsdp["weights_bytes"] < zero2["weights_bytes"]
+    assert [
+        row["gather_transient_bytes"] > 0 for row in (replicated, zero1, zero2, fsdp)
+    ] == [False, False, False, True]
+    assert (
+        fsdp["peak_bytes"]
+        < zero2["peak_bytes"]
+        < zero1["peak_bytes"]
+        < replicated["peak_bytes"]
+    )
+    # One device has nothing to shard across.
+    alone = compare_parallel_modes(config, _runtime(), parameter_inventory(config))
+    assert [row["mode"] for row in alone if "unavailable" in row] == [
+        "zero1",
+        "zero2",
+        "fsdp",
+    ]
+
+    # A budget the cheaper modes miss makes the proposal shard, least communication first.
+    tight = _sharded(config, "replicated").model_copy(deep=True)
+    budget = zero2["peak_bytes"]
+    tight = _sharded(
+        config,
+        "replicated",
+        memory=config.runtime.memory.model_copy(update={"budget_bytes": budget}),
+    )
+    proposal = plan_memory(
+        tight,
+        _runtime(),
+        estimate_memory(tight, _runtime(), parameter_inventory(tight)),
+    )
+    assert proposal.config["runtime"]["parallel"] == {"mode": "zero2"}
+    assert [
+        d["effective"] for d in proposal.decisions if d["requested"] == "parallel"
+    ] == [
+        "zero1",
+        "zero2",
+    ]
+    assert proposal.config["training"] == tight.model_dump(mode="json")["training"]
