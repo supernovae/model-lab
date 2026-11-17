@@ -124,14 +124,18 @@ def config(root: Path) -> RunConfig:
 
 
 @pytest.mark.parametrize(
-    ("memory", "optimizer_name", "state_offload"),
+    ("memory", "optimizer_name", "state_offload", "reduced"),
     [
-        ("none", "adamw", False),
-        ("byte", "adamw", False),
-        ("none", "adafactor", False),
+        ("none", "adamw", False, False),
+        ("byte", "adamw", False, False),
+        ("none", "adafactor", False, False),
         # The interrupted and resumed runs keep their state in host memory and
         # step in many buckets; they must match the resident-state run exactly.
-        ("none", "adamw", True),
+        ("none", "adamw", True, False),
+        # bf16 gradients and moments round stochastically from the run seed and
+        # update index, so a resumed run rounds exactly as an uninterrupted one.
+        ("none", "adamw", False, True),
+        ("none", "adamw", True, True),
     ],
 )
 def test_interrupted_resume_matches_uninterrupted(
@@ -140,6 +144,7 @@ def test_interrupted_resume_matches_uninterrupted(
     memory: str,
     optimizer_name: str,
     state_offload: bool,
+    reduced: bool,
 ) -> None:
     memory_settings = (
         {
@@ -165,6 +170,13 @@ def test_interrupted_resume_matches_uninterrupted(
             "weight_decay": full.optimizer.weight_decay,
         }
         full = RunConfig.model_validate(payload)
+    if reduced:
+        full = full.model_copy(
+            update={
+                "optimizer": full.optimizer.model_copy(update={"state_dtype": "bf16"}),
+                "runtime": full.runtime.model_copy(update={"gradient_dtype": "bf16"}),
+            }
+        )
     train(full, run_id="full")
     split = config(tmp_path / "split")
     split = split.model_copy(
@@ -173,6 +185,7 @@ def test_interrupted_resume_matches_uninterrupted(
             "optimizer": full.optimizer.model_copy(
                 update={"state_offload": state_offload}
             ),
+            "runtime": full.runtime,
         }
     )
     if state_offload:

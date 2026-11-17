@@ -152,8 +152,27 @@ def optimizer_state_bytes(
                 trainable_parameters=config.training.trainable_parameters,
             ).values()
         )
-        return (inventory or parameter_inventory(config)).trainable * 8 + steps * 4
+        moment_bytes = 2 if config.optimizer_state_dtype == "bf16" else 4
+        return (
+            inventory or parameter_inventory(config)
+        ).trainable * 2 * moment_bytes + steps * 4
     return _adafactor_state_bytes(config)
+
+
+def _largest_trainable_parameter_bytes(config: RunConfig) -> int:
+    """FP32 bytes of the largest trainable tensor, which is streamed or staged alone."""
+    return max(
+        (
+            4 * spec.numel
+            for spec in named_tensor_inventory(
+                config.model,
+                config.attention,
+                trainable_parameters=config.training.trainable_parameters,
+            ).values()
+            if spec.trainable and spec.alias_of is None
+        ),
+        default=0,
+    )
 
 
 def registered_runtime_buffers_bytes(config: RunConfig) -> int:
@@ -272,22 +291,12 @@ def estimate_memory(
     model = config.model
     weights = inventory.total * 4
     buffers = registered_runtime_buffers_bytes(config)
-    gradients = inventory.trainable * 4
+    bf16_gradients = config.runtime.gradient_dtype == "bf16"
+    gradients = inventory.trainable * (2 if bf16_gradients else 4)
     optimizer = optimizer_state_bytes(config, inventory)
+    largest = _largest_trainable_parameter_bytes(config)
     offloaded_optimizer = 0
     if config.optimizer.state_offload:
-        largest = max(
-            (
-                4 * spec.numel
-                for spec in named_tensor_inventory(
-                    config.model,
-                    config.attention,
-                    trainable_parameters=config.training.trainable_parameters,
-                ).values()
-                if spec.trainable and spec.alias_of is None
-            ),
-            default=0,
-        )
         # The full state waits in host memory; one bucket is on the device.
         offloaded_optimizer = optimizer
         optimizer = offloaded_state_device_bytes(optimizer, largest)
@@ -392,8 +401,23 @@ def estimate_memory(
     else:
         assert ceiling is not None
         result = "LIKELY_TO_FIT" if peak <= ceiling else "LIKELY_TO_EXCEED"
+    narrowed = [
+        what
+        for what, on in (
+            ("gradients", bf16_gradients),
+            ("AdamW moments", config.optimizer_state_dtype == "bf16"),
+        )
+        if on
+    ]
     assumptions = [
-        "reference-v2: FP32 master parameters and gradients; autocast does not reduce resident model or optimizer state",
+        "reference-v2: FP32 master parameters"
+        + (
+            f"; bf16 {' and '.join(narrowed)} (stochastic rounding, one FP32 "
+            "parameter's temporaries charged to workspace)"
+            if narrowed
+            else " and gradients"
+        )
+        + "; autocast does not reduce resident model or optimizer state",
         "categories are disjoint: registered buffers, retained activations, attention working tensors, workspace, and headroom",
         *attention_notes,
     ]
@@ -749,6 +773,39 @@ def _adafactor_lever(config: RunConfig, runtime_info: RuntimeInfo) -> RunConfig 
     return _with_optimizer(config, "adafactor")
 
 
+def _bf16_gradients_lever(
+    config: RunConfig, runtime_info: RuntimeInfo
+) -> RunConfig | str:
+    runtime = config.runtime
+    if runtime.gradient_dtype == "bf16":
+        return "already bf16"
+    if runtime_info.engine != "pytorch":
+        return "needs the PyTorch engine"
+    if config.optimizer.name != "adamw":
+        return "needs AdamW"
+    if runtime.precision == "fp16" or runtime.secondary_device_indices:
+        return "not available with fp16 loss scaling or secondary devices"
+    return config.model_copy(
+        update={"runtime": runtime.model_copy(update={"gradient_dtype": "bf16"})}
+    )
+
+
+def _bf16_optimizer_state_lever(
+    config: RunConfig, runtime_info: RuntimeInfo
+) -> RunConfig | str:
+    if config.optimizer.name != "adamw":
+        return "only AdamW keeps full moments"
+    if config.optimizer.state_dtype == "bf16":
+        return "already bf16"
+    if runtime_info.engine != "pytorch":
+        return "needs the PyTorch engine"
+    return config.model_copy(
+        update={
+            "optimizer": config.optimizer.model_copy(update={"state_dtype": "bf16"})
+        }
+    )
+
+
 MEMORY_LEVERS: tuple[MemoryLever, ...] = (
     MemoryLever(
         "micro_batch_size",
@@ -777,6 +834,20 @@ MEMORY_LEVERS: tuple[MemoryLever, ...] = (
         "optimizer state crosses the host link every update",
         False,
         _offload_lever,
+    ),
+    MemoryLever(
+        "bf16_gradients",
+        "runtime.gradient_dtype: bf16 (FP32 master weights)",
+        "gradients accumulate with stochastic rounding: a numerics change",
+        True,
+        _bf16_gradients_lever,
+    ),
+    MemoryLever(
+        "bf16_optimizer_state",
+        "optimizer.state_dtype: bf16",
+        "moments stored with stochastic rounding: a numerics change",
+        True,
+        _bf16_optimizer_state_lever,
     ),
     MemoryLever(
         "adafactor",
@@ -1102,6 +1173,29 @@ def plan_memory(
                 "the update is unchanged",
                 effective=True,
             )
+        if policy == "max_fit" and current.result != "LIKELY_TO_FIT":
+            precision_levers = {
+                lever.name: lever
+                for lever in MEMORY_LEVERS
+                if lever.name in {"bf16_gradients", "bf16_optimizer_state"}
+            }
+            for option in config.runtime.memory.allowed_low_precision:
+                if current.result == "LIKELY_TO_FIT":
+                    break
+                changed = precision_levers[option].apply(candidate, runtime_info)
+                if isinstance(changed, str):
+                    decisions.append(
+                        {"requested": option, "effective": False, "reason": changed}
+                    )
+                    continue
+                consider(
+                    option,
+                    changed,
+                    "explicitly allowed reduced-precision storage changes numerics "
+                    "(FP32 master weights stay)",
+                    effective=True,
+                    scientifically_significant=True,
+                )
         if policy == "max_fit" and current.result != "LIKELY_TO_FIT":
             for optimizer in config.runtime.memory.allowed_optimizers:
                 if optimizer == candidate.optimizer.name:

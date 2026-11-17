@@ -57,6 +57,7 @@ from klab.training.optimizer import (
     set_optimizer_learning_rate,
 )
 from klab.training.pilot_progress import current_pilot_progress, pilot_phase
+from klab.training.reduced_precision import Bf16GradientBuffers, ReducedPrecision
 from klab.training.trainable import apply_trainable_parameter_filter
 
 
@@ -422,6 +423,7 @@ class PyTorchEngine:
         self._last_gradient_parameter_names: tuple[str, ...] = ()
         self._last_update_parameter_names: tuple[str, ...] = ()
         self._replicas: ReplicaPool | None = None
+        self.gradient_buffers: Bf16GradientBuffers | None = None
 
     def validate(
         self, config: RunConfig, *, authorization: RuntimeAuthorization | None = None
@@ -454,6 +456,7 @@ class PyTorchEngine:
                     config.optimizer.eps,
                     memory_table_lr_multiplier=config.optimizer.memory_table_lr_multiplier,
                     memory_table_weight_decay=config.optimizer.memory_table_weight_decay,
+                    reduced_precision=ReducedPrecision.from_config(config),
                 )
                 if config.optimizer.name == "adamw"
                 else make_adafactor(
@@ -478,6 +481,13 @@ class PyTorchEngine:
         self.state_offload = (
             OptimizerStateOffload(optimizer, device)
             if config.optimizer.state_offload
+            else None
+        )
+        self.gradient_buffers = (
+            Bf16GradientBuffers(
+                (parameter for _, parameter in trainable_parameters), config.seed
+            )
+            if config.runtime.gradient_dtype == "bf16"
             else None
         )
         self.config, self.runtime, self.device = config, runtime, device
@@ -646,6 +656,8 @@ class PyTorchEngine:
         if self.offload is not None and not self.offload.reset():
             raise RuntimeError("previous update retained offloaded activation storage")
         optimizer.zero_grad(set_to_none=True)
+        if self.gradient_buffers is not None:
+            self.gradient_buffers.begin_update(update_index)
         language_sum = torch.zeros((), device=device)
         aux_sum = torch.zeros((), device=device)
         diagnostic_sums: dict[str, torch.Tensor] = {}
@@ -945,6 +957,8 @@ class PyTorchEngine:
                     chunk_valid,
                     position_count,
                 )
+        if self.gradient_buffers is not None:
+            self.gradient_buffers.publish()
         if self.scaler is not None:
             self.scaler.unscale_(optimizer)
         named_parameters = dict(model.named_parameters())
@@ -963,12 +977,17 @@ class PyTorchEngine:
                     f"{sorted(unexpected_gradients)}"
                 )
         self._last_gradient_parameter_names = gradient_names
-        norm = torch.nn.utils.clip_grad_norm_(
-            model.parameters(),
-            config.training.grad_clip_norm,
-            error_if_nonfinite=False,
-            foreach=False,
-        )
+        if self.gradient_buffers is not None:
+            norm = self.gradient_buffers.clip_(
+                config.training.grad_clip_norm, update_index
+            )
+        else:
+            norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                config.training.grad_clip_norm,
+                error_if_nonfinite=False,
+                foreach=False,
+            )
         gradients_finite = torch.isfinite(norm) if self.scaler is None else None
         # One pre-step boundary checks the accumulated loss and gradients before
         # optimizer mutation. No diagnostic scalar is read per microbatch.
