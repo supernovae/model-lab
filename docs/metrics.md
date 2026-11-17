@@ -25,7 +25,7 @@
 | Metric or family | Interpretation |
 |---|---|
 | `performance/step_seconds` | Synchronized successful-update duration; includes forward/backward, recomputation and transfers, but excludes staging, validation and checkpointing. |
-| `performance/primary_compute_seconds`, `performance/replica_compute_seconds`, `performance/device_wait_seconds`, `performance/gradient_merge_seconds` | Reported only for updates that ran on [several devices](training.md#several-gpus-on-one-host): each side's compute time, how long finished devices waited for the slowest, and the time to merge collected gradients. |
+| `performance/primary_compute_seconds`, `performance/replica_compute_seconds`, `performance/device_wait_seconds`, `performance/gradient_merge_seconds` | Reported only for updates that ran on [several devices](training.md#several-gpus-on-one-host): each side's compute time, how long finished devices waited for the slowest, and the time to merge collected gradients. [Sharded](training.md#shard-the-model-across-the-devices) updates report `performance/rank_compute_seconds` (the slowest device's compute) and `performance/update_seconds` instead. |
 | `batch/micro_batch_size`, `batch/accumulation_steps`, `batch/effective_batch_size` | Configured microbatch size and actual microbatches/examples in the committed update. Epoch boundaries and final budgets can shorten a window. |
 | `batch/tokens_per_micro_batch`, `batch/effective_tokens_per_update` | Valid supervised prediction targets, not raw prompt length or a nominal batch-size product. |
 | `memory/device_allocated_bytes`, `memory/device_reserved_bytes` | Native allocation/reservation where exposed; MLX active allocation is distinct from `memory/device_cache_bytes`. |

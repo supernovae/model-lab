@@ -130,6 +130,57 @@ An update with a single microbatch runs on the primary alone. FP16, activation
 offload and memory-allocation runs are refused with secondaries. Validation runs
 on the primary.
 
+### Shard the model across the devices
+
+Replicas hold the whole model: every device keeps weights and gradients, and the
+primary alone holds the optimizer state. `runtime.parallel.mode` shards what
+each device holds instead, over the devices of `device_index` and
+`secondary_device_indices`, with real collectives (`xccl` on XPU, `nccl` on
+CUDA and ROCm, `gloo` on CPU) rather than shared host tensors:
+
+```yaml
+runtime:
+  backend: xpu
+  device_index: 0
+  secondary_device_indices: [1, 2, 3]
+  parallel:
+    mode: zero2        # replicated (default) | zero1 | zero2 | fsdp
+training:
+  gradient_accumulation: 16
+```
+
+| Mode | Each device holds | Communication per update |
+| --- | --- | --- |
+| `replicated` | whole weights, whole gradients; the primary alone the optimizer state | weights and gradients through host memory |
+| `zero1` | whole weights and gradients, a shard of the optimizer state | one reduce-scatter of the gradients, one all-gather of the weights |
+| `zero2` | whole weights, a shard of the gradients and of the optimizer state | a reduce-scatter per microbatch, one all-gather of the weights |
+| `fsdp` | a shard of everything, plus the block being computed | a gather per block in each forward and backward, a reduce-scatter per microbatch |
+
+Every mode sums gradients, so an update equals the one-device update up to
+summation order: the loss, `optimizer/grad_norm`, clipping and the finite
+checks see the whole gradient. Adam's elementwise update makes the sharded
+optimizer step exact. The step with the most memory saved is `fsdp`; the one
+with the least communication is `zero1`. Sharded memory is compared by
+the estimate before you run.
+
+Every device runs the same number of microbatches, because each forward and
+backward is a collective; when `gradient_accumulation` does not divide evenly
+the short devices run a masked microbatch that carries no loss. Prefer a
+`gradient_accumulation` that is a multiple of the device count. Validation
+runs on every device over the same batches. A rank that dies leaves the others
+waiting in a collective for up to 20 minutes before the run fails.
+
+Checkpoints hold whole tensors in the layout of a one-device run, gathered to
+the primary's host memory when saved, so a run resumes in any mode and on any
+number of devices: `replicated` to `fsdp` and back, or four devices to two.
+
+Sharded modes need AdamW without `optimizer.state_offload` (Adafactor's
+factored state is not elementwise), bf16 or fp32 without activation offload,
+no compiled kernels, the next-token objective and no
+`evaluation.gradient_bottleneck`. Activation recomputation, the chunked output
+head, tied embeddings and Engram tables work as on one device; the tables are
+sharded with the rest.
+
 On Intel XPU every training process sees only its own card. A process that can
 see several Arc cards also holds its device memory in host RAM, so Lab sets
 `ZE_AFFINITY_MASK` to the configured device before the process loads Torch,

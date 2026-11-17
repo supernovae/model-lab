@@ -14,12 +14,14 @@ import torch
 from pydantic import ValidationError
 
 from klab.config.models import (
+    ActivationCheckpointingConfig,
     ActivationOffloadConfig,
     AdamWConfig,
     DatasetConfig,
     LoggingConfig,
     MemoryConfig,
     ModelConfig,
+    ParallelConfig,
     RunConfig,
     RuntimeConfig,
     TokenizerConfig,
@@ -45,6 +47,7 @@ def _make_run_config(
     tmp_path: Path,
     *,
     secondary_device_indices: tuple[int, ...] = (),
+    runtime_options: dict[str, object] | None = None,
 ) -> RunConfig:
     return RunConfig(
         schema_version=2,
@@ -56,6 +59,7 @@ def _make_run_config(
             device_index=0,
             secondary_device_indices=secondary_device_indices,
             precision="fp32",
+            **(runtime_options or {}),
         ),
         model=ModelConfig(
             vocab_size=260,
@@ -695,3 +699,144 @@ def test_a_process_is_confined_to_its_own_xpu_before_enumeration(
     with pytest.warns(RuntimeWarning, match="enumerated before Lab could confine"):
         visibility.confine("xpu", 0)
     assert "ZE_AFFINITY_MASK" not in os.environ
+
+
+def _weights(engine: PyTorchEngine) -> dict[str, torch.Tensor]:
+    source = engine.export_weights()
+    weights = {
+        tensor.name: torch.from_numpy(tensor.array.copy())
+        for tensor in source.tensors()
+    }
+    return {
+        **weights,
+        **{name: weights[target] for name, target in source.aliases.items()},
+    }
+
+
+def _named_state(engine: PyTorchEngine) -> dict[str, dict[str, torch.Tensor]]:
+    state = engine.export_training_state()
+    return {
+        state.optimizer_parameter_names[index]: slots
+        for index, slots in state.optimizer["state"].items()  # type: ignore[union-attr]
+    }
+
+
+def _assert_same_training(
+    left: PyTorchEngine, right: PyTorchEngine, context: str
+) -> None:
+    left_weights, right_weights = _weights(left), _weights(right)
+    assert left_weights.keys() == right_weights.keys()
+    for name, tensor in left_weights.items():
+        assert torch.allclose(tensor, right_weights[name], atol=1e-6, rtol=1e-5), (
+            f"{context}: weight {name}"
+        )
+    left_state, right_state = _named_state(left), _named_state(right)
+    assert left_state.keys() == right_state.keys()
+    for name, slots in left_state.items():
+        for key, value in slots.items():
+            assert torch.allclose(
+                value, right_state[name][key], atol=1e-6, rtol=1e-5
+            ), f"{context}: optimizer {name}.{key}"
+
+
+@pytest.mark.parametrize(
+    ("mode", "options"),
+    [
+        ("zero1", {}),
+        (
+            "zero2",
+            {
+                "memory": MemoryConfig(
+                    activation_checkpointing=ActivationCheckpointingConfig(enabled=True)
+                )
+            },
+        ),
+        ("fsdp", {"output_head_chunk_tokens": 8}),
+    ],
+)
+def test_sharded_training_matches_one_device_and_crosses_layouts(
+    tmp_path: Path, mode: str, options: dict[str, object]
+) -> None:
+    """Every mode trains like one device, and checkpoints load across layouts.
+
+    Three microbatches over two ranks also run the lockstep padding, and the
+    Engram tables and tied output head are sharded with everything else.
+    """
+    single = _make_run_config(tmp_path / "single", runtime_options=options)
+    sharded = _make_run_config(
+        tmp_path / mode,
+        secondary_device_indices=(0,),
+        runtime_options={**options, "parallel": ParallelConfig(mode=mode)},
+    )
+    reference, engine, resumed = PyTorchEngine(), PyTorchEngine(), PyTorchEngine()
+    try:
+        for subject, config in ((reference, single), (engine, sharded)):
+            _seed_all(config.seed)
+            subject.initialize(config)
+        for step in (1, 2):
+            microbatches, valid_targets = _make_microbatches(100 + step, count=3)
+            expected = reference.train_update(microbatches, step, valid_targets)
+            actual = engine.train_update(microbatches, step, valid_targets)
+            assert actual.outcome == expected.outcome == "APPLIED"
+            assert expected.metrics is not None and actual.metrics is not None
+            assert actual.metrics["batch/devices_used"] == 2.0
+            for key in (
+                "train/loss",
+                "optimizer/grad_norm",
+                "engram/lookup_count",
+                "engram/table_utilization",
+            ):
+                assert actual.metrics[key] == pytest.approx(
+                    expected.metrics[key], rel=1e-5, abs=1e-6
+                ), f"{mode} step {step} {key}"
+            _assert_same_training(reference, engine, f"{mode} step {step}")
+        held_out, _ = _make_microbatches(7, count=2)
+        assert engine.evaluate(held_out).loss_sum == pytest.approx(
+            reference.evaluate(held_out).loss_sum, rel=1e-5
+        )
+
+        # The sharded checkpoint resumes on one device, and the next update agrees.
+        state = copy.deepcopy(engine.export_training_state())
+        _seed_all(single.seed)
+        resumed.initialize(single, initial_weights=_weights(engine))
+        resumed.restore_training_state(state)
+        microbatches, valid_targets = _make_microbatches(103, count=3)
+        resumed.train_update(microbatches, 3, valid_targets)
+        engine.train_update(microbatches, 3, valid_targets)
+        _assert_same_training(resumed, engine, f"{mode} resumed on one device")
+
+        # And a one-device checkpoint resumes sharded.
+        state = copy.deepcopy(reference.export_training_state())
+        engine.close()
+        engine = PyTorchEngine()
+        _seed_all(sharded.seed)
+        engine.initialize(sharded, initial_weights=_weights(reference))
+        engine.restore_training_state(state)
+        microbatches, valid_targets = _make_microbatches(104, count=3)
+        reference.train_update(microbatches, 3, valid_targets)
+        engine.train_update(microbatches, 3, valid_targets)
+        _assert_same_training(reference, engine, f"{mode} resumed sharded")
+    finally:
+        for subject in (reference, engine, resumed):
+            subject.close()
+
+
+def test_sharded_modes_refuse_what_they_cannot_shard(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="shards across the devices"):
+        RuntimeConfig(backend="cpu", parallel=ParallelConfig(mode="fsdp"))
+    sharded = {"backend": "cpu", "secondary_device_indices": (0,)}
+    with pytest.raises(ValidationError, match="compiled kernels"):
+        RuntimeConfig(
+            **sharded,
+            parallel=ParallelConfig(mode="zero2"),
+            compile_transformer_blocks=True,
+        )
+    config = _make_run_config(tmp_path)
+    with pytest.raises(ValidationError, match="require AdamW"):
+        RunConfig.model_validate(
+            {
+                **config.model_dump(mode="python"),
+                "runtime": {**sharded, "parallel": {"mode": "zero1"}},
+                "optimizer": {"name": "adafactor", "warmup_steps": 1},
+            }
+        )

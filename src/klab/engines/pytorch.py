@@ -8,6 +8,7 @@ import re
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
+from typing import Any
 
 import numpy as np
 import torch
@@ -27,13 +28,14 @@ from klab.engines.base import (
 from klab.engines.multi_device import (
     ReplicaPool,
     accumulate_microbatch_diagnostics,
-    diagnostic_is_count,
+    merge_replica_outputs,
     microbatch_position_mask,
 )
 from klab.engines.output_head import (
     chunked_output_head_cross_entropy,
     chunked_output_head_token_losses,
 )
+from klab.engines.sharded import ShardGroup
 from klab.evaluation.positions import PositionLoss
 from klab.memory import DeviceMemorySpill, MemoryMonitor, SpillLimits
 from klab.model.inspection import architecture_metrics
@@ -51,9 +53,8 @@ from klab.training.objectives import Frozen, TrainingObjective, load_frozen_mode
 from klab.training.offload import ActivationOffload
 from klab.training.optimizer import (
     OptimizerStateOffload,
+    build_optimizer,
     learning_rate_for_step,
-    make_adafactor,
-    make_optimizer,
     set_optimizer_learning_rate,
 )
 from klab.training.pilot_progress import current_pilot_progress, pilot_phase
@@ -298,6 +299,24 @@ def _named_optimizer_state(
     return {"state": remapped_slots, "param_groups": remapped_groups}
 
 
+def state_dict_aliases(model: torch.nn.Module) -> dict[str, str]:
+    """Each state-dict name that shares storage with an earlier one, mapped to it."""
+    aliases: dict[str, str] = {}
+    seen: dict[tuple[int, int, tuple[int, ...], torch.dtype], str] = {}
+    for name, tensor in model.state_dict().items():
+        key = (
+            tensor.data_ptr(),
+            tensor.storage_offset(),
+            tuple(tensor.shape),
+            tensor.dtype,
+        )
+        if key in seen:
+            aliases[name] = seen[key]
+        else:
+            seen[key] = name
+    return aliases
+
+
 class _PyTorchWeights(WeightSource):
     def __init__(self, model: DenseLM) -> None:
         self._model = model
@@ -305,19 +324,7 @@ class _PyTorchWeights(WeightSource):
             name: parameter.requires_grad
             for name, parameter in model.named_parameters(remove_duplicate=False)
         }
-        aliases: dict[str, str] = {}
-        seen: dict[tuple[int, int, tuple[int, ...], torch.dtype], str] = {}
-        for name, tensor in model.state_dict().items():
-            key = (
-                tensor.data_ptr(),
-                tensor.storage_offset(),
-                tuple(tensor.shape),
-                tensor.dtype,
-            )
-            if key in seen:
-                aliases[name] = seen[key]
-            else:
-                seen[key] = name
+        aliases = state_dict_aliases(model)
         self._aliases = aliases
 
     @property
@@ -380,6 +387,98 @@ def output_projection_cross_entropy(
     )
 
 
+def evaluate_batches(
+    config: RunConfig,
+    device: torch.device,
+    model: DenseLM,
+    batches: Iterable[Microbatch],
+    positions: PositionLoss | None = None,
+    observer: Callable[[torch.Tensor, torch.Tensor], None] | None = None,
+    *,
+    objective: TrainingObjective | None = None,
+    frozen: Frozen | None = None,
+) -> EvaluationResult:
+    """Held-out loss of ``model`` over ``batches``, leaving its mode as it was.
+
+    Every rank of a sharded run calls this with the same batches: each forward
+    is a collective.
+    """
+    was_training = model.training
+    total_loss, total_targets, count = 0.0, 0, 0
+    try:
+        model.eval()
+        with torch.no_grad(), precision_context(config, device):
+            for batch in batches:
+                x = torch.from_numpy(batch.inputs).to(device)
+                y = torch.from_numpy(batch.targets).to(device)
+                addresses = (
+                    None
+                    if batch.byte_addresses is None
+                    else torch.from_numpy(batch.byte_addresses).to(device)
+                )
+                if observer is not None and (
+                    objective is not None
+                    or config.runtime.output_head_chunk_tokens is not None
+                ):
+                    raise ValueError(
+                        "evaluation.gradient_bottleneck needs the full logits: "
+                        "unset runtime.output_head_chunk_tokens and the "
+                        "custom training objective"
+                    )
+                if objective is not None:
+                    if positions is not None:
+                        positions.unavailable = (
+                            "the training objective scores whole batches, "
+                            "not single targets"
+                        )
+                    targets_in_batch = int(np.count_nonzero(batch.targets != -100))
+                    total_loss += float(
+                        objective.evaluation_loss(
+                            model,
+                            ObjectiveBatch(x, y, targets_in_batch, x.shape[0]),
+                            frozen,
+                        )
+                    )
+                    total_targets += targets_in_batch
+                    count += 1
+                    continue
+                if config.runtime.output_head_chunk_tokens is not None:
+                    hidden, _ = model.forward_with_aux(
+                        x, byte_addresses=addresses, return_hidden=True
+                    )
+                    head = (
+                        chunked_output_head_cross_entropy
+                        if positions is None
+                        else chunked_output_head_token_losses
+                    )
+                    loss = head(
+                        hidden,
+                        y,
+                        model.output.weight,
+                        config.runtime.output_head_chunk_tokens,
+                        lambda: precision_context(config, device),
+                    )
+                else:
+                    logits = model.forward_with_aux(x, byte_addresses=addresses)[0]
+                    if observer is not None:
+                        observer(logits, y)
+                    loss = functional.cross_entropy(
+                        logits.float().flatten(0, 1),
+                        y.flatten(),
+                        ignore_index=-100,
+                        reduction="sum" if positions is None else "none",
+                    )
+                if positions is not None:
+                    positions.add(loss.view_as(y), y)
+                    loss = loss.sum()
+                total_loss += float(loss)
+                total_targets += int(np.count_nonzero(batch.targets != -100))
+                count += 1
+    finally:
+        model.train(was_training)
+    return EvaluationResult(total_loss, total_targets, count)
+
+
 class PyTorchEngine:
     """The former trainer compute path, without lifecycle or checkpoint ownership."""
 
@@ -400,6 +499,7 @@ class PyTorchEngine:
         self._last_gradient_parameter_names: tuple[str, ...] = ()
         self._last_update_parameter_names: tuple[str, ...] = ()
         self._replicas: ReplicaPool | None = None
+        self._shard: ShardGroup | None = None
 
     def validate(
         self, config: RunConfig, *, authorization: RuntimeAuthorization | None = None
@@ -422,37 +522,30 @@ class PyTorchEngine:
             model.load_state_dict(initial_weights)  # type: ignore[arg-type]
         trainable_parameters = apply_trainable_parameter_filter(model, config)
         apply_recomputation_strategy(model, config)
+        if self._shard is not None:
+            self._shard.close()
+            self._shard = None
+        if self._replicas is not None:
+            self._replicas.close()
+            self._replicas = None
         with pilot_phase("optimizer_initialization"):
-            optimizer = (
-                make_optimizer(
-                    model,
-                    config.optimizer.peak,
-                    config.optimizer.weight_decay,
-                    config.optimizer.betas,
-                    config.optimizer.eps,
-                    memory_table_lr_multiplier=config.optimizer.memory_table_lr_multiplier,
-                    memory_table_weight_decay=config.optimizer.memory_table_weight_decay,
+            if config.runtime.parallel.sharded:
+                # The group shards the model, so it also builds the optimizer.
+                self._shard = ShardGroup(config, runtime.backend, model, device)
+                model, optimizer = self._shard.model, self._shard.optimizer
+            else:
+                optimizer = build_optimizer(model, config)
+        if self._shard is None:
+            selected_ids = {id(parameter) for _, parameter in trainable_parameters}
+            optimizer_ids = {
+                id(parameter)
+                for group in optimizer.param_groups
+                for parameter in group["params"]
+            }
+            if optimizer_ids != selected_ids:
+                raise RuntimeError(
+                    "optimizer parameters differ from the explicit trainable inventory"
                 )
-                if config.optimizer.name == "adamw"
-                else make_adafactor(
-                    model,
-                    config.optimizer.peak,
-                    config.optimizer.weight_decay,
-                    config.optimizer.beta2_decay,
-                    config.optimizer.eps,
-                    config.optimizer.d,
-                )
-            )
-        selected_ids = {id(parameter) for _, parameter in trainable_parameters}
-        optimizer_ids = {
-            id(parameter)
-            for group in optimizer.param_groups
-            for parameter in group["params"]
-        }
-        if optimizer_ids != selected_ids:
-            raise RuntimeError(
-                "optimizer parameters differ from the explicit trainable inventory"
-            )
         self.state_offload = (
             OptimizerStateOffload(optimizer, device)
             if config.optimizer.state_offload
@@ -497,10 +590,10 @@ class PyTorchEngine:
             if config.runtime.memory.activation_offload.enabled
             else None
         )
-        if self._replicas is not None:
-            self._replicas.close()
-            self._replicas = None
-        if config.runtime.secondary_device_indices:
+        if (
+            config.runtime.secondary_device_indices
+            and not config.runtime.parallel.sharded
+        ):
             self._replicas = ReplicaPool(
                 config,
                 runtime.backend,
@@ -652,7 +745,22 @@ class PyTorchEngine:
         replica_timings: dict[str, float] = {}
         objective_sums: dict[str, torch.Tensor | float] = {}
         update_rows = sum(batch.inputs.shape[0] for batch, _ in active_pairs)
-        if (
+        sharded_norm = 0.0
+        if self._shard is not None:
+            devices_used = min(len(active_pairs), self._shard.world_size)
+            merged, replica_timings = self._shard.update(
+                active_pairs, valid_targets, lr, microbatches
+            )
+            language_sum = merged["language_sum"]
+            aux_sum = merged["aux_sum"]
+            losses_finite = merged["losses_finite"]
+            recomputed = merged["recomputed"]
+            executed_microbatches = merged["executed_microbatches"]
+            diagnostic_sums = merged["diagnostic_sums"]
+            diagnostic_weights = merged["diagnostic_weights"]
+            sharded_norm = merged["grad_norm"]
+            gradient_names = merged["gradient_names"]
+        elif (
             self._replicas is not None
             and len(microbatches) >= 2
             and len(active_pairs) >= 2
@@ -666,15 +774,7 @@ class PyTorchEngine:
 
             def _run_primary_slice(
                 primary_pairs: list[tuple[Microbatch, int]],
-            ) -> tuple[
-                torch.Tensor,
-                torch.Tensor,
-                torch.Tensor,
-                float,
-                int,
-                dict[str, torch.Tensor],
-                dict[str, int],
-            ]:
+            ) -> dict[str, Any]:
                 p_lang = torch.zeros((), device=device)
                 p_aux = torch.zeros((), device=device)
                 p_diag: dict[str, torch.Tensor] = {}
@@ -747,44 +847,32 @@ class PyTorchEngine:
                         chunk_valid,
                         position_count,
                     )
-                return p_lang, p_aux, p_finite, p_recomp, p_exec, p_diag, p_weights
+                return {
+                    "language_sum": p_lang,
+                    "aux_sum": p_aux,
+                    "losses_finite": p_finite,
+                    "recomputed": p_recomp,
+                    "executed_microbatches": p_exec,
+                    "diagnostic_sums": p_diag,
+                    "diagnostic_weights": p_weights,
+                }
 
-            (
-                (
-                    language_sum,
-                    aux_sum,
-                    losses_finite,
-                    recomputed,
-                    executed_microbatches,
-                    diagnostic_sums,
-                    diagnostic_weights,
-                ),
-                replica_outs,
-                replica_timings,
-            ) = self._replicas.dispatch(
+            primary_totals, replica_outs, replica_timings = self._replicas.dispatch(
                 active_pairs=active_pairs,
                 valid_targets=valid_targets,
                 primary_fn=_run_primary_slice,
                 primary_device=device,
             )
-            for rep_out in replica_outs:
-                language_sum = language_sum + rep_out["language_sum"].to(device)
-                aux_sum = aux_sum + rep_out["aux_sum"].to(device)
-                losses_finite = losses_finite & rep_out["losses_finite"].to(device)
-                recomputed += float(rep_out["recomputed"])
-                executed_microbatches += int(rep_out["executed_microbatches"])
-                for name, value in rep_out["diagnostic_sums"].items():
-                    val_dev = value.to(device)
-                    diagnostic_sums[name] = (
-                        diagnostic_sums.get(name, val_dev.new_zeros(())) + val_dev
-                    )
-                    weight = rep_out["diagnostic_weights"][name]
-                    if diagnostic_is_count(name, microbatches):
-                        diagnostic_weights[name] = 1
-                    else:
-                        diagnostic_weights[name] = (
-                            diagnostic_weights.get(name, 0) + weight
-                        )
+            merged = merge_replica_outputs(
+                primary_totals, replica_outs, device, microbatches
+            )
+            language_sum = merged["language_sum"]
+            aux_sum = merged["aux_sum"]
+            losses_finite = merged["losses_finite"]
+            recomputed = merged["recomputed"]
+            executed_microbatches = merged["executed_microbatches"]
+            diagnostic_sums = merged["diagnostic_sums"]
+            diagnostic_weights = merged["diagnostic_weights"]
             if pilot_progress is not None:
                 pilot_progress.emit(
                     "progress",
@@ -934,49 +1022,54 @@ class PyTorchEngine:
                     chunk_valid,
                     position_count,
                 )
-        if self.scaler is not None:
-            self.scaler.unscale_(optimizer)
-        named_parameters = dict(model.named_parameters())
-        gradient_names = tuple(
-            name
-            for name, parameter in named_parameters.items()
-            if parameter.grad is not None
-        )
-        if config.training.trainable_parameters is not None:
-            allowed_names = set(config.training.trainable_parameters)
-            unexpected_gradients = set(gradient_names) - allowed_names
-            if unexpected_gradients:
-                optimizer.zero_grad(set_to_none=True)
-                raise RuntimeError(
-                    "gradients escaped the explicit trainable inventory: "
-                    f"{sorted(unexpected_gradients)}"
-                )
-        self._last_gradient_parameter_names = gradient_names
-        norm = torch.nn.utils.clip_grad_norm_(
-            model.parameters(),
-            config.training.grad_clip_norm,
-            error_if_nonfinite=False,
-            foreach=False,
-        )
-        gradients_finite = torch.isfinite(norm) if self.scaler is None else None
-        # One pre-step boundary checks the accumulated loss and gradients before
-        # optimizer mutation. No diagnostic scalar is read per microbatch.
-        synchronize(device)
-        if not bool(losses_finite):
-            optimizer.zero_grad(set_to_none=True)
-            raise EngineNonFiniteError("nonfinite training loss")
-        if gradients_finite is not None and not bool(gradients_finite):
-            optimizer.zero_grad(set_to_none=True)
-            raise EngineNonFiniteError("nonfinite unscaled gradients")
-        set_optimizer_learning_rate(optimizer, lr)
         overflow = False
-        if self.scaler is None:
-            optimizer.step()
+        if self._shard is not None:
+            # The ranks already clipped, checked and applied the update.
+            norm = torch.tensor(sharded_norm)
+            self._last_gradient_parameter_names = gradient_names
         else:
-            old_scale = self.scaler.get_scale()
-            self.scaler.step(optimizer)
-            self.scaler.update()
-            overflow = self.scaler.get_scale() < old_scale
+            if self.scaler is not None:
+                self.scaler.unscale_(optimizer)
+            named_parameters = dict(model.named_parameters())
+            gradient_names = tuple(
+                name
+                for name, parameter in named_parameters.items()
+                if parameter.grad is not None
+            )
+            if config.training.trainable_parameters is not None:
+                allowed_names = set(config.training.trainable_parameters)
+                unexpected_gradients = set(gradient_names) - allowed_names
+                if unexpected_gradients:
+                    optimizer.zero_grad(set_to_none=True)
+                    raise RuntimeError(
+                        "gradients escaped the explicit trainable inventory: "
+                        f"{sorted(unexpected_gradients)}"
+                    )
+            self._last_gradient_parameter_names = gradient_names
+            norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                config.training.grad_clip_norm,
+                error_if_nonfinite=False,
+                foreach=False,
+            )
+            gradients_finite = torch.isfinite(norm) if self.scaler is None else None
+            # One pre-step boundary checks the accumulated loss and gradients before
+            # optimizer mutation. No diagnostic scalar is read per microbatch.
+            synchronize(device)
+            if not bool(losses_finite):
+                optimizer.zero_grad(set_to_none=True)
+                raise EngineNonFiniteError("nonfinite training loss")
+            if gradients_finite is not None and not bool(gradients_finite):
+                optimizer.zero_grad(set_to_none=True)
+                raise EngineNonFiniteError("nonfinite unscaled gradients")
+            set_optimizer_learning_rate(optimizer, lr)
+            if self.scaler is None:
+                optimizer.step()
+            else:
+                old_scale = self.scaler.get_scale()
+                self.scaler.step(optimizer)
+                self.scaler.update()
+                overflow = self.scaler.get_scale() < old_scale
         monitor.sample("optimizer")
         if not overflow and self._replicas is not None:
             self._replicas.invalidate()
@@ -1002,7 +1095,7 @@ class PyTorchEngine:
             "batch/accumulation_steps": float(len(microbatches)),
             **(
                 {"batch/devices_used": float(devices_used)}
-                if self._replicas is not None
+                if self._replicas is not None or self._shard is not None
                 else {}
             ),
             **replica_timings,
@@ -1072,91 +1165,48 @@ class PyTorchEngine:
         observer: Callable[[torch.Tensor, torch.Tensor], None] | None,
     ) -> EvaluationResult:
         config, device, model, _, _ = self._ready()
-        was_training = model.training
         rng = _rng_state(device, config.runtime.backend)
-        total_loss, total_targets, count = 0.0, 0, 0
         try:
-            model.eval()
-            with torch.no_grad(), precision_context(config, device):
-                for batch in batches:
-                    x = torch.from_numpy(batch.inputs).to(device)
-                    y = torch.from_numpy(batch.targets).to(device)
-                    addresses = (
-                        None
-                        if batch.byte_addresses is None
-                        else torch.from_numpy(batch.byte_addresses).to(device)
-                    )
-                    if observer is not None and (
-                        self.objective is not None
-                        or config.runtime.output_head_chunk_tokens is not None
-                    ):
-                        raise ValueError(
-                            "evaluation.gradient_bottleneck needs the full logits: "
-                            "unset runtime.output_head_chunk_tokens and the "
-                            "custom training objective"
-                        )
-                    if self.objective is not None:
-                        if positions is not None:
-                            positions.unavailable = (
-                                "the training objective scores whole batches, "
-                                "not single targets"
-                            )
-                        targets_in_batch = int(np.count_nonzero(batch.targets != -100))
-                        total_loss += float(
-                            self.objective.evaluation_loss(
-                                model,
-                                ObjectiveBatch(x, y, targets_in_batch, x.shape[0]),
-                                self.frozen,
-                            )
-                        )
-                        total_targets += targets_in_batch
-                        count += 1
-                        continue
-                    if config.runtime.output_head_chunk_tokens is not None:
-                        hidden, _ = model.forward_with_aux(
-                            x, byte_addresses=addresses, return_hidden=True
-                        )
-                        head = (
-                            chunked_output_head_cross_entropy
-                            if positions is None
-                            else chunked_output_head_token_losses
-                        )
-                        loss = head(
-                            hidden,
-                            y,
-                            model.output.weight,
-                            config.runtime.output_head_chunk_tokens,
-                            lambda: precision_context(config, device),
-                        )
-                    else:
-                        logits = model(x, byte_addresses=addresses)
-                        if observer is not None:
-                            observer(logits, y)
-                        loss = functional.cross_entropy(
-                            logits.float().flatten(0, 1),
-                            y.flatten(),
-                            ignore_index=-100,
-                            reduction="sum" if positions is None else "none",
-                        )
-                    if positions is not None:
-                        positions.add(loss.view_as(y), y)
-                        loss = loss.sum()
-                    total_loss += float(loss)
-                    total_targets += int(np.count_nonzero(batch.targets != -100))
-                    count += 1
+            if self._shard is not None:
+                return self._shard.evaluate(batches, positions, observer)
+            return evaluate_batches(
+                config,
+                device,
+                model,
+                batches,
+                positions,
+                observer,
+                objective=self.objective,
+                frozen=self.frozen,
+            )
         finally:
-            model.train(was_training)
             _restore_rng(rng, device)
-        return EvaluationResult(total_loss, total_targets, count)
 
     def export_weights(self) -> WeightSource:
         _, _, model, _, _ = self._ready()
+        if self._shard is not None:
+            # Gathered whole, on the host, by every rank together.
+            trainable = {
+                name: parameter.requires_grad
+                for name, parameter in model.named_parameters(remove_duplicate=False)
+            }
+            return _DetachedWeights(
+                self._shard.rank.aliases,
+                [
+                    CanonicalTensor(name, tensor.numpy(), trainable.get(name, False))
+                    for name, tensor in self._shard.weights().items()
+                ],
+            )
         return _PyTorchWeights(model)
 
     def export_training_state(self) -> EngineState:
         _, device, model, optimizer, _ = self._ready()
         names = {id(parameter): name for name, parameter in model.named_parameters()}
-        optimizer_state = optimizer.state_dict()
+        optimizer_state = (
+            optimizer.state_dict()
+            if self._shard is None
+            else self._shard.optimizer_state()
+        )
         parameter_names = {
             stored_id: names[id(parameter)]
             for stored_group, live_group in zip(
@@ -1183,7 +1233,10 @@ class PyTorchEngine:
             state.optimizer,
             state.optimizer_parameter_names,
         )
-        restore_optimizer_state(optimizer, remapped_optimizer_state)
+        if self._shard is not None:
+            self._shard.restore_optimizer_state(remapped_optimizer_state)
+        else:
+            restore_optimizer_state(optimizer, remapped_optimizer_state)
         if self.state_offload is not None:
             # Loading places state beside each parameter; return it to the host.
             self.state_offload.to_host()
@@ -1215,6 +1268,9 @@ class PyTorchEngine:
         if self._replicas is not None:
             self._replicas.close()
             self._replicas = None
+        if self._shard is not None:
+            self._shard.close()
+            self._shard = None
         if self.monitor is not None:
             self.monitor.close()
             self.monitor = None
