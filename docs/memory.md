@@ -71,6 +71,28 @@ estimate exceeds the ceiling is refused. With `observe`, `train` and `stage`
 warn and continue unchanged, including above `budget_bytes`; real allocation
 failures still stop the run.
 
+## See what each lever buys
+
+```sh
+klab inspect CONFIG --explain
+```
+
+For this config, `--explain` applies each lever alone and re-estimates it, so the
+change in peak and in each category is the difference between two estimates, not
+a general rule. The levers are micro-batch size 1 (with gradient accumulation
+raised to keep the batch), activation recomputation, the chunked output head,
+optimizer state offload and Adafactor. A lever that is already on or does not
+apply says why. Adafactor changes results (a new experiment) and is marked so.
+After the per-lever lines, the levers that leave results unchanged are stacked in
+order, and the running peak shows where a combination lands. `--json` adds the
+same data as `memory_levers`. The proposal below is built from the same lever
+definitions, so a lever shown here is a lever `--write-proposal` can apply.
+
+For a 1.05B-parameter, 4,096-token, bf16 model at micro-batch 1 the baseline
+estimate is 35.1 GiB; recomputation alone is 23.5 GiB, the chunked head 33.9,
+optimizer offload 25.7 and Adafactor 25.3. Stacked, recomputation, head chunking
+and offload reach 13.0 GiB, with 7.8 GiB of optimizer state in host memory.
+
 ## Make it fit
 
 `inspect` can propose a config that fits, written beside the original without
@@ -120,7 +142,8 @@ at a time, drops each chunk's logits after its loss and rebuilds them during
 backward. The loss and gradients are the same up to summation order; the head
 is computed twice. Validation uses the same chunks. It applies to the default
 next-token objective on the PyTorch engine, on one device or several, and
-cannot be combined with `compile_output_head_loss`.
+cannot be combined with `compile_output_head_loss`; a proposal that chunks the head
+turns that setting off.
 
 On one Arc Pro B70 (bf16, activation recomputation on), a 730M-parameter model
 with a 32,768-entry vocabulary and one 32,768-token row ran out of device memory
