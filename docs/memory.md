@@ -11,8 +11,8 @@ trade memory for time.
 - **Resident weights:** every parameter, including inactive experts and frozen
   memory tables. Tied embeddings count once.
 - **Runtime buffers:** RoPE caches and token-memory maps.
-- **Gradients:** FP32, for trainable parameters.
-- **Optimizer state:** AdamW's two moments, or Adafactor's factors (below).
+- **Gradients:** FP32 for trainable parameters, or bf16 with `runtime.gradient_dtype: bf16`.
+- **Optimizer state:** AdamW's two moments (FP32, or bf16 with `optimizer.state_dtype: bf16`), or Adafactor's factors (below).
 - **Retained activations:** tensors kept for backward, including logits and
   memory values.
 - **Attention working tensors**, sized by how many keys each query scores: two
@@ -22,7 +22,7 @@ trade memory for time.
 - **Temporary workspace:** an allowance for allocator, kernels and logits.
 - **Headroom:** 15% of the subtotal, for uncertainty.
 
-Weights and gradients are counted in FP32 even with BF16 autocast. Activation
+Weights are counted in FP32 even with BF16 autocast, and so are gradients and optimizer state unless the reduced-precision options below are set. Activation
 assumptions are conservative. When a matching run has measured a higher peak,
 calibration raises the estimate; it never lowers it.
 
@@ -235,6 +235,67 @@ column of each matrix (plus a full second moment for vectors) instead of AdamW's
 two full moments. The estimate uses the actual factor shapes. Its learning rate
 is a relative step-size cap, not an AdamW learning rate, so switching optimizer
 is a new experiment.
+
+### Reduced-precision storage
+
+```yaml
+runtime:
+  gradient_dtype: bf16
+optimizer:
+  state_dtype: bf16
+```
+
+Weights stay FP32 (the master copy) and every update is computed in FP32. The
+two options narrow only what waits in memory, and each saves 2 bytes per
+trainable parameter against 16 (weights 4, gradients 4, AdamW moments 8):
+
+- `runtime.gradient_dtype: bf16` keeps each parameter's gradient in a persistent
+  bf16 buffer. Autograd's FP32 gradient for one parameter is folded into its
+  buffer by a hook and freed, so only one parameter's FP32 gradient exists at a
+  time. Gradient accumulation adds into the buffer; clipping takes the norm in
+  FP32. It needs AdamW, no fp16 loss scaling and no `secondary_device_indices`.
+- `optimizer.state_dtype: bf16` keeps AdamW's two moments in bf16. It applies to
+  AdamW only (Adafactor keeps factors, not moments) and works with
+  `optimizer.state_offload`.
+
+Both narrow by stochastic rounding: a value rounds up with the probability of
+the discarded fraction, so the stored value is unbiased and a step smaller than
+bf16's spacing still moves it on average, where round-to-nearest drops it every
+time. The random bits come from a generator seeded by `seed` and the update
+number, so a resumed run rounds exactly as an uninterrupted one; the tests check
+that resume reproduces the model and optimizer state bit for bit. A checkpoint
+stores the moments in bf16 and resumes only under the same `state_dtype`. With
+FP32 storage the optimizer reproduces `torch.optim.AdamW`.
+
+These options change results, so they are new experiments; the FP32 default is the
+baseline to compare with. A one-layer, 16-wide model on synthetic text (600
+updates, 2 x 16 tokens times 4 accumulated microbatches, CPU, three seeds) ended
+at a mean training loss over the last 50 updates of 0.610 with FP32 storage,
+0.598 with bf16 moments, 0.598 with bf16 gradients and 0.601 with both; the
+seeds themselves spread by 0.03.
+
+The estimate charges the narrowed bytes exactly (`gradients` and `optimizer`
+categories) and keeps `workspace` and `headroom` as percentages of the smaller
+totals. A proposal uses an option only when `runtime.memory.allowed_low_precision`
+lists it (`bf16_gradients`, `bf16_optimizer_state`), under `policy: max_fit`, and
+records it as scientifically significant. `klab inspect --explain` shows both.
+
+Measured on one Arc Pro B70, bf16 autocast, 12 layers (390M parameters) of width
+1,536, a 4,096-token row, 4 accumulated microbatches, activation recomputation,
+steady updates:
+
+| Storage | Resident after an update | Peak allocated | Seconds per update |
+| --- | --- | --- | --- |
+| FP32 gradients and moments | 5.83 GiB | 8.14 GiB | 1.49 |
+| bf16 moments | 4.37 GiB | 6.69 GiB | 1.54 |
+| bf16 gradients | 5.10 GiB | 7.42 GiB | 1.64 |
+| both | 3.65 GiB | 5.97 GiB | 1.69 |
+
+The peak fell by exactly the bytes narrowed (1.45 GiB for moments, 0.73 GiB for
+gradients), at 4% to 14% more time per update. Pure bf16 parameters without a
+master copy, and 8-bit optimizer state, are not offered: the first discards
+the master weights this design keeps, and the second needs a quantization library
+Lab does not depend on and that has no XPU build.
 
 ## Measured memory
 
