@@ -157,10 +157,6 @@ class ShardedRank:
 
         # Tied weights and other aliases are saved once, as in a single device.
         self.aliases = state_dict_aliases(model)
-        self.trainable = {
-            name: parameter.requires_grad
-            for name, parameter in model.named_parameters(remove_duplicate=False)
-        }
         self.model = shard_model(model, self.mode)
         self.optimizer = build_optimizer(self.model, config)
         self.replica = SecondaryReplica(
