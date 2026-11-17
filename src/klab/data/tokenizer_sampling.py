@@ -312,12 +312,17 @@ def _text(release: Path, candidate: _Candidate) -> str:
 
 
 def documents(
-    config: TokenizerTrainConfig, stats: dict, selected_hashes: set[str] | None = None
+    config: TokenizerTrainConfig,
+    stats: dict,
+    selected_hashes: set[str] | None = None,
+    *,
+    selection: Selection | None = None,
 ):
+    """The fit documents; pass the `select_documents` result to reuse a scan already made."""
     spec = config.sampling
     assert spec is not None
     caps = quotas(config)
-    selection = select_documents(config, caps)
+    selection = selection or select_documents(config, caps)
     used = {key: sum(c.size for c in selection.fit[key]) for key in caps}
     counts = {key: len(selection.fit[key]) for key in caps}
     missing = [key for key, count in counts.items() if not count]
@@ -360,14 +365,16 @@ def documents(
     )
 
 
-def audit(config: TokenizerTrainConfig, tokenizer) -> dict:
+def audit(
+    config: TokenizerTrainConfig, tokenizer, *, selection: Selection | None = None
+) -> dict:
     # Audit ordinary text, including literal special-token spellings, without
     # mutating the fitted artifact or its production encoding behavior.
     tokenizer = Tokenizer.from_str(tokenizer.to_str())
     tokenizer.encode_special_tokens = True
     spec = config.sampling
     assert spec is not None
-    selection = select_documents(config)
+    selection = selection or select_documents(config)
     fit_hashes = {row.content_sha256 for rows in selection.fit.values() for row in rows}
     groups = {
         key: {

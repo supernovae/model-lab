@@ -181,10 +181,12 @@ def _verify_tokenizer_manifest(
             dataset=dataset,
             sampling=contract["sampling"],
         )
-        from klab.data.tokenizer_sampling import audit, documents
+        from klab.data.tokenizer_sampling import audit, documents, select_documents
 
+        # The fit's byte selection and the audit's reserve come from one scan.
+        selection = select_documents(config)
         stats = {}
-        for _ in documents(config, stats):
+        for _ in documents(config, stats, selection=selection):
             pass
         if (
             stats["sampling"] != contract.get("sampling_result")
@@ -192,7 +194,9 @@ def _verify_tokenizer_manifest(
             or stats["bytes"] != contract.get("selected_input_bytes_utf8")
         ):
             raise ValueError("tokenizer TRAIN byte-selection identity mismatch")
-        if audit(config, load_tokenizer(path)) != manifest.get("sampling_audit"):
+        if audit(config, load_tokenizer(path), selection=selection) != manifest.get(
+            "sampling_audit"
+        ):
             raise ValueError("tokenizer disjoint TRAIN audit mismatch")
     return manifest
 

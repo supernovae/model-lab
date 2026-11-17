@@ -7,6 +7,7 @@ the release's source-family label, which identifies a source rather than a work.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -34,6 +35,7 @@ from klab.corpus.mixture_index import (
 )
 from klab.corpus.quota import shortfall_message
 from klab.corpus.release import _verification_operation, verify_release
+from klab.corpus.release_verify import current_settings
 from klab.data.row_layout import document_rows
 from klab.data.tokenizer import load_tokenizer, verify_tokenizer_artifact
 from klab.result_publication import sync_directory
@@ -348,12 +350,17 @@ def _tokenizer(spec: MixtureDeclaration, release: Path, release_id: str):
         )
         digest = observed["tokenizer_sha256"]
     else:
+        # The operator's receipts apply here as to the release: a tokenizer whose
+        # export, files and release are unchanged is not re-derived.
+        settings = current_settings()
         digest = verify_tokenizer_artifact(
             path,
             source=dataset.source,
             revision=dataset.revision,
             vocab_size=config.vocab_size,
             dataset=dataset,
+            proof_store=settings.proof_store,
+            verification_mode=settings.verification_mode,
         )["sha256"]
     return load_tokenizer(path), digest
 
@@ -382,6 +389,16 @@ def _materialize_mixture(
     raw = declaration.read_bytes()
     spec = MixtureDeclaration.model_validate(yaml.safe_load(raw))
     release = spec.release_path.resolve()
+    output = output.resolve()
+    if output.exists():
+        return verify_mixture(declaration, output)
+    # Everything that can refuse this output for its own sake refuses now, before
+    # the hours of verification and indexing below.
+    assembly, early_tokenizer_sha = (
+        _early_assembly(spec, raw, output, release)
+        if reuse_tokens and not spec.additional_releases
+        else (None, None)
+    )
     manifest = verify_release(release)
     cohorts = None
     additive_evidence = []
@@ -450,15 +467,14 @@ def _materialize_mixture(
             "target quotas disagree with verified release requested mixture"
         )
     tokenizer, tokenizer_sha = _tokenizer(spec, release, manifest["release_id"])
+    if early_tokenizer_sha not in {None, tokenizer_sha}:
+        raise ValueError("tokenizer changed while the mixture was being checked")
     from klab.corpus.completed_preparation import local_scope
 
     completed = local_scope(manifest)
     eos = tokenizer.token_to_id("<eos>")
     if eos is None:
         raise ValueError("verified tokenizer lacks EOS token")
-    output = output.resolve()
-    if output.exists():
-        return verify_mixture(declaration, output)
     if completed is not None:
         cache = _completed_mixture_cache(spec)
         bound = [
@@ -532,11 +548,12 @@ def _materialize_mixture(
                 if reuse_tokens:
                     from klab.corpus.mixture_pipeline import (
                         MixtureFrontier,
+                        claim_assembly,
                         pipeline_request,
                     )
 
                     frontier = MixtureFrontier(
-                        output,
+                        assembly or claim_assembly(output, checkpoint_request),
                         checkpoint_cache,
                         pipeline_request(checkpoint_request, index),
                     )
@@ -609,8 +626,8 @@ def _materialize_mixture(
         # The published output and its sealed receipt are the record now. The
         # committed segments and their markers existed only to resume an
         # interrupted schedule; progress.json and request.json stay.
-        assembly = output.parent / ("." + output.name + ".assembly")
-        if assembly.is_dir() and not assembly.is_symlink():
+        if frontier is not None:
+            assembly = frontier.root
             for marker in sorted(assembly.glob("commit-*.json")):
                 marker.unlink()
             for segment in assembly.glob("segment-*"):
@@ -1218,6 +1235,48 @@ def _verify_completed_mixture(declaration, output, receipt):
     return receipt
 
 
+@functools.cache
+def _stat_keyed_sha256(path: Path, stamp: tuple) -> str:
+    return sha256_file(path)
+
+
+def _inventory_sha256(path: Path) -> str:
+    """The family inventory's digest, read once per process while the file is unchanged."""
+    info = path.stat()
+    return _stat_keyed_sha256(
+        path, (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    )
+
+
+def _native_mixture_request(spec, raw, output, release_id, tokenizer_sha):
+    return {
+        "declaration_sha256": hashlib.sha256(raw).hexdigest(),
+        "release_id": release_id,
+        "release_manifest_sha256": sha256_file(spec.release_path / "manifest.json"),
+        "family_inventory_sha256": _inventory_sha256(spec.family_inventory),
+        "tokenizer_sha256": tokenizer_sha,
+        "output": str(output),
+    }
+
+
+def _early_assembly(spec, raw, output, release):
+    """Name this request's checkpoint directory and refuse a conflicting one now.
+
+    Uses only what is cheap to read (declaration, manifest, inventory and
+    tokenizer bytes). Verification later confirms the tokenizer digest it
+    assumed here.
+    """
+    from klab.corpus.mixture_pipeline import claim_assembly
+
+    tokenizer_sha = sha256_file(
+        load_tokenizer_config(spec.tokenizer_config).output_dir / "tokenizer.json"
+    )
+    # The manifest digest already determines the release id.
+    request = _native_mixture_request(spec, raw, output, None, tokenizer_sha)
+    del request["release_id"]
+    return claim_assembly(output, request), tokenizer_sha
+
+
 def _native_mixture_completion(spec, raw, output, manifest, tokenizer_sha):
     from klab.corpus.admission_inspection_cache import InspectionCache
     from klab.verification_proofs import ProofStore
@@ -1241,19 +1300,21 @@ def _native_mixture_completion(spec, raw, output, manifest, tokenizer_sha):
         }
         | {"data/token_store.py": sha256_file(_TOKEN_STORE_SOURCE)},
     }
-    request = {
-        "declaration_sha256": hashlib.sha256(raw).hexdigest(),
-        "release_id": manifest["release_id"],
-        "release_manifest_sha256": sha256_file(spec.release_path / "manifest.json"),
-        "family_inventory_sha256": sha256_file(spec.family_inventory),
-        "tokenizer_sha256": tokenizer_sha,
-        "output": str(output),
-    }
+    request = _native_mixture_request(
+        spec, raw, output, manifest["release_id"], tokenizer_sha
+    )
     return cache, request
 
 
 def verify_mixture(declaration: Path, output: Path, *, audit: bool = False) -> dict:
     """Authenticate completed execution; replay only for an explicit audit."""
+    # One operation, so the release and export are authenticated once, however
+    # many of the checks below reach for them.
+    with _verification_operation():
+        return _verify_mixture(declaration, output, audit=audit)
+
+
+def _verify_mixture(declaration: Path, output: Path, *, audit: bool) -> dict:
     output = output.resolve()
     receipt_path = output / "receipt.json"
     with receipt_path.open("rb") as stream:
@@ -1338,14 +1399,15 @@ def verify_mixture_tokenizer_origin(
     """
     spec = MixtureDeclaration.model_validate(yaml.safe_load(declaration.read_bytes()))
     release = spec.release_path.resolve()
-    manifest = verify_release(release)
     fit = load_tokenizer_config(spec.tokenizer_config)
     if (
         tokenizer_path.resolve() != (fit.output_dir / "tokenizer.json").resolve()
         or vocab_size != fit.vocab_size
     ):
         raise ValueError("tokenizer origin path or vocabulary mismatch")
-    _, digest = _tokenizer(spec, release, manifest["release_id"])
+    with _verification_operation():
+        manifest = verify_release(release)
+        _, digest = _tokenizer(spec, release, manifest["release_id"])
     result = json.loads(
         tokenizer_path.with_name("tokenizer_manifest.json").read_bytes()
     )

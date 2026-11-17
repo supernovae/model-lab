@@ -912,6 +912,7 @@ class Lab:
         self.work.mkdir(mode=0o700)
         self.monkeypatch = monkeypatch
         self.capsys = capsys
+        self.stderr = ""  # what the last command reported on standard error
         monkeypatch.setenv("KLAB_WORK_DIR", str(self.work))
         monkeypatch.setenv("XDG_CONFIG_HOME", str(root / "settings"))
 
@@ -921,7 +922,9 @@ class Lab:
             sys, "argv", ["klab", "--work-dir", str(self.work), *argv]
         )
         main()
-        lines = self.capsys.readouterr().out.strip().splitlines()
+        captured = self.capsys.readouterr()
+        self.stderr = captured.err
+        lines = captured.out.strip().splitlines()
         return lines[-1] if lines else ""
 
     def json(self, *argv: str) -> dict:
