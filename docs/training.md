@@ -69,7 +69,7 @@ sets all of the following and is the starting point for a long run.
 | `evaluation.every_tokens` | Validate by trained tokens. Set `every_steps: null` to use only this. |
 | `logging.every_steps` | Record update metrics every N updates (first and last always kept). |
 | `training.deterministic: false` | Lets the backend pick its fastest kernels and use all host threads. |
-| `runtime.precision: bf16`, `attention.implementation: sdpa`, `runtime.compile_transformer_blocks: true` | Faster updates where the backend supports them. |
+| `runtime.precision: bf16`, `attention.implementation: sdpa`, `runtime.compile_transformer_blocks: true` | Faster updates where the backend supports them. Block compilation combines with [activation recomputation](memory.md#activation-recomputation). |
 | `runtime.compile_output_head_loss: true` | Compiles the output projection and FP32 cross-entropy together (PyTorch XPU, BF16). |
 
 Background checkpoints need host memory for one copy of the weights and

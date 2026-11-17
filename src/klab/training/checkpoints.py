@@ -488,6 +488,9 @@ def _check_native_state(
             or int(count) != count
         ):
             raise ValueError("optimizer update counter is out of bounds")
+        moment_dtype = (
+            torch.bfloat16 if config.optimizer_state_dtype == "bf16" else torch.float32
+        )
         if config.optimizer.name == "adamw":
             moments = {"exp_avg": shape, "exp_avg_sq": shape}
         elif len(shape) >= 2:
@@ -504,7 +507,7 @@ def _check_native_state(
             if (
                 not isinstance(moment, torch.Tensor)
                 or tuple(moment.shape) != expected_shape
-                or moment.dtype != torch.float32
+                or moment.dtype != moment_dtype
             ):
                 raise ValueError(f"invalid optimizer moment: {name}")
     _check_rng(native["rng"], native["backend"], config.runtime.device_index)

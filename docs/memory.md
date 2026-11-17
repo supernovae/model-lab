@@ -11,20 +11,48 @@ trade memory for time.
 - **Resident weights:** every parameter, including inactive experts and frozen
   memory tables. Tied embeddings count once.
 - **Runtime buffers:** RoPE caches and token-memory maps.
-- **Gradients:** FP32, for trainable parameters.
-- **Optimizer state:** AdamW's two moments, or Adafactor's factors (below).
+- **Gradients:** FP32 for trainable parameters, or bf16 with `runtime.gradient_dtype: bf16`.
+- **Optimizer state:** AdamW's two moments (FP32, or bf16 with `optimizer.state_dtype: bf16`), or Adafactor's factors (below).
 - **Retained activations:** tensors kept for backward, including logits and
   memory values.
 - **Attention working tensors**, sized by how many keys each query scores: two
   windows for `sliding_window`; the local window plus selected blocks for
   `local_selected`; nothing for `sdpa` dense or latent attention on CUDA and XPU
-  (confirm with a warmup); a full $T^2$ allowance otherwise.
+  (confirm with the [attention memory probe](#attention-memory-probe)); a full $T^2$ allowance otherwise.
 - **Temporary workspace:** an allowance for allocator, kernels and logits.
 - **Headroom:** 15% of the subtotal, for uncertainty.
 
-Weights and gradients are counted in FP32 even with BF16 autocast. Activation
+Weights are counted in FP32 even with BF16 autocast, and so are gradients and optimizer state unless the reduced-precision options below are set. Activation
 assumptions are conservative. When a matching run has measured a higher peak,
 calibration raises the estimate; it never lowers it.
+
+### Attention memory probe
+
+The estimate charges no $T^2$ scores for `attention.implementation: sdpa` on CUDA
+and XPU because a fused kernel does not keep them. Check that on the device:
+
+```sh
+klab runtime attention CONFIG --runtime RUNTIME_ID --json
+```
+
+`score_memory` runs the causal `scaled_dot_product_attention` call training makes,
+with the config's micro-batch, heads, head dimension and compute dtype, forward
+and backward at 1,024, 2,048 and 4,096 tokens and at `training.seq_len`. It
+records the peak device memory above the inputs and compares it with one
+`[T, T]` score matrix. Extra memory that grows with $T^2$ (an exponent above 1.5
+between the shortest and longest length) means the kernel keeps scores, and
+`estimate_assumption` is `contradicted`; growth with $T$ means `confirmed`. A
+score matrix larger than a quarter of the free device memory is skipped, and a
+device without a peak counter (CPU, MPS) reports `UNMEASURED`. `klab stage` runs
+the same probe on CUDA and XPU and warns when the estimate is contradicted.
+`selected_backend` names the SDPA kernel the profiler saw.
+
+On one Arc Pro B70 (torch 2.15.0+xpu, bf16, batch 1, 24 heads of width 64,
+causal), SDPA selected `FLASH_ATTENTION`: peak memory above q, k and v was 33 MiB
+at 1,024 tokens, 66 MiB at 2,048 and 133 MiB at 4,096 (0.17 of a score matrix at
+4,096 and falling), so the assumption holds. Forcing `MATH` kept 6.1 score
+matrices at every length and was reported as contradicted. The memory-efficient
+and `OVERRIDEABLE` backends are unavailable there.
 
 ## The capacity it is compared with
 
@@ -42,6 +70,28 @@ planning.
 estimate exceeds the ceiling is refused. With `observe`, `train` and `stage`
 warn and continue unchanged, including above `budget_bytes`; real allocation
 failures still stop the run.
+
+## See what each lever buys
+
+```sh
+klab inspect CONFIG --explain
+```
+
+For this config, `--explain` applies each lever alone and re-estimates it, so the
+change in peak and in each category is the difference between two estimates, not
+a general rule. The levers are micro-batch size 1 (with gradient accumulation
+raised to keep the batch), activation recomputation, the chunked output head,
+optimizer state offload and Adafactor. A lever that is already on or does not
+apply says why. Adafactor changes results (a new experiment) and is marked so.
+After the per-lever lines, the levers that leave results unchanged are stacked in
+order, and the running peak shows where a combination lands. `--json` adds the
+same data as `memory_levers`. The proposal below is built from the same lever
+definitions, so a lever shown here is a lever `--write-proposal` can apply.
+
+For a 1.05B-parameter, 4,096-token, bf16 model at micro-batch 1 the baseline
+estimate is 35.1 GiB; recomputation alone is 23.5 GiB, the chunked head 33.9,
+optimizer offload 25.7 and Adafactor 25.3. Stacked, recomputation, head chunking
+and offload reach 13.0 GiB, with 7.8 GiB of optimizer state in host memory.
 
 ## Make it fit
 
@@ -92,7 +142,8 @@ at a time, drops each chunk's logits after its loss and rebuilds them during
 backward. The loss and gradients are the same up to summation order; the head
 is computed twice. Validation uses the same chunks. It applies to the default
 next-token objective on the PyTorch engine, on one device or several, and
-cannot be combined with `compile_output_head_loss`.
+cannot be combined with `compile_output_head_loss`; a proposal that chunks the head
+turns that setting off.
 
 On one Arc Pro B70 (bf16, activation recomputation on), a 730M-parameter model
 with a 32,768-entry vocabulary and one 32,768-token row ran out of device memory
@@ -136,6 +187,32 @@ targets/s from the fourth update on:
 | 32,768 | `transformer_block`, `state_offload` | 28.5 GiB, then the spill guard stopped update 2 | |
 | 32,768 | `transformer_block_and_attention` | 25.9 GiB | 1,295 |
 | 32,768 | `transformer_block_and_attention`, `state_offload` | 18.7 GiB | 1,286 (20 updates) |
+
+Recomputation combines with `runtime.compile_transformer_blocks`: each block is
+compiled once and the compiled block is what backward reruns. Lab builds the
+RoPE tables to `model.max_seq_len` before compiling, so the forward and its
+recomputation use the same graph. The two settings answer different questions
+(speed and memory), so neither excludes the other; activation offload is the one
+setting block compilation still refuses. A block's diagnostic side effects stay
+outside the compiled function.
+
+Measured on one Arc Pro B70, bf16 autocast, SDPA attention, hidden width 1,536
+with 24 heads, FFN width 4,096, vocabulary 32,768, one 4,096-token row per
+update, AdamW, steady updates after three warm-up updates:
+
+| Layers | Settings | Peak allocated | Tokens/s |
+| --- | --- | --- | --- |
+| 12 | none | 10.80 GiB | 11,832 |
+| 12 | `transformer_block` | 7.53 GiB | 9,942 |
+| 12 | `compile_transformer_blocks` | 9.30 GiB | 15,450 |
+| 12 | both | 7.53 GiB | 13,127 |
+| 6 | none | 6.63 GiB | 21,662 |
+| 6 | `transformer_block` | 4.51 GiB | 18,503 |
+| 6 | `compile_transformer_blocks` | 5.88 GiB | 27,968 |
+| 6 | both | 4.51 GiB | 22,358 |
+
+Compiling the recomputed block recovers about a third of the speed that
+recomputation costs and keeps the whole memory saving.
 
 ### Activation offload
 
@@ -186,6 +263,67 @@ column of each matrix (plus a full second moment for vectors) instead of AdamW's
 two full moments. The estimate uses the actual factor shapes. Its learning rate
 is a relative step-size cap, not an AdamW learning rate, so switching optimizer
 is a new experiment.
+
+### Reduced-precision storage
+
+```yaml
+runtime:
+  gradient_dtype: bf16
+optimizer:
+  state_dtype: bf16
+```
+
+Weights stay FP32 (the master copy) and every update is computed in FP32. The
+two options narrow only what waits in memory, and each saves 2 bytes per
+trainable parameter against 16 (weights 4, gradients 4, AdamW moments 8):
+
+- `runtime.gradient_dtype: bf16` keeps each parameter's gradient in a persistent
+  bf16 buffer. Autograd's FP32 gradient for one parameter is folded into its
+  buffer by a hook and freed, so only one parameter's FP32 gradient exists at a
+  time. Gradient accumulation adds into the buffer; clipping takes the norm in
+  FP32. It needs AdamW, no fp16 loss scaling and no `secondary_device_indices`.
+- `optimizer.state_dtype: bf16` keeps AdamW's two moments in bf16. It applies to
+  AdamW only (Adafactor keeps factors, not moments) and works with
+  `optimizer.state_offload`.
+
+Both narrow by stochastic rounding: a value rounds up with the probability of
+the discarded fraction, so the stored value is unbiased and a step smaller than
+bf16's spacing still moves it on average, where round-to-nearest drops it every
+time. The random bits come from a generator seeded by `seed` and the update
+number, so a resumed run rounds exactly as an uninterrupted one; the tests check
+that resume reproduces the model and optimizer state bit for bit. A checkpoint
+stores the moments in bf16 and resumes only under the same `state_dtype`. With
+FP32 storage the optimizer reproduces `torch.optim.AdamW`.
+
+These options change results, so they are new experiments; the FP32 default is the
+baseline to compare with. A one-layer, 16-wide model on synthetic text (600
+updates, 2 x 16 tokens times 4 accumulated microbatches, CPU, three seeds) ended
+at a mean training loss over the last 50 updates of 0.610 with FP32 storage,
+0.598 with bf16 moments, 0.598 with bf16 gradients and 0.601 with both; the
+seeds themselves spread by 0.03.
+
+The estimate charges the narrowed bytes exactly (`gradients` and `optimizer`
+categories) and keeps `workspace` and `headroom` as percentages of the smaller
+totals. A proposal uses an option only when `runtime.memory.allowed_low_precision`
+lists it (`bf16_gradients`, `bf16_optimizer_state`), under `policy: max_fit`, and
+records it as scientifically significant. `klab inspect --explain` shows both.
+
+Measured on one Arc Pro B70, bf16 autocast, 12 layers (390M parameters) of width
+1,536, a 4,096-token row, 4 accumulated microbatches, activation recomputation,
+steady updates:
+
+| Storage | Resident after an update | Peak allocated | Seconds per update |
+| --- | --- | --- | --- |
+| FP32 gradients and moments | 5.83 GiB | 8.14 GiB | 1.49 |
+| bf16 moments | 4.37 GiB | 6.69 GiB | 1.54 |
+| bf16 gradients | 5.10 GiB | 7.42 GiB | 1.64 |
+| both | 3.65 GiB | 5.97 GiB | 1.69 |
+
+The peak fell by exactly the bytes narrowed (1.45 GiB for moments, 0.73 GiB for
+gradients), at 4% to 14% more time per update. Pure bf16 parameters without a
+master copy, and 8-bit optimizer state, are not offered: the first discards
+the master weights this design keeps, and the second needs a quantization library
+Lab does not depend on and that has no XPU build.
 
 ## Measured memory
 

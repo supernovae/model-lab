@@ -921,6 +921,11 @@ class MemoryConfig(StrictModel):
     activation_offload: ActivationOffloadConfig = ActivationOffloadConfig()
     allowed_sequence_lengths: tuple[int, ...] = ()
     allowed_optimizers: tuple[Literal["adamw", "adafactor"], ...] = ()
+    # Reduced-precision options a proposal may turn on. They change results, so
+    # a proposal never uses one the config does not list.
+    allowed_low_precision: tuple[
+        Literal["bf16_gradients", "bf16_optimizer_state"], ...
+    ] = Field(default=(), exclude_if=lambda value: not value)
 
     @model_validator(mode="after")
     def validate_lengths(self) -> MemoryConfig:
@@ -956,6 +961,11 @@ class RuntimeConfig(StrictModel):
         default=ParallelConfig(), exclude_if=lambda value: not value.sharded
     )
     precision: Literal["auto", "fp32", "bf16", "fp16"] = "fp32"
+    # Dtype gradients are held in between microbatches. bf16 keeps FP32 master
+    # weights, accumulates with stochastic rounding and halves gradient memory.
+    gradient_dtype: Literal["fp32", "bf16"] = Field(
+        default="fp32", exclude_if=lambda value: value == "fp32"
+    )
     memory: MemoryConfig = MemoryConfig()
     compile_dynamic_shapes: bool = Field(
         default=False, exclude_if=lambda value: not value
@@ -977,12 +987,10 @@ class RuntimeConfig(StrictModel):
         ):
             raise ValueError("dynamic compilation requires a compiled training kernel")
         if self.compile_transformer_blocks and (
-            self.engine != "pytorch"
-            or self.memory.activation_checkpointing.enabled
-            or self.memory.activation_offload.enabled
+            self.engine != "pytorch" or self.memory.activation_offload.enabled
         ):
             raise ValueError(
-                "block compilation requires PyTorch without activation checkpointing or offload"
+                "block compilation requires PyTorch without activation offload"
             )
         if self.compile_output_head_loss and (
             self.engine != "pytorch"
@@ -1022,6 +1030,11 @@ class RuntimeConfig(StrictModel):
             if self.memory.activation_offload.enabled:
                 raise ValueError(
                     "secondary_device_indices cannot be combined with activation offload"
+                )
+            if self.gradient_dtype != "fp32":
+                raise ValueError(
+                    "secondary_device_indices cannot be combined with "
+                    "gradient_dtype: bf16: replicas return FP32 gradients"
                 )
             if self.precision == "fp16":
                 raise ValueError(
@@ -1187,6 +1200,11 @@ class AdamWConfig(StrictModel):
     betas: tuple[float, float] = (0.9, 0.95)
     eps: float = Field(default=1e-8, gt=0)
     state_offload: bool = False
+    # Dtype of the two moments between updates. bf16 halves them and rounds
+    # stochastically; the update itself runs in FP32.
+    state_dtype: Literal["fp32", "bf16"] = Field(
+        default="fp32", exclude_if=lambda value: value == "fp32"
+    )
 
 
 class AdafactorConfig(StrictModel):
@@ -1389,6 +1407,13 @@ class RunConfig(StrictModel):
     def layer_specs(self) -> tuple[tuple[ModelConfig, AttentionConfig], ...]:
         """Each decoder block's effective model and attention settings."""
         return self.model.layer_specs(self.attention)
+
+    @property
+    def optimizer_state_dtype(self) -> Literal["fp32", "bf16"]:
+        """Dtype of the optimizer's moments; only AdamW can narrow them."""
+        if isinstance(self.optimizer, AdamWConfig):
+            return self.optimizer.state_dtype
+        return "fp32"
 
     @property
     def attention_kinds(self) -> frozenset[str]:
@@ -1619,6 +1644,28 @@ class RunConfig(StrictModel):
                 "runtime.parallel sharded modes require AdamW without "
                 "state_offload (Adafactor's factored state is not elementwise) "
                 "and no evaluation.gradient_bottleneck"
+            )
+        if self.runtime.parallel.sharded and (
+            self.runtime.gradient_dtype != "fp32"
+            or self.optimizer_state_dtype != "fp32"
+        ):
+            raise ValueError(
+                "runtime.parallel sharded modes keep FP32 gradients and optimizer state"
+            )
+        low_precision = (
+            self.runtime.gradient_dtype != "fp32"
+            or self.optimizer_state_dtype != "fp32"
+        )
+        if low_precision and self.runtime.engine != "pytorch":
+            raise ValueError(
+                "bf16 gradients and optimizer state require the PyTorch engine"
+            )
+        if self.runtime.gradient_dtype != "fp32" and (
+            not isinstance(self.optimizer, AdamWConfig)
+            or self.runtime.precision == "fp16"
+        ):
+            raise ValueError(
+                "runtime.gradient_dtype: bf16 requires AdamW and no fp16 loss scaling"
             )
         if self.runtime.engine == "mlx" and self.runtime.backend != "metal":
             raise ValueError("MLX engine requires runtime.backend=metal")
