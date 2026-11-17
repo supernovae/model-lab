@@ -12,11 +12,19 @@ import numpy as np
 import pytest
 import yaml
 
+from klab import token_encode_worker
 from klab.canonical import canonical_json
 from klab.config.loading import load_config
 from klab.config.models import DatasetConfig
 from klab.corpus import mixture
+from klab.corpus.release_verify import verification_settings
 from klab.data.packing import TokenBlockDataset, _collect_token_mixture
+
+
+@pytest.fixture(autouse=True)
+def two_workers():
+    with verification_settings(workers=2):
+        yield
 
 
 def _fixture(
@@ -815,6 +823,64 @@ def _byte_tokenizer():
     return tokenizer
 
 
+def test_output_is_identical_for_any_worker_count(tmp_path, monkeypatch):
+    """Workers read and tokenize rows themselves; the output does not depend on how many."""
+    from klab.data.encoding import PreparationEncoder
+
+    declaration, _, _ = _fixture(tmp_path, monkeypatch)
+    tokenizer = _byte_tokenizer()
+    stand_in = mixture._tokenizer
+    monkeypatch.setattr(
+        mixture, "_tokenizer", lambda *args: (tokenizer, stand_in(*args)[1])
+    )
+    operations = []
+    submit = PreparationEncoder.submit
+
+    def observe(self, request):
+        operations.append(request[:1])
+        return submit(self, request)
+
+    monkeypatch.setattr(PreparationEncoder, "submit", observe)
+    receipts = {}
+    for workers in (1, 3):
+        with verification_settings(workers=workers):
+            receipts[workers] = mixture.materialize_mixture(
+                declaration, tmp_path / f"workers-{workers}"
+            )
+    assert receipts[1] == receipts[3]
+    assert set(operations) == {b"D"}
+    # Killed after a committed segment with the source read ahead, resumed on
+    # another worker count.
+    from klab.corpus.mixture_pipeline import MixtureFrontier
+    from klab.data import encoding
+
+    monkeypatch.setattr(encoding, "TOKENIZER_BATCH_DOCUMENTS", 1)
+    monkeypatch.setenv("KLAB_MIXTURE_COMMIT_CANDIDATES", "1")
+    commit = MixtureFrontier.commit
+
+    def interrupt(self, *args):
+        commit(self, *args)
+        if self.sequence == 2:
+            raise InterruptedError("after a durable commit")
+
+    monkeypatch.setattr(MixtureFrontier, "commit", interrupt)
+    with verification_settings(workers=2), pytest.raises(InterruptedError):
+        mixture.materialize_mixture(declaration, tmp_path / "resumed")
+    monkeypatch.setattr(MixtureFrontier, "commit", commit)
+    with verification_settings(workers=1):
+        assert (
+            mixture.materialize_mixture(declaration, tmp_path / "resumed")
+            == (receipts[1])
+        )
+    assert (tmp_path / "resumed" / "train.tokens.ids").read_bytes() == (
+        tmp_path / "workers-1" / "train.tokens.ids"
+    ).read_bytes()
+    for name in ("train.tokens.ids", "train.records.jsonl"):
+        assert (tmp_path / "workers-1" / name).read_bytes() == (
+            tmp_path / "workers-3" / name
+        ).read_bytes()
+
+
 def test_real_batch_matches_single_document_output_and_warm_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -915,13 +981,14 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
     )
     tokenizer = _byte_tokenizer()
     calls = []
-    original_encode = PreparationEncoder.encode_arrays
+    original_submit = PreparationEncoder.submit
 
-    def observe_batch(self, texts):
+    def observe_batch(self, request):
+        texts = token_encode_worker.unpack_texts(request[1:])
         calls.append((len(texts), sum(len(text.encode("utf-8")) for text in texts)))
-        return original_encode(self, texts)
+        return original_submit(self, request)
 
-    monkeypatch.setattr(PreparationEncoder, "encode_arrays", observe_batch)
+    monkeypatch.setattr(PreparationEncoder, "submit", observe_batch)
 
     def run(name, *, reuse_tokens=True, checkpoint=False):
         import tempfile
@@ -972,17 +1039,16 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
     with monkeypatch.context() as worker_patch:
         import psutil
 
-        worker_patch.setenv("KLAB_MIXTURE_WORKERS", "3")
         worker_patch.setattr(psutil, "cpu_count", lambda **kwargs: 4)
         worker_patch.setattr(psutil.Process, "cpu_affinity", lambda self: [0, 1, 2, 3])
-        assert run("three-workers", reuse_tokens=False) == (result, output)
-        progress = json.loads((root / "three-workers/progress.json").read_bytes())
-        assert (progress["read_workers"], progress["encoder_rayon_threads"]) == (1, 2)
-        # A four-worker plan still reads with one worker and encodes with three.
-        worker_patch.setenv("KLAB_MIXTURE_WORKERS", "4")
-        assert run("four-workers", reuse_tokens=False) == (result, output)
-        progress = json.loads((root / "four-workers/progress.json").read_bytes())
-        assert (progress["read_workers"], progress["encoder_rayon_threads"]) == (1, 3)
+        for name, count in (("three-workers", 3), ("four-workers", 4)):
+            with verification_settings(workers=count):
+                assert run(name, reuse_tokens=False) == (result, output)
+            progress = json.loads((root / name / "progress.json").read_bytes())
+            assert (progress["read_workers"], progress["encoder_rayon_threads"]) == (
+                1,
+                count,
+            )
 
     calls.clear()
     warm_result, warm_output = run("warm")
@@ -1010,12 +1076,12 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
         size <= 2 and source_bytes <= 64 for size, source_bytes in calls
     )
 
-    # A tiny limit exercises the same fallback used above the real 8 MiB bound.
+    # A document over the byte limit is a batch of its own.
     monkeypatch.setattr(mixture, "MIXTURE_BATCH_SOURCE_BYTES", 1)
     calls.clear()
     serial_result, serial_output = run("serial", reuse_tokens=False)
     assert (serial_result, serial_output) == (result, output)
-    assert calls == []
+    assert calls and all(size == 1 for size, _ in calls)
 
     from klab.corpus.mixture_pipeline import MixtureFrontier
 
@@ -1046,8 +1112,9 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
     with pytest.raises(InterruptedError):
         run("resumed", checkpoint=True)
     monkeypatch.setattr(MixtureFrontier, "commit", commit)
-    monkeypatch.setenv("KLAB_MIXTURE_WORKERS", "8")
-    assert run("resumed", checkpoint=True) == (result, output)
+    # The resumed run has a different worker count than the interrupted one.
+    with verification_settings(workers=3):
+        assert run("resumed", checkpoint=True) == (result, output)
 
     # Batched padding changes IDs, so padded tokenizers retain serial semantics.
     tokenizer.enable_padding(pad_id=1, pad_token="<pad>")
@@ -1131,7 +1198,6 @@ def test_mixture_frontier_resumes_without_committed_candidate_replay(
     baseline = tmp_path / "baseline"
     expected = mixture._materialize_mixture(declaration, baseline, reuse_tokens=False)
     monkeypatch.setattr(encoding, "TOKENIZER_BATCH_DOCUMENTS", 1)
-    monkeypatch.setenv("KLAB_MIXTURE_WORKERS", "1")
     monkeypatch.setenv("KLAB_MIXTURE_COMMIT_CANDIDATES", "1")
     output = tmp_path / "interrupted"
     original = MixtureFrontier.commit
@@ -1166,7 +1232,6 @@ def test_mixture_frontier_resumes_without_committed_candidate_replay(
     monkeypatch.setattr(
         mixture.MixtureIndex, "_load_documents", unexpected_inventory_replay
     )
-    monkeypatch.setenv("KLAB_MIXTURE_WORKERS", "8")
     actual = mixture.materialize_mixture(declaration, output)
     assert actual == expected
     for name in ("train.tokens.ids", "train.records.jsonl"):
@@ -1304,35 +1369,17 @@ def test_admitted_ordinary_metadata_can_bypass_warm_source_fetch(tmp_path, monke
     assert progress.get("read_worker_seconds", 0) == 0
 
 
-# One failure for the process listing and one for a per-child sample.
-@pytest.mark.parametrize("failure", ["children", "cpu_times"])
-def test_child_telemetry_races_do_not_abort_materialization(
-    tmp_path, monkeypatch, failure
-):
-    import psutil
+def test_worker_telemetry_survives_a_vanished_worker():
+    import subprocess
+    import sys
 
-    declaration, _, _ = _fixture(tmp_path, monkeypatch)
-    expected = mixture.materialize_mixture(declaration, tmp_path / "expected")
+    from klab.corpus.mixture_pipeline import process_tree_sample
 
-    def sample(name, value):
-        if name == failure:
-            raise psutil.NoSuchProcess(123456)
-        return value
-
-    child = SimpleNamespace(
-        cpu_times=lambda: sample("cpu_times", SimpleNamespace(user=1.0, system=0.5)),
-        memory_info=lambda: sample("memory_info", SimpleNamespace(rss=1024)),
-        num_threads=lambda: sample("num_threads", 1),
-    )
-    monkeypatch.setattr(
-        psutil.Process, "children", lambda self: sample("children", [child])
-    )
-    actual = mixture.materialize_mixture(declaration, tmp_path / "raced")
-    assert actual == expected
-    progress = json.loads((_assembly(tmp_path, "raced") / "progress.json").read_bytes())
-    assert progress["process_observation_errors"] == ["NoSuchProcess"]
-    assert not progress["child_sample_complete"]
-    assert progress["encoder_utilization"] is None
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    sample = process_tree_sample([gone.pid])
+    assert sample["process_observation_errors"] == ["NoSuchProcess"]
+    assert not sample["child_sample_complete"]
 
 
 def test_source_prefetch_continues_while_consumer_is_encoding():
@@ -1430,20 +1477,19 @@ def test_retained_handle_eviction_does_not_invalidate_active_read(
 
 def test_ordinary_fetch_reads_records_by_position(tmp_path, monkeypatch):
     """Records come from positional reads of one descriptor, not a file per record."""
-    from klab.corpus import mixture_index
+    import os
 
     declaration, _, _ = _fixture(tmp_path, monkeypatch)
     baseline = tmp_path / "baseline"
     expected = mixture._materialize_mixture(declaration, baseline, reuse_tokens=False)
     reads = []
-    original = mixture_index.os.pread
+    original = os.pread
 
     def counted(descriptor, size, offset):
         reads.append((size, offset))
         return original(descriptor, size, offset)
 
-    monkeypatch.setattr(mixture_index.os, "pread", counted)
-    monkeypatch.setenv("KLAB_MIXTURE_WORKERS", "3")
+    monkeypatch.setattr(os, "pread", counted)
     actual = mixture._materialize_mixture(
         declaration, tmp_path / "positional", reuse_tokens=False
     )

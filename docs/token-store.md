@@ -98,9 +98,12 @@ Every preparation path tokenizes through the same pool,
 processes that receive text and return int32 token IDs as length-prefixed
 binary frames. No JSON and no Python integer list crosses a process boundary.
 The token store sends workers whole runs of JSONL lines; the streaming
-collector and corpus mixtures send batches of texts through
-`PreparationEncoder`, which spreads each batch over the workers and returns
-the results in input order. Documents are encoded independently, so the split
+collector sends batches of texts through `PreparationEncoder`, which spreads
+each batch over the workers and returns the results in input order. A corpus
+mixture sends a batch as the byte ranges of its rows in `documents.jsonl`, so
+the worker reads and parses the rows itself and the text never reaches the
+coordinator; each batch goes to one free worker and the coordinator applies the
+results in order. Documents are encoded independently, so the split
 does not change any token.
 
 ## Tokens by content

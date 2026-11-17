@@ -264,7 +264,10 @@ def encode_ahead(
                             if "location" in doc
                             else len(doc["text"].encode("utf-8"))
                         )
-                        if open_batch.items and open_batch.bytes + item[5] > source_bytes:
+                        if (
+                            open_batch.items
+                            and open_batch.bytes + item[5] > source_bytes
+                        ):
                             submit()
                         open_batch.items.append(item)
                         open_batch.bytes += item[5]
@@ -588,8 +591,9 @@ class MixturePreflight:
         )
 
 
-def process_tree_sample():
-    """Sample diagnostics without making a disappearing child fail the work."""
+def process_tree_sample(pids):
+    """Sample the given worker processes without scanning every process on the
+    host; a disappearing worker does not fail the work."""
     import psutil
 
     from klab.corpus.progress import memory_bytes
@@ -605,13 +609,9 @@ def process_tree_sample():
         "process_observation_errors": [],
     }
     errors = set()
-    try:
-        children = psutil.Process().children()
-    except psutil.Error as error:
-        children = []
-        errors.add(type(error).__name__)
-    for child in children:
+    for pid in pids:
         try:
+            child = psutil.Process(pid)
             cpu = child.cpu_times()
             memory = child.memory_info()
             threads = child.num_threads()

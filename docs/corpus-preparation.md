@@ -1136,7 +1136,7 @@ unclassified source kinds.
 ## Materialize a mixture
 
 ```sh
-klab corpus materialize-mixture DECLARATION --output OUTPUT
+klab corpus materialize-mixture DECLARATION --output OUTPUT [--workers N]
 klab corpus verify-mixture DECLARATION --output OUTPUT
 ```
 
@@ -1241,13 +1241,21 @@ documents their own rows.
   markers are removed; `progress.json` stays.
   `KLAB_MIXTURE_COMMIT_CANDIDATES=N` sets how often it commits (default 4096
   candidates, 64 MiB or 30 seconds).
-- **Workers.** Encoding uses the shared [encoder pool](token-store.md#one-encoder)
-  and reuses a [content token store](token-store.md#tokens-by-content), so
-  rebuilding a mixture does not tokenize unchanged documents again.
-  `KLAB_MIXTURE_WORKERS=N` caps the worker plan; by default it follows physical
-  cores and memory.
-- **Progress.** `.OUTPUT.assembly-ID/progress.json` reports per-stratum counts,
-  queue peaks, worker utilization and memory.
+- **Workers.** `--workers N` (default: half the CPU count) sets the number of
+  tokenizer processes. The coordinating process keeps the order-dependent work:
+  it walks each stratum's candidates in rank order, drops duplicate content,
+  counts quotas and writes the output. The workers read each document's row from
+  `documents.jsonl` themselves and tokenize it on the shared
+  [encoder pool](token-store.md#one-encoder), with up to three batches per
+  worker requested ahead of the document being applied. The output, receipt and
+  checkpoints are the same for every worker count, and a resumed run may use a
+  different count. Tokens are kept in a [content token
+  store](token-store.md#tokens-by-content), so rebuilding a mixture does not
+  tokenize unchanged documents again. Allow about 512 MiB per worker; the
+  count is lowered to what the host's memory allows.
+- **Progress.** `.OUTPUT.assembly-ID/progress.json`, refreshed every few
+  seconds, reports per-stratum counts, time spent waiting for the encoder,
+  worker utilization and memory.
 - **Verify.** `verify-mixture` checks the recorded completion and current
   inputs without rerunning; `--audit` reproduces the whole schedule without the
   token cache. Both commands authenticate the tokenizer's export and byte sample

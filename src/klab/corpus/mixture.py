@@ -42,7 +42,8 @@ from klab.result_publication import sync_directory
 from klab.safe_io import rename_noreplace, write_canonical_json
 from klab.training.manifest import sha256_file
 
-MIXTURE_BATCH_SOURCE_BYTES = 8 * 1024**2
+MIXTURE_BATCH_SOURCE_BYTES = 2 * 1024**2
+PROGRESS_INTERVAL_SECONDS = 5
 # A mixture output is the scheduled targets as raw little-endian int32 plus one
 # small JSON row per scheduled record; token IDs are never written as JSON.
 TRAIN_TOKENS = "train.tokens.ids"
@@ -674,8 +675,10 @@ def _schedule(
             raise ValueError("mixture exclusion receipt-byte cap exceeded")
         excluded.append(row)
 
+    from klab.corpus.mixture_pipeline import encode_ahead
     from klab.corpus.preparation_inputs import corpus_work_root
-    from klab.data.encoding import TOKENIZER_BATCH_DOCUMENTS, PreparationEncoder
+    from klab.data import encoding
+    from klab.data.encoding import PreparationEncoder
     from klab.data.token_store import ContentTokens
 
     try:
@@ -696,27 +699,21 @@ def _schedule(
             "output.ids": (stream, token_digest),
             "output.records.jsonl": (record_stream, record_digest),
         }
+        from klab.corpus.release_verify import worker_count
         from klab.host_capacity import plan_host_workers
 
-        cap = os.environ.get("KLAB_MIXTURE_WORKERS")
         workers = plan_host_workers(
             "mixture",
             worker_memory_bytes=512 * 1024**2,
             reserve_bytes=1024**3,
-            operator_cap=int(cap) if cap else None,
+            operator_cap=worker_count(),
         ).workers
-        # One source reader keeps up below eight workers (it measured about 5%
-        # busy), so the rest of a small plan goes to the encoder.
+        # The encoder workers read and tokenize; only an index that reads
+        # source rows itself (retained references) uses reader threads.
         read_workers = max(1, workers // 4) if workers > 1 else 0
-        encode_workers = max(1, workers - read_workers)
-        metrics = {
-            "workers": workers,
-            "read_workers": read_workers,
-            "encode_workers": encode_workers,
-        }
+        metrics = {"workers": workers, "read_workers": read_workers}
         index.pipeline_metrics = metrics
         index.token_lookup = tokens.lookup if tokens is not None else None
-        index.token_bytes = tokens.payload_bytes if tokens is not None else None
         started = time.monotonic()
         selected = Counter()
         done = []
@@ -751,9 +748,10 @@ def _schedule(
         if commit_candidates < 1:
             raise ValueError("KLAB_MIXTURE_COMMIT_CANDIDATES must be positive")
         committed_at = time.monotonic()
+        reported_at = float("-inf")
 
         def checkpoint(stratum, available, *, force=False):
-            nonlocal committed_at
+            nonlocal committed_at, reported_at
             commit_started = time.monotonic()
             committed = (
                 frontier.state["state"]
@@ -804,9 +802,14 @@ def _schedule(
             metrics["checkpoint_seconds"] = (
                 metrics.get("checkpoint_seconds", 0) + time.monotonic() - commit_started
             )
+            if not force and time.monotonic() - reported_at < PROGRESS_INTERVAL_SECONDS:
+                return
+            reported_at = time.monotonic()
             from klab.corpus.mixture_pipeline import process_tree_sample
 
-            observation = process_tree_sample()
+            observation = process_tree_sample(
+                encoder.pids() if encoder is not None else []
+            )
             child_cpu_seconds = observation["child_cpu_seconds"]
             metrics.update(
                 {
@@ -825,9 +828,6 @@ def _schedule(
                     if tokens is not None
                     else 0,
                     "cache_write_seconds": tokens.write_seconds
-                    if tokens is not None
-                    else 0,
-                    "cache_encode_seconds": tokens.encode_seconds
                     if tokens is not None
                     else 0,
                     **observation,
@@ -891,31 +891,13 @@ def _schedule(
                 unique[stratum] += take
             records += 1
 
-        batch_source_bytes = MIXTURE_BATCH_SOURCE_BYTES
-        encoder = None
-
-        def encode_missing(texts):
-            nonlocal encoder
-            if (
-                len(texts) < 2
-                or getattr(tokenizer, "padding", None) is not None
-                or not callable(getattr(tokenizer, "to_str", None))
-            ):
-                return [
-                    tokenizer.encode(text, add_special_tokens=False).ids
-                    for text in texts
-                ]
-            if encoder is None:
-                encoder = encoders.enter_context(
-                    PreparationEncoder(tokenizer, max_workers=encode_workers)
-                )
-            encode_started = time.monotonic()
-            try:
-                return encoder.encode_arrays(texts)
-            finally:
-                metrics["encode_seconds"] = (
-                    metrics.get("encode_seconds", 0) + time.monotonic() - encode_started
-                )
+        # A padded or stand-in tokenizer is encoded here, one text at a time.
+        encoder = (
+            encoders.enter_context(PreparationEncoder(tokenizer, max_workers=workers))
+            if getattr(tokenizer, "padding", None) is None
+            and callable(getattr(tokenizer, "to_str", None))
+            else None
+        )
 
         for stratum, quota in sorted(spec.target_quotas.items()):
             if stratum in done:
@@ -933,8 +915,6 @@ def _schedule(
             # A single exposure is emitted as it is encoded; only repeats need
             # the index to retain encoded documents.
             direct = exposures == 1
-            pending = []
-            pending_bytes = 0
 
             def process(
                 doc, family, ids, *, stratum=stratum, quota=quota, direct=direct
@@ -964,102 +944,35 @@ def _schedule(
                 available += len(ids) + 1
                 available_content[stratum] += len(ids)
 
-            def flush(pending=pending, stratum=stratum):
-                nonlocal pending_bytes, available
-                if not pending:
-                    return
-                texts = [
-                    doc["text"]
-                    for doc, family in pending
-                    if family is not None and "cached_ids" not in doc
-                ]
-                ids = iter(
-                    tokens.encode_many(texts, encode_missing)
-                    if tokens is not None
-                    else encode_missing(texts)
-                )
-                for doc, family in pending:
-                    if family is None:
-                        exclude(doc, "duplicate_train_content")
-                    else:
-                        process(
-                            doc,
-                            family,
-                            doc["cached_ids"] if "cached_ids" in doc else next(ids),
-                        )
-                pending.clear()
-                pending_bytes = 0
-                checkpoint(stratum, available)  # noqa: B023 - synchronous flush of current stratum
-
             candidate_rows = (
                 ()
                 if emission_exposure
-                else index.candidates(stratum, candidate_cursor, workers=read_workers)
+                else encode_ahead(
+                    index.candidates(stratum, candidate_cursor, workers=read_workers),
+                    position=lambda: index.frontier,
+                    encoder=encoder,
+                    tokenizer=tokenizer,
+                    tokens=tokens,
+                    documents=encoding.TOKENIZER_BATCH_DOCUMENTS,
+                    source_bytes=MIXTURE_BATCH_SOURCE_BYTES,
+                    metrics=metrics,
+                )
             )
             if hasattr(candidate_rows, "close"):
                 encoders.callback(candidate_rows.close)
-            for doc, family in candidate_rows:
-                if "cached_payload" in doc:
-                    doc["cached_ids"] = ContentTokens.decode_ids(
-                        doc.pop("cached_payload")
-                    )
-                marker = {"document_id": doc["document_id"]}
-                buffered_bytes = (
-                    max(
-                        len(doc["text"].encode("utf-8")),
-                        36 * len(doc.get("cached_ids", [])),
-                    )
-                    + len(doc["document_id"].encode("utf-8"))
-                    + len(doc["source_id"].encode("utf-8"))
-                    + len(family.encode("utf-8"))
-                )
-                # Flush before mutating dedup state for this candidate. Its
-                # cursor must never get ahead of the committed index delta.
-                if pending and (
-                    len(pending) >= TOKENIZER_BATCH_DOCUMENTS
-                    or pending_bytes + buffered_bytes > batch_source_bytes
-                ):
-                    flush()
-                candidate_cursor = index.frontier
+            applied = 0
+            for doc, family, cursor, ids in candidate_rows:
+                candidate_cursor = cursor
                 candidates[stratum] += 1
                 if index.seen(doc["content_sha256"]):
-                    pending.append((marker, None))
-                    pending_bytes += len(doc["document_id"].encode("utf-8"))
-                elif buffered_bytes > batch_source_bytes:
-                    ids = doc.get("cached_ids")
-                    if ids is None:
-                        ids = (
-                            tokens.encode(tokenizer, doc["text"])
-                            if tokens is not None
-                            else tokenizer.encode(
-                                doc["text"], add_special_tokens=False
-                            ).ids
-                        )
-                    process(doc, family, ids)
-                    checkpoint(stratum, available)
+                    exclude(doc, "duplicate_train_content")
                 else:
-                    pending.append(
-                        (
-                            {
-                                **marker,
-                                "source_id": doc["source_id"],
-                                "text": doc["text"],
-                                **(
-                                    {"cached_ids": doc["cached_ids"]}
-                                    if "cached_ids" in doc
-                                    else {}
-                                ),
-                            },
-                            family,
-                        )
-                    )
-                    pending_bytes += buffered_bytes
-                if (
-                    len(pending) >= TOKENIZER_BATCH_DOCUMENTS
-                    or pending_bytes >= batch_source_bytes
-                ):
-                    flush()
-            flush()
+                    process(doc, family, ids)
+                applied += 1
+                if applied >= encoding.TOKENIZER_BATCH_DOCUMENTS:
+                    applied = 0
+                    checkpoint(stratum, available)
+            checkpoint(stratum, available)
             if (
                 spec.unique_train_content_floors is not None
                 and available_content[stratum]
@@ -1084,7 +997,7 @@ def _schedule(
                             break
                         emit(doc, stratum, quota, exposure)
                         emission_ordinal = index.encoded_frontier
-                        if records % TOKENIZER_BATCH_DOCUMENTS == 0:
+                        if records % encoding.TOKENIZER_BATCH_DOCUMENTS == 0:
                             checkpoint(stratum, available)
                     if totals[stratum] == quota:
                         break
