@@ -926,6 +926,8 @@ def _head_chunking_lever(
 
 
 def _offload_lever(config: RunConfig, runtime_info: RuntimeInfo) -> RunConfig | str:
+    if config.runtime.parallel.sharded:
+        return "not available with runtime.parallel sharded modes"
     if config.optimizer.state_offload:
         return "already on"
     if runtime_info.engine != "pytorch" or runtime_info.backend == "cpu":
@@ -934,6 +936,8 @@ def _offload_lever(config: RunConfig, runtime_info: RuntimeInfo) -> RunConfig | 
 
 
 def _adafactor_lever(config: RunConfig, runtime_info: RuntimeInfo) -> RunConfig | str:
+    if config.runtime.parallel.sharded:
+        return "not available with runtime.parallel sharded modes"
     if config.optimizer.name == "adafactor":
         return "already Adafactor"
     if runtime_info.engine != "pytorch":
@@ -963,6 +967,8 @@ def _bf16_optimizer_state_lever(
 ) -> RunConfig | str:
     if config.optimizer.name != "adamw":
         return "only AdamW keeps full moments"
+    if config.runtime.parallel.sharded:
+        return "not available with runtime.parallel sharded modes"
     if config.optimizer.state_dtype == "bf16":
         return "already bf16"
     if runtime_info.engine != "pytorch":
