@@ -48,6 +48,7 @@ def _make_run_config(
     *,
     secondary_device_indices: tuple[int, ...] = (),
     runtime_options: dict[str, object] | None = None,
+    backend: str = "cpu",
 ) -> RunConfig:
     return RunConfig(
         schema_version=2,
@@ -55,7 +56,7 @@ def _make_run_config(
         seed=42,
         runtime=RuntimeConfig(
             engine="pytorch",
-            backend="cpu",
+            backend=backend,
             device_index=0,
             secondary_device_indices=secondary_device_indices,
             precision="fp32",
@@ -739,34 +740,26 @@ def _assert_same_training(
             ), f"{context}: optimizer {name}.{key}"
 
 
-@pytest.mark.parametrize(
-    ("mode", "options"),
-    [
-        ("zero1", {"compile_transformer_blocks": True}),
-        (
-            "zero2",
-            {
-                "memory": MemoryConfig(
-                    activation_checkpointing=ActivationCheckpointingConfig(enabled=True)
-                )
-            },
-        ),
-        ("fsdp", {"output_head_chunk_tokens": 8}),
-    ],
-)
-def test_sharded_training_matches_one_device_and_crosses_layouts(
-    tmp_path: Path, mode: str, options: dict[str, object]
+def _assert_sharded_matches_one_device(
+    tmp_path: Path,
+    mode: str,
+    options: dict[str, object],
+    backend: str,
+    secondary: tuple[int, ...],
 ) -> None:
-    """Every mode trains like one device, and checkpoints load across layouts.
+    """Train in ``mode`` and on one device; compare, then resume across layouts.
 
     Three microbatches over two ranks also run the lockstep padding, and the
     Engram tables and tied output head are sharded with everything else.
     """
-    single = _make_run_config(tmp_path / "single", runtime_options=options)
+    single = _make_run_config(
+        tmp_path / "single", runtime_options=options, backend=backend
+    )
     sharded = _make_run_config(
         tmp_path / mode,
-        secondary_device_indices=(0,),
+        secondary_device_indices=secondary,
         runtime_options={**options, "parallel": ParallelConfig(mode=mode)},
+        backend=backend,
     )
     reference, engine, resumed = PyTorchEngine(), PyTorchEngine(), PyTorchEngine()
     try:
@@ -819,6 +812,39 @@ def test_sharded_training_matches_one_device_and_crosses_layouts(
     finally:
         for subject in (reference, engine, resumed):
             subject.close()
+
+
+@pytest.mark.parametrize(
+    ("mode", "options"),
+    [
+        ("zero1", {"compile_transformer_blocks": True}),
+        (
+            "zero2",
+            {
+                "memory": MemoryConfig(
+                    activation_checkpointing=ActivationCheckpointingConfig(enabled=True)
+                )
+            },
+        ),
+        ("fsdp", {"output_head_chunk_tokens": 8}),
+    ],
+)
+def test_sharded_training_matches_one_device_and_crosses_layouts(
+    tmp_path: Path, mode: str, options: dict[str, object]
+) -> None:
+    """Every mode trains like one device, and checkpoints load across layouts."""
+    _assert_sharded_matches_one_device(tmp_path, mode, options, "cpu", (0,))
+
+
+@pytest.mark.xpu
+@pytest.mark.parametrize("mode", ["zero1", "zero2", "fsdp"])
+def test_sharded_training_over_xccl_matches_one_device(
+    tmp_path: Path, mode: str
+) -> None:
+    """The same check with one process per card and xccl collectives."""
+    if torch.xpu.device_count() < 2:
+        pytest.skip("needs two XPU devices")
+    _assert_sharded_matches_one_device(tmp_path, mode, {}, "xpu", (1,))
 
 
 def test_sharded_modes_refuse_what_they_cannot_shard(tmp_path: Path) -> None:
