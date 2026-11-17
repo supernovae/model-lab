@@ -16,7 +16,6 @@ import base64
 import functools
 import hashlib
 import json
-import os
 import sqlite3
 from collections import defaultdict
 from collections.abc import Iterator
@@ -572,44 +571,37 @@ class MixtureIndex:
         self.staged = None
 
     def candidates(self, stratum, frontier=None, *, workers=1):
+        """Yield ``(doc, family)`` in rank order without reading any text.
+
+        A document is its identity plus ``path`` and ``location``, the byte
+        range of its row, for the encoder to read; a document whose IDs are
+        cached carries them instead. ``workers`` is unused here: reading is
+        the encoder's.
+        """
         if frontier is None:
             self.db.execute("DELETE FROM seen")
-        from klab.corpus.mixture_pipeline import ordered_fetch
-
         if self.selection is None:
             raise ValueError("the mixture index has no selection yet")
         cursor = self.selection.candidates(stratum, frontier)
-
-        descriptor = self.documents.fileno()
-
-        def fetch(row):
-            # A positional read on the index's descriptor: concurrent fetches
-            # share no seek position and open no file per record.
-            offset, size = row[0], row[4]
-            if size > MAX_ROW_BYTES:
-                raise ValueError("mixture record-byte cap exceeded")
-            raw = os.pread(descriptor, size, offset)
-            if len(raw) != size:
-                raise ValueError("mixture source changed during materialization")
-            return json.loads(raw)
-
+        path = str(Path(self.documents.name).resolve())
         try:
-            for row, doc in ordered_fetch(
-                cursor,
-                fetch,
-                workers=workers,
-                size=lambda row: self.candidate_bytes(row[4], row[5]),
-                metrics=getattr(self, "pipeline_metrics", None),
-                cached=lambda row: self.cached_document(row[3], row[6], row[5]),
-            ):
-                self.frontier = [row[2], row[3]]
-                yield doc, row[1]
+            for offset, family, rank, doc_id, size, content, source in cursor:
+                if size > MAX_ROW_BYTES:
+                    raise ValueError("mixture record-byte cap exceeded")
+                self.frontier = [rank, doc_id]
+                yield (
+                    self.cached_document(doc_id, source, content)
+                    or {
+                        "document_id": doc_id,
+                        "source_id": source,
+                        "content_sha256": content,
+                        "path": path,
+                        "location": (offset, size),
+                    },
+                    family,
+                )
         finally:
             cursor.close()
-
-    def candidate_bytes(self, source_bytes, content):
-        lookup = getattr(self, "token_bytes", None)
-        return max(source_bytes, lookup(content) if lookup is not None else 0)
 
     def cached_document(self, doc_id, source, content):
         lookup = getattr(self, "token_lookup", None)

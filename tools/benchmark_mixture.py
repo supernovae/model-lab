@@ -37,7 +37,6 @@ def main():
         os.sched_setaffinity(0, sorted(os.sched_getaffinity(0))[: args.workers])
     for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
         os.environ[name] = "1"
-    os.environ["KLAB_MIXTURE_WORKERS"] = str(args.workers)
     root = args.root.resolve()
     root.mkdir(mode=0o700, parents=True, exist_ok=False)
     os.environ["XDG_CONFIG_HOME"] = str(root / "config")
@@ -47,6 +46,7 @@ def main():
 
     from klab.canonical import canonical_json
     from klab.corpus.mixture import _schedule
+    from klab.corpus.release_verify import verification_settings
     from klab.corpus.retained_mixture import RetainedMixtureIndex
     from klab.corpus.split_runs import write_rows
     from klab.training.manifest import sha256_file
@@ -185,18 +185,19 @@ def main():
                 options["frontier"] = MixtureFrontier(
                     staging, cache, pipeline_request(request, index)
                 )
-            receipt = _schedule(
-                spec,
-                b"synthetic benchmark",
-                release,
-                {"release_id": "a" * 64},
-                tokenizer,
-                tokenizer_sha,
-                3,
-                index,
-                staging,
-                **options,
-            )
+            with verification_settings(workers=args.workers):
+                receipt = _schedule(
+                    spec,
+                    b"synthetic benchmark",
+                    release,
+                    {"release_id": "a" * 64},
+                    tokenizer,
+                    tokenizer_sha,
+                    3,
+                    index,
+                    staging,
+                    **options,
+                )
         progress_path = (
             (root / ("." + name + ".assembly") / "progress.json")
             if options

@@ -14,6 +14,7 @@ from klab.canonical import canonical_json
 from klab.corpus import mixture_index, shards
 from klab.corpus.mixture_index import MixtureIndex, document_rank
 from klab.corpus.release_verify import verification_settings
+from klab.token_encode_worker import read_texts
 
 SEED = 42
 STRATA = {"s0": "alpha", "s1": "alpha", "s2": "beta", "s3": "beta", "s4": "gamma"}
@@ -154,7 +155,8 @@ def test_selection_is_the_specification_for_any_workers_and_resumes_after_a_kill
             )
             if doc["document_id"] == release["documents"][3]["document_id"]
         )
-        assert repeated["text"] == "the later row"
+        # The candidate names the later row's bytes, which the encoder reads.
+        assert read_texts(repeated["path"], [repeated["location"]]) == ["the later row"]
 
     scratch = tmp_path / "scratch"
     monkeypatch.setenv("KLAB_FAULT", f"{mixture_index.INVENTORY_STAGE}:2")

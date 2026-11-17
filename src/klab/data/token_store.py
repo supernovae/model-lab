@@ -508,6 +508,12 @@ class ContentTokens:
         self._flushed = self._tokens
         self.pending = 0
 
+    def store(self, content: bytes, ids: np.ndarray) -> None:
+        """Keep IDs encoded elsewhere, once, under the 32-byte digest of the text."""
+        if content not in self._rows:
+            self.misses += 1
+            self._append(content, np.asarray(ids, dtype="<i4"))
+
     def encode_many(self, texts, encode_missing):
         """Return int32 arrays in input order; only absent content is encoded."""
         keys, known, missing = [], {}, {}

@@ -6,6 +6,7 @@ Only the coordinator mutates the token cache, schedule, or disposable SQL index.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -15,6 +16,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
 
+import numpy as np
+
+from klab import token_encode_worker
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.admission_inspection_cache import capture
 from klab.corpus.mixture_index import MAX_ROW_BYTES, rows
@@ -25,6 +29,10 @@ from klab.training.manifest import sha256_file
 
 PREFETCH_BYTES = 128 * 1024**2
 PREFETCH_DOCUMENTS = 256  # One tokenizer batch can read ahead while encoding runs.
+# Source bytes the encoder may hold ahead of the ordered consumer, and batches
+# in flight per encoder worker.
+ENCODE_AHEAD_BYTES = 128 * 1024**2
+ENCODE_AHEAD_BATCHES = 3
 
 
 def ordered_fetch(
@@ -129,6 +137,183 @@ def ordered_fetch(
             close = getattr(iterator, "close", None)
             if close is not None:
                 close()
+
+
+class _Done:
+    """A finished request, for batches encoded in this process."""
+
+    def __init__(self, frames):
+        self.frames = frames
+
+    def result(self):
+        return self.frames
+
+    def cancel(self):
+        return False
+
+
+class _Batch:
+    def __init__(self):
+        self.items = []
+        self.bytes = 0
+        self.future = None
+
+
+def encode_ahead(
+    source,
+    *,
+    position,
+    encoder,
+    tokenizer,
+    tokens,
+    documents,
+    source_bytes,
+    metrics,
+):
+    """Yield ``(doc, family, cursor, ids)`` in source order, encoding ahead.
+
+    ``source`` yields ``(doc, family)``. A document carries ``cached_payload``
+    (IDs already known), ``text`` (read by the caller) or ``path`` and
+    ``location`` (a byte range the encoder reads itself, so the text never
+    reaches this process). Uncached documents are grouped into batches of at
+    most ``documents`` rows and ``source_bytes``; each batch is one request to
+    whichever encoder worker is free, and up to ``ENCODE_AHEAD_BATCHES`` batches
+    per worker are in flight while the consumer applies earlier ones in order.
+    ``cursor`` is ``position()`` as the document left ``source``, so a consumer
+    that stops after a document resumes after it however far ahead the source
+    ran. ``encoder`` is a pool or ``None`` to encode in this process. Fresh IDs
+    are stored in ``tokens`` under the SHA-256 of the text the encoder read.
+    """
+    limit = ENCODE_AHEAD_BATCHES * (encoder.rayon_threads if encoder else 1)
+    window, flying, held = deque(), 0, 0
+    open_batch = _Batch()
+    exhausted = False
+    iterator = iter(source)
+    metrics.setdefault("encode_wait_seconds", 0.0)
+
+    def submit():
+        nonlocal open_batch, flying
+        batch, open_batch = open_batch, _Batch()
+        first = batch.items[0][0]
+        if "location" in first:
+            locations = [item[0]["location"] for item in batch.items]
+            request = b"D" + token_encode_worker.pack_documents(
+                first["path"], locations
+            )
+        else:
+            request = b"T" + token_encode_worker.pack_texts(
+                [item[0]["text"] for item in batch.items]
+            )
+        if encoder is not None:
+            metrics["batches"] = metrics.get("batches", 0) + 1
+            batch.future = encoder.submit(request)
+        else:
+            batch.future = _Done(_encode_here(tokenizer, request))
+        for item in batch.items:
+            item[4] = batch
+        flying += 1
+
+    def finish(batch):
+        nonlocal flying
+        waiting = time.monotonic()
+        frames = batch.future.result()
+        metrics["encode_wait_seconds"] += time.monotonic() - waiting
+        flying -= 1
+        ids = np.frombuffer(frames[0], dtype=np.int32)
+        counts = np.frombuffer(frames[1], dtype=np.uint32).tolist()
+        if len(counts) != len(batch.items):
+            raise ValueError("tokenizer returned incorrect batch length")
+        started, at = time.monotonic(), 0
+        for index, (item, count) in enumerate(zip(batch.items, counts, strict=True)):
+            item[3] = ids[at : at + count]
+            at += count
+            if tokens is not None:
+                digest = (
+                    frames[2][32 * index : 32 * index + 32]
+                    if len(frames) > 2
+                    else hashlib.sha256(item[0]["text"].encode("utf-8")).digest()
+                )
+                tokens.store(digest, item[3])
+        if tokens is not None:
+            tokens.write_seconds += time.monotonic() - started
+        batch.items = None
+
+    try:
+        while True:
+            while (
+                not exhausted
+                and held < ENCODE_AHEAD_BYTES
+                and flying + bool(open_batch.items) <= limit
+            ):
+                found = next(iterator, None)
+                if found is None:
+                    exhausted = True
+                    break
+                doc, family = found
+                item = [doc, family, position(), None, None, 0]
+                if "cached_payload" in doc:
+                    item[3] = tokens.decode_ids(doc.pop("cached_payload"))
+                    item[5] = 4 * len(item[3])
+                else:
+                    if "text" in doc and tokens is not None:
+                        digest = hashlib.sha256(doc["text"].encode("utf-8")).hexdigest()
+                        item[3] = tokens.lookup(digest, count_miss=False)
+                    if item[3] is None:
+                        item[5] = (
+                            doc["location"][1]
+                            if "location" in doc
+                            else len(doc["text"].encode("utf-8"))
+                        )
+                        if (
+                            open_batch.items
+                            and open_batch.bytes + item[5] > source_bytes
+                        ):
+                            submit()
+                        open_batch.items.append(item)
+                        open_batch.bytes += item[5]
+                        if (
+                            len(open_batch.items) >= documents
+                            or open_batch.bytes >= source_bytes
+                        ):
+                            submit()
+                held += item[5]
+                window.append(item)
+            if not window:
+                return
+            item = window.popleft()
+            if item[3] is None:
+                if item[4] is None:
+                    submit()
+                if item[4].items is not None:
+                    finish(item[4])
+            held -= item[5]
+            metrics["window_peak"] = max(metrics.get("window_peak", 0), len(window) + 1)
+            yield item[0], item[1], item[2], item[3]
+    finally:
+        for item in window:
+            if item[4] is not None and item[4].future is not None:
+                item[4].future.cancel()
+
+
+def _encode_here(tokenizer, request):
+    """Answer an encoder request in this process (a padded or stand-in tokenizer)."""
+    if request[:1] == b"D":
+        texts = token_encode_worker.read_texts(
+            *token_encode_worker.unpack_documents(request[1:])
+        )
+    else:
+        texts = token_encode_worker.unpack_texts(request[1:])
+    encodings = [tokenizer.encode(text, add_special_tokens=False).ids for text in texts]
+    counts = np.fromiter(map(len, encodings), dtype=np.uint32, count=len(encodings))
+    ids = np.fromiter(
+        (token for encoding in encodings for token in encoding),
+        dtype=np.int32,
+        count=int(counts.sum()),
+    )
+    frames = (ids.tobytes(), counts.tobytes())
+    if request[:1] == b"D":
+        frames += (token_encode_worker.text_digests(texts).tobytes(),)
+    return frames
 
 
 class MixtureFrontier:
@@ -406,8 +591,9 @@ class MixturePreflight:
         )
 
 
-def process_tree_sample():
-    """Sample diagnostics without making a disappearing child fail the work."""
+def process_tree_sample(pids):
+    """Sample the given worker processes without scanning every process on the
+    host; a disappearing worker does not fail the work."""
     import psutil
 
     from klab.corpus.progress import memory_bytes
@@ -423,13 +609,9 @@ def process_tree_sample():
         "process_observation_errors": [],
     }
     errors = set()
-    try:
-        children = psutil.Process().children()
-    except psutil.Error as error:
-        children = []
-        errors.add(type(error).__name__)
-    for child in children:
+    for pid in pids:
         try:
+            child = psutil.Process(pid)
             cpu = child.cpu_times()
             memory = child.memory_info()
             threads = child.num_threads()
