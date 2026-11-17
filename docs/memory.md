@@ -137,6 +137,32 @@ targets/s from the fourth update on:
 | 32,768 | `transformer_block_and_attention` | 25.9 GiB | 1,295 |
 | 32,768 | `transformer_block_and_attention`, `state_offload` | 18.7 GiB | 1,286 (20 updates) |
 
+Recomputation combines with `runtime.compile_transformer_blocks`: each block is
+compiled once and the compiled block is what backward reruns. Lab builds the
+RoPE tables to `model.max_seq_len` before compiling, so the forward and its
+recomputation use the same graph. The two settings answer different questions
+(speed and memory), so neither excludes the other; activation offload is the one
+setting block compilation still refuses. A block's diagnostic side effects stay
+outside the compiled function.
+
+Measured on one Arc Pro B70, bf16 autocast, SDPA attention, hidden width 1,536
+with 24 heads, FFN width 4,096, vocabulary 32,768, one 4,096-token row per
+update, AdamW, steady updates after three warm-up updates:
+
+| Layers | Settings | Peak allocated | Tokens/s |
+| --- | --- | --- | --- |
+| 12 | none | 10.80 GiB | 11,832 |
+| 12 | `transformer_block` | 7.53 GiB | 9,942 |
+| 12 | `compile_transformer_blocks` | 9.30 GiB | 15,450 |
+| 12 | both | 7.53 GiB | 13,127 |
+| 6 | none | 6.63 GiB | 21,662 |
+| 6 | `transformer_block` | 4.51 GiB | 18,503 |
+| 6 | `compile_transformer_blocks` | 5.88 GiB | 27,968 |
+| 6 | both | 4.51 GiB | 22,358 |
+
+Compiling the recomputed block recovers about a third of the speed that
+recomputation costs and keeps the whole memory saving.
+
 ### Activation offload
 
 ```yaml

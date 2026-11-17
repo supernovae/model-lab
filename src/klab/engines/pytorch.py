@@ -154,6 +154,28 @@ def apply_recomputation_strategy(model: DenseLM, config: RunConfig) -> None:
             module.recompute_chunks = chunks
 
 
+def compile_transformer_blocks(
+    model: DenseLM, config: RunConfig, device: torch.device
+) -> None:
+    """Compile each block's forward, which activation recomputation may then rerun.
+
+    The RoPE tables are built to ``max_seq_len`` first, so a block compiles once
+    against its final buffers. A table that grew during the first forward would
+    give the forward and its recomputation different graphs, and recomputation
+    refuses saved tensors that differ from the forward's.
+    """
+    from klab.model.rope import RoPE
+
+    for module in model.modules():
+        if isinstance(module, RoPE):
+            module.reserve(config.model.max_seq_len, device)
+    dynamic = config.runtime.compile_dynamic_shapes
+    for block in model.blocks:
+        block.forward_with_aux = torch.compile(
+            block.forward_with_aux, dynamic=dynamic, fullgraph=dynamic
+        )
+
+
 def _cap_allocator(device: torch.device, spill_limits: SpillLimits | None) -> bool:
     """Make the caching allocator refuse growth past the spill guard's limit."""
     api = getattr(torch, device.type, None)
@@ -468,18 +490,7 @@ class PyTorchEngine:
                 fullgraph=config.runtime.compile_dynamic_shapes,
             )
         if config.runtime.compile_transformer_blocks:
-            if config.runtime.compile_dynamic_shapes:
-                from klab.model.rope import RoPE
-
-                for module in model.modules():
-                    if isinstance(module, RoPE):
-                        module.reserve(config.model.max_seq_len, device)
-            for block in model.blocks:
-                block.forward_with_aux = torch.compile(
-                    block.forward_with_aux,
-                    dynamic=config.runtime.compile_dynamic_shapes,
-                    fullgraph=config.runtime.compile_dynamic_shapes,
-                )
+            compile_transformer_blocks(model, config, device)
         self._last_gradient_parameter_names = ()
         self._last_update_parameter_names = ()
         self.scaler = make_grad_scaler(config, device)

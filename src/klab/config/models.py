@@ -958,12 +958,10 @@ class RuntimeConfig(StrictModel):
         ):
             raise ValueError("dynamic compilation requires a compiled training kernel")
         if self.compile_transformer_blocks and (
-            self.engine != "pytorch"
-            or self.memory.activation_checkpointing.enabled
-            or self.memory.activation_offload.enabled
+            self.engine != "pytorch" or self.memory.activation_offload.enabled
         ):
             raise ValueError(
-                "block compilation requires PyTorch without activation checkpointing or offload"
+                "block compilation requires PyTorch without activation offload"
             )
         if self.compile_output_head_loss and (
             self.engine != "pytorch"

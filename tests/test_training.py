@@ -947,12 +947,23 @@ def test_estimate_observation_keeps_warning_and_allocation_failures(
 
 
 @pytest.mark.slow
-def test_compiled_block_checkpoint_round_trip(tmp_path: Path) -> None:
+@pytest.mark.parametrize("recompute", [False, True])
+def test_compiled_block_checkpoint_round_trip(tmp_path: Path, recompute: bool) -> None:
     original = config(tmp_path)
+    memory = original.runtime.memory
     compiled = original.model_copy(
         update={
             "runtime": original.runtime.model_copy(
-                update={"compile_transformer_blocks": True}
+                update={
+                    "compile_transformer_blocks": True,
+                    "memory": memory.model_copy(
+                        update={
+                            "activation_checkpointing": memory.activation_checkpointing.model_copy(
+                                update={"enabled": recompute}
+                            )
+                        }
+                    ),
+                }
             )
         }
     )
