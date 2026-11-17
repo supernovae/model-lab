@@ -16,10 +16,11 @@ from typing import Literal
 import psutil
 import torch
 import yaml
+from pydantic import ValidationError
 
 from klab import host_capacity
 from klab.canonical import canonical_json
-from klab.config.models import AttentionConfig, RunConfig
+from klab.config.models import AttentionConfig, ParallelConfig, RunConfig
 from klab.engines.base import EngineOutOfMemory
 from klab.model.attention.local_selected import CHUNK_CELLS
 from klab.model.inspection import (
@@ -55,6 +56,12 @@ class MemoryEstimate:
     # Optimizer state kept in host memory by ``optimizer.state_offload``; it is
     # not part of ``peak_bytes``.
     host_optimizer_bytes: int = 0
+    # ``runtime.parallel``: the figures above are per device, and under ``fsdp``
+    # ``gather_transient_bytes`` is the parameters gathered at once on top of
+    # the resident shard.
+    parallel_mode: str = "replicated"
+    devices: int = 1
+    gather_transient_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -242,6 +249,92 @@ def _attention_reach(
     )
 
 
+PARALLEL_MODES = ("replicated", "zero1", "zero2", "fsdp")
+
+
+def parallel_devices(config: RunConfig) -> int:
+    return 1 + len(config.runtime.secondary_device_indices)
+
+
+def _sharding_groups(config: RunConfig) -> dict[str, tuple[int, int]]:
+    """FP32 weight and gradient bytes of each group ``shard_model`` wraps.
+
+    A group is one block, one token memory, or the rest (embedding, norm and
+    output head); aliases are counted once.
+    """
+    groups: dict[str, list[int]] = {}
+    for name, spec in named_tensor_inventory(
+        config.model,
+        config.attention,
+        trainable_parameters=config.training.trainable_parameters,
+    ).items():
+        if spec.alias_of is not None:
+            continue
+        head, _, rest = name.partition(".")
+        key = (
+            f"{head}.{rest.partition('.')[0]}"
+            if head in {"blocks", "extra_memories"}
+            else head
+            if head == "memory"
+            else "root"
+        )
+        entry = groups.setdefault(key, [0, 0])
+        entry[0] += 4 * spec.numel
+        entry[1] += 4 * spec.numel * spec.trainable
+    return {key: (weights, gradients) for key, (weights, gradients) in groups.items()}
+
+
+def sharded_device_bytes(
+    config: RunConfig,
+    inventory: ParameterInventory,
+    optimizer_bytes: int,
+    mode: str,
+) -> dict[str, int]:
+    """Per-device weights, gradients, optimizer state and gather transient for ``mode``.
+
+    ``zero1`` and ``zero2`` keep the parameters whole beside their shard;
+    ``fsdp`` keeps the shard and gathers the embedding group, the block being
+    computed and the next one (prefetch) at a time. Gradients that a mode
+    reduces per group are held whole for the embedding group and for the
+    groups in flight.
+    """
+    n = parallel_devices(config)
+    weights, gradients = inventory.total * 4, inventory.trainable * 4
+    shard = {
+        "weights": -(-weights // n),
+        "gradients": -(-gradients // n),
+        "optimizer": -(-optimizer_bytes // n),
+    }
+    groups = _sharding_groups(config)
+    root_w, root_g = groups.get("root", (0, 0))
+    others = [value for key, value in groups.items() if key != "root"]
+    widest_w = max((w for w, _ in others), default=0)
+    widest_g = max((g for _, g in others), default=0)
+    if mode == "zero1":
+        return {
+            "weights": weights + shard["weights"],
+            "gradients": gradients + shard["gradients"],
+            "optimizer": shard["optimizer"],
+            "gather": 0,
+        }
+    in_flight_gradients = min(
+        shard["gradients"] + root_g + 2 * widest_g, gradients + shard["gradients"]
+    )
+    if mode == "zero2":
+        return {
+            "weights": weights + shard["weights"],
+            "gradients": in_flight_gradients,
+            "optimizer": shard["optimizer"],
+            "gather": 0,
+        }
+    return {
+        "weights": shard["weights"],
+        "gradients": in_flight_gradients,
+        "optimizer": shard["optimizer"],
+        "gather": root_w + 2 * widest_w,
+    }
+
+
 def estimate_memory(
     config: RunConfig,
     runtime_info: RuntimeInfo,
@@ -284,6 +377,17 @@ def estimate_memory(
         # The full state waits in host memory; one bucket is on the device.
         offloaded_optimizer = optimizer
         optimizer = offloaded_state_device_bytes(optimizer, largest)
+    gather = 0
+    if config.runtime.parallel.sharded:
+        per_device = sharded_device_bytes(
+            config, inventory, optimizer, config.runtime.parallel.mode
+        )
+        weights, gradients, optimizer, gather = (
+            per_device["weights"],
+            per_device["gradients"],
+            per_device["optimizer"],
+            per_device["gather"],
+        )
     # Each block is charged for its own feed-forward and attention kind. A
     # feed-forward kind from another package is charged as one dense SwiGLU.
     nonattention: list[int] = []
@@ -356,6 +460,7 @@ def estimate_memory(
         + buffers
         + gradients
         + optimizer
+        + gather
         + activations
         + attention_working
         + workspace
@@ -394,6 +499,13 @@ def estimate_memory(
         assumptions.append(
             "activation offload is unsupported here and receives no estimated saving"
         )
+    if config.runtime.parallel.sharded:
+        assumptions.append(
+            f"runtime.parallel {config.runtime.parallel.mode} over "
+            f"{parallel_devices(config)} devices: weights, gradients and "
+            "optimizer state are per device; sharded modes keep FP32 master "
+            "shards and gather in FP32"
+        )
     if offloaded_optimizer:
         assumptions.append(
             "optimizer state offload keeps the full state in host memory and "
@@ -420,6 +532,9 @@ def estimate_memory(
         headroom,
         tuple(assumptions),
         host_optimizer_bytes=offloaded_optimizer,
+        parallel_mode=config.runtime.parallel.mode,
+        devices=parallel_devices(config),
+        gather_transient_bytes=gather,
     )
 
 
@@ -500,6 +615,14 @@ def calibration_key(
             config.runtime.memory.activation_checkpointing.strategy
         ),
         "offload": config.runtime.memory.activation_offload.enabled,
+        **(
+            {
+                "parallel": config.runtime.parallel.mode,
+                "parallel_devices": parallel_devices(config),
+            }
+            if config.runtime.parallel.sharded
+            else {}
+        ),
     }
     canonical = json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -615,6 +738,51 @@ def _replace_microbatch(
     )
 
 
+def _with_parallel_mode(config: RunConfig, mode: str) -> RunConfig:
+    """``config`` under ``runtime.parallel.mode``, or ``ValidationError`` if it cannot."""
+    runtime = config.runtime.model_copy(update={"parallel": ParallelConfig(mode=mode)})
+    return RunConfig.model_validate(
+        {
+            **config.model_dump(mode="json"),
+            "runtime": runtime.model_dump(mode="json"),
+        }
+    )
+
+
+def compare_parallel_modes(
+    config: RunConfig, runtime_info: RuntimeInfo, inventory: ParameterInventory
+) -> list[dict[str, object]]:
+    """Per-device estimate of each ``runtime.parallel`` mode for this config's devices.
+
+    ``replicated`` is the primary device, which also holds the optimizer.
+    Modes the config cannot use (see ``runtime.parallel``) are listed with the
+    reason instead of figures.
+    """
+    rows: list[dict[str, object]] = []
+    for mode in PARALLEL_MODES:
+        try:
+            proposed = _with_parallel_mode(config, mode)
+        except ValidationError as error:
+            reason = error.errors()[0]["msg"].removeprefix("Value error, ")
+            rows.append({"mode": mode, "unavailable": reason})
+            continue
+        estimate = estimate_memory(proposed, runtime_info, inventory)
+        rows.append(
+            {
+                "mode": mode,
+                "devices": estimate.devices,
+                "weights_bytes": estimate.resident_weights_bytes,
+                "gradients_bytes": estimate.gradients_bytes,
+                "optimizer_bytes": estimate.optimizer_bytes,
+                "gather_transient_bytes": estimate.gather_transient_bytes,
+                "activations_bytes": estimate.activations_bytes,
+                "peak_bytes": estimate.peak_bytes,
+                "result": estimate.result,
+            }
+        )
+    return rows
+
+
 def plan_memory(
     config: RunConfig, runtime_info: RuntimeInfo, estimate: MemoryEstimate
 ) -> ResourceProposal:
@@ -714,6 +882,39 @@ def plan_memory(
             effective=enabled,
         )
 
+    def sharding() -> None:
+        """Shard across the listed devices, least communication first.
+
+        The update is unchanged up to summation order, so this comes before
+        any change to the batch or the recomputation.
+        """
+        if candidate.runtime.parallel.sharded or parallel_devices(candidate) < 2:
+            return
+        for mode in PARALLEL_MODES[1:]:
+            try:
+                proposed = _with_parallel_mode(candidate, mode)
+            except ValidationError as error:
+                decisions.append(
+                    {
+                        "requested": "parallel",
+                        "candidate": mode,
+                        "effective": False,
+                        "reason": "unsupported by this config: "
+                        + error.errors()[0]["msg"].removeprefix("Value error, "),
+                    }
+                )
+                return
+            consider(
+                "parallel",
+                proposed,
+                "shard optimizer state, then gradients, then parameters across "
+                "the listed devices; the update is unchanged up to summation order",
+                effective=mode,
+                devices=parallel_devices(candidate),
+            )
+            if current.result == "LIKELY_TO_FIT":
+                return
+
     if policy == "fast":
         checkpointing(False)
         if candidate.runtime.memory.activation_offload.enabled:
@@ -751,6 +952,8 @@ def plan_memory(
                 )
                 break
     else:
+        if current.result != "LIKELY_TO_FIT":
+            sharding()
         if policy == "max_fit" and current.result != "LIKELY_TO_FIT":
             for precision in ("bf16", "fp16"):
                 supported = precision in runtime_info.tested_precisions
