@@ -232,6 +232,30 @@ def test_exact_quotas_repeats_and_cold_replay(
     assert mixture.verify_mixture(declaration, output) == receipt
 
 
+def test_completion_survives_unrelated_lab_changes_not_relevant_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    declaration, _, _ = _fixture(tmp_path, monkeypatch)
+    output = tmp_path / "output"
+    receipt = mixture.materialize_mixture(declaration, output)
+    package = Path(mixture.__file__).parents[1]
+    read = Path.read_bytes
+
+    def edited(*names: str) -> None:
+        changed = {package / name for name in names}
+        monkeypatch.setattr(
+            Path,
+            "read_bytes",
+            lambda self: read(self) + (b"\n# edited" if self in changed else b""),
+        )
+
+    edited("memory.py", "engines/base.py", "cli/main.py")
+    assert mixture.verify_mixture(declaration, output) == receipt
+    edited("corpus/mixture_index.py")
+    with pytest.raises(ValueError, match="explicit audit replay required"):
+        mixture.verify_mixture(declaration, output)
+
+
 def test_accepted_65_25_10_target_shares_are_realized(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -29,16 +29,6 @@ _CORPUS = (
     "corpus.acquisition",
     "data.conversations",
 )
-_PREPARED = (
-    "data.verification",
-    "data.packing",
-    "data.tokenizer",
-    "data.datasets",
-    "data.conversations",
-    "data.byte_hash",
-    "config.models",
-)
-_ARRAY = ("data.verification", "data.packing", "config.models")
 
 # These are verifier entry points, not an exhaustive manually maintained graph.
 # Static imports from them and their imported semantic helpers are discovered
@@ -46,14 +36,6 @@ _ARRAY = ("data.verification", "data.packing", "config.models")
 # authority through a convenience import from the verifier.
 _CLOSURES: dict[str, tuple[str, ...]] = {
     "file": ("data.verification",),
-    "prepared_array": _ARRAY,
-    "stage_inventory_file": (
-        "staging",
-        "data.verification",
-        "data.packing",
-        "data.tokenizer",
-        "config.models",
-    ),
     "dispatch_cache_asset": (
         "workers.bundles",
         "workers.models",
@@ -85,25 +67,6 @@ _CLOSURES: dict[str, tuple[str, ...]] = {
         "config.models",
     ),
     "source_snapshot": _ARTIFACT + _CORPUS,
-    "tokenizer": _ARTIFACT
-    + _CORPUS
-    + (
-        "corpus.export",
-        "config.loading",
-        "data.tokenizer",
-        "corpus.tokenizer_bakeoff",
-    ),
-    "prepared_data": _ARTIFACT + _ARRAY,
-    "stage_bundle": _ARTIFACT
-    + _PREPARED
-    + (
-        "staging",
-        "training.checkpoints",
-        "training.mlx_checkpoints",
-        "model.inspection",
-        "data.encoding",
-        "owned_copy",
-    ),
     "checkpoint": _ARTIFACT
     + (
         "training.checkpoints",
@@ -168,9 +131,6 @@ _ARTIFACT_BRANCHES = {
     "corpus_build": "corpus.release",
     "corpus_release": "corpus.release",
     "corpus_export": "corpus.export",
-    "tokenizer": "data.tokenizer",
-    "prepared_data": "data.packing",
-    "stage_bundle": "staging",
     "checkpoint": "training.checkpoints",
 }
 _ARTIFACT_IMPORTS = frozenset(
@@ -185,7 +145,7 @@ def _excluded_edges(kind: str) -> frozenset[tuple[str, str]]:
         # Snapshot verification needs worker identity schemas transitively,
         # not the package's convenience exports for dispatch and transport.
         result |= {("workers", "workers.transport")}
-    if kind in {"file", "prepared_array", "prepared_data"}:
+    if kind == "file":
         result |= _ARRAY_EXCLUDED_EDGES
     if kind in _ARTIFACT_BRANCHES:
         result |= _ARTIFACT_IMPORTS - {
@@ -525,12 +485,114 @@ def _package_exports(source: bytes) -> frozenset[str]:
     return frozenset(exported)
 
 
+# Corpus modules the verifier reaches only for other operations.
+NOT_VERIFICATION = frozenset({"corpus.cli", "corpus.measurement"})
+# Shared modules whose own source decides what verification accepts. They are
+# digested but not followed: their lazy imports reach the whole program.
+SHARED = (
+    "canonical",
+    "config.models",
+    "safe_io",
+    "training.manifest",
+    "verification_proofs",
+    "verifier_authority",
+)
+_TOKENIZER_CORPUS = ("corpus.release", "corpus.export", "corpus.tokenizer_bakeoff")
+_PREPARED_DATA = ("data.verification", "data.packing")
+_TOKENIZER_DATA = ("data.tokenizer",)
+
+# Receipts whose result is decided by data identities plus only these modules:
+# `follow` is the import closure inside its package, `leaves` are digested alone.
+# Memory estimators, engines, the command line and documentation are in none of
+# them, so changing those never invalidates a receipt.
+_SCOPES: dict[str, dict[str, tuple[str, ...]]] = {
+    "prepared_data": {
+        "data": _PREPARED_DATA,
+        "leaves": (
+            *SHARED,
+            "experiments.artifacts",
+            "memory_tokenizer",
+            "address_hash",
+        ),
+    },
+    "tokenizer": {
+        "corpus": _TOKENIZER_CORPUS,
+        "data": _TOKENIZER_DATA,
+        "leaves": (*SHARED, "experiments.artifacts", "config.loading"),
+    },
+    "stage_bundle": {
+        "corpus": _TOKENIZER_CORPUS,
+        "data": (*_PREPARED_DATA, *_TOKENIZER_DATA, "data.encoding"),
+        "leaves": (
+            *SHARED,
+            "experiments.artifacts",
+            "config.loading",
+            "memory_tokenizer",
+            "address_hash",
+            "staging",
+            "training.checkpoints",
+            "training.mlx_checkpoints",
+            "model.inspection",
+            "owned_copy",
+        ),
+    },
+    # The native mixture completion: what tokenizes, mixes and writes a mixture.
+    "native_mixture": {
+        "corpus": ("corpus.mixture",),
+        "data": (
+            "data.tokenizer",
+            "data.encoding",
+            "data.token_store",
+            "data.row_layout",
+        ),
+        "leaves": (
+            *SHARED,
+            "config.loading",
+            "host_capacity",
+            "result_publication",
+        ),
+    },
+}
+# The array and inventory files inside those bundles are verified by the same code.
+_SCOPES["prepared_array"] = _SCOPES["prepared_data"]
+_SCOPES["stage_inventory_file"] = _SCOPES["stage_bundle"]
+
+
+def scoped_modules(
+    *,
+    corpus: tuple[str, ...] = (),
+    data: tuple[str, ...] = (),
+    leaves: tuple[str, ...] = (),
+) -> dict[str, str]:
+    """Digests of the corpus and data import closures plus the shared leaf modules."""
+    return {
+        **local_import_closure(corpus, within="corpus", exclude=NOT_VERIFICATION),
+        **local_import_closure(data, within="data"),
+        **local_import_closure(leaves, within=""),
+    }
+
+
+def scoped_authority(kind: str, version: int = 1) -> dict[str, object]:
+    modules = dict(sorted(scoped_modules(**_SCOPES[kind]).items()))
+    return asdict(
+        VerifierAuthority(
+            schema=AUTHORITY_SCHEMA,
+            kind=kind,
+            version=version,
+            modules=modules,
+            sha256=canonical_digest(modules),
+        )
+    )
+
+
 def supports_verifier(kind: object) -> bool:
-    return isinstance(kind, str) and kind in _CLOSURES
+    return isinstance(kind, str) and (kind in _CLOSURES or kind in _SCOPES)
 
 
 def verifier_authority(kind: str, version: int) -> dict[str, object]:
     """Digest domain verifier roots and their non-excluded transitive local imports."""
+    if kind in _SCOPES:
+        return scoped_authority(kind, version)
     roots = _CLOSURES[kind]  # unsupported kinds never authorize warm reuse
     excluded = _excluded_edges(kind)
     package = Path(__file__).parent

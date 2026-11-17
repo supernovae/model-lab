@@ -1185,6 +1185,7 @@ def _early_assembly(spec, raw, output, release):
 def _native_mixture_completion(spec, raw, output, manifest, tokenizer_sha):
     from klab.corpus.admission_inspection_cache import InspectionCache
     from klab.verification_proofs import ProofStore
+    from klab.verifier_authority import scoped_authority
 
     # Native artifact verification owns its key beside the work, without a
     # writable user configuration directory or any supervisor dependency.
@@ -1192,19 +1193,9 @@ def _native_mixture_completion(spec, raw, output, manifest, tokenizer_sha):
     proofs.config_root = output.parent / "cache" / "native-mixture-identity"
     proofs.key_path = proofs.config_root / "klab" / "verification-key-v1"
     cache = InspectionCache(output.parent, proof_store=proofs)
-    cache.authority = {
-        **cache.authority,
-        "mixture": {
-            name: sha256_file(Path(__file__).with_name(name))
-            for name in (
-                "mixture.py",
-                "mixture_index.py",
-                "retained_mixture.py",
-                "mixture_pipeline.py",
-            )
-        }
-        | {"data/token_store.py": sha256_file(_TOKEN_STORE_SOURCE)},
-    }
+    # Keyed on the modules that tokenize, mix and write a mixture, not on the
+    # whole corpus package: unrelated Lab changes keep a completed mixture valid.
+    cache.authority = {**cache.authority, "corpus": scoped_authority("native_mixture")}
     request = _native_mixture_request(
         spec, raw, output, manifest["release_id"], tokenizer_sha
     )
