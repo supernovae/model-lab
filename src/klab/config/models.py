@@ -1028,12 +1028,11 @@ class RuntimeConfig(StrictModel):
                     "secondary_device_indices cannot be combined with fp16: scaled "
                     "updates run on the primary device only; use bf16 or fp32"
                 )
-        if self.parallel.sharded:
-            if not self.secondary_device_indices:
-                raise ValueError(
-                    f"runtime.parallel.mode={self.parallel.mode} shards across the "
-                    "devices of runtime.secondary_device_indices; list at least one"
-                )
+        if self.parallel.sharded and not self.secondary_device_indices:
+            raise ValueError(
+                f"runtime.parallel.mode={self.parallel.mode} shards across the "
+                "devices of runtime.secondary_device_indices; list at least one"
+            )
         return self
 
 
