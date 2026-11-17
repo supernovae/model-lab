@@ -154,6 +154,30 @@ def make_optimizer(
     )
 
 
+def build_optimizer(model: nn.Module, config: RunConfig) -> torch.optim.Optimizer:
+    """The optimizer a run's ``config.optimizer`` names, over ``model``'s parameters."""
+    optimizer = config.optimizer
+    if optimizer.name == "adamw":
+        return make_optimizer(
+            model,
+            optimizer.peak,
+            optimizer.weight_decay,
+            optimizer.betas,
+            optimizer.eps,
+            memory_table_lr_multiplier=optimizer.memory_table_lr_multiplier,
+            memory_table_weight_decay=optimizer.memory_table_weight_decay,
+            reduced_precision=ReducedPrecision.from_config(config),
+        )
+    return make_adafactor(
+        model,
+        optimizer.peak,
+        optimizer.weight_decay,
+        optimizer.beta2_decay,
+        optimizer.eps,
+        optimizer.d,
+    )
+
+
 # Parameter bytes whose optimizer state is on the device at once during an
 # offloaded step. A larger tensor is streamed alone.
 STATE_OFFLOAD_BUCKET_BYTES = 128 * 1024 * 1024

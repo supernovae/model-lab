@@ -934,12 +934,31 @@ class MemoryConfig(StrictModel):
         return self
 
 
+class ParallelConfig(StrictModel):
+    """How the devices in ``device_index`` + ``secondary_device_indices`` share one model.
+
+    ``replicated`` keeps a full copy per device and sums gradients through host
+    memory. The sharded modes run real collectives and split what each device
+    holds: ``zero1`` the optimizer state, ``zero2`` also the gradients (summed
+    after every microbatch), ``fsdp`` also the parameters (gathered per block).
+    """
+
+    mode: Literal["replicated", "zero1", "zero2", "fsdp"] = "replicated"
+
+    @property
+    def sharded(self) -> bool:
+        return self.mode != "replicated"
+
+
 class RuntimeConfig(StrictModel):
     engine: Literal["pytorch", "mlx"] = "pytorch"
     backend: Literal["auto", "cpu", "mps", "cuda", "rocm", "xpu", "metal"] = "auto"
     device_index: int = Field(default=0, ge=0)
     secondary_device_indices: tuple[int, ...] = Field(
         default=(), exclude_if=lambda value: not value
+    )
+    parallel: ParallelConfig = Field(
+        default=ParallelConfig(), exclude_if=lambda value: not value.sharded
     )
     precision: Literal["auto", "fp32", "bf16", "fp16"] = "fp32"
     # Dtype gradients are held in between microbatches. bf16 keeps FP32 master
@@ -1022,6 +1041,11 @@ class RuntimeConfig(StrictModel):
                     "secondary_device_indices cannot be combined with fp16: scaled "
                     "updates run on the primary device only; use bf16 or fp32"
                 )
+        if self.parallel.sharded and not self.secondary_device_indices:
+            raise ValueError(
+                f"runtime.parallel.mode={self.parallel.mode} shards across the "
+                "devices of runtime.secondary_device_indices; list at least one"
+            )
         return self
 
 
@@ -1611,6 +1635,23 @@ class RunConfig(StrictModel):
             raise ValueError("optimizer.betas entries must be in [0, 1)")
         if self.optimizer.state_offload and self.runtime.engine != "pytorch":
             raise ValueError("optimizer.state_offload requires the PyTorch engine")
+        if self.runtime.parallel.sharded and (
+            not isinstance(self.optimizer, AdamWConfig)
+            or self.optimizer.state_offload
+            or self.evaluation.gradient_bottleneck
+        ):
+            raise ValueError(
+                "runtime.parallel sharded modes require AdamW without "
+                "state_offload (Adafactor's factored state is not elementwise) "
+                "and no evaluation.gradient_bottleneck"
+            )
+        if self.runtime.parallel.sharded and (
+            self.runtime.gradient_dtype != "fp32"
+            or self.optimizer_state_dtype != "fp32"
+        ):
+            raise ValueError(
+                "runtime.parallel sharded modes keep FP32 gradients and optimizer state"
+            )
         low_precision = (
             self.runtime.gradient_dtype != "fp32"
             or self.optimizer_state_dtype != "fp32"

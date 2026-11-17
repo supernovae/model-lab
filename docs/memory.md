@@ -106,6 +106,42 @@ The decision report lists each candidate change and its estimated peak. Use the
 proposal only by passing it to a later command. Every option below is an
 explicit config change.
 
+### Shard the model
+
+With several devices listed in `runtime.device_index` and
+`runtime.secondary_device_indices`, `runtime.parallel.mode` splits what each
+device holds ([modes and checkpoints](training.md#shard-the-model-across-the-devices)).
+The update is the same as on one device up to summation order, so sharding is
+the first thing to try when weights, gradients and optimizer state do not fit:
+`inspect` prints each mode's per-device figures side by side.
+
+```text
+Per device by runtime.parallel.mode (4 devices)
+  replicated: weights 3.90, gradients 3.90, optimizer 7.79, gather 0.00, ...
+  zero1: weights 4.87, gradients 4.87, optimizer 1.95, gather 0.00, ...
+  zero2: weights 4.87, gradients 1.92, optimizer 1.95, gather 0.00, ...
+  fsdp: weights 0.97, gradients 1.92, optimizer 1.95, gather 0.94, ...
+```
+
+Figures are GiB per device for a 1.05B-parameter model on four devices
+(`--json` has the same as `parallel_modes`). `replicated` is the primary
+device, which alone holds the optimizer. A mode the config cannot use is listed
+with its reason.
+
+- `zero1` shards the optimizer state; the parameters stay whole and gain
+  a sharded master copy, so weights are 1.25x.
+- `zero2` also shards the gradients; the estimate keeps whole the gradients of
+  the embedding group and of the two groups in flight.
+- `fsdp` also shards the parameters. The `gather_transient_bytes` is the
+  parameters held whole at once: the embedding, norm and output head, plus the
+  block or token memory being computed and the next one.
+
+Activations are not sharded: they are per device, per microbatch, so
+recomputation and the chunked output head still apply on top. Gathers are in
+FP32 like the master weights. With `--write-proposal`, a config that does not
+fit and lists several devices is offered `zero1`, then `zero2`, then `fsdp`,
+each as a recorded decision, before any change to the batch or to recomputation.
+
 ### Gradient accumulation
 
 ```yaml

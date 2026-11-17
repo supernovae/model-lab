@@ -49,6 +49,8 @@ class SecondaryReplica:
     model: DenseLM
     compiled_output_head_loss: Any = None
     trainable_params: tuple[torch.nn.Parameter, ...] = field(default=())
+    # Parameters are sharded tensors that autograd cannot be restricted to.
+    sharded: bool = False
 
     def __post_init__(self) -> None:
         if not self.trainable_params:
@@ -103,14 +105,35 @@ def accumulate_microbatch_diagnostics(
         weights[name] = 1 if count_metric else weights.get(name, 0) + weight
 
 
+def masked_copy(batch: Microbatch) -> Microbatch:
+    """``batch`` with every target ignored: it runs the model and teaches it nothing."""
+    return Microbatch(
+        inputs=batch.inputs,
+        targets=np.full_like(batch.targets, -100),
+        byte_addresses=batch.byte_addresses,
+        position_mask=batch.position_mask,
+    )
+
+
 def execute_replica_microbatches(
     replica: SecondaryReplica,
     config: RunConfig,
     pairs: list[tuple[Microbatch, int]],
     valid_targets: int,
     output_head_loss_fn: Any,
+    *,
+    pad_to: int = 0,
+    pad_template: Microbatch | None = None,
+    before_backward: Any = None,
 ) -> dict[str, Any]:
-    """Run one replica's slice, leaving its gradients on its parameters."""
+    """Run one replica's slice, leaving its gradients on its parameters.
+
+    Sharded training needs every rank to run the same number of microbatches,
+    because each forward and backward is a collective. ``pad_to`` runs masked
+    copies of ``pad_template`` after the real ones until that many have run;
+    they carry no loss, gradient or diagnostic. ``before_backward(index, count)``
+    runs before each backward.
+    """
     started = time.perf_counter()
     device = replica.device
     model = replica.model
@@ -122,13 +145,20 @@ def execute_replica_microbatches(
     losses_finite = torch.ones((), device=device, dtype=torch.bool)
     recomputed = 0.0
     executed_microbatches = 0
-    trainable_inputs = list(replica.trainable_params)
+    trainable_inputs = None if replica.sharded else list(replica.trainable_params)
     head_chunk = config.runtime.output_head_chunk_tokens
+    work = [
+        (batch, chunk_valid, True)
+        for batch, chunk_valid in pairs
+        if chunk_valid or batch.position_mask is not None
+    ]
+    if pad_to > len(work):
+        if pad_template is None:
+            raise ValueError("padding microbatches need a template")
+        work += [(masked_copy(pad_template), 0, False)] * (pad_to - len(work))
 
-    for batch, chunk_valid in pairs:
-        if not chunk_valid and batch.position_mask is None:
-            continue
-        executed_microbatches += 1
+    for index, (batch, chunk_valid, real) in enumerate(work):
+        executed_microbatches += real
         x = torch.from_numpy(batch.inputs).to(device)
         y = torch.from_numpy(batch.targets).to(device)
         addresses = (
@@ -171,11 +201,15 @@ def execute_replica_microbatches(
                 reduction="sum",
             )
         auxiliary = auxiliary.float()
+        backward_loss = (ce_sum + auxiliary * chunk_valid) / valid_targets
+        if before_backward is not None:
+            before_backward(index, len(work))
+        torch.autograd.backward(backward_loss, inputs=trainable_inputs)
+        if not real:
+            continue
         losses_finite = (
             losses_finite & torch.isfinite(ce_sum) & torch.isfinite(auxiliary)
         )
-        backward_loss = (ce_sum + auxiliary * chunk_valid) / valid_targets
-        torch.autograd.backward(backward_loss, inputs=trainable_inputs)
         recomputed += model.recomputed_block_call_ratio
         language_sum = language_sum + ce_sum.detach()
         aux_sum = aux_sum + auxiliary.detach() * chunk_valid
@@ -203,37 +237,78 @@ def execute_replica_microbatches(
     }
 
 
+def merge_replica_outputs(
+    totals: dict[str, Any],
+    outputs: list[dict[str, Any]],
+    device: torch.device,
+    microbatches: list[Microbatch],
+) -> dict[str, Any]:
+    """Add each replica's slice result (:func:`execute_replica_microbatches`) to ``totals``."""
+    for output in outputs:
+        totals["language_sum"] = totals["language_sum"] + output["language_sum"].to(
+            device
+        )
+        totals["aux_sum"] = totals["aux_sum"] + output["aux_sum"].to(device)
+        totals["losses_finite"] = totals["losses_finite"] & output["losses_finite"].to(
+            device
+        )
+        totals["recomputed"] += float(output["recomputed"])
+        totals["executed_microbatches"] += int(output["executed_microbatches"])
+        sums, weights = totals["diagnostic_sums"], totals["diagnostic_weights"]
+        for name, value in output["diagnostic_sums"].items():
+            moved = value.to(device)
+            sums[name] = sums.get(name, moved.new_zeros(())) + moved
+            if diagnostic_is_count(name, microbatches):
+                weights[name] = 1
+            else:
+                weights[name] = (
+                    weights.get(name, 0) + output["diagnostic_weights"][name]
+                )
+    return totals
+
+
+def compile_training_kernels(
+    model: DenseLM, config: RunConfig, device: torch.device
+) -> Any:
+    """Compile the blocks in place and return the compiled output head loss, if asked.
+
+    Compile before sharding: FSDP's hooks must stay outside the compiled region.
+    """
+    from klab.engines.pytorch import (
+        compile_transformer_blocks,
+        output_projection_cross_entropy,
+    )
+
+    runtime = config.runtime
+    if runtime.compile_transformer_blocks:
+        compile_transformer_blocks(model, config, device)
+    if not runtime.compile_output_head_loss:
+        return None
+    return torch.compile(
+        output_projection_cross_entropy,
+        dynamic=runtime.compile_dynamic_shapes,
+        fullgraph=runtime.compile_dynamic_shapes,
+    )
+
+
 def build_replica(
     config: RunConfig, device: torch.device, state: dict[str, torch.Tensor]
 ) -> SecondaryReplica:
     """Build the replica the primary's model would be on ``device``."""
-    from klab.engines.pytorch import (
-        apply_recomputation_strategy,
-        compile_transformer_blocks,
-        output_projection_cross_entropy,
-    )
+    from klab.engines.pytorch import apply_recomputation_strategy
     from klab.training.trainable import apply_trainable_parameter_filter
 
     model = DenseLM(config.model, config.attention).to(device)
     model.load_state_dict(state)
     apply_trainable_parameter_filter(model, config)
     apply_recomputation_strategy(model, config)
-    compiled_loss = None
-    runtime = config.runtime
-    if runtime.compile_output_head_loss:
-        compiled_loss = torch.compile(
-            output_projection_cross_entropy,
-            dynamic=runtime.compile_dynamic_shapes,
-            fullgraph=runtime.compile_dynamic_shapes,
-        )
-    if runtime.compile_transformer_blocks:
-        compile_transformer_blocks(model, config, device)
+    compiled_loss = compile_training_kernels(model, config, device)
     return SecondaryReplica(
         device=device, model=model, compiled_output_head_loss=compiled_loss
     )
 
 
-def _report_failure(connection: multiprocessing.connection.Connection) -> None:
+def report_failure(connection: multiprocessing.connection.Connection) -> None:
     """Send the exception itself, so the primary raises the same kind of error."""
     error = sys.exc_info()[1]
     trace = traceback.format_exc()
@@ -243,11 +318,11 @@ def _report_failure(connection: multiprocessing.connection.Connection) -> None:
         connection.send(("error", (RuntimeError(str(error)), trace)))
 
 
-def _host(value: Any) -> Any:
+def to_host(value: Any) -> Any:
     if isinstance(value, torch.Tensor):
         return value.detach().cpu()
     if isinstance(value, dict):
-        return {key: _host(item) for key, item in value.items()}
+        return {key: to_host(item) for key, item in value.items()}
     return value
 
 
@@ -275,7 +350,7 @@ def _replica_main(
         version = -1
         connection.send(("ready", None))
     except Exception:  # noqa: BLE001 - the primary reports the replica's error
-        _report_failure(connection)
+        report_failure(connection)
         return
     while True:
         message = connection.recv()
@@ -299,9 +374,9 @@ def _replica_main(
                     if parameter.grad is not None:
                         gradients[index].copy_(parameter.grad)
             replica.model.zero_grad(set_to_none=True)
-            connection.send(("done", _host(result)))
+            connection.send(("done", to_host(result)))
         except Exception:  # noqa: BLE001 - the primary reports the replica's error
-            _report_failure(connection)
+            report_failure(connection)
 
 
 _ENVIRONMENT_LOCK = threading.Lock()
@@ -338,12 +413,12 @@ def _child_start(environment: dict[str, str]) -> Iterator[None]:
 
 
 @dataclass
-class _ReplicaProcess:
+class ReplicaProcess:
     device_index: int
     process: Any
     connection: multiprocessing.connection.Connection
-    gradients: list[torch.Tensor]
-    has_gradient: torch.Tensor
+    gradients: list[torch.Tensor] = field(default_factory=list)
+    has_gradient: torch.Tensor | None = None
 
     def receive(self, timeout: float | None = None) -> Any:
         waited = 0.0
@@ -368,6 +443,38 @@ class _ReplicaProcess:
         return payload
 
 
+def spawn_replica_process(
+    target: Any, args: tuple[Any, ...], backend: str, device_index: int
+) -> ReplicaProcess:
+    """Start ``target(connection, *args)`` in a process that sees only ``device_index``."""
+    context = torch_multiprocessing.get_context("spawn")
+    parent, child = context.Pipe()
+    process = context.Process(
+        target=target,
+        args=(child, *args),
+        name=f"klab-replica-{device_index}",
+        daemon=True,
+    )
+    with _child_start(child_environment(backend, device_index)):
+        process.start()
+    child.close()
+    return ReplicaProcess(device_index, process, parent)
+
+
+def stop_replica_processes(replicas: list[ReplicaProcess]) -> None:
+    for replica in replicas:
+        try:
+            replica.connection.send(("stop", None))
+        except BrokenPipeError, OSError:
+            pass
+    for replica in replicas:
+        replica.process.join(timeout=30)
+        if replica.process.is_alive():
+            replica.process.terminate()
+            replica.process.join(timeout=10)
+        replica.connection.close()
+
+
 class ReplicaPool:
     """The secondary devices of one run, each in its own process."""
 
@@ -378,7 +485,6 @@ class ReplicaPool:
         model: DenseLM,
         trainable_params: list[torch.nn.Parameter],
     ) -> None:
-        context = torch_multiprocessing.get_context("spawn")
         self.trainable_params = trainable_params
         self.weights = [
             torch.empty(p.shape, dtype=p.dtype).share_memory_()
@@ -389,7 +495,7 @@ class ReplicaPool:
             name: tensor.detach().cpu().share_memory_()
             for name, tensor in model.state_dict().items()
         }
-        self.replicas: list[_ReplicaProcess] = []
+        self.replicas: list[ReplicaProcess] = []
         self.version = 0
         self.stale = True
         try:
@@ -398,11 +504,9 @@ class ReplicaPool:
                 has_gradient = torch.zeros(
                     len(self.weights), dtype=torch.bool
                 ).share_memory_()
-                parent, child = context.Pipe()
-                process = context.Process(
-                    target=_replica_main,
-                    args=(
-                        child,
+                replica = spawn_replica_process(
+                    _replica_main,
+                    (
                         config,
                         backend,
                         device_index,
@@ -411,17 +515,11 @@ class ReplicaPool:
                         gradients,
                         has_gradient,
                     ),
-                    name=f"klab-replica-{device_index}",
-                    daemon=True,
+                    backend,
+                    device_index,
                 )
-                with _child_start(child_environment(backend, device_index)):
-                    process.start()
-                child.close()
-                self.replicas.append(
-                    _ReplicaProcess(
-                        device_index, process, parent, gradients, has_gradient
-                    )
-                )
+                replica.gradients, replica.has_gradient = gradients, has_gradient
+                self.replicas.append(replica)
             for replica in self.replicas:
                 replica.receive(timeout=_READY_SECONDS)
         except Exception:
@@ -524,15 +622,5 @@ class ReplicaPool:
         return primary_out, replica_outs, timings
 
     def close(self) -> None:
-        for replica in self.replicas:
-            try:
-                replica.connection.send(("stop", None))
-            except BrokenPipeError, OSError:
-                pass
-        for replica in self.replicas:
-            replica.process.join(timeout=30)
-            if replica.process.is_alive():
-                replica.process.terminate()
-                replica.process.join(timeout=10)
-            replica.connection.close()
+        stop_replica_processes(self.replicas)
         self.replicas = []
