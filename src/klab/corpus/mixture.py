@@ -34,6 +34,7 @@ from klab.corpus.mixture_index import (
 )
 from klab.corpus.quota import shortfall_message
 from klab.corpus.release import _verification_operation, verify_release
+from klab.corpus.release_verify import current_settings
 from klab.data.row_layout import document_rows
 from klab.data.tokenizer import load_tokenizer, verify_tokenizer_artifact
 from klab.result_publication import sync_directory
@@ -348,12 +349,17 @@ def _tokenizer(spec: MixtureDeclaration, release: Path, release_id: str):
         )
         digest = observed["tokenizer_sha256"]
     else:
+        # The operator's receipts apply here as to the release: a tokenizer whose
+        # export, files and release are unchanged is not re-derived.
+        settings = current_settings()
         digest = verify_tokenizer_artifact(
             path,
             source=dataset.source,
             revision=dataset.revision,
             vocab_size=config.vocab_size,
             dataset=dataset,
+            proof_store=settings.proof_store,
+            verification_mode=settings.verification_mode,
         )["sha256"]
     return load_tokenizer(path), digest
 
@@ -1254,6 +1260,13 @@ def _native_mixture_completion(spec, raw, output, manifest, tokenizer_sha):
 
 def verify_mixture(declaration: Path, output: Path, *, audit: bool = False) -> dict:
     """Authenticate completed execution; replay only for an explicit audit."""
+    # One operation, so the release and export are authenticated once, however
+    # many of the checks below reach for them.
+    with _verification_operation():
+        return _verify_mixture(declaration, output, audit=audit)
+
+
+def _verify_mixture(declaration: Path, output: Path, *, audit: bool) -> dict:
     output = output.resolve()
     receipt_path = output / "receipt.json"
     with receipt_path.open("rb") as stream:
@@ -1338,14 +1351,15 @@ def verify_mixture_tokenizer_origin(
     """
     spec = MixtureDeclaration.model_validate(yaml.safe_load(declaration.read_bytes()))
     release = spec.release_path.resolve()
-    manifest = verify_release(release)
     fit = load_tokenizer_config(spec.tokenizer_config)
     if (
         tokenizer_path.resolve() != (fit.output_dir / "tokenizer.json").resolve()
         or vocab_size != fit.vocab_size
     ):
         raise ValueError("tokenizer origin path or vocabulary mismatch")
-    _, digest = _tokenizer(spec, release, manifest["release_id"])
+    with _verification_operation():
+        manifest = verify_release(release)
+        _, digest = _tokenizer(spec, release, manifest["release_id"])
     result = json.loads(
         tokenizer_path.with_name("tokenizer_manifest.json").read_bytes()
     )

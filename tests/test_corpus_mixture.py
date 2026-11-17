@@ -627,6 +627,37 @@ def test_tokenizer_accepts_retained_release_path_but_not_a_different_origin(
         mixture._tokenizer(spec, release, release_id)
 
 
+def test_tokenizer_verification_uses_the_operators_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Otherwise every mixture command re-verifies the export and re-derives the sample."""
+    from klab.corpus.release_verify import verification_settings
+
+    release_id = "a" * 64
+    dataset = SimpleNamespace(
+        source="local_text", corpus_release_path=tmp_path, revision=release_id
+    )
+    config = SimpleNamespace(dataset=dataset, output_dir=tmp_path, vocab_size=260)
+    spec = SimpleNamespace(
+        tokenizer_config=tmp_path / "config", tokenizer_origin_release_id=release_id
+    )
+    seen = []
+    monkeypatch.setattr(mixture, "load_tokenizer_config", lambda path: config)
+    monkeypatch.setattr(mixture, "load_tokenizer", lambda path: "tokenizer")
+    monkeypatch.setattr(
+        mixture,
+        "verify_tokenizer_artifact",
+        lambda *args, **kwargs: seen.append(kwargs) or {"sha256": "t" * 64},
+    )
+    store = object()
+    with verification_settings(proof_store=store, verification_mode="verified_reuse"):
+        mixture._tokenizer(spec, tmp_path, release_id)
+    assert (seen[0]["proof_store"], seen[0]["verification_mode"]) == (
+        store,
+        "verified_reuse",
+    )
+
+
 @pytest.mark.parametrize("change_during_run", [False, True])
 def test_mixture_records_and_rechecks_opt_in_tokenizer_observation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change_during_run: bool

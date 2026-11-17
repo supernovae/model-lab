@@ -1244,7 +1244,10 @@ documents their own rows.
   queue peaks, worker utilization and memory.
 - **Verify.** `verify-mixture` checks the recorded completion and current
   inputs without rerunning; `--audit` reproduces the whole schedule without the
-  token cache.
+  token cache. Both commands authenticate the tokenizer's export and byte sample
+  through the same signed receipts as the release:
+  the export is read from its bytes and the sample scanned once, by the first
+  command that needs them, and later commands check file metadata only.
 - **Several releases.** `additional_releases` adds one separately built release
   whose splits are bound to the baseline's families.
 

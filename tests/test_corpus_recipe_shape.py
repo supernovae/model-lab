@@ -370,10 +370,16 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     )
     assert receipt["complete"]
     assert receipt["actual_target_tokens"] == quotas
+    # The tokenizer's export and byte sample were authenticated once, with the
+    # sampling scan run once, and are not derived again by the next command.
+    assert lab.stderr.count("tokenizer sampling: rank histogram:") == 2
+    assert lab.stderr.count("verified from the bytes") == 1  # the export
     verified = lab.json(
         "corpus", "verify-mixture", str(declaration), "--output", str(mixture)
     )
     assert verified["status"] == "verified"
+    assert "tokenizer sampling" not in lab.stderr
+    assert "verified from the bytes" not in lab.stderr
     scheduled = [
         json.loads(line)
         for line in (mixture / "train.records.jsonl").read_text().splitlines()
