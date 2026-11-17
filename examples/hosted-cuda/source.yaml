@@ -1,15 +1,15 @@
 schema_version: 1
 kind: huggingface
-repo_id: roneneldan/TinyStories
-revision: f54c09fd23315a6f9c86f9dc80f725de7d8f9c64
-config: default
+repo_id: Salesforce/wikitext
+revision: b08601e04326c79dfdd32d625aee71d232d685c3
+config: wikitext-2-raw-v1
 splits:
   train: train
   validation: validation
 text_field: text
-attribution: "TinyStories, Ronen Eldan and Yuanzhi Li; synthetic stories from GPT-3.5/GPT-4"
-license: CDLA-Sharing-1.0
-license_url: https://huggingface.co/datasets/roneneldan/TinyStories
+attribution: "WikiText, Stephen Merity et al.; text from Wikipedia Good and Featured articles"
+license: CC-BY-SA-3.0
+license_url: https://huggingface.co/datasets/Salesforce/wikitext/blob/b08601e04326c79dfdd32d625aee71d232d685c3/README.md
 selection:
   mode: bounded
   documents:

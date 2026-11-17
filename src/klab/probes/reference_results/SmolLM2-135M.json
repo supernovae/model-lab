@@ -503,7 +503,7 @@
     "stopped": false
   },
   "suite": {
-    "name": "sparselab-probe-battery",
+    "name": "klab-probe-battery",
     "sha256": "bc974a71841375e8788b612186f67a69d7d26598cd1325499b64ffbb5b484a50",
     "splits": {
       "dev": "171e87b37f1a44c35cb86ced6c622927c3e76a434953db87bdec98d3649bdb08",
@@ -556,5 +556,5 @@
     "status": "info",
     "suggestion": "Reference point (pinned public checkpoint): place a result on this curve with `klab compare RESULT --references`."
   },
-  "record_sha256": "ae375674c109aabcab38cbbd7c3a3f29fd8d543adc199e0f4c7620c73438342c"
+  "record_sha256": "4c85e033522f723d580a7459136117b04841eb4b14325dd327020f80813cb650"
 }

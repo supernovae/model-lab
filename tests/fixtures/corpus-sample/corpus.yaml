@@ -1,5 +1,5 @@
 schema_version: 1
-id: devmind-sample-v0
+id: sample-corpus-v0
 sources:
   - sources/code.yaml
   - sources/config.yaml

@@ -1067,7 +1067,7 @@ class MixturePolicy(StrictModel):
     total_tokens: PositiveInt
     max_exposures: PositiveInt
     # A lower bound, so the estimate over-counts tokens' cost and under-counts
-    # supply. The DevMind tokenizer audit measured 2.47 (Python) to 4.41 (web).
+    # supply. A tokenizer audit of a 12B-token run measured 2.47 (Python) to 4.41 (web).
     bytes_per_token: PositiveFloat = 3.0
 
 

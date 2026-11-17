@@ -6,7 +6,7 @@ Declarations for running on a hosted NVIDIA GPU, used by the
 inside a workspace outside this checkout; their relative paths then put the
 snapshot, tokenizer, data cache and runs beside it.
 
-- `source.yaml` pins a bounded TinyStories snapshot, and `tokenizer.yaml`
+- `source.yaml` pins a bounded WikiText-2 snapshot (CC BY-SA 3.0), and `tokenizer.yaml`
   trains a 2,048-token tokenizer on its train split.
 - `run-t4.yaml` is six 256-wide dense layers with 4 heads and a 704-wide FFN,
   sequence length 128, microbatch 8 with no accumulation, 20 updates and 20,480

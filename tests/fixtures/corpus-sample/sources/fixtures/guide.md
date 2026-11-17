@@ -11,7 +11,7 @@ Read the project declarations before acquiring a source. Use `klab corpus acquir
 - A released view is verified again before tokenizer fitting.
 
 ```sh
-klab corpus build corpora/devmind-sample-v0/corpus.yaml --offline
+klab corpus build corpora/sample-corpus-v0/corpus.yaml --offline
 ```
 
 ## Inspecting lineage

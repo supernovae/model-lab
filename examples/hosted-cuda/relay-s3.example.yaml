@@ -1,7 +1,7 @@
 # Copy outside the checkout and replace only local config-path references.
 # Configure the prefix-scoped S3 remote interactively; credentials never belong here.
 relay_version: 1
-namespace: hosted-tinystories
+namespace: hosted-cuda
 controller:
   kind: rclone
   root: labs3:klab-relay

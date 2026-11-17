@@ -242,7 +242,7 @@ workflow. Keep `KLAB_WORK_DIR` pointing at the persistent root, not a nested
 experiment: explicit cache locations remain separate.
 
 ```sh
-WORK="${KLAB_WORK_DIR:-$HOME/.local/share/klab}/experiments/dense-lm-v1"
+WORK="${KLAB_WORK_DIR:-$HOME/.local/share/klab}/experiments/my-experiment"
 klab workspace cleanup plan "$WORK" \
   --output "$WORK/local-reports/cleanup-plan.json"
 # Review the JSON paths, identities, and reclaimable bytes before applying.

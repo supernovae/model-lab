@@ -53,7 +53,7 @@ PINNED_SUITE = {
     # within-run eval-noise wording on held-out loss.
     4: "b24f01ec34293994ad0df3a3e45f1e602c54cef21a769f17c24ddcf084c58289",
     # v5: battery and scoring protocol identities renamed with the project
-    # (sparselab-* -> klab-*); probe declarations and items unchanged.
+    # (old project prefix -> klab-*); probe declarations and items unchanged.
     5: "b7f7b01dc04b9531f5680b398afbf4ffb0e7333e267fe79540e73eda84c20ec9",
     # v6: long_needle in the full tier (the needle items at 16k-131k characters).
     6: "6b09c6ab9c21c10d2ae0eb3984c52ffdf6d73931c5f3d7f57129d7f7d5778f2f",

@@ -1,6 +1,6 @@
 # Corpus-layer teaching fixture
 
-An original MIT-licensed, tiny offline fixture for the corpus commands. Three authored source families provide local Markdown, code and YAML; a fourth declaration names the deterministic `pathlib.PurePosixPath` suffix oracle. `technical_docs`, `code`, `configs`, and `systems_scenarios` are illustrative domains. The requested mixture is descriptive, not an optimized sampling policy. All generated text and snapshots live beneath the task-owned `$WORK/corpora/devmind-sample-v0/` directory and may be deleted when no run depends on them. No public corpus is downloaded.
+An original MIT-licensed, tiny offline fixture for the corpus commands. Three authored source families provide local Markdown, code and YAML; a fourth declaration names the deterministic `pathlib.PurePosixPath` suffix oracle. `technical_docs`, `code`, `configs`, and `systems_scenarios` are illustrative domains. The requested mixture is descriptive, not an optimized sampling policy. All generated text and snapshots live beneath the task-owned `$WORK/corpora/sample-corpus-v0/` directory and may be deleted when no run depends on them. No public corpus is downloaded.
 
 Run from the repository root in the [locked CPU environment](../../../README.md#install)
 (no model training). The optional `jq` utility below selects a record ID from

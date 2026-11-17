@@ -1,7 +1,7 @@
 id: sample_config
 kind: local
 origin: human_authored
-canonical_uri: klab://corpora/devmind-sample-v0/settings.yaml
+canonical_uri: klab://corpora/sample-corpus-v0/settings.yaml
 revision: sample-v0
 license: MIT
 rights:

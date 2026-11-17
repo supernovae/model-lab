@@ -646,7 +646,7 @@ policy:
   difference to a larger stratum, raising `max_exposures` or adding sources.
   Quotas are part of the release identity, so this is the cheapest point to
   learn it. `bytes_per_token` should be a lower bound so the check errs toward
-  refusing: 3.0 is below English prose and code; the DevMind tokenizer audit
+  refusing: 3.0 is below English prose and code; a tokenizer audit of a 12B-token run
   measured 2.47 (Python) to 4.41 (web), and a recipe whose strata sit near the
   bound should set it from its own audit. The estimate and verdict are recorded
   in `report.json` as `mixture_supply`. Keep the mixture template's

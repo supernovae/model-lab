@@ -443,7 +443,7 @@ def test_cross_split_identical_text_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="cross-split exact text overlap"):
         build(project, tmp_path / "work", offline=True)
     diagnostics = list(
-        (tmp_path / "work/corpora/devmind-sample-v0/builds/diagnostics").glob("*.json")
+        (tmp_path / "work/corpora/sample-corpus-v0/builds/diagnostics").glob("*.json")
     )
     assert len(diagnostics) == 1
     audit = json.loads(diagnostics[0].read_text())

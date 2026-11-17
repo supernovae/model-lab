@@ -177,15 +177,13 @@ without allocating the model.
   when embeddings are tied. `expert` holds all routed experts. A memory table,
   its projection and gate count as memory.
 
-The dense presets in `configs/` at an 8,192-token vocabulary:
+The dense starting shapes in `configs/`, with the vocabulary each config sets:
 
 | Config | Parameters |
 | --- | --- |
-| `micro_dense.yaml` | 3,344,064 |
-| `dense_7m.yaml` | 6,917,376 |
-| `dense_10m.yaml` | 10,244,160 |
-| `dense_25m.yaml` | 29,893,120 |
-| `dense_50m.yaml` | 50,274,752 |
+| `first_model_20m_cpu.yaml` | 17,308,032 |
+| `scale_dense_160m_cuda.yaml` | 162,554,880 |
+| `scale_dense_1b_cuda.yaml` | 950,621,952 |
 
 ## Explore a mechanism before training
 

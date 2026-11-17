@@ -108,7 +108,7 @@ the glue this design needs and would not give `fsdp`. Lab's own code is the glue
 ## 4. Memory estimate
 
 `klab inspect` prints each mode's per-device figures from the config's device
-list. For the DevMind pretraining config (28 layers, hidden 1536, 32,768
+list. For a 12B-token pretraining config (28 layers, hidden 1536, 32,768
 vocabulary, Engram tables, bf16, sequence 4096, microbatch 1, no recomputation,
 four devices), in GiB per device:
 
@@ -162,5 +162,5 @@ top. A measured comparison is section 7.
 ## 7. Measured comparison
 
 Peak memory and targets per second for each mode, with and without
-recomputation, on the DevMind-shaped model, need all four cards. Not run yet;
+recomputation, on the same-shaped model, need all four cards. Not run yet;
 the per-mode figures above are the projection.

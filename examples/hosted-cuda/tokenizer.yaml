@@ -5,12 +5,12 @@ max_documents: 2000
 output_dir: ../tokenizer
 dataset:
   source: snapshot
-  revision: f54c09fd23315a6f9c86f9dc80f725de7d8f9c64
+  revision: b08601e04326c79dfdd32d625aee71d232d685c3
   cache_dir: ../data
   train_path: ../snapshot/train.jsonl
   validation_path: ../snapshot/validation.jsonl
   source_manifest_path: ../snapshot/manifest.json
-  license: CDLA-Sharing-1.0
+  license: CC-BY-SA-3.0
   train_max_documents: 2000
   validation_max_documents: 100
   train_max_tokens: 8000000

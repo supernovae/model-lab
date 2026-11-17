@@ -148,4 +148,4 @@ jobs:
           --dist worksteal --durations=25
           -m "not mps and not mlx and not cuda and not rocm and not xpu and not network"
       - run: uv run --locked --no-sync klab --help
-      - run: uv run --locked --no-sync klab inspect configs/micro_dense.yaml --json
+      - run: uv run --locked --no-sync klab inspect configs/smoke_cpu.yaml --json
