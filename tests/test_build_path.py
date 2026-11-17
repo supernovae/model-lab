@@ -42,6 +42,7 @@ def test_local_corpus_builds_a_model_with_only_build_commands(
 
     klab("tokenizer", "train", "tokenizer.yaml")
     assert "LIKELY_TO_FIT" in klab("inspect", "model.yaml")
+    assert "Memory levers" in klab("inspect", "model.yaml", "--explain")
     klab("data", "prepare", "model.yaml")
     klab("train", "model.yaml", "--run-id", "first")
     assert (project / "work/runs/first/checkpoints").is_dir()
