@@ -11,6 +11,9 @@ request starts with one operation byte:
        per-document token counts, text sizes and line sizes.
 ``T``  texts packed by ``pack_texts``. The reply is their token IDs as raw
        int32, without EOS, and a raw uint32 array of per-text token counts.
+``D``  documents named by ``pack_documents``: a JSONL file and the byte range
+       of each row. The worker reads the rows itself, so the parent never holds
+       their text. The reply is the ``T`` reply plus the SHA-256 of each text.
 
 No JSON or Python integer list crosses the process boundary. The parent and
 the worker are the same trusted program.
@@ -18,6 +21,7 @@ the worker are the same trusted program.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pickle
@@ -128,6 +132,41 @@ def unpack_texts(payload: bytes) -> list[str]:
     return texts
 
 
+def pack_documents(path: str, locations: list[tuple[int, int]]) -> bytes:
+    raw = path.encode("utf-8")
+    spans = np.asarray(locations, dtype="<u8").reshape(-1, 2)
+    return struct.pack("<II", len(raw), len(spans)) + raw + spans.tobytes()
+
+
+def unpack_documents(payload: bytes) -> tuple[str, list[tuple[int, int]]]:
+    size, count = struct.unpack_from("<II", payload)
+    path = payload[8 : 8 + size].decode("utf-8")
+    spans = np.frombuffer(payload, dtype="<u8", count=2 * count, offset=8 + size)
+    return path, [(int(a), int(b)) for a, b in spans.reshape(-1, 2)]
+
+
+def read_texts(path: str, locations: list[tuple[int, int]]) -> list[str]:
+    """The ``text`` of the JSONL row at each ``(offset, size)``, by positional reads."""
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        texts = []
+        for offset, size in locations:
+            raw = os.pread(descriptor, size, offset)
+            if len(raw) != size:
+                raise ValueError("mixture source changed during materialization")
+            texts.append(json.loads(raw)["text"])
+        return texts
+    finally:
+        os.close(descriptor)
+
+
+def text_digests(texts: list[str]) -> np.ndarray:
+    return np.frombuffer(
+        b"".join(hashlib.sha256(text.encode("utf-8")).digest() for text in texts),
+        dtype=np.uint8,
+    )
+
+
 def encode_texts(texts: list[str]) -> tuple[np.ndarray, np.ndarray]:
     """Tokenize texts as they are; returns ``(ids, token_counts)`` without EOS."""
     assert _tokenizer is not None
@@ -175,6 +214,9 @@ def main() -> None:
         try:
             if request[:1] == b"T":
                 arrays = encode_texts(unpack_texts(request[1:]))
+            elif request[:1] == b"D":
+                texts = read_texts(*unpack_documents(request[1:]))
+                arrays = (*encode_texts(texts), text_digests(texts))
             else:
                 line_limit, source_bytes = struct.unpack("<qq", request[1:17])
                 arrays = encode_lines(

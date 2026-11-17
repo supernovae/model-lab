@@ -129,6 +129,9 @@ class EncoderPool:
         """Queue one worker request (operation byte first); frames come back."""
         return self._threads.submit(self._round_trip, request)
 
+    def pids(self) -> list[int]:
+        return [process.pid for process in self._processes]
+
     def cpu_seconds(self) -> float:
         total = 0.0
         for process in self._processes:
@@ -191,6 +194,15 @@ class PreparationEncoder:
         if pool is not None:
             pool.close()
             self.child_cpu_seconds = pool.cpu_seconds()
+
+    def pids(self) -> list[int]:
+        return [] if self._pool is None else self._pool.pids()
+
+    def submit(self, request: bytes) -> Future[tuple[bytes, ...]]:
+        """Queue one raw worker request; any free worker answers it."""
+        assert self._pool is not None
+        self.request_bytes += len(request)
+        return self._pool.submit(request)
 
     def encode(self, texts: list[str]) -> list[list[int]]:
         return [ids.tolist() for ids in self.encode_arrays(texts)]
