@@ -18,13 +18,41 @@ trade memory for time.
 - **Attention working tensors**, sized by how many keys each query scores: two
   windows for `sliding_window`; the local window plus selected blocks for
   `local_selected`; nothing for `sdpa` dense or latent attention on CUDA and XPU
-  (confirm with a warmup); a full $T^2$ allowance otherwise.
+  (confirm with the [attention memory probe](#attention-memory-probe)); a full $T^2$ allowance otherwise.
 - **Temporary workspace:** an allowance for allocator, kernels and logits.
 - **Headroom:** 15% of the subtotal, for uncertainty.
 
 Weights and gradients are counted in FP32 even with BF16 autocast. Activation
 assumptions are conservative. When a matching run has measured a higher peak,
 calibration raises the estimate; it never lowers it.
+
+### Attention memory probe
+
+The estimate charges no $T^2$ scores for `attention.implementation: sdpa` on CUDA
+and XPU because a fused kernel does not keep them. Check that on the device:
+
+```sh
+klab runtime attention CONFIG --runtime RUNTIME_ID --json
+```
+
+`score_memory` runs the causal `scaled_dot_product_attention` call training makes,
+with the config's micro-batch, heads, head dimension and compute dtype, forward
+and backward at 1,024, 2,048 and 4,096 tokens and at `training.seq_len`. It
+records the peak device memory above the inputs and compares it with one
+`[T, T]` score matrix. Extra memory that grows with $T^2$ (an exponent above 1.5
+between the shortest and longest length) means the kernel keeps scores, and
+`estimate_assumption` is `contradicted`; growth with $T$ means `confirmed`. A
+score matrix larger than a quarter of the free device memory is skipped, and a
+device without a peak counter (CPU, MPS) reports `UNMEASURED`. `klab stage` runs
+the same probe on CUDA and XPU and warns when the estimate is contradicted.
+`selected_backend` names the SDPA kernel the profiler saw.
+
+On one Arc Pro B70 (torch 2.15.0+xpu, bf16, batch 1, 24 heads of width 64,
+causal), SDPA selected `FLASH_ATTENTION`: peak memory above q, k and v was 33 MiB
+at 1,024 tokens, 66 MiB at 2,048 and 133 MiB at 4,096 (0.17 of a score matrix at
+4,096 and falling), so the assumption holds. Forcing `MATH` kept 6.1 score
+matrices at every length and was reported as contradicted. The memory-efficient
+and `OVERRIDEABLE` backends are unavailable there.
 
 ## The capacity it is compared with
 
