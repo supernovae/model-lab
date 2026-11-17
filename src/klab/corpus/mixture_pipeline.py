@@ -371,18 +371,11 @@ class MixturePreflight:
     schedule state is never part of it.
     """
 
-    def __init__(self, cache, release, inventory, *, seed, order_policy, strata):
+    def __init__(self, cache, digests, *, seed, order_policy, strata):
+        """`digests` maps the documents, inventory and TRAIN lineage files to SHA-256."""
         self.cache = cache
-        self.inputs = {
-            path: sha256_file(path)
-            for path in (
-                release / "documents.jsonl",
-                inventory,
-                release / "lm/train.lineage.jsonl",
-            )
-        }
         self.request = {
-            "inputs": {str(p): digest for p, digest in self.inputs.items()},
+            "inputs": {str(p): digest for p, digest in digests.items()},
             "seed": seed,
             "order_policy": order_policy,
             "source_strata": strata,

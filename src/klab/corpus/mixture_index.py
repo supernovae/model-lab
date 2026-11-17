@@ -471,10 +471,23 @@ class Selection:
 class MixtureIndex:
     """Index source offsets and family constraints; keep schedule state in SQLite."""
 
-    def __init__(self, root: Path, documents: Path, *, prepared=None):
+    def __init__(
+        self,
+        root: Path,
+        documents: Path,
+        digests: dict[Path, str] | None = None,
+        *,
+        prepared=None,
+    ):
+        """`digests` are the input files' SHA-256 the caller already verified (from
+        the release manifest); an input without one is hashed when it is first used.
+        """
         self.root = Path(root)
         self.documents_path = documents
-        self.input_digests = {documents: sha256_file(documents)}
+        self.input_digests: dict[Path, str] = {}
+        self.stamps: dict[Path, tuple] = {}
+        for path in (documents, *(digests or {})):
+            self.bind(path, (digests or {}).get(path))
         self.documents = documents.open("rb")
         self.tokens = (self.root / "encoded.jsonl").open("xb+")
         self.prepared = prepared is not None
@@ -501,14 +514,37 @@ class MixtureIndex:
         self.db.close()
         self.selection = self.staged = None
 
+    def bind(self, path: Path, digest: str | None = None) -> None:
+        """Record an input's digest and file identity; `digest` None hashes the file."""
+        self.input_digests[path] = digest or sha256_file(path)
+        info = path.stat()
+        self.stamps[path] = (
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+
     def verify_inputs(self):
-        for path, digest in self.input_digests.items():
-            if sha256_file(path) != digest:
+        """Refuse if an input was replaced or rewritten since it was bound.
+
+        Digests come from the verified release; rereading hundreds of GB to
+        confirm them again would repeat that verification.
+        """
+        for path, stamp in self.stamps.items():
+            info = path.stat()
+            if stamp != (
+                info.st_ino,
+                info.st_size,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+            ):
                 raise ValueError("mixture input changed during materialization")
 
     def inventory(self, path, strata, seed, order_policy=None):
         """Check the family inventory against the kept documents; return its row count."""
-        self.input_digests[path] = sha256_file(path)
+        if path not in self.input_digests:
+            self.bind(path)
         documents, sources = _kept_documents(self.documents_path, strata)
         table, families = _join_inventory(path, documents, strata, seed, order_policy)
         self.staged = (table, strata, families, sources)
@@ -518,7 +554,8 @@ class MixtureIndex:
         """Keep the documents of the TRAIN lineage view, ordered for the schedule."""
         if self.staged is None:
             raise ValueError("select needs the family inventory first")
-        self.input_digests[lineage] = sha256_file(lineage)
+        if lineage not in self.input_digests:
+            self.bind(lineage)
         table, strata, families, sources = self.staged
         chosen = _train_view(lineage, table)
         names = _stratum_names(strata)

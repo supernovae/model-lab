@@ -493,11 +493,17 @@ def _materialize_mixture(
             if cohorts is None:
                 from klab.corpus.mixture_pipeline import MixturePreflight
 
+                # The release manifest already carries the documents and lineage
+                # digests; only the family inventory is outside it.
+                digests = {
+                    release / name: manifest["files"][name]["sha256"]
+                    for name in ("documents.jsonl", "lm/train.lineage.jsonl")
+                } | {spec.family_inventory: _inventory_sha256(spec.family_inventory)}
+
                 if reuse_tokens:
                     preflight = MixturePreflight(
                         checkpoint_cache,
-                        release,
-                        spec.family_inventory,
+                        digests,
                         seed=spec.seed,
                         order_policy=spec.order_policy,
                         strata=spec.source_strata,
@@ -505,6 +511,7 @@ def _materialize_mixture(
                 index = MixtureIndex(
                     Path(scratch),
                     release / "documents.jsonl",
+                    digests,
                     prepared=preflight.snapshot if preflight else None,
                 )
             else:
@@ -529,8 +536,6 @@ def _materialize_mixture(
                     index.select(release / "lm/train.lineage.jsonl")
                     if preflight is not None:
                         preflight.publish(index)
-                elif preflight is not None:
-                    index.input_digests.update(preflight.inputs)
                 frontier = None
                 if reuse_tokens:
                     from klab.corpus.mixture_pipeline import (

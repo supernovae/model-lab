@@ -128,9 +128,10 @@ def test_selection_is_the_specification_for_any_workers_and_resumes_after_a_kill
     release = _release(tmp_path)
     expected = _expected(release, order_policy)
     _shard_small(monkeypatch)
-    with verification_settings(workers=1), _build(
-        release, tmp_path / "serial", order_policy
-    ) as serial:
+    with (
+        verification_settings(workers=1),
+        _build(release, tmp_path / "serial", order_policy) as serial,
+    ):
         reference = _files(serial)
         for stratum, rows in expected.items():
             taken = [
@@ -142,7 +143,8 @@ def test_selection_is_the_specification_for_any_workers_and_resumes_after_a_kill
             middle = len(rows) // 2
             rank, doc_id, _ = rows[middle]
             resumed = [
-                doc["document_id"] for doc, _ in serial.candidates(stratum, [rank, doc_id])
+                doc["document_id"]
+                for doc, _ in serial.candidates(stratum, [rank, doc_id])
             ]
             assert resumed == [row[1] for row in rows[middle + 1 :]]
         repeated = next(
@@ -173,11 +175,6 @@ def test_selection_is_the_specification_for_any_workers_and_resumes_after_a_kill
     assert any("documents" in line and "reused 0/" not in line for line in reused)
 
 
-def _drop_document(release: dict) -> None:
-    rows = [json.loads(line) for line in release["paths"]["documents"].read_text().splitlines()]
-    _write(release["paths"]["documents"], rows[1:])
-
-
 def _edit(path_name: str, change):
     def edit(release: dict) -> None:
         path = release["paths"][path_name]
@@ -198,10 +195,30 @@ def _family_leak(rows: list[dict]) -> None:
     other["family_id"] = first["family_id"]
 
 
-def _content_leak(rows: list[dict]) -> None:
+def _content_leak(release: dict) -> None:
+    """A held-out document whose content digest is a train document's."""
+    inventory = release["paths"]["inventory"]
+    rows = [json.loads(line) for line in inventory.read_text().splitlines()]
     train = next(row for row in rows if row["split"] == "train")
     held = next(row for row in rows if row["split"] == "validation")
+    documents = release["paths"]["documents"]
+    docs = [json.loads(line) for line in documents.read_text().splitlines()]
+    for doc in docs:
+        if doc["document_id"] == held["document_id"]:
+            doc["content_sha256"] = train["content_sha256"]
     held["content_sha256"] = train["content_sha256"]
+    _write(inventory, rows)
+    _write(documents, docs)
+
+
+def _without_rights(release: dict) -> None:
+    documents = release["paths"]["documents"]
+    docs = [json.loads(line) for line in documents.read_text().splitlines()]
+    last = next(
+        d for d in reversed(docs) if d["split"] == "train" and not d["drop_reason"]
+    )
+    last["rights"] = {"training_eligibility": "ineligible"}
+    _write(documents, docs)
 
 
 REFUSALS = {
@@ -222,7 +239,7 @@ REFUSALS = {
         "family leaks across splits",
     ),
     "content on two splits": (
-        _edit("inventory", _content_leak),
+        _content_leak,
         "identical content leaks across splits",
     ),
     "a kept document without a family": (
@@ -238,12 +255,7 @@ REFUSALS = {
         "does not cover exactly eligible train documents",
     ),
     "a train document without training rights": (
-        _edit(
-            "documents",
-            lambda rows: next(r for r in rows if r["split"] == "train").update(
-                rights={"training_eligibility": "ineligible"}
-            ),
-        ),
+        _without_rights,
         "lacks admitted file or record rights",
     ),
 }

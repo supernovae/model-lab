@@ -18,6 +18,18 @@ from klab.config.models import DatasetConfig
 from klab.corpus import mixture
 from klab.corpus.mixture_index import document_rank
 from klab.data.packing import TokenBlockDataset, _collect_token_mixture
+from klab.training.manifest import sha256_file
+
+
+def _manifest(release: Path) -> dict:
+    """What a verified release says about the files the index reads."""
+    return {
+        "release_id": release.name,
+        "files": {
+            name: {"sha256": sha256_file(release / name)}
+            for name in ("documents.jsonl", "lm/train.lineage.jsonl")
+        },
+    }
 
 
 def _fixture(
@@ -99,9 +111,7 @@ def _fixture(
             {"requested_mixture": {"general": 0.5, "explanatory": 0.3, "incident": 0.2}}
         )
     )
-    monkeypatch.setattr(
-        mixture, "verify_release", lambda path: {"release_id": release.name}
-    )
+    monkeypatch.setattr(mixture, "verify_release", lambda path: _manifest(release))
     monkeypatch.setattr(
         mixture,
         "_tokenizer",
