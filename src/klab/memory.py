@@ -170,6 +170,15 @@ def registered_runtime_buffers_bytes(config: RunConfig) -> int:
     return layers * rope + mapping_bytes
 
 
+def assumes_fused_scores(config: RunConfig, attention: AttentionConfig) -> bool:
+    """Whether the estimate charges no [T, T] scores because SDPA is fused here."""
+    return (
+        attention.implementation == "sdpa"
+        and attention.kind in {"dense", "mla"}
+        and config.runtime.backend in {"cuda", "xpu"}
+    )
+
+
 def _attention_reach(
     config: RunConfig, attention: AttentionConfig
 ) -> tuple[int, int, str]:
@@ -207,17 +216,14 @@ def _attention_reach(
             0,
             "sliding-window attention scores at most two windows of keys per query",
         )
-    if (
-        attention.implementation == "sdpa"
-        and attention.kind in {"dense", "mla"}
-        and config.runtime.backend in {"cuda", "xpu"}
-    ):
+    if assumes_fused_scores(config, attention):
         return (
             0,
             0,
             (
                 "fused scaled-dot-product attention on CUDA/XPU is assumed not to "
-                "retain a [T, T] score matrix; verify with a measured warmup"
+                "retain a [T, T] score matrix; verify with klab runtime attention "
+                "or a measured warmup"
             ),
         )
     from klab.components import is_builtin
