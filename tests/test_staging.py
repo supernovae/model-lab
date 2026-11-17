@@ -682,3 +682,84 @@ def test_matched_story_pilots_complete_under_native_supervision(
         assert state.completed_targets == expected_targets
         if verification_mode == "cold":
             assert verification_counters > 0
+
+
+def test_stage_reuses_prepared_inputs_of_the_same_config_across_source_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    work = tmp_path / "work"
+    first = stage(config, tmp_path / "first", through="validate")
+    assert staging_module.find_prepared_inputs(work, config) is None
+    staging_module.record_prepared_inputs(work, config, first)
+    changed = config.model_copy(
+        update={"training": config.training.model_copy(update={"max_steps": 4})}
+    )
+    assert staging_module.find_prepared_inputs(work, changed) is None
+
+    # Unrelated Lab changes alter the whole-source identity; the data is still sound.
+    monkeypatch.setattr(staging_module, "source_identity", lambda: {"sha256": "f" * 64})
+    prepared = staging_module.find_prepared_inputs(work, config)
+    assert prepared == first / "prepared"
+    with pytest.raises(ValueError, match="source identity differs"):
+        staging_module.verify_prepared_inputs(prepared, config)
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("prepared data must not be rebuilt")
+
+    monkeypatch.setattr(staging_module, "materialize_prepared_inputs", refuse)
+    second = stage(
+        config,
+        tmp_path / "second",
+        through="validate",
+        prepared_inputs=prepared,
+        prepared_source_drift=True,
+    )
+    assert (second / "bundle.json").is_file()
+
+
+def test_cheap_input_refusal_comes_before_preparation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise ValueError("native mixture completion unavailable")
+
+    def prepare(*args: object, **kwargs: object) -> None:
+        raise AssertionError("preparation started before the cheap checks")
+
+    monkeypatch.setattr(staging_module, "_precheck_inputs", refuse)
+    monkeypatch.setattr(staging_module, "materialize_prepared_inputs", prepare)
+    with pytest.raises(ValueError, match="completion unavailable"):
+        stage(_config(tmp_path), tmp_path / "stage", through="validate")
+
+
+def test_stage_status_reports_phase_progress_and_failure(
+    tmp_path: Path, capsys
+) -> None:
+    from types import SimpleNamespace
+
+    from klab.stage_status import StageStatus
+
+    path = tmp_path / "status.json"
+    status = StageStatus(path, interval=0.05)
+    with status.phase("warmup"):
+        status.pilot(
+            SimpleNamespace(completed_steps=2, expected_steps=5, phases=["training"])
+        )
+        status.emit()
+        assert json.loads(path.read_text()) | {
+            "updated_unix": 0,
+            "elapsed_seconds": 0,
+        } == {
+            "phase": "warmup",
+            "state": "running",
+            "elapsed_seconds": 0,
+            "step": 2,
+            "total_steps": 5,
+            "detail": "training",
+            "updated_unix": 0,
+        }
+    with pytest.raises(RuntimeError), status.phase("prepare"):
+        raise RuntimeError("boom")
+    assert json.loads(path.read_text())["state"] == "failed"
+    assert "stage warmup running" in capsys.readouterr().err
