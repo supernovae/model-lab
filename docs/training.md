@@ -160,8 +160,8 @@ Every mode sums gradients, so an update equals the one-device update up to
 summation order: the loss, `optimizer/grad_norm`, clipping and the finite
 checks see the whole gradient. Adam's elementwise update makes the sharded
 optimizer step exact. The step with the most memory saved is `fsdp`; the one
-with the least communication is `zero1`. Sharded memory is compared by
-the estimate before you run.
+with the least communication is `zero1`. [`klab inspect`](memory.md#shard-the-model)
+compares the modes' per-device memory before you run.
 
 Every device runs the same number of microbatches, because each forward and
 backward is a collective; when `gradient_accumulation` does not divide evenly

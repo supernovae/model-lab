@@ -279,6 +279,7 @@ def _inspect(args: argparse.Namespace) -> None:
     from klab.memory import (
         calibrated_estimate,
         calibration_key,
+        compare_parallel_modes,
         explain_levers,
         plan_memory,
         write_resource_proposal,
@@ -306,6 +307,7 @@ def _inspect(args: argparse.Namespace) -> None:
         **inspection_report(config),
         "parameter_inventory": inventory.__dict__,
         "memory_estimate": estimate.__dict__,
+        "parallel_modes": compare_parallel_modes(config, runtime, inventory),
         "runtime": runtime.as_dict(),
         "advisories": memory_advisories(config),
     }
@@ -343,6 +345,20 @@ def _inspect(args: argparse.Namespace) -> None:
     for field, value in asdict(estimate).items():
         if field.endswith("_bytes") and value is not None:
             print(f"  {field}: {value:,} bytes ({value / 1024**3:.3f} GiB)")
+    if estimate.devices > 1:
+        print(f"Per device by runtime.parallel.mode ({estimate.devices} devices)")
+        for row in values["parallel_modes"]:
+            if "unavailable" in row:
+                print(f"  {row['mode']}: unavailable, {row['unavailable']}")
+                continue
+            print(
+                f"  {row['mode']}: weights {row['weights_bytes'] / 1024**3:.2f}, "
+                f"gradients {row['gradients_bytes'] / 1024**3:.2f}, "
+                f"optimizer {row['optimizer_bytes'] / 1024**3:.2f}, "
+                f"gather {row['gather_transient_bytes'] / 1024**3:.2f}, "
+                f"activations {row['activations_bytes'] / 1024**3:.2f}, "
+                f"peak {row['peak_bytes'] / 1024**3:.2f} GiB ({row['result']})"
+            )
     print("Device")
     print(f"  {runtime.engine}/{runtime.backend}, index {runtime.device_index}")
     for limitation in runtime.limitations:
