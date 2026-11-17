@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -108,8 +109,15 @@ def _fixture(
                 encode=lambda text, **kwargs: SimpleNamespace(ids=list(text.encode())),
                 token_to_id=lambda token: 3 if token == "<eos>" else None,
             ),
-            "t" * 64,
+            hashlib.sha256(b"{}").hexdigest(),
         ),
+    )
+    (tmp_path / "tokenizer").mkdir()
+    (tmp_path / "tokenizer/tokenizer.json").write_bytes(b"{}")
+    monkeypatch.setattr(
+        mixture,
+        "load_tokenizer_config",
+        lambda path: SimpleNamespace(output_dir=tmp_path / "tokenizer"),
     )
     inventory = tmp_path / "families.jsonl"
     strata = {
@@ -639,6 +647,8 @@ def test_mixture_records_and_rechecks_opt_in_tokenizer_observation(
         source="local_text", corpus_release_path=release, revision=release.name
     )
     config = SimpleNamespace(dataset=data, output_dir=tmp_path / "fit", vocab_size=260)
+    config.output_dir.mkdir()
+    (config.output_dir / "tokenizer.json").write_bytes(b"{}")
     monkeypatch.setattr(mixture, "load_tokenizer_config", lambda path: config)
     monkeypatch.setattr(
         mixture,
@@ -661,7 +671,10 @@ def test_mixture_records_and_rechecks_opt_in_tokenizer_observation(
         calls.append(1)
         if change_during_run and len(calls) == 2:
             raise ValueError("observed input changed")
-        return {"method": "post_run_observation", "tokenizer_sha256": "t" * 64}
+        return {
+            "method": "post_run_observation",
+            "tokenizer_sha256": hashlib.sha256(b"{}").hexdigest(),
+        }
 
     monkeypatch.setattr(tokenizer_observation, "verify_observed_tokenizer", observe)
     data = yaml.safe_load(declaration.read_text())
@@ -894,7 +907,7 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
             frontier = None
             if checkpoint:
                 frontier = MixtureFrontier(
-                    staging,
+                    root / f".{name}.assembly-fixture",
                     InspectionCache(root),
                     pipeline_request(
                         {"tokenizer": "a" * 64, "declaration": "fixture"}, index
@@ -979,18 +992,18 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
     monkeypatch.setattr(mixture, "MIXTURE_BATCH_SOURCE_BYTES", 64)
     monkeypatch.setenv("KLAB_MIXTURE_COMMIT_CANDIDATES", "4096")
     assert run("grouped", checkpoint=True) == (result, output)
-    assert len(list((root / ".grouped.assembly").glob("commit-*.json"))) == 1
+    assert len(list(_assembly(root, "grouped").glob("commit-*.json"))) == 1
     with monkeypatch.context() as cadence:
         cadence.setattr(mixture, "MIXTURE_COMMIT_SEGMENT_BYTES", 1)
         assert run("byte-commits", checkpoint=True) == (result, output)
-        assert len(list((root / ".byte-commits.assembly").glob("commit-*.json"))) > 1
+        assert len(list(_assembly(root, "byte-commits").glob("commit-*.json"))) > 1
     with monkeypatch.context() as cadence:
         cadence.setattr(mixture, "MIXTURE_COMMIT_INTERVAL_SECONDS", 0)
         assert run("time-commits", checkpoint=True) == (result, output)
-        assert len(list((root / ".time-commits.assembly").glob("commit-*.json"))) > 1
+        assert len(list(_assembly(root, "time-commits").glob("commit-*.json"))) > 1
     monkeypatch.setenv("KLAB_MIXTURE_COMMIT_CANDIDATES", "1")
     assert run("eager", checkpoint=True) == (result, output)
-    assert len(list((root / ".eager.assembly").glob("commit-*.json"))) > 1
+    assert len(list(_assembly(root, "eager").glob("commit-*.json"))) > 1
     commit = MixtureFrontier.commit
 
     def interrupt(self, *args):
@@ -1071,6 +1084,11 @@ def test_real_batch_cache_survives_interrupted_caller(tmp_path: Path) -> None:
             ContentTokens(tmp_path / "cache", "b" * 64)
 
 
+def _assembly(parent, name):
+    (found,) = parent.glob(f".{name}.assembly-*")
+    return found
+
+
 @pytest.mark.parametrize("after_commit", [False, True])
 def test_mixture_frontier_resumes_without_committed_candidate_replay(
     tmp_path, monkeypatch, after_commit
@@ -1098,7 +1116,7 @@ def test_mixture_frontier_resumes_without_committed_candidate_replay(
     with pytest.raises(InterruptedError):
         mixture.materialize_mixture(declaration, output)
     assert not output.exists()
-    checkpoints = tmp_path / ".interrupted.assembly"
+    checkpoints = _assembly(tmp_path, "interrupted")
     last = json.loads(max(checkpoints.glob("commit-*.json")).read_bytes())
     committed = sum(last["state"]["candidates"].values())
     visited = []
@@ -1130,7 +1148,7 @@ def test_mixture_frontier_resumes_without_committed_candidate_replay(
     assert (checkpoints / "progress.json").is_file()
 
 
-@pytest.mark.parametrize("damage", ["output.ids", "identity", "marker"])
+@pytest.mark.parametrize("damage", ["output.ids", "marker"])
 def test_mixture_frontier_rejects_changed_checkpoint(tmp_path, monkeypatch, damage):
     from klab.corpus.mixture_pipeline import MixtureFrontier
 
@@ -1146,20 +1164,60 @@ def test_mixture_frontier_rejects_changed_checkpoint(tmp_path, monkeypatch, dama
     with pytest.raises(InterruptedError):
         mixture.materialize_mixture(declaration, output)
     monkeypatch.setattr(MixtureFrontier, "commit", original)
-    checkpoints = tmp_path / ".interrupted.assembly"
+    checkpoints = _assembly(tmp_path, "interrupted")
     marker = next(checkpoints.glob("commit-*.json"))
     entry = json.loads(marker.read_bytes())
     if damage == "output.ids":
         path = Path(entry["directory"]) / damage
         path.write_bytes(path.read_bytes() + b"{}\n")
-    elif damage == "identity":
-        declaration.write_bytes(declaration.read_bytes() + b"\n# changed declaration\n")
     else:
         entry["state"]["records"] += 1
         marker.write_bytes(canonical_json(entry))
     with pytest.raises(ValueError, match="checkpoint"):
         mixture.materialize_mixture(declaration, output)
     assert not output.exists()
+
+
+def test_checkpoints_are_named_by_request_and_conflicts_refuse_before_verification(
+    tmp_path, monkeypatch, capsys
+):
+    from klab.corpus.mixture_pipeline import MixtureFrontier
+
+    declaration, _, _ = _fixture(tmp_path, monkeypatch)
+    output = tmp_path / "interrupted"
+    original = MixtureFrontier.commit
+
+    def interrupt(self, *args):
+        original(self, *args)
+        raise InterruptedError("after durable commit")
+
+    monkeypatch.setattr(MixtureFrontier, "commit", interrupt)
+    with pytest.raises(InterruptedError):
+        mixture.materialize_mixture(declaration, output)
+    monkeypatch.setattr(MixtureFrontier, "commit", original)
+    first = _assembly(tmp_path, "interrupted")
+    # Another declaration beside the same output never meets that checkpoint.
+    unchanged = declaration.read_bytes()
+    declaration.write_bytes(unchanged + b"\n# another declaration\n")
+    capsys.readouterr()
+    mixture.materialize_mixture(declaration, output)
+    assert first.is_dir()
+    assert first.name in capsys.readouterr().err
+    shutil.rmtree(output)
+    # A checkpoint that claims another request is refused before verification
+    # or indexing, naming what to delete.
+    declaration.write_bytes(unchanged)
+    binding = first / "request.json"
+    stored = json.loads(binding.read_bytes())
+    binding.write_bytes(canonical_json({**stored, "declaration_sha256": "0" * 64}))
+
+    def verification_ran(*args):
+        raise AssertionError("verification ran before the checkpoint check")
+
+    monkeypatch.setattr(mixture, "verify_release", verification_ran)
+    with pytest.raises(ValueError, match="delete that directory") as refused:
+        mixture.materialize_mixture(declaration, output)
+    assert str(first) in str(refused.value)
 
 
 def test_ordered_source_fetch_bounds_reorder_and_propagates_failure(monkeypatch):
@@ -1210,7 +1268,7 @@ def test_admitted_ordinary_metadata_can_bypass_warm_source_fetch(tmp_path, monke
     cold = mixture.materialize_mixture(declaration, tmp_path / "cold")
     warm = mixture.materialize_mixture(declaration, tmp_path / "warm")
     assert cold == warm
-    progress = json.loads((tmp_path / ".warm.assembly/progress.json").read_bytes())
+    progress = json.loads((_assembly(tmp_path, "warm") / "progress.json").read_bytes())
     assert progress["cache_hits"] == 3
     assert progress.get("read_worker_seconds", 0) == 0
 
@@ -1240,7 +1298,7 @@ def test_child_telemetry_races_do_not_abort_materialization(
     )
     actual = mixture.materialize_mixture(declaration, tmp_path / "raced")
     assert actual == expected
-    progress = json.loads((tmp_path / ".raced.assembly/progress.json").read_bytes())
+    progress = json.loads((_assembly(tmp_path, "raced") / "progress.json").read_bytes())
     assert progress["process_observation_errors"] == ["NoSuchProcess"]
     assert not progress["child_sample_complete"]
     assert progress["encoder_utilization"] is None
