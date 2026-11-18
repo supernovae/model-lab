@@ -36,18 +36,6 @@ if TYPE_CHECKING:
     from klab.verification_proofs import ProofStore, VerificationMode
 
 SCHEMA = 1
-# Modules outside the corpus package whose source decides what verification accepts.
-_OUTSIDE_CORPUS = (
-    "canonical",
-    "config.models",
-    "data.conversations",
-    "safe_io",
-    "training.manifest",
-    "verification_proofs",
-    "verifier_authority",
-)
-# Corpus modules the verifier reaches only for other operations.
-NOT_VERIFICATION = frozenset({"corpus.cli", "corpus.measurement"})
 
 
 class Untrustable(ValueError):
@@ -63,21 +51,18 @@ def verifier_digest(kind: str) -> str:
     screen, the trainer or the command line does not make a release unverified,
     and editing anything that verification runs does.
     """
-    from klab.verifier_authority import local_import_closure
+    from klab.verifier_authority import SHARED, scoped_modules
 
     exported = kind == "export"
     return canonical_digest(
-        {
-            **local_import_closure(
-                ("corpus.release", *(("corpus.export",) if exported else ())),
-                within="corpus",
-                exclude=NOT_VERIFICATION,
+        scoped_modules(
+            corpus=("corpus.release", *(("corpus.export",) if exported else ())),
+            leaves=(
+                *SHARED,
+                "data.conversations",
+                *(("config.loading",) if exported else ()),
             ),
-            **local_import_closure(
-                (*_OUTSIDE_CORPUS, *(("config.loading",) if exported else ())),
-                within="",
-            ),
-        }
+        )
     )
 
 

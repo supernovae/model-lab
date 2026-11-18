@@ -8,12 +8,14 @@ When this fails, re-audit the reported edge before re-pinning it.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from klab import verifier_authority as authority
 
 
-@pytest.mark.parametrize("kind", sorted(authority._CLOSURES))
+@pytest.mark.parametrize("kind", sorted({*authority._CLOSURES, *authority._SCOPES}))
 def test_registered_verifier_kind_authorizes_current_source(kind: str) -> None:
     result = authority.verifier_authority(kind, 1)
     assert result
@@ -26,3 +28,36 @@ def test_memory_configuration_validators_remain_in_authority(kind: str) -> None:
     # Producer-only packing exclusions must not remove config semantics.
     assert "memory_tokenizer" in modules
     assert "address_hash" in modules
+
+
+def _edited(monkeypatch: pytest.MonkeyPatch, *relative: str) -> None:
+    """Make the named Lab source files read as if their source had changed."""
+    package = Path(authority.__file__).parent
+    changed = {package / name for name in relative}
+    read = Path.read_bytes
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda self: read(self) + (b"\n# edited" if self in changed else b""),
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "relevant"),
+    [
+        ("native_mixture", "corpus/mixture_index.py"),
+        ("tokenizer", "data/tokenizer.py"),
+        ("prepared_data", "data/packing.py"),
+        ("prepared_array", "data/verification.py"),
+        ("stage_bundle", "staging.py"),
+        ("stage_inventory_file", "data/encoding.py"),
+    ],
+)
+def test_receipt_keys_ignore_unrelated_modules_and_follow_relevant_ones(
+    kind: str, relevant: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = authority.verifier_authority(kind, 1)["sha256"]
+    _edited(monkeypatch, "memory.py", "engines/base.py", "cli/main.py")
+    assert authority.verifier_authority(kind, 1)["sha256"] == before
+    _edited(monkeypatch, relevant)
+    assert authority.verifier_authority(kind, 1)["sha256"] != before

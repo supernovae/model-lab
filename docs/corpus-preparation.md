@@ -890,6 +890,15 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   files with a single hard link; when they cannot be recorded the command says
   why and verifies every time.
 
+  The completed-mixture, tokenizer, prepared-data and stage-bundle receipts are
+  keyed the same way: on the data identities they bind and the source of only
+  the modules that decide their result (the mixture, tokenizer, packing and
+  staging code and what they import within the corpus and data packages), not
+  the whole program. Editing the memory estimator, engines, command line or
+  documentation does not make any of them unverified or force an audit replay;
+  editing a module they run does. After upgrading Lab across this change, each
+  such receipt is re-verified once.
+
 `audit` verifies exactly what `freeze` did and nothing more; it prints the build
 audit that was written with the release. Run it for that audit, not to verify.
 

@@ -354,8 +354,7 @@ def test_files_a_receipt_cannot_vouch_for_are_verified_every_time(
 
 
 def test_receipt_survives_changes_to_code_that_does_not_verify() -> None:
-    from klab.corpus.release_receipt import NOT_VERIFICATION
-    from klab.verifier_authority import local_import_closure
+    from klab.verifier_authority import NOT_VERIFICATION, local_import_closure
 
     closure = local_import_closure(
         ("corpus.release",), within="corpus", exclude=NOT_VERIFICATION
