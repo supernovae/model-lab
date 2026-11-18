@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -59,10 +60,21 @@ def _load[T: BaseModel](path: Path, model_type: type[T]) -> T:
         raise ValueError(f"invalid config {path}: {error}") from error
 
 
-def load_config(path: Path) -> RunConfig:
-    """Load a fully resolved v2 run configuration without touching artifacts."""
+def load_config(path: Path, *, expected_sha256: str | None = None) -> RunConfig:
+    """Load a resolved run config, optionally authenticating the bytes parsed."""
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if expected_sha256 is None:
+            content = path.read_text(encoding="utf-8")
+        else:
+            if path.is_symlink():
+                raise ValueError(f"config {path} is a symlink")
+            captured = path.read_bytes()
+            if hashlib.sha256(captured).hexdigest() != expected_sha256:
+                raise ValueError(
+                    f"config {path} differs from its authenticated file digest"
+                )
+            content = captured.decode("utf-8")
+        raw = yaml.safe_load(content)
     except OSError as error:
         raise ValueError(
             f"cannot read config {path}: {error.strerror or error}"

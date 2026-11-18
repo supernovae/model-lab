@@ -14,7 +14,7 @@ NativeReceiptKind = Literal["train", "none"]
 
 
 def _training(
-    path: Path, parent_checkpoint_path: Path | None
+    path: Path, parent_checkpoint_path: Path | None, expected_stop_step: int | None
 ) -> tuple[int, int, int, int]:
     from klab.evaluation.evidence import experiment_evidence
 
@@ -27,11 +27,26 @@ def _training(
     progress = json.loads(progress_path.read_text())
     manifest_sha = canonical_digest(manifest)
     evidence = experiment_evidence(path, verification_mode="cold")
+    status = progress.get("status")
+    forecast = progress.get("runtime_forecast")
+    final = forecast.get("final_observed") if isinstance(forecast, dict) else None
+    reached_stop = (
+        status == "interrupted"
+        and expected_stop_step is not None
+        and manifest.get("continuation_kind") == "FRESH"
+        and progress.get("step") == expected_stop_step
+        and isinstance(final, dict)
+        and final.get("run_status") == "interrupted"
+        and final.get("reason") == "stop_after_step"
+        and final.get("run_id") == final.get("operation_id") == path.name
+        and (final.get("completed_steps"), final.get("completed_targets"))
+        == (progress.get("step"), progress.get("tokens_seen"))
+    )
     if (
         manifest.get("run_id") != path.name
         or evidence.get("run_id") != path.name
         or evidence.get("verified_checkpoints") is not True
-        or progress.get("status") != "completed"
+        or (status != "completed" and not reached_stop)
         or progress.get("manifest_sha256") != manifest_sha
     ):
         raise ValueError("native training completion or checkpoint evidence unverified")
@@ -53,6 +68,7 @@ def _training(
         or type(terminal.get("tokens_seen")) is not int
         or terminal["step"] <= 0
         or terminal["tokens_seen"] <= 0
+        or (expected_stop_step is not None and terminal["step"] > expected_stop_step)
         or (terminal["step"], terminal["tokens_seen"])
         != (progress.get("step"), progress.get("tokens_seen"))
     ):
@@ -112,14 +128,18 @@ def verify_native_phase_counters(
     receipt_path: Path | None,
     *,
     parent_checkpoint_path: Path | None = None,
+    expected_stop_step: int | None = None,
 ) -> tuple[int, int, int, int]:
     """Return (updates, nonmasked targets, calls, completion IDs), or fail closed."""
     if kind == "none":
-        if receipt_path is not None or parent_checkpoint_path is not None:
+        if any(
+            value is not None
+            for value in (receipt_path, parent_checkpoint_path, expected_stop_step)
+        ):
             raise ValueError("counter-free phase must not claim a native receipt")
         return 0, 0, 0, 0
     if receipt_path is None or not receipt_path.is_absolute():
         raise ValueError("absolute native receipt path required")
     if kind == "train":
-        return _training(receipt_path, parent_checkpoint_path)
+        return _training(receipt_path, parent_checkpoint_path, expected_stop_step)
     raise ValueError("unknown native receipt kind")

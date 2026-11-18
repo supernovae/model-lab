@@ -976,7 +976,10 @@ def _train(args: argparse.Namespace) -> None:
     from klab.training.spot_safety import load_spot_policy
     from klab.training.trainer import train
 
-    config = load_config(Path(args.config))
+    config = load_config(
+        Path(args.config),
+        expected_sha256=os.environ.get("KLAB_ATTEMPT_TRAIN_FILE_SHA256"),
+    )
     if args.runs_dir is not None:
         config = config.model_copy(
             update={
