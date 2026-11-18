@@ -171,18 +171,25 @@ def training_storage_checks(
     checkpoint_generations_upper: int | None = None,
     completed_steps: int = 0,
     completed_tokens: int = 0,
+    stop_after_step: int | None = None,
+    operational_checkpoints: bool = False,
     verified_prepared: VerifiedPreparedData | None = None,
 ) -> list[StorageCheck]:
     """Reserve incremental growth on each device, not already allocated cache bytes.
 
     Training copies the prepared arrays into its run even when the cache exists.
     Without in-process proof, budget both a new cache and the eventual run copy.
+    A known absolute stop bounds checkpoint growth, not the prepared data size.
     """
     if checkpoint_generations_upper is None:
         from klab.experiments.storage import checkpoint_generation_bounds
 
         checkpoint_generations_upper = checkpoint_generation_bounds(
-            config, completed_steps=completed_steps, completed_tokens=completed_tokens
+            config,
+            completed_steps=completed_steps,
+            completed_tokens=completed_tokens,
+            stop_after_step=stop_after_step,
+            operational_checkpoints=operational_checkpoints,
         )["peak_generations"]
     if checkpoint_generations_upper < 1:
         raise ValueError("checkpoint generation count must be positive")

@@ -142,8 +142,10 @@ def _check_training_storage(
     data: PreparedData,
     *,
     tokenizer_path: Path | None = None,
-    completed_steps: int = 0,
-    completed_tokens: int = 0,
+    completed_steps: int,
+    completed_tokens: int,
+    stop_after_step: int | None,
+    operational_checkpoints: bool,
 ) -> None:
     from klab.workspace_preflight import require_storage, training_storage_checks
 
@@ -166,15 +168,10 @@ def _check_training_storage(
             verified_prepared=data.receipt,
             completed_steps=completed_steps,
             completed_tokens=completed_tokens,
+            stop_after_step=stop_after_step,
+            operational_checkpoints=operational_checkpoints,
         )
     )
-
-
-def _check_cold_storage(config: RunConfig) -> None:
-    """Reserve the new cache, its run copy and the checkpoints together."""
-    from klab.workspace_preflight import require_storage, training_storage_checks
-
-    require_storage(training_storage_checks(config))
 
 
 def _stack_optional(
@@ -916,6 +913,40 @@ def _train_impl(
         snapshot = continuation_state.snapshot
         source_run = continuation_state.source_run
         continuation = continuation_state.kind
+        if continuation == "RESUMED":
+            assert snapshot is not None
+            completed_steps, completed_tokens = snapshot.step, snapshot.tokens_seen
+            if (
+                completed_steps >= config.training.max_steps
+                or completed_tokens >= config.training.max_tokens
+            ):
+                raise ValueError("cannot resume a completed training budget")
+        else:
+            completed_steps = completed_tokens = 0
+        if stop_after_step is not None:
+            if isinstance(stop_after_step, bool) or not isinstance(
+                stop_after_step, int
+            ):
+                raise ValueError("stop-after-step must be an integer")
+            if stop_after_step <= completed_steps:
+                raise ValueError("stop-after-step must exceed current step")
+
+        def check_cold_storage() -> None:
+            from klab.workspace_preflight import (
+                require_storage,
+                training_storage_checks,
+            )
+
+            require_storage(
+                training_storage_checks(
+                    config,
+                    completed_steps=completed_steps,
+                    completed_tokens=completed_tokens,
+                    stop_after_step=stop_after_step,
+                    operational_checkpoints=spot_policy is not None,
+                )
+            )
+
         artifact_source = (
             source_run if continuation == "RESUMED" and not append_data else None
         )
@@ -971,7 +1002,7 @@ def _train_impl(
                     require_prepared=require_prepared,
                     # A cold cache: refuse before packing when the new cache,
                     # its run copy and the checkpoints cannot all fit.
-                    before_packing=(lambda: _check_cold_storage(config))
+                    before_packing=check_cold_storage
                     if purpose == "training"
                     else None,
                 )
@@ -1001,10 +1032,10 @@ def _train_impl(
             _check_training_storage(
                 config,
                 data,
-                completed_steps=snapshot.step if continuation == "RESUMED" else 0,
-                completed_tokens=snapshot.tokens_seen
-                if continuation == "RESUMED"
-                else 0,
+                completed_steps=completed_steps,
+                completed_tokens=completed_tokens,
+                stop_after_step=stop_after_step,
+                operational_checkpoints=spot_policy is not None,
                 # Native continuation/stage verification selected this owned
                 # input source. A resumed run need not retain caller-local files.
                 tokenizer_path=(
@@ -1220,12 +1251,6 @@ def _train_impl(
         del initial_weights, snapshot
         initial_step = step
         initial_cumulative_updates = cumulative_updates
-        if continuation == "RESUMED" and (
-            step >= config.training.max_steps or tokens >= config.training.max_tokens
-        ):
-            raise ValueError("cannot resume a completed training budget")
-        if stop_after_step is not None and stop_after_step <= step:
-            raise ValueError("stop-after-step must exceed current step")
         if resource_envelope is not None:
             check_envelope(
                 resource_envelope, workspace=run, rss_bytes=current_process_rss_bytes()

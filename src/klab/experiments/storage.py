@@ -19,50 +19,89 @@ if TYPE_CHECKING:
 
 
 def checkpoint_generation_bounds(
-    config: RunConfig, *, completed_steps: int = 0, completed_tokens: int = 0
+    config: RunConfig,
+    *,
+    completed_steps: int = 0,
+    completed_tokens: int = 0,
+    stop_after_step: int | None = None,
+    operational_checkpoints: bool = False,
 ) -> dict[str, Any]:
-    """Bound checkpoints from trainer watermarks and manager prune semantics."""
-    # Plan retention does not alter CheckpointManager's per-run pruning policy.
+    """Bound incremental writes from trainer watermarks and manager pruning.
+
+    The absolute stop is an invocation boundary, not the optimization horizon.
+    A resumed run starts a new checkpoint directory and must not count its
+    parent's already allocated files against incremental free space.
+    """
     training = config.training
-    # Loss masking and partial batches can commit fewer targets than the nominal
-    # batch size. max_tokens / nominal batch is not an upper bound on updates.
-    steps = training.max_steps
-    tokens_per_update = (
-        training.seq_len * training.micro_batch_size * training.gradient_accumulation
-    )
+    remaining_tokens = training.max_tokens - completed_tokens
+    if completed_steps >= training.max_steps or remaining_tokens < 1:
+        raise ValueError("continuation storage requires remaining training budget")
+    terminal_step = training.max_steps
+    if stop_after_step is not None:
+        if isinstance(stop_after_step, bool) or not isinstance(stop_after_step, int):
+            raise ValueError("stop-after-step must be an integer")
+        if stop_after_step <= completed_steps:
+            raise ValueError("stop-after-step must exceed current step")
+        terminal_step = min(terminal_step, stop_after_step)
+    steps = terminal_step - completed_steps
+    interior_steps = steps - 1
+
+    # Loss masking cannot increase targets in a packed update, but matched
+    # document groups can exceed the nominal packed batch. In that case the
+    # only config-only bound is the remaining target budget. An interior
+    # update has not yet reached that budget, otherwise it would be terminal.
+    interior_tokens = remaining_tokens - 1
+    if training.matched_stories is None:
+        tokens_per_update = (
+            training.seq_len
+            * training.micro_batch_size
+            * training.gradient_accumulation
+        )
+        interior_tokens = min(interior_tokens, interior_steps * tokens_per_update)
+
     checkpoints = config.checkpoint
-    explicit = tuple(step for step in checkpoints.steps if 0 < step < steps)
+    explicit = tuple(
+        step for step in checkpoints.steps if completed_steps < step < terminal_step
+    )
+    # The initial save resets cadences even when starting from a checkpoint.
     scheduled_steps = (
-        (steps - 1) // checkpoints.every_steps if checkpoints.every_steps else 0
+        interior_steps // checkpoints.every_steps if checkpoints.every_steps else 0
     )
     scheduled_tokens = (
-        ((steps - 1) * tokens_per_update) // checkpoints.every_tokens
-        if checkpoints.every_tokens
-        else 0
+        interior_tokens // checkpoints.every_tokens if checkpoints.every_tokens else 0
     )
     milestone_events = (
-        len(checkpoints.retention.milestones) if checkpoints.retention else 0
-    )
-    # Validation passes that can each save a new best checkpoint.
-    evaluation = config.evaluation
-    validation_steps = (
-        0
-        if not checkpoints.save_on_new_best
-        else ((steps - 1) // evaluation.every_steps if evaluation.every_steps else 0)
-        + (
-            training.max_tokens // evaluation.every_tokens + 1
-            if evaluation.every_tokens
-            else 0
+        sum(
+            item.step < terminal_step
+            and item.committed_targets <= completed_tokens + interior_tokens
+            and not (
+                item.step <= completed_steps
+                and item.committed_targets <= completed_tokens
+            )
+            for item in checkpoints.retention.milestones
         )
+        if checkpoints.retention
+        else 0
     )
-    minute_steps = steps - 1 if checkpoints.every_minutes is not None else 0
-    # With no other trigger to shift the watermark, a step cadence divisible
-    # by validation cadence fires only at validation boundaries.
+    evaluation = config.evaluation
+    validation_steps = 0
+    if checkpoints.save_on_new_best:
+        if evaluation.every_steps is not None:
+            validation_steps += (
+                terminal_step - 1
+            ) // evaluation.every_steps - completed_steps // evaluation.every_steps
+        if evaluation.every_tokens is not None:
+            validation_steps += interior_tokens // evaluation.every_tokens
+
+    # With no other trigger to shift a cadence that starts at an aligned
+    # step, these periodic writes are covered by the validation event bound.
     disjoint_step_events = scheduled_steps
     if (
-        checkpoints.every_steps is not None
+        checkpoints.save_on_new_best
+        and checkpoints.every_steps is not None
         and evaluation.every_tokens is None
         and evaluation.every_steps is not None
+        and completed_steps % evaluation.every_steps == 0
         and checkpoints.every_steps % evaluation.every_steps == 0
         and not explicit
         and not milestone_events
@@ -70,70 +109,25 @@ def checkpoint_generation_bounds(
         and checkpoints.every_minutes is None
     ):
         disjoint_step_events = 0
+    # Minutes and spot safety have no config-only lower bound on time per
+    # update: either may trigger at every interior step.
+    timed_events = (
+        interior_steps
+        if checkpoints.every_minutes is not None or operational_checkpoints
+        else 0
+    )
     # Initial and terminal saves are unconditional. The terminal evaluation's
-    # best event coincides with the terminal write, as do all simultaneous events.
-    # A target-token cap may terminate before a declared explicit step.
+    # best event coincides with the terminal write, as do simultaneous triggers.
     lower = 2
-    upper = 2 + min(
-        steps - 1,
+    upper = lower + min(
+        interior_steps,
         len(explicit)
         + milestone_events
         + disjoint_step_events
         + scheduled_tokens
         + validation_steps
-        + minute_steps,
+        + timed_events,
     )
-    if completed_steps:
-        # A new resumed run stores only its future generations. Existing parent
-        # bytes already reduce free space and must not be projected a second time.
-        steps = training.max_steps - completed_steps
-        remaining_tokens = training.max_tokens - completed_tokens
-        if steps < 1 or remaining_tokens < 1:
-            raise ValueError("continuation storage requires remaining training budget")
-        explicit = tuple(
-            s for s in checkpoints.steps if completed_steps < s < training.max_steps
-        )
-        scheduled_steps = (
-            ((steps - 1) // checkpoints.every_steps + 1)
-            if checkpoints.every_steps
-            else 0
-        )
-        # Matched-document updates are not seq_len * micro_batch_size targets.
-        # Use the remaining target cap and allow an immediately due inherited watermark.
-        scheduled_tokens = (
-            (
-                (remaining_tokens + checkpoints.every_tokens - 1)
-                // checkpoints.every_tokens
-                + 1
-            )
-            if checkpoints.every_tokens
-            else 0
-        )
-        validation_steps = (
-            0
-            if not checkpoints.save_on_new_best
-            else (
-                (training.max_steps - 1) // evaluation.every_steps
-                - completed_steps // evaluation.every_steps
-                if evaluation.every_steps
-                else 0
-            )
-            + (
-                remaining_tokens // evaluation.every_tokens + 1
-                if evaluation.every_tokens
-                else 0
-            )
-        )
-        minute_steps = steps - 1 if checkpoints.every_minutes is not None else 0
-        upper = 2 + min(
-            steps - 1,
-            len(explicit)
-            + milestone_events
-            + scheduled_steps
-            + scheduled_tokens
-            + validation_steps
-            + minute_steps,
-        )
     keep_periodic = checkpoints.keep_periodic
     retained_upper = upper if keep_periodic else min(upper, 3)
     # Manager prunes *after* committing and projecting a new generation. Reserve
