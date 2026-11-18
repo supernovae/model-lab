@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from test_training import config as training_config
 
-from klab.config.models import RunConfig
+from klab.config.models import MatchedStoryConfig, RunConfig
 from klab.data.packing import prepare_data
 from klab.data.tokenizer import load_tokenizer
-from klab.experiments.storage import storage_preview
+from klab.experiments.storage import checkpoint_generation_bounds, storage_preview
 from klab.workspace_preflight import require_storage, training_storage_checks
 
 
@@ -34,12 +35,17 @@ def configured(tmp_path: Path, *, updates: int = 20, **cadence: object) -> RunCo
     )
 
 
-def test_coincident_periodic_and_validation_without_minutes(tmp_path: Path) -> None:
-    cfg = configured(tmp_path, updates=5525, every_steps=2048)
+@pytest.mark.parametrize("save_best", [True, False])
+def test_coincident_periodic_and_validation_without_minutes(
+    tmp_path: Path, save_best: bool
+) -> None:
+    cfg = configured(
+        tmp_path, updates=5525, every_steps=2048, save_on_new_best=save_best
+    )
     result = storage_preview(cfg)
     assert result["write_count_upper"] == 4
     assert result["periodic_step_trigger_upper"] == 2
-    assert result["validation_triggered_best_upper"] == 3
+    assert result["validation_triggered_best_upper"] == (3 if save_best else 1)
     assert (
         result["estimated_total_write_bytes_upper"]
         == result["estimated_retained_bytes_upper"]
@@ -49,6 +55,8 @@ def test_coincident_periodic_and_validation_without_minutes(tmp_path: Path) -> N
 def test_explicit_token_and_minute_cadences(tmp_path: Path) -> None:
     cfg = configured(tmp_path, updates=10, steps=(2, 4))
     assert storage_preview(cfg)["write_count_upper"] == 4
+    assert checkpoint_generation_bounds(cfg, stop_after_step=4)["upper"] == 3
+    assert checkpoint_generation_bounds(cfg, stop_after_step=20)["upper"] == 4
     token = cfg.model_copy(
         update={
             "checkpoint": cfg.checkpoint.model_copy(
@@ -65,6 +73,13 @@ def test_explicit_token_and_minute_cadences(tmp_path: Path) -> None:
         }
     )
     assert storage_preview(minute)["write_count_upper"] == 11
+    assert checkpoint_generation_bounds(minute, stop_after_step=5)["upper"] == 6
+    assert (
+        checkpoint_generation_bounds(
+            cfg, stop_after_step=5, operational_checkpoints=True
+        )["upper"]
+        == 6
+    )
 
 
 def test_best_and_retention_respect_manager_protection(tmp_path: Path) -> None:
@@ -173,13 +188,16 @@ def test_insufficient_future_growth_is_not_excused_by_existing_cache(
         require_storage(checks)
 
 
-def test_resumed_storage_counts_only_future_target_cadence(tmp_path):
-    from klab.experiments.storage import checkpoint_generation_bounds
-
+def test_resumed_storage_counts_only_future_target_cadence(tmp_path: Path) -> None:
     cfg = configured(tmp_path, updates=14087, every_tokens=5000000, keep_periodic=True)
     cfg = cfg.model_copy(
         update={
-            "training": cfg.training.model_copy(update={"max_tokens": 144235834}),
+            "training": cfg.training.model_copy(
+                update={
+                    "max_tokens": 144235834,
+                    "matched_stories": MatchedStoryConfig(layout="story"),
+                }
+            ),
             "evaluation": cfg.evaluation.model_copy(update={"every_steps": 100}),
         }
     )
@@ -187,11 +205,9 @@ def test_resumed_storage_counts_only_future_target_cadence(tmp_path):
         cfg, completed_steps=13500, completed_tokens=66864692
     )
     assert future["steps"] == 587
-    assert (
-        future["scheduled_tokens"] == 17
-    )  # includes an immediately due inherited watermark
+    assert future["scheduled_tokens"] == 15
     assert future["validation_steps"] == 5
-    assert future["peak_generations"] == 24
+    assert future["peak_generations"] == 22
     old = training_storage_checks(cfg)
     remaining = training_storage_checks(
         cfg, completed_steps=13500, completed_tokens=66864692
@@ -231,3 +247,70 @@ def test_cold_cache_refuses_before_packing_when_the_run_cannot_fit(
     with pytest.raises(OSError, match="storage preflight failed"):
         train(cfg, run_id="does-not-fit")
     assert not list(cfg.dataset.cache_dir.glob("*/manifest.json"))
+
+
+def test_training_storage_admits_only_the_invocations_checkpoint_horizon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A long optimization schedule can run in short, resumable segments."""
+    import klab.workspace_preflight as preflight
+    from klab.training.manifest import read_manifest
+    from klab.training.trainer import train
+
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
+    base = configured(tmp_path, updates=244_141, every_steps=4, keep_periodic=True)
+    cfg = base.model_copy(
+        update={
+            "optimizer": base.optimizer.model_copy(update={"warmup_steps": 2048}),
+            "evaluation": base.evaluation.model_copy(update={"max_batches": 1}),
+        }
+    )
+    real = preflight.os.statvfs
+
+    def short_run_space(path):
+        original = real(path)
+        return SimpleNamespace(
+            f_bavail=(512 * 1024**2) // original.f_frsize,
+            f_frsize=original.f_frsize,
+            f_favail=4096,
+            f_files=original.f_files,
+        )
+
+    monkeypatch.setattr(preflight.os, "statvfs", short_run_space)
+
+    with pytest.raises(OSError, match="storage preflight failed"):
+        train(cfg, run_id="full")
+    with pytest.raises(ValueError, match="current step"):
+        train(cfg, run_id="invalid-stop", stop_after_step=0)
+    for stop in (1.5, True):
+        with pytest.raises(ValueError, match="must be an integer"):
+            train(cfg, run_id="invalid-stop", stop_after_step=stop)
+    assert not list(cfg.dataset.cache_dir.glob("*/manifest.json"))
+    assert not (cfg.logging.root_dir / "full").exists()
+    assert not (cfg.logging.root_dir / "invalid-stop").exists()
+
+    parent = cfg.logging.root_dir / "parent"
+    train(cfg, run_id=parent.name, stop_after_step=8)
+    child = cfg.logging.root_dir / "child"
+    with pytest.raises(ValueError, match="current step"):
+        train(
+            cfg,
+            run_id=child.name,
+            resume=parent / "checkpoints/latest.json",
+            stop_after_step=8,
+        )
+    assert not child.exists()
+    train(
+        cfg,
+        run_id=child.name,
+        resume=parent / "checkpoints/latest.json",
+        stop_after_step=14,
+    )
+    for run, steps in ((parent, [0, 4, 8]), (child, [8, 12, 14])):
+        checkpoints = sorted((run / "checkpoints").glob("step_*_gen_*/manifest.json"))
+        assert [json.loads(path.read_text())["step"] for path in checkpoints] == steps
+        manifest = read_manifest(run / "manifest.json")
+        assert manifest["requested_config"] == cfg.model_dump(mode="json")
+        assert (
+            json.loads((run / "progress.json").read_text())["status"] == "interrupted"
+        )

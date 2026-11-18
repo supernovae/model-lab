@@ -486,7 +486,13 @@ checkpoints, the run's copy of prepared arrays and any unverified cache growth
 against each destination's free bytes and inodes. A worker's copy needs its own
 headroom. When training finds no prepared cache, it checks the new cache,
 the run's copy and the checkpoints together before packing anything, so a
-run that cannot fit is refused before any tokenization.
+run that cannot fit is refused before any tokenization. Standalone previews
+budget the full configuration. For `klab train --stop-after-step STEP`, both
+storage checks limit projected checkpoint counts to this invocation,
+including its initial and terminal saves. Prepared data and any declared
+checkpoint retention reserve still require their full headroom. The stop is
+an absolute optimizer step when resuming and does not change the learning-rate
+schedule or configured training budget.
 
 ## Tune for the device
 
