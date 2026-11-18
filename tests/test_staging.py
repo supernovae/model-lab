@@ -37,6 +37,8 @@ def _config(root: Path, *, retention: bool = False) -> RunConfig:
             ),
             "optimizer": base.optimizer.model_copy(update={"warmup_steps": 1}),
             "checkpoint": base.checkpoint.model_copy(update={"every_steps": 2}),
+            # A sparse log cadence must not starve the pilot of per-update rows.
+            "logging": base.logging.model_copy(update={"every_steps": 20}),
             "staging": base.staging.model_copy(
                 update={"smoke_steps": 2, "warmup_steps": 3}
             ),
