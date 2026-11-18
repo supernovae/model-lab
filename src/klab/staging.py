@@ -389,6 +389,8 @@ def pilot_config(
             payload["optimizer"]["decay_steps"], steps
         )
     payload["logging"]["root_dir"] = str(root / "pilots" / purpose)
+    # The pilot verifies one timing and gradient row per update.
+    payload["logging"]["every_steps"] = 1
     return RunConfig.model_validate(payload)
 
 
