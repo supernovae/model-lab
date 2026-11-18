@@ -10,6 +10,7 @@ import selectors
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -411,6 +412,7 @@ def supervise_pilot(
     inherited_fds: tuple[int, ...] = (),
     expected_steps: int | None = None,
     monitor_policy: MonitorPolicy | None = None,
+    heartbeat: Callable[[PilotDeadlineState], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Launch once; safely terminate only owned PID/create-time descendants.
 
@@ -499,6 +501,8 @@ def supervise_pilot(
                 now = time.monotonic()
                 if now - last_sample >= 1:
                     last_sample = now
+                    if heartbeat is not None:
+                        heartbeat(state)
                     output.flush()
                     os.fsync(output.fileno())
                     try:

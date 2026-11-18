@@ -222,6 +222,17 @@ work, not the whole job. Progress is emitted as JSON lines on stderr;
 `runtime status` and the dashboard read the latest snapshot. See
 [metrics](metrics.md#forecasts-and-progress).
 
+`klab stage` also prints one line a minute to stderr while it prepares data or
+runs the smoke or warmup pilot (`stage warmup running elapsed=300s step=2/50
+in=training`) and keeps the same facts in `.OUTPUT.status.json` beside the
+output, so a watchdog can tell a stuck phase from a slow one. Before preparing,
+it refuses a changed mixture completion or tokenizer in seconds. It reuses the
+prepared inputs a finished stage of the same config left under
+`WORK/stage-prepared/` when they still verify (a changed Lab source does not
+refuse them; the data is checked by receipts and hashes), and otherwise prepares.
+`--prepared-inputs` still names a bundle explicitly and keeps the strict source
+check.
+
 ## Stopping
 
 Ctrl-C, SIGTERM or creating the printed `CANCEL` file stops at the next update

@@ -727,13 +727,21 @@ def _tokenizer_train(args: argparse.Namespace) -> None:
 
 
 def _stage(args: argparse.Namespace) -> None:
-    from klab.staging import stage
+    from klab.staging import find_prepared_inputs, record_prepared_inputs, stage
     from klab.training.pilot_deadline import load_pilot_deadline_policy
 
-    options = verification_options(
-        resolve_work_dir(args.work_dir), cold=args.cold_verify
-    )
+    work_dir = resolve_work_dir(args.work_dir)
+    options = verification_options(work_dir, cold=args.cold_verify)
     config = load_config(Path(args.config))
+    prepared = args.prepared_inputs
+    reused = False
+    if (
+        prepared is None
+        and args.through != "inspect"
+        and not Path(args.output).exists()
+    ):
+        prepared = find_prepared_inputs(work_dir, config, **options)
+        reused = prepared is not None
     if args.prepared_inputs is not None:
         from klab.experiments.artifacts import _safe_path
         from klab.staging import verify_prepared_inputs
@@ -757,7 +765,8 @@ def _stage(args: argparse.Namespace) -> None:
         config,
         Path(args.output),
         args.through,
-        prepared_inputs=args.prepared_inputs,
+        prepared_inputs=prepared,
+        prepared_source_drift=reused,
         authorization=args.runtime_authorization,
         resource_envelope=args.resource_envelope_value,
         tokenizer_batch_documents=args.tokenizer_batch_documents,
@@ -766,6 +775,8 @@ def _stage(args: argparse.Namespace) -> None:
         observer=getattr(args, "observer", None),
         **options,
     )
+    if prepared is None and args.through != "inspect":
+        record_prepared_inputs(work_dir, config, output)
     if getattr(args, "observer", None) is not None:
         try:
             from klab.phase_observations import set_observation_runtime

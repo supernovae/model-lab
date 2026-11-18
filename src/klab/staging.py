@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import tempfile
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -65,6 +66,7 @@ from klab.runtime_forecasting import (
     warmup_estimate,
 )
 from klab.runtime_profile import RuntimeAuthorization, require_authorization
+from klab.stage_status import StageStatus
 from klab.training.checkpoints import _atomic_json, _fsync_directory, _safe_member
 from klab.training.manifest import config_sha256, sha256_file, source_identity
 from klab.training.metrics import SCHEMA_VERSION, ExperimentStore
@@ -83,6 +85,7 @@ from klab.workdir import ensure_work_dir
 
 if TYPE_CHECKING:
     from klab.bottleneck_observations import BottleneckObserver
+    from klab.training.pilot_deadline import PilotDeadlineState
     from klab.verification_proofs import ProofStore
 
 
@@ -853,6 +856,60 @@ def verify_prepared_inputs(
     return {**inputs, "assets_root": str(root / "assets")}
 
 
+def _prepared_pointer(work_dir: Path, config: RunConfig) -> Path:
+    key = config_sha256(config.model_dump(mode="json"))
+    return work_dir / "stage-prepared" / f"{key}.json"
+
+
+def find_prepared_inputs(
+    work_dir: Path, config: RunConfig, **options: Any
+) -> Path | None:
+    """The prepared bundle an earlier stage of this exact config left, if it still verifies.
+
+    The bundle is verified like any `--prepared-inputs`, except that a changed Lab
+    source does not refuse it: its data is checked by the receipts and hashes, and
+    it records the source that produced it.
+    """
+    pointer = _prepared_pointer(work_dir, config)
+    try:
+        root = Path(json.loads(pointer.read_text())["path"])
+        verify_prepared_inputs(root, config, allow_runtime_drift=True, **options)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(f"stage: not reusing prepared inputs ({error})", file=sys.stderr)
+        return None
+    print(f"stage: reusing verified prepared inputs {root}", file=sys.stderr)
+    return root
+
+
+def record_prepared_inputs(work_dir: Path, config: RunConfig, output: Path) -> None:
+    """Remember the prepared bundle a finished stage holds for the next stage."""
+    root = output / "prepared"
+    if (root / "inputs.json").is_file():
+        _atomic_json(_prepared_pointer(work_dir, config), {"path": str(root)})
+
+
+def _precheck_inputs(
+    config: RunConfig,
+    proof_store: ProofStore | None,
+    verification_mode: Literal["cold", "verified_reuse"],
+) -> None:
+    """Refuse what receipts and cached completions can refuse in seconds, before preparing."""
+    if config.dataset.source == "local_token_mixture":
+        from klab.corpus.mixture import verify_mixture
+
+        verify_mixture(
+            config.dataset.mixture_declaration_path, config.dataset.mixture_output_path
+        )
+    if config.dataset.source == "snapshot" or config.tokenizer.origin is not None:
+        from klab.data.tokenizer import verify_run_tokenizer
+
+        verify_run_tokenizer(
+            config, proof_store=proof_store, verification_mode=verification_mode
+        )
+
+
 def _run_pilot(
     root: Path,
     purpose: str,
@@ -862,6 +919,7 @@ def _run_pilot(
     pilot_deadline_policy: PilotDeadlinePolicy | None = None,
     proof_store: ProofStore | None = None,
     verification_mode: Literal["cold", "verified_reuse"] = "cold",
+    heartbeat: Callable[[PilotDeadlineState], None] | None = None,
 ) -> dict[str, Any]:
     if cancel_path is not None and cancel_path.exists():
         raise InterruptedError("staging cancelled before pilot initialization")
@@ -894,6 +952,7 @@ def _run_pilot(
             cancel_path=cancel_path,
             inherited_fds=inherited_fds,
             expected_steps=expected_steps,
+            heartbeat=heartbeat,
         )
     except PilotCancelled as error:
         raise InterruptedError("staging pilot cancelled") from error
@@ -937,6 +996,7 @@ def stage(
     through: str = "smoke",
     *,
     prepared_inputs: Path | None = None,
+    prepared_source_drift: bool = False,
     allow_runtime_drift: bool = False,
     inherited_fds: tuple[int, ...] = (),
     cancel_path: Path | None = None,
@@ -982,6 +1042,7 @@ def stage(
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise FileExistsError("another writer owns this stage output") from error
+        status = StageStatus(output.with_name(f".{output.name}.status.json"))
         prepared_proofs: dict[str, VerifiedFile] = {}
         if prepared_inputs is not None:
             if output.exists() or output.is_symlink():
@@ -1000,6 +1061,7 @@ def stage(
                 prepared_identity = verify_prepared_inputs(
                     prepared_root,
                     config,
+                    allow_runtime_drift=prepared_source_drift,
                     _proofs=prepared_proofs,
                     proof_store=proof_store,
                     verification_mode=verification_mode,
@@ -1184,18 +1246,20 @@ def stage(
                             "estimate_policy=observe continues with the unchanged configuration"
                         )
                     if prepared_inputs is None:
-                        prepared_root = materialize_prepared_inputs(
-                            config,
-                            work / "prepared",
-                            resource_envelope=resource_envelope,
-                            tokenizer_batch_documents=tokenizer_batch_documents,
-                            tokenizer_batch_source_bytes=tokenizer_batch_source_bytes,
-                            proof_store=proof_store,
-                            verification_mode=verification_mode,
-                            _proofs=prepared_proofs,
-                            copy_observations=copy_observations,
-                            observer=observer,
-                        )
+                        with status.phase("prepare"):
+                            _precheck_inputs(config, proof_store, verification_mode)
+                            prepared_root = materialize_prepared_inputs(
+                                config,
+                                work / "prepared",
+                                resource_envelope=resource_envelope,
+                                tokenizer_batch_documents=tokenizer_batch_documents,
+                                tokenizer_batch_source_bytes=tokenizer_batch_source_bytes,
+                                proof_store=proof_store,
+                                verification_mode=verification_mode,
+                                _proofs=prepared_proofs,
+                                copy_observations=copy_observations,
+                                observer=observer,
+                            )
                     if prepared_inputs is None:
                         prepared_identity = _read_sealed(prepared_root / "inputs.json")
                         copied_assets, prepared_proofs = _link_stage_assets(
@@ -1260,15 +1324,17 @@ def stage(
                             "pilot stage lacks validated calibration identity"
                         )
                     history.start(stage_name)
-                    pilot = _run_pilot(
-                        work,
-                        purpose,
-                        inherited_fds=inherited_fds,
-                        cancel_path=cancel_path,
-                        pilot_deadline_policy=pilot_deadline_policy,
-                        proof_store=proof_store,
-                        verification_mode=verification_mode,
-                    )
+                    with status.phase(purpose):
+                        pilot = _run_pilot(
+                            work,
+                            purpose,
+                            inherited_fds=inherited_fds,
+                            cancel_path=cancel_path,
+                            pilot_deadline_policy=pilot_deadline_policy,
+                            proof_store=proof_store,
+                            verification_mode=verification_mode,
+                            heartbeat=status.pilot,
+                        )
                     reports.append(pilot)
                     observations.extend(
                         ExperimentStore.get_calibration(
