@@ -106,7 +106,10 @@ class DenseAttention(nn.Module):
         elif self.implementation == "flex":
             if self._flex_mask is None or self._flex_mask.shape[-1] != length:
                 self.reserve_flex_mask(length, x.device)
-            output = _flex_attention(query, key, value, block_mask=self._flex_mask)
+            # Inductor cannot compile flex attention for the CPU, which is where a
+            # checkpoint is reloaded to be checked; run it eagerly there.
+            attend = flex_attention if x.device.type == "cpu" else _flex_attention
+            output = attend(query, key, value, block_mask=self._flex_mask)
         elif self.implementation == "sdpa":
             output = functional.scaled_dot_product_attention(
                 query, key, value, dropout_p=0.0, is_causal=True

@@ -150,6 +150,23 @@ def test_cuda_fp16_sdpa_forward_backward_and_cache_match_reference() -> None:
 
 
 @pytest.mark.xpu
+def test_flex_attention_runs_on_the_cpu_and_matches_sdpa() -> None:
+    """A checkpoint trained with flex is reloaded on the CPU to be checked.
+
+    The XPU build of PyTorch cannot compile flex attention for the CPU, so this
+    fails there without the eager fallback; the CPU build compiles it, so it can
+    only be caught on an XPU runtime.
+    """
+    torch.manual_seed(7)
+    sdpa = DenseAttention(32, 4, 64, 10_000.0, implementation="sdpa")
+    flex = DenseAttention(32, 4, 64, 10_000.0, implementation="flex")
+    flex.load_state_dict(sdpa.state_dict())
+    values = torch.randn(2, 64, 32)
+    with torch.inference_mode():
+        torch.testing.assert_close(flex(values), sdpa(values), rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.xpu
 def test_flex_attention_matches_sdpa_forward_and_backward_on_xpu() -> None:
     torch.manual_seed(7)
     device = torch.device("xpu", 0)
