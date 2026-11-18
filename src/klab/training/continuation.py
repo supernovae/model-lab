@@ -167,9 +167,11 @@ def runtime_optimization_transition(
         ("runtime", "compile_dynamic_shapes"),
         ("runtime", "compile_output_head_loss"),
         ("runtime", "parallel", "mode"),
+        ("runtime", "secondary_device_indices"),
     )
     defaults = {
         ("runtime", "parallel", "mode"): "replicated",
+        ("runtime", "secondary_device_indices"): [],
         ("attention", "implementation"): "reference",
         ("evaluation", "batch_size"): None,
         ("runtime", "memory", "estimate_policy"): "enforce",

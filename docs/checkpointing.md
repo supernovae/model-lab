@@ -59,7 +59,9 @@ resumed.
   the compiled output head, determinism, `runtime.memory.estimate_policy`, the
   device layout (`runtime.parallel.mode`: a sharded checkpoint resumes
   replicated and the reverse, for example to continue past a stalled
-  collective), and microbatch size and accumulation while keeping their product. When changing
+  collective) and the secondary devices (for example to drop a hung card; an
+  update is still the same microbatches and accumulation, split over fewer
+  cards), and microbatch size and accumulation while keeping their product. When changing
   the microbatch size without fixed validation panels, set
   `evaluation.batch_size` to the old microbatch size so validation scores the
   same sample. The child records old and new values; results are no longer

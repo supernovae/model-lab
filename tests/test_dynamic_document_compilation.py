@@ -133,6 +133,14 @@ def test_resume_may_change_the_device_layout(tmp_path):
             "requested": "replicated",
         }
     ]
+    target["runtime"]["secondary_device_indices"] = []
+    target["runtime"]["parallel"] = {"mode": "replicated"}
+    dropped = runtime_optimization_transition(
+        source, RunConfig.model_validate(target), "parent"
+    )
+    assert "runtime.secondary_device_indices" in {
+        c["field"] for c in dropped["changes"]
+    }
     target["optimizer"]["peak"] = 1.0
     with pytest.raises(ValueError, match="scientific or unsupported"):
         runtime_optimization_transition(source, RunConfig.model_validate(target), "p")
