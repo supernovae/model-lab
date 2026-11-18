@@ -1149,7 +1149,7 @@ unclassified source kinds.
 
 ```sh
 klab corpus materialize-mixture DECLARATION --output OUTPUT [--workers N]
-klab corpus verify-mixture DECLARATION --output OUTPUT
+klab corpus verify-mixture DECLARATION --output OUTPUT [--audit | --reseal]
 ```
 
 Run `klab corpus describe RELEASE --tokenizer TOKENIZER --mixture TEMPLATE`
@@ -1291,6 +1291,20 @@ documents their own rows.
   through the same signed receipts as the release:
   the export is read from its bytes and the sample scanned once, by the first
   command that needs them, and later commands check file metadata only.
+- **Reseal.** When the recorded completion is gone or no longer matches the Lab
+  code (`native mixture completion unavailable or changed`), `verify-mixture
+  --reseal` records it again without replaying the schedule: it hashes
+  `train.tokens.ids` and `train.records.jsonl` (the two files in parallel, large
+  reads) against the receipt, authenticates the release and tokenizer through
+  their receipts, checks that the receipt's declaration, release, tokenizer,
+  inventory, seed, quotas and exposure limit are this declaration's, and checks
+  the receipt's counts and sizes agree with each other. It takes about the time
+  to read the two files (minutes for 12B tokens on NVMe, dominated by one SHA-256 pass over the token file)
+  instead of the replay's hour or more, and its output says the schedule was not
+  replayed. It proves the output is byte-identical to what a builder that
+  verified its inputs sealed. It does not prove the receipt follows from the
+  inputs: only `--audit`, an independent replay, shows that. `--audit` and
+  `--reseal` are exclusive.
 - **Several releases.** `additional_releases` adds one separately built release
   whose splits are bound to the baseline's families.
 
