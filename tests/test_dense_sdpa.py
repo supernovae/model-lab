@@ -11,7 +11,7 @@ from klab.config.models import AttentionConfig, RunConfig
 from klab.model.attention.dense import DenseAttention
 
 
-def _attention(implementation: Literal["reference", "sdpa"]) -> DenseAttention:
+def _attention(implementation: Literal["reference", "sdpa", "flex"]) -> DenseAttention:
     return DenseAttention(16, 4, 8, 10_000.0, implementation=implementation)
 
 
@@ -107,7 +107,7 @@ def test_sdpa_rejects_mlx_and_grouped_query_run_configs() -> None:
     base = load_config(Path("configs/runtime_smoke_cpu.yaml")).model_dump(mode="json")
     base["attention"]["implementation"] = "sdpa"
     mlx = {**base, "runtime": {**base["runtime"], "engine": "mlx", "backend": "metal"}}
-    with pytest.raises(ValueError, match="SDPA requires PyTorch"):
+    with pytest.raises(ValueError, match="SDPA and flex attention require PyTorch"):
         RunConfig.model_validate(mlx)
     grouped_model = {**base["model"], "num_kv_heads": 1}
     with pytest.raises(ValueError, match="equal Q/KV"):
@@ -147,3 +147,22 @@ def test_cuda_fp16_sdpa_forward_backward_and_cache_match_reference() -> None:
         rtol=3e-2,
         atol=3e-3,
     )
+
+
+@pytest.mark.xpu
+def test_flex_attention_matches_sdpa_forward_and_backward_on_xpu() -> None:
+    torch.manual_seed(7)
+    device = torch.device("xpu", 0)
+    sdpa = DenseAttention(256, 4, 512, 10_000.0, implementation="sdpa").to(device)
+    flex = DenseAttention(256, 4, 512, 10_000.0, implementation="flex").to(device)
+    flex.load_state_dict(sdpa.state_dict())
+    values = torch.randn(2, 512, 256, device=device, dtype=torch.bfloat16)
+    results = []
+    for module in (sdpa, flex):
+        module.to(torch.bfloat16)
+        inputs = values.clone().requires_grad_()
+        output = module(inputs)
+        output.float().square().mean().backward()
+        results.append((output, inputs.grad))
+    torch.testing.assert_close(results[1][0], results[0][0], atol=3e-2, rtol=3e-2)
+    torch.testing.assert_close(results[1][1], results[0][1], atol=3e-2, rtol=3e-2)

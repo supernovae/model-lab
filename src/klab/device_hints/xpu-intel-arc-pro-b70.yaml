@@ -1,0 +1,54 @@
+family: xpu-intel-arc-pro-b70
+description: Intel Arc Pro B70 (Xe2), 32 GiB, PyTorch XPU
+match:
+  backend: xpu
+  device_name_regex: Arc.*B70
+measured:
+  device: Intel(R) Arc(TM) Pro B70 Graphics
+  torch: 2.15.0+xpu
+  config_shape: dense decoder, 28 layers, hidden 1536, 24 heads, ffn 4096, seq 4096, vocab 32768, 845M parameters, bf16 autocast, ngram memory
+  source: model-lab PR feat/runtime-tune, single-card trials of 4 to 8 microbatches after 2 warmup updates, synthetic tokens
+hints:
+- lever: attention.implementation
+  value: flex
+  summary: Compiled flex attention is about twice as fast as the SDPA flash kernel at head_dim 64 (44 against 21 TFLOPS forward and backward). Needs runtime.memory.activation_checkpointing.enabled false.
+  evidence:
+  - {name: sdpa, tokens_per_second: 7601, peak_gib: 24.3}
+  - {name: flex, tokens_per_second: 9661, peak_gib: 24.3}
+- lever: runtime.memory.activation_checkpointing.enabled
+  value: false
+  summary: Recompute costs about a quarter of the step. Turn it off when the peak fits under the memory ceiling at micro_batch 1.
+  evidence:
+  - {name: transformer_block, tokens_per_second: 6281, peak_gib: 17.9}
+  - {name: "off", tokens_per_second: 7601, peak_gib: 24.3}
+- lever: optimizer.fused
+  value: true
+  summary: One fused AdamW kernel; a small gain (about 2 percent at 8 microbatches per update).
+  evidence:
+  - {name: unfused, tokens_per_second: 9661, peak_gib: 24.3}
+  - {name: fused, tokens_per_second: 9839, peak_gib: 24.3}
+- lever: runtime.parallel.mode
+  value: zero1
+  summary: On four cards zero1 over xccl kept 93 percent of the single-card rate; the host-staged replicated merge kept 62 percent. zero2 and fsdp cost more time for less memory.
+  evidence:
+  - {name: replicated, tokens_per_second: 24310, peak_gib: 24.3}
+  - {name: zero1, tokens_per_second: 36546, peak_gib: 19.4}
+  - {name: zero2, tokens_per_second: 32160, peak_gib: 16.5}
+  - {name: fsdp, tokens_per_second: 24626, peak_gib: 12.8}
+- lever: training.micro_batch_size
+  value: 1
+  summary: Larger micro-batches did not help; the step is compute bound at 4096 tokens per launch. Use the memory for recompute off instead.
+  evidence:
+  - {name: micro_batch_1, tokens_per_second: 6359, peak_gib: 17.9}
+  - {name: micro_batch_2, tokens_per_second: 6589, peak_gib: 19.1}
+  - {name: micro_batch_4, tokens_per_second: 6654, peak_gib: 21.5}
+- lever: runtime.compile_output_head_loss
+  value: true
+  summary: With output_head_chunk_tokens unset. A small gain (about 2 percent); costs the full logits in memory.
+  evidence:
+  - {name: chunked_eager, tokens_per_second: 6359, peak_gib: 17.9}
+  - {name: compiled, tokens_per_second: 6459, peak_gib: 17.3}
+- lever: host memory
+  value: ZE_AFFINITY_MASK
+  summary: A process that sees several Arc cards mirrors device memory in host RAM. Lab confines each rank to its card; for scripts of your own set ZE_AFFINITY_MASK before the first device call.
+  evidence: []

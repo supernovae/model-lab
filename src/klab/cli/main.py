@@ -276,6 +276,7 @@ def _checkpoint_verify(args: argparse.Namespace) -> None:
 
 
 def _inspect(args: argparse.Namespace) -> None:
+    from klab.device_hints import hints_for_device
     from klab.memory import (
         calibrated_estimate,
         calibration_key,
@@ -315,6 +316,10 @@ def _inspect(args: argparse.Namespace) -> None:
     values["resource_proposal"] = asdict(proposal)
     if args.explain:
         values["memory_levers"] = explain_levers(config, runtime, estimate)
+        family = hints_for_device(runtime.backend, runtime.device_name)
+        values["performance_hints"] = (
+            family.model_dump(mode="json") if family is not None else None
+        )
     if args.write_proposal:
         paths = write_resource_proposal(proposal, Path(args.write_proposal))
         values["proposal_paths"] = [str(path) for path in paths]
@@ -368,10 +373,32 @@ def _inspect(args: argparse.Namespace) -> None:
         print(f"  {assumption}")
     if args.explain:
         _print_levers(values["memory_levers"])
+        _print_hints(values["performance_hints"])
     if values["advisories"]:
         print("Notes")
         for note in values["advisories"]:
             print(f"  [{note['code']}] {note['message']}")
+
+
+def _print_hints(family: dict[str, Any] | None) -> None:
+    if family is None:
+        print(
+            "Performance hints: none shipped for this device; "
+            "klab runtime tune measures it"
+        )
+        return
+    measured = family["measured"]
+    print(f"Performance hints for {family['description']} (suggestions, not applied)")
+    print(f"  measured on {measured['device']}, torch {measured['torch']}")
+    print(f"  shape: {measured['config_shape']}")
+    for hint in family["hints"]:
+        print(f"  {hint['lever']}: {hint['value']}")
+        print(f"    {hint['summary']}")
+        for row in hint["evidence"]:
+            print(
+                f"    {row['name']}: {row['tokens_per_second']:,.0f} tokens/s, "
+                f"peak {row['peak_gib']:.1f} GiB"
+            )
 
 
 def _print_levers(levers: dict[str, Any]) -> None:
@@ -548,6 +575,45 @@ def _runtime_attention(args: argparse.Namespace) -> None:
             authorization = authorize_profile(profile, config)
         result = attention_probe(config, authorization=authorization)
     print(json.dumps(result, indent=2, sort_keys=True))
+
+
+def _runtime_tune(args: argparse.Namespace) -> None:
+    from klab.runtime_environments import profile_for_id
+    from klab.runtime_tune import default_profile_path, tune, write_profile
+
+    config = load_config(Path(args.config))
+    profile = (
+        profile_for_id(args.runtime)
+        if args.runtime is not None
+        else load_runtime_profile(Path(args.runtime_profile))
+        if args.runtime_profile is not None
+        else None
+    )
+    authorization = None
+    if profile is not None:
+        _ensure_runtime_interpreter(
+            profile.python,
+            hashlib.sha256(
+                json.dumps(profile.model_dump(mode="json"), sort_keys=True).encode()
+            ).hexdigest(),
+            lambda: probe_runtime_profile(profile),
+        )
+        authorization = authorize_profile(profile, config)
+    result = tune(
+        config,
+        authorization=authorization,
+        updates=args.updates,
+        warmup=args.warmup,
+        microbatches=args.microbatches,
+        progress=lambda line: print(line, file=sys.stderr, flush=True),
+    )
+    path = (
+        Path(args.output)
+        if args.output
+        else default_profile_path(resolve_work_dir(args.work_dir), result)
+    )
+    write_profile(result, path)
+    print(json.dumps({"best_fitting": result["best_fitting"], "profile": str(path)}))
 
 
 def _runtime_probe(args: argparse.Namespace) -> None:
@@ -2542,6 +2608,20 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     runtime_attention.add_argument("--store", default=runs_dir_default)
     runtime_attention.add_argument("--json", action="store_true", required=True)
     runtime_attention.set_defaults(handler=_runtime_attention)
+    runtime_tune = runtime_commands.add_parser(
+        "tune",
+        description="Time a small grid of performance levers on the configured device "
+        "and write a device performance profile. Nothing in the config changes.",
+    )
+    runtime_tune.add_argument("config")
+    tune_selection = runtime_tune.add_mutually_exclusive_group()
+    tune_selection.add_argument("--runtime")
+    tune_selection.add_argument("--runtime-profile", type=Path)
+    runtime_tune.add_argument("--updates", type=int, default=4)
+    runtime_tune.add_argument("--warmup", type=int, default=2)
+    runtime_tune.add_argument("--microbatches", type=int, default=4)
+    runtime_tune.add_argument("--output", help="profile path (default: WORK_DIR/tune)")
+    runtime_tune.set_defaults(handler=_runtime_tune)
     tokenizer = commands.add_parser("tokenizer")
     tokenizer_commands = tokenizer.add_subparsers(
         dest="tokenizer_command", required=True

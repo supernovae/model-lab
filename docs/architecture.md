@@ -55,7 +55,7 @@ large configured context costs nothing until a sequence that long runs.
 
 | Kind | What it does |
 | --- | --- |
-| `dense` | Full causal attention. `attention.implementation: sdpa` uses the backend's fused kernel. |
+| `dense` | Full causal attention. `attention.implementation: sdpa` uses the backend's fused kernel; `flex` uses compiled flex attention (PyTorch XPU measured about twice as fast as SDPA at head dimension 64). `flex` needs `runtime.memory.activation_checkpointing.enabled: false`: PyTorch cannot recompute it (pytorch/pytorch#166926), so the config is refused. |
 | `sliding_window` | Each position sees the last `window_size` positions. Work and memory grow with `T × window_size`. |
 | `block_sparse` | Keys are grouped into blocks; each query scores block summaries and attends to the selected blocks. |
 | `local_selected` | Long-context attention: a local window plus earlier blocks selected per head. See [sparse attention](sparse-attention.md). |

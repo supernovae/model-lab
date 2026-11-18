@@ -298,7 +298,10 @@ def build_replica(
     from klab.engines.pytorch import apply_recomputation_strategy
     from klab.training.trainable import apply_trainable_parameter_filter
 
-    model = DenseLM(config.model, config.attention).to(device)
+    # Built on the device: the weights are overwritten from ``state`` anyway,
+    # and a host copy per replica is memory the host does not have to spare.
+    with device:
+        model = DenseLM(config.model, config.attention)
     model.load_state_dict(state)
     apply_trainable_parameter_filter(model, config)
     apply_recomputation_strategy(model, config)
@@ -520,7 +523,8 @@ class ReplicaPool:
                 )
                 replica.gradients, replica.has_gradient = gradients, has_gradient
                 self.replicas.append(replica)
-            for replica in self.replicas:
+                # One replica at a time: each builds a host copy of the model
+                # while it starts, and four at once exhaust host memory.
                 replica.receive(timeout=_READY_SECONDS)
         except Exception:
             self.close()
