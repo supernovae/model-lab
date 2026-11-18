@@ -794,6 +794,22 @@ def synchronize(device: torch.device) -> None:
         torch.xpu.synchronize(device)
 
 
+def release_cached_memory(device: torch.device) -> None:
+    """Return the allocator's cached, unused blocks to the device.
+
+    Temporaries of many different sizes (a restore builds one per tensor) stay
+    reserved after they are freed. An Arc card that is over-committed spills to
+    host memory and stalls instead of raising an out-of-memory error, so a
+    long run must not start with that cache still held.
+    """
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    elif device.type == "xpu" and hasattr(torch, "xpu"):
+        torch.xpu.empty_cache()
+    elif device.type == "mps":
+        torch.mps.empty_cache()
+
+
 def allocated_memory_bytes(device: torch.device) -> int | None:
     if device.type == "mps" and hasattr(torch.mps, "current_allocated_memory"):
         return int(torch.mps.current_allocated_memory())

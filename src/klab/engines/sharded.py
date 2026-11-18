@@ -59,7 +59,7 @@ from klab.engines.multi_device import (
     to_host,
 )
 from klab.model.transformer import DenseLM
-from klab.runtime import synchronize, torch_device_for
+from klab.runtime import release_cached_memory, synchronize, torch_device_for
 from klab.training.optimizer import build_optimizer, set_optimizer_learning_rate
 
 PROCESS_GROUP_BACKEND = {
@@ -308,18 +308,23 @@ class ShardedRank:
                     and value.shape == parameter.shape
                     and isinstance(parameter, DTensor)
                 ):
+                    whole = value.to(self.device)
                     value = distribute_tensor(
-                        value.to(self.device),
+                        whole,
                         parameter.device_mesh,
                         parameter.placements,
                         src_data_rank=0,
                     )
+                    del whole
                 slots[key] = value
             sharded[index] = slots
         restore_optimizer_state(
             self.optimizer,
             {"state": sharded, "param_groups": state["param_groups"]},
         )
+        # Every unsharded copy made above is garbage, but the allocator still
+        # holds it: about the size of the whole optimizer state.
+        release_cached_memory(self.device)
 
     def close(self) -> None:
         if dist.is_initialized():
