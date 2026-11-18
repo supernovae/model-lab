@@ -169,7 +169,7 @@ Measured on four Arc Pro B70 cards (28 layers, hidden 1536, sequence 4096,
 bf16): compiled flex attention, recomputation off at micro-batch 1 and fused
 AdamW lifted one card from 5.9k to 9.8k tokens per second, and
 `runtime.parallel.mode: zero1` over xccl kept 93 percent of that on four cards
-(36.5k), where the host-staged `replicated` merge kept 62 percent. Larger
+(36.5k; zero2 at micro-batch 2 gives the same 36.7k), where the host-staged `replicated` merge kept 62 percent. Larger
 micro-batches did not help. See `klab runtime tune` and the hints printed by
 `klab inspect --explain`.
 
@@ -178,3 +178,9 @@ in host RAM. Lab confines each rank to its own card (`ZE_AFFINITY_MASK`); in you
 own scripts, set it before the first device call, and never set it to an empty
 value. `PYTORCH_ALLOC_CONF=expandable_segments:True` avoids the mirror too but
 stalls xccl collectives.
+
+Known limit: on the B70 box, `zero1` at micro-batch 2 and every sharded mode with
+4x-sized Engram tables stalled in an xccl collective (a hung copy-engine job; the
+kernel log shows an `xe` engine reset). `oneCCL` IPC-cache and temp-buffer
+switches did not help. Stay at micro-batch 1 with `zero1`, or `zero2` at
+micro-batch 2, and watch the first hour of a long run.

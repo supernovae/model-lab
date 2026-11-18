@@ -29,12 +29,14 @@ hints:
   - {name: fused, tokens_per_second: 9839, peak_gib: 24.3}
 - lever: runtime.parallel.mode
   value: zero1
-  summary: On four cards zero1 over xccl kept 93 percent of the single-card rate; the host-staged replicated merge kept 62 percent. zero2 and fsdp cost more time for less memory.
+  summary: On four cards zero1 over xccl kept 93 percent of the single-card rate; the host-staged replicated merge kept 62 percent. zero2 and fsdp cost more time for less memory. Caveat - zero1 at micro_batch 2 and any sharded mode with 4x engram tables (1M/2M rows) stalled in a collective (the reduce-scatter buffer allocation in FSDP2 post_backward; kernel log shows copy-engine job timeouts and ENOMEM VM errors). zero2 at micro_batch 2 and zero1 at micro_batch 1 with 2x tables ran cleanly. CCL_ZE_CACHE_OPEN_IPC_HANDLES=0, CCL_SYCL_*_TMP_BUF=1 and UR_L0_V2_FORCE_DISABLE_COPY_OFFLOAD=1 did not fix it.
   evidence:
   - {name: replicated, tokens_per_second: 24310, peak_gib: 24.3}
   - {name: zero1, tokens_per_second: 36546, peak_gib: 19.4}
   - {name: zero2, tokens_per_second: 32160, peak_gib: 16.5}
   - {name: fsdp, tokens_per_second: 24626, peak_gib: 12.8}
+  - {name: zero2_micro_batch_2, tokens_per_second: 36746, peak_gib: 22.7}
+  - {name: zero1_engram_2x, tokens_per_second: 36188, peak_gib: 21.5}
 - lever: training.micro_batch_size
   value: 1
   summary: Larger micro-batches did not help; the step is compute bound at 4096 tokens per launch. Use the memory for recompute off instead.
