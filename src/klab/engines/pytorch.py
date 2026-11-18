@@ -393,6 +393,10 @@ class _DetachedWeights(WeightSource):
     def aliases(self) -> Mapping[str, str]:
         return self._aliases
 
+    def detached(self) -> WeightSource:
+        """Already a host copy, which the trainer snapshots without a second one."""
+        return self
+
     def tensors(self) -> Iterator[CanonicalTensor]:
         # Release each copy once it is written.
         while self._tensors:
