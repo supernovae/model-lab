@@ -21,6 +21,7 @@ from klab.training.checkpoints import (
     LineageBest,
     TrainingSnapshot,
     existing_run_recovery_report,
+    restore_optimizer_state,
 )
 from klab.training.manifest import config_sha256
 from klab.training.optimizer import (
@@ -626,3 +627,21 @@ def test_lineage_local_tie_keeps_earliest_generation(tmp_path) -> None:
     assert manager.lineage_best_for_child("parent", selected.manifest_sha256) == (
         LineageBest("parent", first.manifest_sha256, 1, 0.1)
     )
+
+
+@pytest.mark.xpu
+def test_fused_adamw_resumes_with_its_steps_on_the_device() -> None:
+    """A resumed fused AdamW updates; the restore must not move its steps to the CPU."""
+    device = torch.device("xpu", 0)
+    weight = torch.nn.Parameter(torch.ones(8, 8, device=device))
+
+    def fresh() -> torch.optim.AdamW:
+        return torch.optim.AdamW([weight], lr=1e-3, fused=True)
+
+    original = fresh()
+    weight.grad = torch.ones_like(weight)
+    original.step()
+    resumed = fresh()
+    restore_optimizer_state(resumed, original.state_dict())
+    resumed.step()
+    assert resumed.state[weight]["step"].item() == 2

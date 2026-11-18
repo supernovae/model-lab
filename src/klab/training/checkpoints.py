@@ -1732,10 +1732,14 @@ def existing_run_recovery_report(
 def restore_optimizer_state(
     optimizer: torch.optim.Optimizer, state: dict[str, object]
 ) -> None:
-    """Restore state onto parameter devices while keeping noncapturable steps on CPU."""
+    """Restore state onto parameter devices while keeping noncapturable steps on CPU.
+
+    A capturable or fused optimizer keeps its steps on the parameter device, which
+    ``load_state_dict`` already arranged; moving them breaks its kernel.
+    """
     optimizer.load_state_dict(state)
     for group in optimizer.param_groups:
-        if group.get("capturable", False):
+        if group.get("capturable", False) or group.get("fused", False):
             continue
         for parameter in group["params"]:
             values = optimizer.state.get(parameter)
