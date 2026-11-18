@@ -976,10 +976,14 @@ def _train(args: argparse.Namespace) -> None:
     from klab.training.spot_safety import load_spot_policy
     from klab.training.trainer import train
 
-    config = load_config(
-        Path(args.config),
-        expected_sha256=os.environ.get("KLAB_ATTEMPT_TRAIN_FILE_SHA256"),
+    # Only a child that `klab attempt run` started carries a phase label. A digest
+    # a shell exported for an earlier attempt must not fail an ordinary train.
+    attempt_digest = (
+        os.environ.get("KLAB_ATTEMPT_TRAIN_FILE_SHA256")
+        if os.environ.get("KLAB_ATTEMPT_PHASE_LABEL")
+        else None
     )
+    config = load_config(Path(args.config), expected_sha256=attempt_digest)
     if args.runs_dir is not None:
         config = config.model_copy(
             update={

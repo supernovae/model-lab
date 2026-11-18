@@ -133,3 +133,25 @@ def test_attempt_runs_prepared_fresh_training_to_absolute_stop(tmp_path: Path) -
         assert "exceeds phase reservation" in rejected.stderr
         assert not (runs / label).exists()
     assert budget.status()["reservations"] == [reservation]
+
+    # A digest left exported by an earlier attempt does not fail ordinary training.
+    direct = subprocess.run(
+        [
+            *native,
+            "train",
+            str(declaration),
+            "--runs-dir",
+            str(runs),
+            "--run-id",
+            "direct",
+            "--require-prepared",
+            "--stop-after-step",
+            "2",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        env={**os.environ, "KLAB_ATTEMPT_TRAIN_FILE_SHA256": "0" * 64},
+    )
+    assert direct.returncode == 0, direct.stderr

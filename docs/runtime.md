@@ -315,7 +315,9 @@ klab checkpoint verify "$WORK/runs/dense-160m-child/checkpoints/latest.json" --j
 ```
 
 For a fresh `train` under `klab attempt run`, a declared `--stop-after-step`
-bounds the reservation without shortening the learning-rate schedule.
+bounds the reservation without shortening the learning-rate schedule. For a
+matched-story config only the updates are bounded; the targets keep their full
+reservation, because a document batch can exceed the packed-row shape.
 `--require-prepared` refuses to prepare missing data inside that phase.
 The ledger accepts the intentional stop only with its verified native
 checkpoint; cancellation and timeouts do not complete the phase.
