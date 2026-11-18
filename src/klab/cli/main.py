@@ -734,14 +734,12 @@ def _stage(args: argparse.Namespace) -> None:
     options = verification_options(work_dir, cold=args.cold_verify)
     config = load_config(Path(args.config))
     prepared = args.prepared_inputs
-    reused = False
     if (
         prepared is None
         and args.through != "inspect"
         and not Path(args.output).exists()
     ):
         prepared = find_prepared_inputs(work_dir, config, **options)
-        reused = prepared is not None
     if args.prepared_inputs is not None:
         from klab.experiments.artifacts import _safe_path
         from klab.staging import verify_prepared_inputs
@@ -766,7 +764,6 @@ def _stage(args: argparse.Namespace) -> None:
         Path(args.output),
         args.through,
         prepared_inputs=prepared,
-        prepared_source_drift=reused,
         authorization=args.runtime_authorization,
         resource_envelope=args.resource_envelope_value,
         tokenizer_batch_documents=args.tokenizer_batch_documents,

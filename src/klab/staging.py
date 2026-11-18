@@ -81,6 +81,7 @@ from klab.training.pilot_progress import pilot_phase
 from klab.training.preparation_guard import require_model_runtime_allowed
 from klab.training.stages import ExperimentStage, StageHistory
 from klab.verification_proofs import file_binding
+from klab.verifier_authority import scoped_authority
 from klab.workdir import ensure_work_dir
 
 if TYPE_CHECKING:
@@ -394,6 +395,11 @@ def pilot_config(
     return RunConfig.model_validate(payload)
 
 
+def scoped_source_sha256(kind: str) -> str:
+    """Digest of only the modules that decide this input's content, not the tree."""
+    return str(scoped_authority(kind)["sha256"])
+
+
 def verify_stage_bundle(
     root: Path,
     config: RunConfig,
@@ -426,7 +432,8 @@ def verify_stage_bundle(
     ) != config_sha256(expected.model_dump(mode="json")):
         raise ValueError("stage bundle configuration differs from requested execution")
     if (
-        inputs.get("source_identity_sha256") != source_identity()["sha256"]
+        inputs.get("verification_source_identity_sha256")
+        != scoped_source_sha256("stage_bundle")
         and not allow_runtime_drift
     ):
         raise ValueError(
@@ -678,7 +685,7 @@ def materialize_prepared_inputs(
         work = Path(temporary)
         assets = work / "assets"
         copied: dict[str, VerifiedFile] = {}
-        source_digest = source_identity()["sha256"]
+        source_digest = scoped_source_sha256("prepared_data")
         if prepared_inputs is None:
             tokenizer = load_tokenizer(config.tokenizer.path)
             if tokenizer.get_vocab_size() != config.model.vocab_size:
@@ -811,7 +818,6 @@ def verify_prepared_inputs(
     root: Path,
     config: RunConfig,
     *,
-    allow_runtime_drift: bool = False,
     proof_store: ProofStore | None = None,
     verification_mode: Literal["cold", "verified_reuse"] = "cold",
     _proofs: dict[str, VerifiedFile] | None = None,
@@ -825,10 +831,7 @@ def verify_prepared_inputs(
         raise ValueError(
             "prepared inputs configuration differs from requested execution"
         )
-    if (
-        inputs.get("source_identity_sha256") != source_identity()["sha256"]
-        and not allow_runtime_drift
-    ):
+    if inputs.get("source_identity_sha256") != scoped_source_sha256("prepared_data"):
         raise ValueError("prepared inputs executable source identity differs")
     assets = root / "assets"
     proofs = _verify_inventory(
@@ -875,7 +878,7 @@ def find_prepared_inputs(
     pointer = _prepared_pointer(work_dir, config)
     try:
         root = Path(json.loads(pointer.read_text())["path"])
-        verify_prepared_inputs(root, config, allow_runtime_drift=True, **options)
+        verify_prepared_inputs(root, config, **options)
     except FileNotFoundError:
         return None
     except (OSError, ValueError, KeyError, TypeError) as error:
@@ -998,7 +1001,6 @@ def stage(
     through: str = "smoke",
     *,
     prepared_inputs: Path | None = None,
-    prepared_source_drift: bool = False,
     allow_runtime_drift: bool = False,
     inherited_fds: tuple[int, ...] = (),
     cancel_path: Path | None = None,
@@ -1063,7 +1065,6 @@ def stage(
                 prepared_identity = verify_prepared_inputs(
                     prepared_root,
                     config,
-                    allow_runtime_drift=prepared_source_drift,
                     _proofs=prepared_proofs,
                     proof_store=proof_store,
                     verification_mode=verification_mode,
@@ -1077,7 +1078,8 @@ def stage(
             ):
                 raise FileExistsError("stage output belongs to another configuration")
             if (
-                bundle.get("source_identity_sha256") != source_identity()["sha256"]
+                bundle.get("source_identity_sha256")
+                != scoped_source_sha256("stage_bundle")
                 and not allow_runtime_drift
             ):
                 raise FileExistsError(
@@ -1142,6 +1144,7 @@ def stage(
                     total_targets=config.training.max_tokens,
                 )
                 source_digest = source_identity()["sha256"]
+                bundle_source = scoped_source_sha256("stage_bundle")
                 report.update(
                     inventory=asdict(inventory),
                     runtime=runtime.as_dict(),
@@ -1286,7 +1289,9 @@ def stage(
                         {
                             "format_version": 1,
                             "requested_config": config.model_dump(mode="json"),
-                            "source_identity_sha256": source_digest,
+                            "source_identity_sha256": scoped_source_sha256(
+                                "prepared_data"
+                            ),
                             "producer_source_identity_sha256": prepared_identity.get(
                                 "producer_source_identity_sha256",
                                 prepared_identity["source_identity_sha256"],
@@ -1294,7 +1299,7 @@ def stage(
                             "prepared_production_source_identity_sha256": prepared_manifest[
                                 "source_identity_sha256"
                             ],
-                            "verification_source_identity_sha256": source_digest,
+                            "verification_source_identity_sha256": bundle_source,
                             "parent_inputs_sha256": prepared_identity["sha256"],
                             "runtime_authorization": (
                                 authorization.as_dict()
@@ -1412,7 +1417,7 @@ def stage(
                         "status": "complete",
                         "through": through,
                         "config_sha256": config_sha256(config.model_dump(mode="json")),
-                        "source_identity_sha256": source_digest,
+                        "source_identity_sha256": bundle_source,
                         "inputs_sha256": inputs_digest,
                         "stages": report["stages"],
                         "pilot_reports": reports,
