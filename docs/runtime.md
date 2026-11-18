@@ -314,6 +314,12 @@ klab train configs/scale_dense_160m_cuda.yaml --runtime cuda-local \
 klab checkpoint verify "$WORK/runs/dense-160m-child/checkpoints/latest.json" --json
 ```
 
+For a fresh `train` under `klab attempt run`, a declared `--stop-after-step`
+bounds the reservation without shortening the learning-rate schedule.
+`--require-prepared` refuses to prepare missing data inside that phase.
+The ledger accepts the intentional stop only with its verified native
+checkpoint; cancellation and timeouts do not complete the phase.
+
 Run long jobs from a fixed, committed checkout, and develop in a separate
 worktree while they train.
 

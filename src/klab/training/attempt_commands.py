@@ -184,7 +184,7 @@ _SHAPES: dict[str, tuple[int, set[str], set[str], str]] = {
             "--recover",
             "--stop-after-step",
         },
-        {"--allow-runtime-drift"},
+        {"--allow-runtime-drift", "--require-prepared"},
         "train",
     ),
     "monitor-baseline": (1, {"--output", "--seconds"}, {"--json"}, "preparation"),

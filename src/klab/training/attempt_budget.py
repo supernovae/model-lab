@@ -1281,6 +1281,7 @@ class AttemptBudget:
         parent_checkpoint_path: Path | None = None,
     ) -> int:
         """Reserve before work, then run one phase under the owned supervisor."""
+        command = list(command)
         if not command or not completion.is_absolute() or completion.exists():
             raise ValueError("command and unused absolute completion path required")
         resolved_root = workspace_root.resolve(strict=True)
@@ -1700,9 +1701,10 @@ class AttemptBudget:
                 and resolved_root not in receipt_parent.parents
             ):
                 raise AttemptBudgetError("native receipt must be inside common root")
+        expected_stop = None
         if native_receipt_kind != "none":
-            self._preflight_native_command(
-                command,
+            expected_stop = self._preflight_native_command(
+                classified,
                 native_receipt_kind=native_receipt_kind,
                 native_receipt_path=native_receipt_path,
                 reserved=reserved,
@@ -1746,6 +1748,12 @@ class AttemptBudget:
         environment["KLAB_ATTEMPT_CONTENT_IDENTITY_SHA256"] = content_identity_sha256
         environment["KLAB_ATTEMPT_PHASE_LABEL"] = label
         environment["KLAB_ATTEMPT_ACTIVITY"] = activity
+        environment.pop("KLAB_ATTEMPT_TRAIN_FILE_SHA256", None)
+        if expected_stop is not None:
+            # The bounded child must parse the same bytes that set its target
+            # bound; a changed batch could otherwise spend too much before
+            # the existing post-run config and counter checks.
+            environment["KLAB_ATTEMPT_TRAIN_FILE_SHA256"] = train_identity
         invocation = [
             sys.executable,
             "-m",
@@ -1866,7 +1874,7 @@ class AttemptBudget:
 
             try:
                 if native_receipt_kind == "train":
-                    config_source = Path(self._native_command_args(command)[1])
+                    config_source = Path(classified.args[1])
                     if (
                         config_source.is_symlink()
                         or sha256_file(config_source) != train_identity
@@ -1876,6 +1884,7 @@ class AttemptBudget:
                     native_receipt_kind,
                     native_receipt_path,
                     parent_checkpoint_path=parent_checkpoint_path,
+                    expected_stop_step=expected_stop,
                 )
             except (OSError, ValueError, TypeError, KeyError) as error:
                 self._final_storage_receipt(
@@ -1928,68 +1937,79 @@ class AttemptBudget:
         if now_ns >= deadline_ns:
             raise AttemptBudgetError("shared wall-time limit reached")
 
-    @classmethod
+    @staticmethod
     def _preflight_native_command(
-        cls,
-        command: list[str],
+        classified: AttemptCommand,
         *,
         native_receipt_kind: str,
         native_receipt_path: Path | None,
         reserved: tuple[int, int, int, int],
         parent_checkpoint_path: Path | None,
         content_identity_sha256: str,
-    ) -> None:
-        args = cls._native_command_args(command)
-        if native_receipt_kind != "train" or len(args) < 2 or args[0] != "train":
+    ) -> int | None:
+        if native_receipt_kind != "train" or classified.operation != "train":
             raise AttemptBudgetError("native run receipt requires klab train")
-        if args.count("--run-id") != 1 or args.count("--runs-dir") != 1:
-            raise AttemptBudgetError("native train requires explicit run ID and store")
-        run_id = args[args.index("--run-id") + 1 : args.index("--run-id") + 2]
-        runs_dir = args[args.index("--runs-dir") + 1 : args.index("--runs-dir") + 2]
+        options = classified.options
+        run_id, runs_dir = options.get("--run-id"), options.get("--runs-dir")
         if (
-            not run_id
-            or not runs_dir
+            not isinstance(run_id, str)
+            or not isinstance(runs_dir, str)
             or native_receipt_path is None
-            or (Path(runs_dir[0]).resolve() / run_id[0])
-            != native_receipt_path.resolve()
+            or (Path(runs_dir).resolve() / run_id) != native_receipt_path.resolve()
         ):
             raise AttemptBudgetError("native train command differs from receipt path")
-        from klab.config.loading import load_config
-        from klab.training.manifest import sha256_file
-
-        config_source = Path(args[1])
-        if (
-            config_source.is_symlink()
-            or sha256_file(config_source) != content_identity_sha256
-        ):
-            raise AttemptBudgetError(
-                "direct train config differs from contract identity"
-            )
-        config = load_config(config_source)
-        if sha256_file(config_source) != content_identity_sha256:
-            raise AttemptBudgetError("direct train config changed during preflight")
-        if (
-            reserved[0] < config.training.max_steps
-            or reserved[1] < config.training.max_tokens
-            or reserved[2] != 0
-            or reserved[3] != 0
-        ):
-            raise AttemptBudgetError("native train config exceeds phase reservation")
-        parent_flags = [
-            name
-            for name in ("--resume", "--extend-budget", "--promote")
-            if name in args
-        ]
-        if len(parent_flags) > 1 or "--recover" in args:
+        parent_flags = {"--resume", "--extend-budget", "--promote"} & options.keys()
+        if len(parent_flags) > 1 or "--recover" in options:
             raise AttemptBudgetError("ambiguous native training continuation")
         if parent_flags:
-            flag = parent_flags[0]
-            if parent_checkpoint_path is None or args[
-                args.index(flag) + 1 : args.index(flag) + 2
-            ] != [str(parent_checkpoint_path)]:
+            flag = next(iter(parent_flags))
+            if parent_checkpoint_path is None or options[flag] != str(
+                parent_checkpoint_path
+            ):
                 raise AttemptBudgetError("training parent differs from receipt binding")
         elif parent_checkpoint_path is not None:
             raise AttemptBudgetError("fresh native training cannot claim a parent")
+
+        from klab.config.loading import load_config
+
+        # Verify the exact bytes used to calculate the reservation.
+        try:
+            config = load_config(
+                Path(classified.args[1]), expected_sha256=content_identity_sha256
+            )
+        except (ValueError, TypeError) as error:
+            raise AttemptBudgetError(
+                "direct train config differs from contract identity"
+            ) from error
+        training = config.training
+        updates, targets = training.max_steps, training.max_tokens
+        stop = None
+        if (
+            not parent_flags
+            and training.parent_checkpoint is None
+            and isinstance(value := options.get("--stop-after-step"), str)
+        ):
+            try:
+                stop = int(value)
+            except ValueError as error:
+                raise AttemptBudgetError(
+                    "stop-after-step must be an integer"
+                ) from error
+            if stop < 1:
+                raise AttemptBudgetError("stop-after-step must be positive")
+            updates = min(updates, stop)
+            # Matched document batches can exceed the packed-row shape.
+            if training.matched_stories is None:
+                targets = min(
+                    targets,
+                    updates
+                    * training.seq_len
+                    * training.micro_batch_size
+                    * training.gradient_accumulation,
+                )
+        if reserved[0] < updates or reserved[1] < targets or reserved[2:] != (0, 0):
+            raise AttemptBudgetError("native train config exceeds phase reservation")
+        return stop
 
     @staticmethod
     def _approved_counter_free_command(command: list[str]) -> bool:
