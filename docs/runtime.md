@@ -488,6 +488,31 @@ headroom. When training finds no prepared cache, it checks the new cache,
 the run's copy and the checkpoints together before packing anything, so a
 run that cannot fit is refused before any tokenization.
 
+## Tune for the device
+
+```sh
+klab runtime tune CONFIG --runtime RUNTIME_ID [--updates 4] [--warmup 2] [--microbatches 4] [--output PROFILE.yaml]
+```
+
+`tune` trains a few real updates on synthetic tokens of the config's shape on its
+device, one card, once per variant of a small lever grid: the config as given,
+`optimizer.fused`, activation recomputation off, `attention.implementation: flex`
+(which needs recomputation off), and the compiled output head. A variant the
+config refuses, that runs out of memory or that fails is reported with its reason.
+Nothing in your config changes. The profile it writes (default
+`WORK_DIR/tune/DEVICE.yaml`) holds the device, software versions, config shape,
+protocol and every trial's tokens per second and peak allocated bytes, and names
+the fastest variant whose peak fits under `runtime.memory.max_device_memory_fraction`
+of the device. Compile time is excluded (the warmup updates); measure a candidate
+for a long run on its real data before relying on it.
+
+`klab inspect CONFIG --explain` also lists the shipped performance hints for the
+device family it finds, with the measurements behind each hint. They are
+suggestions, never applied. Hints live in `src/klab/device_hints/`, one YAML file
+per family (Intel Arc Pro B70 first); to add your hardware (CUDA, ROCm, other
+Intel cards), run `tune` on it and copy the trials that helped into a new file
+there, keeping the trials that did not.
+
 ## Memory proposals and optimizers
 
 The memory policy can propose a complete alternative config; it never changes

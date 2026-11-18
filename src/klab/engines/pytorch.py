@@ -172,6 +172,8 @@ def compile_transformer_blocks(
     for module in model.modules():
         if isinstance(module, RoPE):
             module.reserve(config.model.max_seq_len, device)
+        if getattr(module, "implementation", None) == "flex":
+            module.reserve_flex_mask(config.training.seq_len, device)
     dynamic = config.runtime.compile_dynamic_shapes
     for block in model.blocks:
         block.forward_with_aux = torch.compile(

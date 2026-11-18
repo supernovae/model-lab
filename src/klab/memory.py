@@ -200,7 +200,7 @@ def registered_runtime_buffers_bytes(config: RunConfig) -> int:
 def assumes_fused_scores(config: RunConfig, attention: AttentionConfig) -> bool:
     """Whether the estimate charges no [T, T] scores because SDPA is fused here."""
     return (
-        attention.implementation == "sdpa"
+        attention.implementation in {"sdpa", "flex"}
         and attention.kind in {"dense", "mla"}
         and config.runtime.backend in {"cuda", "xpu"}
     )

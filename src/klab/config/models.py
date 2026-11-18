@@ -155,7 +155,9 @@ class AttentionConfig(StrictModel):
     params: dict[str, Any] = Field(
         default_factory=dict, exclude_if=lambda value: not value
     )
-    implementation: Literal["reference", "sdpa"] = Field(
+    # ``flex`` is compiled flex attention: causal, dense, no window, and it
+    # cannot be recomputed (see RunConfig).
+    implementation: Literal["reference", "sdpa", "flex"] = Field(
         default="reference", exclude_if=lambda value: value == "reference"
     )
     rope_base: float = Field(default=10000.0, gt=0)
@@ -249,6 +251,10 @@ class AttentionConfig(StrictModel):
             raise ValueError(
                 "SDPA implementation requires dense, sliding_window or mla attention"
             )
+        if self.implementation == "flex" and (
+            self.kind != "dense" or self.window_size is not None
+        ):
+            raise ValueError("flex attention requires dense attention without a window")
         return self
 
 
@@ -1200,6 +1206,9 @@ class AdamWConfig(StrictModel):
     betas: tuple[float, float] = (0.9, 0.95)
     eps: float = Field(default=1e-8, gt=0)
     state_offload: bool = False
+    # One fused kernel for the whole AdamW update instead of one launch per
+    # tensor. Same arithmetic; needs FP32 state and no state offload.
+    fused: bool = Field(default=False, exclude_if=lambda value: not value)
     # Dtype of the two moments between updates. bf16 halves them and rounds
     # stochastically; the update itself runs in FP32.
     state_dtype: Literal["fp32", "bf16"] = Field(
@@ -1566,11 +1575,21 @@ class RunConfig(StrictModel):
                         "attention.rope_scaling.original_max_seq_len must be below "
                         "model.max_seq_len"
                     )
-            if attention.implementation == "sdpa" and (
+            if attention.implementation in {"sdpa", "flex"} and (
                 self.runtime.engine != "pytorch" or grouped_query
             ):
                 raise ValueError(
-                    "SDPA requires PyTorch dense attention with equal Q/KV head counts"
+                    "SDPA and flex attention require PyTorch dense attention "
+                    "with equal Q/KV head counts"
+                )
+            if (
+                attention.implementation == "flex"
+                and self.runtime.memory.activation_checkpointing.enabled
+            ):
+                raise ValueError(
+                    "flex attention cannot be recomputed (PyTorch fails the "
+                    "checkpoint's tensor-metadata check, pytorch/pytorch#166926): "
+                    "turn runtime.memory.activation_checkpointing off"
                 )
         if self.runtime.engine == "mlx" and self.model.output_head_rank is not None:
             raise ValueError("model.output_head_rank needs the PyTorch engine")
@@ -1635,6 +1654,14 @@ class RunConfig(StrictModel):
             raise ValueError("optimizer.betas entries must be in [0, 1)")
         if self.optimizer.state_offload and self.runtime.engine != "pytorch":
             raise ValueError("optimizer.state_offload requires the PyTorch engine")
+        if (
+            isinstance(self.optimizer, AdamWConfig)
+            and self.optimizer.fused
+            and (self.optimizer.state_offload or self.optimizer.state_dtype != "fp32")
+        ):
+            raise ValueError(
+                "optimizer.fused needs FP32 optimizer state and no state_offload"
+            )
         if self.runtime.parallel.sharded and (
             not isinstance(self.optimizer, AdamWConfig)
             or self.optimizer.state_offload

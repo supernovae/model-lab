@@ -90,6 +90,7 @@ def make_optimizer(
     memory_table_lr_multiplier: float = 1.0,
     memory_table_weight_decay: float | None = None,
     reduced_precision: ReducedPrecision | None = None,
+    fused: bool = False,
 ) -> torch.optim.AdamW:
     from klab.model.memory import TokenNgramMemory
 
@@ -151,6 +152,7 @@ def make_optimizer(
         betas=betas,
         eps=eps,
         foreach=False,
+        fused=fused,
     )
 
 
@@ -167,6 +169,7 @@ def build_optimizer(model: nn.Module, config: RunConfig) -> torch.optim.Optimize
             memory_table_lr_multiplier=optimizer.memory_table_lr_multiplier,
             memory_table_weight_decay=optimizer.memory_table_weight_decay,
             reduced_precision=ReducedPrecision.from_config(config),
+            fused=optimizer.fused,
         )
     return make_adafactor(
         model,

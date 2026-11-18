@@ -70,6 +70,7 @@ sets all of the following and is the starting point for a long run.
 | `logging.every_steps` | Record update metrics every N updates (first and last always kept). |
 | `training.deterministic: false` | Lets the backend pick its fastest kernels and use all host threads. |
 | `runtime.precision: bf16`, `attention.implementation: sdpa`, `runtime.compile_transformer_blocks: true` | Faster updates where the backend supports them. Block compilation combines with [activation recomputation](memory.md#activation-recomputation). |
+| `optimizer.fused: true` | One fused AdamW kernel instead of one launch per tensor. Same arithmetic; needs FP32 optimizer state and no `state_offload`. |
 | `runtime.compile_output_head_loss: true` | Compiles the output projection and FP32 cross-entropy together (PyTorch XPU, BF16). |
 
 Background checkpoints need host memory for one copy of the weights and
@@ -176,7 +177,7 @@ number of devices: `replicated` to `fsdp` and back, or four devices to two.
 
 Sharded modes need AdamW without `optimizer.state_offload` (Adafactor's
 factored state is not elementwise), bf16 or fp32 without activation offload,
-no compiled kernels, the next-token objective and no
+the next-token objective and no
 `evaluation.gradient_bottleneck`. Activation recomputation, the chunked output
 head, tied embeddings and Engram tables work as on one device; the tables are
 sharded with the rest.

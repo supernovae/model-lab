@@ -8,9 +8,22 @@ from typing import Literal
 import torch
 from torch import Tensor, nn
 from torch.nn import functional
+from torch.nn.attention.flex_attention import (
+    BlockMask,
+    create_block_mask,
+    flex_attention,
+)
 
 from klab.model.cache import AttentionKVCache
 from klab.model.rope import RoPE, RopeScaling
+
+
+def _causal(batch: Tensor, head: Tensor, query: Tensor, key: Tensor) -> Tensor:
+    return query >= key
+
+
+# Flex attention only fuses when compiled; eager it materializes the scores.
+_flex_attention = torch.compile(flex_attention)
 
 
 class DenseAttention(nn.Module):
@@ -24,7 +37,7 @@ class DenseAttention(nn.Module):
         num_kv_heads: int | None = None,
         *,
         rope_scaling: RopeScaling | None = None,
-        implementation: Literal["reference", "sdpa"] = "reference",
+        implementation: Literal["reference", "sdpa", "flex"] = "reference",
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -37,11 +50,12 @@ class DenseAttention(nn.Module):
             raise ValueError(
                 "num_kv_heads must be positive, no greater than num_heads, and divide num_heads"
             )
-        if implementation == "sdpa" and self.num_kv_heads != self.num_heads:
-            raise ValueError("SDPA requires equal Q/KV head counts")
+        if implementation in {"sdpa", "flex"} and self.num_kv_heads != self.num_heads:
+            raise ValueError("SDPA and flex attention require equal Q/KV head counts")
         if window_size is not None and window_size <= 0:
             raise ValueError("window_size must be positive")
         self.implementation = implementation
+        self._flex_mask: BlockMask | None = None
         self.max_seq_len = max_seq_len
         self.head_dim = hidden_dim // num_heads
         self.window_size = window_size
@@ -71,6 +85,13 @@ class DenseAttention(nn.Module):
         output = torch.einsum("bkgts,bksd->bkgtd", scores, value)
         return output.flatten(1, 2)
 
+    @torch.compiler.disable
+    def reserve_flex_mask(self, length: int, device: torch.device) -> None:
+        """Build the causal block mask once, outside any compiled region."""
+        self._flex_mask = create_block_mask(
+            _causal, None, None, length, length, device=device
+        )
+
     def forward(self, x: Tensor) -> Tensor:
         batch, length, hidden = x.shape
         if length > self.max_seq_len:
@@ -82,6 +103,10 @@ class DenseAttention(nn.Module):
         )
         if self.window_size is not None and length > self.window_size:
             output = self._windowed(query, key, value)
+        elif self.implementation == "flex":
+            if self._flex_mask is None or self._flex_mask.shape[-1] != length:
+                self.reserve_flex_mask(length, x.device)
+            output = _flex_attention(query, key, value, block_mask=self._flex_mask)
         elif self.implementation == "sdpa":
             output = functional.scaled_dot_product_attention(
                 query, key, value, dropout_p=0.0, is_causal=True
