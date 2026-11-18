@@ -278,7 +278,9 @@ def receipt_policy(spec) -> dict:
     return policy
 
 
-def _check_record_summary(output: Path, receipt: dict) -> None:
+def _check_record_summary(
+    output: Path, receipt: dict, *, records_hashed: bool = False
+) -> None:
     """Recompute the receipt's exposure counts and row layout from its records."""
     policy = {
         key: receipt[key]
@@ -287,7 +289,10 @@ def _check_record_summary(output: Path, receipt: dict) -> None:
     }
     if not policy:
         return
-    if sha256_file(output / TRAIN_RECORDS) != receipt["train_records_sha256"]:
+    if (
+        not records_hashed
+        and sha256_file(output / TRAIN_RECORDS) != receipt["train_records_sha256"]
+    ):
         raise ValueError("mixture token export digest mismatch")
     with (output / TRAIN_RECORDS).open("rb") as stream:
         summary = record_summary(stream, policy)
@@ -604,18 +609,7 @@ def _materialize_mixture(
         if completed is not None:
             _seal_completed_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
         else:
-            cache, request = _native_mixture_completion(
-                spec, raw, output, manifest, tokenizer_sha
-            )
-            from klab.corpus.admission_inspection_cache import capture
-
-            cache.publish(
-                "native-mixture",
-                request,
-                receipt,
-                capture([output]),
-                limit=MAX_RECEIPT_BYTES,
-            )
+            _seal_native_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
         # The published output and its sealed receipt are the record now. The
         # committed segments and their markers existed only to resume an
         # interrupted schedule; progress.json and request.json stay.
@@ -1202,12 +1196,105 @@ def _native_mixture_completion(spec, raw, output, manifest, tokenizer_sha):
     return cache, request
 
 
-def verify_mixture(declaration: Path, output: Path, *, audit: bool = False) -> dict:
+def _seal_native_mixture(spec, raw, output, manifest, tokenizer_sha, receipt):
+    from klab.corpus.admission_inspection_cache import capture
+
+    cache, request = _native_mixture_completion(
+        spec, raw, output, manifest, tokenizer_sha
+    )
+    cache.publish(
+        "native-mixture", request, receipt, capture([output]), limit=MAX_RECEIPT_BYTES
+    )
+
+
+def verify_mixture(
+    declaration: Path, output: Path, *, audit: bool = False, reseal: bool = False
+) -> dict:
     """Authenticate completed execution; replay only for an explicit audit."""
+    if audit and reseal:
+        raise ValueError("--audit replays the mixture; --reseal never does")
     # One operation, so the release and export are authenticated once, however
     # many of the checks below reach for them.
     with _verification_operation():
+        if reseal:
+            return _reseal_mixture(declaration, output.resolve())
         return _verify_mixture(declaration, output, audit=audit)
+
+
+_DIGEST_CHUNK = 16 * 1024 * 1024
+
+
+def _reseal_mixture(declaration: Path, output: Path) -> dict:
+    """Re-record completion for an output a builder already sealed, without replay.
+
+    Proves the files are byte-identical to the receipt and that the receipt
+    matches this declaration, release and tokenizer. It does not re-derive the
+    schedule: only --audit shows the receipt follows from the inputs.
+    """
+    with (output / "receipt.json").open("rb") as stream:
+        raw_receipt = stream.read(MAX_RECEIPT_BYTES + 1)
+    if len(raw_receipt) > MAX_RECEIPT_BYTES:
+        raise ValueError("mixture receipt-byte cap exceeded")
+    receipt = json.loads(raw_receipt)
+    raw = declaration.read_bytes()
+    spec = MixtureDeclaration.model_validate(yaml.safe_load(raw))
+    manifest = verify_release(spec.release_path.resolve())
+    _, tokenizer_sha = _tokenizer(
+        spec, spec.release_path.resolve(), manifest["release_id"]
+    )
+    expected = {
+        "schema_version": 2,
+        "declaration_sha256": hashlib.sha256(raw).hexdigest(),
+        "release_manifest_sha256": sha256_file(spec.release_path / "manifest.json"),
+        "tokenizer_sha256": tokenizer_sha,
+        "seed": spec.seed,
+        "requested_target_quotas": spec.target_quotas,
+        "max_exposures": spec.max_exposures,
+        "train_tokens_format": "int32-le",
+        "order_policy": spec.order_policy,
+    }
+    if not spec.additional_releases:
+        expected |= {
+            "release_id": manifest["release_id"],
+            "family_inventory_sha256": _inventory_sha256(spec.family_inventory),
+        }
+    if any(receipt.get(key) != value for key, value in expected.items()):
+        raise ValueError("mixture receipt does not match this declaration and release")
+    actual = receipt["actual_target_tokens"]
+    if (
+        set(actual) != set(spec.target_quotas)
+        or receipt["quota_shortfalls"]
+        != {s: spec.target_quotas[s] - actual[s] for s in spec.target_quotas}
+        or sum(receipt["source_target_tokens"].values()) != sum(actual.values())
+        or any(
+            receipt["unique_target_positions"][s] > actual[s]
+            for s in spec.target_quotas
+        )
+        or receipt["train_tokens_bytes"] != 4 * sum(actual.values())
+    ):
+        raise ValueError("mixture receipt counts are not self-consistent")
+    from concurrent.futures import ThreadPoolExecutor
+
+    paths = [output / TRAIN_TOKENS, output / TRAIN_RECORDS]
+    with ThreadPoolExecutor(len(paths)) as pool:
+        digests = list(pool.map(lambda p: sha256_file(p, _DIGEST_CHUNK), paths))
+    if digests != [
+        receipt["train_tokens_sha256"],
+        receipt["train_records_sha256"],
+    ] or [p.stat().st_size for p in paths] != [
+        receipt["train_tokens_bytes"],
+        receipt["train_records_bytes"],
+    ]:
+        raise ValueError("mixture token export digest mismatch")
+    _check_record_summary(output, receipt, records_hashed=True)
+    if (
+        receipt.get("completed_preparation", {}).get("policy")
+        == "completed_local_preparation"
+    ):
+        _seal_completed_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
+    else:
+        _seal_native_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
+    return receipt
 
 
 def _verify_mixture(declaration: Path, output: Path, *, audit: bool) -> dict:
@@ -1244,7 +1331,7 @@ def _verify_mixture(declaration: Path, output: Path, *, audit: bool) -> dict:
         cached = cache.load("native-mixture", request, limit=MAX_RECEIPT_BYTES)
         if cached is None or cached[0] != receipt:
             raise ValueError(
-                "native mixture completion unavailable or changed; explicit audit replay required"
+                "native mixture completion unavailable or changed; run verify-mixture --reseal (cheap) or --audit (full replay)"
             )
         return receipt
     with tempfile.TemporaryDirectory(
@@ -1269,18 +1356,7 @@ def _verify_mixture(declaration: Path, output: Path, *, audit: bool) -> dict:
     ):
         _seal_completed_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
     else:
-        from klab.corpus.admission_inspection_cache import capture
-
-        cache, request = _native_mixture_completion(
-            spec, raw, output, manifest, tokenizer_sha
-        )
-        cache.publish(
-            "native-mixture",
-            request,
-            receipt,
-            capture([output]),
-            limit=MAX_RECEIPT_BYTES,
-        )
+        _seal_native_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
     return receipt
 
 

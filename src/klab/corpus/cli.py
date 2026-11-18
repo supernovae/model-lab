@@ -330,7 +330,10 @@ def _run(args: argparse.Namespace) -> None:
             materialize_mixture(Path(args.declaration), Path(args.output))
             if command == "materialize-mixture"
             else verify_mixture(
-                Path(args.declaration), Path(args.output), audit=args.audit
+                Path(args.declaration),
+                Path(args.output),
+                audit=args.audit,
+                reseal=args.reseal,
             )
         )
         print(
@@ -338,6 +341,15 @@ def _run(args: argparse.Namespace) -> None:
                 {
                     "status": "verified",
                     "complete": True,
+                    **(
+                        {
+                            "reseal": "output byte-identical to its receipt and "
+                            "receipt matches this declaration; schedule NOT replayed "
+                            "(use --audit for independent replay)"
+                        }
+                        if getattr(args, "reseal", False)
+                        else {}
+                    ),
                     "release_id": result["release_id"],
                     "receipt_path": str(Path(args.output).resolve() / "receipt.json"),
                     "train_tokens_path": str(
@@ -811,6 +823,12 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
                 "--audit",
                 action="store_true",
                 help="Explicitly reproduce the mixture schedule",
+            )
+            command.add_argument(
+                "--reseal",
+                action="store_true",
+                help="Re-record completion from the receipt and file digests "
+                "without replaying the schedule (weaker than --audit)",
             )
         command.set_defaults(handler=_handle)
     command = sub.add_parser(

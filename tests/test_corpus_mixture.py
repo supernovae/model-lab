@@ -252,7 +252,37 @@ def test_completion_survives_unrelated_lab_changes_not_relevant_ones(
     edited("memory.py", "engines/base.py", "cli/main.py")
     assert mixture.verify_mixture(declaration, output) == receipt
     edited("corpus/mixture_index.py")
-    with pytest.raises(ValueError, match="explicit audit replay required"):
+    with pytest.raises(ValueError, match="--reseal"):
+        mixture.verify_mixture(declaration, output)
+
+
+def test_reseal_rebuilds_lost_completion_without_replay_and_refuses_tampering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    declaration, _, _ = _fixture(tmp_path, monkeypatch)
+    output = tmp_path / "output"
+    receipt = mixture.materialize_mixture(declaration, output)
+    shutil.rmtree(tmp_path / "cache")
+    with pytest.raises(ValueError, match="--reseal"):
+        mixture.verify_mixture(declaration, output)
+    monkeypatch.setattr(
+        mixture,
+        "_materialize_mixture",
+        lambda *a, **k: pytest.fail("reseal must not replay"),
+    )
+    with pytest.raises(ValueError, match="never"):
+        mixture.verify_mixture(declaration, output, audit=True, reseal=True)
+    assert mixture.verify_mixture(declaration, output, reseal=True) == receipt
+    assert mixture.verify_mixture(declaration, output) == receipt
+
+    shutil.rmtree(tmp_path / "cache")
+    tokens = output / "train.tokens.ids"
+    data = bytearray(tokens.read_bytes())
+    data[0] ^= 1
+    tokens.write_bytes(bytes(data))
+    with pytest.raises(ValueError, match="digest mismatch"):
+        mixture.verify_mixture(declaration, output, reseal=True)
+    with pytest.raises(ValueError, match="digest mismatch"):
         mixture.verify_mixture(declaration, output)
 
 
