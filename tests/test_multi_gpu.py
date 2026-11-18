@@ -783,6 +783,13 @@ def _assert_sharded_matches_one_device(
                     expected.metrics[key], rel=1e-5, abs=1e-6
                 ), f"{mode} step {step} {key}"
             _assert_same_training(reference, engine, f"{mode} step {step}")
+        # The trainer snapshots weights with detached() to write a checkpoint
+        # while training continues; a sharded engine must support that too.
+        expected_weights = _weights(engine)
+        for tensor in engine.export_weights().detached().tensors():
+            assert torch.equal(
+                torch.from_numpy(tensor.array.copy()), expected_weights[tensor.name]
+            ), f"{mode} detached weight {tensor.name}"
         held_out, _ = _make_microbatches(7, count=2)
         assert engine.evaluate(held_out).loss_sum == pytest.approx(
             reference.evaluate(held_out).loss_sum, rel=1e-5
