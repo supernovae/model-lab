@@ -56,8 +56,10 @@ resumed.
   the same backend, recording the continuation as best effort.
 - **`--allow-runtime-optimization`** accepts changes to how the same training
   runs: attention implementation, activation recomputation, block compilation,
-  the compiled output head, determinism, `runtime.memory.estimate_policy`, and
-  microbatch size and accumulation while keeping their product. When changing
+  the compiled output head, determinism, `runtime.memory.estimate_policy`, the
+  device layout (`runtime.parallel.mode`: a sharded checkpoint resumes
+  replicated and the reverse, for example to continue past a stalled
+  collective), and microbatch size and accumulation while keeping their product. When changing
   the microbatch size without fixed validation panels, set
   `evaluation.batch_size` to the old microbatch size so validation scores the
   same sample. The child records old and new values; results are no longer

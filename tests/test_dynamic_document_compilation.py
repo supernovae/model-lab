@@ -113,3 +113,26 @@ def test_dynamic_config_and_continuation_delta(tmp_path):
     invalid["runtime"]["compile_dynamic_shapes"] = True
     with pytest.raises(ValueError, match="requires a compiled"):
         RunConfig.model_validate(invalid)
+
+
+def test_resume_may_change_the_device_layout(tmp_path):
+    source = configured(tmp_path).model_dump(mode="json")
+    source["runtime"].update(
+        backend="cpu", secondary_device_indices=[0], parallel={"mode": "zero1"}
+    )
+    source = RunConfig.model_validate(source)
+    target = source.model_dump(mode="json")
+    target["runtime"]["parallel"] = {"mode": "replicated"}
+    transition = runtime_optimization_transition(
+        source, RunConfig.model_validate(target), "parent"
+    )
+    assert transition["changes"] == [
+        {
+            "field": "runtime.parallel.mode",
+            "previous": "zero1",
+            "requested": "replicated",
+        }
+    ]
+    target["optimizer"]["peak"] = 1.0
+    with pytest.raises(ValueError, match="scientific or unsupported"):
+        runtime_optimization_transition(source, RunConfig.model_validate(target), "p")

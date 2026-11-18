@@ -166,8 +166,10 @@ def runtime_optimization_transition(
         ("runtime", "compile_transformer_blocks"),
         ("runtime", "compile_dynamic_shapes"),
         ("runtime", "compile_output_head_loss"),
+        ("runtime", "parallel", "mode"),
     )
     defaults = {
+        ("runtime", "parallel", "mode"): "replicated",
         ("attention", "implementation"): "reference",
         ("evaluation", "batch_size"): None,
         ("runtime", "memory", "estimate_policy"): "enforce",
@@ -184,7 +186,8 @@ def runtime_optimization_transition(
         old: dict[str, Any] = original
         new: dict[str, Any] = comparable
         for part in path[:-1]:
-            old, new = old[part], new[part]
+            # A default-valued block (runtime.parallel) is omitted when serialized.
+            old, new = old.get(part, {}), new.setdefault(part, {})
         key = path[-1]
         # Default-valued fields are omitted from serialized configs.
         default = defaults.get(path, False)
