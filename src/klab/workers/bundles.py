@@ -25,6 +25,7 @@ from klab.data.verification import (
 from klab.owned_copy import owned_copy
 from klab.staging import (
     materialize_prepared_inputs,
+    scoped_source_sha256,
     verify_prepared_inputs,
     verify_stage_bundle,
 )
@@ -1130,7 +1131,7 @@ def materialize_dispatch_bundle(
         payload = {
             "format_version": 1,
             "requested_config": manifest.config.model_dump(mode="json"),
-            "source_identity_sha256": manifest.source_identity_sha256,
+            "source_identity_sha256": scoped_source_sha256("prepared_data"),
             "artifacts": [
                 item.__dict__
                 for item in _inventory(
@@ -1159,7 +1160,6 @@ def materialize_dispatch_bundle(
         verify_prepared_inputs(
             input_root,
             RunConfig.model_validate(manifest.config),
-            allow_runtime_drift=_drift_authorized(manifest.continuation),
             _seals={
                 name.removeprefix("assets/"): seal
                 for name, seal in copied_seals.items()

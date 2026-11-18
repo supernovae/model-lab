@@ -228,10 +228,14 @@ in=training`) and keeps the same facts in `.OUTPUT.status.json` beside the
 output, so a watchdog can tell a stuck phase from a slow one. Before preparing,
 it refuses a changed mixture completion or tokenizer in seconds. It reuses the
 prepared inputs a finished stage of the same config left under
-`WORK/stage-prepared/` when they still verify (a changed Lab source does not
-refuse them; the data is checked by receipts and hashes), and otherwise prepares.
-`--prepared-inputs` still names a bundle explicitly and keeps the strict source
-check.
+`WORK/stage-prepared/` when they still verify, and otherwise prepares.
+`--prepared-inputs` names a bundle explicitly and is checked the same way.
+Prepared inputs and stage bundles bind the source of only the modules that decide
+them (the same scopes as the prepared-data and stage-bundle receipts), not the
+whole tree: merging unrelated Lab changes (memory estimators, engines, the
+command line, documentation) does not force a re-prepare, and editing a packing,
+verification or staging module refuses them with "executable source identity
+differs".
 
 ## Stopping
 

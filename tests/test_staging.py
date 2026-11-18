@@ -686,7 +686,7 @@ def test_matched_story_pilots_complete_under_native_supervision(
             assert verification_counters > 0
 
 
-def test_stage_reuses_prepared_inputs_of_the_same_config_across_source_change(
+def test_prepared_inputs_follow_only_the_modules_that_decide_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config(tmp_path)
@@ -699,25 +699,36 @@ def test_stage_reuses_prepared_inputs_of_the_same_config_across_source_change(
     )
     assert staging_module.find_prepared_inputs(work, changed) is None
 
-    # Unrelated Lab changes alter the whole-source identity; the data is still sound.
-    monkeypatch.setattr(staging_module, "source_identity", lambda: {"sha256": "f" * 64})
+    # An unrelated Lab change leaves explicit and automatic reuse alike valid.
+    package = Path(staging_module.__file__).parent
+    read = Path.read_bytes
+    edited: set[Path] = set()
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda self: read(self) + (b"\n# edited" if self in edited else b""),
+    )
+    edited.add(package / "memory.py")
     prepared = staging_module.find_prepared_inputs(work, config)
     assert prepared == first / "prepared"
-    with pytest.raises(ValueError, match="source identity differs"):
-        staging_module.verify_prepared_inputs(prepared, config)
+    staging_module.verify_prepared_inputs(prepared, config)
 
     def refuse(*args: object, **kwargs: object) -> None:
         raise AssertionError("prepared data must not be rebuilt")
 
     monkeypatch.setattr(staging_module, "materialize_prepared_inputs", refuse)
     second = stage(
-        config,
-        tmp_path / "second",
-        through="validate",
-        prepared_inputs=prepared,
-        prepared_source_drift=True,
+        config, tmp_path / "second", through="validate", prepared_inputs=prepared
     )
     assert (second / "bundle.json").is_file()
+    staging_module.verify_stage_bundle(second, config)
+
+    # A module that decides the prepared arrays or the bundle refuses both.
+    edited.add(package / "data" / "packing.py")
+    with pytest.raises(ValueError, match="source identity differs"):
+        staging_module.verify_prepared_inputs(prepared, config)
+    with pytest.raises(ValueError, match="source identity differs"):
+        staging_module.verify_stage_bundle(second, config)
 
 
 def test_cheap_input_refusal_comes_before_preparation(
