@@ -265,7 +265,7 @@ def test_cleanup_refuses_unresolved_manifest_lineage(tmp_path):
     assert plan_cleanup(workspace)["candidates"] == []
 
 
-def test_cleanup_reclaims_a_finished_runs_data_copy_while_another_run_trains(
+def test_cleanup_links_a_finished_runs_data_copy_while_another_run_trains(
     tmp_path: Path,
 ) -> None:
     workspace, cache = _workspace(tmp_path)
@@ -283,9 +283,16 @@ def test_cleanup_reclaims_a_finished_runs_data_copy_while_another_run_trains(
     ]
     path = tmp_path / "proposal.json"
     write_plan(plan, path)
-    assert apply_cleanup(path)["removed"] == 1
-    assert not finished.exists()
-    assert training.exists() and original.exists()
+    result = apply_cleanup(path)
+    assert (result["removed"], result["linked"]) == (0, 1)
+    # The run keeps every file it loads from (Generate, probes and explore need them),
+    # now sharing the cache's blocks; the training run's copy is untouched.
+    assert sorted(p.name for p in finished.iterdir()) == sorted(
+        p.name for p in original.iterdir()
+    )
+    assert (finished / "train.npy").samefile(original / "train.npy")
+    assert not (training / "train.npy").samefile(original / "train.npy")
+    assert plan_cleanup(workspace)["candidates"] == []
 
 
 def test_cleanup_keeps_a_data_copy_the_retained_cache_cannot_reproduce(
