@@ -95,8 +95,8 @@ def resolve_candidate(root: Path, selected: SavedSnapshot) -> Path:
         or metadata.get("step") != selected.step
     ):
         raise ValueError("Published checkpoint identity differs from its manifest")
-    if selected.size_bytes <= 0 or selected.size_bytes > 5 * 1024**3:
-        raise ValueError("Checkpoint exceeds the 5 GiB local preview inventory limit")
+    if selected.size_bytes <= 0:
+        raise ValueError("Checkpoint has no recorded size")
     files = metadata.get("files")
     if not isinstance(files, list) or not files:
         raise ValueError("Checkpoint has no finalized file inventory")
@@ -111,6 +111,17 @@ def resolve_candidate(root: Path, selected: SavedSnapshot) -> Path:
             or member.stat().st_size != entry["bytes"]
         ):
             raise ValueError("Incomplete checkpoint file inventory")
+    # Generation loads the weight shards; the optimizer state beside them (several
+    # times their size in a long pretraining run, and ``optimizer.safetensors`` in MLX
+    # saves) is never read into the preview. Every entry was validated above.
+    weight_bytes = sum(
+        entry["bytes"]
+        for entry in files
+        if entry["name"].startswith("weights")
+        and entry["name"].endswith(".safetensors")
+    )
+    if weight_bytes > 5 * 1024**3:
+        raise ValueError("Checkpoint weights exceed the 5 GiB local preview limit")
     return original
 
 

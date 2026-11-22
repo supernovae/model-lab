@@ -383,7 +383,10 @@ or outputs. The dashboard UI never loads a model.
 **Generate completion** verifies and loads the exact selected digest through the
 native loader. Cold verification checks finalized contents, manifest, model
 configuration, tokenizer and Engram state. Recorded save-time verification alone
-never replaces it. Partial or staging directories are never loaded.
+never replaces it. Partial or staging directories are never loaded. A save is
+listed only if its weight files total at most 5 GiB; the optimizer state beside
+them in a pretraining checkpoint does not count, because the preview never loads it.
+Cold verification still hashes every file of the save, optimizer state included.
 
 One shared lock spans verification, eviction, loading and generation. Busy requests
 are refused rather than queued; the old model is released before another loads.
