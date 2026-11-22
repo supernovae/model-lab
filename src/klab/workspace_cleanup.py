@@ -321,10 +321,12 @@ def _run_data_candidates(
     the same bytes.
 
     Every attempt copies the prepared data into its own ``data`` directory (reflink
-    where the filesystem supports it, a full copy elsewhere). Once the run is over the
-    copy only costs disk, and the cache it was made from still carries the identical
-    bytes. A copy is proposed only if every member is a regular file equal to the
-    retained cache's, so nothing the cache cannot reproduce is ever removed.
+    where the filesystem supports it, a full copy elsewhere). Loading a run's
+    checkpoint (Generate, probes, explore) needs that directory, so it is never
+    deleted: apply replaces each file with a hard link to the retained cache's, which
+    frees the copy's blocks and leaves the run loadable. A copy is proposed only if
+    every member is a regular file equal to the cache's, on the same filesystem, and
+    not already linked.
     """
     originals: dict[bytes, Path] = {}
     for entry in retained:
@@ -351,19 +353,39 @@ def _run_data_candidates(
         if original is None:
             continue
         try:
+            if data.stat().st_dev != original.stat().st_dev:
+                continue
+            members_to_link = [name for name in names if name != _MARKER]
+            if all((data / name).samefile(original / name) for name in members_to_link):
+                continue
             same = all(
                 filecmp.cmp(data / name, original / name, shallow=False)
-                for name in names - {_MARKER}
+                for name in members_to_link
             )
         except OSError:
             continue
         if same:
             candidates.append(
                 _candidate(
-                    workspace, data, "run_data_copy", "identical_to_retained_cache"
+                    workspace,
+                    data,
+                    "run_data_copy",
+                    f"hardlink_to_retained_cache:{original.relative_to(workspace).as_posix()}",
                 )
             )
     return candidates
+
+
+def _link_to_cache(data: Path, original: Path) -> None:
+    """Replace each file of a run's data copy with a hard link to the cache's file."""
+    for member in sorted(data.iterdir()):
+        if member.name == _MARKER or member.samefile(original / member.name):
+            continue
+        if not filecmp.cmp(member, original / member.name, shallow=False):
+            raise ValueError(f"run data {member.name} no longer equals the cache's")
+        temporary = data / f".{member.name}.klab-link"
+        os.link(original / member.name, temporary)
+        os.replace(temporary, member)
 
 
 def plan_cleanup(
@@ -464,10 +486,24 @@ def apply_cleanup(plan_path: Path) -> dict[str, int]:
             path = workspace / relative
             if _candidate(workspace, path, item["kind"], item["reason"]) != item:
                 raise ValueError("cleanup candidate changed")
+        linked = 0
         for item in saved["candidates"]:
             path = workspace / Path(item["path"])
-            shutil.rmtree(path)
+            if item["kind"] == "run_data_copy":
+                prefix = "hardlink_to_retained_cache:"
+                original = workspace / Path(str(item["reason"]).removeprefix(prefix))
+                if (
+                    not str(item["reason"]).startswith(prefix)
+                    or not _inside(original.resolve(), workspace)
+                    or original.is_symlink()
+                ):
+                    raise ValueError("unsafe run data link target")
+                _link_to_cache(path, original)
+                linked += 1
+            else:
+                shutil.rmtree(path)
     return {
-        "removed": len(saved["candidates"]),
+        "removed": len(saved["candidates"]) - linked,
+        "linked": linked,
         "reclaimed_bytes": int(saved["reclaimable_bytes"]),
     }
