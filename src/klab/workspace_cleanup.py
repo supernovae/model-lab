@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import filecmp
 import hashlib
 import json
 import logging
@@ -232,17 +233,19 @@ def _checkpoint_candidates(
     return candidates
 
 
-def _cache_candidates(
-    workspace: Path,
-    runs: list[tuple[str, str, str]],
-    active_attempts: set[str],
-    max_cache_entries: int,
-) -> list[dict[str, object]]:
+def _runs_are_busy(runs: list[tuple[str, str, str]], active_attempts: set[str]) -> bool:
+    return bool(active_attempts) or any(
+        status not in _TERMINAL_RUNS for _, status, _ in runs
+    )
+
+
+def _owned_cache_entries(
+    workspace: Path, runs: list[tuple[str, str, str]]
+) -> list[Path]:
+    """Workspace-owned prepared-data caches with a valid marker, newest first."""
     from klab.data.packing import supervision_requires_mask
     from klab.training.checkpoints import strict_json
 
-    if active_attempts or any(status not in _TERMINAL_RUNS for _, status, _ in runs):
-        return []
     cache_dirs: set[Path] = set()
     for _, _, raw in runs:
         try:
@@ -291,10 +294,76 @@ def _cache_candidates(
                 continue
             entries.append(path)
     entries.sort(key=lambda path: (path.stat().st_mtime_ns, str(path)), reverse=True)
+    return entries
+
+
+def _cache_candidates(
+    workspace: Path,
+    entries: list[Path],
+    busy: bool,
+    max_cache_entries: int,
+) -> list[dict[str, object]]:
+    if busy:
+        return []
     return [
         _candidate(workspace, path, "prepared_data_cache", "exceeds_max_cache_entries")
         for path in entries[max_cache_entries:]
     ]
+
+
+def _run_data_candidates(
+    workspace: Path,
+    runs: list[tuple[str, str, str]],
+    active_attempts: set[str],
+    retained: list[Path],
+) -> list[dict[str, object]]:
+    """A finished run's private copy of its training data, when a retained cache holds
+    the same bytes.
+
+    Every attempt copies the prepared data into its own ``data`` directory (reflink
+    where the filesystem supports it, a full copy elsewhere). Once the run is over the
+    copy only costs disk, and the cache it was made from still carries the identical
+    bytes. A copy is proposed only if every member is a regular file equal to the
+    retained cache's, so nothing the cache cannot reproduce is ever removed.
+    """
+    originals: dict[bytes, Path] = {}
+    for entry in retained:
+        originals.setdefault((entry / "manifest.json").read_bytes(), entry)
+    candidates: list[dict[str, object]] = []
+    for run_id, status, _ in runs:
+        if status not in _TERMINAL_RUNS or run_id in active_attempts:
+            continue
+        if Path(run_id).name != run_id or run_id in {".", ".."}:
+            continue
+        run = workspace / "runs" / run_id
+        data = run / "data"
+        if run.is_symlink() or data.is_symlink() or not data.is_dir():
+            continue
+        members = list(data.iterdir())
+        names = {member.name for member in members}
+        if (
+            "manifest.json" not in names
+            or not names <= _CACHE_MEMBERS
+            or any(member.is_symlink() or not member.is_file() for member in members)
+        ):
+            continue
+        original = originals.get((data / "manifest.json").read_bytes())
+        if original is None:
+            continue
+        try:
+            same = all(
+                filecmp.cmp(data / name, original / name, shallow=False)
+                for name in names - {_MARKER}
+            )
+        except OSError:
+            continue
+        if same:
+            candidates.append(
+                _candidate(
+                    workspace, data, "run_data_copy", "identical_to_retained_cache"
+                )
+            )
+    return candidates
 
 
 def plan_cleanup(
@@ -310,6 +379,11 @@ def plan_cleanup(
     runs, registered, active_attempts, manifests, bound_checkpoints = _store_rows(
         workspace
     )
+    entries = _owned_cache_entries(workspace, runs)
+    busy = _runs_are_busy(runs, active_attempts)
+    # Caches are pruned only while nothing runs; until then every one is retained, so
+    # a run's copy is never reclaimed against an original that is itself a candidate.
+    retained = entries if busy else entries[:max_cache_entries]
     candidates = [
         *_checkpoint_candidates(
             workspace,
@@ -320,7 +394,8 @@ def plan_cleanup(
             bound_checkpoints,
             max_extra_periodic,
         ),
-        *_cache_candidates(workspace, runs, active_attempts, max_cache_entries),
+        *_cache_candidates(workspace, entries, busy, max_cache_entries),
+        *_run_data_candidates(workspace, runs, active_attempts, retained),
     ]
     candidates.sort(key=lambda item: str(item["path"]))
     body: dict[str, object] = {
