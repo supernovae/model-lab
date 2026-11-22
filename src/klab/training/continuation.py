@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -19,6 +20,11 @@ from klab.training.manifest import (
     config_sha256,
     read_manifest,
     sha256_file,
+)
+
+_LOGGER = logging.getLogger(__name__)
+_LAYOUT_FIELDS = frozenset(
+    {"runtime.parallel.mode", "runtime.secondary_device_indices"}
 )
 
 
@@ -214,6 +220,18 @@ def runtime_optimization_transition(
     ):
         raise ValueError(
             "runtime optimization transition changes scientific or unsupported settings"
+        )
+    layout = [change for change in changes if change["field"] in _LAYOUT_FIELDS]
+    if layout:
+        # Throughput and memory move a lot with the layout (a sharded run that resumes
+        # replicated trained about a third slower), and nothing else says so.
+        _LOGGER.warning(
+            "runtime optimization transition changes the device layout (%s); compare "
+            "tokens per second with the parent run before leaving it unattended",
+            ", ".join(
+                f"{change['field']}: {change['previous']!r} -> {change['requested']!r}"
+                for change in layout
+            ),
         )
     return {
         "kind": "runtime_optimization_transition",
