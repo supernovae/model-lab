@@ -65,6 +65,41 @@ def test_missing_and_corrupt_candidates_fail_without_fallback(tmp_path):
     assert resolve_candidate(tmp_path, item) == path
 
 
+def test_size_limit_counts_the_weights_not_the_optimizer_state(tmp_path):
+    gib = 1024**3
+
+    def checkpoint(weights: int, optimizer: int):
+        item = replace(selected(), size_bytes=weights + optimizer)
+        path = tmp_path / item.run / item.checkpoint
+        path.mkdir(parents=True, exist_ok=True)
+        for name, size in (
+            ("weights.safetensors", weights),
+            ("training_state.pt", optimizer),
+        ):
+            with (path / name).open("wb") as handle:
+                handle.truncate(size)
+        (path / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "sha256": item.digest,
+                    "step": 1,
+                    "files": [
+                        {"name": "weights.safetensors", "bytes": weights},
+                        {"name": "training_state.pt", "bytes": optimizer},
+                    ],
+                }
+            )
+        )
+        return item, path
+
+    # 4.6 GiB of weights beside 9.3 GiB of optimizer state is a loadable preview.
+    item, path = checkpoint(5 * gib - 1, 9 * gib)
+    assert resolve_candidate(tmp_path, item) == path
+    item, _ = checkpoint(5 * gib + 1, 1)
+    with pytest.raises(ValueError, match="weights exceed"):
+        resolve_candidate(tmp_path, item)
+
+
 def test_owner_serializes_load_and_generation_and_reuses_exact_identity():
     owner = SnapshotOwner()
     item = selected()
