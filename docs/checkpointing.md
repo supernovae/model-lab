@@ -65,7 +65,11 @@ resumed.
   the microbatch size without fixed validation panels, set
   `evaluation.batch_size` to the old microbatch size so validation scores the
   same sample. The child records old and new values; results are no longer
-  bitwise comparable.
+  bitwise comparable. A change to the device layout or the secondary devices
+  also logs a warning that names the fields, because speed and memory move a lot
+  with it: a four-card run that resumed replicated instead of sharded trained
+  about a third slower without any other sign. Compare tokens per second with
+  the parent before leaving such a run unattended.
 
 ### Recover
 

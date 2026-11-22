@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import random
 import time
@@ -29,6 +30,7 @@ from klab.config.models import (
 )
 from klab.engines.base import Microbatch
 from klab.engines.pytorch import PyTorchEngine
+from klab.training.continuation import runtime_optimization_transition
 from klab.workers.execution import _acquire_config_lease
 from klab.workers.leases import (
     MultiDeviceLease,
@@ -868,3 +870,34 @@ def test_sharded_modes_refuse_what_they_cannot_shard(tmp_path: Path) -> None:
                 "optimizer": {"name": "adafactor", "warmup_steps": 1},
             }
         )
+
+
+def test_a_recovery_that_changes_the_device_layout_says_so(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A sharded run that resumes replicated trains much slower; that must be visible."""
+    sharded = _make_run_config(
+        tmp_path,
+        secondary_device_indices=(0,),
+        runtime_options={"parallel": ParallelConfig(mode="zero1")},
+    )
+    replicated = _make_run_config(tmp_path, secondary_device_indices=(0,))
+    with caplog.at_level(logging.WARNING, logger="klab.training.continuation"):
+        decision = runtime_optimization_transition(sharded, replicated, "parent")
+    assert {
+        "field": "runtime.parallel.mode",
+        "previous": "zero1",
+        "requested": "replicated",
+    } in decision["changes"]  # type: ignore[operator]
+    assert "runtime.parallel.mode: 'zero1' -> 'replicated'" in caplog.text
+
+    caplog.clear()
+    compiled = _make_run_config(
+        tmp_path,
+        secondary_device_indices=(0,),
+        runtime_options={"compile_transformer_blocks": True},
+    )
+    base = _make_run_config(tmp_path, secondary_device_indices=(0,))
+    with caplog.at_level(logging.WARNING, logger="klab.training.continuation"):
+        runtime_optimization_transition(base, compiled, "parent")
+    assert "device layout" not in caplog.text
