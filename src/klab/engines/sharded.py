@@ -283,6 +283,26 @@ class ShardedRank:
             return None
         return {"state": whole, "param_groups": state["param_groups"]}
 
+    def _check_restored(
+        self, key: str, index: int, shard: DTensor, whole: torch.Tensor
+    ) -> None:
+        """Fail on every rank if a restored shard differs from the checkpoint.
+
+        Rank 0 holds the checkpoint's tensor; the shards are gathered back and compared
+        with it. A shard that never arrived would otherwise train on stale memory.
+        """
+        gathered = shard.full_tensor()
+        wrong = torch.zeros(1, dtype=torch.int64, device=self.device)
+        if self.rank == 0:
+            wrong[0] = int(not torch.equal(gathered, whole))
+        dist.broadcast(wrong, src=0)
+        del gathered
+        if int(wrong.item()):
+            raise ValueError(
+                f"restored optimizer state {key!r} of parameter {index} differs "
+                "from the checkpoint: a shard did not arrive intact"
+            )
+
     def load_optimizer_state(self, state: dict[str, Any]) -> None:
         """Take this rank's shards from ``state`` (whole tensors on rank 0 only).
 
@@ -301,29 +321,41 @@ class ShardedRank:
             slots = {}
             for key in sorted(state["state"][index]):
                 value = state["state"][index][key]
-                if isinstance(value, TensorShape):
-                    value = torch.empty(value.shape, dtype=value.dtype)
                 if (
-                    isinstance(value, torch.Tensor)
-                    and value.shape == parameter.shape
+                    isinstance(value, TensorShape | torch.Tensor)
+                    and tuple(value.shape) == tuple(parameter.shape)
                     and isinstance(parameter, DTensor)
                 ):
-                    whole = value.to(self.device)
+                    # Rank 0 holds the tensor; the others only need a placeholder
+                    # of the right shape, made on the device so the host never holds
+                    # a whole copy. One unsharded tensor lives at a time.
+                    whole = (
+                        torch.empty(value.shape, dtype=value.dtype, device=self.device)
+                        if isinstance(value, TensorShape)
+                        else value.to(self.device)
+                    )
                     value = distribute_tensor(
                         whole,
                         parameter.device_mesh,
                         parameter.placements,
                         src_data_rank=0,
                     )
+                    # The scatter may still be running on the communication stream;
+                    # freeing or releasing memory under it would corrupt a shard.
+                    synchronize(self.device)
+                    self._check_restored(key, index, value, whole)
                     del whole
+                    # Temporaries of many sizes stay reserved; return them each time so
+                    # the peak is one tensor, not the whole optimizer state.
+                    release_cached_memory(self.device)
+                elif isinstance(value, TensorShape):
+                    value = torch.empty(value.shape, dtype=value.dtype)
                 slots[key] = value
             sharded[index] = slots
         restore_optimizer_state(
             self.optimizer,
             {"state": sharded, "param_groups": state["param_groups"]},
         )
-        # Every unsharded copy made above is garbage, but the allocator still
-        # holds it: about the size of the whole optimizer state.
         release_cached_memory(self.device)
 
     def close(self) -> None:
