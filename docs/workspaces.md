@@ -264,6 +264,15 @@ run or worker attempt. Applying a plan rechecks the database, candidate
 inventory, and writer leases; changed plans must be created again. The command
 never scans arbitrary sibling workspaces or deletes unmarked directories.
 
+A finished run also keeps its own copy of the training data in `runs/RUN/data`
+(a reflink where the filesystem supports one, a full copy on ext4). The plan
+proposes that directory, kind `run_data_copy`, when the run is terminal and every
+file in it equals the file of a workspace-owned cache that is itself retained.
+Unlike cache pruning, this works while another run trains: the copy of a
+running or recovering attempt is never proposed, and a copy that differs by a
+single byte, or whose original is gone, is kept. Reclaiming it loses nothing the
+cache cannot reproduce; the run's recorded data identity is unchanged.
+
 ## Move retained data
 
 Separate three things before moving anything: identity (hashes, run IDs,

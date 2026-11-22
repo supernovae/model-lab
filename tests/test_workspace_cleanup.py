@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -261,4 +262,42 @@ def test_cleanup_refuses_unresolved_manifest_lineage(tmp_path):
     with pytest.raises(ValueError, match="unresolved manifest reference for tiny"):
         plan_cleanup(workspace)
     target.materialize_manifest("tiny", digest, payload)
+    assert plan_cleanup(workspace)["candidates"] == []
+
+
+def test_cleanup_reclaims_a_finished_runs_data_copy_while_another_run_trains(
+    tmp_path: Path,
+) -> None:
+    workspace, cache = _workspace(tmp_path)
+    original = _cache(workspace, cache, 1)
+    store = ExperimentStore(workspace / "runs")
+    store.create_run("live", {"dataset": {"cache_dir": str(cache)}}, {})
+    finished = workspace / "runs" / "tiny" / "data"
+    training = workspace / "runs" / "live" / "data"
+    shutil.copytree(original, finished)
+    shutil.copytree(original, training)
+
+    plan = plan_cleanup(workspace)
+    assert [(item["kind"], item["path"]) for item in plan["candidates"]] == [
+        ("run_data_copy", "runs/tiny/data")
+    ]
+    path = tmp_path / "proposal.json"
+    write_plan(plan, path)
+    assert apply_cleanup(path)["removed"] == 1
+    assert not finished.exists()
+    assert training.exists() and original.exists()
+
+
+def test_cleanup_keeps_a_data_copy_the_retained_cache_cannot_reproduce(
+    tmp_path: Path,
+) -> None:
+    workspace, cache = _workspace(tmp_path)
+    original = _cache(workspace, cache, 1)
+    copy = workspace / "runs" / "tiny" / "data"
+    shutil.copytree(original, copy)
+    data = (copy / "train.npy").read_bytes()
+    (copy / "train.npy").write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
+    assert plan_cleanup(workspace)["candidates"] == []
+    (copy / "train.npy").write_bytes((original / "train.npy").read_bytes())
+    shutil.rmtree(original)  # the copy is now the only one
     assert plan_cleanup(workspace)["candidates"] == []
