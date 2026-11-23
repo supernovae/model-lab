@@ -146,6 +146,38 @@ def test_weights_only_reader_can_skip_hashing_the_training_state(
     ).valid
 
 
+def test_load_reuses_a_valid_report_instead_of_verifying_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from klab.training import checkpoints
+
+    manager = CheckpointManager(tmp_path)
+    first = manager.save(_snapshot(1, 0.25), 0.25)
+    second = manager.save(_snapshot(2, 0.25), 0.25)
+    generation = tmp_path / "checkpoints" / first.relative_path
+    report = manager.verify(
+        generation, require_training_state=False, hash_training_state=False
+    )
+
+    hashed: list[str] = []
+    real = checkpoints._sha256
+    monkeypatch.setattr(
+        checkpoints, "_sha256", lambda path: hashed.append(path.name) or real(path)
+    )
+    snapshot = manager.load(generation, "promote", verified=report)
+    assert snapshot.model and hashed == []  # nothing is hashed a second time
+    manager.load(generation, "promote")
+    assert hashed  # without a report, load verifies (and hashes) as before
+
+    # A report about another generation, or of the wrong level, is refused.
+    with pytest.raises(ValueError, match="different checkpoint"):
+        manager.load(
+            tmp_path / "checkpoints" / second.relative_path, "promote", verified=report
+        )
+    with pytest.raises(ValueError, match="level"):
+        manager.load(generation, "resume", verified=report)
+
+
 def test_checkpoint_allows_symlinked_ancestor_but_not_member(tmp_path: Path) -> None:
     real = tmp_path / "real"
     real.mkdir()

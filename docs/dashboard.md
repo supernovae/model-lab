@@ -386,7 +386,10 @@ configuration, tokenizer and Engram state. Recorded save-time verification alone
 never replaces it. Partial or staging directories are never loaded. A save is
 listed only if its weight files total at most 5 GiB; the optimizer state beside
 them in a pretraining checkpoint does not count, because the preview never loads it.
-Cold verification still hashes every file of the save, optimizer state included.
+For the same reason a Generate load size-checks the optimizer state but does not
+re-hash it, and the loaded identity records `training_state_hashed: false`; resume,
+promotion and every other verifier still hash it. Each generation is verified once
+per load, not once to check it and again to read it.
 
 One shared lock spans verification, eviction, loading and generation. Busy requests
 are refused rather than queued; the old model is released before another loads.

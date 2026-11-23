@@ -29,7 +29,7 @@ from klab.model.inspection import inspection_report
 from klab.model.transformer import DenseLM
 from klab.runtime import discover_runtimes, select_device, torch_device_for
 from klab.runtime_profile import RuntimeAuthorization, require_authorization
-from klab.training.checkpoints import CheckpointManager
+from klab.training.checkpoints import CheckpointManager, VerificationReport
 from klab.training.manifest import read_manifest
 from klab.verification_proofs import ProofStore, VerificationMode
 
@@ -136,7 +136,14 @@ def _verified_checkpoint(
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
     hash_training_state: bool = True,
-) -> tuple[RunConfig, dict[str, Any], Path, dict[str, Any], CheckpointManager]:
+) -> tuple[
+    RunConfig,
+    dict[str, Any],
+    Path,
+    dict[str, Any],
+    CheckpointManager,
+    VerificationReport,
+]:
     config = RunConfig.model_validate_json((run / "resolved_config.yaml").read_text())
     manifest = read_manifest(run / "manifest.json")
     manifest_digest = canonical_digest(manifest)
@@ -187,7 +194,7 @@ def _verified_checkpoint(
         raise ValueError(
             "checkpoint runtime differs from the verified run configuration"
         )
-    return config, manifest, selected, metadata, manager
+    return config, manifest, selected, metadata, manager, report
 
 
 def _ephemeral_config(config: RunConfig, backend: str | None) -> RunConfig:
@@ -223,10 +230,10 @@ def load_run(
     artifact made from exactly this checkpoint (PyTorch engine only).
 
     ``hash_training_state=False`` skips re-hashing the optimizer state the loader never
-    reads (the Generate preview); its size is still checked and the identity carries
-    ``training_state_hashed: False``."""
+    reads (the Generate preview); its size is still checked and the identity's
+    ``training_state_hashed`` says whether it was hashed."""
     run = (runs_dir / run_id).resolve()
-    config, manifest, selected, metadata, manager = _verified_checkpoint(
+    config, manifest, selected, metadata, manager, report = _verified_checkpoint(
         run,
         checkpoint,
         proof_store=proof_store,
@@ -291,6 +298,7 @@ def load_run(
         proof_store=proof_store,
         verification_mode=verification_mode,
         hash_training_state=hash_training_state,
+        verified=report,
     ).model
     identity = {
         "run_id": run_id,
@@ -316,8 +324,7 @@ def load_run(
             )
         },
     }
-    if not hash_training_state:
-        identity["training_state_hashed"] = False
+    identity["training_state_hashed"] = hash_training_state
     if quantized is not None and config.runtime.engine != "pytorch":
         raise ValueError("quantized weights need the PyTorch engine (not MLX)")
     if config.runtime.engine == "mlx":
