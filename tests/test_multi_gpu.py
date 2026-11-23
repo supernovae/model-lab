@@ -920,7 +920,7 @@ def test_sharded_restore_refuses_a_shard_that_did_not_arrive(
             update={"model": base.model.model_copy(update={"memory_table_size": 67})}
         )
 
-    options = {"compile_transformer_blocks": True}
+    options: dict[str, object] = {}  # the restore does not need compiled blocks
     reference = PyTorchEngine()
     engines: list[PyTorchEngine] = []
 
