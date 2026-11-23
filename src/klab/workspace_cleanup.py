@@ -12,6 +12,7 @@ import shutil
 import sqlite3
 import stat
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
@@ -316,6 +317,8 @@ def _run_data_candidates(
     runs: list[tuple[str, str, str]],
     active_attempts: set[str],
     retained: list[Path],
+    *,
+    trusted: frozenset[str] = frozenset(),
 ) -> list[dict[str, object]]:
     """A finished run's private copy of its training data, when a retained cache holds
     the same bytes.
@@ -358,7 +361,11 @@ def _run_data_candidates(
             members_to_link = [name for name in names if name != _MARKER]
             if all((data / name).samefile(original / name) for name in members_to_link):
                 continue
-            same = all(
+            # Apply re-plans twice and compares again right before linking, which is the
+            # comparison that guards the swap. The re-plans take the bytes of a copy the
+            # saved plan already accepted on trust (its fingerprint detects a change) and
+            # still compare every other copy, so one that differs stays rejected.
+            same = data.relative_to(workspace).as_posix() in trusted or all(
                 filecmp.cmp(data / name, original / name, shallow=False)
                 for name in members_to_link
             )
@@ -377,7 +384,13 @@ def _run_data_candidates(
 
 
 def _link_to_cache(data: Path, original: Path) -> None:
-    """Replace each file of a run's data copy with a hard link to the cache's file."""
+    """Replace each file of a run's data copy with a hard link to the cache's file.
+
+    This comparison is the guard for the swap, so it must read the bytes: ``filecmp``
+    keeps a process-wide cache keyed on (size, mtime) that would otherwise vouch for a
+    file rewritten in place within one mtime tick.
+    """
+    filecmp.clear_cache()
     for member in sorted(data.iterdir()):
         if member.name == _MARKER or member.samefile(original / member.name):
             continue
@@ -389,7 +402,11 @@ def _link_to_cache(data: Path, original: Path) -> None:
 
 
 def plan_cleanup(
-    workspace: Path, *, max_extra_periodic: int = 2, max_cache_entries: int = 2
+    workspace: Path,
+    *,
+    max_extra_periodic: int = 2,
+    max_cache_entries: int = 2,
+    trusted_run_data: frozenset[str] = frozenset(),
 ) -> dict[str, object]:
     if type(max_extra_periodic) is not int or max_extra_periodic < 0:
         raise ValueError("max_extra_periodic must be nonnegative")
@@ -417,7 +434,9 @@ def plan_cleanup(
             max_extra_periodic,
         ),
         *_cache_candidates(workspace, entries, busy, max_cache_entries),
-        *_run_data_candidates(workspace, runs, active_attempts, retained),
+        *_run_data_candidates(
+            workspace, runs, active_attempts, retained, trusted=trusted_run_data
+        ),
     ]
     candidates.sort(key=lambda item: str(item["path"]))
     body: dict[str, object] = {
@@ -450,11 +469,17 @@ def apply_cleanup(plan_path: Path) -> dict[str, int]:
     body = {key: value for key, value in saved.items() if key != "plan_sha256"}
     if hashlib.sha256(_canonical(body)).hexdigest() != saved.get("plan_sha256"):
         raise ValueError("cleanup plan digest mismatch")
+    trusted = frozenset(
+        str(item["path"])
+        for item in saved["candidates"]
+        if item["kind"] == "run_data_copy"
+    )
     with workspace_lock(workspace), ExitStack() as locks:
         first = plan_cleanup(
             workspace,
             max_extra_periodic=saved["max_extra_periodic"],
             max_cache_entries=saved["max_cache_entries"],
+            trusted_run_data=trusted,
         )
         if first != saved:
             raise ValueError("cleanup plan is stale; create a new plan")
@@ -476,6 +501,7 @@ def apply_cleanup(plan_path: Path) -> dict[str, int]:
             workspace,
             max_extra_periodic=saved["max_extra_periodic"],
             max_cache_entries=saved["max_cache_entries"],
+            trusted_run_data=trusted,
         )
         if current != saved:
             raise ValueError("cleanup plan is stale; create a new plan")
@@ -486,7 +512,7 @@ def apply_cleanup(plan_path: Path) -> dict[str, int]:
             path = workspace / relative
             if _candidate(workspace, path, item["kind"], item["reason"]) != item:
                 raise ValueError("cleanup candidate changed")
-        linked = 0
+        links: list[tuple[Path, Path]] = []
         for item in saved["candidates"]:
             path = workspace / Path(item["path"])
             if item["kind"] == "run_data_copy":
@@ -498,10 +524,16 @@ def apply_cleanup(plan_path: Path) -> dict[str, int]:
                     or original.is_symlink()
                 ):
                     raise ValueError("unsafe run data link target")
-                _link_to_cache(path, original)
-                linked += 1
+                links.append((path, original))
             else:
                 shutil.rmtree(path)
+        # Each copy is read in full and independently of the others; the reads are I/O
+        # bound, so a few at a time overlap on fast storage.
+        if links:
+            with ThreadPoolExecutor(max_workers=min(4, len(links))) as pool:
+                for _ in pool.map(lambda job: _link_to_cache(*job), links):
+                    pass
+        linked = len(links)
     return {
         "removed": len(saved["candidates"]) - linked,
         "linked": linked,
