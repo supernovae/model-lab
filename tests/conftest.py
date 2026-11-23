@@ -4,13 +4,15 @@ This module is imported before test collection in both the xdist controller and
 its workers.  Child processes inherit the environment established here.
 """
 
+import json
 import os
 import sys
-import zlib
+from collections import defaultdict
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+import shard_assignment
 
 _CPU_THREAD_ENVIRONMENT = (
     "OMP_NUM_THREADS",
@@ -138,11 +140,6 @@ _SLOW = frozenset(
 
 # Known failures with an open issue (tests/known_failures.txt): skipped with
 # the precise reason until the issue lands, never silently weakened.
-# Files too heavy to leave to the path hash, pinned to a shard (1-based) so the shards
-# stay close in time. Its six tests take 70 to 138 s each, which the hash had put beside
-# test_multi_gpu.py and test_lab_mode.py in shard 1 while shard 2 finished in 3 minutes.
-_SHARD_PINS = {"tests/test_tokenizer_sampling_parallel.py": 2}
-
 _KNOWN = {
     node.strip(): reason.strip()
     for node, _, reason in (
@@ -167,21 +164,40 @@ def pytest_collection_modifyitems(
         reason = _KNOWN.get(base) or _KNOWN.get(module)
         if reason:
             item.add_marker(pytest.mark.skip(reason=f"known failure: {reason}"))
-    # CI splits the suite across jobs by file: KLAB_TEST_SHARD=INDEX/COUNT keeps
-    # the files whose path hashes to INDEX (1-based), so no job lists files. A file
-    # in _SHARD_PINS goes to its pinned shard instead (when the count has one).
+    # CI splits the suite across jobs by file: KLAB_TEST_SHARD=INDEX/COUNT keeps the
+    # files assigned to INDEX (1-based) from recorded durations (tests/shard_assignment.py);
+    # a file not in the table goes by a hash of its path, so no job lists files.
     shard = os.environ.get("KLAB_TEST_SHARD")
     if shard:
         index, count = (int(part) for part in shard.split("/"))
         if not 1 <= index <= count:
             raise pytest.UsageError(f"invalid KLAB_TEST_SHARD: {shard}")
+        placed = shard_assignment.assign(shard_assignment.load_durations(), count)
         keep, drop = [], []
         for item in items:
             module = item.nodeid.split("::", 1)[0]
-            bucket = _SHARD_PINS.get(module, 0)
-            if not 1 <= bucket <= count:
-                bucket = zlib.crc32(module.encode()) % count + 1
+            bucket = shard_assignment.shard_of(module, count, placed)
             (keep if bucket == index else drop).append(item)
         if drop:
             config.hook.pytest_deselected(items=drop)
             items[:] = keep
+
+
+# KLAB_RECORD_DURATIONS=PATH writes each test file's total seconds (setup, call and
+# teardown) to PATH when a session ends: run the whole fast suite, unsharded, to refresh
+# tests/shard_durations.json.
+_RECORDED: defaultdict[str, float] = defaultdict(float)
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    if os.environ.get("KLAB_RECORD_DURATIONS"):
+        _RECORDED[report.nodeid.split("::", 1)[0]] += report.duration
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    target = os.environ.get("KLAB_RECORD_DURATIONS")
+    if target and _RECORDED and not hasattr(session.config, "workerinput"):
+        table = {
+            module: round(seconds, 1) for module, seconds in sorted(_RECORDED.items())
+        }
+        Path(target).write_text(json.dumps(table, indent=1) + "\n", encoding="utf-8")

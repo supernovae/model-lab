@@ -61,9 +61,9 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || inputs.suite == 'fast'
     name: test (${{ matrix.shard }}/2)
     runs-on: ubuntu-24.04
-    # Before the heaviest file was pinned to shard 2 (tests/conftest.py), shard 1 took
-    # about 10 to 12 minutes when it passed and shard 2 took 3: the path hash put the
-    # heaviest files together. 12 left no room for a slow runner.
+    # Shards are assigned from recorded durations (tests/shard_durations.json), so they
+    # finish together; the cap leaves room for a slow runner. Each job uploads the
+    # durations it measured: see docs/test-speed.md to refresh the table.
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -87,11 +87,17 @@ jobs:
           KLAB_WORK_DIR: ${{ runner.temp }}/test-work
           KLAB_LAB_LOOP_BUDGET_SECONDS: "300"
           KLAB_TEST_SHARD: ${{ matrix.shard }}/2
+          KLAB_RECORD_DURATIONS: ${{ runner.temp }}/shard-durations-${{ matrix.shard }}.json
         run: >-
           uv run --locked --no-sync pytest -q -p no:cacheprovider
           --basetemp "$RUNNER_TEMP/test-pytest"
           -n auto --maxprocesses=4 --dist worksteal --durations=15
           -m "not slow and not mps and not mlx and not cuda and not rocm and not xpu and not network"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: shard-durations-${{ matrix.shard }}
+          path: ${{ runner.temp }}/shard-durations-${{ matrix.shard }}.json
+          retention-days: 14
 
   staging:
     # Supervised staging regressions launch real pilot children. They are
