@@ -9,6 +9,7 @@ import os
 import shutil
 import signal
 import socket
+import sqlite3
 import time
 import uuid
 from collections import deque
@@ -1355,6 +1356,12 @@ def _train_impl(
         manager.manifest_sha256 = manifest_digest
         store = ExperimentStore(config.logging.root_dir)
         resources.enter_context(store.session())
+        try:
+            # Attempts killed by a supervisor never reach finish_run; settle them so
+            # cleanup and the dashboard stop treating them as live.
+            store.settle_abandoned_runs(skip=run_id)
+        except (OSError, sqlite3.Error) as error:
+            _LOGGER.warning("could not settle abandoned runs: %s", error)
         store.create_run(
             run_id,
             config.model_dump(mode="json"),

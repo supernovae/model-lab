@@ -275,6 +275,18 @@ the run still loads. Unlike cache pruning, this works while another run trains:
 the copy of a running or recovering attempt is never proposed, and a copy that
 differs by a single byte, or whose original is gone, is left alone.
 
+A run that a supervisor killed never records its end, so the store keeps it
+`running` and cleanup treats it as live. Every `klab train` settles such runs at
+start: a `running` run whose checkpoint writer lease nobody holds (a training
+process takes it before it creates the run and keeps it until it exits) becomes
+`interrupted`, with its latest-checkpoint pointer kept. A run with a live queue
+attempt, or that never took a lease, is left alone. To settle them without
+starting a run:
+
+```sh
+klab workspace settle "$WORK"
+```
+
 ## Move retained data
 
 Separate three things before moving anything: identity (hashes, run IDs,
