@@ -442,7 +442,10 @@ def _shard_worker_main(
             state,
             built=lambda: connection.send(("built", None)),
         )
-        del state
+        # Not ``del``: the spawned process's arguments hold this same dict, and its
+        # tensors are the primary's weights in shared memory, a whole host copy that
+        # would otherwise stay mapped for the life of the worker.
+        state.clear()
         connection.send(("ready", None))
     except Exception:  # noqa: BLE001 - the primary reports the rank's error
         report_failure(connection)
