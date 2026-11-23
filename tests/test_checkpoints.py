@@ -112,6 +112,40 @@ def test_checkpoint_verification_rejects_tampered_weight_file(tmp_path: Path) ->
     assert not manager.verify(generation).valid
 
 
+def test_weights_only_reader_can_skip_hashing_the_training_state(
+    tmp_path: Path,
+) -> None:
+    manager = CheckpointManager(tmp_path)
+    record = manager.save(_snapshot(1, 0.25), 0.25)
+    generation = tmp_path / "checkpoints" / record.relative_path
+    state_path = generation / "training_state.pt"
+    intact = state_path.read_bytes()
+    state_path.write_bytes(intact[:-1] + bytes([intact[-1] ^ 1]))  # same size
+
+    # Weights-only verification hashes it by default; resume always does.
+    assert not manager.verify(generation, require_training_state=False).valid
+    assert not manager.verify(generation, hash_training_state=False).valid
+    # The preview reader skips it, says so, and still checks its size.
+    report = manager.verify(
+        generation, require_training_state=False, hash_training_state=False
+    )
+    assert report.valid and report.unhashed_files == ("training_state.pt",)
+    assert "training_state.pt" not in {f["name"] for f in report.verified_files}
+    state_path.write_bytes(intact + b"x")
+    assert not manager.verify(
+        generation, require_training_state=False, hash_training_state=False
+    ).valid
+
+    # A corrupt weight shard fails even when the training state is skipped.
+    state_path.write_bytes(intact)
+    shard = next(generation.glob("weights-*.safetensors"))
+    data = shard.read_bytes()
+    shard.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
+    assert not manager.verify(
+        generation, require_training_state=False, hash_training_state=False
+    ).valid
+
+
 def test_checkpoint_allows_symlinked_ancestor_but_not_member(tmp_path: Path) -> None:
     real = tmp_path / "real"
     real.mkdir()

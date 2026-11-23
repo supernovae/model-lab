@@ -135,6 +135,7 @@ def _verified_checkpoint(
     *,
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
+    hash_training_state: bool = True,
 ) -> tuple[RunConfig, dict[str, Any], Path, dict[str, Any], CheckpointManager]:
     config = RunConfig.model_validate_json((run / "resolved_config.yaml").read_text())
     manifest = read_manifest(run / "manifest.json")
@@ -175,6 +176,7 @@ def _verified_checkpoint(
         require_training_state=False,
         proof_store=proof_store,
         verification_mode=verification_mode,
+        hash_training_state=hash_training_state,
     )
     if not report.valid:
         raise ValueError(f"invalid checkpoint: {report.errors}")
@@ -215,12 +217,21 @@ def load_run(
     verification_mode: VerificationMode = "cold",
     expected_checkpoint_sha256: str | None = None,
     quantized: Path | None = None,
+    hash_training_state: bool = True,
 ) -> InferenceRun:
     """Load a verified checkpoint; QUANTIZED applies a ``weights quantize``
-    artifact made from exactly this checkpoint (PyTorch engine only)."""
+    artifact made from exactly this checkpoint (PyTorch engine only).
+
+    ``hash_training_state=False`` skips re-hashing the optimizer state the loader never
+    reads (the Generate preview); its size is still checked and the identity carries
+    ``training_state_hashed: False``."""
     run = (runs_dir / run_id).resolve()
     config, manifest, selected, metadata, manager = _verified_checkpoint(
-        run, checkpoint, proof_store=proof_store, verification_mode=verification_mode
+        run,
+        checkpoint,
+        proof_store=proof_store,
+        verification_mode=verification_mode,
+        hash_training_state=hash_training_state,
     )
     if (
         expected_checkpoint_sha256 is not None
@@ -279,6 +290,7 @@ def load_run(
         "promote",
         proof_store=proof_store,
         verification_mode=verification_mode,
+        hash_training_state=hash_training_state,
     ).model
     identity = {
         "run_id": run_id,
@@ -304,6 +316,8 @@ def load_run(
             )
         },
     }
+    if not hash_training_state:
+        identity["training_state_hashed"] = False
     if quantized is not None and config.runtime.engine != "pytorch":
         raise ValueError("quantized weights need the PyTorch engine (not MLX)")
     if config.runtime.engine == "mlx":
