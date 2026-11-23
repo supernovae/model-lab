@@ -1167,7 +1167,21 @@ def plan_memory(
         nonlocal candidate, current
         if proposed == candidate:
             return
-        proposed = RunConfig.model_validate(proposed.model_dump(mode="json"))
+        try:
+            proposed = RunConfig.model_validate(proposed.model_dump(mode="json"))
+        except ValueError as error:
+            # A lever the config validator refuses (for example recomputation with
+            # flex attention) does not apply to this run: say so and keep planning.
+            message = str(error).splitlines()
+            decisions.append(
+                {
+                    "requested": name,
+                    "effective": False,
+                    "reason": "not applicable to this configuration: "
+                    + (message[1].strip() if len(message) > 1 else message[0]),
+                }
+            )
+            return
         after = candidate_estimate(proposed)
         decisions.append(
             _decision(

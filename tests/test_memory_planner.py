@@ -521,6 +521,43 @@ def test_policy_cannot_discard_measured_uncertainty_to_claim_a_fit() -> None:
     assert proposal.estimate.calibration_sample_count == 0
 
 
+def test_planner_skips_a_lever_the_config_validator_refuses() -> None:
+    """Flex attention cannot be recomputed; the planner says so and still plans."""
+    config = load_config(Path("configs/smoke_cpu.yaml"))
+    config = config.model_copy(
+        update={
+            "attention": config.attention.model_copy(update={"implementation": "flex"}),
+            "runtime": config.runtime.model_copy(
+                update={
+                    "memory": config.runtime.memory.model_copy(
+                        update={
+                            "budget_bytes": 1,
+                            "policy": "balanced",
+                            "activation_checkpointing": config.runtime.memory.activation_checkpointing.model_copy(
+                                update={"enabled": False}
+                            ),
+                        }
+                    )
+                }
+            ),
+        }
+    )
+    config = type(config).model_validate(config.model_dump(mode="json"))
+    estimate = estimate_memory(config, _runtime(), parameter_inventory(config))
+    proposal = plan_memory(config, _runtime(), estimate)
+    skipped = [
+        decision
+        for decision in proposal.decisions
+        if decision.get("requested") == "activation_checkpointing"
+    ]
+    assert skipped and skipped[0]["effective"] is False
+    assert "not applicable" in skipped[0]["reason"]
+    assert proposal.config["attention"]["implementation"] == "flex"
+    assert not proposal.config["runtime"]["memory"]["activation_checkpointing"][
+        "enabled"
+    ]
+
+
 def test_sdpa_buffer_estimate_matches_registered_runtime_allocations():
     import torch
 
