@@ -61,8 +61,9 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || inputs.suite == 'fast'
     name: test (${{ matrix.shard }}/2)
     runs-on: ubuntu-24.04
-    # Shard 1 takes about 10 minutes when it passes (shard 2 takes 3): the path hash puts
-    # the heaviest files together. 12 left no room for a slow runner.
+    # Before the heaviest file was pinned to shard 2 (tests/conftest.py), shard 1 took
+    # about 10 to 12 minutes when it passed and shard 2 took 3: the path hash put the
+    # heaviest files together. 12 left no room for a slow runner.
     timeout-minutes: 20
     strategy:
       fail-fast: false
