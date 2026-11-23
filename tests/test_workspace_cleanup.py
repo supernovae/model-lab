@@ -274,10 +274,16 @@ def test_cleanup_links_a_finished_runs_data_copy_while_another_run_trains(
     original = _cache(workspace, cache, 1)
     store = ExperimentStore(workspace / "runs")
     store.create_run("live", {"dataset": {"cache_dir": str(cache)}}, {})
+    store.create_run("broken", {"dataset": {"cache_dir": str(cache)}}, {})
+    store.finish_run("broken", "completed")
     finished = workspace / "runs" / "tiny" / "data"
     training = workspace / "runs" / "live" / "data"
+    corrupt = workspace / "runs" / "broken" / "data"
     shutil.copytree(original, finished)
     shutil.copytree(original, training)
+    shutil.copytree(original, corrupt)
+    flipped = (corrupt / "train.npy").read_bytes()
+    (corrupt / "train.npy").write_bytes(flipped[:-1] + bytes([flipped[-1] ^ 1]))
 
     compared = []
     real = filecmp.cmp
@@ -288,16 +294,20 @@ def test_cleanup_links_a_finished_runs_data_copy_while_another_run_trains(
     assert [(item["kind"], item["path"]) for item in plan["candidates"]] == [
         ("run_data_copy", "runs/tiny/data")
     ]
-    members = len(compared)
+    members = len([c for c in compared if "tiny" in str(c)])
     assert members > 0
     path = tmp_path / "proposal.json"
     write_plan(plan, path)
     compared.clear()
+    # The corrupted copy is not in the plan, and it does not stop apply from linking
+    # the good one: the re-plans still compare every copy the plan did not accept.
     result = apply_cleanup(path)
     # Apply re-plans twice from fingerprints; only the compare right before linking
-    # reads the bytes, so each member is read once, not three times.
-    assert len(compared) == members
+    # calls cmp on the accepted copy, once per member, not three times. (Calls, not disk
+    # reads: filecmp also keeps a process cache.)
+    assert len([c for c in compared if "tiny" in str(c)]) == members
     assert (result["removed"], result["linked"]) == (0, 1)
+    assert not (corrupt / "train.npy").samefile(original / "train.npy")
     # The run keeps every file it loads from (Generate, probes and explore need them),
     # now sharing the cache's blocks; the training run's copy is untouched.
     assert sorted(p.name for p in finished.iterdir()) == sorted(
@@ -306,6 +316,30 @@ def test_cleanup_links_a_finished_runs_data_copy_while_another_run_trains(
     assert (finished / "train.npy").samefile(original / "train.npy")
     assert not (training / "train.npy").samefile(original / "train.npy")
     assert plan_cleanup(workspace)["candidates"] == []
+
+
+def test_apply_rereads_a_copy_rewritten_in_place_after_the_plan(
+    tmp_path: Path,
+) -> None:
+    workspace, cache = _workspace(tmp_path)
+    original = _cache(workspace, cache, 1)
+    copy = workspace / "runs" / "tiny" / "data"
+    shutil.copytree(original, copy)
+    path = tmp_path / "proposal.json"
+    write_plan(
+        plan_cleanup(workspace), path
+    )  # compares the pair, filling filecmp's cache
+
+    target = copy / "train.npy"
+    before = target.stat()
+    data = target.read_bytes()
+    with target.open("r+b") as handle:  # same size, same inode, same mtime
+        handle.seek(len(data) - 1)
+        handle.write(bytes([data[-1] ^ 1]))
+    os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+    with pytest.raises(ValueError, match="no longer equals"):
+        apply_cleanup(path)
+    assert not target.samefile(original / "train.npy")
 
 
 def test_cleanup_keeps_a_data_copy_the_retained_cache_cannot_reproduce(
