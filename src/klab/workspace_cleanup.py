@@ -316,6 +316,8 @@ def _run_data_candidates(
     runs: list[tuple[str, str, str]],
     active_attempts: set[str],
     retained: list[Path],
+    *,
+    compare_bytes: bool = True,
 ) -> list[dict[str, object]]:
     """A finished run's private copy of its training data, when a retained cache holds
     the same bytes.
@@ -358,7 +360,9 @@ def _run_data_candidates(
             members_to_link = [name for name in names if name != _MARKER]
             if all((data / name).samefile(original / name) for name in members_to_link):
                 continue
-            same = all(
+            # Apply re-plans twice and then compares again right before linking, which
+            # is the comparison that guards the swap; the re-plans rely on fingerprints.
+            same = not compare_bytes or all(
                 filecmp.cmp(data / name, original / name, shallow=False)
                 for name in members_to_link
             )
@@ -389,7 +393,11 @@ def _link_to_cache(data: Path, original: Path) -> None:
 
 
 def plan_cleanup(
-    workspace: Path, *, max_extra_periodic: int = 2, max_cache_entries: int = 2
+    workspace: Path,
+    *,
+    max_extra_periodic: int = 2,
+    max_cache_entries: int = 2,
+    compare_bytes: bool = True,
 ) -> dict[str, object]:
     if type(max_extra_periodic) is not int or max_extra_periodic < 0:
         raise ValueError("max_extra_periodic must be nonnegative")
@@ -417,7 +425,9 @@ def plan_cleanup(
             max_extra_periodic,
         ),
         *_cache_candidates(workspace, entries, busy, max_cache_entries),
-        *_run_data_candidates(workspace, runs, active_attempts, retained),
+        *_run_data_candidates(
+            workspace, runs, active_attempts, retained, compare_bytes=compare_bytes
+        ),
     ]
     candidates.sort(key=lambda item: str(item["path"]))
     body: dict[str, object] = {
@@ -455,6 +465,7 @@ def apply_cleanup(plan_path: Path) -> dict[str, int]:
             workspace,
             max_extra_periodic=saved["max_extra_periodic"],
             max_cache_entries=saved["max_cache_entries"],
+            compare_bytes=False,
         )
         if first != saved:
             raise ValueError("cleanup plan is stale; create a new plan")
@@ -476,6 +487,7 @@ def apply_cleanup(plan_path: Path) -> dict[str, int]:
             workspace,
             max_extra_periodic=saved["max_extra_periodic"],
             max_cache_entries=saved["max_cache_entries"],
+            compare_bytes=False,
         )
         if current != saved:
             raise ValueError("cleanup plan is stale; create a new plan")

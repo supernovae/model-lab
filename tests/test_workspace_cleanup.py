@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import filecmp
 import hashlib
 import json
 import os
@@ -267,7 +268,7 @@ def test_cleanup_refuses_unresolved_manifest_lineage(tmp_path):
 
 
 def test_cleanup_links_a_finished_runs_data_copy_while_another_run_trains(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workspace, cache = _workspace(tmp_path)
     original = _cache(workspace, cache, 1)
@@ -278,13 +279,24 @@ def test_cleanup_links_a_finished_runs_data_copy_while_another_run_trains(
     shutil.copytree(original, finished)
     shutil.copytree(original, training)
 
+    compared = []
+    real = filecmp.cmp
+    monkeypatch.setattr(
+        filecmp, "cmp", lambda a, b, **kw: compared.append(a) or real(a, b, **kw)
+    )
     plan = plan_cleanup(workspace)
     assert [(item["kind"], item["path"]) for item in plan["candidates"]] == [
         ("run_data_copy", "runs/tiny/data")
     ]
+    members = len(compared)
+    assert members > 0
     path = tmp_path / "proposal.json"
     write_plan(plan, path)
+    compared.clear()
     result = apply_cleanup(path)
+    # Apply re-plans twice from fingerprints; only the compare right before linking
+    # reads the bytes, so each member is read once, not three times.
+    assert len(compared) == members
     assert (result["removed"], result["linked"]) == (0, 1)
     # The run keeps every file it loads from (Generate, probes and explore need them),
     # now sharing the cache's blocks; the training run's copy is untouched.
