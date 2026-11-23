@@ -901,3 +901,72 @@ def test_a_recovery_that_changes_the_device_layout_says_so(
     with caplog.at_level(logging.WARNING, logger="klab.training.continuation"):
         runtime_optimization_transition(base, compiled, "parent")
     assert "device layout" not in caplog.text
+
+
+def test_sharded_restore_refuses_a_shard_that_did_not_arrive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restored optimizer shard that differs from the checkpoint stops the resume.
+
+    On real hardware a shard of an unevenly divisible Engram table (the row count has
+    a remainder across the ranks) came back as stale memory and trained silently. A
+    checkpoint that already holds a NaN is refused for what it is, not as a lost shard.
+    """
+    from klab.engines import sharded
+
+    def config(directory: Path, **runtime: object) -> RunConfig:
+        base = _make_run_config(directory, **runtime)  # type: ignore[arg-type]
+        return base.model_copy(
+            update={"model": base.model.model_copy(update={"memory_table_size": 67})}
+        )
+
+    options: dict[str, object] = {}  # the restore does not need compiled blocks
+    reference = PyTorchEngine()
+    engines: list[PyTorchEngine] = []
+
+    def fresh_sharded_engine(name: str) -> PyTorchEngine:
+        while engines:  # one process group per process: close the previous engine
+            engines.pop().close()
+        engine = PyTorchEngine()
+        engines.append(engine)
+        directory = config(
+            tmp_path / name,
+            secondary_device_indices=(0,),
+            runtime_options={**options, "parallel": ParallelConfig(mode="zero1")},
+        )
+        _seed_all(directory.seed)
+        engine.initialize(directory, initial_weights=_weights(reference))
+        return engine
+
+    try:
+        single = config(tmp_path / "single", runtime_options=options)
+        _seed_all(single.seed)
+        reference.initialize(single)
+        microbatches, valid_targets = _make_microbatches(101, count=3)
+        reference.train_update(microbatches, 1, valid_targets)
+        state = copy.deepcopy(reference.export_training_state())
+
+        poisoned = copy.deepcopy(state)
+        moment = next(
+            slots["exp_avg"]
+            for slots in poisoned.optimizer["state"].values()  # type: ignore[union-attr]
+            if slots["exp_avg"].ndim
+        )
+        moment.view(-1)[0] = float("nan")
+        with pytest.raises(Exception, match="non-finite"):
+            fresh_sharded_engine("poisoned").restore_training_state(poisoned)
+
+        real = sharded.distribute_tensor
+
+        def scatter_that_loses_a_shard(*args: object, **kwargs: object) -> object:
+            shard = real(*args, **kwargs)  # type: ignore[arg-type]
+            shard.to_local().zero_()
+            return shard
+
+        monkeypatch.setattr(sharded, "distribute_tensor", scatter_that_loses_a_shard)
+        with pytest.raises(Exception, match="differs from the checkpoint"):
+            fresh_sharded_engine("lossy").restore_training_state(state)
+    finally:
+        reference.close()
+        for engine in engines:
+            engine.close()
