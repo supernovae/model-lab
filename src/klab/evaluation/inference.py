@@ -45,6 +45,10 @@ class InferenceRun:
     engine: MLXEngine | None = None
 
     def validation_dataset(self) -> TokenBlockDataset:
+        if self.identity.get("run_data_hashed") is False:
+            raise ValueError(
+                "this run was loaded without hashing its data; reload it to evaluate"
+            )
         root = self.run / "data"
         addresses = root / "validation_byte_addresses.npy"
         supervision = root / "validation_supervision.npy"
@@ -225,13 +229,19 @@ def load_run(
     expected_checkpoint_sha256: str | None = None,
     quantized: Path | None = None,
     hash_training_state: bool = True,
+    hash_run_data: bool = True,
 ) -> InferenceRun:
     """Load a verified checkpoint; QUANTIZED applies a ``weights quantize``
     artifact made from exactly this checkpoint (PyTorch engine only).
 
     ``hash_training_state=False`` skips re-hashing the optimizer state the loader never
     reads (the Generate preview); its size is still checked and the identity's
-    ``training_state_hashed`` says whether it was hashed."""
+    ``training_state_hashed`` says whether it was hashed.
+
+    ``hash_run_data=False`` likewise skips hashing the run's own prepared arrays
+    (``data/*.npy``, tens of GB for a pretraining run), which generation never reads:
+    their sizes are still checked against the manifest, the identity carries
+    ``run_data_hashed: False`` and ``validation_dataset`` refuses such a load."""
     run = (runs_dir / run_id).resolve()
     config, manifest, selected, metadata, manager, report = _verified_checkpoint(
         run,
@@ -249,7 +259,11 @@ def load_run(
     requested = runtime_config.runtime.backend
     require_authorization(runtime_config, authorization)
     artifacts, array_proofs = _validated_artifacts(
-        run, manifest, proof_store=proof_store, verification_mode=verification_mode
+        run,
+        manifest,
+        proof_store=proof_store,
+        verification_mode=verification_mode,
+        hash_data=hash_run_data,
     )
     required = {
         "tokenizer.json",
@@ -272,13 +286,14 @@ def load_run(
         raise ValueError(
             f"run lacks verified artifacts: {sorted(required - artifacts.keys())}"
         )
-    receipt = _receipt_from_proofs(run / "data", data_manifest, array_proofs)
-    load_prepared_data(
-        run / "data",
-        byte_enabled=config.model.memory == "byte",
-        verification="structural",
-        receipt=receipt,
-    )
+    if hash_run_data:
+        receipt = _receipt_from_proofs(run / "data", data_manifest, array_proofs)
+        load_prepared_data(
+            run / "data",
+            byte_enabled=config.model.memory == "byte",
+            verification="structural",
+            receipt=receipt,
+        )
 
     # The checkpoint and training runtime were verified before authorization.
     if config.model.memory_token_mapping is not None:
@@ -325,6 +340,7 @@ def load_run(
         },
     }
     identity["training_state_hashed"] = hash_training_state
+    identity["run_data_hashed"] = hash_run_data
     if quantized is not None and config.runtime.engine != "pytorch":
         raise ValueError("quantized weights need the PyTorch engine (not MLX)")
     if config.runtime.engine == "mlx":

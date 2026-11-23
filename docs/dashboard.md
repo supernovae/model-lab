@@ -387,9 +387,14 @@ never replaces it. Partial or staging directories are never loaded. A save is
 listed only if its weight files total at most 5 GiB; the optimizer state beside
 them in a pretraining checkpoint does not count, because the preview never loads it.
 For the same reason a Generate load size-checks the optimizer state but does not
-re-hash it, and the loaded identity records `training_state_hashed: false`; resume,
-promotion and every other verifier still hash it. Each generation is verified once
-per load, not once to check it and again to read it.
+re-hash it, and does not hash the run's own prepared arrays (`data/*.npy`, 48 GB or
+more for a pretraining run) either; their sizes are checked against the run manifest.
+The loaded identity records `training_state_hashed: false` and `run_data_hashed:
+false`, and such a load refuses to be used for evaluation. The weights, tokenizer and
+manifests are still hashed, and resume, promotion, evaluation and every other
+verifier still hash everything. Each generation is verified once per load, not once to
+check it and again to read it. On a 1.2B-parameter run this takes a load from about
+90 s to about 8 s.
 
 One shared lock spans verification, eviction, loading and generation. Busy requests
 are refused rather than queued; the old model is released before another loads.

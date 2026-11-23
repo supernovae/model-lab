@@ -38,7 +38,14 @@ def _validated_artifacts(
     *,
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
+    hash_data: bool = True,
 ) -> tuple[dict[str, str], dict[str, VerifiedFile]]:
+    """Verify the run's artifacts against its manifest.
+
+    ``hash_data=False`` is for a reader that never touches the prepared arrays (the
+    Generate preview): each ``data/*.npy`` is checked for presence and for the size the
+    manifest records, but not hashed, and gets no proof. Everything else is hashed.
+    """
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, list):
         raise TypeError("run manifest lacks artifact inventory")
@@ -56,6 +63,12 @@ def _validated_artifacts(
         path = run / name
         if not _inside(run, path) or path.is_symlink() or not path.is_file():
             raise ValueError(f"artifact integrity failure: {name}")
+        if not hash_data and relative.parts[0] == "data" and path.suffix == ".npy":
+            size = item.get("size_bytes")
+            if type(size) is not int or path.stat().st_size != size:
+                raise ValueError(f"artifact integrity failure: {name}")
+            verified[name] = digest
+            continue
         proof = verify_file(
             path,
             expected_sha256=digest,
