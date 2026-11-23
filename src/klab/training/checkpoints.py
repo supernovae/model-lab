@@ -189,6 +189,11 @@ class VerificationReport:
     errors: tuple[dict[str, str], ...]
     verified_files: tuple[dict[str, str], ...]
     resume_level: str
+    # Members whose size matched but whose bytes were not re-hashed (see ``verify``).
+    unhashed_files: tuple[str, ...] = ()
+    # The manifest digest this report is about, so ``load`` can accept it instead of
+    # verifying the same generation a second time.
+    checkpoint_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1334,9 +1339,20 @@ class CheckpointManager:
         expected_config: RunConfig | None = None,
         proof_store: ProofStore | None = None,
         verification_mode: VerificationMode = "cold",
+        hash_training_state: bool = True,
     ) -> VerificationReport:
+        """Check a generation against its manifest.
+
+        ``hash_training_state=False`` is for a weights-only reader (the Generate
+        preview): the native training-state members, several times the weights in a
+        pretraining save, keep their size check but are not re-hashed, and the report
+        lists them in ``unhashed_files``. The manifest digest still binds their
+        recorded hashes. It has no effect when the training state is required.
+        """
         errors: list[dict[str, str]] = []
         files: list[dict[str, str]] = []
+        unhashed: list[str] = []
+        digest: object = None  # set once the manifest is read
         validate_mode(verification_mode)
         cold_members: list[tuple[dict[str, object], object]] = []
         try:
@@ -1374,6 +1390,15 @@ class CheckpointManager:
             if not isinstance(listed, list):
                 errors.append({"field": "files", "reason": "invalid"})
                 listed = []
+            skip_hash: set[str] = set()
+            if not hash_training_state and not require_training_state:
+                skip_hash = (
+                    {"training_state.pt"}
+                    if raw.get("state_codec") == "pytorch_native"
+                    else {"training_state.json", "optimizer.safetensors"}
+                    if raw.get("state_codec") == MLX_CODEC
+                    else set()
+                )
             names: set[str] = set()
             safe_members: dict[str, Path] = {}
             for entry in listed:
@@ -1395,6 +1420,9 @@ class CheckpointManager:
                 safe_members[name] = member
                 if not member.is_file() or member.stat().st_size != entry["bytes"]:
                     errors.append({"field": name, "reason": "hash or size mismatch"})
+                    continue
+                if name in skip_hash:
+                    unhashed.append(name)
                     continue
                 if proof_store is None or verification_mode == "cold":
                     if _sha256(member) != entry["sha256"]:
@@ -1636,6 +1664,8 @@ class CheckpointManager:
             tuple(errors),
             tuple(files),
             "full" if require_training_state else "weights_only",
+            tuple(unhashed),
+            digest if isinstance(digest, str) else None,
         )
 
     def load(
@@ -1645,18 +1675,34 @@ class CheckpointManager:
         *,
         proof_store: ProofStore | None = None,
         verification_mode: VerificationMode = "cold",
+        hash_training_state: bool = True,
+        verified: VerificationReport | None = None,
     ) -> TrainingSnapshot:
-        report = self.verify(
+        """Load a generation after verifying it.
+
+        ``verified`` is a report this caller already obtained from ``verify`` for the
+        same generation and mode: ``load`` then skips verifying it again (each weight
+        shard would otherwise be hashed and read twice). The report must be valid, of
+        the level this mode needs, and about the manifest digest read here.
+        """
+        report = verified or self.verify(
             path,
             self.manifest_sha256 if mode == "resume" else None,
             require_training_state=mode == "resume",
             proof_store=proof_store,
             verification_mode=verification_mode,
+            hash_training_state=hash_training_state,
         )
         if not report.valid:
             raise ValueError(f"invalid checkpoint: {report.errors}")
+        if verified is not None and verified.resume_level != (
+            "full" if mode == "resume" else "weights_only"
+        ):
+            raise ValueError("verification report is not of the level this load needs")
         directory = self._resolve(path)
         raw = strict_json(directory / "manifest.json")
+        if verified is not None and raw.get("sha256") != verified.checkpoint_sha256:
+            raise ValueError("verification report is for a different checkpoint")
         weights: dict[str, torch.Tensor] = {}
         for entry in raw["files"]:
             if entry["name"].startswith("weights-") and entry["name"].endswith(

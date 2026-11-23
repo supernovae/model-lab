@@ -362,7 +362,7 @@ def test_native_loader_rejects_record_digest_mismatch_before_device_or_model_wor
     monkeypatch.setattr(
         inference,
         "_verified_checkpoint",
-        lambda *a, **kw: (None, None, None, {"sha256": "b" * 64}, None),
+        lambda *a, **kw: (None, None, None, {"sha256": "b" * 64}, None, None),
     )
     monkeypatch.setattr(
         inference,
