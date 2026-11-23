@@ -179,6 +179,21 @@ own scripts, set it before the first device call, and never set it to an empty
 value. `PYTORCH_ALLOC_CONF=expandable_segments:True` avoids the mirror too but
 stalls xccl collectives.
 
+Each rank keeps only its shard of the model's weights on its card. On the same
+model a `zero1` run holds 26.8 GiB on every 32 GiB card, fresh or resumed (27.7
+after a restore), and a resumed run trains at the fresh rate (36.5k tokens per
+second).
+
+The Level Zero GPU driver matters more than any Lab setting. With
+`libze-intel-gpu1` 26.40.40196.8 every xccl collective above about 1 MiB hangs in
+`zeMemGetIpcHandle` (each rank spins a core, the kernel log stays clean); with
+26.27.39122.14 the same collectives pass from 1 to 512 MiB. Check the installed
+version before a sharded run, and pin it against unattended upgrades. Stop a
+sharded run with SIGTERM or the `CANCEL` file: a rank killed with SIGKILL in the
+middle of device work can leave its card's copy engine wedged until the kernel
+resets it (a `bcs` job timeout in the kernel log), and the next run then hangs
+while loading weights onto that card.
+
 Known limit: on the B70 box, `zero1` at micro-batch 2 and every sharded mode with
 4x-sized Engram tables stalled in an xccl collective (a hung copy-engine job; the
 kernel log shows an `xe` engine reset). `oneCCL` IPC-cache and temp-buffer

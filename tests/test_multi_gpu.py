@@ -970,3 +970,56 @@ def test_sharded_restore_refuses_a_shard_that_did_not_arrive(
         reference.close()
         for engine in engines:
             engine.close()
+
+
+def test_a_worker_rank_does_not_keep_the_unsharded_weights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sharding replaces the parameters; nothing may pin the originals afterwards.
+
+    A worker that kept its pre-shard replica held a second full copy of the model on
+    its card for the whole run, which left a sharded resume without headroom.
+    """
+    import gc
+    import weakref
+
+    import torch.distributed as dist
+
+    from klab.engines import sharded
+    from klab.model.transformer import DenseLM
+
+    config = _make_run_config(
+        tmp_path,
+        secondary_device_indices=(0,),
+        runtime_options={"parallel": ParallelConfig(mode="zero1")},
+    )
+    originals: list[weakref.ref[torch.nn.Parameter]] = []
+    real = sharded.build_replica
+
+    def recording_build(*args: object, **kwargs: object) -> object:
+        replica = real(*args, **kwargs)  # type: ignore[arg-type]
+        originals.extend(weakref.ref(p) for p in replica.model.parameters())
+        return replica
+
+    monkeypatch.setattr(sharded, "build_replica", recording_build)
+    state = DenseLM(config.model, config.attention).state_dict()
+    if dist.is_initialized():
+        dist.destroy_process_group()
+    rank = sharded.build_worker_rank(
+        config,
+        "cpu",
+        torch.device("cpu"),
+        0,
+        1,
+        f"tcp://127.0.0.1:{sharded._free_port()}",
+        state,
+    )
+    try:
+        gc.collect()
+        assert originals
+        alive = sum(reference() is not None for reference in originals)
+        assert alive == 0, (
+            f"{alive} of {len(originals)} unsharded parameters are pinned"
+        )
+    finally:
+        rank.close()

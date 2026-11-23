@@ -391,6 +391,34 @@ class ShardedRank:
             dist.destroy_process_group()
 
 
+def build_worker_rank(
+    config: RunConfig,
+    backend: str,
+    device: torch.device,
+    rank: int,
+    world_size: int,
+    init_method: str,
+    state: dict[str, torch.Tensor],
+    *,
+    built: Callable[[], None] = lambda: None,
+) -> ShardedRank:
+    """Build a non-primary rank's model on ``device`` and shard it.
+
+    Nothing may outlive this call that refers to the unsharded parameters:
+    ``SecondaryReplica`` keeps a tuple of them, and sharding replaces the model's
+    parameters without freeing the originals, so a replica kept past this point
+    pins a whole second copy of the weights on the device (4.7 GiB a card for a
+    1.2B-parameter model, which was the headroom a resume needed).
+    """
+    replica = build_replica(config, device, state)
+    built()
+    model, compiled_loss = replica.model, replica.compiled_output_head_loss
+    del replica
+    return ShardedRank(
+        config, backend, rank, world_size, init_method, model, device, compiled_loss
+    )
+
+
 def _shard_worker_main(
     connection: Any,
     config: RunConfig,
@@ -404,19 +432,17 @@ def _shard_worker_main(
     """A non-primary rank: build its shard of the model, then obey commands."""
     try:
         device = torch_device_for(backend, device_index)
-        replica = build_replica(config, device, state)
-        del state
-        connection.send(("built", None))
-        worker = ShardedRank(
+        worker = build_worker_rank(
             config,
             backend,
+            device,
             rank,
             world_size,
             init_method,
-            replica.model,
-            device,
-            replica.compiled_output_head_loss,
+            state,
+            built=lambda: connection.send(("built", None)),
         )
+        del state
         connection.send(("ready", None))
     except Exception:  # noqa: BLE001 - the primary reports the rank's error
         report_failure(connection)
