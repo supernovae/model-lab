@@ -114,6 +114,19 @@ def _workspace_cleanup_apply(args: argparse.Namespace) -> None:
     print(json.dumps(apply_cleanup(Path(args.plan)), sort_keys=True))
 
 
+def _workspace_settle(args: argparse.Namespace) -> None:
+    from klab.training.metrics import ExperimentStore
+
+    runs = Path(args.workspace) / "runs"
+    if runs.is_symlink() or not (runs / "experiments.sqlite3").is_file():
+        raise ValueError("workspace needs a real runs directory with a run database")
+    print(
+        json.dumps(
+            {"settled": ExperimentStore(runs).settle_abandoned_runs()}, sort_keys=True
+        )
+    )
+
+
 def _config_compose(args: argparse.Namespace) -> None:
     """Publish one run config assembled from several declaration files."""
     try:
@@ -2583,6 +2596,12 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     cleanup_apply = cleanup_commands.add_parser("apply")
     cleanup_apply.add_argument("plan")
     cleanup_apply.set_defaults(handler=_workspace_cleanup_apply)
+    workspace_settle = workspace_commands.add_parser(
+        "settle",
+        description="Mark runs left 'running' by a killed process as interrupted.",
+    )
+    workspace_settle.add_argument("workspace")
+    workspace_settle.set_defaults(handler=_workspace_settle)
     runtime = commands.add_parser(
         "runtime",
         description="Runtime probes and status.",

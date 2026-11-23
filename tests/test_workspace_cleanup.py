@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -308,3 +309,31 @@ def test_cleanup_keeps_a_data_copy_the_retained_cache_cannot_reproduce(
     (copy / "train.npy").write_bytes((original / "train.npy").read_bytes())
     shutil.rmtree(original)  # the copy is now the only one
     assert plan_cleanup(workspace)["candidates"] == []
+
+
+def test_a_killed_runs_data_copy_is_linked_once_its_status_is_settled(
+    tmp_path: Path,
+) -> None:
+    workspace, cache = _workspace(tmp_path, status="running")
+    original = _cache(workspace, cache, 1)
+    run = workspace / "runs" / "tiny"
+    shutil.copytree(original, run / "data")
+    lock = run / "checkpoints" / ".writer.lock"
+    lock.parent.mkdir(parents=True)
+    lock.touch()
+    store = ExperimentStore(workspace / "runs")
+
+    # A live writer holds the lease: the run keeps its status and nothing is proposed.
+    with lock.open("a+b") as holder:
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert store.settle_abandoned_runs() == []
+        assert plan_cleanup(workspace)["candidates"] == []
+
+    # The process was killed: its lease is free, so the run settles to interrupted
+    # and cleanup can link its copy. A run that never took a lease is left alone.
+    store.create_run("old", {"dataset": {"cache_dir": str(cache)}}, {})
+    assert store.settle_abandoned_runs(skip="other") == ["tiny"]
+    assert [item["path"] for item in plan_cleanup(workspace)["candidates"]] == [
+        "runs/tiny/data"
+    ]
+    assert store.settle_abandoned_runs() == []

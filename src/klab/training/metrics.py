@@ -836,6 +836,43 @@ class ExperimentStore:
             ),
         )
 
+    def settle_abandoned_runs(self, *, skip: str | None = None) -> list[str]:
+        """Mark ``running`` runs whose writer is gone as ``interrupted``.
+
+        A training process takes its run's checkpoint writer lease before it creates the
+        run row and holds it until it exits, so a ``running`` row whose lease nobody
+        holds was left by a process that was killed. Settling it lets cleanup and
+        recovery see the real state. The lease is held while the row is updated, so a
+        writer cannot start underneath. Runs with a live queue attempt are skipped, as is
+        ``skip`` (the caller's own run), and the latest-checkpoint pointer is kept.
+        """
+        import fcntl
+
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT run_id,latest_checkpoint FROM runs WHERE status='running' "
+                "AND run_id NOT IN (SELECT run_id FROM attempts WHERE status NOT IN "
+                "('COMPLETE','FAILED','INTERRUPTED','CANCELLED'))"
+            ).fetchall()
+        settled: list[str] = []
+        for run_id, checkpoint in rows:
+            if run_id == skip or Path(run_id).name != run_id or run_id in {".", ".."}:
+                continue
+            lock = self.path.parent / run_id / "checkpoints" / ".writer.lock"
+            if lock.is_symlink() or not lock.is_file():
+                continue
+            with lock.open("a+b") as handle:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                try:
+                    self.finish_run(run_id, "interrupted", checkpoint)
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            settled.append(run_id)
+        return settled
+
     def export_records(
         self, after_sequence: int = 0, limit: int = 1000, max_bytes: int = 4_194_304
     ) -> dict[str, object]:
