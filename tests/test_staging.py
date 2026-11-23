@@ -699,6 +699,24 @@ def test_prepared_inputs_follow_only_the_modules_that_decide_them(
     )
     assert staging_module.find_prepared_inputs(work, changed) is None
 
+    # When a run checkpoints, logs and evaluates, and how it executes an update, do
+    # not change the prepared bytes: such an edit reuses the bundle both ways.
+    cadence = config.model_copy(
+        update={
+            "checkpoint": config.checkpoint.model_copy(update={"every_minutes": 7.0}),
+            "logging": config.logging.model_copy(update={"every_steps": 3}),
+            "evaluation": config.evaluation.model_copy(update={"every_steps": 5}),
+            "runtime": config.runtime.model_copy(
+                update={"compile_transformer_blocks": True}
+            ),
+        }
+    )
+    assert cadence != config
+    staging_module.verify_prepared_inputs(first / "prepared", cadence)
+    assert staging_module.find_prepared_inputs(work, cadence) == first / "prepared"
+    with pytest.raises(ValueError, match="configuration differs"):
+        staging_module.verify_prepared_inputs(first / "prepared", changed)
+
     # An unrelated Lab change leaves explicit and automatic reuse alike valid.
     package = Path(staging_module.__file__).parent
     read = Path.read_bytes

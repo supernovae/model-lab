@@ -792,14 +792,41 @@ def materialize_prepared_inputs(
     return destination
 
 
+# Settings that cannot change the prepared bytes: when a run checkpoints, logs and
+# evaluates, and how the same update is executed on the devices. Editing one of them
+# after `klab stage` must not force the data to be prepared again.
+_NOT_PREPARED: tuple[tuple[str, ...], ...] = (
+    ("checkpoint",),
+    ("logging",),
+    ("evaluation", "every_steps"),
+    ("evaluation", "every_tokens"),
+    ("runtime", "memory"),
+    ("runtime", "parallel"),
+    ("runtime", "secondary_device_indices"),
+    ("runtime", "compile_transformer_blocks"),
+    ("runtime", "compile_dynamic_shapes"),
+    ("runtime", "compile_output_head_loss"),
+    ("runtime", "output_head_chunk_tokens"),
+)
+
+
+def _prepared_settings(config: RunConfig) -> dict[str, Any]:
+    """The settings a prepared bundle is bound to: everything but `_NOT_PREPARED`."""
+    settings = config.model_dump(mode="json")
+    for path in _NOT_PREPARED:
+        section = settings
+        for part in path[:-1]:
+            section = section.get(part) or {}
+        section.pop(path[-1], None)
+    return settings
+
+
 def _prepared_config_matches(saved: RunConfig, requested: RunConfig) -> bool:
-    """Allow only a worker's recorded auto-runtime resolution over frozen inputs."""
-    if config_sha256(saved.model_dump(mode="json")) == config_sha256(
-        requested.model_dump(mode="json")
-    ):
+    """Allow operational edits and a worker's recorded auto-runtime resolution."""
+    base = _prepared_settings(saved)
+    effective = _prepared_settings(requested)
+    if config_sha256(base) == config_sha256(effective):
         return True
-    base = saved.model_dump(mode="json")
-    effective = requested.model_dump(mode="json")
     runtime = base["runtime"]
     resolved = effective["runtime"]
     if (
@@ -862,7 +889,7 @@ def verify_prepared_inputs(
 
 
 def _prepared_pointer(work_dir: Path, config: RunConfig) -> Path:
-    key = config_sha256(config.model_dump(mode="json"))
+    key = config_sha256(_prepared_settings(config))
     return work_dir / "stage-prepared" / f"{key}.json"
 
 
