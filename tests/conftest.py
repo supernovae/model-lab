@@ -138,6 +138,11 @@ _SLOW = frozenset(
 
 # Known failures with an open issue (tests/known_failures.txt): skipped with
 # the precise reason until the issue lands, never silently weakened.
+# Files too heavy to leave to the path hash, pinned to a shard (1-based) so the shards
+# stay close in time. Its six tests take 70 to 138 s each, which the hash had put beside
+# test_multi_gpu.py and test_lab_mode.py in shard 1 while shard 2 finished in 3 minutes.
+_SHARD_PINS = {"tests/test_tokenizer_sampling_parallel.py": 2}
+
 _KNOWN = {
     node.strip(): reason.strip()
     for node, _, reason in (
@@ -163,7 +168,8 @@ def pytest_collection_modifyitems(
         if reason:
             item.add_marker(pytest.mark.skip(reason=f"known failure: {reason}"))
     # CI splits the suite across jobs by file: KLAB_TEST_SHARD=INDEX/COUNT keeps
-    # the files whose path hashes to INDEX (1-based), so no job lists files.
+    # the files whose path hashes to INDEX (1-based), so no job lists files. A file
+    # in _SHARD_PINS goes to its pinned shard instead (when the count has one).
     shard = os.environ.get("KLAB_TEST_SHARD")
     if shard:
         index, count = (int(part) for part in shard.split("/"))
@@ -172,7 +178,9 @@ def pytest_collection_modifyitems(
         keep, drop = [], []
         for item in items:
             module = item.nodeid.split("::", 1)[0]
-            bucket = zlib.crc32(module.encode()) % count + 1
+            bucket = _SHARD_PINS.get(module, 0)
+            if not 1 <= bucket <= count:
+                bucket = zlib.crc32(module.encode()) % count + 1
             (keep if bucket == index else drop).append(item)
         if drop:
             config.hook.pytest_deselected(items=drop)
