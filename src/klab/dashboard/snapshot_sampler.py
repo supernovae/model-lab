@@ -31,6 +31,7 @@ class Sampler:
             "cpu",
             expected_checkpoint_sha256=selected.digest,
             hash_training_state=False,
+            hash_run_data=False,
         )
 
     def complete(self, request):

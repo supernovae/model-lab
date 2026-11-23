@@ -53,6 +53,30 @@ def test_inference_rejects_tampered_tokenizer(trained_run, tmp_path):
         load_run("corrupt", tmp_path)
 
 
+def test_preview_skips_hashing_the_run_data_and_nothing_else(trained_run, tmp_path):
+    shutil.copytree(trained_run.logging.root_dir / "original", tmp_path / "preview")
+    run = tmp_path / "preview"
+    assert load_run("preview", tmp_path).identity["run_data_hashed"] is True
+    array = run / "data" / "train.npy"
+    intact = array.read_bytes()
+    array.write_bytes(intact[:-1] + bytes([intact[-1] ^ 1]))  # same size, one bit
+
+    with pytest.raises(ValueError):  # a normal load hashes it
+        load_run("preview", tmp_path)
+    preview = load_run("preview", tmp_path, hash_run_data=False)
+    assert preview.identity["run_data_hashed"] is False
+    with pytest.raises(ValueError, match="without hashing its data"):
+        preview.validation_dataset()  # such a load is not evidence for evaluation
+
+    array.write_bytes(intact + b"x")  # a size change is still caught
+    with pytest.raises(ValueError):
+        load_run("preview", tmp_path, hash_run_data=False)
+    array.write_bytes(intact)
+    (run / "tokenizer.json").write_text("{}")  # so is everything the preview reads
+    with pytest.raises(ValueError):
+        load_run("preview", tmp_path, hash_run_data=False)
+
+
 def test_selected_checkpoint_identity_is_not_latest(trained_run, tmp_path):
     shutil.copytree(trained_run.logging.root_dir / "original", tmp_path / "history")
     generations = sorted((tmp_path / "history/checkpoints").glob("step_*"))
