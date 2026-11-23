@@ -738,6 +738,11 @@ def calibrated_estimate(
     )
 
 
+def _refusal(error: ValidationError) -> str:
+    """The config validator's own message, without pydantic's framing."""
+    return str(error.errors()[0]["msg"]).removeprefix("Value error, ")
+
+
 def _decision(
     name: str,
     before: MemoryEstimate,
@@ -1104,9 +1109,11 @@ def explain_levers(
         }
         if isinstance(changed, str):
             return {**row, "applicable": False, "reason": changed}, None, None
-        after = candidate_estimate(
-            RunConfig.model_validate(changed.model_dump(mode="json"))
-        )
+        try:
+            validated = RunConfig.model_validate(changed.model_dump(mode="json"))
+        except ValidationError as error:
+            return {**row, "applicable": False, "reason": _refusal(error)}, None, None
+        after = candidate_estimate(validated)
         return (
             {
                 **row,
@@ -1169,16 +1176,15 @@ def plan_memory(
             return
         try:
             proposed = RunConfig.model_validate(proposed.model_dump(mode="json"))
-        except ValueError as error:
+        except ValidationError as error:
             # A lever the config validator refuses (for example recomputation with
             # flex attention) does not apply to this run: say so and keep planning.
-            message = str(error).splitlines()
             decisions.append(
                 {
                     "requested": name,
                     "effective": False,
                     "reason": "not applicable to this configuration: "
-                    + (message[1].strip() if len(message) > 1 else message[0]),
+                    + _refusal(error),
                 }
             )
             return

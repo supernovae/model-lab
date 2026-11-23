@@ -551,7 +551,19 @@ def test_planner_skips_a_lever_the_config_validator_refuses() -> None:
         if decision.get("requested") == "activation_checkpointing"
     ]
     assert skipped and skipped[0]["effective"] is False
-    assert "not applicable" in skipped[0]["reason"]
+    # The validator's own sentence, without pydantic's type and input dump.
+    assert skipped[0]["reason"].startswith(
+        "not applicable to this configuration: flex attention cannot be recomputed"
+    )
+    assert "input_value" not in skipped[0]["reason"]
+    # The same refusal reaches `klab inspect --explain` as a row, not a traceback.
+    alone = {
+        row["lever"]: row
+        for row in explain_levers(config, _runtime(), estimate)["alone"]
+    }
+    refused = alone["activation_checkpointing"]
+    assert refused["applicable"] is False
+    assert "flex attention cannot be recomputed" in refused["reason"]
     assert proposal.config["attention"]["implementation"] == "flex"
     assert not proposal.config["runtime"]["memory"]["activation_checkpointing"][
         "enabled"
