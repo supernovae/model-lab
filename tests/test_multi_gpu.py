@@ -909,7 +909,8 @@ def test_sharded_restore_refuses_a_shard_that_did_not_arrive(
     """A restored optimizer shard that differs from the checkpoint stops the resume.
 
     On real hardware a shard of an unevenly divisible Engram table (the row count has
-    a remainder across the ranks) came back as stale memory and trained silently.
+    a remainder across the ranks) came back as stale memory and trained silently. A
+    checkpoint that already holds a NaN is refused for what it is, not as a lost shard.
     """
     from klab.engines import sharded
 
@@ -920,7 +921,23 @@ def test_sharded_restore_refuses_a_shard_that_did_not_arrive(
         )
 
     options = {"compile_transformer_blocks": True}
-    reference, engine = PyTorchEngine(), PyTorchEngine()
+    reference = PyTorchEngine()
+    engines: list[PyTorchEngine] = []
+
+    def fresh_sharded_engine(name: str) -> PyTorchEngine:
+        while engines:  # one process group per process: close the previous engine
+            engines.pop().close()
+        engine = PyTorchEngine()
+        engines.append(engine)
+        directory = config(
+            tmp_path / name,
+            secondary_device_indices=(0,),
+            runtime_options={**options, "parallel": ParallelConfig(mode="zero1")},
+        )
+        _seed_all(directory.seed)
+        engine.initialize(directory, initial_weights=_weights(reference))
+        return engine
+
     try:
         single = config(tmp_path / "single", runtime_options=options)
         _seed_all(single.seed)
@@ -929,13 +946,15 @@ def test_sharded_restore_refuses_a_shard_that_did_not_arrive(
         reference.train_update(microbatches, 1, valid_targets)
         state = copy.deepcopy(reference.export_training_state())
 
-        sharded_config = config(
-            tmp_path / "zero1",
-            secondary_device_indices=(0,),
-            runtime_options={**options, "parallel": ParallelConfig(mode="zero1")},
+        poisoned = copy.deepcopy(state)
+        moment = next(
+            slots["exp_avg"]
+            for slots in poisoned.optimizer["state"].values()  # type: ignore[union-attr]
+            if slots["exp_avg"].ndim
         )
-        _seed_all(sharded_config.seed)
-        engine.initialize(sharded_config, initial_weights=_weights(reference))
+        moment.view(-1)[0] = float("nan")
+        with pytest.raises(Exception, match="non-finite"):
+            fresh_sharded_engine("poisoned").restore_training_state(poisoned)
 
         real = sharded.distribute_tensor
 
@@ -946,7 +965,8 @@ def test_sharded_restore_refuses_a_shard_that_did_not_arrive(
 
         monkeypatch.setattr(sharded, "distribute_tensor", scatter_that_loses_a_shard)
         with pytest.raises(Exception, match="differs from the checkpoint"):
-            engine.restore_training_state(state)
+            fresh_sharded_engine("lossy").restore_training_state(state)
     finally:
         reference.close()
-        engine.close()
+        for engine in engines:
+            engine.close()

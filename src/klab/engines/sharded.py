@@ -125,6 +125,19 @@ def _full(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.full_tensor() if isinstance(tensor, DTensor) else tensor
 
 
+_LOST_SHARD = 1
+_NON_FINITE = 2
+_INTEGER_OF_WIDTH = {1: torch.int8, 2: torch.int16, 4: torch.int32, 8: torch.int64}
+
+
+def _same_bits(left: torch.Tensor, right: torch.Tensor) -> bool:
+    """Bit-for-bit equality, so a NaN equals itself."""
+    if left.dtype != right.dtype or left.shape != right.shape:
+        return False
+    width = _INTEGER_OF_WIDTH[left.element_size()]
+    return torch.equal(left.contiguous().view(width), right.contiguous().view(width))
+
+
 class ShardedRank:
     """One rank's sharded model and optimizer, and the collectives that drive them."""
 
@@ -284,20 +297,32 @@ class ShardedRank:
         return {"state": whole, "param_groups": state["param_groups"]}
 
     def _check_restored(
-        self, key: str, index: int, shard: DTensor, whole: torch.Tensor
+        self, key: str, index: int, shard: DTensor, source: torch.Tensor | None
     ) -> None:
         """Fail on every rank if a restored shard differs from the checkpoint.
 
-        Rank 0 holds the checkpoint's tensor; the shards are gathered back and compared
-        with it. A shard that never arrived would otherwise train on stale memory.
+        ``source`` is the checkpoint's tensor on the host (rank 0 only). The shards are
+        gathered back, rank 0 compares their bits with it and broadcasts the verdict,
+        so every rank raises together. Bits, not values: a NaN already in the
+        checkpoint is not mistaken for a lost shard, and is reported as what it is. A
+        shard that never arrived would otherwise train on stale memory.
         """
         gathered = shard.full_tensor()
-        wrong = torch.zeros(1, dtype=torch.int64, device=self.device)
+        verdict = torch.zeros(1, dtype=torch.int64, device=self.device)
         if self.rank == 0:
-            wrong[0] = int(not torch.equal(gathered, whole))
-        dist.broadcast(wrong, src=0)
+            assert source is not None
+            if source.is_floating_point() and not bool(torch.isfinite(source).all()):
+                verdict[0] = _NON_FINITE
+            elif not _same_bits(gathered.cpu(), source):
+                verdict[0] = _LOST_SHARD
         del gathered
-        if int(wrong.item()):
+        dist.broadcast(verdict, src=0)
+        if int(verdict.item()) == _NON_FINITE:
+            raise ValueError(
+                f"checkpoint optimizer state {key!r} of parameter {index} is "
+                "non-finite; it cannot be restored"
+            )
+        if int(verdict.item()) == _LOST_SHARD:
             raise ValueError(
                 f"restored optimizer state {key!r} of parameter {index} differs "
                 "from the checkpoint: a shard did not arrive intact"
@@ -329,6 +354,7 @@ class ShardedRank:
                     # Rank 0 holds the tensor; the others only need a placeholder
                     # of the right shape, made on the device so the host never holds
                     # a whole copy. One unsharded tensor lives at a time.
+                    source = value if isinstance(value, torch.Tensor) else None
                     whole = (
                         torch.empty(value.shape, dtype=value.dtype, device=self.device)
                         if isinstance(value, TensorShape)
@@ -343,8 +369,10 @@ class ShardedRank:
                     # The scatter may still be running on the communication stream;
                     # freeing or releasing memory under it would corrupt a shard.
                     synchronize(self.device)
-                    self._check_restored(key, index, value, whole)
+                    # Free the placeholder before the check gathers a whole tensor
+                    # back, so each rank still peaks at one.
                     del whole
+                    self._check_restored(key, index, value, source)
                     # Temporaries of many sizes stay reserved; return them each time so
                     # the peak is one tensor, not the whole optimizer state.
                     release_cached_memory(self.device)
