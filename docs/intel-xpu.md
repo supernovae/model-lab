@@ -194,8 +194,13 @@ middle of device work can leave its card's copy engine wedged until the kernel
 resets it (a `bcs` job timeout in the kernel log), and the next run then hangs
 while loading weights onto that card.
 
-Known limit: on the B70 box, `zero1` at micro-batch 2 and every sharded mode with
-4x-sized Engram tables stalled in an xccl collective (a hung copy-engine job; the
-kernel log shows an `xe` engine reset). `oneCCL` IPC-cache and temp-buffer
-switches did not help. Stay at micro-batch 1 with `zero1`, or `zero2` at
-micro-batch 2, and watch the first hour of a long run.
+Every rank's allocator stops at `runtime.memory.max_device_memory_fraction` of its
+card (0.9 by default). A configuration that does not fit therefore fails with an
+out-of-memory error that names the rank, instead of over-committing the card, which
+an Arc card answers by spilling into host memory and stalling. On the B70 box,
+`zero1` at micro-batch 2 (27.6 GiB live against a 28.7 GiB limit) and `zero1` with
+4x-sized Engram tables (whole weights and whole gradients of 25M table rows on each
+card) do not fit a 32 GiB card and now say so. Micro-batch 2 is no faster than
+micro-batch 1 here (36.0k against 36.5k tokens per second), so stay at micro-batch
+1 with `zero1`. Larger tables need a mode that shards more than the optimizer
+state (`zero2`, `fsdp`); that is not measured here.

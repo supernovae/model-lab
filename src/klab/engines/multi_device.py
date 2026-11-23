@@ -295,9 +295,14 @@ def build_replica(
     config: RunConfig, device: torch.device, state: dict[str, torch.Tensor]
 ) -> SecondaryReplica:
     """Build the replica the primary's model would be on ``device``."""
-    from klab.engines.pytorch import apply_recomputation_strategy
+    from klab.engines.pytorch import apply_recomputation_strategy, cap_allocator
+    from klab.memory import SpillLimits
     from klab.training.trainable import apply_trainable_parameter_filter
 
+    # The same limit as the primary: without it this rank's caching allocator grows
+    # until the card is over-committed, which an Arc card answers by spilling to host
+    # memory and stalling instead of raising.
+    cap_allocator(device, SpillLimits.from_config(config))
     # Built on the device: the weights are overwritten from ``state`` anyway,
     # and a host copy per replica is memory the host does not have to spare.
     with device:

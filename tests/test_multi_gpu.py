@@ -1023,3 +1023,31 @@ def test_a_worker_rank_does_not_keep_the_unsharded_weights(
         )
     finally:
         rank.close()
+
+
+def test_a_worker_rank_gets_the_primarys_allocator_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every rank's allocator stops at the spill guard's limit, not only rank 0's.
+
+    A worker without it grows its cache until the card is over-committed, which an
+    Arc card answers by spilling to host memory and stalling instead of raising.
+    """
+    from klab.engines import multi_device
+    from klab.engines import pytorch as pytorch_engine
+    from klab.memory import SpillLimits
+    from klab.model.transformer import DenseLM
+
+    config = _make_run_config(tmp_path)
+    assert SpillLimits.from_config(config) is not None
+    capped: list[tuple[torch.device, SpillLimits | None]] = []
+    monkeypatch.setattr(
+        pytorch_engine,
+        "cap_allocator",
+        lambda device, limits: capped.append((device, limits)),
+    )
+    device = torch.device("cpu")
+    multi_device.build_replica(
+        config, device, DenseLM(config.model, config.attention).state_dict()
+    )
+    assert capped == [(device, SpillLimits.from_config(config))]

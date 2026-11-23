@@ -181,7 +181,7 @@ def compile_transformer_blocks(
         )
 
 
-def _cap_allocator(device: torch.device, spill_limits: SpillLimits | None) -> bool:
+def cap_allocator(device: torch.device, spill_limits: SpillLimits | None) -> bool:
     """Make the caching allocator refuse growth past the spill guard's limit."""
     api = getattr(torch, device.type, None)
     cap = getattr(api, "set_per_process_memory_fraction", None)
@@ -611,7 +611,7 @@ class PyTorchEngine:
         if self.monitor.spill_limits is not None:
             # A spilling update slows inside one forward; check between blocks.
             model.before_block = self.monitor.check_spill
-            if _cap_allocator(device, self.monitor.spill_limits):
+            if cap_allocator(device, self.monitor.spill_limits):
                 self._allocator_cap = self.monitor.spill_limits
         self.offload = (
             ActivationOffload(device, model)
