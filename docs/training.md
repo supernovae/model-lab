@@ -231,6 +231,14 @@ it refuses a changed mixture completion or tokenizer in seconds. It reuses the
 prepared inputs a finished stage of the same config left under
 `WORK/stage-prepared/` when they still verify, and otherwise prepares.
 `--prepared-inputs` names a bundle explicitly and is checked the same way.
+A prepared bundle is bound to the settings that decide its bytes, not to the
+whole config: changing when a run checkpoints, logs or evaluates
+(`checkpoint`, `logging`, `evaluation.every_steps`, `evaluation.every_tokens`)
+or how it executes the same update (`runtime.memory`, `runtime.parallel`, the
+secondary devices, the compile switches, `runtime.output_head_chunk_tokens`)
+reuses it. Anything else (data, tokenizer, model, training, seed) prepares again.
+Pointers under `WORK/stage-prepared/` written before this rule are not found
+once; pass `--prepared-inputs` to reuse such a bundle.
 Prepared inputs and stage bundles bind the source of only the modules that decide
 them (the same scopes as the prepared-data and stage-bundle receipts), not the
 whole tree: merging unrelated Lab changes (memory estimators, engines, the
