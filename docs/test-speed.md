@@ -21,12 +21,25 @@ Pushes to `main` and all PRs run three Linux jobs in parallel: `lint` (Ruff
 check and format), `test` (the fast suite, split by file into two shards) and
 `staging` (three supervised staging regressions from `tests/test_staging.py`
 that launch real pilot children). `tests/conftest.py` assigns each test file to
-a shard by a hash of its path when `KLAB_TEST_SHARD=INDEX/COUNT` is set, so no
-job keeps a list of files; a new test file lands in a shard on its own. The
-hash does not balance time, so a file that is too heavy for it is pinned to a
-shard in `_SHARD_PINS` in `tests/conftest.py`: add one when `--durations` shows a
-shard running well past the other (a shard that passes near its timeout is the
-sign). See the [workflow](../.github/workflows/ci.yml) for budgets.
+a shard when `KLAB_TEST_SHARD=INDEX/COUNT` is set. Files listed in
+`tests/shard_durations.json` (seconds per file) are placed longest first onto the
+lightest shard (`tests/shard_assignment.py`), so the shards finish together; a file
+not in the table goes by a hash of its path, so no job keeps a list of files and a
+new test file lands in a shard on its own. The assignment depends only on the table
+and the shard count, so every shard job computes the same one. To refresh the table
+after the suite changes much, take the numbers from CI (a runner has four cores and
+a workstation many: one file ran seven times slower there). Each test job uploads
+the durations it measured as the `shard-durations-1` and `shard-durations-2`
+artifacts, and
+
+```sh
+gh run download RUN_ID -n shard-durations-1 -n shard-durations-2 -D /tmp/durations
+jq -s add /tmp/durations/*/*.json > tests/shard_durations.json
+```
+
+merges them. `KLAB_RECORD_DURATIONS=PATH pytest ...` writes the same file anywhere.
+A shard that finishes well after the other is the sign it is time to refresh.
+See the [workflow](../.github/workflows/ci.yml) for budgets.
 
 Opening, synchronizing or reopening a PR runs CI; changing only draft or ready
 state does not. Inspect a failed or cancelled run before rerunning it; do not
