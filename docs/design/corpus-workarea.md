@@ -320,12 +320,23 @@ peak RSS, physical I/O and time of reading the production lock remain
 unmeasured. Keep wide metadata and production measurements tracked in
 [#450](https://github.com/supernovae/model-lab/issues/450).
 
-For single-body adapters, first retain a verified completed body and seal
-the derived output before publication. This bounds restarts after either
-phase. A stop inside a compressed stream still replays parsing from a
-valid format boundary. Measure that cost before adding per-member or
-per-page checkpoints. The [source recovery inventory](../corpus-preparation.md#recovery-by-source-adapter)
+Archive and MediaWiki acquisition now retain the verified body and seal the
+derived output before publication. Using the same fixture on tmpfs, the
+median retry without a transport cache was approximately 0.14 s for the
+archive and 0.08 s for MediaWiki across three trials each. Both retried
+without requests, and both matched the baseline payload inventory digests.
+The timed retry verifies staged output and publishes it. A stop inside a
+compressed stream still replays parsing from the retained body. Extend the
+same recovery boundary to Wikimedia and measure mid-stream restart before
+adding per-member or per-page checkpoints. The
+[source recovery inventory](../corpus-preparation.md#recovery-by-source-adapter)
 records the current replay boundary for every adapter. [#485](https://github.com/supernovae/model-lab/issues/485)
+
+On the same 16 MiB archive fixture, a source-step retry from a finished
+derivation reduced payload bytes hashed from 48 MiB to 16 MiB. A retry from
+the body reduced that count from 50.74 MiB to 25.37 MiB. These counters cover
+SHA-256 reads in one source-step call. They exclude extraction reads and
+later verification in a separate command.
 
 ## Relational Knowledge Microlab
 

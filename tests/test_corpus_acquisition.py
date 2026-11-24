@@ -1252,6 +1252,175 @@ def test_archive_plan_step_snapshot_and_reviewed_release(
     assert verify_release(published)["release_id"] == published.name
 
 
+@pytest.mark.parametrize("damage", ["none", "derivation", "both"])
+def test_archive_recovery_checks_staged_body_and_derivation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    from klab.corpus import acquisition, acquisition_parts
+
+    text = b"pinned source text\n"
+    body = _tar_gz([("rfc1.txt", text, None)])
+    recipe = _archive_recipe(tmp_path, body, budget=True)
+    project = load_project(recipe)
+    work = tmp_path / "work"
+    ledger = work / "corpora/example/transport-budget.sqlite"
+    TransportBudget.initialize(ledger, project)
+    calls = _serve_pinned(monkeypatch, {_RFC_URL: body})
+    step = {"source_id": "one", "max_new_bytes": 1 << 30, "min_free_bytes": 0}
+    real_verify = acquisition.verify_snapshot
+    real_derive = acquisition._acquire_archive
+    extractions = []
+
+    def interrupt(path, **options):
+        if options.get("_staged"):
+            raise OSError("stop before staged verification")
+        return real_verify(path, **options)
+
+    def count(*args, **kwargs):
+        extractions.append(1)
+        return real_derive(*args, **kwargs)
+
+    monkeypatch.setattr(acquisition, "_acquire_archive", count)
+    with monkeypatch.context() as fault:
+        fault.setattr(acquisition, "verify_snapshot", interrupt)
+        with pytest.raises(OSError, match="stop before staged verification"):
+            acquire(project, work, **step)
+    assert not (ledger.parent / "acquisition.json").exists()
+    parent = ledger.parent / "snapshots/one"
+    (checkpoint,) = parent.glob(".archive-parts-*")
+    if damage != "none":
+        (checkpoint / "snapshot/files/rfc1.txt").write_bytes(b"damaged")
+    if damage == "both":
+        (checkpoint / "input/RFC-all.tar.gz").write_bytes(b"damaged")
+
+    plan = acquire(project, work, plan_only=True, **step)["admission"]
+    assert (
+        plan["pinned_checkpoint_reuse"]
+        == {"none": "derivation", "derivation": "body", "both": None}[damage]
+    )
+    output_hashes = []
+    body_hashes = []
+    real_hash = acquisition.sha256_file
+
+    def record_hash(path: Path) -> str:
+        if path.name == "rfc1.txt":
+            output_hashes.append(path)
+        elif path.name == "RFC-all.tar.gz":
+            body_hashes.append(path)
+        return real_hash(path)
+
+    monkeypatch.setattr(acquisition, "sha256_file", record_hash)
+    monkeypatch.setattr(acquisition_parts, "sha256_file", record_hash)
+    assert acquire(project, work, **step)["status"] == "source_verified"
+    if damage != "both":
+        assert len(output_hashes) == 1
+        assert len(body_hashes) == (0 if damage == "none" else 1)
+    lock = acquire(project, work, require_existing=True)
+    assert not checkpoint.exists()
+    assert _snapshot_payload(lock)[1] == {"rfc1.txt": text}
+    assert len(extractions) == (1 if damage == "none" else 2)
+    assert len(calls) == (2 if damage == "both" else 1)
+    assert TransportBudget(ledger, project).receipt()["source_actual"] == len(
+        calls
+    ) * len(body)
+
+
+def test_archive_retry_reclaims_body_left_after_snapshot_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from klab.corpus import acquisition
+
+    body = _tar_gz([("rfc1.txt", b"pinned source text\n", None)])
+    project = load_project(_archive_recipe(tmp_path, body, budget=True))
+    work = tmp_path / "work"
+    base = work / "corpora/example"
+    TransportBudget.initialize(base / "transport-budget.sqlite", project)
+    calls = _serve_pinned(monkeypatch, {_RFC_URL: body})
+    step = {"source_id": "one", "max_new_bytes": 1 << 30, "min_free_bytes": 0}
+    rename = acquisition.rename_noreplace
+
+    def stop_after_rename(source: Path, target: Path) -> None:
+        rename(source, target)
+        raise OSError("stop just after rename")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(acquisition, "rename_noreplace", stop_after_rename)
+        with pytest.raises(OSError, match="stop just after rename"):
+            acquire(project, work, **step)
+    parent = base / "snapshots/one"
+    (orphan,) = parent.glob(".archive-parts-*")
+    assert (orphan / "input/RFC-all.tar.gz").stat().st_size == len(body)
+    sibling = parent / (".archive-parts-" + "0" * 64)
+    (sibling / "snapshot").mkdir(parents=True, mode=0o700)
+    adapter = acquisition._adapter
+    monkeypatch.setattr(
+        acquisition,
+        "_adapter",
+        lambda source: {**adapter(source), "module_sha256": "b" * 64},
+    )
+    plan = acquire(project, work, plan_only=True, **step)["admission"]
+    assert plan["existing_snapshot"] is not None
+    assert orphan.exists()
+    resumed = acquire(project, work, **step)
+    assert resumed["source"]["snapshot_path"] == plan["existing_snapshot"]
+    assert not orphan.exists()
+    assert (sibling / "snapshot").is_dir()
+    assert calls == [_RFC_URL]
+
+
+@pytest.mark.parametrize("mutation", ["admitted", "renamed"])
+def test_archive_rejects_changed_bytes_after_checkpoint_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    from klab.corpus import acquisition
+
+    body = _tar_gz([("rfc1.txt", b"initial\n", None)])
+    project = load_project(_archive_recipe(tmp_path, body, budget=True))
+    work = tmp_path / "work"
+    base = work / "corpora/example"
+    TransportBudget.initialize(base / "transport-budget.sqlite", project)
+    calls = _serve_pinned(monkeypatch, {_RFC_URL: body})
+    step = {"source_id": "one", "max_new_bytes": 1 << 30, "min_free_bytes": 0}
+
+    def replace_bytes(path: Path) -> None:
+        info = path.stat()
+        path.write_bytes(b"mutated\n")
+        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+
+    if mutation == "admitted":
+
+        def stop(path, **options):
+            raise OSError("stop before publish")
+
+        with monkeypatch.context() as fault:
+            fault.setattr(acquisition, "verify_snapshot", stop)
+            with pytest.raises(OSError, match="stop before publish"):
+                acquire(project, work, **step)
+        stage = acquisition.acquisition_staging
+
+        @contextmanager
+        def mutate_before_lock(parent, parts):
+            replace_bytes(parts.staging / "files/rfc1.txt")
+            with stage(parent, parts) as staging:
+                yield staging
+
+        monkeypatch.setattr(acquisition, "acquisition_staging", mutate_before_lock)
+        reason = "derivation changed after admission"
+    else:
+        rename = acquisition.rename_noreplace
+
+        def mutate_after_rename(source, target):
+            rename(source, target)
+            replace_bytes(target / "files/rfc1.txt")
+
+        monkeypatch.setattr(acquisition, "rename_noreplace", mutate_after_rename)
+        reason = "snapshot byte mismatch"
+    with pytest.raises(ValueError, match=reason):
+        acquire(project, work, **step)
+    assert calls == [_RFC_URL]
+    assert not (base / "acquisition.json").exists()
+
+
 @pytest.mark.parametrize(
     ("members", "tamper", "message"),
     [
@@ -1274,8 +1443,9 @@ def test_archive_refuses_unsafe_members_and_unpinned_bytes(
     with pytest.raises(ValueError, match=message):
         acquire(project, tmp_path / "work")
     assert not (tmp_path / "work/corpora/example/acquisition.json").exists()
-    published = (tmp_path / "work/corpora/example/snapshots/one").iterdir()
-    assert [path.name for path in published] == [".resource-receipts"]
+    snapshots = tmp_path / "work/corpora/example/snapshots/one"
+    assert not any(not path.name.startswith(".") for path in snapshots.iterdir())
+    assert not list(snapshots.glob(".archive-parts-*/snapshot/manifest.json"))
 
 
 def _pdf(text: str) -> bytes:
@@ -1932,6 +2102,8 @@ def test_cache_fill_downloads_bodies_but_makes_no_snapshot_then_acquire_is_free(
     content = b'{"text":"one"}\n'
     recipe = _bounded_hf_fixture(tmp_path, content, "default/train/data.jsonl", rows=1)
     cache, root = tmp_path / "cold", tmp_path / "work"
+    configured_cache = str(tmp_path / "environment-cache")
+    monkeypatch.setenv("KLAB_TRANSPORT_CACHE", configured_cache)
     calls = _mock_hf_stream(monkeypatch, content)
 
     def run(*arguments: str) -> object:
@@ -1951,6 +2123,7 @@ def test_cache_fill_downloads_bodies_but_makes_no_snapshot_then_acquire_is_free(
 
     filled = run("cache-fill", str(recipe))
     assert filled["sources"][0]["bodies"][0]["served_from"] == "network"
+    assert os.environ["KLAB_TRANSPORT_CACHE"] == configured_cache
     assert len(calls) == 1
     assert not list((root / "corpora/example/snapshots").rglob("manifest.json"))
     assert not (root / "corpora/example/acquisition.json").exists()

@@ -8,6 +8,7 @@ import stat
 from pathlib import Path
 
 from klab.corpus import bounded_metadata
+from klab.corpus.acquisition_parts import check_checkpoint
 from klab.corpus.project import Project
 from klab.corpus.transport_budget import (
     PINNED_FILE_KINDS,
@@ -142,6 +143,8 @@ def prepare(
             )
     existing = None
     parent = base / "snapshots" / source.id
+    pinned = native.pinned_body_parts(parent, source, budget)
+    checked_snapshot = checked_body = None
     if parent.exists():
         native._safe_snapshot_path(parent.absolute())
         candidates = []
@@ -156,7 +159,16 @@ def prepare(
             native._safe_snapshot_path(candidate.absolute())
             if (candidate / "manifest.json").stat().st_size > MANIFEST_BYTES:
                 raise ValueError("acquisition step manifest byte cap exceeded")
-            manifest = native.verify_snapshot(candidate, verification_mode="cold")
+            if pinned is not None:
+                checked = check_checkpoint(
+                    candidate,
+                    lambda path: native.verify_snapshot(path, verification_mode="cold"),
+                )
+                assert checked is not None
+                manifest = checked.value
+            else:
+                checked = None
+                manifest = native.verify_snapshot(candidate, verification_mode="cold")
             if (
                 manifest["declaration_sha256"] == native.declaration_sha256(source)
                 and manifest["declaration"]
@@ -165,12 +177,14 @@ def prepare(
                 and (source_id not in retained or manifest == retained[source_id][1])
             ):
                 existing = candidate
+                checked_snapshot = checked
                 break
     effect = effects.get(source_id)
     pending = pinned_transfers(source)
     reused_output_bytes = 0
     hf_reuse = {}
     pdf_reuse = {}
+    pinned_reuse = None
     checkpoint_bytes = checkpoint_peak_bytes = 0
     if existing is not None:
         output_bytes = compressed = 0
@@ -214,6 +228,19 @@ def prepare(
                 pdf_reuse[document.name] = "text" if text is not None else "body"
                 reused_output_bytes += size + (text[1] if text is not None else 0)
         verified_paths = frozenset(hf_reuse.keys() | pdf_reuse.keys())
+        if pinned is not None:
+            checked_snapshot = native.verified_pinned_derivation(
+                source, pinned, manifest_limit=MANIFEST_BYTES
+            )
+            if checked_snapshot is not None:
+                pinned_reuse = "derivation"
+                output_bytes = reused_output_bytes = sum(
+                    item["size"] for item in checked_snapshot.value["files"]
+                )
+            elif (checked_body := pinned.checked_body()) is not None:
+                pinned_reuse = "body"
+            if pinned_reuse is not None:
+                verified_paths = frozenset({pinned.name})
         pending = tuple(item for item in pending if item[0] not in verified_paths)
         # PDF bodies are kept in the snapshot and so are already output bytes;
         # other bodies occupy one temporary path until they are expanded.
@@ -267,6 +294,9 @@ def prepare(
             "storage_mode": "observational" if observes_storage else "enforced",
             "hf_checkpoint_reuse": hf_reuse,
             "pdf_checkpoint_reuse": pdf_reuse,
+            "pinned_checkpoint_reuse": pinned_reuse,
             "external_logs_receipts_and_baseline_are_additional": True,
         },
+        checked_snapshot,
+        checked_body,
     )

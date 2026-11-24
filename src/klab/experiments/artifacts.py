@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import stat
 import weakref
 from pathlib import Path
 from types import MappingProxyType
@@ -22,6 +21,7 @@ from klab.verification_proofs import (
     ProofStore,
     VerificationMode,
     artifact_binding,
+    artifact_fingerprint,
     validate_mode,
 )
 
@@ -376,27 +376,6 @@ class _VerifiedArtifact:
 _MINTED_ARTIFACTS: weakref.WeakSet[_VerifiedArtifact] = weakref.WeakSet()
 
 
-def _fingerprint(path: Path) -> tuple[tuple[str, int, int, int, int, int, int], ...]:
-    members = [path] if path.is_file() else [path, *sorted(path.rglob("*"))]
-    result = []
-    for member in members:
-        info = member.lstat()
-        if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
-            raise ValueError(f"nonregular artifact member: {member}")
-        result.append(
-            (
-                member.relative_to(path).as_posix() if member != path else ".",
-                info.st_dev,
-                info.st_ino,
-                info.st_mode,
-                info.st_size,
-                info.st_mtime_ns,
-                info.st_ctime_ns,
-            )
-        )
-    return tuple(result)
-
-
 def snapshot_dependencies(path: Path, manifest_name: str) -> tuple[Path, ...]:
     manifest = _json_file(path / manifest_name)
     from klab.corpus.preparation_inputs import (
@@ -524,7 +503,10 @@ def _artifact_key(
     artifact: Artifact, path: Path, dataset: DatasetConfig | None = None
 ) -> tuple[object, ...]:
     dependencies = tuple(
-        (str(dependency.absolute()), _fingerprint(_safe_path(str(dependency), path)))
+        (
+            str(dependency.absolute()),
+            artifact_fingerprint(_safe_path(str(dependency), path)),
+        )
         for dependency in _dependent_paths(artifact, path)
     )
     manifest_binding = _manifest_binding(artifact, path)
@@ -548,7 +530,7 @@ def _artifact_key(
         # including its event journal and any additional declared splits.
         members += (dataset.source_manifest_path.parent,)
         dependencies += tuple(
-            (str(member), _fingerprint(_safe_path(str(member), path)))
+            (str(member), artifact_fingerprint(_safe_path(str(member), path)))
             for member in members
         )
         manifest_binding = canonical_json(
@@ -568,7 +550,7 @@ def _artifact_key(
         artifact.version,
         artifact.identifier,
         artifact.sha256,
-        _fingerprint(path),
+        artifact_fingerprint(path),
         dependencies,
         artifact.state,
         manifest_binding,

@@ -8,8 +8,9 @@ import shutil
 import stat
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,50 @@ from klab.result_publication import (
 )
 from klab.safe_io import symlinked
 from klab.training.manifest import sha256_file
+from klab.verification_proofs import ArtifactFingerprint, artifact_fingerprint
+
+
+def _checkpoint_fingerprint(path: Path) -> ArtifactFingerprint | None:
+    try:
+        return artifact_fingerprint(path)
+    except OSError, ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class CheckedCheckpoint[T]:
+    """Cold verification evidence kept only within one acquisition call."""
+
+    path: Path
+    value: T
+    fingerprint: ArtifactFingerprint | None
+
+    def matches(self, path: Path, *, renamed: bool = False) -> bool:
+        if self.fingerprint is None or (not renamed and self.path != path):
+            return False
+        current = _checkpoint_fingerprint(path)
+        if current is None:
+            return False
+        if renamed:
+            # The atomic directory rename can change the root's ctime.
+            # Require the same inode and all other metadata, including member ctimes.
+            return (
+                current[0][:-1] == self.fingerprint[0][:-1]
+                and current[1:] == self.fingerprint[1:]
+            )
+        return current == self.fingerprint
+
+
+def check_checkpoint[T](
+    path: Path, verify: Callable[[Path], T | None]
+) -> CheckedCheckpoint[T] | None:
+    before = _checkpoint_fingerprint(path)
+    value = verify(path)
+    if value is None:
+        return None
+    if before is not None and before != _checkpoint_fingerprint(path):
+        raise ValueError(f"checkpoint changed during verification: {path}")
+    return CheckedCheckpoint(path, value, before)
 
 
 class AcquisitionParts:
@@ -79,6 +124,74 @@ class AcquisitionParts:
         while parent != self.root:
             sync_directory(parent)
             parent = parent.parent
+
+
+class PinnedBodyParts(AcquisitionParts):
+    """Retain one pinned input independently of its derived snapshot."""
+
+    def __init__(
+        self,
+        parent: Path,
+        identity: str,
+        *,
+        adapter: str,
+        name: str,
+        sha256: str,
+        max_bytes: int,
+    ):
+        super().__init__(parent, identity, adapter=adapter)
+        self.name = name
+        self.sha256 = sha256
+        self.max_bytes = max_bytes
+        self.body = self.root / "input" / name
+        self.manifest = self.staging / "manifest.json"
+
+    def checked_body(
+        self, previous: CheckedCheckpoint[int] | None = None
+    ) -> CheckedCheckpoint[int] | None:
+        self._check_root()
+        if previous is not None and previous.matches(self.body):
+            return previous
+        return check_checkpoint(
+            self.body,
+            lambda path: self.verified_size(path, self.sha256, self.max_bytes),
+        )
+
+    def manifest_size(self) -> int | None:
+        self._check_root()
+        return self.staged_file_size(self.manifest)
+
+    def reset_derivation(self) -> None:
+        self.manifest.unlink(missing_ok=True)
+        files = self.staging / "files"
+        if files.exists() or files.is_symlink():
+            shutil.rmtree(files)
+
+    def discard_body(self) -> None:
+        # The directory removal on success also handles unsafe input entries
+        # without following links.
+        if symlinked(self.body.parent):
+            return
+        try:
+            self.body.unlink()
+        except FileNotFoundError:
+            return
+        sync_directory(self.body.parent)
+
+    def reclaim_published(self) -> None:
+        """A moved snapshot leaves no usable derivation in this request root."""
+        if not self.root.exists() or self.staging.exists():
+            return
+        with _parts_lock(self) as locked:
+            if not locked:
+                print(
+                    f"existing acquisition staging retained at {self.root}",
+                    file=sys.stderr,
+                )
+                return
+            if self.root.exists() and not self.staging.exists():
+                shutil.rmtree(self.root)
+                sync_directory(self.root.parent)
 
 
 class ReceiptedParts(AcquisitionParts):
@@ -272,29 +385,38 @@ class PDFParts(ReceiptedParts):
 
 
 @contextmanager
-def acquisition_staging(parent: Path, parts: AcquisitionParts | None) -> Iterator[Path]:
-    if parts is None:
-        for sibling in sorted(parent.glob(".acquire-*")):
-            if not sibling.is_symlink() and sibling.is_dir():
-                print(
-                    f"existing acquisition staging retained at {sibling}",
-                    file=sys.stderr,
-                )
-        with tempfile.TemporaryDirectory(prefix=".acquire-", dir=parent) as temporary:
-            yield Path(temporary)
-        return
+def _parts_lock(parts: AcquisitionParts) -> Iterator[bool]:
     parts._check_root()
     descriptor = os.open(
-        parent / f".{parts.adapter}-parts.lock",
+        parts.root.parent / f".{parts.adapter}-parts.lock",
         os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW,
         0o600,
     )
     with os.fdopen(descriptor, "w") as lock:
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise ValueError("another acquisition is writing this source") from error
-        parts._check_root()
+        except BlockingIOError:
+            yield False
+        else:
+            parts._check_root()
+            yield True
+
+
+@contextmanager
+def acquisition_staging(parent: Path, parts: AcquisitionParts | None) -> Iterator[Path]:
+    for sibling in sorted(parent.glob(".acquire-*")):
+        if not sibling.is_symlink() and sibling.is_dir():
+            print(
+                f"existing acquisition staging retained at {sibling}",
+                file=sys.stderr,
+            )
+    if parts is None:
+        with tempfile.TemporaryDirectory(prefix=".acquire-", dir=parent) as temporary:
+            yield Path(temporary)
+        return
+    with _parts_lock(parts) as locked:
+        if not locked:
+            raise ValueError("another acquisition is writing this source")
         for sibling in sorted(parent.glob(f".{parts.adapter}-parts-*")):
             if sibling != parts.root and not sibling.is_symlink() and sibling.is_dir():
                 print(
