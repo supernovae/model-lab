@@ -332,6 +332,12 @@ adding per-member or per-page checkpoints. The
 [source recovery inventory](../corpus-preparation.md#recovery-by-source-adapter)
 records the current replay boundary for every adapter. [#485](https://github.com/supernovae/model-lab/issues/485)
 
+On the same 16 MiB archive fixture, a source-step retry from a finished
+derivation reduced payload bytes hashed from 48 MiB to 16 MiB. A retry from
+the body reduced that count from 50.74 MiB to 25.37 MiB. These counters cover
+SHA-256 reads in one source-step call. They exclude extraction reads and
+later verification in a separate command.
+
 ## Relational Knowledge Microlab
 
 Keep named recipes and study outputs in Workshop. Start with deterministic

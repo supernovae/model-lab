@@ -36,7 +36,7 @@ from klab.hf_auth import hub_access_errors, hub_auth_kwargs, raise_for_hub_auth
 from klab.result_publication import sync_directory
 from klab.safe_io import rename_noreplace, symlinked, write_canonical_json
 from klab.training.manifest import sha256_file
-from klab.verification_proofs import VerificationMode
+from klab.verification_proofs import VerificationMode, artifact_fingerprint
 
 
 class _Model(BaseModel):
@@ -848,15 +848,13 @@ def _reject_snapshot_symlinks(path: Path) -> None:
 
 
 def _snapshot_key(path: Path, manifest: dict) -> tuple:
-    from klab.experiments.artifacts import _fingerprint
-
     _reject_snapshot_symlinks(path)
     return (
         str(path.absolute()),
         manifest["format"],
         manifest["manifest_sha256"],
         manifest["lock"]["lock_sha256"],
-        _fingerprint(path.parent),
+        artifact_fingerprint(path.parent),
     )
 
 

@@ -61,6 +61,18 @@ def _fingerprint(path: Path) -> list[int]:
     ]
 
 
+type ArtifactFingerprint = tuple[tuple[str, int, int, int, int, int, int], ...]
+
+
+def artifact_fingerprint(path: Path) -> ArtifactFingerprint:
+    """Capture filesystem metadata for the exact file or relative directory tree."""
+    members = [path] if path.is_file() else [path, *sorted(path.rglob("*"))]
+    return tuple(
+        (member.relative_to(path).as_posix(), *_fingerprint(member))
+        for member in members
+    )
+
+
 def writable_by_others(info: os.stat_result) -> bool:
     """Whether anyone but the owner may write this entry.
 

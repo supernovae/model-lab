@@ -132,8 +132,12 @@ per source and then an acquisition lock binding them.
   snapshots. A finished derivation is verified and published from staging.
   If only the body verifies, extraction starts again from that local body.
   Source-step plans report `pinned_checkpoint_reuse` as `derivation`, `body`,
-  or null. A request change gets a separate checkpoint. Publishing removes
-  the working copy of the downloaded body.
+  or null. Admission verifies payload bytes. Within the same command, the
+  locked retry and publication reuse that verification when the filesystem
+  fingerprint still matches. A standalone plan stays read-only. Publishing
+  removes the downloaded body after the snapshot rename is durable. A retry
+  that verifies an already-published snapshot reclaims the matching staging
+  directory if the snapshot was moved out of it.
 - **Observed rather than enforced limits.** On a local workflow where the owner
   wants time, network or storage observed rather than capped,
   `corpus budget-observe-time`, `budget-observe-network` and
