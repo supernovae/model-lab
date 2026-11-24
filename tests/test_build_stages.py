@@ -10,6 +10,7 @@ from corpus_fixtures import neutral_corpus
 from recipe_fixtures import Lab, write_recipe
 
 from klab.corpus import build_stages, large_build
+from klab.corpus.view_checkpoints import ViewCheckpoints
 from klab.training.manifest import sha256_file
 
 
@@ -130,6 +131,70 @@ def test_a_stage_that_does_not_verify_is_rebuilt_and_leftovers_are_ignored(
     shutil.rmtree(resumed)
     lab.run("corpus", "build", project, "--offline", "--keep-stages", "1")
     assert len(stage_dirs(lab.work)) == 2
+
+
+def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    lab = Lab(tmp_path, monkeypatch, capsys)
+    recipe = write_recipe(tmp_path / "recipe")
+    recipe.hub.install(monkeypatch)
+    project = str(recipe.project)
+    lab.run("corpus", "budget-init", project)
+    lab.run("corpus", "acquire", project)
+    monkeypatch.setattr(large_build, "_VIEW_CHECKPOINT_ROWS", 2)
+    reference = Path(lab.run("corpus", "build", project, "--offline"))
+    expected = tree(reference)
+    shutil.rmtree(reference)
+
+    commit = ViewCheckpoints.commit
+
+    def interrupt_after_commit(checkpoints, state):
+        commit(checkpoints, state)
+        if state["count"] == 2:
+            with (checkpoints.root / "build" / "documents.jsonl").open("ab") as stream:
+                stream.write(b"uncommitted tail")
+            raise OSError("interrupted view emission")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(ViewCheckpoints, "commit", interrupt_after_commit)
+        with pytest.raises(OSError, match="interrupted view emission"):
+            lab.run("corpus", "build", project, "--offline")
+    assert not reference.exists()
+    staging = next(lab.work.glob("corpora/*/.views-*/build"))
+    assert (staging / "documents.jsonl").read_bytes().endswith(b"uncommitted tail")
+
+    rendered = []
+    lineage = large_build._document_lineage
+
+    def count_lineage(document, *args):
+        rendered.append(document["document_id"])
+        return lineage(document, *args)
+
+    monkeypatch.setattr(large_build, "_document_lineage", count_lineage)
+
+    def interrupt_publication(staging, target):
+        assert (staging / "build.json").exists()
+        raise OSError("interrupted publication")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(large_build, "publish_staging", interrupt_publication)
+        with pytest.raises(OSError, match="interrupted publication"):
+            lab.run("corpus", "build", project, "--offline")
+    assert not reference.exists()
+    total_documents = len((staging / "documents.jsonl").read_bytes().splitlines())
+    assert len(rendered) == total_documents - 2
+
+    # Damage only the last committed group after the manifest was produced.
+    # A new attempt must retain the valid prefix and rebuild that group.
+    with (staging / "documents.jsonl").open("r+b") as stream:
+        stream.seek(-2, 2)
+        stream.write(b"x")
+    rendered.clear()
+    resumed = Path(lab.run("corpus", "build", project, "--offline"))
+    assert len(rendered) == (total_documents % 2 or 2)
+    assert tree(resumed) == expected
+    assert not list(lab.work.glob("corpora/*/.views-*"))
 
 
 def test_stage_keys_follow_exactly_their_inputs(tmp_path: Path) -> None:

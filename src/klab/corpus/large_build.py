@@ -7,10 +7,12 @@ incomplete staging directories are never inputs to a resumed build.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import tempfile
 from array import array
@@ -58,6 +60,7 @@ from klab.corpus.rights import (
     FILE_ADMISSION_KINDS,
     resolve_file_rights,
 )
+from klab.corpus.view_checkpoints import ViewCheckpoints
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
@@ -1066,16 +1069,20 @@ class _SQLBuildRows:
         self.connection = connection
 
     def spans(self):
-        for (span,) in self.connection.execute(
-            "SELECT span FROM documents ORDER BY rowid"
-        ):
+        for _, span in self.span_rows(0):
             yield span
 
-    def documents(self):
+    def span_rows(self, after: int):
+        yield from self.connection.execute(
+            "SELECT rowid,span FROM documents WHERE rowid>? ORDER BY rowid", (after,)
+        )
+
+    def documents(self, after: str = ""):
         yield from self.connection.execute(
             "SELECT d.payload,d.split,x.representative_id,x.drop_reason "
-            "FROM documents d JOIN dedup x ON x.document_number=d.rowid "
-            "ORDER BY d.document_id"
+            "FROM documents d CROSS JOIN dedup x ON x.document_number=d.rowid "
+            "WHERE d.document_id>? ORDER BY d.document_id",
+            (after,),
         )
 
     def family_splits(self):
@@ -1093,6 +1100,10 @@ class _SQLBuildRows:
                     )
                 ],
             )
+
+
+_VIEW_CHECKPOINT_ROWS = 25_000
+_VIEW_CHECKPOINT_BYTES = 64 * 1024**2
 
 
 def _emit_build(
@@ -1113,6 +1124,8 @@ def _emit_build(
     progress: BuildProgress,
     ordered_rows=None,
     descriptive_census=True,
+    checkpoints: ViewCheckpoints | None = None,
+    diagnostics: Path | None = None,
 ) -> None:
     from klab.corpus.measurement import summarize_release
 
@@ -1133,9 +1146,14 @@ def _emit_build(
 
     with ExitStack() as stack:
 
-        def writer(name: str) -> Any:
+        def writer(name: str, *, resumable: bool = True) -> Any:
             path = staging / name
             path.parent.mkdir(parents=True, exist_ok=True)
+            if checkpoints is not None and resumable:
+                if path.is_symlink():
+                    raise ValueError(f"symlinked corpus view: {path}")
+                stream = stack.enter_context(path.open("a+b"))
+                return checkpoints.add(name, stream)
             return stack.enter_context(path.open("wb"))
 
         documents = writer("documents.jsonl")
@@ -1152,15 +1170,72 @@ def _emit_build(
             "tool_episodes.jsonl",
             "chat/records.jsonl",
         ):
-            writer(path)
+            writer(path, resumable=False)
         for split in SPLITS:
-            writer(f"chat/{split}.jsonl")
-            writer(f"chat/{split}.lineage.jsonl")
+            writer(f"chat/{split}.jsonl", resumable=False)
+            writer(f"chat/{split}.lineage.jsonl", resumable=False)
+
+        span_rowid, last_id = 0, ""
+        pending_rows, pending_bytes = 0, 0
+        if checkpoints is not None:
+            state = checkpoints.restore()
+            if checkpoints.damaged:
+                progress.record("discarded_damaged_view_checkpoint")
+            if state:
+                tally.restore(state["tally"])
+                lm_counts.update(state["lm_counts"])
+                span_rowid, last_id = state["span_rowid"], state["last_id"]
+                count, stage_count = state["count"], state["stage_count"]
+                with (staging / f"stages/{stage_id}.jsonl").open("rb") as prefix:
+                    for index, line in enumerate(prefix):
+                        if index:
+                            stage_digest.update(b",")
+                        stage_digest.update(line.removesuffix(b"\n"))
+                progress.update(output_records=sum(lm_counts.values()))
+                progress.record("reused_view_checkpoints")
+
+        def boundary(size: int, *, finished: bool = False) -> None:
+            nonlocal pending_rows, pending_bytes
+            if checkpoints is None:
+                return
+            pending_rows += not finished
+            pending_bytes += size
+            if not (
+                (finished and pending_rows)
+                or pending_rows >= _VIEW_CHECKPOINT_ROWS
+                or pending_bytes >= _VIEW_CHECKPOINT_BYTES
+            ):
+                return
+            checkpoints.commit(
+                {
+                    "span_rowid": span_rowid,
+                    "last_id": last_id,
+                    "count": count,
+                    "stage_count": stage_count,
+                    "lm_counts": lm_counts,
+                    "tally": tally.snapshot(),
+                }
+            )
+            pending_bytes = pending_rows = 0
 
         # Source spans retain acquisition order; documents and views use ID order.
-        for span in ordered_rows.spans():
+        span_rows = (
+            ordered_rows.span_rows(span_rowid)
+            if checkpoints is not None
+            else ((0, span) for span in ordered_rows.spans())
+        )
+        for span_rowid, span in stack.enter_context(closing(span_rows)):
             spans.write(span + b"\n")
-        for raw_doc, split, representative, reason in ordered_rows.documents():
+            boundary(len(span))
+        boundary(0, finished=True)
+        document_rows = (
+            ordered_rows.documents(last_id)
+            if checkpoints is not None
+            else ordered_rows.documents()
+        )
+        for raw_doc, split, representative, reason in stack.enter_context(
+            closing(document_rows)
+        ):
             doc = json.loads(raw_doc)
             doc["split"] = split
             doc["representative_id"] = representative
@@ -1173,7 +1248,7 @@ def _emit_build(
                 ),
             )
             count += 1
-            record_id = doc["document_id"]
+            record_id = last_id = doc["document_id"]
             origin = (
                 HUMAN_ORIGIN
                 if source_origins[doc["source_id"]] == HUMAN_ORIGIN
@@ -1181,6 +1256,7 @@ def _emit_build(
             )
             if reason is not None:
                 tally.add_dropped(doc)
+                boundary(len(raw_doc))
                 continue
             tally.add(doc)
             text = doc["text"]
@@ -1211,16 +1287,8 @@ def _emit_build(
                 _output(links[split], {"record_id": record_id, "split": split})
                 lm_counts[split] += 1
                 progress.update(output_records=1)
-        for handle in (
-            documents,
-            spans,
-            lineage,
-            stage,
-            *views.values(),
-            *links.values(),
-        ):
-            handle.flush()
-            os.fsync(handle.fileno())
+            boundary(len(raw_doc))
+        boundary(0, finished=True)
 
     stage_digest.update(b"]]")
     stage_path = staging / "stages" / f"{stage_id}.jsonl"
@@ -1250,7 +1318,8 @@ def _emit_build(
             field="source_family_ids",
             family=family,
             splits=splits,
-            diagnostics=staging.parent / "diagnostics" / f"{build_id}.json",
+            diagnostics=diagnostics
+            or staging.parent / "diagnostics" / f"{build_id}.json",
         )
     _write_audit(
         staging / "audit.json",
@@ -1694,12 +1763,33 @@ def build_large(
     )
     stages.prune("dedup", keep=_PRUNE_ON_PUBLISH, protect=dedup_dir.name)
     progress.update(phase="writing_views")
+    view_key = canonical_digest(
+        {
+            "build": build_id,
+            "index_receipt": sha256_file(index_dir / "receipt.json"),
+            "dedup_receipt": sha256_file(dedup_dir / "receipt.json"),
+            "implementation": implementation_digests(
+                "view_checkpoints.py", "build_outputs.py"
+            ),
+        }
+    )
+    view_root = workspace / f".views-{view_key}"
     with (
         _open_decided(index_dir, dedup_dir) as connection,
-        tempfile.TemporaryDirectory(prefix=".build-", dir=root) as temporary,
+        (workspace / ".view-emission.lock").open("a") as lock_file,
     ):
-        staging = Path(temporary)
-        stage_declared_inputs(project, staging, admission_path)
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ValueError("another Corpus build is writing views") from error
+        staging = view_root / "build"
+        if view_root.is_symlink() or staging.is_symlink():
+            raise ValueError(f"symlinked build checkpoint: {view_root}")
+        staging.mkdir(parents=True, exist_ok=True)
+        # An interruption during publication may have left a manifest from the
+        # previous attempt. The inventory must never include the manifest itself.
+        (staging / "build.json").unlink(missing_ok=True)
+        stage_declared_inputs(project, staging, admission_path, resume=True)
         _emit_build(
             connection=connection,
             staging=staging,
@@ -1715,9 +1805,12 @@ def build_large(
             group_count=dedup_result["groups"],
             dropped=dedup_result["dropped"],
             progress=progress,
+            checkpoints=ViewCheckpoints(view_root, view_key),
+            diagnostics=root / "diagnostics" / f"{build_id}.json",
         )
         progress.update(phase="publishing")
         publish_staging(staging, target)
+        shutil.rmtree(view_root)
     for stage in ("dedup", "index"):
         stages.prune(stage, keep=keep_stages)
     progress.record("complete")
