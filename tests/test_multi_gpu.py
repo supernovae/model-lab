@@ -911,6 +911,7 @@ def test_sharded_restore_refuses_a_shard_that_did_not_arrive(
     On real hardware a shard of an unevenly divisible Engram table (the row count has
     a remainder across the ranks) came back as stale memory and trained silently. A
     checkpoint that already holds a NaN is refused for what it is, not as a lost shard.
+    Swapped shards and a slice of the wrong shape are refused too.
     """
     from klab.engines import sharded
 
@@ -956,16 +957,29 @@ def test_sharded_restore_refuses_a_shard_that_did_not_arrive(
         with pytest.raises(Exception, match="non-finite"):
             fresh_sharded_engine("poisoned").restore_training_state(poisoned)
 
-        real = sharded.distribute_tensor
+        real = sharded._shard_slices
 
-        def scatter_that_loses_a_shard(*args: object, **kwargs: object) -> object:
-            shard = real(*args, **kwargs)  # type: ignore[arg-type]
-            shard.to_local().zero_()
-            return shard
+        # Two ranks holding each other's shards have the same plain sum; the
+        # position-weighted checksum refuses them.
+        def swapped(*args: object) -> list[torch.Tensor] | None:
+            slices = real(*args)  # type: ignore[arg-type]
+            return slices[::-1] if slices is not None else None
 
-        monkeypatch.setattr(sharded, "distribute_tensor", scatter_that_loses_a_shard)
+        monkeypatch.setattr(sharded, "_shard_slices", swapped)
         with pytest.raises(Exception, match="differs from the checkpoint"):
-            fresh_sharded_engine("lossy").restore_training_state(state)
+            fresh_sharded_engine("swapped").restore_training_state(state)
+
+        # A slice that is not the shape of the rank's shard is refused before it is
+        # loaded, so a layout the host cut does not match cannot restore wrongly.
+        def truncated(*args: object) -> list[torch.Tensor] | None:
+            slices = real(*args)  # type: ignore[arg-type]
+            if slices is not None:
+                slices[0] = slices[0][:-1]
+            return slices
+
+        monkeypatch.setattr(sharded, "_shard_slices", truncated)
+        with pytest.raises(Exception, match="handed a slice of shape"):
+            fresh_sharded_engine("truncated").restore_training_state(state)
     finally:
         reference.close()
         for engine in engines:
@@ -1051,3 +1065,61 @@ def test_a_worker_rank_gets_the_primarys_allocator_limit(
         config, device, DenseLM(config.model, config.attention).state_dict()
     )
     assert capped == [(device, SpillLimits.from_config(config))]
+
+
+def test_a_sharded_restore_runs_no_collective(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each rank cuts its own shard from the checkpoint tensor it is handed.
+
+    On Arc cards every buffer a collective exchanges stays resident in host memory, so
+    a restore that scattered and gathered the optimizer state cost a resumed run about
+    13 GiB of host memory per rank.
+    """
+    import torch.distributed as dist
+
+    reference, engine = PyTorchEngine(), PyTorchEngine()
+    try:
+        single = _make_run_config(tmp_path / "single")
+        _seed_all(single.seed)
+        reference.initialize(single)
+        microbatches, valid_targets = _make_microbatches(101, count=3)
+        reference.train_update(microbatches, 1, valid_targets)
+        state = copy.deepcopy(reference.export_training_state())
+
+        sharded_config = _make_run_config(
+            tmp_path / "zero1",
+            secondary_device_indices=(0,),
+            runtime_options={"parallel": ParallelConfig(mode="zero1")},
+        )
+        _seed_all(sharded_config.seed)
+        engine.initialize(sharded_config, initial_weights=_weights(reference))
+
+        calls: list[str] = []
+        for name in (
+            "all_gather_into_tensor",
+            "all_gather",
+            "all_reduce",
+            "broadcast",
+            "scatter",
+            "reduce_scatter_tensor",
+        ):
+            real = getattr(dist, name)
+            monkeypatch.setattr(
+                dist,
+                name,
+                lambda *a, _real=real, _name=name, **k: (
+                    calls.append(_name) or _real(*a, **k)
+                ),
+            )
+        engine.restore_training_state(state)
+        assert calls == []
+        monkeypatch.undo()
+        restored, expected = _named_state(engine), _named_state(reference)
+        assert restored.keys() == expected.keys()
+        for name, slots in expected.items():
+            for key, value in slots.items():
+                assert torch.equal(value, restored[name][key]), f"{name}.{key}"
+    finally:
+        reference.close()
+        engine.close()
