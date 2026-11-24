@@ -319,6 +319,18 @@ The run selector, the pilot filter and the refresh interval are in the sidebar o
 this page only. The former per-topic pages and their paths (`/training`,
 `/engram`, ...) are gone; use `/run` with a `tab`.
 
+**Overview** states what was trained in plain words, each from the saved
+configuration: the model's size, its Engram memory, how many tokens one update
+reads, the budget, the learning-rate schedule, the hardware and the training data.
+A fact the run did not record is left out. **What happened** lists the events that
+changed the run's course (recoveries, layout changes, saved checkpoints, the stop or
+failure and its reason), newest first; stage changes and validations stay in the
+full event table below it.
+
+**Device memory** draws every reading in GiB, one panel each: what the framework's
+allocator holds and reserves on the device, and the host's process RSS and available
+memory.
+
 **Engram memory** is separate from device and host memory. Training opens with a
 compact memory summary and three curves: training loss, validation loss and
 throughput, when recorded. Use the metric selector to add other curves.

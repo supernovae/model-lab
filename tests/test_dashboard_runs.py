@@ -162,3 +162,33 @@ def test_engram_tables_follow_the_config_and_readings_never_invent_values() -> N
     # Site 14 has no finite hidden norm at step 5: its push is unavailable, not
     # computed from the older value and not zero.
     assert readings(series, "engram/port/14/")["push"].value is None
+
+
+def test_overview_states_recorded_facts_and_course_changing_events_only() -> None:
+    from klab.dashboard.queries import RunRecord
+    from klab.dashboard.run_overview import facts, timeline
+
+    config = {
+        "training": {"seq_len": 128, "micro_batch_size": 2, "gradient_accumulation": 4},
+        "runtime": {"backend": "xpu", "secondary_device_indices": [1, 2, 3]},
+    }
+    record = RunRecord("r", "r", "failed", None, "t", config, {}, None)
+    tiles = {label: value for label, value, _ in facts(record)}
+    # Nothing is said about the model, budget or data: the run recorded none.
+    assert tiles == {"One update": "1.0k tokens", "Hardware": "4 × xpu"}
+
+    events = [
+        {"run_id": "r", "step": 1, "kind": "stage_started", "payload_json": "{}"},
+        {
+            "run_id": "r",
+            "step": 9,
+            "kind": "run_failed",
+            "payload_json": '{"reason": "nonfinite training loss"}',
+        },
+        {"run_id": "r", "step": 9, "kind": "resumable", "payload_json": "not json"},
+    ]
+    rows = timeline(events)
+    assert [(row["kind"], row["level"], row["detail"]) for row in rows] == [
+        ("resumable", "pass", ""),
+        ("run_failed", "fail", "nonfinite training loss"),
+    ]
