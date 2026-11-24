@@ -20,7 +20,14 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from klab.dashboard import generation, inspection, lab_pages, training_charts, ui
+from klab.dashboard import (
+    generation,
+    inspection,
+    lab_pages,
+    runs_hub,
+    training_charts,
+    ui,
+)
 from klab.dashboard.learn import learn_page
 from klab.dashboard.queries import DashboardSnapshot, RunRecord, runs, snapshot
 from klab.dashboard.stores import (
@@ -1224,10 +1231,9 @@ def main() -> None:
     lab = [
         st.Page(
             lambda: lab_pages.home_page(lab_dir, runs_dirs, pages),
-            title="Home",
+            title="Lab home",
             icon=":material/home:",
             url_path="home",
-            default=True,
         ),
         st.Page(
             lambda: lab_pages.experiments_page(lab_dir),
@@ -1285,8 +1291,18 @@ def main() -> None:
             "stages",
         )
     ]
+    training_pages = [
+        st.Page(
+            lambda: runs_hub.runs_page(root),
+            title="Runs",
+            icon=":material/timeline:",
+            url_path="runs",
+            default=True,
+        )
+    ]
     page = st.navigation(
         {
+            "Training": training_pages,
             "Lab": lab,
             "Run telemetry": run_pages,
             "Learn": [st.Page(lambda: learn(), title="Learn", url_path="learn")],

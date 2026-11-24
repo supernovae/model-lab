@@ -27,6 +27,7 @@ class RunRecord:
     config: dict[str, object]
     metadata: dict[str, object]
     purpose: str | None
+    created_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -80,7 +81,7 @@ def _run_rows(connection: sqlite3.Connection) -> tuple[RunRecord, ...]:
         return ()
     rows = connection.execute(
         "SELECT run_id,name,status,parent_run_id,updated_at,config_json,"
-        "metadata_json FROM runs ORDER BY updated_at DESC"
+        "metadata_json,created_at FROM runs ORDER BY updated_at DESC"
     ).fetchall()
     records: list[RunRecord] = []
     for row in rows:
@@ -96,6 +97,7 @@ def _run_rows(connection: sqlite3.Connection) -> tuple[RunRecord, ...]:
                 config=_object(row[5]),
                 metadata=metadata,
                 purpose=str(purpose) if isinstance(purpose, str) else None,
+                created_at=str(row[7] or ""),
             )
         )
     return tuple(records)
@@ -252,3 +254,157 @@ def events(root: Path, run_ids: list[str]) -> list[dict[str, object]]:
 def stages(root: Path, run_ids: list[str]) -> list[dict[str, object]]:
     wanted = set(run_ids)
     return [row for row in snapshot(root).stages if row["run_id"] in wanted]
+
+
+# What happened to a run, as recorded: these event kinds decide its verdict.
+OUTCOME_EVENTS = (
+    "run_failed",
+    "run_interrupted",
+    "recovery",
+    "resumable",
+    "runtime_optimization_transition",
+    "runtime_drift",
+    "runtime_final_observation",
+)
+_LATEST_METRICS = ("train/loss", "validation/loss", "optimizer/learning_rate")
+
+
+@dataclass(frozen=True)
+class RunFacts:
+    """Aggregates of one run's recorded telemetry, without its full metric series."""
+
+    first_step: int | None = None
+    last_step: int | None = None
+    first_tokens: int | None = None
+    last_tokens: int | None = None
+    first_wall_time: float | None = None
+    last_wall_time: float | None = None
+    updates: int = 0
+    latest: dict[str, float] | None = None
+    best_validation_loss: float | None = None
+    tokens_per_second: float | None = None
+    events: tuple[tuple[str, int, dict[str, object]], ...] = ()
+    verified_checkpoints: int = 0
+    last_checkpoint_step: int | None = None
+    heartbeat_at: str | None = None
+    heartbeat_event: str | None = None
+
+
+def run_facts(root: Path) -> dict[str, RunFacts]:
+    """One aggregate per run for the runs hub: a few grouped queries, no series."""
+    with _connect(root) as connection:
+        tables = _tables(connection)
+        facts: dict[str, dict[str, object]] = {}
+
+        def entry(run_id: object) -> dict[str, object]:
+            return facts.setdefault(str(run_id), {})
+
+        if "metrics" in tables:
+            for row in connection.execute(
+                "SELECT run_id,MIN(step),MAX(step),MIN(tokens_seen),MAX(tokens_seen),"
+                "MIN(wall_time),MAX(wall_time),COUNT(DISTINCT step) FROM metrics "
+                "GROUP BY run_id"
+            ):
+                entry(row[0]).update(
+                    first_step=row[1],
+                    last_step=row[2],
+                    first_tokens=row[3],
+                    last_tokens=row[4],
+                    first_wall_time=row[5],
+                    last_wall_time=row[6],
+                    updates=row[7],
+                )
+            marks = ",".join("?" for _ in _LATEST_METRICS)
+            for run_id, name, value in connection.execute(
+                "SELECT m.run_id,m.name,m.value FROM metrics m JOIN ("
+                f"SELECT run_id,name,MAX(step) AS step FROM metrics WHERE name IN ({marks}) "
+                "GROUP BY run_id,name) l ON m.run_id=l.run_id AND m.name=l.name "
+                "AND m.step=l.step",
+                _LATEST_METRICS,
+            ):
+                entry(run_id).setdefault("latest", {})[str(name)] = float(value)  # type: ignore[index]
+            for run_id, value in connection.execute(
+                "SELECT run_id,MIN(value) FROM metrics WHERE name='validation/loss' "
+                "GROUP BY run_id"
+            ):
+                entry(run_id)["best_validation_loss"] = value
+            # The first updates of a process compile the model; leave them out of the rate.
+            for run_id, value in connection.execute(
+                "SELECT m.run_id,AVG(m.value) FROM metrics m JOIN ("
+                "SELECT run_id,MIN(step) AS first FROM metrics GROUP BY run_id) f "
+                "ON m.run_id=f.run_id WHERE m.name='performance/tokens_per_second' "
+                "AND m.step>f.first+3 GROUP BY m.run_id"
+            ):
+                entry(run_id)["tokens_per_second"] = value
+        if "events" in tables:
+            marks = ",".join("?" for _ in OUTCOME_EVENTS)
+            for run_id, kind, step, payload in connection.execute(
+                f"SELECT run_id,kind,step,payload_json FROM events WHERE kind IN ({marks}) "
+                "ORDER BY id",
+                OUTCOME_EVENTS,
+            ):
+                entry(run_id).setdefault("events", []).append(  # type: ignore[union-attr]
+                    (str(kind), int(step), _object(payload))
+                )
+        if "checkpoints" in tables:
+            for run_id, count, step in connection.execute(
+                "SELECT run_id,COUNT(*),MAX(step) FROM checkpoints "
+                "WHERE verification_status='verified' GROUP BY run_id"
+            ):
+                entry(run_id).update(
+                    verified_checkpoints=count, last_checkpoint_step=step
+                )
+        if "runtime_progress_snapshots" in tables:
+            for run_id, payload in connection.execute(
+                "SELECT run_id,payload_json FROM runtime_progress_snapshots"
+            ):
+                progress = _object(payload)
+                observed, event = progress.get("observed_at_utc"), progress.get("event")
+                entry(run_id).update(
+                    heartbeat_at=observed if isinstance(observed, str) else None,
+                    heartbeat_event=event if isinstance(event, str) else None,
+                )
+    return {
+        run_id: RunFacts(**{**values, "events": tuple(values.get("events", ()))})  # type: ignore[arg-type]
+        for run_id, values in facts.items()
+    }
+
+
+def metric_series(
+    root: Path, run_ids: tuple[str, ...], names: tuple[str, ...], max_points: int = 2000
+) -> list[dict[str, object]]:
+    """The named series of the given runs, thinned to about ``max_points`` per series.
+
+    Thinning keeps every ``k``-th step of a run (and always its last), so a series of a
+    multi-day run stays cheap to send to the browser without changing its shape.
+    """
+    if not run_ids or not names:
+        return []
+    rows: list[dict[str, object]] = []
+    with _connect(root) as connection:
+        if "metrics" not in _tables(connection):
+            return []
+        name_marks = ",".join("?" for _ in names)
+        for run_id in run_ids:
+            for name, count, last in connection.execute(
+                f"SELECT name,COUNT(*),MAX(step) FROM metrics WHERE run_id=? AND name IN "
+                f"({name_marks}) GROUP BY name",
+                (run_id, *names),
+            ).fetchall():
+                stride = max(1, -(-int(count) // max_points))
+                for step, tokens, wall_time, value in connection.execute(
+                    "SELECT step,tokens_seen,wall_time,value FROM metrics WHERE run_id=? "
+                    "AND name=? AND (step % ? = 0 OR step=?) ORDER BY step",
+                    (run_id, name, stride, last),
+                ):
+                    rows.append(
+                        {
+                            "run_id": run_id,
+                            "name": name,
+                            "step": step,
+                            "tokens_seen": tokens,
+                            "wall_time": wall_time,
+                            "value": value,
+                        }
+                    )
+    return rows

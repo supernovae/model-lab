@@ -450,8 +450,8 @@ def test_explorer_page_names_the_size_limit(lab: Path) -> None:
     assert "Too big to explore" in test.warning[0].value
 
 
-def test_full_app_opens_on_lab_home(lab: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The real entry point: navigation builds and the default page is Home."""
+def test_full_app_opens_on_runs(lab: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real entry point: navigation builds and the default page is Runs."""
     monkeypatch.setattr(
         sys, "argv", ["app", "--runs-dir", str(lab / "runs"), "--lab-dir", str(lab)]
     )
@@ -460,7 +460,7 @@ def test_full_app_opens_on_lab_home(lab: Path, monkeypatch: pytest.MonkeyPatch) 
     )
     test.run()
     assert not test.exception
-    assert [h.value for h in test.header] == ["Lab home"]
+    assert [h.value for h in test.header] == ["Runs"]
     assert any(str(lab) in c.value for c in test.sidebar.caption)
 
 

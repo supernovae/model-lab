@@ -631,7 +631,7 @@ appear in four of them. **Experiments** shows the verdict banner (with any
 missing evidence), per-probe results against the baseline with meters, charts,
 per-probe trends, history and a side-by-side compare. **Models** has the
 checkpoint catalog and the Pareto view. **Behaviors** shows generations, recall
-hits and misses, needle by length and reliability diagrams. **Home** shows the
+hits and misses, needle by length and reliability diagrams. **Lab home** shows the
 latest verdict and the next command. Every page reads records through the same
 verified reader as `report` and lists rejected (edited or unreadable) records
 instead of showing them.
