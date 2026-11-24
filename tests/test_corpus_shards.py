@@ -29,12 +29,19 @@ def test_warm_results_are_read_only_within_the_worker_window(tmp_path, monkeypat
 
     monkeypatch.setattr(Path, "read_text", count_reads)
     monkeypatch.setattr(shards, "PARALLEL_MIN_BYTES", 0)
+    monkeypatch.setattr(shards, "worker_count", lambda: 3)
+    monkeypatch.setattr(host_capacity.psutil, "cpu_count", lambda *, logical: 3)
+    monkeypatch.setattr(
+        host_capacity.psutil,
+        "Process",
+        lambda: SimpleNamespace(cpu_affinity=lambda: [0, 1]),
+    )
     with (
-        verification_settings(workers=2),
+        verification_settings(workers=3),
         closing(shards.run_sharded(plan, int, ordered=True)) as results,
     ):
         assert next(results) == 0
-        assert 1 <= len(reads) <= 2
+        assert len(reads) == 2
         assert list(results) == list(range(1, 9))
     assert len(set(reads)) == len(reads) == 9
 
