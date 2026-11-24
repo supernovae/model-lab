@@ -355,6 +355,17 @@ representative dump. Wikimedia's index marks compressed streams within
 one XML document, so range extraction must preserve the shared XML
 context. [Wikimedia multistream format](https://meta.wikimedia.org/wiki/Data_dumps/Dump_format#Multistream_dumps)
 
+The [Wikimedia range planner](../corpus-preparation.md#verify-wikimedia-multistream-ranges)
+validates pinned local dump and index bytes, physical bzip2 member boundaries,
+shared XML context and ordered page IDs. Its metadata is proportional to the
+number of compressed members. The planner emits no decoded payload. The
+planned offsets are the input to the next extraction increment in
+[#587](https://github.com/supernovae/model-lab/issues/587).
+On tmpfs, three runs of the planner on 256 synthetic pages with separate
+header and footer members took a median 0.75 s for 16 MiB of page text
+and 1.98 s for 64 MiB. Peak RSS was about 81 MiB in both cases, including
+CLI startup. These are serial planning measurements on synthetic input.
+
 ## Relational Knowledge Microlab
 
 Keep named recipes and study outputs in Workshop. Start with deterministic

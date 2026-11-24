@@ -96,6 +96,26 @@ def _run(args: argparse.Namespace) -> None:
 
     root = resolve_work_dir(args.work_dir)
     command = args.corpus_command
+    if command == "plan-wikimedia-ranges":
+        from klab.corpus.wikimedia_ranges import plan_wikimedia_ranges
+
+        project = load_project(args.project)
+        source = next(
+            (source for source in project.sources if source.id == args.source_id), None
+        )
+        if source is None:
+            raise ValueError("exact declared source ID required")
+        plan = plan_wikimedia_ranges(
+            source,
+            args.dump,
+            args.index,
+            index_sha256=args.index_sha256,
+            max_index_bytes=args.max_index_bytes,
+            max_index_expanded_bytes=args.max_index_expanded_bytes,
+            max_members=args.max_members,
+        )
+        print(json.dumps(asdict(plan), sort_keys=True))
+        return
     if command in {"cache-fill", "cache-list", "cache-prune"}:
         from klab.corpus.transport_cache import TransportCache, resolve_transport_cache
 
@@ -557,6 +577,19 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "corpus", help="Acquire, derive, freeze and inspect corpus releases"
     )
     sub = corpus.add_subparsers(dest="corpus_command", required=True)
+    command = sub.add_parser(
+        "plan-wikimedia-ranges",
+        help="Verify a pinned local Wikimedia dump and its multistream index",
+    )
+    command.add_argument("project", type=Path)
+    command.add_argument("--source-id", required=True)
+    command.add_argument("--dump", type=Path, required=True)
+    command.add_argument("--index", type=Path, required=True)
+    command.add_argument("--index-sha256", required=True)
+    command.add_argument("--max-index-bytes", type=int, required=True)
+    command.add_argument("--max-index-expanded-bytes", type=int, required=True)
+    command.add_argument("--max-members", type=int, required=True)
+    command.set_defaults(handler=_handle)
     command = sub.add_parser(
         "preview", help="Preview pinned JSONL bytes without admission or copies"
     )
