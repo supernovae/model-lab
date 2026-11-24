@@ -206,7 +206,7 @@ explorer declaration (relative to that file), or pass the run directory directly
 klab dashboard
 ```
 
-- **Home**: the newest verdict and next-step commands.
+- **Lab home**: the newest verdict and next-step commands.
 - **Experiments**: the try's banner, probe table, and per-probe trends across
   the seed tries. Use **Compare** for paired deltas; cells read better, worse
   or within noise.

@@ -2,8 +2,9 @@
 
 Commands below use the [activated, provisioned environment](../README.md#install).
 
-`klab dashboard` opens a local, read-only Streamlit app. The **Lab** pages
-come first. Each answers one question, opens with the verdict, explains its
+`klab dashboard` opens a local, read-only Streamlit app on the **Runs** page:
+what is training now and how every earlier run went. The **Lab** pages follow.
+Each page answers one question, opens with the verdict, explains its
 numbers in plain words and, when it has nothing to show, names the command that
 would fill it. Run telemetry (training curves, runtime, memory, checkpoints) and
 the Learn page follow in their own sections.
@@ -20,7 +21,8 @@ with Streamlit so stop signals and the server's exit status are preserved.
 
 | Page | Question | What you see |
 |---|---|---|
-| **Home** | What happened, and what should I do next? | latest verdict, next-step cards with commands, counts, recent tries and probes |
+| **Runs** | What is training right now, and how did every earlier run go? | the run verified live by its heartbeat, then every run as a lineage of attempts with progress, loss, throughput and an outcome per attempt |
+| **Lab home** | What happened, and what should I do next? | latest verdict, next-step cards with commands, counts, recent tries and probes |
 | **Experiments** | Did my change help, and is the evidence good enough to act on? | verdict banner, per-probe table and charts, per-probe trends, history, side-by-side compare |
 | **Models** | Where does each checkpoint sit on cost vs quality, next to known models? | checkpoint catalog, Pareto frontier, reference models, runs nobody has scored yet |
 | **Behaviors** | What does the model actually do, and where does it fail? | greedy generations side by side, fact-recall hits and misses, needle by length, reliability diagram |
@@ -45,7 +47,38 @@ FFN, a third layer, 4 experts with 1 active, an n-gram memory table) at the
 standard tier, one full-tier probe and three explorations. The models are tiny
 on purpose. The point is how the pages read, not the scores.
 
-## Home
+## Runs
+
+A long run is rarely one process: every recovery is a new run whose parent is the
+run it resumed. The page groups such a chain into one **lineage** and shows it as
+one job: tokens trained against the budget, the furthest step, the latest and best
+validation loss, throughput, and the time left at the newest attempt's rate.
+**Active now** lists a lineage only while one of its attempts has written a
+heartbeat in the last 150 seconds; a stored `running` status alone is shown as
+**Not verified**, never as training.
+
+Open **Loss curve and attempts** for one loss curve stitched along the path to the
+newest attempt (updates that a recovery repeated appear once; diamonds mark where
+each attempt ended) and a row per attempt, newest first:
+
+| Outcome | Recorded facts behind it |
+|---|---|
+| **Training** | status `running` and a fresh heartbeat |
+| **Not verified** | status `running`, no fresh heartbeat; `klab workspace settle` marks such runs interrupted |
+| **Completed** | the run reached the end of its budget |
+| **Paused cleanly** | stopped by a signal or the `CANCEL` file, with a resumable checkpoint at its last step |
+| **Interrupted** | stopped any other way, or without a resumable checkpoint |
+| **Memory spill**, **Out of memory**, **Non-finite loss**, **Disk full**, **Corrupt restore**, **Failed** | the run failed; the recorded reason is shown in full |
+| **No progress** | stopped before completing an update |
+
+A good outcome is lowered to a warning when the attempt trained more than 15
+percent slower than the run it resumed, and a recovery that changed
+`runtime.parallel.mode` or ran under a different Lab version says so in its row.
+**Steps redone** counts the updates after the attempt's last verified checkpoint,
+which the next recovery repeats. An attempt off the path to the newest one is
+marked a dead end. Each attempt links to its telemetry.
+
+## Lab home
 
 ![Home: latest verdict, next steps, recent activity](assets/dashboard-home.png)
 
