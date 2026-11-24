@@ -35,6 +35,7 @@ from klab.corpus.acquisition_parts import (
     CheckedCheckpoint,
     HFParts,
     PDFParts,
+    PinnedBody,
     PinnedBodyParts,
     acquisition_staging,
     check_checkpoint,
@@ -1370,17 +1371,29 @@ def pinned_body_parts(
     *,
     adapter: dict[str, str] | None = None,
 ) -> PinnedBodyParts | None:
-    """Bind the archive or MediaWiki body and derivation to this request."""
-    if source.kind not in {"archive", "mediawiki_dump"}:
+    """Bind a single pinned body and its derivation to this request."""
+    spec = source.acquisition
+    if isinstance(spec, WikimediaDumpAcquisition):
+        name, max_bytes = (
+            source_file_name(source.canonical_uri),
+            spec.max_compressed_bytes,
+        )
+        sha1 = spec.expected_sha1.lower()
+    elif isinstance(spec, (ArchiveAcquisition, MediaWikiDumpAcquisition)):
+        ((name, max_bytes),) = pinned_transfers(source)
+        sha1 = None
+    else:
         return None
-    ((name, max_bytes),) = pinned_transfers(source)
     return PinnedBodyParts(
         parent,
         _acquisition_part_identity(source, budget, adapter=adapter),
         adapter=source.kind,
         name=name,
-        sha256=source.acquisition.expected_sha256,
+        sha256=spec.expected_sha256.lower()
+        if spec.expected_sha256 is not None
+        else None,
         max_bytes=max_bytes,
+        sha1=sha1,
     )
 
 
@@ -1958,24 +1971,45 @@ def _wikimedia_body(
     cache: TransportCache | None,
     *,
     verify_only: bool = False,
-) -> tuple[str, int]:
+    verified_destination: Path | None = None,
+) -> PinnedBody:
     """The compressed dump: from the cache when it verifies, else downloaded."""
-    name = Path(urlparse(source.canonical_uri).path).name
     key = BodyKey(
         "wikimedia_dump",
         source.canonical_uri,
         sha256=spec.expected_sha256 or None,
         sha1=spec.expected_sha1,
     )
-    if cache is not None:
-        served = cache.lookup(
+    served = (
+        cache.lookup(
             key,
             None if verify_only else compressed,
             limit=spec.max_compressed_bytes,
             observe=resources.observe,
         )
-        if served is not None:
-            return served.sha256, served.size
+        if cache is not None
+        else None
+    )
+    body = (
+        PinnedBody(served.sha256, served.size)
+        if served is not None
+        else _download_wikimedia(source, spec, compressed, resources)
+    )
+    if verified_destination is not None:
+        rename_noreplace(compressed, verified_destination)
+        sync_directory(verified_destination.parent)
+    if cache is not None and served is None:
+        cache.store(key, verified_destination or compressed)
+    return body
+
+
+def _download_wikimedia(
+    source: SourceDeclaration,
+    spec: WikimediaDumpAcquisition,
+    compressed: Path,
+    resources: _AcquisitionResources,
+) -> PinnedBody:
+    name = source_file_name(source.canonical_uri)
     opener = urllib.request.build_opener()
     headers = {
         "User-Agent": (
@@ -2015,36 +2049,24 @@ def _wikimedia_body(
         raise ValueError("Wikimedia compressed SHA-256 mismatch")
     if source_sha1.hexdigest() != spec.expected_sha1.lower():
         raise ValueError("Wikimedia compressed SHA-1 mismatch")
-    if cache is not None:
-        cache.store(key, compressed)
-    return digest, compressed_bytes
+    return PinnedBody(digest, compressed_bytes)
 
 
 def _acquire_wikimedia(
     source: SourceDeclaration,
     staging: Path,
-    offline: bool,
-    resources: _AcquisitionResources | None = None,
-    cache: TransportCache | None = None,
+    compressed: Path,
+    body: PinnedBody,
+    resources: _AcquisitionResources,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    if offline:
-        raise ValueError("offline acquisition cannot fetch Wikimedia dump")
     spec = source.acquisition
     assert isinstance(spec, WikimediaDumpAcquisition)
-    resources = resources or _AcquisitionResources(staging)
-    resources.observe()
-    name = Path(urlparse(source.canonical_uri).path).name
-    compressed = staging / "wikimedia-input" / name
-    digest, compressed_bytes = _wikimedia_body(
-        source, spec, compressed, resources, cache
-    )
-    output_name = name + ".sample.jsonl"
+    output_name = compressed.name + ".sample.jsonl"
     output_path = staging / "files" / output_name
     with bz2.open(compressed, "rb") as decompressed:
         rows, scanned, emitted, _ = _wiki_jsonl(
             source, decompressed, output_path, resources
         )
-    compressed.unlink()
     return [
         {
             "path": output_name,
@@ -2055,8 +2077,8 @@ def _acquire_wikimedia(
         "source_uri": source.canonical_uri,
         "checksum_uri": spec.checksum_uri,
         "source_sha1": spec.expected_sha1.lower(),
-        "source_sha256": digest,
-        "compressed_bytes": compressed_bytes,
+        "source_sha256": body.sha256,
+        "compressed_bytes": body.size,
         "resources": resources.receipt(),
         "scanned_pages": scanned,
         "selected_pages": rows,
@@ -2170,28 +2192,45 @@ def _resume_pinned_body(
     cache: TransportCache | None,
     *,
     admit_body: bool,
-    previous: CheckedCheckpoint[int] | None,
-) -> int:
+    previous: CheckedCheckpoint[PinnedBody] | None,
+) -> PinnedBody:
     checked = parts.checked_body(previous)
-    size = checked.value if checked is not None else None
-    if admit_body and size is None:
+    if admit_body and checked is None:
         raise ValueError(f"pinned body checkpoint changed after admission: {source.id}")
-    if size is None:
+    if checked is None:
         parts.body.unlink(missing_ok=True)
     resources.observe()
     if budget is not None:
         budget.remaining_seconds()
         expected = budget.projected_disk_bytes(source_id=source.id)
         budget.check_disk(
-            parts.root, expected - (parts.max_bytes if size is not None else 0)
+            parts.root, expected - (parts.max_bytes if checked is not None else 0)
         )
-    if size is not None:
+    if checked is not None:
         if budget is not None:
-            budget.recover_staged_transfer(source.id, parts.name, size)
-        return size
+            budget.recover_staged_transfer(source.id, parts.name, checked.value.size)
+        return checked.value
     parts.body.parent.mkdir(exist_ok=True)
     sync_directory(parts.root)
-    return _fetch_pinned(
+    if isinstance(source.acquisition, WikimediaDumpAcquisition):
+        # Only a body promoted after its official checksum and pins pass
+        # is eligible on restart. An interrupted download is disposable.
+        incoming = parts.body.with_name(".download")
+        parts.staged_file_size(incoming)
+        incoming.unlink(missing_ok=True)
+        try:
+            return _wikimedia_body(
+                source,
+                source.acquisition,
+                incoming,
+                resources,
+                cache,
+                verified_destination=parts.body,
+            )
+        finally:
+            incoming.unlink(missing_ok=True)
+    assert parts.sha256 is not None
+    size = _fetch_pinned(
         source,
         source.canonical_uri,
         parts.name,
@@ -2203,6 +2242,7 @@ def _resume_pinned_body(
         cache,
         parts=parts,
     )
+    return PinnedBody(parts.sha256, size)
 
 
 class _CountedStream:
@@ -3262,10 +3302,7 @@ def acquire(
                             )
                         pinned.reset_derivation()
                 (staging / "files").mkdir(exist_ok=True)
-                if source.kind == "wikimedia_dump":
-                    resources = _AcquisitionResources(staging)
-                    resources.retain(source)
-                elif source.kind in PINNED_FILE_KINDS:
+                if pinned is not None or source.kind in PINNED_FILE_KINDS:
                     resources = _AcquisitionResources(
                         pinned.root if pinned is not None else staging,
                         budget,
@@ -3280,7 +3317,7 @@ def acquire(
                     resources.observe()
                 elif pinned is not None:
                     assert resources is not None
-                    size = _resume_pinned_body(
+                    body = _resume_pinned_body(
                         source,
                         pinned,
                         budget,
@@ -3289,14 +3326,19 @@ def acquire(
                         admit_body=planned_pin == "body",
                         previous=checked_body,
                     )
-                    derive = (
-                        _acquire_archive
-                        if source.kind == "archive"
-                        else _acquire_mediawiki
-                    )
-                    files, retrieval = derive(
-                        source, staging, pinned.body, size, resources
-                    )
+                    if source.kind == "wikimedia_dump":
+                        files, retrieval = _acquire_wikimedia(
+                            source, staging, pinned.body, body, resources
+                        )
+                    else:
+                        derive = (
+                            _acquire_archive
+                            if source.kind == "archive"
+                            else _acquire_mediawiki
+                        )
+                        files, retrieval = derive(
+                            source, staging, pinned.body, body.size, resources
+                        )
                 elif source.kind == "local":
                     files, retrieval = _acquire_local(source, project.root, staging)
                 elif source.kind == "git":
@@ -3321,10 +3363,6 @@ def acquire(
                         cache,
                         parts=parts if isinstance(parts, HFParts) else None,
                         planned_reuse=step["hf_checkpoint_reuse"] if step else None,
-                    )
-                elif source.kind == "wikimedia_dump":
-                    files, retrieval = _acquire_wikimedia(
-                        source, staging, False, resources, cache
                     )
                 elif source.kind == "pdf_documents":
                     assert isinstance(parts, PDFParts)

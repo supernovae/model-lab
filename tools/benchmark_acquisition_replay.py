@@ -15,6 +15,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import huggingface_hub
@@ -32,6 +33,7 @@ from corpus_fixtures import (
 
 MIB = 1024**2
 CACHE_CASES = {"archive", "mediawiki_dump", "wikimedia_dump", "git", "http_document"}
+DUMP_CASES = ("mediawiki_dump", "wikimedia_dump")
 CASES = (
     "archive",
     "mediawiki_dump",
@@ -44,7 +46,7 @@ CASES = (
 
 
 class Interrupted(OSError):
-    """Simulate interruption after extraction and before verification."""
+    """Simulate interruption at the requested replay boundary."""
 
 
 def synthetic_records(size: int, count: int) -> list[bytes]:
@@ -213,7 +215,7 @@ def fixture(root: Path, kind: str, size: int, patch: pytest.MonkeyPatch):
     return load_project(recipe), http_calls, hub_calls, len(bodies.get(uri, b""))
 
 
-def benchmark(root: Path, kind: str, size: int, trials: int) -> None:
+def benchmark(root: Path, kind: str, size: int, trials: int, interruption: str) -> None:
     with pytest.MonkeyPatch.context() as patch:
         project, http, hub, pinned_bytes = fixture(root, kind, size, patch)
         fetches: list[str] = []
@@ -230,11 +232,22 @@ def benchmark(root: Path, kind: str, size: int, trials: int) -> None:
 
         patch.setattr(subprocess, "Popen", record_git)
         verify = acquisition.verify_snapshot
+        iterparse = ET.iterparse
 
         def interrupt(path, **options):
             if options.get("_staged"):
                 raise Interrupted("replay benchmark")
             return verify(path, **options)
+
+        def interrupt_xml(*args, **options):
+            midpoint = project.sources[0].acquisition.max_selected_pages // 2
+            pages = 0
+            for event, element in iterparse(*args, **options):
+                yield event, element
+                if event == "end" and element.tag.endswith("}page"):
+                    pages += 1
+                    if pages == midpoint:
+                        raise Interrupted("replay benchmark")
 
         modes = (False, True) if kind in CACHE_CASES else (False,)
         expected_digest = None
@@ -247,7 +260,10 @@ def benchmark(root: Path, kind: str, size: int, trials: int) -> None:
                     parent = work / "corpora/example"
                     snapshots = parent / "snapshots/one"
                     with pytest.MonkeyPatch.context() as fault:
-                        fault.setattr(acquisition, "verify_snapshot", interrupt)
+                        if interruption == "mid-xml":
+                            fault.setattr(ET, "iterparse", interrupt_xml)
+                        else:
+                            fault.setattr(acquisition, "verify_snapshot", interrupt)
                         try:
                             acquisition.acquire(project, work, transport_cache=cache)
                         except Interrupted:
@@ -300,6 +316,7 @@ def benchmark(root: Path, kind: str, size: int, trials: int) -> None:
                 json.dumps(
                     {
                         "adapter": kind,
+                        "interruption": interruption,
                         "warm_transport_cache": cached,
                         "median_retry_seconds": round(statistics.median(elapsed), 6),
                         "trials": trials,
@@ -330,8 +347,18 @@ def main() -> None:
         "--trials", type=int, choices=range(1, 11), default=3, metavar="1..10"
     )
     parser.add_argument("--scratch-dir", type=Path, default=None)
+    parser.add_argument(
+        "--interrupt-at",
+        choices=("prepublish", "mid-xml"),
+        default="prepublish",
+        help="Stop before staged verification or halfway through a dump's XML pages",
+    )
     args = parser.parse_args()
-    for kind in args.adapter or CASES:
+    allowed = DUMP_CASES if args.interrupt_at == "mid-xml" else CASES
+    kinds = args.adapter or allowed
+    if any(kind not in allowed for kind in kinds):
+        parser.error("--interrupt-at mid-xml requires a dump adapter")
+    for kind in kinds:
         with (
             tempfile.TemporaryDirectory(
                 prefix="klab-replay-", dir=args.scratch_dir
@@ -341,7 +368,7 @@ def main() -> None:
             root = Path(scratch)
             patch.setenv("XDG_CONFIG_HOME", str(root / "config"))
             patch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
-            benchmark(root, kind, args.size_mib * MIB, args.trials)
+            benchmark(root, kind, args.size_mib * MIB, args.trials, args.interrupt_at)
 
 
 if __name__ == "__main__":

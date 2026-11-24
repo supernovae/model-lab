@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import shutil
 import stat
@@ -126,6 +127,12 @@ class AcquisitionParts:
             parent = parent.parent
 
 
+@dataclass(frozen=True)
+class PinnedBody:
+    sha256: str
+    size: int
+
+
 class PinnedBodyParts(AcquisitionParts):
     """Retain one pinned input independently of its derived snapshot."""
 
@@ -136,26 +143,39 @@ class PinnedBodyParts(AcquisitionParts):
         *,
         adapter: str,
         name: str,
-        sha256: str,
+        sha256: str | None,
         max_bytes: int,
+        sha1: str | None = None,
     ):
         super().__init__(parent, identity, adapter=adapter)
         self.name = name
         self.sha256 = sha256
+        self.sha1 = sha1
         self.max_bytes = max_bytes
         self.body = self.root / "input" / name
         self.manifest = self.staging / "manifest.json"
 
     def checked_body(
-        self, previous: CheckedCheckpoint[int] | None = None
-    ) -> CheckedCheckpoint[int] | None:
+        self, previous: CheckedCheckpoint[PinnedBody] | None = None
+    ) -> CheckedCheckpoint[PinnedBody] | None:
         self._check_root()
         if previous is not None and previous.matches(self.body):
             return previous
-        return check_checkpoint(
-            self.body,
-            lambda path: self.verified_size(path, self.sha256, self.max_bytes),
-        )
+        return check_checkpoint(self.body, self._verify_body)
+
+    def _verify_body(self, path: Path) -> PinnedBody | None:
+        if self.sha1 is None:
+            assert self.sha256 is not None
+            size = self.verified_size(path, self.sha256, self.max_bytes)
+            return PinnedBody(self.sha256, size) if size is not None else None
+        size = self.staged_file_size(path)
+        if size is None or size > self.max_bytes:
+            return None
+        sha1 = hashlib.sha1()
+        sha256 = sha256_file(path, hash_chunk=sha1.update)
+        if sha1.hexdigest() != self.sha1 or (self.sha256 and sha256 != self.sha256):
+            return None
+        return PinnedBody(sha256, size)
 
     def manifest_size(self) -> int | None:
         self._check_root()

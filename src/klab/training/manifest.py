@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import platform
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -157,6 +157,7 @@ def sha256_file(
     chunk_size: int = 1024 * 1024,
     *,
     progress_phase: str | None = None,
+    hash_chunk: Callable[[bytes], None] | None = None,
 ) -> str:
     from klab.training.pilot_progress import current_pilot_progress
 
@@ -179,6 +180,8 @@ def sha256_file(
     with path.open("rb") as handle:
         while chunk := handle.read(chunk_size):
             digest.update(chunk)
+            if hash_chunk is not None:
+                hash_chunk(chunk)
             if subject is not None:
                 counted += len(chunk)
                 if counted - reported >= 64 * 1024 * 1024 or counted == total:

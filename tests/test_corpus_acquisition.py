@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bz2
 import hashlib
 import io
 import json
@@ -1918,25 +1919,27 @@ def test_pinned_downloads_and_http_documents_are_cached_by_what_was_asked(
     assert (leftover / "payload").read_bytes() == body
 
 
-def test_wikimedia_download_checks_sha1_even_with_matching_sha256(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _wikimedia_fixture(
+    root: Path,
+    body: bytes,
+    *,
+    sha1: str,
+    sha256: str | None = None,
+) -> tuple[Path, dict[str, bytes]]:
     date = "20261101"
     prefix = f"https://dumps.wikimedia.org/enwiki/{date}"
     name = f"enwiki-{date}-pages-articles-multistream1.xml-p1p1.bz2"
     uri = f"{prefix}/{name}"
     checksum_uri = f"{prefix}/enwiki-{date}-sha1sums.txt"
-    body = b"corrupt compressed body"
-    sha1 = "0" * 40
     recipe = _fixture(
-        tmp_path,
+        root,
         kind="wikimedia_dump",
         uri=uri,
         revision=date,
         license="CC-BY-SA-4.0",
         acquisition={
             "expected_sha1": sha1,
-            "expected_sha256": hashlib.sha256(body).hexdigest(),
+            "expected_sha256": sha256,
             "checksum_uri": checksum_uri,
             "max_compressed_bytes": len(body),
             "max_decompressed_bytes": 1024,
@@ -1945,11 +1948,89 @@ def test_wikimedia_download_checks_sha1_even_with_matching_sha256(
             "max_emitted_bytes": 1024,
         },
     )
-    _serve_pinned(monkeypatch, {uri: body, checksum_uri: f"{sha1}  {name}\n".encode()})
+    return recipe, {checksum_uri: f"{sha1}  {name}\n".encode(), uri: body}
+
+
+def test_wikimedia_download_checks_sha1_even_with_matching_sha256(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = b"corrupt compressed body"
+    recipe, responses = _wikimedia_fixture(
+        tmp_path, body, sha1="0" * 40, sha256=hashlib.sha256(body).hexdigest()
+    )
+    _serve_pinned(monkeypatch, responses)
     work = tmp_path / "work"
     with pytest.raises(ValueError, match="Wikimedia compressed SHA-1 mismatch"):
         acquire(load_project(recipe), work)
-    assert not (work / "corpora/example/acquisition.json").exists()
+    base = work / "corpora/example"
+    assert not (base / "acquisition.json").exists()
+    assert not list(
+        (base / "snapshots/one").glob(".wikimedia_dump-parts-*/input/*.bz2")
+    )
+
+
+@pytest.mark.parametrize("stop", ["extraction", "damaged_body", "sealed"])
+def test_wikimedia_retry_verifies_and_reuses_completed_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str
+) -> None:
+    from klab.corpus import acquisition
+
+    monkeypatch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
+    xml = (
+        '<mediawiki xmlns="http://www.mediawiki.org/xml/export-0.11/" xml:lang="en">'
+        "<siteinfo><dbname>enwiki</dbname></siteinfo><page><title>Article</title>"
+        "<ns>0</ns><id>1</id><revision><id>2</id>"
+        "<timestamp>2026-10-01T00:00:00Z</timestamp>"
+        "<text>A pinned example.</text></revision></page></mediawiki>"
+    )
+    body = bz2.compress(xml.encode())
+    sha1 = hashlib.sha1(body).hexdigest()
+    recipe, responses = _wikimedia_fixture(tmp_path, body, sha1=sha1)
+    calls = _serve_pinned(monkeypatch, responses)
+    project = load_project(recipe)
+    control = acquire(project, tmp_path / "control")
+    assert calls == list(responses)
+    calls.clear()
+    work = tmp_path / "work"
+    real_verify = acquisition.verify_snapshot
+    real_extract = acquisition._wiki_jsonl
+    extractions = []
+
+    def stop_before_verification(path, **options):
+        if options.get("_staged"):
+            raise OSError("interrupted Wikimedia acquisition")
+        return real_verify(path, **options)
+
+    def observe_extraction(source, stream, output, resources):
+        extractions.append(output)
+        if stop != "sealed" and len(extractions) == 1:
+            output.write_bytes(b"incomplete output")
+            raise OSError("interrupted Wikimedia acquisition")
+        return real_extract(source, stream, output, resources)
+
+    monkeypatch.setattr(acquisition, "_wiki_jsonl", observe_extraction)
+    with monkeypatch.context() as fault:
+        if stop == "sealed":
+            fault.setattr(acquisition, "verify_snapshot", stop_before_verification)
+        with pytest.raises(OSError, match="interrupted Wikimedia acquisition"):
+            acquire(project, work)
+    base = work / "corpora/example"
+    assert not (base / "acquisition.json").exists()
+    assert calls == list(responses)
+    calls.clear()
+    (parts,) = (base / "snapshots/one").glob(".wikimedia_dump-parts-*")
+    (pinned,) = (parts / "input").iterdir()
+    assert pinned.read_bytes() == body
+    if stop == "damaged_body":
+        pinned.write_bytes(b"!" + body[1:])
+
+    resumed = acquire(project, work)
+    assert calls == (list(responses) if stop == "damaged_body" else [])
+    assert len(extractions) == (1 if stop == "sealed" else 2)
+    assert not parts.exists()
+    actual = _snapshot_payload(resumed)
+    assert actual == _snapshot_payload(control)
+    assert actual[0]["retrieval"]["source_sha256"] == hashlib.sha256(body).hexdigest()
 
 
 def test_http_document_cache_replays_the_recorded_retrieval(
