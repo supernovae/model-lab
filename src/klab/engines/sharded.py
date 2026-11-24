@@ -39,7 +39,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import FSDPModule, fully_shard
-from torch.distributed.tensor import DTensor, distribute_tensor
+from torch.distributed.tensor import DTensor, Shard
 
 from klab.config.models import RunConfig
 from klab.engines.base import (
@@ -121,19 +121,46 @@ _INTEGER_OF_WIDTH = {1: torch.int8, 2: torch.int16, 4: torch.int32, 8: torch.int
 _CHECKSUM_MASK = 2**64 - 1
 
 
-def _checksum(tensor: torch.Tensor) -> int:
-    """The sum of a tensor's elements as raw integers, modulo 2**64.
+def _checksum(tensor: torch.Tensor, offset: int = 0) -> int:
+    """Position-weighted sum of a tensor's raw bits, modulo 2**64.
 
-    Additive over a tensor's shards, so the ranks' checksums add up to the whole's
-    without any rank seeing another's data. Bits, not values: a NaN counts as itself.
+    Element ``i`` (in row-major order, counted from ``offset``) contributes its bits as
+    an integer times ``offset + i + 1``. That is additive over shards cut along the
+    first dimension when each is given its own offset, so the ranks' checksums add up
+    to the whole tensor's without any rank seeing another's data, and it changes if
+    shards are swapped, shifted or reordered, not only if bits are lost. Bits, not
+    values: a NaN counts as itself.
     """
     if not tensor.numel():
         return 0
     width = _INTEGER_OF_WIDTH[tensor.element_size()]
-    return (
-        int(tensor.contiguous().view(width).to(torch.int64).sum().item())
-        & _CHECKSUM_MASK
+    raw = tensor.contiguous().view(width).to(torch.int64).flatten()
+    weights = torch.arange(
+        offset + 1, offset + 1 + raw.numel(), dtype=torch.int64, device=raw.device
     )
+    return int((raw * weights).sum().item()) & _CHECKSUM_MASK
+
+
+def _shard_slices(
+    value: torch.Tensor, parameter: Any, world_size: int
+) -> list[torch.Tensor] | None:
+    """``value`` cut into one slice per rank, or ``None`` if it is not sharded that way.
+
+    A parameter sharded along its first dimension holds contiguous rows in rank order
+    (``torch.chunk``, with empty slices when there are fewer rows than ranks). Each rank
+    checks the slice it is handed against its own shard's shape, so a layout this does
+    not match is refused instead of restored wrongly.
+    """
+    if (
+        not isinstance(parameter, DTensor)
+        or tuple(value.shape) != tuple(parameter.shape)
+        or not value.ndim
+        or [p for p in parameter.placements if isinstance(p, Shard)] != [Shard(0)]
+    ):
+        return None
+    slices = list(torch.chunk(value, world_size, dim=0))
+    slices += [value[:0]] * (world_size - len(slices))
+    return slices
 
 
 class ShardedRank:
@@ -296,30 +323,39 @@ class ShardedRank:
             return None
         return {"state": whole, "param_groups": state["param_groups"]}
 
-    def restore_slot(self, index: int, key: str, value: Any) -> int | None:
+    def restore_slot(
+        self, index: int, key: str, value: Any, offset: int | None = None
+    ) -> int | None:
         """Take one optimizer-state entry; return the checksum of this rank's shard.
 
-        Every rank is handed the whole tensor and cuts its own shard out of it
-        (``src_data_rank=None``), so restoring runs no collective. A collective would
-        exchange each tensor between the cards, and every buffer exchanged that way
-        stays resident in host memory for the life of the process: restoring a
-        1.2B-parameter model through them held about 13 GiB of host memory per rank.
+        With ``offset`` the value is this rank's own slice of a sharded tensor, starting
+        at that element of the whole. No rank is handed more than it keeps and nothing
+        is exchanged between the cards: a collective would leave every buffer it moved
+        resident in host memory for the life of the process, which cost a resumed
+        1.2B-parameter run about 13 GiB of host memory per rank.
         """
         parameter = self._restore_parameters()[index]
         if isinstance(value, np.ndarray):
             value = torch.from_numpy(value)
         checksum = None
-        if (
-            isinstance(value, torch.Tensor)
-            and tuple(value.shape) == tuple(parameter.shape)
-            and isinstance(parameter, DTensor)
-        ):
-            whole = value.to(self.device)
-            value = distribute_tensor(
-                whole, parameter.device_mesh, parameter.placements, src_data_rank=None
+        if offset is not None:
+            assert isinstance(parameter, DTensor)
+            expected = tuple(parameter.to_local().shape)
+            if tuple(value.shape) != expected:
+                raise ValueError(
+                    f"optimizer state {key!r} of parameter {index}: rank {self.rank} was "
+                    f"handed a slice of shape {tuple(value.shape)}, its shard is {expected}"
+                )
+            local = value.to(self.device)
+            checksum = _checksum(local, offset)
+            value = DTensor.from_local(
+                local,
+                parameter.device_mesh,
+                parameter.placements,
+                run_check=False,
+                shape=parameter.shape,
+                stride=parameter.stride(),
             )
-            del whole
-            checksum = _checksum(value.to_local())
         self._restoring.setdefault(index, {})[key] = value
         return checksum
 
@@ -598,42 +634,63 @@ class ShardGroup:
         return state
 
     def restore_optimizer_state(self, state: dict[str, Any]) -> None:
-        """Hand every rank each entry of ``state`` in turn; no collective runs.
+        """Hand every rank its part of each entry of ``state``; no collective runs.
 
-        A tensor goes to the workers as bytes over their pipes, one at a time, so the
-        most that is in flight is one tensor. Each rank keeps its own shard and
-        answers with its checksum; they must add up to the checkpoint tensor's.
+        A sharded tensor is cut on the host and each rank gets only its own slice, as
+        bytes over its pipe, so nothing is sent or copied to a device that the rank
+        does not keep and at most one tensor is in flight. Each rank answers with the
+        checksum of what it holds; they must add up to the checkpoint tensor's.
         """
         assert self.rank is not None
         workers = len(self.replicas)
+        parameters = self.rank._restore_parameters()
         for index in sorted(state["state"]):
             slots = state["state"][index]
             for key in sorted(slots):
                 value = slots[key]
-                payload = value
-                if isinstance(value, torch.Tensor):
-                    if value.is_floating_point() and not bool(
-                        torch.isfinite(value).all()
-                    ):
-                        raise ValueError(
-                            f"checkpoint optimizer state {key!r} of parameter {index} "
-                            "is non-finite; it cannot be restored"
-                        )
-                    # Bytes through the pipe, not a tensor: pickling a tensor moves its
-                    # storage into shared memory, and a scalar sent as one would be
-                    # the primary's own (the worker would increment it).
-                    payload = value.detach().cpu().numpy()
+                if not isinstance(value, torch.Tensor):
+                    self.run(
+                        "restore_slot",
+                        lambda index=index, key=key, value=value: (
+                            self.rank.restore_slot(index, key, value)
+                        ),
+                        [(index, key, value)] * workers,
+                    )
+                    continue
+                value = value.detach().cpu()
+                if value.is_floating_point() and not bool(torch.isfinite(value).all()):
+                    raise ValueError(
+                        f"checkpoint optimizer state {key!r} of parameter {index} "
+                        "is non-finite; it cannot be restored"
+                    )
+                slices = _shard_slices(value, parameters[index], self.world_size)
+                if slices is None:
+                    # Bytes, not a tensor: pickling a tensor moves its storage into
+                    # shared memory, and a step count sent that way would be the
+                    # primary's own (the worker would increment it).
+                    self.run(
+                        "restore_slot",
+                        lambda index=index, key=key, value=value: (
+                            self.rank.restore_slot(index, key, value)
+                        ),
+                        [(index, key, value.numpy())] * workers,
+                    )
+                    continue
+                offsets, start = [], 0
+                for piece in slices:
+                    offsets.append(start)
+                    start += piece.numel()
                 mine, theirs = self.run(
                     "restore_slot",
-                    lambda index=index, key=key, value=value: self.rank.restore_slot(
-                        index, key, value
+                    lambda index=index, key=key, piece=slices[0]: (
+                        self.rank.restore_slot(index, key, piece, 0)
                     ),
-                    [(index, key, payload)] * workers,
+                    [
+                        (index, key, slices[rank].contiguous().numpy(), offsets[rank])
+                        for rank in range(1, self.world_size)
+                    ],
                 )
-                if mine is None:
-                    continue
-                arrived = sum([mine, *theirs]) & _CHECKSUM_MASK
-                if arrived != _checksum(value):
+                if (sum([mine, *theirs]) & _CHECKSUM_MASK) != _checksum(value):
                     raise ValueError(
                         f"restored optimizer state {key!r} of parameter {index} differs "
                         "from the checkpoint: a shard did not arrive intact"

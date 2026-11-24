@@ -98,8 +98,10 @@ the glue this design needs and would not give `fsdp`. Lab's own code is the glue
   `forward_with_aux`. In a sharded run the module's `forward` *is*
   `forward_with_aux`.
 - **Checkpoints.** Weights and optimizer state are gathered whole to the
-  primary's host and written in the one-device layout. Restore scatters the
-  optimizer state with `distribute_tensor`. A run moves between modes and device
+  primary's host and written in the one-device layout. Restore runs no
+  collective: the primary cuts each optimizer-state tensor on the host and hands
+  every rank its own slice over its pipe, and the ranks' position-weighted
+  checksums must add up to the checkpoint tensor's. A run moves between modes and device
   counts, which is the resume rule of
   [#485](https://github.com/supernovae/model-lab/issues/485).
 - **Options, not versions.** `runtime.parallel` is omitted from the recorded

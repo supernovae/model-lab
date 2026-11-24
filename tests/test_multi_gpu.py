@@ -911,6 +911,7 @@ def test_sharded_restore_refuses_a_shard_that_did_not_arrive(
     On real hardware a shard of an unevenly divisible Engram table (the row count has
     a remainder across the ranks) came back as stale memory and trained silently. A
     checkpoint that already holds a NaN is refused for what it is, not as a lost shard.
+    Swapped shards and a slice of the wrong shape are refused too.
     """
     from klab.engines import sharded
 
@@ -956,16 +957,29 @@ def test_sharded_restore_refuses_a_shard_that_did_not_arrive(
         with pytest.raises(Exception, match="non-finite"):
             fresh_sharded_engine("poisoned").restore_training_state(poisoned)
 
-        real = sharded.distribute_tensor
+        real = sharded._shard_slices
 
-        def scatter_that_loses_a_shard(*args: object, **kwargs: object) -> object:
-            shard = real(*args, **kwargs)  # type: ignore[arg-type]
-            shard.to_local().zero_()
-            return shard
+        # Two ranks holding each other's shards have the same plain sum; the
+        # position-weighted checksum refuses them.
+        def swapped(*args: object) -> list[torch.Tensor] | None:
+            slices = real(*args)  # type: ignore[arg-type]
+            return slices[::-1] if slices is not None else None
 
-        monkeypatch.setattr(sharded, "distribute_tensor", scatter_that_loses_a_shard)
+        monkeypatch.setattr(sharded, "_shard_slices", swapped)
         with pytest.raises(Exception, match="differs from the checkpoint"):
-            fresh_sharded_engine("lossy").restore_training_state(state)
+            fresh_sharded_engine("swapped").restore_training_state(state)
+
+        # A slice that is not the shape of the rank's shard is refused before it is
+        # loaded, so a layout the host cut does not match cannot restore wrongly.
+        def truncated(*args: object) -> list[torch.Tensor] | None:
+            slices = real(*args)  # type: ignore[arg-type]
+            if slices is not None:
+                slices[0] = slices[0][:-1]
+            return slices
+
+        monkeypatch.setattr(sharded, "_shard_slices", truncated)
+        with pytest.raises(Exception, match="handed a slice of shape"):
+            fresh_sharded_engine("truncated").restore_training_state(state)
     finally:
         reference.close()
         for engine in engines:
