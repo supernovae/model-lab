@@ -103,8 +103,19 @@ per source and then an acquisition lock binding them.
   beside the snapshots. They are bound to the acquisition declaration,
   adapter and ledger scope. Successful acquisition removes them. Remove
   abandoned checkpoints only when no attempt uses them. The published
-  snapshot format is unchanged. Other source adapters still recover at
-  snapshot granularity, with raw transport cache reuse where supported.
+  snapshot format is unchanged.
+- **Retry a bounded Git source.** Rerun acquisition with the same
+  `bounded_blobs` declaration and transport ledger. Lab retains downloaded
+  blobs in a private `.git-parts-<key>` directory beside the snapshots. It
+  recomputes each staged blob's Git object ID and verifies the declared byte
+  count before reuse. A complete blob incurs no new transfer, and an
+  incomplete or damaged blob needs a verified cache body or an allowed
+  pinned retry. The staged tree becomes the snapshot on success without
+  copying the completed blobs. Previous charges and retry limits still apply.
+  If a stop interrupted the ledger update after the body was written, Lab
+  reconciles the matching transfer from its verified bytes and existing charge.
+  Other source adapters recover at snapshot granularity, with raw transport
+  cache reuse where supported.
 - **Observed rather than enforced limits.** On a local workflow where the owner
   wants time, network or storage observed rather than capped,
   `corpus budget-observe-time`, `budget-observe-network` and
@@ -1062,7 +1073,7 @@ checks all three, and that the screen covered every document of this release.
 
 | Step | Resumable after a kill? | A failure at the end costs |
 | --- | --- | --- |
-| `acquire` | yes: verified snapshots, transport cache, and committed bounded HF selections | unfinished HF shard selection or transfer, or the unfinished source for other adapters |
+| `acquire` | yes: verified snapshots, transport cache, bounded HF selections and bounded Git blobs | unfinished HF shard selection or transfer, unfinished Git blob transfer, or the unfinished source for other adapters |
 | `build` normalize | yes: per-file receipted shards | files being written |
 | `build` index, dedup | yes: receipted stage outputs ([resume](#resume-a-failed-build)) | the stage that was running |
 | `build` views and publish (native disk builder) | yes: verified append boundaries and atomic publication | uncommitted rows, prefix verification and any unfinished report or manifest pass |

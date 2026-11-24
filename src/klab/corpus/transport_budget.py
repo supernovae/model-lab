@@ -694,6 +694,14 @@ class TransportBudget:
 
         self._mutate(update, check_deadline=False)
 
+    def recover_staged_transfer(self, source_id: str, path: str, size: int) -> None:
+        """Settle a reservation after its owner verifies a staged body under lock."""
+        key = f"{source_id}:{path}"
+        for index, item in enumerate(self._read()["transfers"]):
+            if item["key"] == key and item["status"] == "started":
+                complete = item["actual"] == size
+                self.finish_transfer(index, success=complete, interrupted=not complete)
+
     def record_failure(self, source_id: str, error: BaseException) -> None:
         def update(state: dict[str, Any]) -> None:
             state["failures"].append(

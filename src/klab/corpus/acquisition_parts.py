@@ -1,4 +1,4 @@
-"""Private checkpoint storage for a pinned, bounded HF acquisition."""
+"""Private staging and checkpoints for pinned, bounded acquisition."""
 
 from __future__ import annotations
 
@@ -23,20 +23,18 @@ from klab.safe_io import symlinked
 from klab.training.manifest import sha256_file
 
 
-class HFParts:
-    """Selected outputs stay in staging and move into the snapshot by rename."""
+class AcquisitionParts:
+    """Keep completed parts in a private staging tree until snapshot publication."""
 
-    def __init__(
-        self, parent: Path, identity: str, *, receipt_limit: int | None = None
-    ):
-        self.root = parent / f".hf-parts-{identity}"
+    def __init__(self, parent: Path, identity: str, *, adapter: str):
+        self.adapter = adapter
+        self.root = parent / f".{adapter}-parts-{identity}"
         self.staging = self.root / "snapshot"
         self.identity = identity
-        self.receipt_limit = receipt_limit
 
     def _check_root(self) -> None:
         if symlinked(self.staging):
-            raise ValueError(f"unsafe HF checkpoint root: {self.root}")
+            raise ValueError(f"unsafe acquisition checkpoint root: {self.root}")
         for path in (self.root, self.staging):
             try:
                 info = path.lstat()
@@ -47,7 +45,40 @@ class HFParts:
                 or info.st_uid != os.getuid()
                 or stat.S_IMODE(info.st_mode) != 0o700
             ):
-                raise ValueError(f"HF checkpoint must be privately owned: {path}")
+                raise ValueError(
+                    f"acquisition checkpoint must be privately owned: {path}"
+                )
+
+    def staged_file_size(self, path: Path) -> int | None:
+        if symlinked(path):
+            raise ValueError(f"unsafe acquisition checkpoint file: {path}")
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return None
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+        ):
+            raise ValueError(f"unsafe acquisition checkpoint file: {path}")
+        return info.st_size
+
+    def sync_path(self, path: Path) -> None:
+        parent = path.parent
+        while parent != self.root:
+            sync_directory(parent)
+            parent = parent.parent
+
+
+class HFParts(AcquisitionParts):
+    """Keep receipts for selected rows and verify the raw bodies of unfinished shards."""
+
+    def __init__(
+        self, parent: Path, identity: str, *, receipt_limit: int | None = None
+    ):
+        super().__init__(parent, identity, adapter="hf")
+        self.receipt_limit = receipt_limit
 
     def body(self, shard: HFBoundedShard) -> Path:
         return self.staging / "hf-input" / shard.path
@@ -59,21 +90,10 @@ class HFParts:
         return self.root / ("part-" + canonical_digest(shard.path) + ".json")
 
     def _size(self, path: Path, expected: str, limit: int) -> int | None:
-        if symlinked(path):
-            raise ValueError(f"unsafe HF checkpoint file: {path}")
-        try:
-            info = path.lstat()
-        except FileNotFoundError:
-            return None
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_uid != os.getuid()
-            or info.st_nlink != 1
-        ):
-            raise ValueError(f"unsafe HF checkpoint file: {path}")
+        size = self.staged_file_size(path)
         return (
-            info.st_size
-            if info.st_size <= limit and sha256_file(path) == expected
+            size
+            if size is not None and size <= limit and sha256_file(path) == expected
             else None
         )
 
@@ -139,12 +159,6 @@ class HFParts:
         self._check_root()
         return sum(path.lstat().st_size for path in self.root.glob("part-*.json"))
 
-    def sync_path(self, path: Path) -> None:
-        parent = path.parent
-        while parent != self.root:
-            sync_directory(parent)
-            parent = parent.parent
-
     def commit(
         self,
         shard: HFBoundedShard,
@@ -170,20 +184,22 @@ class HFParts:
 
 
 @contextmanager
-def acquisition_staging(parent: Path, parts: HFParts | None) -> Iterator[Path]:
+def acquisition_staging(parent: Path, parts: AcquisitionParts | None) -> Iterator[Path]:
     if parts is None:
         with tempfile.TemporaryDirectory(prefix=".acquire-", dir=parent) as temporary:
             yield Path(temporary)
         return
     parts._check_root()
     descriptor = os.open(
-        parent / ".hf-parts.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600
+        parent / f".{parts.adapter}-parts.lock",
+        os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW,
+        0o600,
     )
     with os.fdopen(descriptor, "w") as lock:
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise ValueError("another acquisition is writing this HF source") from error
+            raise ValueError("another acquisition is writing this source") from error
         parts._check_root()
         parts.root.mkdir(mode=0o700, exist_ok=True)
         sync_directory(parent)
