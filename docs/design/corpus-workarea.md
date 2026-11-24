@@ -240,13 +240,37 @@ Sources: [#450](https://github.com/supernovae/model-lab/issues/450),
 [#506](https://github.com/supernovae/model-lab/pull/506),
 [#521](https://github.com/supernovae/model-lab/pull/521).
 
+Use the connected canary for correctness, a repeatable approximately
+1M-document workload for profiling, and the historical Workshop workloads
+for scale where the source data and host are available. Separate cold,
+warm, one-partition append, and resumed runs. Record wall and CPU time,
+throughput, peak RSS, peak scratch, I/O amplification, worker scaling,
+reuse and recovery cost. Include storage and hardware details and compare
+NVMe with slower storage where practical. Record inferred costs separately
+from measurements. Require bounded memory and scratch, no release-sized
+copy at reference freeze, and zero re-encoding after a schedule-only
+change. Before a loader default changes, compare both modes on the same
+schedule for batch waits, access locality, host memory, step throughput,
+and accelerator utilization.
+
 ### Acquisition replay measurements
 
-At Lab `1b4e31a4`, inject an interruption after the adapter finishes
-deriving its output and before the staged snapshot verifier starts. Retry
-through the ordinary acquisition entry point and time through publication.
-The table reports the median of three retries for each configuration on
-tmpfs with Python 3.14.8 and a 24-core AMD Threadripper PRO 9965WX.
+The [replay benchmark](../../tools/benchmark_acquisition_replay.py) injects
+an interruption after the adapter finishes deriving its output and before
+the staged snapshot verifier starts. It retries through the ordinary
+acquisition entry point and times through publication. Run it in the Lab
+development environment with the command below. Use `--adapter git` to
+run one case or `--scratch-dir` to test another filesystem. Each output line
+is a JSON record with timings, request and subprocess counts, payload identity
+and staging bytes where the adapter records them.
+
+```sh
+uv run --locked --no-sync python tools/benchmark_acquisition_replay.py
+```
+
+The baseline table reports the median of three retries for each configuration
+at Lab `1b4e31a4` on tmpfs with Python 3.14.8 and a 24-core AMD Threadripper PRO
+9965WX.
 Payload digests were stable across repetitions and across cache settings
 for the archive and dumps. Those fixtures contain 256 selected text records
 of 64 KiB each. The text is
@@ -268,6 +292,14 @@ verification.
 | Local files | 16.00 MiB emitted | 0.059 s, all files copied | Outside the Lab transport cache |
 | Pinned HTTP document | 16.00 MiB emitted | 0.038 s, one body request | 0.037 s, zero requests |
 
+The same harness compared Git at `1b4e31a4` with the batched reader on
+tmpfs. For 64 files, each retry went from 128 `git cat-file` subprocesses
+to one. In three trials per configuration, the median went from 0.897 s to
+0.773 s without a cache and from 0.287 s to 0.171 s with a warm cache. The
+payload inventory digest matched across builds and cache settings. The
+cached Git reader computes the blob hash while copying. On a Wikimedia
+cache miss, the SHA-1 check likewise shares the copy pass with SHA-256.
+
 Archive and dump retries wrote the complete derived payload again in both
 cache configurations. Their peak staged file bytes were 25.37 MiB for the
 archive, 25.45 MiB for MediaWiki and 24.25 MiB for Wikimedia. Those figures
@@ -279,13 +311,14 @@ adapter paths and should be measured again with a representative source
 before setting a scale target.
 
 The retained Workshop acquisition lock is **4,120,395,181 bytes**, measured
-from file metadata. Current advisory snapshot reuse parses the full lock
-inside the source loop. If each of 33 sources consults a lock that size,
-the loop requests about 136 GB of logical lock reads in addition to source
-snapshot checks. That is a calculation from the loop and observed file
-size. Peak RSS, physical bytes read and wall time on that lock remain
-unmeasured. Track bounded, single-pass advisory lookup with the wide
-metadata work and keep the final lock and provenance checks. [#450](https://github.com/supernovae/model-lab/issues/450)
+from file metadata. The former loop read it once per consulted source.
+Across 33 consultations, that is about 136 GB of calculated logical input.
+Acquisition now reads the advisory lock at most once and falls back to
+verified immutable snapshots if that read fails, including on memory
+exhaustion. Verification of the published lock is a separate step. The
+peak RSS, physical I/O and time of reading the production lock remain
+unmeasured. Keep wide metadata and production measurements tracked in
+[#450](https://github.com/supernovae/model-lab/issues/450).
 
 For single-body adapters, first retain a verified completed body and seal
 the derived output before publication. This bounds restarts after either
@@ -293,19 +326,6 @@ phase. A stop inside a compressed stream still replays parsing from a
 valid format boundary. Measure that cost before adding per-member or
 per-page checkpoints. The [source recovery inventory](../corpus-preparation.md#recovery-by-source-adapter)
 records the current replay boundary for every adapter. [#485](https://github.com/supernovae/model-lab/issues/485)
-
-Use the connected canary for correctness, a repeatable approximately
-1M-document workload for profiling, and the historical Workshop workloads
-for scale where the source data and host are available. Separate cold,
-warm, one-partition append, and resumed runs. Record wall and CPU time,
-throughput, peak RSS, peak scratch, I/O amplification, worker scaling,
-reuse and recovery cost. Include storage and hardware details and compare
-NVMe with slower storage where practical. Record inferred costs separately
-from measurements. Require bounded memory and scratch, no release-sized
-copy at reference freeze, and zero re-encoding after a schedule-only
-change. Before a loader default changes, compare both modes on the same
-schedule for batch waits, access locality, host memory, step throughput,
-and accelerator utilization.
 
 ## Relational Knowledge Microlab
 

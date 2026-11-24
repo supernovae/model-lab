@@ -261,22 +261,30 @@ def _copy_stream(
     target: Path,
     remaining: int,
     resources: _AcquisitionResources | None = None,
+    *,
+    exact: bool = False,
+    hash_chunk: Callable[[bytes], None] | None = None,
 ) -> tuple[str, int]:
     target.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()
     size = 0
+    limit = remaining if exact else remaining + 1
     with target.open("xb") as output:
         if resources is not None:
             resources.observe()
-        while chunk := source.read(min(1024 * 1024, remaining - size + 1)):
+        while size < limit and (chunk := source.read(min(1024 * 1024, limit - size))):
             size += len(chunk)
             if size > remaining:
                 raise ValueError("source exceeds declared max_bytes")
             digest.update(chunk)
+            if hash_chunk is not None:
+                hash_chunk(chunk)
             output.write(chunk)
             if resources is not None:
                 output.flush()
                 resources.observe()
+        if exact and size != remaining:
+            raise ValueError("source ended before declared size")
         output.flush()
         os.fsync(output.fileno())
     return digest.hexdigest(), size
@@ -359,6 +367,40 @@ def _ensure_git_repository(
     return repository, commit
 
 
+def _copy_git_blob(
+    process: subprocess.Popen[bytes],
+    blob: str,
+    target: Path,
+    remaining: int,
+    *,
+    verify_oid: bool,
+) -> tuple[str, int]:
+    assert process.stdin is not None and process.stdout is not None
+    oid = blob.encode("ascii")
+    process.stdin.write(oid + b"\n")
+    process.stdin.flush()
+    header = process.stdout.readline(128).split()
+    if len(header) != 3 or header[:2] != [oid, b"blob"] or not header[2].isdigit():
+        raise ValueError(f"Git blob header mismatch: {target}")
+    size = int(header[2])
+    if size > remaining:
+        raise ValueError("Git selection exceeds max_bytes")
+    # A cached repository is trusted no further than its object ids.
+    git_hash = git_blob_hasher(size) if verify_oid else None
+    digest, copied = _copy_stream(
+        process.stdout,
+        target,
+        size,
+        exact=True,
+        hash_chunk=git_hash.update if git_hash is not None else None,
+    )
+    if process.stdout.read(1) != b"\n":
+        raise ValueError(f"Git blob read failed: {target}")
+    if git_hash is not None and git_hash.hexdigest() != blob:
+        raise ValueError(f"cached Git blob differs from its object id: {target}")
+    return digest, copied
+
+
 def _acquire_git(
     source: SourceDeclaration,
     staging: Path,
@@ -382,58 +424,55 @@ def _acquire_git(
     tree = _git(["--git-dir", str(repository), "ls-tree", "-rz", "--full-tree", commit])
     inventory = []
     total = 0
-    selected = set()
+    selected = False
     metadata_path = acquisition_identity(source).nested_metadata_path
     metadata_seen = False
-    for record in tree.split(b"\0"):
-        if not record:
-            continue
-        metadata, raw_path = record.split(b"\t", 1)
-        mode, kind, blob = metadata.decode("ascii").split()
-        path = raw_path.decode("utf-8", errors="strict")
-        is_metadata = path == metadata_path
-        if not is_metadata and not any(
-            fnmatch.fnmatchcase(path, pattern) for pattern in spec.include
-        ):
-            continue
-        if any(fnmatch.fnmatchcase(path, pattern) for pattern in spec.exclude):
+    with subprocess.Popen(
+        ["git", "--git-dir", str(repository), "cat-file", "--batch"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    ) as process:
+        for record in tree.split(b"\0"):
+            if not record:
+                continue
+            metadata, raw_path = record.split(b"\t", 1)
+            mode, kind, blob = metadata.decode("ascii").split()
+            path = raw_path.decode("utf-8", errors="strict")
+            is_metadata = path == metadata_path
+            if not is_metadata and not any(
+                fnmatch.fnmatchcase(path, pattern) for pattern in spec.include
+            ):
+                continue
+            if any(fnmatch.fnmatchcase(path, pattern) for pattern in spec.exclude):
+                if is_metadata:
+                    raise ValueError(
+                        "rights metadata excluded from pinned Git selection"
+                    )
+                continue
+            safe_name(path)
+            if mode not in ("100644", "100755") or kind != "blob":
+                raise ValueError(
+                    f"Git selection contains unsafe symlink/submodule: {path}"
+                )
             if is_metadata:
-                raise ValueError("rights metadata excluded from pinned Git selection")
-            continue
-        safe_name(path)
-        if mode not in ("100644", "100755") or kind != "blob":
-            raise ValueError(f"Git selection contains unsafe symlink/submodule: {path}")
-        if is_metadata:
-            metadata_seen = True
-        else:
-            selected.add(path)
-        size = int(_git(["--git-dir", str(repository), "cat-file", "-s", blob]))
-        if size > spec.max_bytes - total:
-            raise ValueError("Git selection exceeds max_bytes")
-        target = staging / "files" / path
-        with subprocess.Popen(
-            ["git", "--git-dir", str(repository), "cat-file", "blob", blob],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        ) as process:
-            assert process.stdout is not None
-            digest, copied = _copy_stream(
-                process.stdout, target, spec.max_bytes - total
+                metadata_seen = True
+            else:
+                selected = True
+            digest, copied = _copy_git_blob(
+                process,
+                blob,
+                staging / "files" / path,
+                spec.max_bytes - total,
+                verify_oid=transport is not None,
             )
-            if process.wait() != 0 or copied != size:
-                raise ValueError(f"Git blob read failed: {path}")
-        if transport is not None:
-            # A cached repository is trusted no further than its object ids.
-            git_hasher = hashlib.sha1(f"blob {copied}\0".encode())
-            with target.open("rb") as copied_blob:
-                for chunk in iter(lambda: copied_blob.read(1024 * 1024), b""):
-                    git_hasher.update(chunk)
-            if git_hasher.hexdigest() != blob:
-                raise ValueError(f"cached Git blob differs from its object id: {path}")
-        total += copied
-        inventory.append(
-            {"path": path, "sha256": digest, "size": copied, "git_blob_id": blob}
-        )
+            total += copied
+            inventory.append(
+                {"path": path, "sha256": digest, "size": copied, "git_blob_id": blob}
+            )
+        assert process.stdin is not None
+        process.stdin.close()
+        if process.wait() != 0:
+            raise ValueError("Git batch blob read failed")
     if not selected:
         raise ValueError("Git include patterns selected no files")
     if metadata_path and not metadata_seen:
@@ -1883,21 +1922,22 @@ def _wikimedia_body(
     ]
     if len(matches) != 1 or matches[0][0].lower() != spec.expected_sha1.lower():
         raise ValueError("Wikimedia official SHA-1 manifest mismatch")
+    source_sha1 = hashlib.sha1()
     with opener.open(
         urllib.request.Request(source.canonical_uri, headers=headers), timeout=60
     ) as response:
         if response.url != source.canonical_uri:
             raise ValueError("Wikimedia dump redirect differs from pinned URI")
         digest, compressed_bytes = _copy_stream(
-            response, compressed, spec.max_compressed_bytes, resources
+            response,
+            compressed,
+            spec.max_compressed_bytes,
+            resources,
+            hash_chunk=source_sha1.update,
         )
     resources.observe()
     if spec.expected_sha256 and digest != spec.expected_sha256.lower():
         raise ValueError("Wikimedia compressed SHA-256 mismatch")
-    source_sha1 = hashlib.sha1()
-    with compressed.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            source_sha1.update(chunk)
     if source_sha1.hexdigest() != spec.expected_sha1.lower():
         raise ValueError("Wikimedia compressed SHA-1 mismatch")
     if cache is not None:
@@ -2953,6 +2993,7 @@ def acquire(
         else None
     )
     entries = {}
+    old_sources = None
     for source in active_sources:
         declared_digest = declaration_sha256(source)
         effect = effects[source.id] if effects is not None else None
@@ -3009,27 +3050,39 @@ def acquire(
                 "receipt": {"status": "acquired", "retrieval": manifest["retrieval"]},
             }
             continue
-        # A pre-existing lock is advisory for reuse, but never trusted without verification.
-        try:
-            old = json.loads((base / "acquisition.json").read_text(encoding="utf-8"))[
-                "sources"
-            ][source.id]
-            old_path = snapshot_root / source.id / old["snapshot_sha256"]
-            if old["declaration_sha256"] == declared_digest:
-                manifest = verify_snapshot(
-                    old_path,
-                    proof_store=proof_store,
-                    verification_mode=verification_mode,
-                )
-                if (
-                    source.kind not in ("local", "http_document")
-                    and manifest["declaration"] == acquisition_identity_payload(source)
-                    and _reusable_immutable_adapter(source, manifest)
-                ):
-                    entries[source.id] = old
-                    continue
-        except OSError, ValueError, TypeError, KeyError, json.JSONDecodeError:
-            pass
+        if source.kind not in ("local", "http_document"):
+            # Read the advisory lock once. Reuse still requires snapshot verification.
+            if old_sources is None:
+                previous = base / "acquisition.json"
+                try:
+                    old_sources = read_metadata(previous)["sources"]
+                    if not isinstance(old_sources, dict):
+                        raise TypeError("sources must be a mapping")
+                except FileNotFoundError:
+                    old_sources = {}
+                except (OSError, ValueError, TypeError, KeyError, MemoryError) as error:
+                    print(
+                        f"cannot read advisory acquisition lock at {previous} "
+                        f"({type(error).__name__}): {error}",
+                        file=sys.stderr,
+                    )
+                    old_sources = {}
+            if (old := old_sources.get(source.id)) is not None:
+                try:
+                    old_path = snapshot_root / source.id / old["snapshot_sha256"]
+                    if old["declaration_sha256"] == declared_digest:
+                        manifest = verify_snapshot(
+                            old_path,
+                            proof_store=proof_store,
+                            verification_mode=verification_mode,
+                        )
+                        if manifest["declaration"] == acquisition_identity_payload(
+                            source
+                        ) and _reusable_immutable_adapter(source, manifest):
+                            entries[source.id] = old
+                            continue
+                except OSError, ValueError, TypeError, KeyError:
+                    pass
         # An interrupted run can publish verified source snapshots before
         # writing its final lock. Only immutable upstream revisions are reusable.
         parent = snapshot_root / source.id

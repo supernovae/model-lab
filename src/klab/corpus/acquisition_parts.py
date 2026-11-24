@@ -274,6 +274,12 @@ class PDFParts(ReceiptedParts):
 @contextmanager
 def acquisition_staging(parent: Path, parts: AcquisitionParts | None) -> Iterator[Path]:
     if parts is None:
+        for sibling in sorted(parent.glob(".acquire-*")):
+            if not sibling.is_symlink() and sibling.is_dir():
+                print(
+                    f"existing acquisition staging retained at {sibling}",
+                    file=sys.stderr,
+                )
         with tempfile.TemporaryDirectory(prefix=".acquire-", dir=parent) as temporary:
             yield Path(temporary)
         return

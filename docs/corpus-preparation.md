@@ -165,6 +165,13 @@ need available allowance in the ledger.
 | MediaWiki and Wikimedia dumps | The optional transport cache can supply the complete pinned body. | Copy or download the body and replay the XML stream from the start. A Wikimedia cache miss also fetches the checksum manifest. |
 | Deterministic or recorded-response generator | Acquisition records the declared generator identity without producing documents. | Recreate the metadata-only snapshot if it was unfinished. Generation follows the build workflow. |
 
+A hard kill can leave a transient `.acquire-*` directory containing an
+entire staged payload. On the next staging attempt for that source, Lab
+reports existing directories and retains their contents because another
+acquisition may still be writing there. To reclaim the space, confirm all
+acquisitions using that source's work directory have stopped before
+removing the reported transient directories.
+
 A cache hit avoids body transfer. It still re-hashes the cached input and
 performs the local work listed above. A host-local verification receipt can
 also avoid repeating a cold check on a published snapshot. See the
