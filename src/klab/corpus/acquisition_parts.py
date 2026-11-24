@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import shutil
 import stat
@@ -21,7 +22,7 @@ from klab.result_publication import (
     sync_directory,
     write_bytes_exclusive,
 )
-from klab.safe_io import symlinked
+from klab.safe_io import rename_noreplace, symlinked
 from klab.training.manifest import sha256_file
 from klab.verification_proofs import ArtifactFingerprint, artifact_fingerprint
 
@@ -126,6 +127,12 @@ class AcquisitionParts:
             parent = parent.parent
 
 
+@dataclass(frozen=True)
+class PinnedBody:
+    sha256: str
+    size: int
+
+
 class PinnedBodyParts(AcquisitionParts):
     """Retain one pinned input independently of its derived snapshot."""
 
@@ -136,26 +143,62 @@ class PinnedBodyParts(AcquisitionParts):
         *,
         adapter: str,
         name: str,
-        sha256: str,
+        sha256: str | None,
         max_bytes: int,
+        sha1: str | None = None,
     ):
         super().__init__(parent, identity, adapter=adapter)
         self.name = name
         self.sha256 = sha256
+        self.sha1 = sha1
         self.max_bytes = max_bytes
         self.body = self.root / "input" / name
         self.manifest = self.staging / "manifest.json"
 
+    @property
+    def download(self) -> Path:
+        return self.body.with_name(".download")
+
+    @property
+    def cache_download(self) -> Path:
+        return self.body.with_name(".cache-download")
+
     def checked_body(
-        self, previous: CheckedCheckpoint[int] | None = None
-    ) -> CheckedCheckpoint[int] | None:
+        self, previous: CheckedCheckpoint[PinnedBody] | None = None
+    ) -> CheckedCheckpoint[PinnedBody] | None:
         self._check_root()
         if previous is not None and previous.matches(self.body):
             return previous
-        return check_checkpoint(
-            self.body,
-            lambda path: self.verified_size(path, self.sha256, self.max_bytes),
-        )
+        return check_checkpoint(self.body, self._verify_body)
+
+    def recover_download(self) -> PinnedBody | None:
+        """Recheck the official-download candidate before discarding it."""
+        self._check_root()
+        self.staged_file_size(self.cache_download)
+        self.cache_download.unlink(missing_ok=True)
+        checked = check_checkpoint(self.download, self._verify_body)
+        if checked is None:
+            self.download.unlink(missing_ok=True)
+            return None
+        with self.download.open("rb") as body:
+            os.fsync(body.fileno())
+        rename_noreplace(self.download, self.body)
+        sync_directory(self.body.parent)
+        return checked.value
+
+    def _verify_body(self, path: Path) -> PinnedBody | None:
+        if self.sha1 is None:
+            assert self.sha256 is not None
+            size = self.verified_size(path, self.sha256, self.max_bytes)
+            return PinnedBody(self.sha256, size) if size is not None else None
+        size = self.staged_file_size(path)
+        if size is None or size > self.max_bytes:
+            return None
+        sha1 = hashlib.sha1()
+        sha256 = sha256_file(path, hash_chunk=sha1.update)
+        if sha1.hexdigest() != self.sha1 or (self.sha256 and sha256 != self.sha256):
+            return None
+        return PinnedBody(sha256, size)
 
     def manifest_size(self) -> int | None:
         self._check_root()

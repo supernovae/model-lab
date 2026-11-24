@@ -35,6 +35,7 @@ from klab.corpus.acquisition_parts import (
     CheckedCheckpoint,
     HFParts,
     PDFParts,
+    PinnedBody,
     PinnedBodyParts,
     acquisition_staging,
     check_checkpoint,
@@ -1370,17 +1371,29 @@ def pinned_body_parts(
     *,
     adapter: dict[str, str] | None = None,
 ) -> PinnedBodyParts | None:
-    """Bind the archive or MediaWiki body and derivation to this request."""
-    if source.kind not in {"archive", "mediawiki_dump"}:
+    """Bind a single pinned body and its derivation to this request."""
+    spec = source.acquisition
+    if isinstance(spec, WikimediaDumpAcquisition):
+        name, max_bytes = (
+            source_file_name(source.canonical_uri),
+            spec.max_compressed_bytes,
+        )
+        sha1 = spec.expected_sha1.lower()
+    elif isinstance(spec, (ArchiveAcquisition, MediaWikiDumpAcquisition)):
+        ((name, max_bytes),) = pinned_transfers(source)
+        sha1 = None
+    else:
         return None
-    ((name, max_bytes),) = pinned_transfers(source)
     return PinnedBodyParts(
         parent,
         _acquisition_part_identity(source, budget, adapter=adapter),
         adapter=source.kind,
         name=name,
-        sha256=source.acquisition.expected_sha256,
+        sha256=spec.expected_sha256.lower()
+        if spec.expected_sha256 is not None
+        else None,
         max_bytes=max_bytes,
+        sha1=sha1,
     )
 
 
@@ -1843,10 +1856,10 @@ def _wiki_row(
         re.search(r"[a-zA-Z]", text) if english else any(c.isalpha() for c in text)
     ):
         return None
-    if english:
+    if english and not text.isascii():
         # Skip predominantly non-Latin prose; retain mathematics/code with English context.
-        letters = [char for char in text if char.isalpha()]
-        if letters and sum(char.isascii() for char in letters) * 2 < len(letters):
+        balance = sum(1 if char.isascii() else -1 for char in text if char.isalpha())
+        if balance < 0:
             return None
     revision_id = revision.findtext(ns + "id")
     timestamp = revision.findtext(ns + "timestamp")
@@ -1882,11 +1895,12 @@ def _wiki_jsonl(
     decompressed: Any,
     output_path: Path,
     resources: _AcquisitionResources,
-) -> tuple[list[dict[str, str]], int, int, int]:
+) -> tuple[list[dict[str, str]], int, int, str]:
     """Stream pages from a decompressed XML export into bounded JSONL rows."""
     spec = source.acquisition
     generic = isinstance(spec, MediaWikiDumpAcquisition)
     emitted = scanned = 0
+    digest = hashlib.sha256()
     rows: list[dict[str, str]] = []
     with resources.output(output_path) as output:
         guarded = _BoundedXML(decompressed, spec.max_decompressed_bytes, resources)
@@ -1933,6 +1947,7 @@ def _wiki_jsonl(
                 if len(line) > spec.max_emitted_bytes - emitted:
                     raise ValueError("Wikimedia emitted JSONL exceeds limit")
                 output.write(line)
+                digest.update(line)
                 emitted += len(line)
                 rows.append(
                     {
@@ -1947,7 +1962,7 @@ def _wiki_jsonl(
         resources.expanded = guarded.size
     if not rows:
         raise ValueError("Wikimedia bounded selection produced no pages")
-    return rows, scanned, emitted, guarded.size
+    return rows, scanned, emitted, digest.hexdigest()
 
 
 def _wikimedia_body(
@@ -1958,24 +1973,46 @@ def _wikimedia_body(
     cache: TransportCache | None,
     *,
     verify_only: bool = False,
-) -> tuple[str, int]:
+    parts: PinnedBodyParts | None = None,
+) -> PinnedBody:
     """The compressed dump: from the cache when it verifies, else downloaded."""
-    name = Path(urlparse(source.canonical_uri).path).name
     key = BodyKey(
         "wikimedia_dump",
         source.canonical_uri,
         sha256=spec.expected_sha256 or None,
         sha1=spec.expected_sha1,
     )
-    if cache is not None:
-        served = cache.lookup(
+    cache_target = parts.cache_download if parts is not None else compressed
+    served = (
+        cache.lookup(
             key,
-            None if verify_only else compressed,
+            None if verify_only else cache_target,
             limit=spec.max_compressed_bytes,
             observe=resources.observe,
         )
-        if served is not None:
-            return served.sha256, served.size
+        if cache is not None
+        else None
+    )
+    body = (
+        PinnedBody(served.sha256, served.size)
+        if served is not None
+        else _download_wikimedia(source, spec, compressed, resources)
+    )
+    if parts is not None:
+        rename_noreplace(cache_target if served is not None else compressed, parts.body)
+        sync_directory(parts.body.parent)
+    if cache is not None and served is None:
+        cache.store(key, parts.body if parts is not None else compressed)
+    return body
+
+
+def _download_wikimedia(
+    source: SourceDeclaration,
+    spec: WikimediaDumpAcquisition,
+    compressed: Path,
+    resources: _AcquisitionResources,
+) -> PinnedBody:
+    name = source_file_name(source.canonical_uri)
     opener = urllib.request.build_opener()
     headers = {
         "User-Agent": (
@@ -2012,51 +2049,41 @@ def _wikimedia_body(
         )
     resources.observe()
     if spec.expected_sha256 and digest != spec.expected_sha256.lower():
+        compressed.unlink()
         raise ValueError("Wikimedia compressed SHA-256 mismatch")
     if source_sha1.hexdigest() != spec.expected_sha1.lower():
+        compressed.unlink()
         raise ValueError("Wikimedia compressed SHA-1 mismatch")
-    if cache is not None:
-        cache.store(key, compressed)
-    return digest, compressed_bytes
+    return PinnedBody(digest, compressed_bytes)
 
 
 def _acquire_wikimedia(
     source: SourceDeclaration,
     staging: Path,
-    offline: bool,
-    resources: _AcquisitionResources | None = None,
-    cache: TransportCache | None = None,
+    compressed: Path,
+    body: PinnedBody,
+    resources: _AcquisitionResources,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    if offline:
-        raise ValueError("offline acquisition cannot fetch Wikimedia dump")
     spec = source.acquisition
     assert isinstance(spec, WikimediaDumpAcquisition)
-    resources = resources or _AcquisitionResources(staging)
-    resources.observe()
-    name = Path(urlparse(source.canonical_uri).path).name
-    compressed = staging / "wikimedia-input" / name
-    digest, compressed_bytes = _wikimedia_body(
-        source, spec, compressed, resources, cache
-    )
-    output_name = name + ".sample.jsonl"
+    output_name = compressed.name + ".sample.jsonl"
     output_path = staging / "files" / output_name
     with bz2.open(compressed, "rb") as decompressed:
-        rows, scanned, emitted, _ = _wiki_jsonl(
+        rows, scanned, emitted, digest = _wiki_jsonl(
             source, decompressed, output_path, resources
         )
-    compressed.unlink()
     return [
         {
             "path": output_name,
-            "sha256": sha256_file(output_path),
+            "sha256": digest,
             "size": emitted,
         }
     ], {
         "source_uri": source.canonical_uri,
         "checksum_uri": spec.checksum_uri,
         "source_sha1": spec.expected_sha1.lower(),
-        "source_sha256": digest,
-        "compressed_bytes": compressed_bytes,
+        "source_sha256": body.sha256,
+        "compressed_bytes": body.size,
         "resources": resources.receipt(),
         "scanned_pages": scanned,
         "selected_pages": rows,
@@ -2170,28 +2197,40 @@ def _resume_pinned_body(
     cache: TransportCache | None,
     *,
     admit_body: bool,
-    previous: CheckedCheckpoint[int] | None,
-) -> int:
+    previous: CheckedCheckpoint[PinnedBody] | None,
+) -> PinnedBody:
     checked = parts.checked_body(previous)
-    size = checked.value if checked is not None else None
-    if admit_body and size is None:
+    if admit_body and checked is None:
         raise ValueError(f"pinned body checkpoint changed after admission: {source.id}")
-    if size is None:
+    if checked is None:
         parts.body.unlink(missing_ok=True)
+    # The download candidate is written only after the official checksum manifest passes.
+    if (
+        checked is None
+        and isinstance(source.acquisition, WikimediaDumpAcquisition)
+        and (recovered := parts.recover_download()) is not None
+    ):
+        resources.observe()
+        return recovered
     resources.observe()
     if budget is not None:
         budget.remaining_seconds()
         expected = budget.projected_disk_bytes(source_id=source.id)
         budget.check_disk(
-            parts.root, expected - (parts.max_bytes if size is not None else 0)
+            parts.root, expected - (parts.max_bytes if checked is not None else 0)
         )
-    if size is not None:
+    if checked is not None:
         if budget is not None:
-            budget.recover_staged_transfer(source.id, parts.name, size)
-        return size
+            budget.recover_staged_transfer(source.id, parts.name, checked.value.size)
+        return checked.value
     parts.body.parent.mkdir(exist_ok=True)
     sync_directory(parts.root)
-    return _fetch_pinned(
+    if isinstance(source.acquisition, WikimediaDumpAcquisition):
+        return _wikimedia_body(
+            source, source.acquisition, parts.download, resources, cache, parts=parts
+        )
+    assert parts.sha256 is not None
+    size = _fetch_pinned(
         source,
         source.canonical_uri,
         parts.name,
@@ -2203,6 +2242,7 @@ def _resume_pinned_body(
         cache,
         parts=parts,
     )
+    return PinnedBody(parts.sha256, size)
 
 
 class _CountedStream:
@@ -2605,12 +2645,10 @@ def _acquire_mediawiki(
     output_path = staging / "files" / output_name
     opener = {"bz2": bz2.open, "gzip": gzip.open, "none": open}[spec.compression]
     with opener(body, "rb") as decompressed:
-        rows, scanned, emitted, _ = _wiki_jsonl(
+        rows, scanned, emitted, digest = _wiki_jsonl(
             source, decompressed, output_path, resources
         )
-    return [
-        {"path": output_name, "sha256": sha256_file(output_path), "size": emitted}
-    ], {
+    return [{"path": output_name, "sha256": digest, "size": emitted}], {
         "source_uri": source.canonical_uri,
         "source_sha256": spec.expected_sha256,
         "compressed_bytes": compressed_bytes,
@@ -2620,9 +2658,10 @@ def _acquire_mediawiki(
     }
 
 
-def _verify_wikimedia_receipt(path: Path, manifest: dict[str, Any]) -> None:
+def _verify_wikimedia_receipt(
+    path: Path, source: AcquisitionIdentity, manifest: dict[str, Any]
+) -> None:
     receipt = manifest["retrieval"]
-    source = AcquisitionIdentity.model_validate(manifest["declaration"])
     spec = source.acquisition
     if isinstance(spec, WikimediaDumpAcquisition):
         mismatch = (
@@ -2647,9 +2686,15 @@ def _verify_wikimedia_receipt(path: Path, manifest: dict[str, Any]) -> None:
         or manifest["files"][0]["size"] > spec.max_emitted_bytes
     ):
         raise ValueError("Wikimedia receipt mismatch")
-    rows = []
+    entry = manifest["files"][0]
+    observed_size = 0
+    digest = hashlib.sha256()
+    pages = iter(receipt["selected_pages"])
+    missing = object()
     with (path / "files" / receipt["output_path"]).open("rb") as handle:
         for line in handle:
+            observed_size += len(line)
+            digest.update(line)
             row = json.loads(line)
             metadata = row["_klab_source"]
             if (
@@ -2658,15 +2703,16 @@ def _verify_wikimedia_receipt(path: Path, manifest: dict[str, Any]) -> None:
                 or metadata["dump_revision"] != source.revision
             ):
                 raise ValueError("Wikimedia row provenance mismatch")
-            rows.append(
-                {
-                    "page_id": metadata["page_id"],
-                    "revision_id": metadata["revision_id"],
-                    "row_sha256": hashlib.sha256(line).hexdigest(),
-                }
-            )
-    if rows != receipt["selected_pages"]:
+            if next(pages, missing) != {
+                "page_id": metadata["page_id"],
+                "revision_id": metadata["revision_id"],
+                "row_sha256": hashlib.sha256(line).hexdigest(),
+            }:
+                raise ValueError("Wikimedia page receipt mismatch")
+    if next(pages, missing) is not missing:
         raise ValueError("Wikimedia page receipt mismatch")
+    if observed_size != entry["size"] or digest.hexdigest() != entry["sha256"]:
+        raise ValueError(f"snapshot byte mismatch: {entry['path']}")
 
 
 def _retrieval_is_identity(source: SourceDeclaration | AcquisitionIdentity) -> bool:
@@ -2790,18 +2836,25 @@ def _verify_snapshot_cold(path: Path, *, _staged: bool = False) -> dict[str, Any
             _regular(file)
             checks.append((name, file, entry))
 
+        wiki = source.kind in {"wikimedia_dump", "mediawiki_dump"}
+
         def check(item) -> None:
             name, file, entry = item
             if (
                 not file.resolve().is_relative_to((path / "files").resolve())
                 or file.stat().st_size != entry["size"]
-                or sha256_file(file) != entry["sha256"]
+                or (not wiki and sha256_file(file) != entry["sha256"])
             ):
                 raise ValueError(f"snapshot byte mismatch: {name}")
 
-        # Hashing releases the GIL, so threads read and hash files concurrently.
-        with ThreadPoolExecutor(max_workers=worker_count()) as pool:
-            list(pool.map(check, checks))
+        if wiki:
+            for item in checks:
+                check(item)
+            _verify_wikimedia_receipt(path, source, manifest)
+        else:
+            # Hashing releases the GIL, so threads read and hash files concurrently.
+            with ThreadPoolExecutor(max_workers=worker_count()) as pool:
+                list(pool.map(check, checks))
         actual = {
             p.relative_to(path / "files").as_posix()
             for p in (path / "files").rglob("*")
@@ -2809,8 +2862,6 @@ def _verify_snapshot_cold(path: Path, *, _staged: bool = False) -> dict[str, Any
         }
         if actual != names:
             raise ValueError("snapshot file inventory mismatch")
-        if source.kind in {"wikimedia_dump", "mediawiki_dump"}:
-            _verify_wikimedia_receipt(path, manifest)
         if source.kind == "archive":
             _verify_archive_files(source, manifest)
         if source.kind == "pdf_documents":
@@ -3262,10 +3313,7 @@ def acquire(
                             )
                         pinned.reset_derivation()
                 (staging / "files").mkdir(exist_ok=True)
-                if source.kind == "wikimedia_dump":
-                    resources = _AcquisitionResources(staging)
-                    resources.retain(source)
-                elif source.kind in PINNED_FILE_KINDS:
+                if pinned is not None or source.kind in PINNED_FILE_KINDS:
                     resources = _AcquisitionResources(
                         pinned.root if pinned is not None else staging,
                         budget,
@@ -3280,7 +3328,7 @@ def acquire(
                     resources.observe()
                 elif pinned is not None:
                     assert resources is not None
-                    size = _resume_pinned_body(
+                    body = _resume_pinned_body(
                         source,
                         pinned,
                         budget,
@@ -3289,14 +3337,19 @@ def acquire(
                         admit_body=planned_pin == "body",
                         previous=checked_body,
                     )
-                    derive = (
-                        _acquire_archive
-                        if source.kind == "archive"
-                        else _acquire_mediawiki
-                    )
-                    files, retrieval = derive(
-                        source, staging, pinned.body, size, resources
-                    )
+                    if source.kind == "wikimedia_dump":
+                        files, retrieval = _acquire_wikimedia(
+                            source, staging, pinned.body, body, resources
+                        )
+                    else:
+                        derive = (
+                            _acquire_archive
+                            if source.kind == "archive"
+                            else _acquire_mediawiki
+                        )
+                        files, retrieval = derive(
+                            source, staging, pinned.body, body.size, resources
+                        )
                 elif source.kind == "local":
                     files, retrieval = _acquire_local(source, project.root, staging)
                 elif source.kind == "git":
@@ -3321,10 +3374,6 @@ def acquire(
                         cache,
                         parts=parts if isinstance(parts, HFParts) else None,
                         planned_reuse=step["hf_checkpoint_reuse"] if step else None,
-                    )
-                elif source.kind == "wikimedia_dump":
-                    files, retrieval = _acquire_wikimedia(
-                        source, staging, False, resources, cache
                     )
                 elif source.kind == "pdf_documents":
                     assert isinstance(parts, PDFParts)

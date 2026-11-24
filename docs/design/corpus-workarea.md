@@ -326,9 +326,7 @@ median retry without a transport cache was approximately 0.14 s for the
 archive and 0.08 s for MediaWiki across three trials each. Both retried
 without requests, and both matched the baseline payload inventory digests.
 The timed retry verifies staged output and publishes it. A stop inside a
-compressed stream still replays parsing from the retained body. Extend the
-same recovery boundary to Wikimedia and measure mid-stream restart before
-adding per-member or per-page checkpoints. The
+compressed stream still replays parsing from the retained body. The
 [source recovery inventory](../corpus-preparation.md#recovery-by-source-adapter)
 records the current replay boundary for every adapter. [#485](https://github.com/supernovae/model-lab/issues/485)
 
@@ -337,6 +335,25 @@ derivation reduced payload bytes hashed from 48 MiB to 16 MiB. A retry from
 the body reduced that count from 50.74 MiB to 25.37 MiB. These counters cover
 SHA-256 reads in one source-step call. They exclude extraction reads and
 later verification in a separate command.
+
+Wikimedia uses the same recovery boundary. A retry also checks a completed
+download that was interrupted before promotion. On the 256-page bzip2
+fixture on tmpfs, the follow-up to `b89e2ca1` reduced the three-trial median
+after a halfway XML stop from 1.085 s to 0.744 s. Retry from a finished
+derivation went from 0.051 s to 0.045 s. The extraction shortcut skips the
+per-letter language count for ASCII pages. Output hashing shares the write
+pass, and cold verification checks file and page digests in one read. The
+payload digest matched across builds. Both interruption points retried
+without requests and yielded identical snapshots within each build, with
+and without the transport cache. Pass
+`--adapter wikimedia_dump --interrupt-at mid-xml` to rerun the halfway stop.
+
+Mid-stream replay still decompresses and parses the full input.
+[#587](https://github.com/supernovae/model-lab/issues/587) tracks verified
+compressed ranges, ordered checkpoints, and worker scaling on a
+representative dump. Wikimedia's index marks compressed streams within
+one XML document, so range extraction must preserve the shared XML
+context. [Wikimedia multistream format](https://meta.wikimedia.org/wiki/Data_dumps/Dump_format#Multistream_dumps)
 
 ## Relational Knowledge Microlab
 
