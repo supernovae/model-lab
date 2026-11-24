@@ -30,7 +30,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urljoin, urlparse
 
 from klab.canonical import canonical_digest, canonical_json
-from klab.corpus.acquisition_parts import HFParts, acquisition_staging
+from klab.corpus.acquisition_parts import AcquisitionParts, HFParts, acquisition_staging
 from klab.corpus.bounded_metadata import read_metadata
 from klab.corpus.project import (
     IMMUTABLE_SOURCE_KINDS,
@@ -58,7 +58,12 @@ from klab.corpus.transport_budget import (
     TransportBudget,
     source_file_name,
 )
-from klab.corpus.transport_cache import BodyKey, TransportCache, resolve_transport_cache
+from klab.corpus.transport_cache import (
+    BodyKey,
+    TransportCache,
+    git_blob_hasher,
+    resolve_transport_cache,
+)
 from klab.hf_auth import hub_access_errors, hub_auth_kwargs, raise_for_hub_auth
 from klab.result_publication import sync_directory
 from klab.safe_io import rename_noreplace, symlinked, write_canonical_json
@@ -355,6 +360,8 @@ def _acquire_git(
     offline: bool,
     budget: TransportBudget | None = None,
     transport: TransportCache | None = None,
+    *,
+    parts: AcquisitionParts | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if offline:
         raise ValueError("offline acquisition cannot fetch Git")
@@ -363,7 +370,8 @@ def _acquire_git(
     if spec.bounded_blobs is not None:
         if budget is None:
             raise ValueError("bounded Git acquisition requires a transport ledger")
-        return _bounded_git_acquire(source, spec, staging, budget, transport)
+        assert parts is not None
+        return _bounded_git_acquire(source, spec, budget, transport, parts=parts)
     repository, commit = _ensure_git_repository(source, cache_root, transport)
     tree = _git(["--git-dir", str(repository), "ls-tree", "-rz", "--full-tree", commit])
     inventory = []
@@ -513,6 +521,7 @@ def _git_blob_body(
     ensure_metadata: Callable[[], None],
     *,
     verify_only: bool = False,
+    parts: AcquisitionParts | None = None,
 ) -> tuple[str, int, str]:
     """One pinned blob as (SHA-256, size, Git blob id): cached, else downloaded.
 
@@ -530,6 +539,8 @@ def _git_blob_body(
             observe=resources.observe,
         )
         if served is not None:
+            if parts is not None:
+                parts.sync_path(target)
             return served.sha256, served.size, blob.git_blob_oid.lower()
     ensure_metadata()
     budget.assert_transfer_available(
@@ -546,16 +557,21 @@ def _git_blob_body(
         with response:
             if _response_length(response) != blob.max_bytes:
                 raise ValueError("pinned Git blob Content-Length mismatch")
+            git_hash = git_blob_hasher(blob.max_bytes)
             digest, copied = _copy_hf_body(
-                response, target, blob.max_bytes, budget, transfer_index, resources
+                response,
+                target,
+                blob.max_bytes,
+                budget,
+                transfer_index,
+                resources,
+                hash_chunk=git_hash.update,
             )
-        git_hasher = hashlib.sha1(f"blob {copied}\0".encode())
-        with target.open("rb") as copied_blob:
-            for chunk in iter(lambda: copied_blob.read(1024 * 1024), b""):
-                git_hasher.update(chunk)
-        git_digest = git_hasher.hexdigest()
+        git_digest = git_hash.hexdigest()
         if git_digest.lower() != blob.git_blob_oid.lower():
             raise ValueError(f"pinned Git blob SHA-1 mismatch: {blob.path}")
+        if parts is not None:
+            parts.sync_path(target)
         budget.finish_transfer(transfer_index, success=True)
     except OSError, TimeoutError, EOFError:
         budget.finish_transfer(transfer_index, success=False, interrupted=True)
@@ -571,6 +587,16 @@ def _git_blob_body(
     return digest, copied, git_digest
 
 
+def _git_blob_digests(path: Path, size: int) -> tuple[str, str]:
+    git_hash = git_blob_hasher(size)
+    content_hash = hashlib.sha256()
+    with path.open("rb") as stream:
+        while block := stream.read(1024**2):
+            git_hash.update(block)
+            content_hash.update(block)
+    return content_hash.hexdigest(), git_hash.hexdigest()
+
+
 def _git_blob_url(
     source: SourceDeclaration, owner: str, repository: str, path: str
 ) -> str:
@@ -583,9 +609,10 @@ def _git_blob_url(
 def _bounded_git_acquire(
     source: SourceDeclaration,
     spec: GitAcquisition,
-    staging: Path,
     budget: TransportBudget,
     cache: TransportCache | None = None,
+    *,
+    parts: AcquisitionParts,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     owner, repository = _github_origin(source)
     checked = False
@@ -596,22 +623,40 @@ def _bounded_git_acquire(
             _check_git_metadata(source, spec, owner, repository, budget)
             checked = True
 
-    if cache is None:
-        ensure_metadata()
+    staging = parts.staging
     budget.check_disk(staging, budget.projected_disk_bytes())
     files = []
+    reused = 0
     for blob in spec.bounded_blobs:
-        resources = _AcquisitionResources(staging, budget)
-        digest, copied, git_digest = _git_blob_body(
-            source,
-            blob,
-            _git_blob_url(source, owner, repository, blob.path),
-            staging / "files" / blob.path,
-            budget,
-            resources,
-            cache,
-            ensure_metadata,
-        )
+        budget.remaining_seconds()
+        target = staging / "files" / blob.path
+        copied = parts.staged_file_size(target)
+        if copied == blob.max_bytes:
+            digest, git_digest = _git_blob_digests(target, copied)
+        else:
+            git_digest = None
+        if git_digest == blob.git_blob_oid.lower():
+            budget.recover_staged_transfer(source.id, blob.path, copied)
+            reused += 1
+        else:
+            if copied is not None:
+                print(
+                    f"{source.id}: retrying incomplete or damaged Git blob {blob.path}",
+                    file=sys.stderr,
+                )
+                target.unlink()
+            resources = _AcquisitionResources(staging, budget)
+            digest, copied, git_digest = _git_blob_body(
+                source,
+                blob,
+                _git_blob_url(source, owner, repository, blob.path),
+                target,
+                budget,
+                resources,
+                cache,
+                ensure_metadata,
+                parts=parts,
+            )
         files.append(
             {
                 "path": blob.path,
@@ -620,6 +665,8 @@ def _bounded_git_acquire(
                 "git_blob_id": git_digest,
             }
         )
+    if reused:
+        print(f"{source.id}: reused {reused} verified Git blobs", file=sys.stderr)
     return files, {
         "commit": source.revision,
         "tree": spec.tree_oid,
@@ -900,6 +947,8 @@ def _copy_hf_body(
     budget: TransportBudget | None,
     transfer_index: int | None,
     resources: _AcquisitionResources | None = None,
+    *,
+    hash_chunk: Callable[[bytes], None] | None = None,
 ) -> tuple[str, int]:
     length = _response_length(response)
     if length is None:
@@ -938,6 +987,8 @@ def _copy_hf_body(
                 assert transfer_index is not None
                 budget.charge_transfer_actual(transfer_index, len(chunk))
             digest.update(chunk)
+            if hash_chunk is not None:
+                hash_chunk(chunk)
             output.write(chunk)
             if resources is not None:
                 output.flush()
@@ -1227,6 +1278,19 @@ def _hf_shard_body(
     return digest, input_bytes
 
 
+def _acquisition_part_identity(
+    source: SourceDeclaration, budget: TransportBudget | None
+) -> str:
+    return canonical_digest(
+        {
+            "declaration": declaration_sha256(source),
+            "acquisition": source.acquisition.model_dump(mode="json"),
+            "adapter": _adapter(source),
+            "ledger": budget.binding if budget is not None else None,
+        }
+    )
+
+
 def bounded_hf_parts(
     parent: Path,
     source: SourceDeclaration,
@@ -1242,14 +1306,7 @@ def bounded_hf_parts(
         return None
     return HFParts(
         parent,
-        canonical_digest(
-            {
-                "declaration": declaration_sha256(source),
-                "acquisition": spec.model_dump(mode="json"),
-                "adapter": _adapter(source),
-                "ledger": budget.binding if budget is not None else None,
-            }
-        ),
+        _acquisition_part_identity(source, budget),
         receipt_limit=receipt_limit,
     )
 
@@ -1314,6 +1371,8 @@ def _bounded_hf_acquire(
             resources.observe()
             if input_bytes is not None:
                 digest = shard.expected_sha256.lower()
+                if budget is not None:
+                    budget.recover_staged_transfer(source.id, shard.path, input_bytes)
                 reused_bodies += 1
             else:
                 input_path.unlink(missing_ok=True)
@@ -2917,12 +2976,20 @@ def acquire(
             raise ValueError(f"existing verified snapshot unavailable: {source.id}")
         parent = snapshot_root / source.id
         parent.mkdir(parents=True, exist_ok=True)
-        parts = bounded_hf_parts(
+        parts: AcquisitionParts | None = bounded_hf_parts(
             parent,
             source,
             budget,
             receipt_limit=acquisition_step.MANIFEST_BYTES if step is not None else None,
         )
+        if (
+            source.kind == "git"
+            and source.acquisition.bounded_blobs is not None
+            and budget is not None
+        ):
+            parts = AcquisitionParts(
+                parent, _acquisition_part_identity(source, budget), adapter="git"
+            )
         with acquisition_staging(parent, parts) as staging:
             resources = None
             try:
@@ -2939,7 +3006,13 @@ def acquire(
                     files, retrieval = _acquire_local(source, project.root, staging)
                 elif source.kind == "git":
                     files, retrieval = _acquire_git(
-                        source, staging, base / "git-cache", False, budget, cache
+                        source,
+                        staging,
+                        base / "git-cache",
+                        False,
+                        budget,
+                        cache,
+                        parts=parts,
                     )
                 elif source.kind == "http_document":
                     files, retrieval = _acquire_http(source, staging, False, cache)
@@ -2951,7 +3024,7 @@ def acquire(
                         False,
                         budget,
                         cache,
-                        parts=parts,
+                        parts=parts if isinstance(parts, HFParts) else None,
                         planned_reuse=step["hf_checkpoint_reuse"] if step else None,
                     )
                 elif source.kind == "wikimedia_dump":

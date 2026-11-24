@@ -713,7 +713,16 @@ def test_bounded_hf_source_step_resumes_without_recharging_verified_shards(
     )
 
 
-def _bounded_git_fixture(tmp_path: Path, content: bytes) -> tuple[Path, str]:
+_GIT_BLOB = "docs/one.md"
+
+
+def _bounded_git_fixture(
+    tmp_path: Path,
+    content: bytes,
+    *,
+    paths: tuple[str, ...] = (_GIT_BLOB,),
+    retry_slots: int = 1,
+) -> tuple[Path, str]:
     oid = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
     recipe = _fixture(
         tmp_path,
@@ -721,19 +730,20 @@ def _bounded_git_fixture(tmp_path: Path, content: bytes) -> tuple[Path, str]:
         uri="https://github.com/org/repo",
         revision="a" * 40,
         acquisition={
-            "max_bytes": len(content),
+            "max_bytes": len(content) * len(paths),
             "tree_oid": "b" * 40,
             "bounded_blobs": [
-                {"path": "docs/one.md", "git_blob_oid": oid, "max_bytes": len(content)}
+                {"path": path, "git_blob_oid": oid, "max_bytes": len(content)}
+                for path in paths
             ],
         },
     )
     config = yaml.safe_load(recipe.read_text(encoding="utf-8"))
     config["transport_budget"] = {
         "attempt_id": "git_fixture",
-        "max_source_body_bytes": len(content) * 2,
+        "max_source_body_bytes": len(content) * (len(paths) + retry_slots),
         "max_metadata_body_bytes": 10000,
-        "max_transfers": 2,
+        "max_transfers": len(paths) + retry_slots,
         "max_retries_per_shard": 1,
         "max_wall_seconds": 120,
         "max_disk_bytes": 1000000,
@@ -747,11 +757,15 @@ def _mock_bounded_git_http(
     content: bytes,
     oid: str,
     *,
+    paths: tuple[str, ...] = (_GIT_BLOB,),
     wrong_tree: bool = False,
     corrupt: bool = False,
-    interrupt: bool = False,
+    interrupt: str | None = None,
     extra_body: bool = False,
-) -> None:
+) -> list[str]:
+    requests = []
+    raw_prefix = "https://raw.githubusercontent.com/org/repo/" + "a" * 40 + "/"
+
     class Response(io.BytesIO):
         def __init__(self, body: bytes, url: str):
             super().__init__(body)
@@ -760,7 +774,7 @@ def _mock_bounded_git_http(
             self.headers = {"Content-Length": str(len(body))}
 
         def read(self, size: int = -1) -> bytes:
-            if interrupt and "raw.githubusercontent.com" in self.url:
+            if interrupt is not None and self.url == raw_prefix + interrupt:
                 if self.tell():
                     raise OSError("interrupted bounded Git transfer")
                 return super().read(min(2, size))
@@ -777,21 +791,20 @@ def _mock_bounded_git_http(
                     "truncated": False,
                     "tree": [
                         {
-                            "path": "docs/wrong.md" if wrong_tree else "docs/one.md",
+                            "path": "docs/wrong.md" if wrong_tree else path,
                             "type": "blob",
                             "mode": "100644",
                             "sha": oid,
                             "size": len(content),
                         }
+                        for path in paths
                     ],
                 }
             else:
-                assert (
-                    url
-                    == "https://raw.githubusercontent.com/org/repo/"
-                    + "a" * 40
-                    + "/docs/one.md"
-                )
+                assert url.startswith(raw_prefix)
+                path = url.removeprefix(raw_prefix)
+                assert path in paths
+                requests.append(path)
                 return Response(
                     content + b"x"
                     if extra_body
@@ -803,6 +816,7 @@ def _mock_bounded_git_http(
             return Response(json.dumps(body).encode(), url)
 
     monkeypatch.setattr(urllib.request, "build_opener", lambda *_args: Opener())
+    return requests
 
 
 def test_bounded_git_blob_metadata_checksum_and_resume(
@@ -821,7 +835,7 @@ def test_bounded_git_blob_metadata_checksum_and_resume(
     with pytest.raises(ValueError, match="missing or ambiguous"):
         acquire(project, root)
     assert TransportBudget(ledger_path, project).receipt()["source_charged"] == 0
-    _mock_bounded_git_http(monkeypatch, content, oid, interrupt=True)
+    _mock_bounded_git_http(monkeypatch, content, oid, interrupt=_GIT_BLOB)
     with pytest.raises(OSError, match="interrupted"):
         acquire(project, root)
     _mock_bounded_git_http(monkeypatch, content, oid)
@@ -878,7 +892,7 @@ def test_bounded_git_blob_metadata_checksum_and_resume(
     exhausted_root = tmp_path / "exhausted-work"
     exhausted_ledger = exhausted_root / "corpora/example/transport-budget.sqlite"
     TransportBudget.initialize(exhausted_ledger, project)
-    _mock_bounded_git_http(monkeypatch, content, oid, interrupt=True)
+    _mock_bounded_git_http(monkeypatch, content, oid, interrupt=_GIT_BLOB)
     for _ in range(2):
         with pytest.raises(OSError, match="interrupted"):
             acquire(project, exhausted_root)
@@ -887,6 +901,95 @@ def test_bounded_git_blob_metadata_checksum_and_resume(
     assert TransportBudget(exhausted_ledger, project).receipt()["source_charged"] == (
         2 * len(content)
     )
+
+
+@pytest.mark.parametrize("failure", ["later_blob", "damaged_blob", "unsettled_ledger"])
+def test_bounded_git_acquisition_reuses_only_verified_blobs_after_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, failure: str
+) -> None:
+    monkeypatch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
+    content = b"# Pinned text\n"
+    second = "docs/two.md"
+    paths = (_GIT_BLOB, second)
+    damage_staged_blob = failure == "damaged_blob"
+    unsettled_ledger = failure == "unsettled_ledger"
+    recipe, oid = _bounded_git_fixture(
+        tmp_path, content, paths=paths, retry_slots=1 + damage_staged_blob
+    )
+    project = load_project(recipe)
+    root = tmp_path / "work"
+    ledger_path = root / "corpora/example/transport-budget.sqlite"
+    budget = TransportBudget.initialize(ledger_path, project)
+    staged_reads = []
+    open_path = Path.open
+
+    def record_staged_read(path, mode="r", *args, **kwargs):
+        if mode == "rb" and any(part.startswith(".git-parts-") for part in path.parts):
+            staged_reads.append(path)
+        return open_path(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", record_staged_read)
+    requests = _mock_bounded_git_http(
+        monkeypatch,
+        content,
+        oid,
+        paths=paths,
+        interrupt=None if unsettled_ledger else second,
+    )
+    if unsettled_ledger:
+
+        def stop_before_ledger_commit(*args, **kwargs):
+            raise SystemExit("interrupted before committing Git transfer")
+
+        with monkeypatch.context() as fault:
+            fault.setattr(TransportBudget, "finish_transfer", stop_before_ledger_commit)
+            with pytest.raises(SystemExit, match="interrupted before committing"):
+                acquire(project, root)
+        assert requests == [_GIT_BLOB]
+        assert budget.receipt()["transfers"][0]["status"] == "started"
+    else:
+        with pytest.raises(OSError, match="interrupted bounded Git transfer"):
+            acquire(project, root)
+        assert requests == list(paths)
+    # The interrupted acquisition never reaches snapshot verification.
+    # Hashing a freshly downloaded blob should not reread its staged file.
+    assert not staged_reads
+    snapshots = root / "corpora/example/snapshots/one"
+    assert not any(not path.name.startswith(".") for path in snapshots.iterdir())
+    assert not (root / "corpora/example/acquisition.json").exists()
+    staged = next(snapshots.glob(".git-parts-*/snapshot/files/docs/one.md"))
+    inode = staged.stat().st_ino
+    if damage_staged_blob:
+        staged.write_bytes(b"!" + content[1:])
+
+    abandoned = None
+    if failure == "later_blob":
+        abandoned = snapshots / (".git-parts-" + "0" * 64)
+        abandoned.mkdir()
+
+    initial_requests = len(requests)
+    requests = _mock_bounded_git_http(monkeypatch, content, oid, paths=paths)
+    resumed = acquire(project, root)
+    assert requests == (list(paths) if damage_staged_blob else [second])
+    ledger = budget.receipt()
+    assert ledger["source_charged"] == (initial_requests + len(requests)) * len(content)
+    assert all(item["status"] != "started" for item in ledger["transfers"])
+    assert list(snapshots.glob(".git-parts-*")) == ([abandoned] if abandoned else [])
+    if abandoned is not None:
+        assert str(abandoned) in capsys.readouterr().err
+    output = Path(resumed["sources"]["one"]["snapshot_path"])
+    if not damage_staged_blob:
+        assert (output / "files" / _GIT_BLOB).stat().st_ino == inode
+
+    control = tmp_path / "control"
+    TransportBudget.initialize(
+        control / "corpora/example/transport-budget.sqlite", project
+    )
+    expected = acquire(project, control)
+    resumed_manifest, resumed_files = _snapshot_payload(resumed)
+    expected_manifest, expected_files = _snapshot_payload(expected)
+    assert resumed_manifest["snapshot_sha256"] == expected_manifest["snapshot_sha256"]
+    assert resumed_files == expected_files
 
 
 def test_bounded_git_rejects_ambiguous_declaration(tmp_path: Path) -> None:

@@ -96,7 +96,8 @@ class _Sums:
     size: int = 0
 
 
-def _git_blob_hasher(size: int) -> Any:
+def git_blob_hasher(size: int) -> Any:
+    """SHA-1 state seeded with the object's Git blob header."""
     return hashlib.sha1(f"blob {size}\0".encode())
 
 
@@ -192,7 +193,7 @@ class TransportCache:
         if limit is not None and size > limit:
             self._reject(key, "body exceeds the declared byte cap")
             return None
-        sums = _Sums(sha1=_git_blob_hasher(size) if key.git_blob_oid else None)
+        sums = _Sums(sha1=git_blob_hasher(size) if key.git_blob_oid else None)
         plain_sha1 = hashlib.sha1() if key.sha1 else None
         output = None
         try:
