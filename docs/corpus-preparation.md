@@ -139,8 +139,10 @@ per source and then an acquisition lock binding them.
   that verifies an already-published snapshot reclaims the matching staging
   directory if the snapshot was moved out of it. Wikimedia commits its
   body after the official checksum and declared pins verify, then rechecks
-  SHA-1 and any declared SHA-256 pin together on resume. A stop before the
-  body is committed needs a verified cache hit or a fresh download.
+  SHA-1 and any declared SHA-256 pin together on resume. A complete
+  download left before that commit can also be promoted after rechecking
+  the pins. An incomplete or damaged body needs a verified cache hit or
+  a fresh download.
 - **Observed rather than enforced limits.** On a local workflow where the owner
   wants time, network or storage observed rather than capped,
   `corpus budget-observe-time`, `budget-observe-network` and

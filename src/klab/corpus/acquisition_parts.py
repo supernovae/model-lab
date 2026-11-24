@@ -22,7 +22,7 @@ from klab.result_publication import (
     sync_directory,
     write_bytes_exclusive,
 )
-from klab.safe_io import symlinked
+from klab.safe_io import rename_noreplace, symlinked
 from klab.training.manifest import sha256_file
 from klab.verification_proofs import ArtifactFingerprint, artifact_fingerprint
 
@@ -155,6 +155,14 @@ class PinnedBodyParts(AcquisitionParts):
         self.body = self.root / "input" / name
         self.manifest = self.staging / "manifest.json"
 
+    @property
+    def download(self) -> Path:
+        return self.body.with_name(".download")
+
+    @property
+    def cache_download(self) -> Path:
+        return self.body.with_name(".cache-download")
+
     def checked_body(
         self, previous: CheckedCheckpoint[PinnedBody] | None = None
     ) -> CheckedCheckpoint[PinnedBody] | None:
@@ -162,6 +170,21 @@ class PinnedBodyParts(AcquisitionParts):
         if previous is not None and previous.matches(self.body):
             return previous
         return check_checkpoint(self.body, self._verify_body)
+
+    def recover_download(self) -> PinnedBody | None:
+        """Recheck the official-download candidate before discarding it."""
+        self._check_root()
+        self.staged_file_size(self.cache_download)
+        self.cache_download.unlink(missing_ok=True)
+        checked = check_checkpoint(self.download, self._verify_body)
+        if checked is None:
+            self.download.unlink(missing_ok=True)
+            return None
+        with self.download.open("rb") as body:
+            os.fsync(body.fileno())
+        rename_noreplace(self.download, self.body)
+        sync_directory(self.body.parent)
+        return checked.value
 
     def _verify_body(self, path: Path) -> PinnedBody | None:
         if self.sha1 is None:

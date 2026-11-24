@@ -336,15 +336,24 @@ the body reduced that count from 50.74 MiB to 25.37 MiB. These counters cover
 SHA-256 reads in one source-step call. They exclude extraction reads and
 later verification in a separate command.
 
-Wikimedia now uses the same recovery boundary. On the 256-page bzip2 fixture
-on tmpfs, the three-trial median retry was 0.052 s from a finished derivation
-and 1.092 s after a stop halfway through XML extraction. Both finished
-without a body or checksum request, with or without the transport cache.
-The payload digest matched the baseline and the two interruption points
-produced identical snapshots. Mid-stream replay still decompresses and parses
-the full input. Measure that cost on a representative dump before choosing
-per-page checkpoints. Pass `--adapter wikimedia_dump --interrupt-at mid-xml`
-to the replay benchmark to rerun the halfway stop.
+Wikimedia uses the same recovery boundary. A retry also checks a completed
+download that was interrupted before promotion. On the 256-page bzip2
+fixture on tmpfs, the follow-up to `b89e2ca1` reduced the three-trial median
+after a halfway XML stop from 1.085 s to 0.744 s. Retry from a finished
+derivation went from 0.051 s to 0.045 s. The extraction shortcut skips the
+per-letter language count for ASCII pages. Output hashing shares the write
+pass, and cold verification checks file and page digests in one read. The
+payload digest matched across builds. Both interruption points retried
+without requests and yielded identical snapshots within each build, with
+and without the transport cache. Pass
+`--adapter wikimedia_dump --interrupt-at mid-xml` to rerun the halfway stop.
+
+Mid-stream replay still decompresses and parses the full input.
+[#587](https://github.com/supernovae/model-lab/issues/587) tracks verified
+compressed ranges, ordered checkpoints, and worker scaling on a
+representative dump. Wikimedia's index marks compressed streams within
+one XML document, so range extraction must preserve the shared XML
+context. [Wikimedia multistream format](https://meta.wikimedia.org/wiki/Data_dumps/Dump_format#Multistream_dumps)
 
 ## Relational Knowledge Microlab
 

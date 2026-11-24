@@ -1969,7 +1969,10 @@ def test_wikimedia_download_checks_sha1_even_with_matching_sha256(
     )
 
 
-@pytest.mark.parametrize("stop", ["extraction", "damaged_body", "sealed"])
+@pytest.mark.parametrize(
+    "stop",
+    ["before_promote", "partial_download", "extraction", "damaged_body", "sealed"],
+)
 def test_wikimedia_retry_verifies_and_reuses_completed_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str
 ) -> None:
@@ -1994,6 +1997,7 @@ def test_wikimedia_retry_verifies_and_reuses_completed_work(
     work = tmp_path / "work"
     real_verify = acquisition.verify_snapshot
     real_extract = acquisition._wiki_jsonl
+    real_rename = acquisition.rename_noreplace
     extractions = []
 
     def stop_before_verification(path, **options):
@@ -2003,15 +2007,22 @@ def test_wikimedia_retry_verifies_and_reuses_completed_work(
 
     def observe_extraction(source, stream, output, resources):
         extractions.append(output)
-        if stop != "sealed" and len(extractions) == 1:
+        if stop in {"extraction", "damaged_body"} and len(extractions) == 1:
             output.write_bytes(b"incomplete output")
             raise OSError("interrupted Wikimedia acquisition")
         return real_extract(source, stream, output, resources)
+
+    def stop_before_promote(source, target):
+        if source.name == ".download":
+            raise OSError("interrupted Wikimedia acquisition")
+        return real_rename(source, target)
 
     monkeypatch.setattr(acquisition, "_wiki_jsonl", observe_extraction)
     with monkeypatch.context() as fault:
         if stop == "sealed":
             fault.setattr(acquisition, "verify_snapshot", stop_before_verification)
+        elif stop in {"before_promote", "partial_download"}:
+            fault.setattr(acquisition, "rename_noreplace", stop_before_promote)
         with pytest.raises(OSError, match="interrupted Wikimedia acquisition"):
             acquire(project, work)
     base = work / "corpora/example"
@@ -2023,10 +2034,14 @@ def test_wikimedia_retry_verifies_and_reuses_completed_work(
     assert pinned.read_bytes() == body
     if stop == "damaged_body":
         pinned.write_bytes(b"!" + body[1:])
+    elif stop == "partial_download":
+        pinned.write_bytes(body[: len(body) // 2])
 
     resumed = acquire(project, work)
-    assert calls == (list(responses) if stop == "damaged_body" else [])
-    assert len(extractions) == (1 if stop == "sealed" else 2)
+    assert calls == (
+        list(responses) if stop in {"damaged_body", "partial_download"} else []
+    )
+    assert len(extractions) == (2 if stop in {"extraction", "damaged_body"} else 1)
     assert not parts.exists()
     actual = _snapshot_payload(resumed)
     assert actual == _snapshot_payload(control)
