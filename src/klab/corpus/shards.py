@@ -11,6 +11,7 @@ The operator's `--workers` choice lives in `release_verify.verification_settings
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import multiprocessing
@@ -18,19 +19,23 @@ import os
 import resource
 import sys
 import time
-from collections import deque
 from collections.abc import Callable, Iterator
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+from klab.corpus.build_stages import StageStore, run_stage
 from klab.corpus.release_verify import current_settings, worker_count
+from klab.host_capacity import plan_host_workers
 
 CHUNK_BYTES = 64 * 1024**2
 # Below this much row data a worker pool costs more than it saves.
 PARALLEL_MIN_BYTES = 256 * 1024**2
+_COORDINATOR_RESERVE = 1024**3
+_FILE_STAGE = "shard"
 
 
 @dataclass(frozen=True)
@@ -64,6 +69,7 @@ class ShardPlan:
     total_bytes: int
     inputs: dict[str, Any] = field(default_factory=dict)
     store: Path | None = None
+    worker_memory_bytes: int = 512 * 1024**2
 
 
 def chunk_ranges(path: Path) -> list[tuple[int, int]]:
@@ -80,6 +86,12 @@ def chunk_ranges(path: Path) -> list[tuple[int, int]]:
     return ranges
 
 
+def range_file_identity(path: Path) -> list[int]:
+    """Bind range offsets to a specific local generation of the input file."""
+    stat = path.stat()
+    return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+
+
 def plan_ranges(
     stage: str,
     path: Path,
@@ -89,18 +101,15 @@ def plan_ranges(
     """One shard per line-aligned byte range of `path`, called `(path, start, end, *extra)`.
 
     Results are kept under the operator's scratch directory, if they chose one,
-    keyed by the stage inputs and the file's size and modification time.
+    keyed by the stage inputs and a fingerprint of the file.
     """
-    stat = path.stat()
+    identity = range_file_identity(path)
     scratch = current_settings().scratch_dir
     return ShardPlan(
         stage=stage,
         tasks=[(str(path), start, end, *extra) for start, end in chunk_ranges(path)],
-        total_bytes=stat.st_size,
-        inputs={
-            **(inputs or {}),
-            "file": [path.name, stat.st_size, stat.st_mtime_ns],
-        },
+        total_bytes=identity[2],
+        inputs={**(inputs or {}), "file": identity},
         store=None if scratch is None else scratch / "shards",
     )
 
@@ -162,57 +171,92 @@ def _cpu_seconds() -> float:
     return own.ru_utime + own.ru_stime + children.ru_utime + children.ru_stime
 
 
+def _limit_native_threads() -> None:
+    # Spawned workers initialize these native libraries after this runs.
+    os.environ.update(
+        dict.fromkeys(
+            (
+                "OMP_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "OPENBLAS_NUM_THREADS",
+                "VECLIB_MAXIMUM_THREADS",
+                "RAYON_NUM_THREADS",
+            ),
+            "1",
+        )
+    )
+
+
 def _pool_results(
-    function: Callable[..., Any], tasks: list[tuple], workers: int, ordered: bool
-) -> Iterator[tuple[int, Any]]:
-    """Yield `(task index, result)` from a bounded pool, two tasks per worker in flight."""
-    pending: deque = deque()
-    queue = iter(enumerate(tasks))
+    function: Callable[..., Any],
+    jobs: Iterator[tuple[tuple, Any]],
+    workers: int,
+    ordered: bool,
+) -> Iterator[tuple[tuple, Any, bool]]:
+    """Keep at most one running, completed or cached result per slot."""
+    pending: dict[Future, tuple[tuple, bool]] = {}
     context = multiprocessing.get_context("spawn")
     with (
         _workers_without_main(),
-        ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool,
+        ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=context,
+            initializer=_limit_native_threads,
+        ) as pool,
     ):
         try:
             while True:
-                while len(pending) < workers * 2:
-                    item = next(queue, None)
-                    if item is None:
+                for task, cached in jobs:
+                    if cached is None:
+                        future = pool.submit(function, *task)
+                    else:
+                        future = Future()
+                        future.set_result(cached)
+                    pending[future] = (task, cached is not None)
+                    del cached
+                    if len(pending) == workers:
                         break
-                    pending.append((item[0], pool.submit(function, *item[1])))
                 if not pending:
                     return
-                if ordered:
-                    index, future = pending.popleft()
-                    yield index, future.result()
-                    continue
-                done, _ = wait([f for _, f in pending], return_when=FIRST_COMPLETED)
-                for index, future in [p for p in pending if p[1] in done]:
-                    pending.remove((index, future))
-                    yield index, future.result()
+                if len(pending) == 1 or ordered:
+                    ready = (next(iter(pending)),)
+                else:
+                    ready = wait(pending, return_when=FIRST_COMPLETED).done
+                for future in ready:
+                    task, reused = pending.pop(future)
+                    yield task, future.result(), reused
+                # Futures retain their result even after they leave the window.
+                del ready, future
         finally:
-            for _, future in pending:
+            for future in pending:
                 future.cancel()
 
 
-def run_sharded(
-    plan: ShardPlan, function: Callable[..., Any], *, ordered: bool = False
+def _run_sharded(
+    plan: ShardPlan,
+    function: Callable[..., Any],
+    load: Callable[[tuple], Any],
+    save: Callable[[tuple, Any], None] | None,
+    *,
+    ordered: bool,
 ) -> Iterator[Any]:
-    """Run a declared stage's shards and yield each result.
-
-    With `ordered`, results are yielded in shard order so a caller can merge them
-    exactly as a serial loop would; otherwise as they finish. Runs inline for one
-    worker, a `Single` stage or a small input. Stops early, cancelling the rest,
-    if the caller stops iterating. The operator sees the workers used at the
-    start and, at the end, wall time, CPU time, cores used and reused shards.
-    `KLAB_FAULT=<stage>:<n>` (tests) raises after the n-th stored shard.
-    """
     if plan.stage not in STAGES:
         raise ValueError(f"stage {plan.stage!r} is not declared with declare_stage")
     declared = STAGES[plan.stage]
-    workers = 1 if isinstance(declared, Single) else worker_count()
-    if plan.total_bytes < PARALLEL_MIN_BYTES:
+    workers = min(worker_count(), len(plan.tasks))
+    if (
+        workers < 2
+        or isinstance(declared, Single)
+        or plan.total_bytes < PARALLEL_MIN_BYTES
+    ):
         workers = 1
+    else:
+        workers = plan_host_workers(
+            plan.stage,
+            worker_memory_bytes=plan.worker_memory_bytes,
+            reserve_bytes=_COORDINATOR_RESERVE,
+            operator_cap=workers,
+        ).workers
     echo = current_settings().echo
     if echo is not None:
         note = f" ({declared.reason})" if isinstance(declared, Single) else ""
@@ -223,74 +267,104 @@ def run_sharded(
         )
     started, cpu = time.monotonic(), _cpu_seconds()
     reused = executed = 0
-    keys = [None if plan.store is None else _key(plan, task) for task in plan.tasks]
-    if plan.store is not None:
-        plan.store.mkdir(parents=True, exist_ok=True)
     fault = os.environ.get("KLAB_FAULT", "")
     fault_stage, _, fault_after = fault.rpartition(":")
-    stored: dict[int, Any] = {}
-    todo: list[int] = []
-    for index, key in enumerate(keys):
-        found = None if key is None else _receipt(plan.store / f"{key}.json")
-        if found is None:
-            todo.append(index)
-        else:
-            stored[index] = found
-            reused += 1
-
-    def computed() -> Iterator[tuple[int, Any]]:
-        tasks = [plan.tasks[i] for i in todo]
-        if workers == 1:
-            for position, task in enumerate(tasks):
-                yield todo[position], function(*task)
-            return
-        for position, result in _pool_results(function, tasks, workers, ordered):
-            yield todo[position], result
-
-    def finish() -> None:
-        if echo is None:
-            return
-        wall = max(time.monotonic() - started, 1e-9)
-        used = _cpu_seconds() - cpu
-        print(
-            f"{plan.stage}: {wall:.1f}s wall, {used:.1f}s cpu, "
-            f"{used / wall:.1f} cores used, reused {reused}/{len(plan.tasks)}",
-            file=echo,
-            flush=True,
+    jobs = ((task, load(task)) for task in plan.tasks)
+    results = (
+        (
+            (task, function(*task), False) if cached is None else (task, cached, True)
+            for task, cached in jobs
         )
-
-    results = computed()
-    fresh: dict[int, Any] = {}
-    next_index = 0
+        if workers == 1
+        else _pool_results(function, jobs, workers, ordered)
+    )
     try:
-        for index, result in results:
-            executed += 1
-            if keys[index] is not None:
-                _commit(plan.store / f"{keys[index]}.json", result)
+        for task, result, from_cache in results:
+            if from_cache:
+                reused += 1
+            elif plan.store is not None:
+                if save is not None:
+                    save(task, result)
+                executed += 1
                 if fault_stage == plan.stage and executed == int(fault_after):
                     raise RuntimeError(f"KLAB_FAULT after shard {executed}")
-            if not ordered:
-                yield result
-                continue
-            fresh[index] = result
-            while True:
-                while next_index in stored:
-                    yield stored.pop(next_index)
-                    next_index += 1
-                if next_index not in fresh:
-                    break
-                yield fresh.pop(next_index)
-                next_index += 1
-        if ordered:
-            while next_index in stored:
-                yield stored.pop(next_index)
-                next_index += 1
-        else:
-            for result in stored.values():
-                yield result
+            yield result
+            del result
     finally:
         results.close()
-        finish()
+        if echo is not None:
+            wall = max(time.monotonic() - started, 1e-9)
+            used = _cpu_seconds() - cpu
+            print(
+                f"{plan.stage}: {wall:.1f}s wall, {used:.1f}s cpu, "
+                f"{used / wall:.1f} cores used, reused {reused}/{len(plan.tasks)}",
+                file=echo,
+                flush=True,
+            )
+
+
+def run_sharded(
+    plan: ShardPlan, function: Callable[..., Any], *, ordered: bool = False
+) -> Iterator[Any]:
+    """Yield small results in plan order or as they finish, checkpointing JSON to store."""
+    store = plan.store
+    if store is not None:
+        store.mkdir(parents=True, exist_ok=True)
+
+    def load(task: tuple) -> Any:
+        return None if store is None else _receipt(store / f"{_key(plan, task)}.json")
+
+    def save(task: tuple, result: Any) -> None:
+        assert store is not None
+        _commit(store / f"{_key(plan, task)}.json", result)
+
+    yield from _run_sharded(plan, function, load, save, ordered=ordered)
+
+
+def _file_inputs(stage: str, inputs: dict[str, Any], task: tuple) -> dict[str, Any]:
+    return {"stage": stage, "inputs": inputs, "task": task}
+
+
+def _produce_files(
+    store: StageStore,
+    stage: str,
+    inputs: dict[str, Any],
+    function: Callable[..., dict[str, Any]],
+    *task: Any,
+) -> tuple[Path, dict[str, Any]]:
+    shard_inputs = _file_inputs(stage, inputs, task)
+    locks = store.root / "locks"
+    locks.mkdir(parents=True, exist_ok=True)
+    with (locks / store.key(shard_inputs)).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+
+        def produce(staging: Path, result: dict[str, Any]) -> None:
+            result.update(function(staging, *task))
+
+        return run_stage(store, _FILE_STAGE, shard_inputs, produce)
+
+
+def run_sharded_files(
+    plan: ShardPlan, function: Callable[..., dict[str, Any]], *, ordered: bool = False
+) -> Iterator[tuple[Path, dict[str, Any]]]:
+    """Run a worker with a private output directory and yield verified file references.
+
+    The plan must bind the producer identity in its inputs. Workers return small
+    JSON metadata. File bytes stay in the store and are verified before reuse.
+    """
+    if plan.store is None:
+        raise ValueError("file-backed shards need a store")
+    store = StageStore(plan.store / "files")
+
+    def load(task: tuple) -> tuple[Path, dict[str, Any]] | None:
+        inputs = _file_inputs(plan.stage, plan.inputs, task)
+        receipt = store.verified(_FILE_STAGE, inputs)
+        if receipt is None:
+            return None
+        return store.directory(_FILE_STAGE, receipt["key"]), receipt["result"]
+
+    worker = partial(_produce_files, store, plan.stage, plan.inputs, function)
+    yield from _run_sharded(plan, worker, load, None, ordered=ordered)
 
 
 declare_stage("release verification")

@@ -31,12 +31,18 @@ def _release_path(value: str, work_root: Path) -> Path:
     return Path(value).resolve()
 
 
-def _verification_flags(command: argparse.ArgumentParser) -> None:
+def _verification_flags(
+    command: argparse.ArgumentParser,
+    *,
+    scratch_help: str = (
+        "Directory for disposable verification state; default is WORK/scratch. "
+        "Allow 2-3x the release size on fast storage"
+    ),
+) -> None:
     command.add_argument(
         "--scratch-dir",
         type=Path,
-        help="Directory for disposable verification state; default is WORK/scratch. "
-        "Allow 2-3x the release size on fast storage",
+        help=scratch_help,
     )
     add_workers_flag(command)
     command.add_argument(
@@ -755,7 +761,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     )
     command.add_argument("mixture")
     command.add_argument("--json", action="store_true")
-    add_workers_flag(command)
+    _verification_flags(
+        command,
+        scratch_help="Keep resumable inventory segments in this directory. "
+        "Without it, use temporary space beside the inventory output",
+    )
     command.set_defaults(handler=_handle)
     command = sub.add_parser(
         "audit-protected-lineage",
