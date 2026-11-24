@@ -102,7 +102,7 @@ per source and then an acquisition lock binding them.
   Checkpoints live under the source's hidden `.hf-parts-<key>` directory
   beside the snapshots. They are bound to the acquisition declaration,
   adapter and ledger scope. Successful acquisition removes its checkpoint.
-  Git and Hugging Face acquisition list checkpoints for other requests so
+  Git, PDF and Hugging Face acquisition list checkpoints for other requests so
   you can find retained staging data. Remove abandoned checkpoints only
   when no attempt uses them. The published
   snapshot format is unchanged.
@@ -116,8 +116,17 @@ per source and then an acquisition lock binding them.
   copying the completed blobs. Previous charges and retry limits still apply.
   If a stop interrupted the ledger update after the body was written, Lab
   reconciles the matching transfer from its verified bytes and existing charge.
-  Other source adapters recover at snapshot granularity, with raw transport
-  cache reuse where supported.
+- **Retry a multi-file PDF source.** Rerun the same acquisition to reuse
+  complete pinned files and verified extraction receipts under
+  `.pdf-parts-<key>` beside the snapshots. A valid original PDF with missing
+  or damaged text needs extraction again. A damaged or partial original needs
+  a verified cache body or a permitted retry. Source-step plans report
+  `pdf_checkpoint_reuse` as `text` when both artifacts verify and `body` when
+  only the original verifies. The existing ledger governs new requests. Cold
+  snapshot verification still re-extracts the text to check fidelity.
+  Successful publication moves the staged files into the snapshot and removes
+  the checkpoint receipts. Other source adapters recover at snapshot
+  granularity, with raw transport cache reuse where supported.
 - **Observed rather than enforced limits.** On a local workflow where the owner
   wants time, network or storage observed rather than capped,
   `corpus budget-observe-time`, `budget-observe-network` and
@@ -1075,7 +1084,7 @@ checks all three, and that the screen covered every document of this release.
 
 | Step | Resumable after a kill? | A failure at the end costs |
 | --- | --- | --- |
-| `acquire` | yes: verified snapshots, transport cache, bounded HF selections and bounded Git blobs | unfinished HF shard selection or transfer, unfinished Git blob transfer, or the unfinished source for other adapters |
+| `acquire` | yes: verified snapshots, transport cache, bounded HF selections, bounded Git blobs and pinned PDFs with extracted text receipts | incomplete HF shard, Git blob or PDF transfer or extraction, plus final verification. Other adapters replay the unfinished source. |
 | `build` normalize | yes: per-file receipted shards | files being written |
 | `build` index, dedup | yes: receipted stage outputs ([resume](#resume-a-failed-build)) | the stage that was running |
 | `build` views and publish (native disk builder) | yes: verified append boundaries and atomic publication | uncommitted rows, prefix verification and any unfinished report or manifest pass |

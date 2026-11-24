@@ -30,7 +30,13 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urljoin, urlparse
 
 from klab.canonical import canonical_digest, canonical_json
-from klab.corpus.acquisition_parts import AcquisitionParts, HFParts, acquisition_staging
+from klab.corpus.acquisition_parts import (
+    AcquisitionParts,
+    HFParts,
+    PDFParts,
+    acquisition_staging,
+    pinned_pdf_path,
+)
 from klab.corpus.bounded_metadata import read_metadata
 from klab.corpus.project import (
     IMMUTABLE_SOURCE_KINDS,
@@ -116,7 +122,7 @@ class _AcquisitionResources:
         self.binding = {
             "source_id": source.id,
             "declaration_sha256": declaration_sha256(source),
-            "staging_name": self.root.name,
+            "staging_name": self.root.relative_to(self.journal_parent).as_posix(),
         }
         if shard_path is not None:
             self.binding["source_shard_path"] = shard_path
@@ -1958,6 +1964,7 @@ def _fetch_pinned(
     cache: TransportCache | None = None,
     *,
     verify_only: bool = False,
+    parts: AcquisitionParts | None = None,
 ) -> int:
     """One content-pinned body: from the cache when it verifies, else downloaded.
 
@@ -1972,9 +1979,19 @@ def _fetch_pinned(
             observe=resources.observe,
         )
         if served is not None:
+            if parts is not None:
+                parts.sync_path(target)
             return served.size
     size = _download_pinned(
-        source, url, key_name, expected_sha256, limit, target, budget, resources
+        source,
+        url,
+        key_name,
+        expected_sha256,
+        limit,
+        target,
+        budget,
+        resources,
+        parts=parts,
     )
     if cache is not None:
         cache.store(key, target)
@@ -1990,6 +2007,8 @@ def _download_pinned(
     target: Path,
     budget: TransportBudget | None,
     resources: _AcquisitionResources,
+    *,
+    parts: AcquisitionParts | None = None,
 ) -> int:
     if budget is None:
         request = urllib.request.Request(url, headers=_USER_AGENT)
@@ -1999,6 +2018,8 @@ def _download_pinned(
             digest, size = _copy_stream(response, target, limit, resources)
         if digest != expected_sha256:
             raise ValueError(f"pinned download SHA-256 mismatch: {key}")
+        if parts is not None:
+            parts.sync_path(target)
         return size
     budget.assert_transfer_available(source.id, key, limit, allow_verified_retry=True)
     index = budget.reserve_transfer(source.id, key, limit, allow_verified_retry=True)
@@ -2011,6 +2032,8 @@ def _download_pinned(
             )
         if digest != expected_sha256:
             raise ValueError(f"pinned download SHA-256 mismatch: {key}")
+        if parts is not None:
+            parts.sync_path(target)
         budget.finish_transfer(index, success=True)
     except OSError, TimeoutError, EOFError:
         budget.finish_transfer(index, success=False, interrupted=True)
@@ -2250,16 +2273,45 @@ def _pdf_text(path: Path, spec: PdfAcquisition, name: str) -> tuple[bytes, int]:
     return text, int(pages)
 
 
-def _pinned_pdf_path(name: str) -> str:
-    return name.removesuffix(".txt") + ".pdf"
+def pdf_parts(
+    parent: Path,
+    source: SourceDeclaration,
+    budget: TransportBudget | None,
+    *,
+    receipt_limit: int | None = None,
+) -> PDFParts:
+    """Bind PDF checkpoints to the pinned parser and the acquisition request."""
+    spec = source.acquisition
+    assert isinstance(spec, PdfAcquisition)
+    if receipt_limit is not None:
+        # The fixed envelope, SHA-256 fields and counters fit within 512 bytes
+        # beyond the encoded document name.
+        receipt_limit = min(
+            receipt_limit,
+            sum(512 + len(canonical_json(d.name)) for d in spec.documents),
+        )
+    return PDFParts(
+        parent,
+        canonical_digest(
+            {
+                "request": _acquisition_part_identity(source, budget),
+                "extractor_sha256": sha256_file(
+                    Path(__file__).with_name("pdf_text.py")
+                ),
+            }
+        ),
+        receipt_limit=receipt_limit,
+    )
 
 
 def _acquire_pdf(
     source: SourceDeclaration,
-    staging: Path,
     budget: TransportBudget | None,
     resources: _AcquisitionResources,
     cache: TransportCache | None = None,
+    *,
+    parts: PDFParts,
+    planned_reuse: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     spec = source.acquisition
     assert isinstance(spec, PdfAcquisition)
@@ -2267,41 +2319,80 @@ def _acquire_pdf(
     resources.expanded = None  # PDF bodies are kept whole, not expanded
     resources.observe()
     if budget is not None:
-        budget.check_disk(staging, budget.projected_disk_bytes(source_id=source.id))
+        budget.check_disk(
+            parts.staging, budget.projected_disk_bytes(source_id=source.id)
+        )
     inventory = []
     receipts = []
     text_bytes = 0
+    reused_bodies = reused_text = 0
+    planned_reuse = planned_reuse or {}
     for document in spec.documents:
-        pinned = staging / "pinned" / _pinned_pdf_path(document.name)
-        size = _fetch_pinned(
-            source,
-            document.url,
-            document.name,
-            document.expected_sha256,
-            document.max_bytes,
-            pinned,
-            budget,
-            resources,
-            cache,
-        )
-        text, pages = _pdf_text(pinned, spec, document.name)
-        text_bytes += len(text)
+        resources.index = None
+        if budget is not None:
+            budget.remaining_seconds()
+        pinned, target = parts.body(document), parts.output(document)
+        size, selected = parts.verified_document(document, spec)
+        planned = planned_reuse.get(document.name)
+        if (planned == "text" and selected is None) or (
+            planned == "body" and size is None
+        ):
+            raise ValueError(f"PDF checkpoint changed after admission: {document.name}")
+        if size is None:
+            pinned.unlink(missing_ok=True)
+            size = _fetch_pinned(
+                source,
+                document.url,
+                document.name,
+                document.expected_sha256,
+                document.max_bytes,
+                pinned,
+                budget,
+                resources,
+                cache,
+                parts=parts,
+            )
+        else:
+            if budget is not None:
+                budget.recover_staged_transfer(source.id, document.name, size)
+            reused_bodies += 1
+        if selected is None:
+            if parts.discard_marker(document):
+                print(
+                    f"{source.id}: rebuilding damaged PDF text {document.name}",
+                    file=sys.stderr,
+                )
+            parts.staged_file_size(target)  # validate a leftover before unlinking it
+            target.unlink(missing_ok=True)
+            text, pages = _pdf_text(pinned, spec, document.name)
+            if len(text) > spec.max_text_bytes - text_bytes:
+                raise ValueError("PDF extracted text exceeds max_text_bytes")
+            digest, written = _copy_stream(
+                io.BytesIO(text), target, len(text), resources
+            )
+            parts.commit(document, digest, written, pages)
+        else:
+            digest, written, pages = selected
+            reused_text += 1
+        text_bytes += written
         if text_bytes > spec.max_text_bytes:
             raise ValueError("PDF extracted text exceeds max_text_bytes")
-        digest, written = _copy_stream(
-            io.BytesIO(text), staging / "files" / document.name, len(text), resources
-        )
         inventory.append({"path": document.name, "sha256": digest, "size": written})
         receipts.append(
             {
                 "name": document.name,
                 "url": document.url,
-                "pdf_path": _pinned_pdf_path(document.name),
+                "pdf_path": pinned_pdf_path(document.name),
                 "pdf_sha256": document.expected_sha256,
                 "pdf_bytes": size,
                 "pages": pages,
                 "text_sha256": digest,
             }
+        )
+    if reused_bodies:
+        print(
+            f"{source.id}: reused {reused_bodies} pinned PDFs and {reused_text} extracted texts",
+            file=sys.stderr,
         )
     return inventory, {
         "extraction": spec.extraction.model_dump(mode="json"),
@@ -2327,7 +2418,7 @@ def _verify_pdf_receipt(
             for item in documents
         ]
         != [
-            (d.name, d.url, d.expected_sha256, _pinned_pdf_path(d.name))
+            (d.name, d.url, d.expected_sha256, pinned_pdf_path(d.name))
             for d in spec.documents
         ]
         or [{"path": f["path"], "sha256": f["sha256"]} for f in manifest["files"]]
@@ -2976,11 +3067,9 @@ def acquire(
             raise ValueError(f"existing verified snapshot unavailable: {source.id}")
         parent = snapshot_root / source.id
         parent.mkdir(parents=True, exist_ok=True)
+        receipt_limit = acquisition_step.MANIFEST_BYTES if step is not None else None
         parts: AcquisitionParts | None = bounded_hf_parts(
-            parent,
-            source,
-            budget,
-            receipt_limit=acquisition_step.MANIFEST_BYTES if step is not None else None,
+            parent, source, budget, receipt_limit=receipt_limit
         )
         if (
             source.kind == "git"
@@ -2990,6 +3079,8 @@ def acquire(
             parts = AcquisitionParts(
                 parent, _acquisition_part_identity(source, budget), adapter="git"
             )
+        elif source.kind == "pdf_documents":
+            parts = pdf_parts(parent, source, budget, receipt_limit=receipt_limit)
         with acquisition_staging(parent, parts) as staging:
             resources = None
             try:
@@ -2998,7 +3089,9 @@ def acquire(
                     resources = _AcquisitionResources(staging)
                     resources.retain(source)
                 elif source.kind in PINNED_FILE_KINDS:
-                    resources = _AcquisitionResources(staging, budget)
+                    resources = _AcquisitionResources(
+                        staging, budget, journal_parent=parent
+                    )
                     if budget is None:
                         resources.retain(source)
                 retrieval: dict[str, Any] = {}
@@ -3036,8 +3129,14 @@ def acquire(
                         source, staging, budget, resources, cache
                     )
                 elif source.kind == "pdf_documents":
+                    assert isinstance(parts, PDFParts)
                     files, retrieval = _acquire_pdf(
-                        source, staging, budget, resources, cache
+                        source,
+                        budget,
+                        resources,
+                        cache,
+                        parts=parts,
+                        planned_reuse=step["pdf_checkpoint_reuse"] if step else None,
                     )
                 elif source.kind == "mediawiki_dump":
                     files, retrieval = _acquire_mediawiki(
@@ -3292,7 +3391,7 @@ def _fill_source(
                 document.name,
                 document.expected_sha256,
                 document.max_bytes,
-                staging / "pinned" / _pinned_pdf_path(document.name),
+                staging / "pinned" / pinned_pdf_path(document.name),
                 budget,
                 resources,
                 cache,
