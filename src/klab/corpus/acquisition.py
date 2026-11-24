@@ -557,10 +557,17 @@ def _git_blob_body(
         with response:
             if _response_length(response) != blob.max_bytes:
                 raise ValueError("pinned Git blob Content-Length mismatch")
+            git_hash = git_blob_hasher(blob.max_bytes)
             digest, copied = _copy_hf_body(
-                response, target, blob.max_bytes, budget, transfer_index, resources
+                response,
+                target,
+                blob.max_bytes,
+                budget,
+                transfer_index,
+                resources,
+                hash_chunk=git_hash.update,
             )
-        _, git_digest = _git_blob_digests(target, copied, sha256=digest)
+        git_digest = git_hash.hexdigest()
         if git_digest.lower() != blob.git_blob_oid.lower():
             raise ValueError(f"pinned Git blob SHA-1 mismatch: {blob.path}")
         if parts is not None:
@@ -580,20 +587,14 @@ def _git_blob_body(
     return digest, copied, git_digest
 
 
-def _git_blob_digests(
-    path: Path, size: int, *, sha256: str | None = None
-) -> tuple[str, str]:
+def _git_blob_digests(path: Path, size: int) -> tuple[str, str]:
     git_hash = git_blob_hasher(size)
-    content_hash = hashlib.sha256() if sha256 is None else None
+    content_hash = hashlib.sha256()
     with path.open("rb") as stream:
         while block := stream.read(1024**2):
             git_hash.update(block)
-            if content_hash is not None:
-                content_hash.update(block)
-    return (
-        sha256 if content_hash is None else content_hash.hexdigest(),
-        git_hash.hexdigest(),
-    )
+            content_hash.update(block)
+    return content_hash.hexdigest(), git_hash.hexdigest()
 
 
 def _git_blob_url(
@@ -946,6 +947,8 @@ def _copy_hf_body(
     budget: TransportBudget | None,
     transfer_index: int | None,
     resources: _AcquisitionResources | None = None,
+    *,
+    hash_chunk: Callable[[bytes], None] | None = None,
 ) -> tuple[str, int]:
     length = _response_length(response)
     if length is None:
@@ -984,6 +987,8 @@ def _copy_hf_body(
                 assert transfer_index is not None
                 budget.charge_transfer_actual(transfer_index, len(chunk))
             digest.update(chunk)
+            if hash_chunk is not None:
+                hash_chunk(chunk)
             output.write(chunk)
             if resources is not None:
                 output.flush()

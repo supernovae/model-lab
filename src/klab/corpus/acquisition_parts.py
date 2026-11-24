@@ -6,6 +6,7 @@ import fcntl
 import os
 import shutil
 import stat
+import sys
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -201,6 +202,12 @@ def acquisition_staging(parent: Path, parts: AcquisitionParts | None) -> Iterato
         except BlockingIOError as error:
             raise ValueError("another acquisition is writing this source") from error
         parts._check_root()
+        for sibling in sorted(parent.glob(f".{parts.adapter}-parts-*")):
+            if sibling != parts.root and not sibling.is_symlink() and sibling.is_dir():
+                print(
+                    f"acquisition checkpoint for another request retained at {sibling}",
+                    file=sys.stderr,
+                )
         parts.root.mkdir(mode=0o700, exist_ok=True)
         sync_directory(parent)
         parts.staging.mkdir(mode=0o700, exist_ok=True)

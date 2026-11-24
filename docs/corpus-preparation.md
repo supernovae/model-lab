@@ -101,8 +101,10 @@ per source and then an acquisition lock binding them.
 
   Checkpoints live under the source's hidden `.hf-parts-<key>` directory
   beside the snapshots. They are bound to the acquisition declaration,
-  adapter and ledger scope. Successful acquisition removes them. Remove
-  abandoned checkpoints only when no attempt uses them. The published
+  adapter and ledger scope. Successful acquisition removes its checkpoint.
+  Git and Hugging Face acquisition list checkpoints for other requests so
+  you can find retained staging data. Remove abandoned checkpoints only
+  when no attempt uses them. The published
   snapshot format is unchanged.
 - **Retry a bounded Git source.** Rerun acquisition with the same
   `bounded_blobs` declaration and transport ledger. Lab retains downloaded

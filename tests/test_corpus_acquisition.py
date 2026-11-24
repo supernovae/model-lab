@@ -905,7 +905,7 @@ def test_bounded_git_blob_metadata_checksum_and_resume(
 
 @pytest.mark.parametrize("failure", ["later_blob", "damaged_blob", "unsettled_ledger"])
 def test_bounded_git_acquisition_reuses_only_verified_blobs_after_interruption(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, failure: str
 ) -> None:
     monkeypatch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
     content = b"# Pinned text\n"
@@ -920,6 +920,15 @@ def test_bounded_git_acquisition_reuses_only_verified_blobs_after_interruption(
     root = tmp_path / "work"
     ledger_path = root / "corpora/example/transport-budget.sqlite"
     budget = TransportBudget.initialize(ledger_path, project)
+    staged_reads = []
+    open_path = Path.open
+
+    def record_staged_read(path, mode="r", *args, **kwargs):
+        if mode == "rb" and any(part.startswith(".git-parts-") for part in path.parts):
+            staged_reads.append(path)
+        return open_path(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", record_staged_read)
     requests = _mock_bounded_git_http(
         monkeypatch,
         content,
@@ -942,6 +951,9 @@ def test_bounded_git_acquisition_reuses_only_verified_blobs_after_interruption(
         with pytest.raises(OSError, match="interrupted bounded Git transfer"):
             acquire(project, root)
         assert requests == list(paths)
+    # The interrupted acquisition never reaches snapshot verification.
+    # Hashing a freshly downloaded blob should not reread its staged file.
+    assert not staged_reads
     snapshots = root / "corpora/example/snapshots/one"
     assert not any(not path.name.startswith(".") for path in snapshots.iterdir())
     assert not (root / "corpora/example/acquisition.json").exists()
@@ -950,6 +962,11 @@ def test_bounded_git_acquisition_reuses_only_verified_blobs_after_interruption(
     if damage_staged_blob:
         staged.write_bytes(b"!" + content[1:])
 
+    abandoned = None
+    if failure == "later_blob":
+        abandoned = snapshots / (".git-parts-" + "0" * 64)
+        abandoned.mkdir()
+
     initial_requests = len(requests)
     requests = _mock_bounded_git_http(monkeypatch, content, oid, paths=paths)
     resumed = acquire(project, root)
@@ -957,7 +974,9 @@ def test_bounded_git_acquisition_reuses_only_verified_blobs_after_interruption(
     ledger = budget.receipt()
     assert ledger["source_charged"] == (initial_requests + len(requests)) * len(content)
     assert all(item["status"] != "started" for item in ledger["transfers"])
-    assert not list(snapshots.glob(".git-parts-*"))
+    assert list(snapshots.glob(".git-parts-*")) == ([abandoned] if abandoned else [])
+    if abandoned is not None:
+        assert str(abandoned) in capsys.readouterr().err
     output = Path(resumed["sources"]["one"]["snapshot_path"])
     if not damage_staged_blob:
         assert (output / "files" / _GIT_BLOB).stat().st_ino == inode
