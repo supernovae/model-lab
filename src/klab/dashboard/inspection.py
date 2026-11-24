@@ -46,119 +46,44 @@ def latest_metrics(view: DashboardSnapshot, selected_ids: list[str]) -> list[dic
     return result
 
 
-def engram_summary(
-    view: DashboardSnapshot, selected_ids: list[str], *, compact: bool = False
-) -> None:
-    st.subheader("Engram · n-gram memory")
-    st.caption(
-        "Recorded diagnostics, target-weighted across microbatches in each update. "
-        "Counts may be fractional. Address reuse includes repeated input; it is not "
-        "proof of hash collisions, retrieval accuracy, or improved model quality."
-    )
+def engram_summary(view: DashboardSnapshot, selected_ids: list[str]) -> None:
+    """Three headline memory values per run; the Engram tab has the rest."""
     rows = [
         row
         for row in latest_metrics(view, selected_ids)
         if row["metric"].startswith("engram/")
     ]
-    if not selected_ids:
-        st.info("Select a run in the sidebar to inspect its memory observations.")
+    if not rows:
         return
+    st.subheader("Engram · n-gram memory")
     for run_id in selected_ids:
-        own = [row for row in rows if row["run_id"] == run_id]
+        by_name = {row["metric"]: row for row in rows if row["run_id"] == run_id}
+        if not by_name:
+            continue
         with st.container(border=True):
             st.markdown(f"**{run_id}**")
-            if not own:
-                st.info(
-                    "Unavailable: this run has no persisted Engram diagnostics. Missing values are not zero."
+            columns = st.columns(3)
+            for column, metric, label in zip(
+                columns,
+                ("gate_mean", "value_norm", "table_utilization"),
+                ("Mean gate", "Value norm", "Rows read per document"),
+                strict=True,
+            ):
+                row = by_name.get(f"engram/{metric}")
+                value = row["value"] if row else None
+                column.metric(
+                    label,
+                    (
+                        f"{value:.2%}"
+                        if metric == "table_utilization"
+                        else f"{value:.4g}"
+                    )
+                    if value is not None
+                    else "Unavailable",
                 )
-                continue
-            ports = sorted(
-                {
-                    row["metric"].split("/")[2]
-                    for row in own
-                    if row["metric"].startswith("engram/port/")
-                }
+            st.caption(
+                "Open the Engram memory tab for each site and what the values mean."
             )
-            scopes = [("Aggregate", "engram/")] + [
-                (f"Port {port}", f"engram/port/{port}/") for port in ports
-            ]
-            by_name = {row["metric"]: row for row in own}
-            if compact:
-                columns = st.columns(3)
-                for column, metric, label in zip(
-                    columns,
-                    ("gate_mean", "value_norm", "table_utilization"),
-                    ("Mean gate", "Value norm", "Addressed-row fraction"),
-                    strict=True,
-                ):
-                    row = by_name.get(f"engram/{metric}")
-                    value = row["value"] if row else None
-                    column.metric(
-                        label,
-                        (
-                            f"{value:.2%}"
-                            if metric == "table_utilization"
-                            else f"{value:.4g}"
-                        )
-                        if value is not None
-                        else "Unavailable",
-                    )
-                steps = [row["step"] for row in own]
-                st.caption(
-                    f"Recorded steps {min(steps)}–{max(steps)} · {len(ports)} per-port series groups · Open Engram memory for details."
-                )
-                continue
-            summary = []
-            for label, prefix in scopes:
-                for metric in (
-                    "gate_mean",
-                    "value_norm",
-                    "hidden_norm",
-                    "bucket_reuse_rate",
-                    "table_utilization",
-                ):
-                    row = by_name.get(prefix + metric)
-                    summary.append(
-                        {
-                            "scope": label,
-                            "metric": metric,
-                            "value": row["value"] if row else None,
-                            "step": row["step"] if row else None,
-                            "availability": row["availability"]
-                            if row
-                            else "not recorded",
-                        }
-                    )
-            st.dataframe(summary, hide_index=True, width="stretch")
-    if compact:
-        return
-    st.info(
-        "Utilization is a length-weighted per-document unique addressed-row fraction, "
-        "not the fraction of the whole table learned. Reported collision counts include "
-        "repeated inputs; they are not true hash-collision rates. Gates and norms measure "
-        "memory activity, not useful knowledge or causal impact."
-    )
-    with st.expander("How to read these values", expanded=True):
-        names = (
-            "gate_mean",
-            "value_norm",
-            "hidden_norm",
-            "bucket_reuse_rate",
-            "table_utilization",
-            "collision_count",
-            "maximum_address_fraction",
-        )
-        for name in names:
-            spec = metric_spec(f"engram/{name}")
-            st.write(f"**{name.replace('_', ' ').capitalize()}** — {spec.summary}")
-        st.caption(
-            "Aggregate and per-port values come from the producer. No gradients or quality gains are inferred."
-        )
-    with st.expander("All memory values and changes since the previous observation"):
-        st.dataframe(rows, hide_index=True, width="stretch")
-        st.caption(
-            "A change compares successive observations of the same metric, not checkpoints or model quality."
-        )
 
 
 def snapshot_inspector(view: DashboardSnapshot, selected_ids: list[str]) -> None:

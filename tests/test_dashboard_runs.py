@@ -114,3 +114,51 @@ def test_run_page_opens_the_linked_tab_with_the_attempt_outcome(tmp_path) -> Non
     app.button_group[0].set_value("checkpoints").run()
     assert [h.value for h in app.header] == ["Checkpoints"]
     assert app.query_params["tab"] == ["checkpoints"]
+
+
+def test_engram_tables_follow_the_config_and_readings_never_invent_values() -> None:
+    from klab.dashboard.engram_view import readings, scopes, tables
+
+    model = {
+        "memory": "ngram",
+        "memory_dim": 8,
+        "memory_injection": "after_block",
+        "memory_block_indices": [1, 14],
+        "memory_ngram_orders": [2, 3],
+        "memory_hash_heads": 2,
+        "memory_table_sizes": [11, 13, 17, 19, 23, 29, 31, 37],
+    }
+    layout = tables({"model": model})
+    assert [(t.site, t.order, t.head, t.rows) for t in layout][4:6] == [
+        ("after block 14", 2, 0, 23),
+        ("after block 14", 2, 1, 29),
+    ]
+    assert layout[0].parameters == 88
+    # Sizes that do not match sites x orders x heads are listed, never labelled.
+    short = tables({"model": {**model, "memory_table_sizes": [11, 13, 17]}})
+    assert [(t.site, t.order, t.rows) for t in short] == [
+        ("unlabelled", None, 11),
+        ("unlabelled", None, 13),
+        ("unlabelled", None, 17),
+    ]
+    assert tables({"model": {"memory": None}}) == []
+
+    series = {
+        "engram/gate_mean": [(1, 0.9)],
+        "engram/port/1/gate_mean": [(1, 0.2), (5, 0.1)],
+        "engram/port/1/value_norm": [(1, 4.0), (5, 5.0)],
+        "engram/port/1/hidden_norm": [(1, 100.0), (5, 50.0)],
+        "engram/port/14/gate_mean": [(5, 0.05)],
+        "engram/port/14/value_norm": [(5, 3.0)],
+        "engram/port/14/hidden_norm": [(3, 200.0), (5, None)],
+    }
+    assert [prefix for _, prefix in scopes(set(series))] == [
+        "engram/port/1/",
+        "engram/port/14/",
+    ]
+    site = readings(series, "engram/port/1/")
+    assert (site["gate_mean"].value, site["gate_mean"].first) == (0.1, 0.2)
+    assert site["push"].value == 0.1 * 5.0 / 50.0
+    # Site 14 has no finite hidden norm at step 5: its push is unavailable, not
+    # computed from the older value and not zero.
+    assert readings(series, "engram/port/14/")["push"].value is None

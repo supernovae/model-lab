@@ -180,6 +180,21 @@ def step_card(title: str, why: str, command: str | None = None) -> None:
         st.code(command, language="bash")
 
 
+def tiles(items: list[tuple[str, str, str]], minimum: int = 140) -> str:
+    """Label, value and a line of help for each tile, at least ``minimum`` pixels wide."""
+    return (
+        "<div class='rh-tiles' style='grid-template-columns:"
+        f"repeat(auto-fit,minmax({minimum}px,1fr))'>"
+        + "".join(
+            f"<div class='rh-tile'><div class='l'>{html.escape(label)}</div>"
+            f"<div class='v'>{html.escape(value)}</div>"
+            f"<div class='h'>{html.escape(hint)}</div></div>"
+            for label, value, hint in items
+        )
+        + "</div>"
+    )
+
+
 def explainer(label: str, text: str, expanded: bool = False) -> None:
     with st.expander(f"ⓘ {label}", expanded=expanded):
         st.markdown(text)

@@ -22,6 +22,7 @@ import plotly.express as px
 import streamlit as st
 
 from klab.dashboard import (
+    engram_view,
     generation,
     inspection,
     lab_pages,
@@ -547,7 +548,7 @@ def training(view: DashboardSnapshot, root: Path | None = None) -> None:
     ui.page_header("Training", "How is the current run progressing?")
     records, selected_ids = selected(view)
     inspection.learning_summary(view, selected_ids)
-    inspection.engram_summary(view, selected_ids, compact=True)
+    inspection.engram_summary(view, selected_ids)
     _runtime_forecast_panel(view, selected_ids)
     comparison([record for record in records if record.run_id in selected_ids], view)
     if root is not None:
@@ -1279,7 +1280,9 @@ def render(root: Path, page: str) -> None:
         "training": lambda value: training(value, root),
         "evaluation": evaluation,
         "architecture": architecture_diagnostics,
-        "engram": lambda value: inspection.engram_summary(value, selected(value)[1]),
+        "engram": lambda value: engram_view.engram_page(
+            value, selected(value)[1], list(value.runs)
+        ),
         "snapshots": lambda value: inspection.snapshot_inspector(
             value, selected(value)[1]
         ),
