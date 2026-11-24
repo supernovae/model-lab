@@ -240,6 +240,60 @@ Sources: [#450](https://github.com/supernovae/model-lab/issues/450),
 [#506](https://github.com/supernovae/model-lab/pull/506),
 [#521](https://github.com/supernovae/model-lab/pull/521).
 
+### Acquisition replay measurements
+
+At Lab `1b4e31a4`, inject an interruption after the adapter finishes
+deriving its output and before the staged snapshot verifier starts. Retry
+through the ordinary acquisition entry point and time through publication.
+The table reports the median of three retries for each configuration on
+tmpfs with Python 3.14.8 and a 24-core AMD Threadripper PRO 9965WX.
+Payload digests were stable across repetitions and across cache settings
+for the archive and dumps. Those fixtures contain 256 selected text records
+of 64 KiB each. The text is
+hexadecimal output from Python's `Random(485).randbytes`. The gzip and
+bzip2 fixtures use compression levels 1 and 3 respectively. The other file
+fixtures use 64 files or rows of 256 KiB each. The HTTP fixture combines
+them in one document.
+The HTTP responses and the Hub file lookup are local fixtures. Git fetches
+from a local pinned upstream. The measured times cover local replay and
+verification.
+
+| Adapter | Input / output | Retry without Lab transport cache | Retry with warm Lab transport cache |
+| --- | --- | --- | --- |
+| Archive, gzip tar | 9.37 MiB compressed, 16.00 MiB emitted | 0.400 s, one body request | 0.399 s, zero requests |
+| MediaWiki, gzip XML | 9.38 MiB compressed, 16.07 MiB emitted | 0.761 s, one body request | 0.748 s, zero requests |
+| Wikimedia, bzip2 XML | 8.17 MiB compressed, 16.08 MiB emitted | 1.117 s, body and checksum requests | 1.116 s, zero requests |
+| Git include | 16.00 MiB emitted | 0.880 s, one local fetch and all selected files extracted | 0.292 s, zero fetches and all selected files extracted |
+| Hugging Face include | 16.00 MiB emitted | 0.063 s, one Hub client call against the fixture and all selected files validated and copied | Outside the Lab transport cache |
+| Local files | 16.00 MiB emitted | 0.059 s, all files copied | Outside the Lab transport cache |
+| Pinned HTTP document | 16.00 MiB emitted | 0.038 s, one body request | 0.037 s, zero requests |
+
+Archive and dump retries wrote the complete derived payload again in both
+cache configurations. Their peak staged file bytes were 25.37 MiB for the
+archive, 25.45 MiB for MediaWiki and 24.25 MiB for Wikimedia. Those figures
+include the raw body and output as they coexist in staging. Network
+latency, NVMe and HDD replay, and retained-subset replay time were outside
+this measurement. The Workshop base recipe at `4164998` has 15 Git sources
+and 18 Hugging Face sources. The dump and archive figures describe other
+adapter paths and should be measured again with a representative source
+before setting a scale target.
+
+The retained Workshop acquisition lock is **4,120,395,181 bytes**, measured
+from file metadata. Current advisory snapshot reuse parses the full lock
+inside the source loop. If each of 33 sources consults a lock that size,
+the loop requests about 136 GB of logical lock reads in addition to source
+snapshot checks. That is a calculation from the loop and observed file
+size. Peak RSS, physical bytes read and wall time on that lock remain
+unmeasured. Track bounded, single-pass advisory lookup with the wide
+metadata work and keep the final lock and provenance checks. [#450](https://github.com/supernovae/model-lab/issues/450)
+
+For single-body adapters, first retain a verified completed body and seal
+the derived output before publication. This bounds restarts after either
+phase. A stop inside a compressed stream still replays parsing from a
+valid format boundary. Measure that cost before adding per-member or
+per-page checkpoints. The [source recovery inventory](../corpus-preparation.md#recovery-by-source-adapter)
+records the current replay boundary for every adapter. [#485](https://github.com/supernovae/model-lab/issues/485)
+
 Use the connected canary for correctness, a repeatable approximately
 1M-document workload for profiling, and the historical Workshop workloads
 for scale where the source data and host are available. Separate cold,
