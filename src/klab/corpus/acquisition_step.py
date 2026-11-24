@@ -167,6 +167,10 @@ def prepare(
                 existing = candidate
                 break
     effect = effects.get(source_id)
+    pending = pinned_transfers(source)
+    reused_output_bytes = 0
+    hf_reuse = {}
+    checkpoint_bytes = checkpoint_peak_bytes = 0
     if existing is not None:
         output_bytes = compressed = 0
         manifest_bytes = 0
@@ -178,25 +182,43 @@ def prepare(
     else:
         output_bytes = source.acquisition.max_bytes
         manifest_bytes = MANIFEST_BYTES
+        parts = native.bounded_hf_parts(
+            parent, source, budget, receipt_limit=MANIFEST_BYTES
+        )
+        if parts is not None:
+            checkpoint_bytes = MANIFEST_BYTES
+            checkpoint_peak_bytes = checkpoint_bytes - parts.receipt_bytes()
+            if checkpoint_peak_bytes < 0:
+                raise ValueError("acquisition step HF checkpoint metadata cap exceeded")
+            for shard in source.acquisition.bounded_shards:
+                if (part := parts.verified_part(shard, output_bytes)) is not None:
+                    hf_reuse[shard.path] = "selection"
+                    if part[0] is not None:
+                        reused_output_bytes += part[0]["size"]
+                elif parts.verified_body(shard) is not None:
+                    hf_reuse[shard.path] = "body"
+        pending = tuple(item for item in pending if item[0] not in hf_reuse)
         # PDF bodies are kept in the snapshot and so are already output bytes;
         # other bodies occupy one temporary path until they are expanded.
         compressed = (
-            0
-            if source.kind == "pdf_documents"
-            else sum(size for _, size in pinned_transfers(source))
+            0 if source.kind == "pdf_documents" else sum(size for _, size in pending)
         )
-        budget.assert_source_available(source_id)
+        budget.assert_source_available(source_id, verified_paths=frozenset(hf_reuse))
     # Expanded data + manifest appear at staging and published paths. Each
     # compressed body has one temporary path. Stable capped SQLite/journal paths
     # are additional native overhead, independent of external job logs/receipts.
     path_bytes = (
-        2 * (output_bytes + manifest_bytes) + compressed + LEDGER_BYTES + JOURNAL_BYTES
+        2 * (output_bytes + manifest_bytes)
+        + compressed
+        + checkpoint_bytes
+        + LEDGER_BYTES
+        + JOURNAL_BYTES
     )
     peak_bytes = (
-        output_bytes
+        max(0, output_bytes - reused_output_bytes)
         + manifest_bytes
-        + max((size for _, size in pinned_transfers(source)), default=0)
-        * (compressed != 0)
+        + checkpoint_peak_bytes
+        + max((size for _, size in pending), default=0) * (compressed != 0)
         + LEDGER_BYTES
         + JOURNAL_BYTES
     )
@@ -226,6 +248,7 @@ def prepare(
             "min_free_bytes": min_free_bytes,
             "max_new_bytes": max_new_bytes,
             "storage_mode": "observational" if observes_storage else "enforced",
+            "hf_checkpoint_reuse": hf_reuse,
             "external_logs_receipts_and_baseline_are_additional": True,
         },
     )

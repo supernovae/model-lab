@@ -6,9 +6,11 @@ import hashlib
 import io
 import json
 import os
+import stat
 import subprocess
 import threading
 import urllib.request
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -602,6 +604,115 @@ def test_hf_declaration_hash_and_receipt_reuse(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("damage_selection", [False, True])
+def test_bounded_hf_source_step_resumes_without_recharging_verified_shards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage_selection: bool
+) -> None:
+    from klab.corpus import acquisition as native
+
+    monkeypatch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
+    content = b'{"text":"One verified document."}\n'
+    first = "default/train/first.jsonl"
+    second = "default/train/second.jsonl"
+    recipe = _bounded_hf_fixture(tmp_path, content, first, rows=1)
+    source_path = recipe.parent / "sources/one.yaml"
+    source = yaml.safe_load(source_path.read_text())
+    (part,) = source["acquisition"]["bounded_shards"]
+    part["hash_modulus"] = 1
+    part["hash_remainders"] = [0]
+    source["acquisition"]["bounded_shards"].append({**part, "path": second})
+    _yaml(source_path, source)
+    config = yaml.safe_load(recipe.read_text())
+    transfers = 3 if damage_selection else 2
+    config["transport_budget"] = {
+        "attempt_id": "hf_resume",
+        "max_source_body_bytes": len(content) * transfers,
+        "max_metadata_body_bytes": 4096,
+        "max_transfers": transfers,
+        "max_retries_per_shard": int(damage_selection),
+        "max_wall_seconds": 120,
+        "max_disk_bytes": 2 * 1024**3,
+    }
+    _yaml(recipe, config)
+    project = load_project(recipe)
+    root = tmp_path / "work"
+    budget = TransportBudget.initialize(
+        root / "corpora/example/transport-budget.sqlite", project
+    )
+    requests = _mock_hf_stream(monkeypatch, content)
+    monkeypatch.setattr(native, "_hf_pinned_metadata", lambda *_args: {})
+    scans = []
+    read_rows = native._bounded_hf_rows
+    interrupted = True
+
+    def rows(path, **kwargs):
+        scans.append(path.name)
+        if path.name == "second.jsonl" and interrupted:
+            raise OSError("interrupted after verified transfer")
+        yield from read_rows(path, **kwargs)
+
+    monkeypatch.setattr(native, "_bounded_hf_rows", rows)
+    step_options = {
+        "source_id": "one",
+        "max_new_bytes": 2 * 1024**3,
+        "min_free_bytes": 0,
+    }
+    with pytest.raises(OSError, match="interrupted after verified transfer"):
+        acquire(project, root, **step_options)
+    snapshots = root / "corpora/example/snapshots/one"
+    assert not any(not path.name.startswith(".") for path in snapshots.iterdir())
+    assert budget.receipt()["source_actual"] == 2 * len(content)
+    assert len(requests) == 2
+    if damage_selection:
+        selection = next(snapshots.glob(".hf-parts-*/**/first.jsonl.sample.jsonl"))
+        selection.write_bytes(selection.read_bytes().replace(b"verified", b"changed!"))
+
+    interrupted = False
+    scans.clear()
+    plan = acquire(project, root, plan_only=True, **step_options)
+    expected = {second: "body"}
+    if not damage_selection:
+        expected[first] = "selection"
+    assert plan["admission"]["hf_checkpoint_reuse"] == expected
+    if not damage_selection:
+        staged_body = next(snapshots.glob(".hf-parts-*/**/hf-input/**/second.jsonl"))
+        staging = native.acquisition_staging
+
+        @contextmanager
+        def change_after_admission(parent, parts):
+            with staging(parent, parts) as path:
+                staged_body.write_bytes(b"changed")
+                yield path
+
+        with monkeypatch.context() as drift:
+            drift.setattr(native, "acquisition_staging", change_after_admission)
+            with pytest.raises(ValueError, match="checkpoint changed after admission"):
+                acquire(project, root, **step_options)
+        assert len(requests) == 2
+        staged_body.write_bytes(content)
+
+    resumed = acquire(project, root, **step_options)
+    assert scans == (["first.jsonl"] if damage_selection else []) + ["second.jsonl"]
+    assert len(requests) == transfers
+    assert budget.receipt()["source_actual"] == transfers * len(content)
+    assert not list(snapshots.glob(".hf-parts-*"))
+    assert (
+        stat.S_IMODE(Path(resumed["source"]["snapshot_path"]).stat().st_mode) == 0o700
+    )
+
+    # Compare with a fresh run of the same declaration and producer.
+    control = tmp_path / "control"
+    TransportBudget.initialize(
+        control / "corpora/example/transport-budget.sqlite", project
+    )
+    reference = acquire(project, control, **step_options)["source"]
+    assert resumed["source"]["snapshot_sha256"] == reference["snapshot_sha256"]
+    assert (
+        verify_snapshot(reference["snapshot_path"])["files"]
+        == verify_snapshot(resumed["source"]["snapshot_path"])["files"]
+    )
+
+
 def _bounded_git_fixture(tmp_path: Path, content: bytes) -> tuple[Path, str]:
     oid = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
     recipe = _fixture(
@@ -697,6 +808,7 @@ def _mock_bounded_git_http(
 def test_bounded_git_blob_metadata_checksum_and_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
     content = b"# Pinned text\n"
     recipe, oid = _bounded_git_fixture(tmp_path, content)
     project = load_project(recipe)
