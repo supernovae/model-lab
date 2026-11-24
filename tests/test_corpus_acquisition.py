@@ -14,6 +14,7 @@ import urllib.request
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -2000,6 +2001,21 @@ def _multistream_wikimedia_fixture(
     return recipe, responses, pieces, members, index_text
 
 
+def _fixture_index_options(
+    responses: dict[str, bytes], pieces: tuple[bytes, ...], index_text: bytes
+) -> dict:
+    uri = next(reversed(responses))
+    index = responses[uri]
+    return {
+        "uri": uri,
+        "expected_sha256": hashlib.sha256(index).hexdigest(),
+        "max_bytes": len(index),
+        "max_expanded_bytes": len(index_text),
+        "max_members": len(pieces),
+        "max_member_expanded_bytes": max(map(len, pieces)),
+    }
+
+
 @pytest.mark.parametrize("fault", [None, "page_id", "split_page", "expanded_bound"])
 def test_wikimedia_range_plan_verifies_index_and_physical_members(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], fault: str | None
@@ -2090,7 +2106,7 @@ def test_wikimedia_indexed_acquisition_matches_serial_and_reuses_members(
     from klab.corpus import acquisition, wikimedia_ranges
 
     monkeypatch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
-    recipe, responses, pieces, members, index_text = _multistream_wikimedia_fixture(
+    recipe, responses, pieces, _, index_text = _multistream_wikimedia_fixture(
         tmp_path, shared_members=case != "scan_boundary"
     )
     source_path = recipe.parent / "sources/one.yaml"
@@ -2112,22 +2128,18 @@ def test_wikimedia_indexed_acquisition_matches_serial_and_reuses_members(
         with pytest.raises(ValueError, match="emitted JSONL exceeds limit"):
             acquire(load_project(recipe), tmp_path / "serial-cap")
     calls.clear()
-    index_uri = next(reversed(responses))
-    index = responses[index_uri]
-    spec["multistream_index"] = {
-        "uri": index_uri,
-        "expected_sha256": hashlib.sha256(index).hexdigest(),
-        "max_bytes": len(index),
-        "max_expanded_bytes": len(index_text),
-        "max_members": len(members),
-        "max_member_expanded_bytes": max(map(len, pieces)),
-    }
+    index = _fixture_index_options(responses, pieces, index_text)
+    spec["multistream_index"] = index
     _yaml(source_path, declaration)
     indexed = load_project(recipe)
     work = tmp_path / "indexed"
     if case == "byte_cap":
         with pytest.raises(ValueError, match="emitted JSONL exceeds limit"):
-            acquire(indexed, work)
+            acquire(
+                indexed,
+                work,
+                wikimedia_prefetch_bytes=index["max_member_expanded_bytes"],
+            )
         assert not (work / "corpora/example/acquisition.json").exists()
         return
 
@@ -2166,7 +2178,9 @@ def test_wikimedia_indexed_acquisition_matches_serial_and_reuses_members(
         (rows,) = (staged / "ranges/wikimedia-member").glob("*/rows.jsonl")
         rows.write_bytes(b"damaged")
 
-    lock = acquire(indexed, work)
+    lock = acquire(
+        indexed, work, wikimedia_prefetch_bytes=index["max_member_expanded_bytes"]
+    )
     manifest, output = _snapshot_payload(lock)
     assert output == serial_output
     assert (
@@ -2179,13 +2193,94 @@ def test_wikimedia_indexed_acquisition_matches_serial_and_reuses_members(
     )
     assert (
         manifest["retrieval"]["multistream_index"]["index_sha256"]
-        == hashlib.sha256(index).hexdigest()
+        == index["expected_sha256"]
     )
     first, *remaining = decoded
     assert remaining.count(first) == (case == "damaged")
     assert len(set(decoded)) == (1 if case == "scan_boundary" else 2)
     assert len(plans) == 1
     assert not calls and not staged.exists()
+
+
+def test_wikimedia_prefetch_overlaps_decode_without_changing_selected_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from klab.cli.main import build_parser
+    from klab.corpus import shards, wikimedia_ranges
+    from klab.corpus.release_verify import current_settings, verification_settings
+
+    monkeypatch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
+    recipe, responses, pieces, _, index_text = _multistream_wikimedia_fixture(
+        tmp_path, shared_members=True
+    )
+    source_path = recipe.parent / "sources/one.yaml"
+    declaration = yaml.safe_load(source_path.read_text())
+    index = _fixture_index_options(responses, pieces, index_text)
+    declaration["acquisition"].update(
+        multistream_index=index, max_scanned_pages=4, max_selected_pages=1
+    )
+    _yaml(source_path, declaration)
+    _serve_pinned(monkeypatch, responses)
+    project = load_project(recipe)
+    original = wikimedia_ranges.read_wikimedia_member
+    observed = []
+    admissions = []
+
+    def serial_decode(path, member, **options):
+        observed.append(member.expanded_bytes)
+        return original(path, member, **options)
+
+    def host_plan(stage, *, operator_cap, **_options):
+        if stage == "wikimedia member decode":
+            admissions.append(operator_cap)
+        return SimpleNamespace(workers=operator_cap)
+
+    monkeypatch.setattr(shards, "worker_count", lambda: current_settings().workers)
+    monkeypatch.setattr(shards, "plan_host_workers", host_plan)
+    monkeypatch.setattr(wikimedia_ranges, "read_wikimedia_member", serial_decode)
+    with verification_settings(workers=2):
+        serial = acquire(
+            project,
+            tmp_path / "serial",
+            wikimedia_prefetch_bytes=max(map(len, pieces)) - 1,
+        )
+    assert len(observed) == 1
+    assert not admissions
+
+    concurrent = threading.Barrier(2, timeout=10)
+    threads = set()
+
+    def parallel_decode(path, member, **options):
+        threads.add(threading.get_ident())
+        concurrent.wait()
+        if member.start != 0:
+            raise ValueError("speculative member must not affect the prefix")
+        return original(path, member, **options)
+
+    monkeypatch.setattr(wikimedia_ranges, "read_wikimedia_member", parallel_decode)
+    args = build_parser().parse_args(
+        [
+            "--work-dir",
+            str(tmp_path / "threaded"),
+            "corpus",
+            "acquire",
+            str(recipe),
+            "--cold",
+            "--workers",
+            "2",
+            "--wikimedia-prefetch-bytes",
+            str(max(map(len, pieces))),
+        ]
+    )
+    args.handler(args)
+    threaded = json.loads(capsys.readouterr().out)
+    assert admissions == [2]
+    assert len(threads) == 2
+    assert (
+        threaded["sources"]["one"]["snapshot_sha256"]
+        == serial["sources"]["one"]["snapshot_sha256"]
+    )
+    assert _snapshot_payload(threaded) == _snapshot_payload(serial)
 
 
 def test_wikimedia_download_checks_sha1_even_with_matching_sha256(

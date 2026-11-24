@@ -24,6 +24,7 @@ import pytest
 from klab.canonical import canonical_digest
 from klab.corpus import acquisition
 from klab.corpus.project import load_project
+from klab.corpus.release_verify import verification_settings, worker_count
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 from corpus_fixtures import (
@@ -268,7 +269,14 @@ def fixture(
     return load_project(recipe), http_calls, hub_calls, len(bodies.get(uri, b""))
 
 
-def benchmark(root: Path, kind: str, size: int, trials: int, interruption: str) -> None:
+def benchmark(
+    root: Path,
+    kind: str,
+    size: int,
+    trials: int,
+    interruption: str,
+    prefetch_bytes: int,
+) -> None:
     with pytest.MonkeyPatch.context() as patch:
         project, http, hub, pinned_bytes = fixture(
             root, kind, size, patch, indexed=interruption == "member-checkpoint"
@@ -315,10 +323,22 @@ def benchmark(root: Path, kind: str, size: int, trials: int, interruption: str) 
         expected_digest = None
         for cached in modes:
             elapsed = []
+            cold_elapsed = []
             for _ in range(trials):
                 with tempfile.TemporaryDirectory(dir=root) as attempt:
-                    work = Path(attempt) / "work"
-                    cache = Path(attempt) / "cache" if cached else None
+                    trial_root = Path(attempt)
+                    cold_entry = None
+                    if interruption == "member-checkpoint" and not cached:
+                        started = time.perf_counter()
+                        cold_lock = acquisition.acquire(
+                            project,
+                            trial_root / "cold",
+                            wikimedia_prefetch_bytes=prefetch_bytes,
+                        )
+                        cold_elapsed.append(time.perf_counter() - started)
+                        cold_entry = cold_lock["sources"]["one"]
+                    work = trial_root / "work"
+                    cache = trial_root / "cache" if cached else None
                     parent = work / "corpora/example"
                     snapshots = parent / "snapshots/one"
                     with pytest.MonkeyPatch.context() as fault:
@@ -329,7 +349,12 @@ def benchmark(root: Path, kind: str, size: int, trials: int, interruption: str) 
                         else:
                             fault.setattr(acquisition, "verify_snapshot", interrupt)
                         try:
-                            acquisition.acquire(project, work, transport_cache=cache)
+                            acquisition.acquire(
+                                project,
+                                work,
+                                transport_cache=cache,
+                                wikimedia_prefetch_bytes=prefetch_bytes,
+                            )
                         except Interrupted:
                             pass
                         else:
@@ -345,9 +370,19 @@ def benchmark(root: Path, kind: str, size: int, trials: int, interruption: str) 
                     for calls in (http, hub, fetches, blob_processes):
                         calls.clear()
                     started = time.perf_counter()
-                    lock = acquisition.acquire(project, work, transport_cache=cache)
+                    lock = acquisition.acquire(
+                        project,
+                        work,
+                        transport_cache=cache,
+                        wikimedia_prefetch_bytes=prefetch_bytes,
+                    )
                     elapsed.append(time.perf_counter() - started)
                     entry = lock["sources"]["one"]
+                    if (
+                        cold_entry
+                        and entry["snapshot_sha256"] != cold_entry["snapshot_sha256"]
+                    ):
+                        raise RuntimeError("snapshot identity changed on resume")
                     manifest = verify(Path(entry["snapshot_path"]))
                     digest = canonical_digest(manifest["files"])
                     if expected_digest is None:
@@ -383,6 +418,11 @@ def benchmark(root: Path, kind: str, size: int, trials: int, interruption: str) 
                         "adapter": kind,
                         "interruption": interruption,
                         "warm_transport_cache": cached,
+                        "worker_limit": worker_count(),
+                        "wikimedia_prefetch_bytes": prefetch_bytes,
+                        "median_cold_seconds": round(statistics.median(cold_elapsed), 6)
+                        if cold_elapsed
+                        else None,
                         "median_retry_seconds": round(statistics.median(elapsed), 6),
                         "trials": trials,
                         "pinned_body_bytes": pinned_bytes or None,
@@ -415,6 +455,8 @@ def main() -> None:
         "--trials", type=int, choices=range(1, 11), default=3, metavar="1..10"
     )
     parser.add_argument("--scratch-dir", type=Path, default=None)
+    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--wikimedia-prefetch-bytes", type=int, default=0)
     parser.add_argument(
         "--interrupt-at",
         choices=("prepublish", "mid-xml", "member-checkpoint"),
@@ -428,17 +470,29 @@ def main() -> None:
     kinds = args.adapter or allowed
     if any(kind not in allowed for kind in kinds):
         parser.error("--interrupt-at requires an eligible adapter")
+    if args.workers < 1 or args.wikimedia_prefetch_bytes < 0:
+        parser.error(
+            "--workers must be positive and --wikimedia-prefetch-bytes nonnegative"
+        )
     for kind in kinds:
         with (
             tempfile.TemporaryDirectory(
                 prefix="klab-replay-", dir=args.scratch_dir
             ) as scratch,
             pytest.MonkeyPatch.context() as patch,
+            verification_settings(workers=args.workers),
         ):
             root = Path(scratch)
             patch.setenv("XDG_CONFIG_HOME", str(root / "config"))
             patch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
-            benchmark(root, kind, args.size_mib * MIB, args.trials, args.interrupt_at)
+            benchmark(
+                root,
+                kind,
+                args.size_mib * MIB,
+                args.trials,
+                args.interrupt_at,
+                args.wikimedia_prefetch_bytes,
+            )
 
 
 if __name__ == "__main__":

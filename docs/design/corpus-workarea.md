@@ -374,10 +374,55 @@ After interruption following the first 100-page checkpoint, the median
 retry was 0.495 s with zero requests. It decoded the remaining 156 pages,
 returned 9.77 MiB of expanded data to the extractor, and peaked at
 40.36 MiB of staged files while assembling the snapshot. Output digests
-matched serial acquisition. Run the replay benchmark with
-`--adapter wikimedia_dump --interrupt-at member-checkpoint` for this
-interruption case. [#587](https://github.com/supernovae/model-lab/issues/587)
-tracks parallel execution and representative dump measurements.
+matched serial acquisition.
+
+Indexed acquisition can now overlap bzip2 decoding with ordered XML
+selection and commits. It uses the shared shard runner, an explicit
+extra buffer budget, and the existing member checkpoints. The cold range
+planner is still serial. Speculative workers write no stage files. Changing
+the worker count leaves the acquisition identity unchanged.
+
+Three trials per setting on tmpfs used a 64 MiB prefetch allowance for
+three workers. The resumed run started after one of three page members
+committed, with no transport cache configured. Times include range
+verification on a cold acquisition. Peak staging and decoded bytes are
+from the acquisition receipts.
+
+| Synthetic page text | Cold, 1 / 3 workers | Resumed, 1 / 3 workers | Retry expanded | Peak staging, both |
+| --- | --- | --- | --- | --- |
+| 16 MiB | 1.192 / 0.947 s | 0.494 / 0.405 s | 9.77 MiB | 40.36 MiB |
+| 64 MiB | 4.708 / 3.773 s | 1.957 / 1.608 s | 39.02 MiB | 160.83 MiB |
+
+Both worker counts produced identical payload and snapshot digests with
+zero retry requests. The benchmark process peaked at 174 / 193 MiB RSS
+for the 16 MiB fixture and 458 / 514 MiB for 64 MiB, including in-memory
+fixture construction and transport. Run `tools/benchmark_acquisition_replay.py`
+with `--adapter wikimedia_dump --interrupt-at member-checkpoint` and
+compare `--workers 1` with `--workers 3 --wikimedia-prefetch-bytes 67108864`.
+
+The first dated English Wikipedia shard (`p1p41242`, 2026-11-01,
+287.04 MiB compressed) was also replayed from pinned local files on
+NVMe ext4. Each run used a fresh work root or resumed its own hard stop.
+The operating system page cache was left in place. The recipe capped
+selection at 5,000 pages and scanning at 24,000. The selected prefix used
+82 page members and produced 83.96 MiB of JSONL. The interrupted runs
+received `SIGKILL` after the 25th member commit. [Dated dump inventory](https://dumps.wikimedia.org/enwiki/20261101/)
+
+| Real shard, one run per setting | 1 worker | 3 workers, 64 MiB prefetch |
+| --- | --- | --- |
+| Cold acquisition | 56.67 s, 185 MiB peak RSS | 46.26 s, 199 MiB peak RSS |
+| Time to hard stop, including startup | 35.09 s, 154 MiB peak RSS | 35.29 s, 164 MiB peak RSS |
+| Resumed acquisition | 19.42 s, 174 MiB peak RSS | 13.53 s, 193 MiB peak RSS |
+| Retry expanded bytes | 237.92 MiB | 245.63 MiB |
+| Peak staging, completed attempts | 455.89 MiB | 455.89 MiB |
+
+All four completed attempts had identical snapshot and payload digests
+and the same ordered page and revision IDs. Both resumed without
+transport requests. Three workers expanded about 7.7 MiB of additional
+input speculatively near the selection boundary. Cold range verification
+and per-member commits remain part of the elapsed time. Parallel
+decoding stays opt-in because the improvement and memory cost depend on
+the input and storage. Slower storage and wider ranges remain unmeasured.
 
 ## Relational Knowledge Microlab
 

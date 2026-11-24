@@ -241,11 +241,26 @@ Use the matching dated index and its known SHA-256. Acquisition verifies
 the entire dump at the declared decompressed-byte bound before extracting
 the selected prefix. The XML header must fit `max_header_bytes` (default
 1 MiB). Each visited member must fit the declared expanded-member bound.
-Members run in source order so the scan, selection, and output limits
+Selection runs in source order so the scan, selection, and output limits
 apply even inside a member. During assembly the selected JSONL exists
 both in member checkpoints and in the staged snapshot. Acquisition
 removes the checkpoints after publication. A retry checks compressed
 input integrity and verifies the completed output files.
+
+Indexed acquisition can overlap bzip2 decoding with ordered selection.
+Set an explicit budget for expanded bytes held ahead of the current
+member. The largest member eligible for the scan sets the per-slot
+allowance. Available RAM, CPU affinity and `--workers` can lower
+concurrency. The default budget is zero. Near a selection limit, workers
+may finish decoding unused members in memory. Only selected rows are
+staged, and the output and its identity are independent of worker count.
+Member checkpoints are bound to the acquisition adapter implementation.
+After updating the adapter, a partial indexed acquisition starts a new
+plan. Published snapshots remain reusable after verification.
+
+```sh
+klab corpus acquire PROJECT --workers 3 --wikimedia-prefetch-bytes 67108864
+```
 
 ### What identifies an acquisition
 
@@ -985,8 +1000,9 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   a single-process run. A file smaller than a few hundred MB is read in-process.
   The same option is accepted by `klab tokenizer train`, `klab tokenizer verify`,
   `klab corpus export`, `klab corpus derive-family-inventory`, `klab corpus materialize-mixture` and `klab corpus verify-mixture`. Each parallel stage prints `STAGE: N shards, up to W workers` when it
-  starts and `STAGE: S s wall, C s cpu, K cores used, reused R/N` when it ends,
-  where cores used is CPU seconds over wall seconds.
+  starts and `STAGE: S s wall, C s cpu, K cores used` when it ends. Cores used
+  is CPU seconds over wall seconds. Stages whose receipts are managed by the
+  shard runner also report `reused R/N`.
 - **Worker capacity.** The shard runner also caps large parallel passes by
   CPU affinity and available RAM. Its default planning estimate is 512 MiB
   per worker slot with 1 GiB left for the coordinator and other work. It
@@ -1003,6 +1019,7 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
 
   | Stage | Parallelism |
   | --- | --- |
+  | `wikimedia member decode` | opt-in threaded decoding of verified compressed members, consumed and checkpointed in source order |
   | `release verification` | shardable: byte ranges of the release files |
   | `tokenizer sampling: TRAIN lineage` | shardable: byte ranges of the lineage view |
   | `family inventory` | shardable: byte ranges of `documents.jsonl`, written in file order |

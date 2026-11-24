@@ -20,7 +20,13 @@ import resource
 import sys
 import time
 from collections.abc import Callable, Iterator
-from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Future,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    wait,
+)
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
@@ -70,6 +76,8 @@ class ShardPlan:
     inputs: dict[str, Any] = field(default_factory=dict)
     store: Path | None = None
     worker_memory_bytes: int = 512 * 1024**2
+    threaded: bool = False
+    operator_cap: int | None = None
 
 
 def chunk_ranges(path: Path) -> list[tuple[int, int]]:
@@ -187,23 +195,34 @@ def _limit_native_threads() -> None:
     )
 
 
+@contextmanager
+def _worker_pool(workers: int, *, threaded: bool):
+    if threaded:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            yield pool
+        return
+    with (
+        _workers_without_main(),
+        ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=_limit_native_threads,
+        ) as pool,
+    ):
+        yield pool
+
+
 def _pool_results(
     function: Callable[..., Any],
     jobs: Iterator[tuple[tuple, Any]],
     workers: int,
     ordered: bool,
+    *,
+    threaded: bool,
 ) -> Iterator[tuple[tuple, Any, bool]]:
     """Keep at most one running, completed or cached result per slot."""
     pending: dict[Future, tuple[tuple, bool]] = {}
-    context = multiprocessing.get_context("spawn")
-    with (
-        _workers_without_main(),
-        ProcessPoolExecutor(
-            max_workers=workers,
-            mp_context=context,
-            initializer=_limit_native_threads,
-        ) as pool,
-    ):
+    with _worker_pool(workers, threaded=threaded) as pool:
         try:
             while True:
                 for task, cached in jobs:
@@ -244,10 +263,12 @@ def _run_sharded(
         raise ValueError(f"stage {plan.stage!r} is not declared with declare_stage")
     declared = STAGES[plan.stage]
     workers = min(worker_count(), len(plan.tasks))
+    if plan.operator_cap is not None:
+        workers = min(workers, plan.operator_cap)
     if (
         workers < 2
         or isinstance(declared, Single)
-        or plan.total_bytes < PARALLEL_MIN_BYTES
+        or (not plan.threaded and plan.total_bytes < PARALLEL_MIN_BYTES)
     ):
         workers = 1
     else:
@@ -276,7 +297,7 @@ def _run_sharded(
             for task, cached in jobs
         )
         if workers == 1
-        else _pool_results(function, jobs, workers, ordered)
+        else _pool_results(function, jobs, workers, ordered, threaded=plan.threaded)
     )
     try:
         for task, result, from_cache in results:
@@ -295,9 +316,12 @@ def _run_sharded(
         if echo is not None:
             wall = max(time.monotonic() - started, 1e-9)
             used = _cpu_seconds() - cpu
+            reuse = (
+                f", reused {reused}/{len(plan.tasks)}" if plan.store is not None else ""
+            )
             print(
                 f"{plan.stage}: {wall:.1f}s wall, {used:.1f}s cpu, "
-                f"{used / wall:.1f} cores used, reused {reused}/{len(plan.tasks)}",
+                f"{used / wall:.1f} cores used{reuse}",
                 file=echo,
                 flush=True,
             )
@@ -306,7 +330,7 @@ def _run_sharded(
 def run_sharded(
     plan: ShardPlan, function: Callable[..., Any], *, ordered: bool = False
 ) -> Iterator[Any]:
-    """Yield small results in plan order or as they finish, checkpointing JSON to store."""
+    """Yield bounded results in plan order or as they finish, checkpointing JSON to store."""
     store = plan.store
     if store is not None:
         store.mkdir(parents=True, exist_ok=True)

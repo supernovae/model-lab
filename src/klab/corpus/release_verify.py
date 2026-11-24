@@ -99,8 +99,8 @@ def add_workers_flag(command: Any) -> None:
     command.add_argument(
         "--workers",
         type=int,
-        help="Worker processes for parallel passes over corpus files (default: "
-        f"half the CPU count, {default_workers()} here; 1 runs in one process)",
+        help="Worker limit for parallel corpus passes (default: "
+        f"half the CPU count, {default_workers()} here; 1 runs serially)",
     )
 
 
