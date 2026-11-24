@@ -19,13 +19,16 @@ from urllib.parse import urlencode
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
 from klab.dashboard import (
     engram_view,
     generation,
     inspection,
     lab_pages,
+    run_overview,
     runs_hub,
     training_charts,
     ui,
@@ -198,12 +201,9 @@ def _selection_controls(root: Path) -> None:
                 "Linked run is unavailable or hidden in this store. No substitute selected."
             )
             st.session_state["selected_runs"] = []
-    if active:
-        if st.sidebar.button("Focus recorded running runs"):
-            st.session_state["selected_runs"] = active
-            st.query_params.pop("run", None)
-    else:
-        st.sidebar.info("No runs recorded as running in this store.")
+    if active and st.sidebar.button("Focus recorded running runs"):
+        st.session_state["selected_runs"] = active
+        st.query_params.pop("run", None)
     previous = st.session_state.get("selected_runs", active or ids[:1])
     st.session_state["selected_runs"] = [run_id for run_id in previous if run_id in ids]
     names = {
@@ -437,31 +437,71 @@ def comparison(records: list[RunRecord], view: DashboardSnapshot) -> None:
 def overview(view: DashboardSnapshot, root: Path | None = None) -> None:
     st.header("Overview")
     records, selected_ids = selected(view)
-    if root is not None:
-        generation.checkpoint_summary(root, selected_ids, view)
     if not records:
         st.info("No eligible runs yet. Smoke and warmup pilots are hidden by default.")
         return
-    st.dataframe(
-        [
-            {
-                "run_id": item.run_id,
-                "name": item.name,
-                "status": item.status,
-                "parent": item.parent_run_id or "unavailable",
-                "updated_at": item.updated_at,
-                **architecture(item),
-            }
-            for item in records
-        ],
-        width="stretch",
-        hide_index=True,
-    )
-    comparison([record for record in records if record.run_id in selected_ids], view)
+    chosen = [record for record in records if record.run_id in selected_ids]
+    for record in chosen:
+        tiles = run_overview.facts(record)
+        if tiles:
+            st.markdown(
+                (f"**{html.escape(record.run_id)}**" if len(chosen) > 1 else "")
+                + ui.tiles(tiles, minimum=200),
+                unsafe_allow_html=True,
+            )
+    comparison(chosen, view)
     selected_events = _rows_for(view.events, selected_ids)
+    happened = run_overview.timeline(selected_events)
+    if happened:
+        st.subheader("What happened")
+        st.caption(
+            "Events that changed the run's course, newest first. Stage changes and "
+            "validations are left out; every event is in the table below."
+        )
+        shown = happened[:20]
+        st.markdown(
+            "<table class='pb-table'><tr><th>Step</th><th>Event</th><th>Detail</th>"
+            + ("<th>Run</th>" if len(chosen) > 1 else "")
+            + "</tr>"
+            + "".join(
+                f"<tr><td class='nw'>{int(row['step']):,}</td>"  # type: ignore[call-overload]
+                f"<td class='nw'>{ui.chip(str(row['level']), str(row['label']))}</td>"
+                f"<td>{html.escape(str(row['detail']))}</td>"
+                + (
+                    f"<td class='nw'>{html.escape(str(row['run_id']))}</td>"
+                    if len(chosen) > 1
+                    else ""
+                )
+                + "</tr>"
+                for row in shown
+            )
+            + "</table>",
+            unsafe_allow_html=True,
+        )
+        if len(happened) > len(shown):
+            st.caption(f"Showing the newest {len(shown)} of {len(happened)}.")
+    if root is not None:
+        st.subheader("Saved checkpoints")
+        generation.checkpoint_summary(root, selected_ids, view)
     if selected_events:
-        st.subheader("Events")
-        st.dataframe(selected_events, width="stretch", hide_index=True)
+        with st.expander("Every recorded event"):
+            st.dataframe(selected_events, width="stretch", hide_index=True)
+    with st.expander("Every run in this store"):
+        st.dataframe(
+            [
+                {
+                    "run_id": item.run_id,
+                    "name": item.name,
+                    "status": item.status,
+                    "parent": item.parent_run_id or "unavailable",
+                    "updated_at": item.updated_at,
+                    **architecture(item),
+                }
+                for item in records
+            ],
+            width="stretch",
+            hide_index=True,
+        )
 
 
 def _runtime_forecast_panel(view: DashboardSnapshot, selected_ids: list[str]) -> None:
@@ -770,6 +810,49 @@ def runtime_view(view: DashboardSnapshot) -> None:
         st.markdown(metric_help("runtime"))
 
 
+def _memory_chart(points: list[dict[str, object]]) -> Any:
+    """One panel per reading, in GiB, with a title a person can read."""
+    names = sorted({str(point["name"]) for point in points})
+    runs_shown = sorted({str(point["run_id"]) for point in points})
+
+    def title(name: str) -> str:
+        return (
+            name.split("/", 1)[1].removesuffix("_bytes").replace("_", " ").capitalize()
+        )
+
+    figure = make_subplots(
+        rows=len(names),
+        cols=1,
+        shared_xaxes=True,
+        subplot_titles=[title(name) for name in names],
+        vertical_spacing=min(0.08, 0.5 / max(1, len(names))),
+    )
+    palette = list(ui.SERIES.values())
+    for row, name in enumerate(names, start=1):
+        in_bytes = name.endswith("_bytes")
+        for index, run_id in enumerate(runs_shown):
+            own = [p for p in points if p["name"] == name and p["run_id"] == run_id]
+            figure.add_trace(
+                go.Scatter(
+                    x=[p["step"] for p in own],
+                    y=[float(p["value"]) / (2**30 if in_bytes else 1) for p in own],  # type: ignore[arg-type]
+                    name=run_id,
+                    legendgroup=run_id,
+                    showlegend=row == 1,
+                    mode="lines",
+                    line={"color": palette[index % len(palette)], "width": 1.6},
+                    hovertemplate="step %{x:,}<br>%{y:.2f}"
+                    + (" GiB" if in_bytes else "")
+                    + "<extra></extra>",
+                ),
+                row=row,
+                col=1,
+            )
+        figure.update_yaxes(title_text="GiB" if in_bytes else "", row=row, col=1)
+    figure.update_xaxes(title_text="Optimizer step", row=len(names), col=1)
+    return ui.figure_layout(figure, height=max(320, 210 * len(names)))
+
+
 def memory_view(view: DashboardSnapshot) -> None:
     st.header("Memory")
     records, selected_ids = selected(view)
@@ -792,15 +875,12 @@ def memory_view(view: DashboardSnapshot) -> None:
     ]
     sampled = [point for point in values if point["name"] in _MEMORY_SAMPLED]
     if native:
-        st.subheader("Native allocator readings")
-        st.plotly_chart(
-            px.line(native, x="step", y="value", color="run_id", facet_row="name")
-            .update_yaxes(matches=None)
-            .update_layout(
-                height=max(350, 220 * len({point["name"] for point in native}))
-            ),
-            width="stretch",
+        st.subheader("Device memory, from the framework's allocator")
+        st.caption(
+            "Allocated is what tensors hold now; reserved is what the allocator keeps "
+            "from the device; peaks are the highest value seen since the run started."
         )
+        st.plotly_chart(_memory_chart(native), width="stretch", key="memory-native")
     else:
         st.info(
             "Native allocator readings are unavailable for the selected non-MLX runs."
@@ -808,29 +888,21 @@ def memory_view(view: DashboardSnapshot) -> None:
     if mlx_native:
         st.subheader("MLX Metal memory")
         st.plotly_chart(
-            px.line(mlx_native, x="step", y="value", color="run_id", facet_row="name")
-            .update_yaxes(matches=None)
-            .update_layout(
-                height=max(350, 220 * len({point["name"] for point in mlx_native}))
-            ),
-            width="stretch",
+            _memory_chart(mlx_native), width="stretch", key="memory-mlx_native"
         )
         st.caption(
             "MLX active, peak, and cache memory are Metal framework measurements. "
             "Cache memory is neither allocator-reserved nor driver-allocated memory."
         )
-    else:
+    elif mlx_run_ids & set(selected_ids):
         st.info("MLX Metal memory is unavailable for the selected runs.")
     if sampled:
-        st.subheader("Sampled and host readings")
-        st.plotly_chart(
-            px.line(sampled, x="step", y="value", color="run_id", facet_row="name")
-            .update_yaxes(matches=None)
-            .update_layout(
-                height=max(350, 220 * len({point["name"] for point in sampled}))
-            ),
-            width="stretch",
+        st.subheader("Host memory")
+        st.caption(
+            "RSS is the training process's memory in RAM. System available is what "
+            "the whole machine has left: when it falls, the run is close to swapping."
         )
+        st.plotly_chart(_memory_chart(sampled), width="stretch", key="memory-sampled")
         st.caption(
             "Sampled device peaks are lower bounds; host RSS is not added to device capacity."
         )
@@ -1248,7 +1320,8 @@ def render(root: Path, page: str) -> None:
         generation.generation_page(None, root, [])
         return
     header = st.container()
-    st.button(
+    status_row = st.container(horizontal=True, vertical_alignment="center")
+    status_row.button(
         "Refresh now",
         key="dashboard_refresh",
         help="Read the current recorded values without reloading the page.",
@@ -1261,7 +1334,7 @@ def render(root: Path, page: str) -> None:
     if error:
         st.error(f"Showing stale data ({_observation_age(observed_at)} old): {error}")
     else:
-        st.caption(
+        status_row.caption(
             f"Observed at {observed_at:%H:%M:%S} UTC · "
             + (
                 f"Refreshes every {st.session_state.get('refresh_seconds', 10)} seconds."

@@ -57,6 +57,18 @@ SEQUENTIAL = "Viridis"
 
 CSS = """
 <style>
+/* Type and spacing: quieter headings, one accent, numbers that line up. */
+h1 {font-size:1.7rem !important; font-weight:680 !important; letter-spacing:-.01em;}
+h2 {font-size:1.45rem !important; font-weight:660 !important; letter-spacing:-.01em;
+  padding-top:.4rem !important;}
+h3 {font-size:1.08rem !important; font-weight:640 !important;}
+h5 {font-size:.78rem !important; text-transform:uppercase; letter-spacing:.06em;
+  opacity:.7; padding-top:.9rem !important;}
+[data-testid="stSidebar"] {border-right:1px solid rgba(128,128,128,.18);}
+[data-testid="stVerticalBlockBorderWrapper"] {border-radius:12px;}
+[data-testid="stExpander"] details {border-radius:10px;}
+[data-testid="stCaptionContainer"] {line-height:1.45;}
+.pb-table {font-variant-numeric:tabular-nums;}
 .rh-head {display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:6px;}
 .rh-head .n {font-size:1.15rem; font-weight:650;}
 .rh-bar {height:8px; border-radius:6px; background:rgba(128,128,128,.18); margin:6px 0 12px 0;}
