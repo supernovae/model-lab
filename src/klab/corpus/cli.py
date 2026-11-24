@@ -96,19 +96,10 @@ def _run(args: argparse.Namespace) -> None:
 
     root = resolve_work_dir(args.work_dir)
     command = args.corpus_command
-    if getattr(args, "transport_cache", None) is not None:
-        from klab.corpus.transport_cache import (
-            TRANSPORT_CACHE_ENV,
-            resolve_transport_cache,
-        )
-
-        os.environ[TRANSPORT_CACHE_ENV] = str(
-            resolve_transport_cache(args.transport_cache)
-        )
     if command in {"cache-fill", "cache-list", "cache-prune"}:
         from klab.corpus.transport_cache import TransportCache, resolve_transport_cache
 
-        cache_root = resolve_transport_cache()
+        cache_root = resolve_transport_cache(args.transport_cache)
         if cache_root is None:
             raise ValueError(
                 "no transport cache: pass --transport-cache or set KLAB_TRANSPORT_CACHE"
@@ -429,6 +420,7 @@ def _run(args: argparse.Namespace) -> None:
                 min_free_bytes=args.min_free_bytes,
                 plan_only=args.plan,
                 require_existing=args.require_existing,
+                transport_cache=args.transport_cache,
                 **verification,
             )
             if args.require_existing:

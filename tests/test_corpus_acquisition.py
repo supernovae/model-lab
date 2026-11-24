@@ -2102,6 +2102,8 @@ def test_cache_fill_downloads_bodies_but_makes_no_snapshot_then_acquire_is_free(
     content = b'{"text":"one"}\n'
     recipe = _bounded_hf_fixture(tmp_path, content, "default/train/data.jsonl", rows=1)
     cache, root = tmp_path / "cold", tmp_path / "work"
+    configured_cache = str(tmp_path / "environment-cache")
+    monkeypatch.setenv("KLAB_TRANSPORT_CACHE", configured_cache)
     calls = _mock_hf_stream(monkeypatch, content)
 
     def run(*arguments: str) -> object:
@@ -2121,6 +2123,7 @@ def test_cache_fill_downloads_bodies_but_makes_no_snapshot_then_acquire_is_free(
 
     filled = run("cache-fill", str(recipe))
     assert filled["sources"][0]["bodies"][0]["served_from"] == "network"
+    assert os.environ["KLAB_TRANSPORT_CACHE"] == configured_cache
     assert len(calls) == 1
     assert not list((root / "corpora/example/snapshots").rglob("manifest.json"))
     assert not (root / "corpora/example/acquisition.json").exists()
