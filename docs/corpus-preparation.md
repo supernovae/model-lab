@@ -127,6 +127,13 @@ per source and then an acquisition lock binding them.
   Successful publication moves the staged files into the snapshot and removes
   the checkpoint receipts. See [recovery by source adapter](#recovery-by-source-adapter)
   for the replay boundary of each source kind.
+- **Retry an archive or MediaWiki dump.** Use the same source declaration
+  and transport ledger to resume from the private checkpoint beside the
+  snapshots. A finished derivation is verified and published from staging.
+  If only the body verifies, extraction starts again from that local body.
+  Source-step plans report `pinned_checkpoint_reuse` as `derivation`, `body`,
+  or null. A request change gets a separate checkpoint. Publishing removes
+  the working copy of the downloaded body.
 - **Observed rather than enforced limits.** On a local workflow where the owner
   wants time, network or storage observed rather than capped,
   `corpus budget-observe-time`, `budget-observe-network` and
@@ -161,8 +168,9 @@ need available allowance in the ledger.
 | Hugging Face with `include` | The Hub client's download cache can supply files at the pinned revision. | Resolve the file set through the Hub client, validate selected rows and copy the selected files again. |
 | Hugging Face retained subset | The verified local parent snapshot. | Replay the bounded selection from the parent. Cold verification also checks the derivative against its parent. |
 | PDF documents | Verified originals and receipted extracted text. | Transfer or extract unfinished and damaged documents as needed. Cold verification also re-extracts the published text. |
-| Tar, compressed tar or ZIP archive | The optional transport cache can supply the complete pinned body. | Copy or download the body and repeat selection and extraction, including for ZIP. |
-| MediaWiki and Wikimedia dumps | The optional transport cache can supply the complete pinned body. | Copy or download the body and replay the XML stream from the start. A Wikimedia cache miss also fetches the checksum manifest. |
+| Tar, compressed tar or ZIP archive | A complete staged body or a verified staged derivation. The optional transport cache can supply a missing body. | An unfinished derivation repeats selection and extraction. A finished derivation is verified and published. |
+| MediaWiki dump | A complete staged body or a verified staged derivation. The optional transport cache can supply a missing body. | An unfinished derivation replays the XML stream from the start. A finished derivation is verified and published. |
+| Wikimedia dump | The optional transport cache can supply the complete pinned body. | Copy or download the body and replay the XML stream from the start. A cache miss also fetches the checksum manifest. |
 | Deterministic or recorded-response generator | Acquisition records the declared generator identity without producing documents. | Recreate the metadata-only snapshot if it was unfinished. Generation follows the build workflow. |
 
 A hard kill can leave a transient `.acquire-*` directory containing an

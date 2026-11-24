@@ -1252,6 +1252,63 @@ def test_archive_plan_step_snapshot_and_reviewed_release(
     assert verify_release(published)["release_id"] == published.name
 
 
+@pytest.mark.parametrize("damage", ["none", "derivation", "both"])
+def test_archive_recovery_checks_staged_body_and_derivation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    from klab.corpus import acquisition
+
+    text = b"pinned source text\n"
+    body = _tar_gz([("rfc1.txt", text, None)])
+    recipe = _archive_recipe(tmp_path, body, budget=True)
+    project = load_project(recipe)
+    work = tmp_path / "work"
+    ledger = work / "corpora/example/transport-budget.sqlite"
+    TransportBudget.initialize(ledger, project)
+    calls = _serve_pinned(monkeypatch, {_RFC_URL: body})
+    step = {"source_id": "one", "max_new_bytes": 1 << 30, "min_free_bytes": 0}
+    real_verify = acquisition.verify_snapshot
+    real_derive = acquisition._acquire_archive
+    extractions = []
+
+    def interrupt(path, **options):
+        if options.get("_staged"):
+            raise OSError("stop before staged verification")
+        return real_verify(path, **options)
+
+    def count(*args, **kwargs):
+        extractions.append(1)
+        return real_derive(*args, **kwargs)
+
+    monkeypatch.setattr(acquisition, "_acquire_archive", count)
+    with monkeypatch.context() as fault:
+        fault.setattr(acquisition, "verify_snapshot", interrupt)
+        with pytest.raises(OSError, match="stop before staged verification"):
+            acquire(project, work, **step)
+    assert not (ledger.parent / "acquisition.json").exists()
+    parent = ledger.parent / "snapshots/one"
+    (checkpoint,) = parent.glob(".archive-parts-*")
+    if damage != "none":
+        (checkpoint / "snapshot/files/rfc1.txt").write_bytes(b"damaged")
+    if damage == "both":
+        (checkpoint / "input/RFC-all.tar.gz").write_bytes(b"damaged")
+
+    plan = acquire(project, work, plan_only=True, **step)["admission"]
+    assert (
+        plan["pinned_checkpoint_reuse"]
+        == {"none": "derivation", "derivation": "body", "both": None}[damage]
+    )
+    assert acquire(project, work, **step)["status"] == "source_verified"
+    lock = acquire(project, work, require_existing=True)
+    assert not checkpoint.exists()
+    assert _snapshot_payload(lock)[1] == {"rfc1.txt": text}
+    assert len(extractions) == (1 if damage == "none" else 2)
+    assert len(calls) == (2 if damage == "both" else 1)
+    assert TransportBudget(ledger, project).receipt()["source_actual"] == len(
+        calls
+    ) * len(body)
+
+
 @pytest.mark.parametrize(
     ("members", "tamper", "message"),
     [
@@ -1274,8 +1331,9 @@ def test_archive_refuses_unsafe_members_and_unpinned_bytes(
     with pytest.raises(ValueError, match=message):
         acquire(project, tmp_path / "work")
     assert not (tmp_path / "work/corpora/example/acquisition.json").exists()
-    published = (tmp_path / "work/corpora/example/snapshots/one").iterdir()
-    assert [path.name for path in published] == [".resource-receipts"]
+    snapshots = tmp_path / "work/corpora/example/snapshots/one"
+    assert not any(not path.name.startswith(".") for path in snapshots.iterdir())
+    assert not list(snapshots.glob(".archive-parts-*/snapshot/manifest.json"))
 
 
 def _pdf(text: str) -> bytes:

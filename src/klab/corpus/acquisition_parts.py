@@ -81,6 +81,40 @@ class AcquisitionParts:
             parent = parent.parent
 
 
+class PinnedBodyParts(AcquisitionParts):
+    """Retain one pinned input independently of its derived snapshot."""
+
+    def __init__(
+        self,
+        parent: Path,
+        identity: str,
+        *,
+        adapter: str,
+        name: str,
+        sha256: str,
+        max_bytes: int,
+    ):
+        super().__init__(parent, identity, adapter=adapter)
+        self.name = name
+        self.sha256 = sha256
+        self.max_bytes = max_bytes
+        self.body = self.root / "input" / name
+        self.manifest = self.staging / "manifest.json"
+
+    def verified_body(self) -> int | None:
+        return self.verified_size(self.body, self.sha256, self.max_bytes)
+
+    def manifest_size(self) -> int | None:
+        self._check_root()
+        return self.staged_file_size(self.manifest)
+
+    def reset_derivation(self) -> None:
+        self.manifest.unlink(missing_ok=True)
+        files = self.staging / "files"
+        if files.exists() or files.is_symlink():
+            shutil.rmtree(files)
+
+
 class ReceiptedParts(AcquisitionParts):
     """Bind derived output receipts to their request and logical part."""
 
@@ -273,13 +307,13 @@ class PDFParts(ReceiptedParts):
 
 @contextmanager
 def acquisition_staging(parent: Path, parts: AcquisitionParts | None) -> Iterator[Path]:
+    for sibling in sorted(parent.glob(".acquire-*")):
+        if not sibling.is_symlink() and sibling.is_dir():
+            print(
+                f"existing acquisition staging retained at {sibling}",
+                file=sys.stderr,
+            )
     if parts is None:
-        for sibling in sorted(parent.glob(".acquire-*")):
-            if not sibling.is_symlink() and sibling.is_dir():
-                print(
-                    f"existing acquisition staging retained at {sibling}",
-                    file=sys.stderr,
-                )
         with tempfile.TemporaryDirectory(prefix=".acquire-", dir=parent) as temporary:
             yield Path(temporary)
         return

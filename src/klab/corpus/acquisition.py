@@ -34,6 +34,7 @@ from klab.corpus.acquisition_parts import (
     AcquisitionParts,
     HFParts,
     PDFParts,
+    PinnedBodyParts,
     acquisition_staging,
     pinned_pdf_path,
 )
@@ -62,6 +63,7 @@ from klab.corpus.release_verify import worker_count
 from klab.corpus.transport_budget import (
     PINNED_FILE_KINDS,
     TransportBudget,
+    pinned_transfers,
     source_file_name,
 )
 from klab.corpus.transport_cache import (
@@ -1356,6 +1358,42 @@ def bounded_hf_parts(
     )
 
 
+def pinned_body_parts(
+    parent: Path, source: SourceDeclaration, budget: TransportBudget | None
+) -> PinnedBodyParts | None:
+    """Bind the archive or MediaWiki body and derivation to this request."""
+    if source.kind not in {"archive", "mediawiki_dump"}:
+        return None
+    ((name, max_bytes),) = pinned_transfers(source)
+    return PinnedBodyParts(
+        parent,
+        _acquisition_part_identity(source, budget),
+        adapter=source.kind,
+        name=name,
+        sha256=source.acquisition.expected_sha256,
+        max_bytes=max_bytes,
+    )
+
+
+def verified_pinned_derivation(
+    source: SourceDeclaration, parts: PinnedBodyParts, *, manifest_limit: int | None
+) -> dict[str, Any] | None:
+    size = parts.manifest_size()
+    if size is None:
+        return None
+    if manifest_limit is not None and size > manifest_limit:
+        raise ValueError("acquisition step manifest byte cap exceeded")
+    try:
+        manifest = verify_snapshot(parts.staging, _staged=True)
+    except ValueError:
+        return None
+    if manifest["declaration"] != acquisition_identity_payload(source) or manifest[
+        "adapter"
+    ] != _adapter(source):
+        return None
+    return manifest
+
+
 def _bounded_hf_acquire(
     source: SourceDeclaration,
     spec: HuggingFaceAcquisition,
@@ -2087,6 +2125,47 @@ def _download_pinned(
     return size
 
 
+def _resume_pinned_body(
+    source: SourceDeclaration,
+    parts: PinnedBodyParts,
+    budget: TransportBudget | None,
+    resources: _AcquisitionResources,
+    cache: TransportCache | None,
+    *,
+    admit_body: bool,
+) -> int:
+    size = parts.verified_body()
+    if admit_body and size is None:
+        raise ValueError(f"pinned body checkpoint changed after admission: {source.id}")
+    if size is None:
+        parts.body.unlink(missing_ok=True)
+    resources.observe()
+    if budget is not None:
+        budget.remaining_seconds()
+        expected = budget.projected_disk_bytes(source_id=source.id)
+        budget.check_disk(
+            parts.root, expected - (parts.max_bytes if size is not None else 0)
+        )
+    if size is not None:
+        if budget is not None:
+            budget.recover_staged_transfer(source.id, parts.name, size)
+        return size
+    parts.body.parent.mkdir(exist_ok=True)
+    sync_directory(parts.root)
+    return _fetch_pinned(
+        source,
+        source.canonical_uri,
+        parts.name,
+        parts.sha256,
+        parts.max_bytes,
+        parts.body,
+        budget,
+        resources,
+        cache,
+        parts=parts,
+    )
+
+
 class _CountedStream:
     """Bound the bytes an archive decompressor returns, before tar parses them."""
 
@@ -2122,9 +2201,9 @@ def _archive_member(name: str) -> str | None:
 def _acquire_archive(
     source: SourceDeclaration,
     staging: Path,
-    budget: TransportBudget | None,
+    body: Path,
+    archive_bytes: int,
     resources: _AcquisitionResources,
-    cache: TransportCache | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     import tarfile
     import zipfile
@@ -2132,22 +2211,6 @@ def _acquire_archive(
 
     spec = source.acquisition
     assert isinstance(spec, ArchiveAcquisition)
-    resources.observe()
-    if budget is not None:
-        budget.check_disk(staging, budget.projected_disk_bytes(source_id=source.id))
-    name = source_file_name(source.canonical_uri)
-    body = staging / "archive-input" / name
-    archive_bytes = _fetch_pinned(
-        source,
-        source.canonical_uri,
-        name,
-        spec.expected_sha256,
-        spec.max_archive_bytes,
-        body,
-        budget,
-        resources,
-        cache,
-    )
     inventory: list[dict[str, Any]] = []
     names: set[str] = set()
     parents: set[str] = set()
@@ -2229,8 +2292,6 @@ def _acquire_archive(
         zlib.error,
     ) as error:
         raise ValueError(f"invalid {spec.format} archive: {error}") from error
-    body.unlink()
-    body.parent.rmdir()
     resources.observe()
     if not inventory:
         raise ValueError("archive include patterns selected no files")
@@ -2495,37 +2556,19 @@ def _verify_pdf_receipt(
 def _acquire_mediawiki(
     source: SourceDeclaration,
     staging: Path,
-    budget: TransportBudget | None,
+    body: Path,
+    compressed_bytes: int,
     resources: _AcquisitionResources,
-    cache: TransportCache | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     spec = source.acquisition
     assert isinstance(spec, MediaWikiDumpAcquisition)
-    resources.observe()
-    if budget is not None:
-        budget.check_disk(staging, budget.projected_disk_bytes(source_id=source.id))
-    name = source_file_name(source.canonical_uri)
-    body = staging / "mediawiki-input" / name
-    compressed_bytes = _fetch_pinned(
-        source,
-        source.canonical_uri,
-        name,
-        spec.expected_sha256,
-        spec.max_compressed_bytes,
-        body,
-        budget,
-        resources,
-        cache,
-    )
-    output_name = name + ".sample.jsonl"
+    output_name = body.name + ".sample.jsonl"
     output_path = staging / "files" / output_name
     opener = {"bz2": bz2.open, "gzip": gzip.open, "none": open}[spec.compression]
     with opener(body, "rb") as decompressed:
         rows, scanned, emitted, _ = _wiki_jsonl(
             source, decompressed, output_path, resources
         )
-    body.unlink()
-    body.parent.rmdir()
     return [
         {"path": output_name, "sha256": sha256_file(output_path), "size": emitted}
     ], {
@@ -2889,6 +2932,13 @@ def verify_acquisition(
         raise ValueError("missing or invalid acquisition lock") from error
 
 
+def _sync_snapshot_directories(staging: Path) -> None:
+    for directory in sorted(staging.rglob("*"), reverse=True):
+        if directory.is_dir():
+            sync_directory(directory)
+    sync_directory(staging)
+
+
 def acquire(
     project: Project,
     work_root: Path | str,
@@ -3134,21 +3184,62 @@ def acquire(
             )
         elif source.kind == "pdf_documents":
             parts = pdf_parts(parent, source, budget, receipt_limit=receipt_limit)
+        pinned = pinned_body_parts(parent, source, budget)
+        if pinned is not None:
+            parts = pinned
         with acquisition_staging(parent, parts) as staging:
             resources = None
             try:
+                sealed = None
+                planned_pin = step["pinned_checkpoint_reuse"] if step else None
+                if pinned is not None:
+                    if budget is not None:
+                        budget.remaining_seconds()
+                    sealed = verified_pinned_derivation(
+                        source, pinned, manifest_limit=receipt_limit
+                    )
+                    if sealed is None:
+                        if planned_pin == "derivation":
+                            raise ValueError(
+                                f"pinned derivation changed after admission: {source.id}"
+                            )
+                        pinned.reset_derivation()
                 (staging / "files").mkdir(exist_ok=True)
                 if source.kind == "wikimedia_dump":
                     resources = _AcquisitionResources(staging)
                     resources.retain(source)
                 elif source.kind in PINNED_FILE_KINDS:
                     resources = _AcquisitionResources(
-                        staging, budget, journal_parent=parent
+                        pinned.root if pinned is not None else staging,
+                        budget,
+                        journal_parent=parent,
                     )
                     if budget is None:
                         resources.retain(source)
                 retrieval: dict[str, Any] = {}
-                if source.kind == "local":
+                if sealed is not None:
+                    files, retrieval = sealed["files"], sealed["retrieval"]
+                    assert resources is not None
+                    resources.observe()
+                elif pinned is not None:
+                    assert resources is not None
+                    size = _resume_pinned_body(
+                        source,
+                        pinned,
+                        budget,
+                        resources,
+                        cache,
+                        admit_body=planned_pin == "body",
+                    )
+                    derive = (
+                        _acquire_archive
+                        if source.kind == "archive"
+                        else _acquire_mediawiki
+                    )
+                    files, retrieval = derive(
+                        source, staging, pinned.body, size, resources
+                    )
+                elif source.kind == "local":
                     files, retrieval = _acquire_local(source, project.root, staging)
                 elif source.kind == "git":
                     files, retrieval = _acquire_git(
@@ -3177,10 +3268,6 @@ def acquire(
                     files, retrieval = _acquire_wikimedia(
                         source, staging, False, resources, cache
                     )
-                elif source.kind == "archive":
-                    files, retrieval = _acquire_archive(
-                        source, staging, budget, resources, cache
-                    )
                 elif source.kind == "pdf_documents":
                     assert isinstance(parts, PDFParts)
                     files, retrieval = _acquire_pdf(
@@ -3191,10 +3278,6 @@ def acquire(
                         parts=parts,
                         planned_reuse=step["pdf_checkpoint_reuse"] if step else None,
                     )
-                elif source.kind == "mediawiki_dump":
-                    files, retrieval = _acquire_mediawiki(
-                        source, staging, budget, resources, cache
-                    )
                 else:
                     files = []
                     retrieval = {
@@ -3202,37 +3285,42 @@ def acquire(
                             source.acquisition.model_dump(mode="json")
                         )
                     }
-                adapter = _adapter(source)
-                identity_fields = {
-                    "declaration_sha256": declared_digest,
-                    "adapter": adapter,
-                    "files": files,
-                }
-                if _retrieval_is_identity(source):
-                    identity_fields["retrieval"] = retrieval
-                identity = canonical_digest(identity_fields)
-                manifest = {
-                    "schema_version": 1,
-                    "source_id": source.id,
-                    "declaration": acquisition_identity_payload(source),
-                    "declaration_sha256": declared_digest,
-                    "adapter": adapter,
-                    "files": files,
-                    "retrieval": retrieval,
-                    "snapshot_sha256": identity,
-                }
-                if (
-                    step is not None
-                    and len(canonical_json(manifest)) + 1
-                    > acquisition_step.MANIFEST_BYTES
-                ):
-                    raise ValueError("acquisition step manifest byte cap exceeded")
-                write_canonical_json(staging / "manifest.json", manifest)
-                if (
-                    verify_snapshot(staging, _staged=True)["snapshot_sha256"]
-                    != identity
-                ):
-                    raise ValueError("staged snapshot identity mismatch")
+                if sealed is not None:
+                    identity = sealed["snapshot_sha256"]
+                else:
+                    adapter = _adapter(source)
+                    identity_fields = {
+                        "declaration_sha256": declared_digest,
+                        "adapter": adapter,
+                        "files": files,
+                    }
+                    if _retrieval_is_identity(source):
+                        identity_fields["retrieval"] = retrieval
+                    identity = canonical_digest(identity_fields)
+                    manifest = {
+                        "schema_version": 1,
+                        "source_id": source.id,
+                        "declaration": acquisition_identity_payload(source),
+                        "declaration_sha256": declared_digest,
+                        "adapter": adapter,
+                        "files": files,
+                        "retrieval": retrieval,
+                        "snapshot_sha256": identity,
+                    }
+                    if (
+                        step is not None
+                        and len(canonical_json(manifest)) + 1
+                        > acquisition_step.MANIFEST_BYTES
+                    ):
+                        raise ValueError("acquisition step manifest byte cap exceeded")
+                    write_canonical_json(staging / "manifest.json", manifest)
+                    if pinned is not None:
+                        _sync_snapshot_directories(staging)
+                    if (
+                        verify_snapshot(staging, _staged=True)["snapshot_sha256"]
+                        != identity
+                    ):
+                        raise ValueError("staged snapshot identity mismatch")
                 destination = parent / identity
                 if destination.exists():
                     verify_snapshot(
@@ -3241,11 +3329,8 @@ def acquire(
                         verification_mode=verification_mode,
                     )
                 else:
-                    for directory in sorted(staging.rglob("*"), reverse=True):
-                        if directory.is_dir():
-                            sync_directory(directory)
-                    sync_directory(staging / "files")
-                    sync_directory(staging)
+                    if pinned is None or sealed is not None:
+                        _sync_snapshot_directories(staging)
                     rename_noreplace(staging, destination)
                     sync_directory(parent)
                     verify_snapshot(

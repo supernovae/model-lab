@@ -171,6 +171,7 @@ def prepare(
     reused_output_bytes = 0
     hf_reuse = {}
     pdf_reuse = {}
+    pinned_reuse = None
     checkpoint_bytes = checkpoint_peak_bytes = 0
     if existing is not None:
         output_bytes = compressed = 0
@@ -214,6 +215,20 @@ def prepare(
                 pdf_reuse[document.name] = "text" if text is not None else "body"
                 reused_output_bytes += size + (text[1] if text is not None else 0)
         verified_paths = frozenset(hf_reuse.keys() | pdf_reuse.keys())
+        pinned = native.pinned_body_parts(parent, source, budget)
+        if pinned is not None:
+            sealed = native.verified_pinned_derivation(
+                source, pinned, manifest_limit=MANIFEST_BYTES
+            )
+            if sealed is not None:
+                pinned_reuse = "derivation"
+                output_bytes = reused_output_bytes = sum(
+                    item["size"] for item in sealed["files"]
+                )
+            elif pinned.verified_body() is not None:
+                pinned_reuse = "body"
+            if pinned_reuse is not None:
+                verified_paths = frozenset({pinned.name})
         pending = tuple(item for item in pending if item[0] not in verified_paths)
         # PDF bodies are kept in the snapshot and so are already output bytes;
         # other bodies occupy one temporary path until they are expanded.
@@ -267,6 +282,7 @@ def prepare(
             "storage_mode": "observational" if observes_storage else "enforced",
             "hf_checkpoint_reuse": hf_reuse,
             "pdf_checkpoint_reuse": pdf_reuse,
+            "pinned_checkpoint_reuse": pinned_reuse,
             "external_logs_receipts_and_baseline_are_additional": True,
         },
     )
