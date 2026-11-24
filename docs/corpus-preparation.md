@@ -195,6 +195,35 @@ also avoid repeating a cold check on a published snapshot. See the
 [measured replay cases](design/corpus-workarea.md#acquisition-replay-measurements)
 for the distinction between transfer, extraction and publication costs.
 
+### Verify Wikimedia multistream ranges
+
+Use local copies of a declared Wikimedia dump and its bzip2 index, with
+the index's known SHA-256 from the same release. For example, for a source
+whose index fits these limits, run the following command.
+
+```sh
+klab corpus plan-wikimedia-ranges PROJECT --source-id SOURCE --dump DUMP.bz2 \
+  --index INDEX.txt.bz2 --index-sha256 INDEX_SHA256 --max-index-bytes 8388608 \
+  --max-index-expanded-bytes 67108864 --max-members 10000
+```
+
+The planner verifies the dump pins and index SHA-256, then reads the
+bzip2 members in order. It checks the XML namespace, site and language,
+refuses truncated members or pages that cross a member boundary, and
+compares each member's ordered page IDs with the index. It prints JSON
+with the input digests, the verified XML context, and each member's
+compressed start and exclusive end, expanded size, page count and
+ordered page-ID digest. Each digest hashes the decimal IDs in source
+order, with a newline after each ID. Header and footer members appear
+even when they contain no pages. Index titles are descriptive. Page IDs
+bind the index to the content. [Wikimedia multistream format](https://meta.wikimedia.org/wiki/Data_dumps/Dump_format#Multistream_dumps)
+
+Set the declaration's compressed and decompressed byte bounds for the
+whole dump. The planner verifies every member, including pages past
+the acquisition selection limits. It also caps index lines at 64 KiB
+and XML nesting at 64 levels. The command reads local files and prints
+a plan. Acquisition and indexed replay remain separate steps.
+
 ### What identifies an acquisition
 
 A snapshot's identity (`declaration_sha256` in its manifest, the acquisition

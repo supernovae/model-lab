@@ -1951,6 +1951,103 @@ def _wikimedia_fixture(
     return recipe, {checksum_uri: f"{sha1}  {name}\n".encode(), uri: body}
 
 
+@pytest.mark.parametrize("fault", [None, "page_id", "split_page", "expanded_bound"])
+def test_wikimedia_range_plan_verifies_index_and_physical_members(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], fault: str | None
+) -> None:
+    from klab.cli.main import build_parser
+
+    header = (
+        b'<?xml version="1.0"?>\n<mediawiki xmlns="http://www.mediawiki.org/xml/export-0.11/" '
+        b'xml:lang="en"><siteinfo><dbname>enwiki</dbname></siteinfo>\n'
+    )
+    first = b"<page><title>Topic:A</title><id>1</id></page>\n"
+    second = b"<page><title>Topic B</title><id>2</id></page>\n"
+    third = b"<page><title>Topic C</title><id>3</id></page>\n"
+    if fault == "split_page":
+        pieces = (header, first[:22], first[22:] + second, third, b"</mediawiki>\n")
+    else:
+        pieces = (header, first + second, third, b"</mediawiki>\n")
+    members = [bz2.compress(piece) for piece in pieces]
+    body = b"".join(members)
+    recipe, _ = _wikimedia_fixture(tmp_path, body, sha1=hashlib.sha1(body).hexdigest())
+    first_offset = len(members[0])
+    third_offset = len(body) - len(members[-2]) - len(members[-1])
+    index_text = (
+        f"{first_offset}:1:Topic:A\n"
+        f"{first_offset}:{9 if fault == 'page_id' else 2}:Topic B\n"
+        f"{third_offset}:3:Topic C\n"
+    ).encode()
+    compressed_index = bz2.compress(index_text)
+    dump = tmp_path / "dump.bz2"
+    index = tmp_path / "index.bz2"
+    dump.write_bytes(body)
+    index.write_bytes(compressed_index)
+    work = tmp_path / "work"
+    index_sha256 = hashlib.sha256(compressed_index).hexdigest()
+    args = build_parser().parse_args(
+        [
+            "--work-dir",
+            str(work),
+            "corpus",
+            "plan-wikimedia-ranges",
+            str(recipe),
+            "--source-id",
+            "one",
+            "--dump",
+            str(dump),
+            "--index",
+            str(index),
+            "--index-sha256",
+            index_sha256,
+            "--max-index-bytes",
+            str(len(compressed_index)),
+            "--max-index-expanded-bytes",
+            str(len(index_text) - (fault == "expanded_bound")),
+            "--max-members",
+            str(len(members)),
+        ]
+    )
+    if fault is not None:
+        with pytest.raises(
+            ValueError,
+            match={
+                "page_id": "page IDs or offset differ",
+                "split_page": "XML crosses a compressed member boundary",
+                "expanded_bound": "index exceeds its expanded byte bound",
+            }[fault],
+        ):
+            args.handler(args)
+        assert not work.exists()
+        return
+
+    args.handler(args)
+    plan = json.loads(capsys.readouterr().out)
+    assert not work.exists()
+    assert plan["dump_sha256"] == hashlib.sha256(body).hexdigest()
+    assert plan["index_sha256"] == index_sha256
+    assert (plan["dbname"], plan["language"], plan["indexed_pages"]) == (
+        "enwiki",
+        "en",
+        3,
+    )
+    assert plan["expanded_bytes"] == sum(map(len, pieces))
+    ranges = plan["ranges"]
+    assert [item["pages"] for item in ranges] == [0, 2, 1, 0]
+    assert [item["start"] for item in ranges] == [
+        0,
+        first_offset,
+        third_offset,
+        len(body) - len(members[-1]),
+    ]
+    assert [item["end"] for item in ranges] == [
+        *(item["start"] for item in ranges[1:]),
+        len(body),
+    ]
+    assert ranges[0]["opens_document"] and ranges[-1]["closes_document"]
+    assert ranges[1]["page_ids_sha256"] == hashlib.sha256(b"1\n2\n").hexdigest()
+
+
 def test_wikimedia_download_checks_sha1_even_with_matching_sha256(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
