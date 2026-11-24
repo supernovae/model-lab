@@ -253,6 +253,80 @@ change. Before a loader default changes, compare both modes on the same
 schedule for batch waits, access locality, host memory, step throughput,
 and accelerator utilization.
 
+### Acquisition replay measurements
+
+The [replay benchmark](../../tools/benchmark_acquisition_replay.py) injects
+an interruption after the adapter finishes deriving its output and before
+the staged snapshot verifier starts. It retries through the ordinary
+acquisition entry point and times through publication. Run it in the Lab
+development environment with the command below. Use `--adapter git` to
+run one case or `--scratch-dir` to test another filesystem. Each output line
+is a JSON record with timings, request and subprocess counts, payload identity
+and staging bytes where the adapter records them.
+
+```sh
+uv run --locked --no-sync python tools/benchmark_acquisition_replay.py
+```
+
+The baseline table reports the median of three retries for each configuration
+at Lab `1b4e31a4` on tmpfs with Python 3.14.8 and a 24-core AMD Threadripper PRO
+9965WX.
+Payload digests were stable across repetitions and across cache settings
+for the archive and dumps. Those fixtures contain 256 selected text records
+of 64 KiB each. The text is
+hexadecimal output from Python's `Random(485).randbytes`. The gzip and
+bzip2 fixtures use compression levels 1 and 3 respectively. The other file
+fixtures use 64 files or rows of 256 KiB each. The HTTP fixture combines
+them in one document.
+The HTTP responses and the Hub file lookup are local fixtures. Git fetches
+from a local pinned upstream. The measured times cover local replay and
+verification.
+
+| Adapter | Input / output | Retry without Lab transport cache | Retry with warm Lab transport cache |
+| --- | --- | --- | --- |
+| Archive, gzip tar | 9.37 MiB compressed, 16.00 MiB emitted | 0.400 s, one body request | 0.399 s, zero requests |
+| MediaWiki, gzip XML | 9.38 MiB compressed, 16.07 MiB emitted | 0.761 s, one body request | 0.748 s, zero requests |
+| Wikimedia, bzip2 XML | 8.17 MiB compressed, 16.08 MiB emitted | 1.117 s, body and checksum requests | 1.116 s, zero requests |
+| Git include | 16.00 MiB emitted | 0.880 s, one local fetch and all selected files extracted | 0.292 s, zero fetches and all selected files extracted |
+| Hugging Face include | 16.00 MiB emitted | 0.063 s, one Hub client call against the fixture and all selected files validated and copied | Outside the Lab transport cache |
+| Local files | 16.00 MiB emitted | 0.059 s, all files copied | Outside the Lab transport cache |
+| Pinned HTTP document | 16.00 MiB emitted | 0.038 s, one body request | 0.037 s, zero requests |
+
+The same harness compared Git at `1b4e31a4` with the batched reader on
+tmpfs. For 64 files, each retry went from 128 `git cat-file` subprocesses
+to one. In three trials per configuration, the median went from 0.897 s to
+0.773 s without a cache and from 0.287 s to 0.171 s with a warm cache. The
+payload inventory digest matched across builds and cache settings. The
+cached Git reader computes the blob hash while copying. On a Wikimedia
+cache miss, the SHA-1 check likewise shares the copy pass with SHA-256.
+
+Archive and dump retries wrote the complete derived payload again in both
+cache configurations. Their peak staged file bytes were 25.37 MiB for the
+archive, 25.45 MiB for MediaWiki and 24.25 MiB for Wikimedia. Those figures
+include the raw body and output as they coexist in staging. Network
+latency, NVMe and HDD replay, and retained-subset replay time were outside
+this measurement. The Workshop base recipe at `4164998` has 15 Git sources
+and 18 Hugging Face sources. The dump and archive figures describe other
+adapter paths and should be measured again with a representative source
+before setting a scale target.
+
+The retained Workshop acquisition lock is **4,120,395,181 bytes**, measured
+from file metadata. The former loop read it once per consulted source.
+Across 33 consultations, that is about 136 GB of calculated logical input.
+Acquisition now reads the advisory lock at most once and falls back to
+verified immutable snapshots if that read fails, including on memory
+exhaustion. Verification of the published lock is a separate step. The
+peak RSS, physical I/O and time of reading the production lock remain
+unmeasured. Keep wide metadata and production measurements tracked in
+[#450](https://github.com/supernovae/model-lab/issues/450).
+
+For single-body adapters, first retain a verified completed body and seal
+the derived output before publication. This bounds restarts after either
+phase. A stop inside a compressed stream still replays parsing from a
+valid format boundary. Measure that cost before adding per-member or
+per-page checkpoints. The [source recovery inventory](../corpus-preparation.md#recovery-by-source-adapter)
+records the current replay boundary for every adapter. [#485](https://github.com/supernovae/model-lab/issues/485)
+
 ## Relational Knowledge Microlab
 
 Keep named recipes and study outputs in Workshop. Start with deterministic

@@ -1,10 +1,13 @@
 """Synthetic metadata for corpus engine tests; never acquired or published."""
 
+import io
 import json
 import shutil
+import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
 import yaml
 
 from klab.canonical import canonical_digest, canonical_json
@@ -312,3 +315,89 @@ def edit_declared_source(
             (root / "manifest.json").write_bytes(canonical_json(manifest) + b"\n")
 
     return apply
+
+
+def _write_acquisition_yaml(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(value), encoding="utf-8")
+
+
+def write_acquisition_recipe(
+    tmp_path: Path,
+    *,
+    kind: str = "local",
+    acquisition: dict | None = None,
+    revision: str = "v1",
+    uri: str = "fixture://source",
+    license: str = "MIT",
+    rights: dict | None = None,
+) -> Path:
+    root = tmp_path / "recipe"
+    root.mkdir(exist_ok=True)
+    _write_acquisition_yaml(
+        root / "corpus.yaml",
+        {
+            "schema_version": 1,
+            "id": "example",
+            "sources": ["sources/one.yaml"],
+            "transforms": [],
+            "splits": "splits.yaml",
+            "release": "release.yaml",
+        },
+    )
+    _write_acquisition_yaml(
+        root / "splits.yaml",
+        {"schema_version": 1, "unit": "document", "assignments": {"document": "train"}},
+    )
+    release = {
+        "mixture": {"technical_docs": 1.0},
+        "lm": {"selected": True, "training_splits": ["train", "validation"]},
+        "chat": {"selected": False, "training_splits": []},
+        "publication_mode": "metadata_reconstruction_only",
+        "normalizer": PLAIN_NORMALIZER,
+        "policy": STRICT_POLICY,
+    }
+    rights = rights or {**fixture_rights(), "spdx_expression": license}
+    source = {
+        "id": "one",
+        "kind": kind,
+        "canonical_uri": uri,
+        "revision": revision,
+        "license": license,
+        "license_url": rights["license_references"][0],
+        "rights": rights,
+        "domains": ["technical_docs"],
+        "document_kinds": ["markdown"],
+        "source_family": "docs",
+        "acquisition": acquisition
+        or {
+            "files": [{"path": "sources/data.md", "name": "data.md"}],
+            "max_bytes": 1024,
+        },
+    }
+    _write_acquisition_yaml(root / "release.yaml", release)
+    _write_acquisition_yaml(root / "sources/one.yaml", source)
+    return root / "corpus.yaml"
+
+
+def serve_pinned_acquisition(
+    monkeypatch: pytest.MonkeyPatch, bodies: dict[str, bytes]
+) -> list[str]:
+    """Answer pinned HTTPS downloads from memory; record every requested URL."""
+    calls: list[str] = []
+
+    class Response(io.BytesIO):
+        status = 200
+
+        def __init__(self, body: bytes, url: str):
+            super().__init__(body)
+            self.url = url
+            self.headers = {"Content-Length": str(len(body))}
+
+    class Opener:
+        def open(self, request: urllib.request.Request, timeout: float) -> Response:
+            calls.append(request.full_url)
+            return Response(bodies[request.full_url], request.full_url)
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_args: Opener())
+    return calls

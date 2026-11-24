@@ -16,7 +16,8 @@ from pathlib import Path
 
 import pytest
 import yaml
-from corpus_fixtures import PLAIN_NORMALIZER, STRICT_POLICY, fixture_rights
+from corpus_fixtures import serve_pinned_acquisition as _serve_pinned
+from corpus_fixtures import write_acquisition_recipe as _fixture
 
 from klab.corpus.acquisition import (
     acquire,
@@ -31,64 +32,6 @@ from klab.corpus.transport_budget import TransportBudget
 def _yaml(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(value), encoding="utf-8")
-
-
-def _fixture(
-    tmp_path: Path,
-    *,
-    kind: str = "local",
-    acquisition: dict | None = None,
-    revision: str = "v1",
-    uri: str = "fixture://source",
-    license: str = "MIT",
-    rights: dict | None = None,
-) -> Path:
-    root = tmp_path / "recipe"
-    root.mkdir(exist_ok=True)
-    _yaml(
-        root / "corpus.yaml",
-        {
-            "schema_version": 1,
-            "id": "example",
-            "sources": ["sources/one.yaml"],
-            "transforms": [],
-            "splits": "splits.yaml",
-            "release": "release.yaml",
-        },
-    )
-    _yaml(
-        root / "splits.yaml",
-        {"schema_version": 1, "unit": "document", "assignments": {"document": "train"}},
-    )
-    release = {
-        "mixture": {"technical_docs": 1.0},
-        "lm": {"selected": True, "training_splits": ["train", "validation"]},
-        "chat": {"selected": False, "training_splits": []},
-        "publication_mode": "metadata_reconstruction_only",
-        "normalizer": PLAIN_NORMALIZER,
-        "policy": STRICT_POLICY,
-    }
-    rights = rights or {**fixture_rights(), "spdx_expression": license}
-    source = {
-        "id": "one",
-        "kind": kind,
-        "canonical_uri": uri,
-        "revision": revision,
-        "license": license,
-        "license_url": rights["license_references"][0],
-        "rights": rights,
-        "domains": ["technical_docs"],
-        "document_kinds": ["markdown"],
-        "source_family": "docs",
-        "acquisition": acquisition
-        or {
-            "files": [{"path": "sources/data.md", "name": "data.md"}],
-            "max_bytes": 1024,
-        },
-    }
-    _yaml(root / "release.yaml", release)
-    _yaml(root / "sources/one.yaml", source)
-    return root / "corpus.yaml"
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -568,6 +511,47 @@ def _mock_hf_stream(monkeypatch: pytest.MonkeyPatch, content: bytes) -> list[str
     monkeypatch.setattr(huggingface_hub, "snapshot_download", no_snapshot)
     monkeypatch.setattr(urllib.request, "build_opener", lambda *_args: Opener())
     return calls
+
+
+@pytest.mark.parametrize("memory_exhausted", [False, True])
+def test_reacquire_reads_advisory_lock_once_and_can_fall_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    memory_exhausted: bool,
+) -> None:
+    from klab.corpus import acquisition
+
+    content = b'{"text":"one"}\n'
+    recipe = _bounded_hf_fixture(tmp_path, content, "default/train/data.jsonl", rows=1)
+    corpus = yaml.safe_load(recipe.read_text())
+    corpus["sources"].append("sources/two.yaml")
+    _yaml(recipe, corpus)
+    source = yaml.safe_load((recipe.parent / "sources/one.yaml").read_text())
+    _yaml(recipe.parent / "sources/two.yaml", {**source, "id": "two"})
+    calls = _mock_hf_stream(monkeypatch, content)
+    project = load_project(recipe)
+    work = tmp_path / "work"
+    first = acquire(project, work)
+    calls.clear()
+
+    lock_path = work / "corpora/example/acquisition.json"
+    reads = []
+    real_read = acquisition.read_metadata
+
+    def read(path: Path):
+        if path == lock_path:
+            reads.append(path)
+            if len(reads) == 1 and memory_exhausted:
+                raise MemoryError
+        return real_read(path)
+
+    monkeypatch.setattr(acquisition, "read_metadata", read)
+    assert acquire(project, work, require_existing=True) == first
+    assert reads == [lock_path, lock_path]  # Advisory lookup, then final verification.
+    assert not calls
+    if memory_exhausted:
+        assert "MemoryError" in capsys.readouterr().err
 
 
 def test_hf_declaration_hash_and_receipt_reuse(
@@ -1084,29 +1068,6 @@ def test_admission_reuses_verified_snapshot_and_rejects_changed_bytes(
     (snapshot / "files/guide.md").write_text("Changed source.\n", encoding="utf-8")
     with pytest.raises(ValueError, match="mismatch"):
         draft_admission_manifest(project, work, template, document, work / "third.json")
-
-
-def _serve_pinned(
-    monkeypatch: pytest.MonkeyPatch, bodies: dict[str, bytes]
-) -> list[str]:
-    """Answer pinned HTTPS downloads from memory; record every requested URL."""
-    calls: list[str] = []
-
-    class Response(io.BytesIO):
-        status = 200
-
-        def __init__(self, body: bytes, url: str):
-            super().__init__(body)
-            self.url = url
-            self.headers = {"Content-Length": str(len(body))}
-
-    class Opener:
-        def open(self, request: urllib.request.Request, timeout: float) -> Response:
-            calls.append(request.full_url)
-            return Response(bodies[request.full_url], request.full_url)
-
-    monkeypatch.setattr(urllib.request, "build_opener", lambda *_args: Opener())
-    return calls
 
 
 _RFC_URL = "https://www.rfc-editor.org/in-notes/tar/RFC-all.tar.gz"
@@ -1759,7 +1720,7 @@ def test_server_bytes_that_miss_the_pin_are_never_cached(
 
 
 def test_pinned_downloads_and_http_documents_are_cached_by_what_was_asked(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     body = _tar_gz([("rfc1.txt", b"Request for Comments 1 " * 3, None)])
     recipe = _archive_recipe(tmp_path, body, budget=True)
@@ -1776,10 +1737,49 @@ def test_pinned_downloads_and_http_documents_are_cached_by_what_was_asked(
     project = load_project(recipe)
     ledger = tmp_path / "w2/corpora/example/transport-budget.sqlite"
     TransportBudget.initialize(ledger, project)
+    leftover = ledger.parent / "snapshots/one/.acquire-leftover"
+    leftover.mkdir(parents=True)
+    (leftover / "payload").write_bytes(body)
     second = acquire(project, tmp_path / "w2", transport_cache=cache)
     assert len(calls) == 1
     assert TransportBudget(ledger, project).receipt()["source_charged"] == 0
     assert second["sources"]["one"]["transport_cache"][0]["served_from"] == "cache"
+    assert str(leftover) in capsys.readouterr().err
+    assert (leftover / "payload").read_bytes() == body
+
+
+def test_wikimedia_download_checks_sha1_even_with_matching_sha256(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    date = "20261101"
+    prefix = f"https://dumps.wikimedia.org/enwiki/{date}"
+    name = f"enwiki-{date}-pages-articles-multistream1.xml-p1p1.bz2"
+    uri = f"{prefix}/{name}"
+    checksum_uri = f"{prefix}/enwiki-{date}-sha1sums.txt"
+    body = b"corrupt compressed body"
+    sha1 = "0" * 40
+    recipe = _fixture(
+        tmp_path,
+        kind="wikimedia_dump",
+        uri=uri,
+        revision=date,
+        license="CC-BY-SA-4.0",
+        acquisition={
+            "expected_sha1": sha1,
+            "expected_sha256": hashlib.sha256(body).hexdigest(),
+            "checksum_uri": checksum_uri,
+            "max_compressed_bytes": len(body),
+            "max_decompressed_bytes": 1024,
+            "max_scanned_pages": 1,
+            "max_selected_pages": 1,
+            "max_emitted_bytes": 1024,
+        },
+    )
+    _serve_pinned(monkeypatch, {uri: body, checksum_uri: f"{sha1}  {name}\n".encode()})
+    work = tmp_path / "work"
+    with pytest.raises(ValueError, match="Wikimedia compressed SHA-1 mismatch"):
+        acquire(load_project(recipe), work)
+    assert not (work / "corpora/example/acquisition.json").exists()
 
 
 def test_http_document_cache_replays_the_recorded_retrieval(
@@ -1836,6 +1836,7 @@ def test_pattern_selected_git_repository_is_reused_and_rebuilt_when_damaged(
     _git(repo, "config", "user.name", "Test")
     (repo / "docs").mkdir()
     (repo / "docs/guide.md").write_text("first\n", encoding="utf-8")
+    (repo / "docs/empty.md").write_bytes(b"")
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "first")
     recipe = _fixture(
@@ -1847,19 +1848,33 @@ def test_pattern_selected_git_repository_is_reused_and_rebuilt_when_damaged(
     )
     cache = tmp_path / "cold"
     fetches = []
+    blob_reads = []
     real = acquisition._git
+    popen = subprocess.Popen
 
     def watch(args: list[str], **options: object) -> bytes:
         if "fetch" in args:
             fetches.append(args)
         return real(args, **options)
 
+    def watch_process(args, *options, **kwargs):
+        if isinstance(args, list) and "cat-file" in args:
+            blob_reads.append(args[args.index("cat-file") + 1 :])
+        return popen(args, *options, **kwargs)
+
     monkeypatch.setattr(acquisition, "_git", watch)
+    monkeypatch.setattr(subprocess, "Popen", watch_process)
     first = acquire(load_project(recipe), tmp_path / "w1", transport_cache=cache)
     assert len(fetches) == 1
+    assert blob_reads == [["--batch"]]
+    assert _snapshot_payload(first)[1] == {
+        "docs/empty.md": b"",
+        "docs/guide.md": b"first\n",
+    }
     _widen_cap(recipe)
     second = acquire(load_project(recipe), tmp_path / "w2", transport_cache=cache)
     assert len(fetches) == 1
+    assert blob_reads == [["--batch"], ["--batch"]]
     assert second["sources"]["one"]["transport_cache"][0]["served_from"] == "cache"
     assert _snapshot_payload(first)[1] == _snapshot_payload(second)[1]
 

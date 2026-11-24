@@ -125,8 +125,8 @@ per source and then an acquisition lock binding them.
   only the original verifies. The existing ledger governs new requests. Cold
   snapshot verification still re-extracts the text to check fidelity.
   Successful publication moves the staged files into the snapshot and removes
-  the checkpoint receipts. Other source adapters recover at snapshot
-  granularity, with raw transport cache reuse where supported.
+  the checkpoint receipts. See [recovery by source adapter](#recovery-by-source-adapter)
+  for the replay boundary of each source kind.
 - **Observed rather than enforced limits.** On a local workflow where the owner
   wants time, network or storage observed rather than capped,
   `corpus budget-observe-time`, `budget-observe-network` and
@@ -142,6 +142,41 @@ per source and then an acquisition lock binding them.
 - **Preview.** `corpus preview DECLARATION --input-root INPUTS --output NEW_DIR`
   shows seeded sample excerpts from acquired JSONL in place, without copying or
   admitting anything.
+
+### Recovery by source adapter
+
+A published immutable snapshot can be verified and reused even if a stop
+prevented publication of the project lock. Inside an unfinished snapshot,
+the source adapter determines what is reusable. A partially downloaded body
+restarts at its first byte. Metered retries preserve existing charges and
+need available allowance in the ledger.
+
+| Source | Reusable work inside an unfinished source | Work replayed on retry |
+| --- | --- | --- |
+| Local files | The local inputs are still available. Acquire reads their current bytes. | Copy and hash the selected files again. |
+| Pinned HTTP document | The optional transport cache can serve the verified body and recorded retrieval headers. | Copy and verify the body from cache, or download it. |
+| Git with `bounded_blobs` | Complete staged blobs that match the declared sizes and object IDs. A verified cache body can supply a missing blob. | Transfer incomplete or damaged blobs as needed and verify the snapshot. |
+| Git with `include` | The optional transport cache can reuse a verified bare repository at the pinned commit. | Recheck the repository and extract the selected files again. Without the transport cache, acquire calls Git fetch again. |
+| Hugging Face with `bounded_shards` | Receipted selections and complete staged bodies that match their pins. | Transfer incomplete bodies as needed, then select rows for unfinished or damaged shards. |
+| Hugging Face with `include` | The Hub client's download cache can supply files at the pinned revision. | Resolve the file set through the Hub client, validate selected rows and copy the selected files again. |
+| Hugging Face retained subset | The verified local parent snapshot. | Replay the bounded selection from the parent. Cold verification also checks the derivative against its parent. |
+| PDF documents | Verified originals and receipted extracted text. | Transfer or extract unfinished and damaged documents as needed. Cold verification also re-extracts the published text. |
+| Tar, compressed tar or ZIP archive | The optional transport cache can supply the complete pinned body. | Copy or download the body and repeat selection and extraction, including for ZIP. |
+| MediaWiki and Wikimedia dumps | The optional transport cache can supply the complete pinned body. | Copy or download the body and replay the XML stream from the start. A Wikimedia cache miss also fetches the checksum manifest. |
+| Deterministic or recorded-response generator | Acquisition records the declared generator identity without producing documents. | Recreate the metadata-only snapshot if it was unfinished. Generation follows the build workflow. |
+
+A hard kill can leave a transient `.acquire-*` directory containing an
+entire staged payload. On the next staging attempt for that source, Lab
+reports existing directories and retains their contents because another
+acquisition may still be writing there. To reclaim the space, confirm all
+acquisitions using that source's work directory have stopped before
+removing the reported transient directories.
+
+A cache hit avoids body transfer. It still re-hashes the cached input and
+performs the local work listed above. A host-local verification receipt can
+also avoid repeating a cold check on a published snapshot. See the
+[measured replay cases](design/corpus-workarea.md#acquisition-replay-measurements)
+for the distinction between transfer, extraction and publication costs.
 
 ### What identifies an acquisition
 
