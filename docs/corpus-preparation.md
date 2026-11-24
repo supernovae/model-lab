@@ -457,15 +457,15 @@ the in-memory builder. Both builders decide every duplicate group with the same 
 
 ### Resume a failed build
 
-The disk builder checkpoints every long stage, so a failure or a kill repeats
-only the stage that was running:
+The disk builder reuses verified outputs after a failure or a kill:
 
 | Stage | Output under `WORK/corpora/<id>/builds` | Reused when |
 | --- | --- | --- |
 | normalize | `prepared/normalized-source-v2/<source>/<digest>`, one shard per source file | the shard's receipt and three output hashes verify |
 | index | `stages/index/<key>/documents.sqlite`, `narrow.sqlite` | its receipt verifies; key below |
 | dedup | `stages/dedup/<key>/dedup.sqlite`, `groups.jsonl` | its receipt verifies; key below |
-| views and publish | the build directory itself, renamed into place atomically | the build exists and verifies |
+| views | `../.views-<key>/build` with receipts beside the staged output | matching build and stage inputs, with a verified append boundary |
+| publish | the build directory itself, renamed into place atomically | the build exists and verifies |
 
 The key of a stage is the SHA-256 of exactly the inputs it depends on, recorded
 in its `receipt.json` next to the SHA-256 and size of every output file:
@@ -493,12 +493,19 @@ The checks that fail fast, such as the empty-source check and the admitted
 inventory check, run on every start against the verified index, so a fix to the
 recipe is judged in seconds, not after the stage that produced the data.
 
-Writing views is one pass over the deduplicated index with a running tally, a
-running stage digest and one release writer; it takes about 25 minutes at 6.7
-million documents. It is not resumable mid-pass: the tally and digests would
-have to be serialized and the output files truncated to a verified offset, which
-would add a second code path to a release whose bytes must not depend on how
-often it was interrupted. A failure there repeats only that pass.
+The native disk builder commits ordered span and view boundaries on reaching
+25,000 rows or 64 MiB of input. A row can cross the byte threshold.
+Each receipt binds the committed output offsets, range
+digests, cursor and report counts. On retry the writer verifies the committed
+prefix, truncates uncommitted or damaged suffixes and seeks to the last
+verified row. It re-reads bytes to verify the prefix and restore the stage
+digest. A stop near the end can still repeat report measurement or manifest
+hashing. The staged view files become the published build, so checkpointing
+adds receipt metadata and keeps one staged payload. Successful publication
+removes the view checkpoint. Abandoned checkpoints from other build
+identities can be removed between builds once they are no longer needed.
+Changing the code revision can require new builder checkpoints, with acquired
+snapshots still available for reuse.
 
 **Disk cost.** The index holds every prepared record, so it is about as large
 as the prepared shards plus their spans (`documents.sqlite`), with a small
@@ -1039,7 +1046,7 @@ checks all three, and that the screen covered every document of this release.
 | `acquire` | yes: verified snapshots and the transport cache are reused | the unfinished source |
 | `build` normalize | yes: per-file receipted shards | files being written |
 | `build` index, dedup | yes: receipted stage outputs ([resume](#resume-a-failed-build)) | the stage that was running |
-| `build` views and publish | no: one pass, published by one rename | that pass (about 25 min at 6.7M documents) |
+| `build` views and publish (native disk builder) | yes: verified append boundaries and atomic publication | uncommitted rows, prefix verification and any unfinished report or manifest pass |
 | `freeze` | yes: rerun it; a stopped freeze is finished after verifying the staged files | the rename, or a verification from the bytes after a stop |
 | `audit`, `describe`, `sources`, release readers | no, but a successful verification is a receipt that later commands reuse | one verification from the bytes |
 | `export` | no: staged, then renamed | the export |

@@ -69,7 +69,7 @@ def split_policy(project):
     return policy
 
 
-def copy_assignments(project, destination):
+def copy_assignments(project, destination, *, resume: bool = False):
     reference = project.splits.model_dump(mode="json").get("assignment_file")
     if reference is None:
         return
@@ -79,6 +79,13 @@ def copy_assignments(project, destination):
         project_path(project.root, project.config.splits).parent, reference
     )
     target = Path(destination) / source.name
+    if resume and target.is_file() and not target.is_symlink():
+        try:
+            assignment_path(destination, reference)
+        except ValueError:
+            target.unlink()
+        else:
+            return
     with target.open("xb") as output, source.open("rb") as original:
         shutil.copyfileobj(original, output)
     assignment_path(destination, reference)

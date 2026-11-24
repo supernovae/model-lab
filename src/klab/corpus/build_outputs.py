@@ -66,13 +66,15 @@ def write_json(path: Path, value: Any) -> None:
 
 
 def stage_declared_inputs(
-    project: Any, staging: Path, admission_path: Path | None
+    project: Any, staging: Path, admission_path: Path | None, *, resume: bool = False
 ) -> None:
     """Copy the frozen split assignments and reviewed admission into a staging build."""
-    copy_assignments(project, staging)
+    copy_assignments(project, staging, resume=resume)
     if admission_path is None:
         return
     copy = staging / ADMISSION_COPY
+    if resume:
+        copy.unlink(missing_ok=True)
     shutil.copyfile(admission_path, copy)
     if sha256_file(copy) != project.release.record_admission.sha256.lower():
         raise ValueError(
@@ -274,6 +276,29 @@ class Tally:
     def add_dropped(self, doc: Mapping[str, Any]) -> None:
         """Count a built document that the duplicate policy removed, by reason."""
         self.dedup_dropped[doc["source_id"]][doc["drop_reason"]] += 1
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "by_split": self.by_split,
+            "by_source": self.by_source,
+            "by_kind": self.by_kind,
+            "by_domain": self.by_domain,
+            "source_scale": self.source_scale,
+            "dedup_dropped": self.dedup_dropped,
+        }
+
+    def restore(self, state: Mapping[str, Any]) -> None:
+        self.by_split.update(state["by_split"])
+        self.by_source.update(state["by_source"])
+        self.by_kind.update(state["by_kind"])
+        self.by_domain.update(state["by_domain"])
+        self.source_scale.update(state["source_scale"])
+        self.dedup_dropped.update(
+            {
+                source: Counter(counts)
+                for source, counts in state["dedup_dropped"].items()
+            }
+        )
 
     def add(self, doc: Mapping[str, Any]) -> None:
         text = doc["text"]
