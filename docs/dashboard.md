@@ -323,12 +323,29 @@ this page only. The former per-topic pages and their paths (`/training`,
 compact memory summary and three curves: training loss, validation loss and
 throughput, when recorded. Use the metric selector to add other curves.
 
-Engram memory shows aggregate and recorded per-port gates, value/hidden norms,
-address reuse and table utilization. Every value retains its observation step;
-missing diagnostics say unavailable. These are target-weighted forward diagnostics,
-so counts can be fractional. Address reuse includes repeated inputs and is not
-proof of hash collisions or retrieval quality. The page does not infer gradients,
-parameter updates or quality gains.
+The **Engram memory** tab explains the memory before it shows numbers. *What an
+Engram is* is a short primer (address, value, gate). *How this memory is built*
+lists the run's tables from its configuration: site, n-gram length, hash head, rows,
+row width and parameters. *What it is doing now* gives each site's latest values as
+tiles that say what the number means and what it was at the start of the run:
+
+| Tile | Meaning |
+|---|---|
+| **Gate** | how much of the row it read the model adds, from 0 (ignore) to 1 (add all) |
+| **Push (derived)** | gate × value norm ÷ hidden norm: the approximate size of what the memory adds, relative to the hidden state. Shown only when all three were recorded at the same step |
+| **Value norm**, **Hidden norm** | length of the vector read from the tables, and of the hidden state it is added to |
+| **Distinct rows read** | different rows read, of all lookups in one forward pass of the site |
+| **Reuse** | lookups that hit a row already read in the same document; repeated n-grams and hash collisions are not told apart |
+| **Rows read per document** | share of a table's rows one document reads; not how much of the table is trained |
+| **Hottest row** | share of lookups on the single most-read row |
+
+*How it changed during this run* draws the same values over the run's steps, one
+line per site, and *What to look for* says how to read a falling gate, a rising value
+norm and differences between sites. Values are recorded per site, not per table.
+They are target-weighted forward diagnostics, so counts can be fractional; a missing
+value is shown as unavailable, never as zero. The page does not infer gradients,
+parameter updates or quality gains: only a controlled comparison shows whether the
+memory helps.
 
 Snapshot inspector filters current recorded metric values and their changes from
 the preceding observation, displays the saved configuration, shows recent events,

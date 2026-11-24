@@ -38,11 +38,12 @@ def test_selected_snapshot_and_observation_deltas(tmp_path):
 def _inspector(root):
     from pathlib import Path
 
-    from klab.dashboard.inspection import engram_summary, snapshot_inspector
+    from klab.dashboard.engram_view import engram_page
+    from klab.dashboard.inspection import snapshot_inspector
     from klab.dashboard.queries import snapshot
 
     view = snapshot(Path(root))
-    engram_summary(view, ["memory", "dense"])
+    engram_page(view, ["memory", "dense"], list(view.runs))
     snapshot_inspector(view, ["memory", "dense"])
 
 
@@ -50,7 +51,7 @@ def test_inspector_missing_values_filter_navigation_and_refresh(tmp_path):
     store = _store(tmp_path)
     app = AppTest.from_function(_inspector, args=(str(tmp_path),)).run()
     assert not app.exception
-    assert any("no persisted Engram" in item.value for item in app.info)
+    assert any("no Engram memory" in item.value for item in app.info)
     app.text_input(key="inspect_metric_filter").set_value("port/1").run()
     assert len(app.dataframe[-1].value) == 1
     store.log_metrics("memory", 5, 50, 5.0, {"engram/port/1/gate_mean": 0.7})

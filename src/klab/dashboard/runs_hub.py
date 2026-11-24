@@ -71,20 +71,6 @@ def _progress_bar(fraction: float | None, color: str) -> str:
     )
 
 
-def _tiles(items: list[tuple[str, str, str]]) -> str:
-    """Label, value and a line of help for each tile."""
-    return (
-        "<div class='rh-tiles'>"
-        + "".join(
-            f"<div class='rh-tile'><div class='l'>{html.escape(label)}</div>"
-            f"<div class='v'>{html.escape(value)}</div>"
-            f"<div class='h'>{html.escape(hint)}</div></div>"
-            for label, value, hint in items
-        )
-        + "</div>"
-    )
-
-
 def _summary_tiles(lineage: Lineage, now: datetime) -> str:
     tip = lineage.tip
     rate = tip.facts.tokens_per_second
@@ -144,7 +130,7 @@ def _summary_tiles(lineage: Lineage, now: datetime) -> str:
             else "needs a budget and a rate",
         ),
     ]
-    return _tiles(items)
+    return ui.tiles(items)
 
 
 def _attempt_rows(lineage: Lineage, root: Path) -> str:
