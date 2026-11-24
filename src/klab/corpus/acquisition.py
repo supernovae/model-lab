@@ -15,6 +15,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import urllib.request
@@ -29,6 +30,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urljoin, urlparse
 
 from klab.canonical import canonical_digest, canonical_json
+from klab.corpus.acquisition_parts import HFParts, acquisition_staging
 from klab.corpus.bounded_metadata import read_metadata
 from klab.corpus.project import (
     IMMUTABLE_SOURCE_KINDS,
@@ -76,7 +78,13 @@ class _AcquisitionResources:
     Parquet has no equivalent stream reading and reports unavailable explicitly.
     """
 
-    def __init__(self, root: Path, budget: TransportBudget | None = None):
+    def __init__(
+        self,
+        root: Path,
+        budget: TransportBudget | None = None,
+        *,
+        journal_parent: Path | None = None,
+    ):
         self.root = root
         self.budget = budget
         self.index: int | None = None
@@ -84,11 +92,12 @@ class _AcquisitionResources:
         self.peak_bytes = 0
         self.peak_inodes = 0
         self.journal: Path | None = None
+        self.journal_parent = journal_parent or root.parent
         self.binding: dict[str, Any] = {}
         self.status = "started"
 
     def retain(self, source: SourceDeclaration, shard_path: str | None = None) -> None:
-        directory = self.root.parent / ".resource-receipts"
+        directory = self.journal_parent / ".resource-receipts"
         directory.mkdir(exist_ok=True)
         if directory.is_symlink() or not directory.is_dir():
             raise ValueError(
@@ -1114,6 +1123,7 @@ def _hf_shard_body(
     cache: TransportCache | None,
     *,
     verify_only: bool = False,
+    parts: HFParts | None = None,
 ) -> tuple[str, int]:
     """One pinned shard body: from the cache when it verifies, else downloaded.
 
@@ -1149,18 +1159,26 @@ def _hf_shard_body(
             observe=resources.observe,
         )
         if served is not None:
+            if parts is not None:
+                parts.sync_path(input_path)
             return served.sha256, served.size
     transfer_index = None
     try:
         if budget is not None:
             budget.assert_transfer_available(
-                source.id, shard.path, shard.max_shard_bytes
+                source.id,
+                shard.path,
+                shard.max_shard_bytes,
+                allow_verified_retry=parts is not None,
             )
             projected = budget.projected_disk_bytes(source_id=budget.selected_source_id)
             budget.check_disk(resources.root, projected)
             _hf_pinned_metadata(source, spec, shard, headers, budget)
             transfer_index = budget.reserve_transfer(
-                source.id, shard.path, shard.max_shard_bytes
+                source.id,
+                shard.path,
+                shard.max_shard_bytes,
+                allow_verified_retry=parts is not None,
             )
             resources.index = transfer_index
             resources.persist()
@@ -1200,11 +1218,40 @@ def _hf_shard_body(
         if budget is not None and transfer_index is not None:
             budget.finish_transfer(transfer_index, success=False)
         raise ValueError(f"HF shard SHA-256 mismatch: {shard.path}")
+    if parts is not None:
+        parts.sync_path(input_path)
     if budget is not None and transfer_index is not None:
         budget.finish_transfer(transfer_index, success=True)
     if cache is not None:
         cache.store(key, input_path)
     return digest, input_bytes
+
+
+def bounded_hf_parts(
+    parent: Path,
+    source: SourceDeclaration,
+    budget: TransportBudget | None,
+    *,
+    receipt_limit: int | None = None,
+) -> HFParts | None:
+    """Bind resumable parts to this adapter, complete request and ledger scope."""
+    if source.kind != "huggingface_dataset":
+        return None
+    spec = source.acquisition
+    if spec.bounded_shards is None or spec.retained_subset is not None:
+        return None
+    return HFParts(
+        parent,
+        canonical_digest(
+            {
+                "declaration": declaration_sha256(source),
+                "acquisition": spec.model_dump(mode="json"),
+                "adapter": _adapter(source),
+                "ledger": budget.binding if budget is not None else None,
+            }
+        ),
+        receipt_limit=receipt_limit,
+    )
 
 
 def _bounded_hf_acquire(
@@ -1213,31 +1260,74 @@ def _bounded_hf_acquire(
     staging: Path,
     budget: TransportBudget | None = None,
     cache: TransportCache | None = None,
+    *,
+    parts: HFParts,
+    planned_reuse: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     assert spec.bounded_shards is not None
     inventory: list[dict[str, Any]] = []
     receipts: list[dict[str, Any]] = []
     total_bytes = 0
     total_rows = 0
+    reused_parts = reused_bodies = 0
+    planned_reuse = planned_reuse or {}
     if spec.max_decompressed_bytes is not None and any(
         shard.path.endswith(".parquet") for shard in spec.bounded_shards
     ):
         raise ValueError("required expanded byte reading unavailable for Parquet")
     for shard in spec.bounded_shards:
-        resources = _AcquisitionResources(staging, budget)
+        if shard.declared_config is not None and budget is None:
+            raise ValueError("explicit HF shard metadata requires a transport budget")
+        if budget is not None:
+            budget.remaining_seconds()
+        input_path = parts.body(shard)
+        target = parts.output(shard)
+        if symlinked(input_path):
+            raise ValueError(f"unsafe HF staged body: {input_path}")
+        if (record := parts.verified_part(shard, spec.max_bytes)) is not None:
+            output_entry, receipt = record
+            if output_entry is not None:
+                inventory.append(output_entry)
+                total_bytes += output_entry["size"]
+            total_rows += len(receipt["selected_rows"])
+            if total_bytes > spec.max_bytes or total_rows > spec.max_rows:
+                raise ValueError("recovered HF selection exceeds declared bounds")
+            receipts.append(receipt)
+            input_path.unlink(missing_ok=True)
+            reused_parts += 1
+            continue
+        input_bytes = parts.verified_body(shard)
+        planned = planned_reuse.get(shard.path)
+        if planned == "selection" or (planned == "body" and input_bytes is None):
+            raise ValueError(f"HF checkpoint changed after admission: {shard.path}")
+        if parts.discard_marker(shard):
+            print(
+                f"{source.id}: rebuilding damaged HF part {shard.path}", file=sys.stderr
+            )
+        if symlinked(target):
+            raise ValueError(f"unsafe HF selection output: {target}")
+        target.unlink(missing_ok=True)
+        resources = _AcquisitionResources(
+            staging, budget, journal_parent=parts.root.parent
+        )
         with resources.attempt(source, shard.path):
             resources.observe()
-            if shard.declared_config is not None and budget is None:
-                raise ValueError(
-                    "explicit HF shard metadata requires a transport budget"
+            if input_bytes is not None:
+                digest = shard.expected_sha256.lower()
+                reused_bodies += 1
+            else:
+                input_path.unlink(missing_ok=True)
+                digest, input_bytes = _hf_shard_body(
+                    source,
+                    spec,
+                    shard,
+                    input_path,
+                    budget,
+                    resources,
+                    cache,
+                    parts=parts,
                 )
-            input_path = staging / "hf-input" / shard.path
-            digest, input_bytes = _hf_shard_body(
-                source, spec, shard, input_path, budget, resources, cache
-            )
-
-            output_name = shard.path + ".sample.jsonl"
-            target = staging / "files" / output_name
+            output_name = target.relative_to(staging / "files").as_posix()
             target.parent.mkdir(parents=True, exist_ok=True)
             selected: list[dict[str, Any]] = []
             output_digest = hashlib.sha256()
@@ -1323,29 +1413,37 @@ def _bounded_hf_acquire(
                     )
                 output.flush()
                 os.fsync(output.fileno())
-            input_path.unlink()
+            output_entry = None
             if not selected:
                 target.unlink()
             else:
                 total_bytes += output_bytes
-                inventory.append(
-                    {
-                        "path": output_name,
-                        "sha256": output_digest.hexdigest(),
-                        "size": output_bytes,
-                    }
-                )
-            receipts.append(
-                {
-                    "source_shard_path": shard.path,
-                    "source_shard_sha256": digest,
-                    "source_shard_bytes": input_bytes,
-                    "resources": resources.receipt(),
-                    "scanned_rows": scanned,
-                    "selected_rows": selected,
-                    "output_path": output_name if selected else None,
+                output_entry = {
+                    "path": output_name,
+                    "sha256": output_digest.hexdigest(),
+                    "size": output_bytes,
                 }
-            )
+                inventory.append(output_entry)
+            receipt = {
+                "source_shard_path": shard.path,
+                "source_shard_sha256": digest,
+                "source_shard_bytes": input_bytes,
+                "resources": resources.receipt(),
+                "scanned_rows": scanned,
+                "selected_rows": selected,
+                "output_path": output_name if selected else None,
+            }
+            parts.commit(shard, output_entry, receipt)
+            input_path.unlink()
+            # Forgetting the body must survive a crash before snapshot publication.
+            sync_directory(input_path.parent)
+            receipts.append(receipt)
+    if reused_parts or reused_bodies:
+        print(
+            f"{source.id}: reused {reused_parts} selected HF parts and "
+            f"{reused_bodies} verified HF bodies",
+            file=sys.stderr,
+        )
     if not inventory:
         raise ValueError("HF bounded selection produced no rows")
     retrieval = {
@@ -1372,6 +1470,9 @@ def _acquire_hf(
     offline: bool,
     budget: TransportBudget | None = None,
     cache: TransportCache | None = None,
+    *,
+    parts: HFParts | None = None,
+    planned_reuse: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if offline:
         raise ValueError("offline acquisition cannot fetch Hugging Face")
@@ -1383,7 +1484,16 @@ def _acquire_hf(
 
         return derive_subset(source, staging=staging, scratch_directory=staging)
     if spec.bounded_shards is not None:
-        return _bounded_hf_acquire(source, spec, staging, budget, cache)
+        assert parts is not None
+        return _bounded_hf_acquire(
+            source,
+            spec,
+            staging,
+            budget,
+            cache,
+            parts=parts,
+            planned_reuse=planned_reuse,
+        )
     assert isinstance(spec, HuggingFaceAcquisition)
     auth = hub_auth_kwargs()
     try:
@@ -2807,135 +2917,149 @@ def acquire(
             raise ValueError(f"existing verified snapshot unavailable: {source.id}")
         parent = snapshot_root / source.id
         parent.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(prefix=".acquire-", dir=parent))
-        resources = None
-        try:
-            (staging / "files").mkdir()
-            if source.kind == "wikimedia_dump":
-                resources = _AcquisitionResources(staging)
-                resources.retain(source)
-            elif source.kind in PINNED_FILE_KINDS:
-                resources = _AcquisitionResources(staging, budget)
-                if budget is None:
+        parts = bounded_hf_parts(
+            parent,
+            source,
+            budget,
+            receipt_limit=acquisition_step.MANIFEST_BYTES if step is not None else None,
+        )
+        with acquisition_staging(parent, parts) as staging:
+            resources = None
+            try:
+                (staging / "files").mkdir(exist_ok=True)
+                if source.kind == "wikimedia_dump":
+                    resources = _AcquisitionResources(staging)
                     resources.retain(source)
-            retrieval: dict[str, Any] = {}
-            if source.kind == "local":
-                files, retrieval = _acquire_local(source, project.root, staging)
-            elif source.kind == "git":
-                files, retrieval = _acquire_git(
-                    source, staging, base / "git-cache", False, budget, cache
-                )
-            elif source.kind == "http_document":
-                files, retrieval = _acquire_http(source, staging, False, cache)
-            elif source.kind == "huggingface_dataset":
-                files, retrieval = _acquire_hf(
-                    source, staging, base / "hf-cache", False, budget, cache
-                )
-            elif source.kind == "wikimedia_dump":
-                files, retrieval = _acquire_wikimedia(
-                    source, staging, False, resources, cache
-                )
-            elif source.kind == "archive":
-                files, retrieval = _acquire_archive(
-                    source, staging, budget, resources, cache
-                )
-            elif source.kind == "pdf_documents":
-                files, retrieval = _acquire_pdf(
-                    source, staging, budget, resources, cache
-                )
-            elif source.kind == "mediawiki_dump":
-                files, retrieval = _acquire_mediawiki(
-                    source, staging, budget, resources, cache
-                )
-            else:
-                files = []
-                retrieval = {
-                    "generator_config_sha256": canonical_digest(
-                        source.acquisition.model_dump(mode="json")
+                elif source.kind in PINNED_FILE_KINDS:
+                    resources = _AcquisitionResources(staging, budget)
+                    if budget is None:
+                        resources.retain(source)
+                retrieval: dict[str, Any] = {}
+                if source.kind == "local":
+                    files, retrieval = _acquire_local(source, project.root, staging)
+                elif source.kind == "git":
+                    files, retrieval = _acquire_git(
+                        source, staging, base / "git-cache", False, budget, cache
                     )
+                elif source.kind == "http_document":
+                    files, retrieval = _acquire_http(source, staging, False, cache)
+                elif source.kind == "huggingface_dataset":
+                    files, retrieval = _acquire_hf(
+                        source,
+                        staging,
+                        base / "hf-cache",
+                        False,
+                        budget,
+                        cache,
+                        parts=parts,
+                        planned_reuse=step["hf_checkpoint_reuse"] if step else None,
+                    )
+                elif source.kind == "wikimedia_dump":
+                    files, retrieval = _acquire_wikimedia(
+                        source, staging, False, resources, cache
+                    )
+                elif source.kind == "archive":
+                    files, retrieval = _acquire_archive(
+                        source, staging, budget, resources, cache
+                    )
+                elif source.kind == "pdf_documents":
+                    files, retrieval = _acquire_pdf(
+                        source, staging, budget, resources, cache
+                    )
+                elif source.kind == "mediawiki_dump":
+                    files, retrieval = _acquire_mediawiki(
+                        source, staging, budget, resources, cache
+                    )
+                else:
+                    files = []
+                    retrieval = {
+                        "generator_config_sha256": canonical_digest(
+                            source.acquisition.model_dump(mode="json")
+                        )
+                    }
+                adapter = _adapter(source)
+                identity_fields = {
+                    "declaration_sha256": declared_digest,
+                    "adapter": adapter,
+                    "files": files,
                 }
-            adapter = _adapter(source)
-            identity_fields = {
-                "declaration_sha256": declared_digest,
-                "adapter": adapter,
-                "files": files,
-            }
-            if _retrieval_is_identity(source):
-                identity_fields["retrieval"] = retrieval
-            identity = canonical_digest(identity_fields)
-            manifest = {
-                "schema_version": 1,
-                "source_id": source.id,
-                "declaration": acquisition_identity_payload(source),
-                "declaration_sha256": declared_digest,
-                "adapter": adapter,
-                "files": files,
-                "retrieval": retrieval,
-                "snapshot_sha256": identity,
-            }
-            if (
-                step is not None
-                and len(canonical_json(manifest)) + 1 > acquisition_step.MANIFEST_BYTES
-            ):
-                raise ValueError("acquisition step manifest byte cap exceeded")
-            write_canonical_json(staging / "manifest.json", manifest)
-            if verify_snapshot(staging, _staged=True)["snapshot_sha256"] != identity:
-                raise ValueError("staged snapshot identity mismatch")
-            destination = parent / identity
-            if destination.exists():
-                verify_snapshot(
-                    destination,
-                    proof_store=proof_store,
-                    verification_mode=verification_mode,
-                )
-            else:
-                for directory in sorted(staging.rglob("*"), reverse=True):
-                    if directory.is_dir():
-                        sync_directory(directory)
-                sync_directory(staging / "files")
-                sync_directory(staging)
-                rename_noreplace(staging, destination)
-                sync_directory(parent)
-                verify_snapshot(
-                    destination,
-                    proof_store=proof_store,
-                    verification_mode=verification_mode,
-                )
-            entries[source.id] = {
-                "declaration_sha256": declared_digest,
-                "snapshot_sha256": identity,
-                "snapshot_path": str(destination.resolve()),
-                "receipt": {
-                    "status": "generator"
-                    if not files and source.kind.endswith("generator")
-                    else "acquired",
+                if _retrieval_is_identity(source):
+                    identity_fields["retrieval"] = retrieval
+                identity = canonical_digest(identity_fields)
+                manifest = {
+                    "schema_version": 1,
+                    "source_id": source.id,
+                    "declaration": acquisition_identity_payload(source),
+                    "declaration_sha256": declared_digest,
+                    "adapter": adapter,
+                    "files": files,
                     "retrieval": retrieval,
-                },
-            }
-            if cache is not None and (evidence := cache.take_evidence()):
-                # Provenance of the bytes, outside the snapshot identity: the
-                # same snapshot is reached whether the network or the cache served it.
-                entries[source.id]["transport_cache"] = evidence
-        except BaseException as error:
-            if resources is not None:
-                resources.status = (
-                    "interrupted"
-                    if isinstance(
-                        error, (OSError, EOFError, KeyboardInterrupt, SystemExit)
+                    "snapshot_sha256": identity,
+                }
+                if (
+                    step is not None
+                    and len(canonical_json(manifest)) + 1
+                    > acquisition_step.MANIFEST_BYTES
+                ):
+                    raise ValueError("acquisition step manifest byte cap exceeded")
+                write_canonical_json(staging / "manifest.json", manifest)
+                if (
+                    verify_snapshot(staging, _staged=True)["snapshot_sha256"]
+                    != identity
+                ):
+                    raise ValueError("staged snapshot identity mismatch")
+                destination = parent / identity
+                if destination.exists():
+                    verify_snapshot(
+                        destination,
+                        proof_store=proof_store,
+                        verification_mode=verification_mode,
                     )
-                    else "failed"
-                )
-                resources.persist()
-            if budget is not None:
-                budget.record_failure(source.id, error)
-            raise
-        else:
-            if resources is not None:
-                resources.status = "complete"
-                resources.persist()
-        finally:
-            if staging.exists():
-                shutil.rmtree(staging)
+                else:
+                    for directory in sorted(staging.rglob("*"), reverse=True):
+                        if directory.is_dir():
+                            sync_directory(directory)
+                    sync_directory(staging / "files")
+                    sync_directory(staging)
+                    rename_noreplace(staging, destination)
+                    sync_directory(parent)
+                    verify_snapshot(
+                        destination,
+                        proof_store=proof_store,
+                        verification_mode=verification_mode,
+                    )
+                entries[source.id] = {
+                    "declaration_sha256": declared_digest,
+                    "snapshot_sha256": identity,
+                    "snapshot_path": str(destination.resolve()),
+                    "receipt": {
+                        "status": "generator"
+                        if not files and source.kind.endswith("generator")
+                        else "acquired",
+                        "retrieval": retrieval,
+                    },
+                }
+                if cache is not None and (evidence := cache.take_evidence()):
+                    # Provenance of the bytes, outside the snapshot identity: the
+                    # same snapshot is reached whether the network or the cache served it.
+                    entries[source.id]["transport_cache"] = evidence
+            except BaseException as error:
+                if resources is not None:
+                    resources.status = (
+                        "interrupted"
+                        if isinstance(
+                            error, (OSError, EOFError, KeyboardInterrupt, SystemExit)
+                        )
+                        else "failed"
+                    )
+                    resources.persist()
+                if budget is not None:
+                    budget.record_failure(source.id, error)
+                raise
+            else:
+                if resources is not None:
+                    resources.status = "complete"
+                    resources.persist()
     if effects is not None:
         # An origin changed during the permitted transfer cannot be sealed in
         # the new lock merely because its preflight passed earlier.

@@ -635,18 +635,23 @@ class TransportBudget:
             allow_verified_retry=allow_verified_retry,
         )
 
-    def assert_source_available(self, source_id: str) -> None:
-        """Read-only admission for all shards, including cumulative transfer caps."""
+    def assert_source_available(
+        self, source_id: str, *, verified_paths: frozenset[str] = frozenset()
+    ) -> None:
+        """Read-only admission for outstanding bodies, including cumulative caps."""
         self.remaining_seconds()
         state = self._read()
         source = next(item for item in self.project.sources if item.id == source_id)
         for path, size in pinned_transfers(source):
+            if path in verified_paths:
+                continue
             key = f"{source_id}:{path}"
             self._check_transfer(
                 state,
                 key,
                 size,
-                allow_verified_retry=source.kind in PINNED_FILE_KINDS,
+                allow_verified_retry=source.kind
+                in PINNED_FILE_KINDS | {"huggingface_dataset"},
             )
             state["source_charged"] += size
             state["transfers"].append({"key": key, "status": "started"})

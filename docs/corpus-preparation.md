@@ -86,6 +86,25 @@ per source and then an acquisition lock binding them.
   `--plan` verifies everything without network access or writes. A step returns
   `source_verified` and `complete: false`; once every source is present, plain
   `corpus acquire PROJECT` publishes the lock, reusing the snapshots.
+- **Retry a bounded Hugging Face source.** Rerun the same acquisition after an
+  interruption. With `bounded_shards`, completed selections are receipted
+  individually. Lab skips those shards after verifying their selected bytes.
+  A complete staged input body is reused only after checking its pinned
+  SHA-256. Selection then restarts within that shard. Source-step plans list
+  these cases under `hf_checkpoint_reuse` and reserve network transfers only
+  for the remaining bodies. The plan also budgets the checkpoint metadata.
+  Previous transport charges and deadlines still apply. If a checkpoint
+  used for admission changes before acquisition, rerun the step for a fresh
+  admission. A damaged part can use the transport cache or retry the pinned
+  transfer within the existing ledger allowances. A partial source never
+  appears as a snapshot or lock entry.
+
+  Checkpoints live under the source's hidden `.hf-parts-<key>` directory
+  beside the snapshots. They are bound to the acquisition declaration,
+  adapter and ledger scope. Successful acquisition removes them. Remove
+  abandoned checkpoints only when no attempt uses them. The published
+  snapshot format is unchanged. Other source adapters still recover at
+  snapshot granularity, with raw transport cache reuse where supported.
 - **Observed rather than enforced limits.** On a local workflow where the owner
   wants time, network or storage observed rather than capped,
   `corpus budget-observe-time`, `budget-observe-network` and
@@ -1043,7 +1062,7 @@ checks all three, and that the screen covered every document of this release.
 
 | Step | Resumable after a kill? | A failure at the end costs |
 | --- | --- | --- |
-| `acquire` | yes: verified snapshots and the transport cache are reused | the unfinished source |
+| `acquire` | yes: verified snapshots, transport cache, and committed bounded HF selections | unfinished HF shard selection or transfer, or the unfinished source for other adapters |
 | `build` normalize | yes: per-file receipted shards | files being written |
 | `build` index, dedup | yes: receipted stage outputs ([resume](#resume-a-failed-build)) | the stage that was running |
 | `build` views and publish (native disk builder) | yes: verified append boundaries and atomic publication | uncommitted rows, prefix verification and any unfinished report or manifest pass |

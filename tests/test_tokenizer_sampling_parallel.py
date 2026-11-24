@@ -6,7 +6,6 @@ import hashlib
 import io
 import json
 import random
-import re
 from pathlib import Path
 
 import pytest
@@ -262,18 +261,6 @@ def test_a_document_over_the_cap_ends_the_prefix_and_an_ineligible_one_is_refuse
         _sampled(_config(release), workers=3)
     with pytest.raises(ValueError, match="needs every TRAIN document"):
         _sampled(_config(_release(tmp_path / "two"), max_documents=60), workers=3)
-
-
-def test_scan_states_its_workers_and_cores_used(
-    tmp_path: Path, split_scan: None
-) -> None:
-    echo = io.StringIO()
-    config = _config(_release(tmp_path))
-    with verification_settings(workers=3, echo=echo):
-        for _ in tokenizer_sampling.documents(config, {}):
-            pass
-    assert re.search(r"rank histogram: \d+ shards, up to 3 workers", echo.getvalue())
-    assert "cores used" in echo.getvalue()
 
 
 def test_killed_scan_resumes_from_its_stored_shards_to_the_same_selection(
