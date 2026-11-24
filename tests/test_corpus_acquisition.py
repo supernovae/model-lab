@@ -1343,16 +1343,15 @@ def _pdf(text: str) -> bytes:
     return bytes(out)
 
 
-def test_pdf_text_is_reproducible_from_pinned_bytes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import sys
-
+def _pdf_recipe(
+    tmp_path: Path, texts: tuple[str, ...]
+) -> tuple[Path, dict[str, bytes]]:
     pypdf = pytest.importorskip("pypdf")
-    from klab.corpus import acquisition
-
-    url = "https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-0.pdf"
-    body = _pdf("Pinned safety guidance text")
+    base = "https://nvlpubs.nist.gov/nistpubs/SpecialPublications"
+    bodies = {
+        f"{base}/NIST.SP.800-{index}.pdf": _pdf(text)
+        for index, text in enumerate(texts)
+    }
     recipe = _fixture(
         tmp_path,
         kind="pdf_documents",
@@ -1365,16 +1364,30 @@ def test_pdf_text_is_reproducible_from_pinned_bytes(
                     "url": url,
                     "expected_sha256": hashlib.sha256(body).hexdigest(),
                     "max_bytes": len(body),
-                    "name": "NIST.SP.800-0.txt",
+                    "name": Path(url).stem + ".txt",
                 }
+                for url, body in bodies.items()
             ],
             "extraction": {"engine": "pypdf", "version": pypdf.__version__},
             "max_pages": 5,
             "max_text_bytes": 4096,
         },
     )
+    return recipe, bodies
+
+
+def test_pdf_text_is_reproducible_from_pinned_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    from klab.corpus import acquisition
+
+    recipe, bodies = _pdf_recipe(tmp_path, ("Pinned safety guidance text",))
+    pypdf = pytest.importorskip("pypdf")
+    (body,) = bodies.values()
     project = load_project(recipe)
-    _serve_pinned(monkeypatch, {url: body})
+    _serve_pinned(monkeypatch, bodies)
     lock = acquire(project, tmp_path / "work")
     snapshot = Path(lock["sources"]["one"]["snapshot_path"])
     text = (snapshot / "files/NIST.SP.800-0.txt").read_bytes()
@@ -1394,6 +1407,80 @@ def test_pdf_text_is_reproducible_from_pinned_bytes(
         patch.setitem(sys.modules, "pypdf", None)
         with pytest.raises(ValueError, match="`pdf` extra"):
             verify_snapshot(snapshot)
+
+
+@pytest.mark.parametrize("damage_text", [False, True])
+def test_pdf_source_step_reuses_pinned_bodies_and_verified_text_after_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage_text: bool
+) -> None:
+    from klab.corpus import acquisition as native
+
+    monkeypatch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
+    recipe, bodies = _pdf_recipe(tmp_path, ("First pinned PDF", "Second pinned PDF"))
+    names = ("NIST.SP.800-0.txt", "NIST.SP.800-1.txt")
+    total_body_bytes = sum(map(len, bodies.values()))
+    config = yaml.safe_load(recipe.read_text())
+    config["transport_budget"] = {
+        "attempt_id": "pdf_resume",
+        "max_source_body_bytes": total_body_bytes,
+        "max_metadata_body_bytes": 4096,
+        "max_transfers": 2,
+        "max_retries_per_shard": 0,
+        "max_wall_seconds": 120,
+        "max_disk_bytes": 2 * 1024**3,
+    }
+    _yaml(recipe, config)
+    project = load_project(recipe)
+    root = tmp_path / "work"
+    budget = TransportBudget.initialize(
+        root / "corpora/example/transport-budget.sqlite", project
+    )
+    requests = _serve_pinned(monkeypatch, bodies)
+    extract = native._pdf_text
+    extracted = []
+    interrupted = True
+
+    def extract_with_fault(path, spec, name):
+        if not (path.parent.parent / "manifest.json").exists():
+            extracted.append(name)
+            if name == names[1] and interrupted:
+                raise OSError("interrupted before PDF extraction")
+        return extract(path, spec, name)
+
+    monkeypatch.setattr(native, "_pdf_text", extract_with_fault)
+    step = {"source_id": "one", "max_new_bytes": 1 << 30, "min_free_bytes": 0}
+    with pytest.raises(OSError, match="interrupted before PDF extraction"):
+        acquire(project, root, **step)
+    snapshots = root / "corpora/example/snapshots/one"
+    assert not any(not path.name.startswith(".") for path in snapshots.iterdir())
+    assert requests == list(bodies)
+    assert budget.receipt()["source_actual"] == total_body_bytes
+    if damage_text:
+        staged_text = next(snapshots.glob(".pdf-parts-*/snapshot/files/" + names[0]))
+        staged_text.write_bytes(staged_text.read_bytes().replace(b"First", b"Other"))
+
+    interrupted = False
+    extracted.clear()
+    plan = acquire(project, root, plan_only=True, **step)["admission"]
+    assert plan["pdf_checkpoint_reuse"] == {
+        names[0]: "body" if damage_text else "text",
+        names[1]: "body",
+    }
+    resumed = acquire(project, root, **step)["source"]
+    assert extracted == (list(names) if damage_text else [names[1]])
+    assert requests == list(bodies)
+    assert budget.receipt()["source_actual"] == total_body_bytes
+    assert not list(snapshots.glob(".pdf-parts-*"))
+
+    control = tmp_path / "control"
+    TransportBudget.initialize(
+        control / "corpora/example/transport-budget.sqlite", project
+    )
+    expected = acquire(project, control, **step)["source"]
+    assert resumed["snapshot_sha256"] == expected["snapshot_sha256"]
+    assert verify_snapshot(resumed["snapshot_path"]) == verify_snapshot(
+        expected["snapshot_path"]
+    )
 
 
 @pytest.mark.parametrize(

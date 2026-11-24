@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from klab.canonical import canonical_digest, canonical_json
-from klab.corpus.project import HFBoundedShard
+from klab.corpus.project import HFBoundedShard, PdfAcquisition, PdfDocument
 from klab.result_publication import (
     read_canonical,
     sync_directory,
@@ -65,32 +65,8 @@ class AcquisitionParts:
             raise ValueError(f"unsafe acquisition checkpoint file: {path}")
         return info.st_size
 
-    def sync_path(self, path: Path) -> None:
-        parent = path.parent
-        while parent != self.root:
-            sync_directory(parent)
-            parent = parent.parent
-
-
-class HFParts(AcquisitionParts):
-    """Keep receipts for selected rows and verify the raw bodies of unfinished shards."""
-
-    def __init__(
-        self, parent: Path, identity: str, *, receipt_limit: int | None = None
-    ):
-        super().__init__(parent, identity, adapter="hf")
-        self.receipt_limit = receipt_limit
-
-    def body(self, shard: HFBoundedShard) -> Path:
-        return self.staging / "hf-input" / shard.path
-
-    def output(self, shard: HFBoundedShard) -> Path:
-        return self.staging / "files" / (shard.path + ".sample.jsonl")
-
-    def _marker(self, shard: HFBoundedShard) -> Path:
-        return self.root / ("part-" + canonical_digest(shard.path) + ".json")
-
-    def _size(self, path: Path, expected: str, limit: int) -> int | None:
+    def verified_size(self, path: Path, expected: str, limit: int) -> int | None:
+        self._check_root()
         size = self.staged_file_size(path)
         return (
             size
@@ -98,19 +74,33 @@ class HFParts(AcquisitionParts):
             else None
         )
 
-    def verified_body(self, shard: HFBoundedShard) -> int | None:
-        self._check_root()
-        return self._size(
-            self.body(shard), shard.expected_sha256.lower(), shard.max_shard_bytes
-        )
+    def sync_path(self, path: Path) -> None:
+        parent = path.parent
+        while parent != self.root:
+            sync_directory(parent)
+            parent = parent.parent
 
-    def verified_part(
+
+class ReceiptedParts(AcquisitionParts):
+    """Bind derived output receipts to their request and logical part."""
+
+    def __init__(
         self,
-        shard: HFBoundedShard,
-        max_bytes: int,
-    ) -> tuple[dict[str, Any] | None, dict[str, Any]] | None:
+        parent: Path,
+        identity: str,
+        *,
+        adapter: str,
+        receipt_limit: int | None,
+    ):
+        super().__init__(parent, identity, adapter=adapter)
+        self.receipt_limit = receipt_limit
+
+    def _marker(self, name: str) -> Path:
+        return self.root / ("part-" + canonical_digest(name) + ".json")
+
+    def _read_result(self, name: str) -> dict[str, Any] | None:
         self._check_root()
-        marker = self._marker(shard)
+        marker = self._marker(name)
         try:
             if (
                 self.receipt_limit is not None
@@ -122,10 +112,68 @@ class HFParts(AcquisitionParts):
             if (
                 canonical_digest(body) != entry["sha256"]
                 or body["identity"] != self.identity
-                or body["shard"] != shard.path
+                or body["part"] != name
+                or not isinstance(body["result"], dict)
             ):
                 return None
-            inventory, receipt = body["inventory"], body["receipt"]
+            return body["result"]
+        except FileNotFoundError, ValueError, TypeError, KeyError:
+            return None
+
+    def _discard_marker(self, name: str) -> bool:
+        try:
+            self._marker(name).unlink()
+        except FileNotFoundError:
+            return False
+        return True
+
+    def receipt_bytes(self) -> int:
+        self._check_root()
+        return sum(path.lstat().st_size for path in self.root.glob("part-*.json"))
+
+    def _commit(self, name: str, output: Path, result: dict[str, Any]) -> None:
+        self.sync_path(output)
+        body = {"identity": self.identity, "part": name, "result": result}
+        encoded = (
+            canonical_json({"body": body, "sha256": canonical_digest(body)}) + b"\n"
+        )
+        if (
+            self.receipt_limit is not None
+            and self.receipt_bytes() + len(encoded) > self.receipt_limit
+        ):
+            raise ValueError("acquisition step checkpoint metadata cap exceeded")
+        write_bytes_exclusive(self._marker(name), encoded)
+
+
+class HFParts(ReceiptedParts):
+    """Keep receipts for selected rows and verify the raw bodies of unfinished shards."""
+
+    def __init__(
+        self, parent: Path, identity: str, *, receipt_limit: int | None = None
+    ):
+        super().__init__(parent, identity, adapter="hf", receipt_limit=receipt_limit)
+
+    def body(self, shard: HFBoundedShard) -> Path:
+        return self.staging / "hf-input" / shard.path
+
+    def output(self, shard: HFBoundedShard) -> Path:
+        return self.staging / "files" / (shard.path + ".sample.jsonl")
+
+    def verified_body(self, shard: HFBoundedShard) -> int | None:
+        return self.verified_size(
+            self.body(shard), shard.expected_sha256.lower(), shard.max_shard_bytes
+        )
+
+    def verified_part(
+        self,
+        shard: HFBoundedShard,
+        max_bytes: int,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]] | None:
+        result = self._read_result(shard.path)
+        if result is None:
+            return None
+        try:
+            inventory, receipt = result["inventory"], result["receipt"]
             if (
                 receipt["source_shard_path"] != shard.path
                 or receipt["source_shard_sha256"] != shard.expected_sha256.lower()
@@ -136,7 +184,7 @@ class HFParts(AcquisitionParts):
                 return None
             if inventory is not None:
                 path = self.output(shard)
-                size = self._size(path, inventory["sha256"], max_bytes)
+                size = self.verified_size(path, inventory["sha256"], max_bytes)
                 if (
                     size is None
                     or size != inventory["size"]
@@ -150,15 +198,7 @@ class HFParts(AcquisitionParts):
             return None
 
     def discard_marker(self, shard: HFBoundedShard) -> bool:
-        try:
-            self._marker(shard).unlink()
-        except FileNotFoundError:
-            return False
-        return True
-
-    def receipt_bytes(self) -> int:
-        self._check_root()
-        return sum(path.lstat().st_size for path in self.root.glob("part-*.json"))
+        return self._discard_marker(shard.path)
 
     def commit(
         self,
@@ -166,22 +206,69 @@ class HFParts(AcquisitionParts):
         inventory: dict[str, Any] | None,
         receipt: dict[str, Any],
     ) -> None:
-        self.sync_path(self.output(shard))
-        body = {
-            "identity": self.identity,
-            "shard": shard.path,
-            "inventory": inventory,
-            "receipt": receipt,
-        }
-        encoded = (
-            canonical_json({"body": body, "sha256": canonical_digest(body)}) + b"\n"
+        self._commit(
+            shard.path, self.output(shard), {"inventory": inventory, "receipt": receipt}
         )
-        if (
-            self.receipt_limit is not None
-            and self.receipt_bytes() + len(encoded) > self.receipt_limit
-        ):
-            raise ValueError("acquisition step HF checkpoint metadata cap exceeded")
-        write_bytes_exclusive(self._marker(shard), encoded)
+
+
+def pinned_pdf_path(name: str) -> str:
+    """Relative path of the original PDF in a snapshot's pinned inventory."""
+    return name.removesuffix(".txt") + ".pdf"
+
+
+class PDFParts(ReceiptedParts):
+    """Checkpoints for pinned PDF bodies and completed text extraction."""
+
+    def __init__(
+        self, parent: Path, identity: str, *, receipt_limit: int | None = None
+    ):
+        super().__init__(parent, identity, adapter="pdf", receipt_limit=receipt_limit)
+
+    def body(self, document: PdfDocument) -> Path:
+        return self.staging / "pinned" / pinned_pdf_path(document.name)
+
+    def output(self, document: PdfDocument) -> Path:
+        return self.staging / "files" / document.name
+
+    def verified_document(
+        self, document: PdfDocument, spec: PdfAcquisition
+    ) -> tuple[int | None, tuple[str, int, int] | None]:
+        """Return verified original bytes and, when valid, the extracted text receipt."""
+        body_size = self.verified_size(
+            self.body(document), document.expected_sha256, document.max_bytes
+        )
+        if body_size is None:
+            return None, None
+        return body_size, self._verified_text(document, spec)
+
+    def _verified_text(
+        self, document: PdfDocument, spec: PdfAcquisition
+    ) -> tuple[str, int, int] | None:
+        result = self._read_result(document.name)
+        if result is None:
+            return None
+        try:
+            pages, digest = result["pages"], result["text_sha256"]
+            if type(pages) is not int or not 0 < pages <= spec.max_pages:
+                return None
+            size = self.verified_size(
+                self.output(document), digest, spec.max_text_bytes
+            )
+            if size is None or size != result["text_bytes"]:
+                return None
+            return digest, size, pages
+        except TypeError, KeyError:
+            return None
+
+    def discard_marker(self, document: PdfDocument) -> bool:
+        return self._discard_marker(document.name)
+
+    def commit(self, document: PdfDocument, digest: str, size: int, pages: int) -> None:
+        self._commit(
+            document.name,
+            self.output(document),
+            {"pages": pages, "text_sha256": digest, "text_bytes": size},
+        )
 
 
 @contextmanager

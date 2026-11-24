@@ -170,6 +170,7 @@ def prepare(
     pending = pinned_transfers(source)
     reused_output_bytes = 0
     hf_reuse = {}
+    pdf_reuse = {}
     checkpoint_bytes = checkpoint_peak_bytes = 0
     if existing is not None:
         output_bytes = compressed = 0
@@ -182,28 +183,44 @@ def prepare(
     else:
         output_bytes = source.acquisition.max_bytes
         manifest_bytes = MANIFEST_BYTES
-        parts = native.bounded_hf_parts(
+        hf = native.bounded_hf_parts(
             parent, source, budget, receipt_limit=MANIFEST_BYTES
         )
-        if parts is not None:
+        if hf is not None:
             checkpoint_bytes = MANIFEST_BYTES
-            checkpoint_peak_bytes = checkpoint_bytes - parts.receipt_bytes()
+            checkpoint_peak_bytes = checkpoint_bytes - hf.receipt_bytes()
             if checkpoint_peak_bytes < 0:
                 raise ValueError("acquisition step HF checkpoint metadata cap exceeded")
             for shard in source.acquisition.bounded_shards:
-                if (part := parts.verified_part(shard, output_bytes)) is not None:
+                if (part := hf.verified_part(shard, output_bytes)) is not None:
                     hf_reuse[shard.path] = "selection"
                     if part[0] is not None:
                         reused_output_bytes += part[0]["size"]
-                elif parts.verified_body(shard) is not None:
+                elif hf.verified_body(shard) is not None:
                     hf_reuse[shard.path] = "body"
-        pending = tuple(item for item in pending if item[0] not in hf_reuse)
+        elif source.kind == "pdf_documents":
+            pdf = native.pdf_parts(parent, source, budget, receipt_limit=MANIFEST_BYTES)
+            assert pdf.receipt_limit is not None
+            checkpoint_bytes = pdf.receipt_limit
+            checkpoint_peak_bytes = checkpoint_bytes - pdf.receipt_bytes()
+            if checkpoint_peak_bytes < 0:
+                raise ValueError(
+                    "acquisition step PDF checkpoint metadata cap exceeded"
+                )
+            for document in source.acquisition.documents:
+                size, text = pdf.verified_document(document, source.acquisition)
+                if size is None:
+                    continue
+                pdf_reuse[document.name] = "text" if text is not None else "body"
+                reused_output_bytes += size + (text[1] if text is not None else 0)
+        verified_paths = frozenset(hf_reuse.keys() | pdf_reuse.keys())
+        pending = tuple(item for item in pending if item[0] not in verified_paths)
         # PDF bodies are kept in the snapshot and so are already output bytes;
         # other bodies occupy one temporary path until they are expanded.
         compressed = (
             0 if source.kind == "pdf_documents" else sum(size for _, size in pending)
         )
-        budget.assert_source_available(source_id, verified_paths=frozenset(hf_reuse))
+        budget.assert_source_available(source_id, verified_paths=verified_paths)
     # Expanded data + manifest appear at staging and published paths. Each
     # compressed body has one temporary path. Stable capped SQLite/journal paths
     # are additional native overhead, independent of external job logs/receipts.
@@ -249,6 +266,7 @@ def prepare(
             "max_new_bytes": max_new_bytes,
             "storage_mode": "observational" if observes_storage else "enforced",
             "hf_checkpoint_reuse": hf_reuse,
+            "pdf_checkpoint_reuse": pdf_reuse,
             "external_logs_receipts_and_baseline_are_additional": True,
         },
     )
