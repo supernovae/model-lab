@@ -835,6 +835,14 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   `klab corpus export`, `klab corpus derive-family-inventory`, `klab corpus materialize-mixture` and `klab corpus verify-mixture`. Each parallel stage prints `STAGE: N shards, up to W workers` when it
   starts and `STAGE: S s wall, C s cpu, K cores used, reused R/N` when it ends,
   where cores used is CPU seconds over wall seconds.
+- **Worker capacity.** The shard runner also caps large parallel passes by
+  CPU affinity and available RAM. Its default planning estimate is 512 MiB
+  per worker slot with 1 GiB left for the coordinator and other work. It
+  refuses a parallel pass when RAM cannot be measured or cannot fit one
+  slot. This estimate governs the worker window, while each operation owns
+  the memory it needs to merge results. Spawned workers set common BLAS,
+  OpenMP and Rayon thread counts to one. Cached results are read inside the
+  same bounded window as newly finished results.
 - **Shards.** A parallel stage cuts its file into line-aligned byte ranges
   (shards), runs them on the worker pool and merges results in file order, so the
   output never depends on `--workers`. With `--scratch-dir`, the stage also keeps
@@ -1035,6 +1043,7 @@ checks all three, and that the screen covered every document of this release.
 | `freeze` | yes: rerun it; a stopped freeze is finished after verifying the staged files | the rename, or a verification from the bytes after a stop |
 | `audit`, `describe`, `sources`, release readers | no, but a successful verification is a receipt that later commands reuse | one verification from the bytes |
 | `export` | no: staged, then renamed | the export |
+| `derive-family-inventory` | yes with `--scratch-dir`: verify and reuse committed segments | unfinished ranges and a sequential assembly pass |
 | `near-duplicates` | yes, per shard by training-document offset | the documents since each shard's last checkpoint |
 | `materialize-mixture` | yes: committed segments | the segment in progress |
 | `verify-mixture` | no | one verification pass |
@@ -1205,9 +1214,17 @@ inside one split. Which command writes it depends on how the release was split.
   says; the mixture re-checks that no family spans splits. The command refuses
   a release split by reviewed assignment files, a document whose source is
   unmapped, or one whose `domains` omit its stratum, and never overwrites. It
-  streams the release once and holds no rows in memory; it needs the verified
-  release, not a rebuild. Several declarations over one release (for example
-  a long-context mixture) share the one inventory.
+  streams the verified documents into receipted segments, then assembles
+  them in release order. Several declarations over one release can share
+  the inventory. Pass `--scratch-dir` and reuse that directory on retry to
+  retain completed segments. Use `--cold` to read and verify the release
+  from its bytes. Allow roughly the size of the resulting inventory for
+  the segments, plus the same amount for the assembly beside the output.
+  Without explicit scratch, both use temporary space beside the output.
+  Explicit scratch keeps the segments after success. Remove them when no
+  inventory attempt is using the scratch directory. Existing published
+  inventories keep the same format and need no rebuild. Older disposable
+  range checkpoints with a different input fingerprint are ignored.
 
 The family does not choose what a quota takes: documents of a stratum are
 ranked individually by a seeded hash and taken in rank order, so a stratum of

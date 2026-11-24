@@ -170,7 +170,43 @@ def test_sharded_inventory_is_byte_identical_to_the_single_process_pass(
     output.unlink()
     monkeypatch.setattr(shards, "PARALLEL_MIN_BYTES", 0)
     monkeypatch.setattr(shards, "CHUNK_BYTES", 3000)
-    with verification_settings(workers=3):
+    scratch = tmp_path / "scratch"
+    with verification_settings(workers=3, scratch_dir=scratch):
         sharded = declared_family_inventory.derive_family_inventory(declaration)
     assert output.read_bytes() == expected
     assert sharded == single
+
+
+def test_inventory_resumes_with_verified_segments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from klab.corpus import shards
+    from klab.corpus.release_verify import verification_settings
+
+    _, declaration = _release(tmp_path, monkeypatch, _split())
+    output = Path(yaml.safe_load(declaration.read_text())["family_inventory"])
+    scratch = tmp_path / "scratch"
+    monkeypatch.setattr(shards, "CHUNK_BYTES", 3000)
+    with verification_settings(workers=1):
+        expected = declared_family_inventory.derive_family_inventory(declaration)
+    expected_bytes = output.read_bytes()
+    output.unlink()
+
+    monkeypatch.setenv("KLAB_FAULT", "family inventory:2")
+    with (
+        verification_settings(workers=1, scratch_dir=scratch),
+        pytest.raises(RuntimeError, match="KLAB_FAULT"),
+    ):
+        declared_family_inventory.derive_family_inventory(declaration)
+    assert not output.exists()
+    good, damaged = sorted(scratch.glob("shards/files/shard/*/inventory.jsonl"))
+    inode = good.stat().st_ino
+    damaged.write_bytes(b"bad data")
+    monkeypatch.delenv("KLAB_FAULT")
+
+    with verification_settings(workers=1, scratch_dir=scratch):
+        resumed = declared_family_inventory.derive_family_inventory(declaration)
+    assert good.stat().st_ino == inode
+    assert damaged.read_bytes() != b"bad data"
+    assert output.read_bytes() == expected_bytes
+    assert resumed == expected
