@@ -7,6 +7,7 @@ writer-side ExperimentStore, so loading a dashboard can never migrate a run stor
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import sqlite3
 from datetime import UTC, datetime
@@ -29,7 +30,14 @@ from klab.dashboard import (
     ui,
 )
 from klab.dashboard.learn import learn_page
-from klab.dashboard.queries import DashboardSnapshot, RunRecord, runs, snapshot
+from klab.dashboard.lineage import Lineage, lineages
+from klab.dashboard.queries import (
+    DashboardSnapshot,
+    RunRecord,
+    run_facts,
+    runs,
+    snapshot,
+)
 from klab.dashboard.stores import (
     available_stores,
     discovery_roots,
@@ -207,9 +215,7 @@ def _selection_controls(root: Path) -> None:
             st.sidebar.caption(
                 f"{record.name} · Recorded {record.status} · Updated {record.updated_at} UTC"
             )
-            st.sidebar.markdown(
-                f"[Open this run](training?{urlencode({'store': str(root), 'run': record.run_id})})"
-            )
+            st.sidebar.markdown(f"[Link to this run]({run_link(root, record.run_id)})")
     st.sidebar.caption(
         "Stored status is not a process heartbeat. Verify activity before calling a run live."
     )
@@ -1125,10 +1131,122 @@ def _read_snapshot(
     return fresh, observed_at, None
 
 
+# One run page with a tab per question, in the order a run is usually read.
+RUN_TABS: tuple[tuple[str, str, str], ...] = (
+    ("overview", "Overview", "Which run is this, and how is it configured?"),
+    ("training", "Training", "Is the loss falling, and how fast is it training?"),
+    ("evaluation", "Evaluation", "Is it improving on data it never trained on?"),
+    ("engram", "Engram memory", "Is the n-gram memory being read and filled?"),
+    ("architecture", "Architecture", "Are the expert and memory parts in use?"),
+    ("runtime", "Runtime", "Where does the time of an update go?"),
+    ("memory", "Device memory", "How close are the devices and the host to full?"),
+    ("checkpoints", "Checkpoints", "What can be resumed or sampled from?"),
+    ("stages", "Stages", "Which stage of its life is the run in?"),
+    ("snapshots", "Snapshot", "What is every recorded value right now?"),
+    ("generate", "Generate", "What does a checkpoint of this run write?"),
+)
+_TAB_TITLES = {name: title for name, title, _ in RUN_TABS}
+
+
+def run_link(root: Path, run_id: str, tab: str | None = None) -> str:
+    """The stable link to a run's page; relative, so it works behind any host."""
+    query = {"store": str(root), "run": run_id}
+    if tab:
+        query["tab"] = tab
+    return "run?" + urlencode(query)
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def _lineages(root: str) -> list[Lineage]:
+    return lineages(runs(Path(root)), run_facts(Path(root)))
+
+
+def _run_header(root: Path, focused_ids: list[str], tab: str) -> None:
+    """Say which run this is, how it ended, and where it sits among its attempts."""
+    if not focused_ids:
+        return
+    try:
+        groups = _lineages(str(root))
+    except OSError, sqlite3.Error, ValueError:
+        groups = []
+    located = {
+        attempt.run_id: (group, index)
+        for group in groups
+        for index, attempt in enumerate(group.attempts)
+    }
+    blocks = []
+    for run_id in focused_ids:
+        if run_id not in located:
+            blocks.append(f"<div class='rh-run'><b>{html.escape(run_id)}</b></div>")
+            continue
+        group, index = located[run_id]
+        attempt = group.attempts[index]
+        where = (
+            f"step {attempt.last_step:,} · {ui.compact(attempt.last_tokens)} tokens"
+            if attempt.last_step is not None
+            else "no update recorded"
+        )
+        links = []
+        if len(group.attempts) > 1:
+            if index > 0:
+                earlier = group.attempts[index - 1].run_id
+                links.append(
+                    f"<a href='{html.escape(run_link(root, earlier, tab))}' "
+                    f"target='_self'>← earlier attempt</a>"
+                )
+            links.append(f"attempt {index + 1} of {len(group.attempts)}")
+            if index + 1 < len(group.attempts):
+                later = group.attempts[index + 1].run_id
+                links.append(
+                    f"<a href='{html.escape(run_link(root, later, tab))}' "
+                    f"target='_self'>later attempt →</a>"
+                )
+        blocks.append(
+            "<div class='rh-run'>"
+            f"<span class='n'>{html.escape(attempt.record.name)}</span>"
+            f"{ui.chip(attempt.verdict.level, attempt.verdict.label)}"
+            f"<span class='pb-hint'>{html.escape(run_id)} · {where}"
+            + (" · " + " · ".join(links) if links else "")
+            + "</span>"
+            + (
+                f"<div class='pb-hint'>{html.escape(attempt.verdict.why)}</div>"
+                if len(focused_ids) == 1
+                else ""
+            )
+            + "</div>"
+        )
+    st.markdown("".join(blocks), unsafe_allow_html=True)
+
+
+def run_tabs() -> str:
+    """The tab bar of the run page; the choice is kept in the ``tab`` query value."""
+    names = [name for name, _, _ in RUN_TABS]
+    requested = st.query_params.get("tab")
+    if requested in names and st.session_state.get("run_tab_applied") != requested:
+        st.session_state["run_tab"] = requested
+        st.session_state["run_tab_applied"] = requested
+    if st.session_state.get("run_tab") not in names:
+        st.session_state["run_tab"] = names[0]
+    chosen = st.segmented_control(
+        "View",
+        names,
+        format_func=_TAB_TITLES.get,
+        key="run_tab",
+        label_visibility="collapsed",
+    )
+    chosen = chosen if chosen in names else names[0]
+    if st.query_params.get("tab") != chosen:
+        st.query_params["tab"] = chosen
+        st.session_state["run_tab_applied"] = chosen
+    st.caption(next(question for name, _, question in RUN_TABS if name == chosen))
+    return chosen
+
+
 def render(root: Path, page: str) -> None:
     if page == "generate":
         generation.generation_page(None, root, [])
         return
+    header = st.container()
     st.button(
         "Refresh now",
         key="dashboard_refresh",
@@ -1151,15 +1269,8 @@ def render(root: Path, page: str) -> None:
             )
         )
     _, focused_ids = selected(view)
-    for record in view.runs:
-        if record.run_id in focused_ids:
-            with st.container(border=True):
-                st.markdown(f"**{record.name}** · Recorded status: **{record.status}**")
-                st.caption(f"Run {record.run_id} · Updated {record.updated_at} UTC")
-                if record.status.lower() == "running":
-                    st.caption(
-                        "Activity unverified: stored running status is not a live process heartbeat."
-                    )
+    with header:
+        _run_header(root, focused_ids, page)
     pages = {
         "generate": lambda value: generation.generation_page(
             value, root, selected(value)[1]
@@ -1261,36 +1372,11 @@ def main() -> None:
         ),
     ]
     pages.update({p.url_path: p for p in lab})
-    run_pages = [
-        st.Page(
-            lambda name=name: _run_page(root, name),
-            title={
-                "engram": "Engram memory",
-                "snapshots": "Snapshot inspector",
-                "memory": "Device memory",
-            }.get(name, name.title()),
-            icon={
-                "training": ":material/monitoring:",
-                "engram": ":material/memory:",
-                "snapshots": ":material/manage_search:",
-                "checkpoints": ":material/save:",
-            }.get(name, ":material/analytics:"),
-            url_path=name,
-        )
-        for name in (
-            "overview",
-            "training",
-            "generate",
-            "engram",
-            "snapshots",
-            "evaluation",
-            "architecture",
-            "runtime",
-            "memory",
-            "checkpoints",
-            "stages",
-        )
-    ]
+
+    def run_page() -> None:
+        st.page_link(training_pages[0], label="All runs", icon=":material/arrow_back:")
+        _run_page(root, run_tabs())
+
     training_pages = [
         st.Page(
             lambda: runs_hub.runs_page(root),
@@ -1298,13 +1384,18 @@ def main() -> None:
             icon=":material/timeline:",
             url_path="runs",
             default=True,
-        )
+        ),
+        st.Page(
+            run_page,
+            title="Run detail",
+            icon=":material/monitoring:",
+            url_path="run",
+        ),
     ]
     page = st.navigation(
         {
             "Training": training_pages,
             "Lab": lab,
-            "Run telemetry": run_pages,
             "Learn": [st.Page(lambda: learn(), title="Learn", url_path="learn")],
         }
     )
@@ -1312,29 +1403,23 @@ def main() -> None:
     st.sidebar.caption("Observe training · Inspect evidence · Compare models")
     with st.sidebar.expander("Data locations"):
         st.caption(f"lab {lab_dir}  \nruns {root}")
-    _selection_controls(root)
-    if page.url_path in {item.url_path for item in run_pages}:
+    on_run_page = page.url_path == "run"
+    if on_run_page:
+        _selection_controls(root)
+    else:
+        # Widgets that are not drawn lose their state; keep the selection for later.
+        for key in ("selected_runs", "include_pilot_runs"):
+            if key in st.session_state:
+                st.session_state[key] = st.session_state[key]
+    if on_run_page or page.url_path == "runs":
         st.sidebar.selectbox(
             "Automatic refresh",
             [10, 2, 30, 0],
             format_func=lambda value: f"Every {value}s" if value else "Paused",
             key="refresh_seconds",
         )
-        with st.container(horizontal=True):
-            for destination in (
-                "training",
-                "generate",
-                "engram",
-                "snapshots",
-                "checkpoints",
-                "explorer",
-            ):
-                target = next(
-                    (item for item in run_pages + lab if item.url_path == destination),
-                    None,
-                )
-                if target is not None:
-                    st.page_link(target, label=target.title)
+    elif "refresh_seconds" in st.session_state:
+        st.session_state["refresh_seconds"] = st.session_state["refresh_seconds"]
     page.run()
 
 

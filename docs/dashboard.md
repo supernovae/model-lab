@@ -6,8 +6,8 @@ Commands below use the [activated, provisioned environment](../README.md#install
 what is training now and how every earlier run went. The **Lab** pages follow.
 Each page answers one question, opens with the verdict, explains its
 numbers in plain words and, when it has nothing to show, names the command that
-would fill it. Run telemetry (training curves, runtime, memory, checkpoints) and
-the Learn page follow in their own sections.
+would fill it. **Run detail** shows one run's telemetry (training curves, runtime,
+memory, checkpoints) in tabs, and the Learn page closes the navigation.
 
 ```sh
 klab dashboard               # WORK_DIR/runs + WORK_DIR/lab
@@ -288,13 +288,40 @@ separately for each checkpoint; dense FFNs have no MoE router. Changing a select
 or sentence hides the previous result until you run again. A failed new comparison
 clears the prior comparison, so old charts cannot appear under a new selection.
 
-## Run telemetry
+## Run detail
 
-Run telemetry includes **Engram memory** (separate from device and host memory)
-and **Snapshot inspector**. Training opens with a compact memory summary and three
-curves: training loss, validation loss and throughput, when recorded. Use the
-metric selector to add other curves. The quick navigation links retain the run
-selection across telemetry pages.
+One page shows one run (or several, overlaid). It opens from an attempt on the
+Runs page, or from a stable link:
+
+```text
+/run?store=<URL-encoded run store path>&run=<RUN_ID>&tab=<TAB>
+```
+
+The page starts with the run's name, its outcome as on the Runs page, where it got
+to, and links to the earlier and later attempt of its lineage (the tab is kept).
+A tab bar then selects the question; the choice is kept in `tab`:
+
+| Tab | Question |
+|---|---|
+| **Overview** (`overview`) | Which run is this, and how is it configured? |
+| **Training** (`training`) | Is the loss falling, and how fast is it training? |
+| **Evaluation** (`evaluation`) | Is it improving on data it never trained on? |
+| **Engram memory** (`engram`) | Is the n-gram memory being read and filled? |
+| **Architecture** (`architecture`) | Are the expert and memory parts in use? |
+| **Runtime** (`runtime`) | Where does the time of an update go? |
+| **Device memory** (`memory`) | How close are the devices and the host to full? |
+| **Checkpoints** (`checkpoints`) | What can be resumed or sampled from? |
+| **Stages** (`stages`) | Which stage of its life is the run in? |
+| **Snapshot** (`snapshots`) | What is every recorded value right now? |
+| **Generate** (`generate`) | What does a checkpoint of this run write? |
+
+The run selector, the pilot filter and the refresh interval are in the sidebar of
+this page only. The former per-topic pages and their paths (`/training`,
+`/engram`, ...) are gone; use `/run` with a `tab`.
+
+**Engram memory** is separate from device and host memory. Training opens with a
+compact memory summary and three curves: training loss, validation loss and
+throughput, when recorded. Use the metric selector to add other curves.
 
 Engram memory shows aggregate and recorded per-port gates, value/hidden norms,
 address reuse and table utilization. Every value retains its observation step;
@@ -307,9 +334,8 @@ Snapshot inspector filters current recorded metric values and their changes from
 the preceding observation, displays the saved configuration, shows recent events,
 and inspects an explicitly selected checkpoint generation (newest by default).
 It reads projected metadata only; no weights are loaded and no inference runs.
-Save-time verification is distinct from a current local file check. Existing
-**Checkpoints** verification and **Explorer** remain available through the quick
-links.
+Save-time verification is distinct from a current local file check; the
+**Checkpoints** tab verifies files.
 
 The **Evaluation** page draws every `validation/` metric against the step for the
 selected runs, so several runs overlay (for example the arms of a sweep). Dotted

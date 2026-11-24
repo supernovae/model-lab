@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from klab.dashboard import ui
 from klab.dashboard.lineage import lineages, stitch
 from klab.dashboard.queries import metric_series, run_facts, runs
 from klab.training.metrics import ExperimentStore
@@ -78,3 +79,38 @@ def test_runs_are_grouped_into_a_lineage_with_a_verdict_per_attempt(tmp_path) ->
     live = lineages(runs(tmp_path), run_facts(tmp_path), NOW)
     assert live[0].root_id == "job-a0" and live[0].live
     assert live[0].tip.verdict.label == "Training"
+
+
+def _run_page_script(root):
+    from pathlib import Path
+
+    from klab.dashboard.app import _run_page, _selection_controls, run_tabs
+
+    _selection_controls(Path(root))
+    _run_page(Path(root), run_tabs())
+
+
+def test_run_page_opens_the_linked_tab_with_the_attempt_outcome(tmp_path) -> None:
+    from streamlit.testing.v1 import AppTest
+
+    store = ExperimentStore(tmp_path)
+    store.create_run("job-a0", {"name": "job"}, {})
+    _train(store, "job-a0", 0, 8, 1000.0)
+    store.log_event("job-a0", 8, 800, 8.0, "run_failed", {"reason": "nonfinite loss"})
+    store.finish_run("job-a0", "failed")
+    store.create_run("job-a1", {"name": "job"}, {}, parent_run_id="job-a0")
+
+    app = AppTest.from_function(_run_page_script, args=(str(tmp_path),))
+    app.query_params["run"] = "job-a0"
+    app.query_params["tab"] = "stages"
+    app.run()
+
+    assert not app.exception
+    assert [h.value for h in app.header] == ["Stages"]
+    header = next(m.value for m in app.markdown if "rh-run" in m.value)
+    assert ui.STATUS_COLOR["fail"] in header  # the failed attempt's outcome chip
+    assert "run=job-a1" in header and "tab=stages" in header
+
+    app.button_group[0].set_value("checkpoints").run()
+    assert [h.value for h in app.header] == ["Checkpoints"]
+    assert app.query_params["tab"] == ["checkpoints"]

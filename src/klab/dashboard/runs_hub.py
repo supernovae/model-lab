@@ -59,7 +59,7 @@ def _loss(value: float | None) -> str:
 
 
 def _run_link(root: Path, run_id: str) -> str:
-    return "training?" + urlencode({"store": str(root), "run": run_id})
+    return "run?" + urlencode({"store": str(root), "run": run_id})
 
 
 def _progress_bar(fraction: float | None, color: str) -> str:
@@ -306,31 +306,12 @@ def _lineage_block(
             st.markdown(_attempt_rows(lineage, root), unsafe_allow_html=True)
 
 
-_CSS = """
-<style>
-.rh-head {display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:6px;}
-.rh-head .n {font-size:1.15rem; font-weight:650;}
-.rh-bar {height:8px; border-radius:6px; background:rgba(128,128,128,.18); margin:6px 0 12px 0;}
-.rh-fill {height:8px; border-radius:6px;}
-.rh-tiles {display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px;}
-.rh-tile {border:1px solid rgba(128,128,128,.22); border-radius:10px; padding:9px 12px;
-  background:rgba(128,128,128,.04);}
-.rh-tile .l {font-size:.72rem; text-transform:uppercase; letter-spacing:.04em; opacity:.65;}
-.rh-tile .v {font-size:1.25rem; font-weight:650; line-height:1.3; font-variant-numeric:tabular-nums;}
-.rh-tile .h {font-size:.74rem; opacity:.65; line-height:1.25;}
-.pb-table td.nw {white-space:nowrap;}
-.rh-live {border-left:4px solid #0969da; padding-left:12px; margin:4px 0 10px 0;}
-</style>
-"""
-
-
 def runs_page(root: Path) -> None:
     ui.page_header(
         "Runs",
         "What is training right now, and how did every earlier run go?",
         f"Run store {root}",
     )
-    st.markdown(_CSS, unsafe_allow_html=True)
     if not (root / "experiments.sqlite3").is_file():
         ui.empty_state(
             "No runs in this store yet",

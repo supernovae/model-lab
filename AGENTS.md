@@ -205,7 +205,7 @@ Do not close or drop an item silently.
 ## 9. Report what people can inspect
 
 When discussing training, give the dashboard URL, the run-store path, the model
-name and the exact run ID. Use `/training?store=<URL-encoded-path>&run=<ID>` for
+name and the exact run ID. Use `/run?store=<URL-encoded-path>&run=<ID>` for
 a stable link. Confirm the current run from fresh evidence; a stored `running`
 status is not a heartbeat, and the newest record is not necessarily active.
 Report status with its observation time, and say idle or completed when nothing
