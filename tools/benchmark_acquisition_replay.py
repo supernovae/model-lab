@@ -90,13 +90,57 @@ def wiki_xml(records: list[bytes], dbname: str) -> bytes:
     return output.getvalue()
 
 
+def indexed_wiki_xml(xml: bytes, index_uri: str) -> tuple[bytes, bytes, dict]:
+    header, _, articles = xml.partition(b"<page>")
+    pages = (b"<page>" + articles).split(b"</page>")
+    footer = pages.pop()
+    parts = [header]
+    parts.extend(
+        b"".join(page + b"</page>" for page in pages[start : start + 100])
+        for start in range(0, len(pages), 100)
+    )
+    parts.append(footer)
+    body = io.BytesIO()
+    rows = []
+    for number, part in enumerate(parts):
+        if 0 < number < len(parts) - 1:
+            rows.extend(
+                f"{body.tell()}:{page}:Article {page}\n"
+                for page in range(
+                    (number - 1) * 100 + 1, min(number * 100, len(pages)) + 1
+                )
+            )
+        body.write(bz2.compress(part, compresslevel=3))
+    index_xml = "".join(rows).encode()
+    index = bz2.compress(index_xml)
+    return (
+        body.getvalue(),
+        index,
+        {
+            "uri": index_uri,
+            "expected_sha256": hashlib.sha256(index).hexdigest(),
+            "max_bytes": len(index),
+            "max_expanded_bytes": len(index_xml),
+            "max_members": len(parts),
+            "max_member_expanded_bytes": max(map(len, parts)),
+        },
+    )
+
+
 def git(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args], cwd=repo, check=True, capture_output=True, text=True
     ).stdout.strip()
 
 
-def fixture(root: Path, kind: str, size: int, patch: pytest.MonkeyPatch):
+def fixture(
+    root: Path,
+    kind: str,
+    size: int,
+    patch: pytest.MonkeyPatch,
+    *,
+    indexed: bool = False,
+):
     records = synthetic_records(size, 256 if kind in CASES[:3] else 64)
     site = "https://fixture.example"
     uri, revision, license_id = f"{site}/manual.txt", "fixture", "MIT"
@@ -125,10 +169,19 @@ def fixture(root: Path, kind: str, size: int, patch: pytest.MonkeyPatch):
             name = f"enwiki-{revision}-pages-articles-multistream1.xml-p1p256.bz2"
             uri = f"{prefix}/{name}"
             checksum_uri = f"{prefix}/enwiki-{revision}-sha1sums.txt"
-            body = bodies[uri] = bz2.compress(xml, compresslevel=3)
+            index_uri = uri.replace("multistream1.xml", "multistream-index1.txt")
+            if indexed:
+                body, index_data, index = indexed_wiki_xml(xml, index_uri)
+                spec = {"multistream_index": index}
+            else:
+                body = bz2.compress(xml, compresslevel=3)
+                spec = {}
+            bodies[uri] = body
             sha1 = hashlib.sha1(body).hexdigest()
             bodies[checksum_uri] = f"{sha1}  {name}\n".encode()
-            spec = {"checksum_uri": checksum_uri, "expected_sha1": sha1}
+            spec.update(checksum_uri=checksum_uri, expected_sha1=sha1)
+            if indexed:
+                bodies[index_uri] = index_data
         else:
             uri = f"{site}/fixturewiki-{revision}.xml.gz"
             body = bodies[uri] = gzip.compress(xml, compresslevel=1, mtime=0)
@@ -217,7 +270,9 @@ def fixture(root: Path, kind: str, size: int, patch: pytest.MonkeyPatch):
 
 def benchmark(root: Path, kind: str, size: int, trials: int, interruption: str) -> None:
     with pytest.MonkeyPatch.context() as patch:
-        project, http, hub, pinned_bytes = fixture(root, kind, size, patch)
+        project, http, hub, pinned_bytes = fixture(
+            root, kind, size, patch, indexed=interruption == "member-checkpoint"
+        )
         fetches: list[str] = []
         blob_processes: list[str] = []
         popen = subprocess.Popen
@@ -233,6 +288,7 @@ def benchmark(root: Path, kind: str, size: int, trials: int, interruption: str) 
         patch.setattr(subprocess, "Popen", record_git)
         verify = acquisition.verify_snapshot
         iterparse = ET.iterparse
+        run_stage = acquisition.run_stage
 
         def interrupt(path, **options):
             if options.get("_staged"):
@@ -249,6 +305,12 @@ def benchmark(root: Path, kind: str, size: int, trials: int, interruption: str) 
                     if pages == midpoint:
                         raise Interrupted("replay benchmark")
 
+        def interrupt_member(store, stage, inputs, produce):
+            result = run_stage(store, stage, inputs, produce)
+            if stage == "wikimedia-member":
+                raise Interrupted("replay benchmark")
+            return result
+
         modes = (False, True) if kind in CACHE_CASES else (False,)
         expected_digest = None
         for cached in modes:
@@ -262,6 +324,8 @@ def benchmark(root: Path, kind: str, size: int, trials: int, interruption: str) 
                     with pytest.MonkeyPatch.context() as fault:
                         if interruption == "mid-xml":
                             fault.setattr(ET, "iterparse", interrupt_xml)
+                        elif interruption == "member-checkpoint":
+                            fault.setattr(acquisition, "run_stage", interrupt_member)
                         else:
                             fault.setattr(acquisition, "verify_snapshot", interrupt)
                         try:
@@ -298,6 +362,11 @@ def benchmark(root: Path, kind: str, size: int, trials: int, interruption: str) 
                             "attempt-*.json"
                         )
                     ]
+                    completed = [
+                        receipt["resources"]
+                        for receipt in receipts
+                        if receipt["status"] == "complete"
+                    ]
                     peak = (
                         manifest["retrieval"]
                         .get("resources", {})
@@ -305,11 +374,7 @@ def benchmark(root: Path, kind: str, size: int, trials: int, interruption: str) 
                     )
                     if peak is None:
                         peak = max(
-                            (
-                                receipt["resources"]["peak_staging_bytes"]
-                                for receipt in receipts
-                                if receipt["status"] == "complete"
-                            ),
+                            (readings["peak_staging_bytes"] for readings in completed),
                             default=None,
                         )
             print(
@@ -327,6 +392,9 @@ def benchmark(root: Path, kind: str, size: int, trials: int, interruption: str) 
                         "payload_inventory_sha256": digest,
                         "snapshot_sha256": entry["snapshot_sha256"],
                         "peak_staging_bytes": peak,
+                        "retry_expanded_bytes": completed[0]["expanded_bytes"]
+                        if completed
+                        else None,
                         "http_requests": len(http),
                         "hub_lookups": len(hub),
                         "git_fetches": len(fetches),
@@ -349,15 +417,17 @@ def main() -> None:
     parser.add_argument("--scratch-dir", type=Path, default=None)
     parser.add_argument(
         "--interrupt-at",
-        choices=("prepublish", "mid-xml"),
+        choices=("prepublish", "mid-xml", "member-checkpoint"),
         default="prepublish",
-        help="Stop before staged verification or halfway through a dump's XML pages",
+        help="Stop before publication, halfway through XML, or after the first indexed member",
     )
     args = parser.parse_args()
     allowed = DUMP_CASES if args.interrupt_at == "mid-xml" else CASES
+    if args.interrupt_at == "member-checkpoint":
+        allowed = ("wikimedia_dump",)
     kinds = args.adapter or allowed
     if any(kind not in allowed for kind in kinds):
-        parser.error("--interrupt-at mid-xml requires a dump adapter")
+        parser.error("--interrupt-at requires an eligible adapter")
     for kind in kinds:
         with (
             tempfile.TemporaryDirectory(

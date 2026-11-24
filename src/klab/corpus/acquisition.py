@@ -23,6 +23,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -42,6 +43,7 @@ from klab.corpus.acquisition_parts import (
     pinned_pdf_path,
 )
 from klab.corpus.bounded_metadata import read_metadata
+from klab.corpus.build_stages import StageStore, run_stage
 from klab.corpus.project import (
     IMMUTABLE_SOURCE_KINDS,
     RETAINED_MAX_BYTES,
@@ -1895,15 +1897,23 @@ def _wiki_jsonl(
     decompressed: Any,
     output_path: Path,
     resources: _AcquisitionResources,
+    *,
+    limits: tuple[int, int, int, int] | None = None,
 ) -> tuple[list[dict[str, str]], int, int, str]:
     """Stream pages from a decompressed XML export into bounded JSONL rows."""
     spec = source.acquisition
+    expanded_limit, scan_limit, row_limit, output_limit = limits or (
+        spec.max_decompressed_bytes,
+        spec.max_scanned_pages,
+        spec.max_selected_pages,
+        spec.max_emitted_bytes,
+    )
     generic = isinstance(spec, MediaWikiDumpAcquisition)
     emitted = scanned = 0
     digest = hashlib.sha256()
     rows: list[dict[str, str]] = []
     with resources.output(output_path) as output:
-        guarded = _BoundedXML(decompressed, spec.max_decompressed_bytes, resources)
+        guarded = _BoundedXML(decompressed, expanded_limit, resources)
         context = ET.iterparse(guarded, events=("start", "end"))
         root: ET.Element | None = None
         ns = _WIKI_NS
@@ -1935,16 +1945,13 @@ def _wiki_jsonl(
                 continue
             if not site_verified:
                 raise ValueError("Wikimedia dump lacks English siteinfo")
-            if (
-                scanned >= spec.max_scanned_pages
-                or len(rows) >= spec.max_selected_pages
-            ):
+            if scanned >= scan_limit or len(rows) >= row_limit:
                 break
             scanned += 1
             row = _wiki_row(element, source, ns)
             if row is not None:
                 line = canonical_json(row) + b"\n"
-                if len(line) > spec.max_emitted_bytes - emitted:
+                if len(line) > output_limit - emitted:
                     raise ValueError("Wikimedia emitted JSONL exceeds limit")
                 output.write(line)
                 digest.update(line)
@@ -1960,7 +1967,7 @@ def _wiki_jsonl(
         output.flush()
         os.fsync(output.fileno())
         resources.expanded = guarded.size
-    if not rows:
+    if not rows and limits is None:
         raise ValueError("Wikimedia bounded selection produced no pages")
     return rows, scanned, emitted, digest.hexdigest()
 
@@ -2057,21 +2064,177 @@ def _download_wikimedia(
     return PinnedBody(digest, compressed_bytes)
 
 
+def _extract_indexed_wikimedia(
+    source: SourceDeclaration,
+    parts: PinnedBodyParts,
+    body: PinnedBody,
+    output_path: Path,
+    resources: _AcquisitionResources,
+    cache: TransportCache | None,
+) -> tuple[list[dict[str, str]], int, int, str, dict[str, Any]]:
+    from klab.corpus import wikimedia_ranges
+
+    spec = source.acquisition
+    assert (
+        isinstance(spec, WikimediaDumpAcquisition)
+        and spec.multistream_index is not None
+    )
+    index = spec.multistream_index
+    name = source_file_name(index.uri)
+    index_path = parts.body.with_name(name)
+    if parts.verified_size(index_path, index.expected_sha256, index.max_bytes) is None:
+        index_path.unlink(missing_ok=True)
+        _fetch_pinned(
+            source,
+            index.uri,
+            name,
+            index.expected_sha256,
+            index.max_bytes,
+            index_path,
+            None,
+            resources,
+            cache,
+            parts=parts,
+        )
+    store = StageStore(parts.root / "ranges")
+    inputs = {
+        "request": parts.identity,
+        "dump_sha256": body.sha256,
+        "index_sha256": index.expected_sha256,
+        "planner_sha256": sha256_file(Path(wikimedia_ranges.__file__)),
+    }
+    plan_stage, member_stage = "wikimedia-plan", "wikimedia-member"
+    store.prune(plan_stage, keep=1)
+    store.prune(member_stage, keep=index.max_members)
+
+    def prepare(staging: Path, _result: dict[str, Any]) -> None:
+        plan = wikimedia_ranges.plan_wikimedia_ranges(
+            source,
+            parts.body,
+            index_path,
+            index_sha256=index.expected_sha256,
+            max_index_bytes=index.max_bytes,
+            max_index_expanded_bytes=index.max_expanded_bytes,
+            max_members=index.max_members,
+        )
+        resources.expanded = plan.expanded_bytes
+        write_canonical_json(staging / "plan.json", asdict(plan))
+
+    plan_directory, _ = run_stage(store, plan_stage, inputs, prepare)
+    plan_record = json.loads((plan_directory / "plan.json").read_bytes())
+    plan = wikimedia_ranges.WikimediaRangePlan.from_record(plan_record)
+    plan_digest = canonical_digest(plan_record)
+    header, footer = wikimedia_ranges.wikimedia_xml_context(
+        parts.body, plan, limit=index.max_header_bytes
+    )
+    resources.expanded += len(header)
+    rows: list[dict[str, str]] = []
+    scanned = emitted = visited = 0
+    digest = hashlib.sha256()
+    with resources.output(output_path) as output:
+        for member in plan.ranges:
+            if (
+                scanned >= spec.max_scanned_pages
+                or len(rows) >= spec.max_selected_pages
+            ):
+                break
+            if not member.pages:
+                continue
+            limits = (
+                spec.max_scanned_pages - scanned,
+                spec.max_selected_pages - len(rows),
+                spec.max_emitted_bytes - emitted,
+            )
+
+            def extract(
+                staging: Path, _result: dict[str, Any], *, member=member, limits=limits
+            ) -> None:
+                expanded = wikimedia_ranges.read_wikimedia_member(
+                    parts.body, member, limit=index.max_member_expanded_bytes
+                )
+                resources.expanded += len(expanded)
+                xml = io.BytesIO()
+                xml.write(header)
+                xml.write(memoryview(expanded)[member.page_start : member.page_end])
+                xml.write(footer)
+                size = xml.tell()
+                xml.seek(0)
+                del expanded
+                selected, page_count, used, _ = _wiki_jsonl(
+                    source,
+                    xml,
+                    staging / "rows.jsonl",
+                    _AcquisitionResources(staging),
+                    limits=(size, *limits),
+                )
+                write_canonical_json(
+                    staging / "member.json",
+                    {"rows": selected, "scanned": page_count, "emitted": used},
+                )
+
+            completed, _ = run_stage(
+                store,
+                member_stage,
+                {"plan_sha256": plan_digest, "offset": member.start, "limits": limits},
+                extract,
+            )
+            selection = json.loads((completed / "member.json").read_bytes())
+            member_file = completed / "rows.jsonl"
+            if (
+                not 0 < selection["scanned"] <= min(member.pages, limits[0])
+                or len(selection["rows"]) > min(selection["scanned"], limits[1])
+                or not 0 <= selection["emitted"] <= limits[2]
+                or member_file.stat().st_size != selection["emitted"]
+            ):
+                raise ValueError("Wikimedia member selection differs from its bounds")
+            with member_file.open("rb") as stream:
+                while chunk := stream.read(1024**2):
+                    digest.update(chunk)
+                    output.write(chunk)
+            rows.extend(selection["rows"])
+            scanned += selection["scanned"]
+            emitted += selection["emitted"]
+            visited += 1
+        output.flush()
+        os.fsync(output.fileno())
+    if not rows:
+        raise ValueError("Wikimedia bounded selection produced no pages")
+    return (
+        rows,
+        scanned,
+        emitted,
+        digest.hexdigest(),
+        {
+            "index_sha256": index.expected_sha256,
+            "plan_sha256": plan_digest,
+            "selected_members": visited,
+        },
+    )
+
+
 def _acquire_wikimedia(
     source: SourceDeclaration,
     staging: Path,
-    compressed: Path,
+    parts: PinnedBodyParts,
     body: PinnedBody,
     resources: _AcquisitionResources,
+    cache: TransportCache | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     spec = source.acquisition
     assert isinstance(spec, WikimediaDumpAcquisition)
-    output_name = compressed.name + ".sample.jsonl"
+    output_name = parts.name + ".sample.jsonl"
     output_path = staging / "files" / output_name
-    with bz2.open(compressed, "rb") as decompressed:
-        rows, scanned, emitted, digest = _wiki_jsonl(
-            source, decompressed, output_path, resources
+    if spec.multistream_index is None:
+        with bz2.open(parts.body, "rb") as decompressed:
+            rows, scanned, emitted, digest = _wiki_jsonl(
+                source, decompressed, output_path, resources
+            )
+        evidence = {"resources": resources.receipt()}
+    else:
+        rows, scanned, emitted, digest, indexed = _extract_indexed_wikimedia(
+            source, parts, body, output_path, resources, cache
         )
+        evidence = {"multistream_index": indexed}
     return [
         {
             "path": output_name,
@@ -2084,7 +2247,7 @@ def _acquire_wikimedia(
         "source_sha1": spec.expected_sha1.lower(),
         "source_sha256": body.sha256,
         "compressed_bytes": body.size,
-        "resources": resources.receipt(),
+        **evidence,
         "scanned_pages": scanned,
         "selected_pages": rows,
         "output_path": output_name,
@@ -2664,6 +2827,21 @@ def _verify_wikimedia_receipt(
     receipt = manifest["retrieval"]
     spec = source.acquisition
     if isinstance(spec, WikimediaDumpAcquisition):
+        index_receipt = receipt.get("multistream_index")
+        if spec.multistream_index is None:
+            if index_receipt is not None:
+                raise ValueError("Wikimedia snapshot claims an undeclared index")
+        elif (
+            not isinstance(index_receipt, dict)
+            or index_receipt.get("index_sha256")
+            != spec.multistream_index.expected_sha256
+            or not re.fullmatch(r"[0-9a-f]{64}", index_receipt.get("plan_sha256", ""))
+            or type(index_receipt.get("selected_members")) is not int
+            or not 0
+            < index_receipt["selected_members"]
+            <= spec.multistream_index.max_members
+        ):
+            raise ValueError("Wikimedia multistream index receipt mismatch")
         mismatch = (
             receipt["checksum_uri"] != spec.checksum_uri
             or receipt["source_sha1"] != spec.expected_sha1.lower()
@@ -3339,7 +3517,7 @@ def acquire(
                     )
                     if source.kind == "wikimedia_dump":
                         files, retrieval = _acquire_wikimedia(
-                            source, staging, pinned.body, body, resources
+                            source, staging, pinned, body, resources, cache
                         )
                     else:
                         derive = (
@@ -3621,6 +3799,21 @@ def _fill_source(
             cache,
             verify_only=True,
         )
+        if spec.multistream_index is not None:
+            index = spec.multistream_index
+            name = source_file_name(index.uri)
+            _fetch_pinned(
+                source,
+                index.uri,
+                name,
+                index.expected_sha256,
+                index.max_bytes,
+                staging / "wikimedia-input" / name,
+                None,
+                resources,
+                cache,
+                verify_only=True,
+            )
     elif kind in {"archive", "mediawiki_dump"}:
         name = source_file_name(source.canonical_uri)
         limit = (

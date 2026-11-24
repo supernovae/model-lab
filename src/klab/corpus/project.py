@@ -250,6 +250,21 @@ class HuggingFaceAcquisition(StrictModel):
         return self
 
 
+class WikimediaMultistreamIndex(StrictModel):
+    uri: str
+    expected_sha256: str
+    max_bytes: int = Field(gt=0)
+    max_expanded_bytes: int = Field(gt=0)
+    max_members: int = Field(gt=0)
+    max_member_expanded_bytes: int = Field(gt=0)
+    max_header_bytes: int = Field(default=1024**2, gt=0)
+
+    @field_validator("expected_sha256")
+    @classmethod
+    def pinned_index_digest(cls, value: str) -> str:
+        return _sha256_hex(value)
+
+
 class WikimediaDumpAcquisition(StrictModel):
     expected_sha1: str
     expected_sha256: str | None = None
@@ -260,6 +275,9 @@ class WikimediaDumpAcquisition(StrictModel):
     max_scanned_pages: int = Field(gt=0)
     max_selected_pages: int = Field(gt=0)
     max_emitted_bytes: int = Field(gt=0)
+    multistream_index: WikimediaMultistreamIndex | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @property
     def max_rows(self) -> int:
@@ -629,6 +647,16 @@ class SourceDeclaration(StrictModel):
                 raise ValueError(
                     "Wikimedia dump requires matching official checksum URI"
                 )
+            if spec.multistream_index is not None:
+                index_uri = re.sub(
+                    r"-multistream(\d*)\.xml(?=(?:-p\d+p\d+)?\.bz2$)",
+                    r"-multistream-index\1.txt",
+                    self.canonical_uri,
+                )
+                if spec.multistream_index.uri != index_uri:
+                    raise ValueError(
+                        "Wikimedia index must be the matching dated dump index"
+                    )
         if self.kind in {"archive", "mediawiki_dump"}:
             _pinned_url(self.canonical_uri)
         if self.kind == "mediawiki_dump":

@@ -179,7 +179,7 @@ need available allowance in the ledger.
 | PDF documents | Verified originals and receipted extracted text. | Transfer or extract unfinished and damaged documents as needed. Cold verification also re-extracts the published text. |
 | Tar, compressed tar or ZIP archive | A complete staged body or a verified staged derivation. The optional transport cache can supply a missing body. | An unfinished derivation repeats selection and extraction. A finished derivation is verified and published. |
 | MediaWiki dump | A complete staged body or a verified staged derivation. The optional transport cache can supply a missing body. | An unfinished derivation replays the XML stream from the start. A finished derivation is verified and published. |
-| Wikimedia dump | A complete verified staged body or a verified staged derivation. The optional transport cache can supply a missing body. | A finished derivation is verified and published. An unfinished derivation replays the XML stream from the start. When neither a verified staged body nor a cache entry is available, acquisition fetches both the checksum manifest and the dump. |
+| Wikimedia dump | A verified staged body or derivation. With `multistream_index`, verified member outputs and the range plan also survive a stop. | An indexed retry decodes unfinished members as needed. Other unfinished derivations replay the XML stream from the start. Without a verified staged body or cache entry, acquisition fetches the checksum manifest and dump. |
 | Deterministic or recorded-response generator | Acquisition records the declared generator identity without producing documents. | Recreate the metadata-only snapshot if it was unfinished. Generation follows the build workflow. |
 
 A hard kill can leave a transient `.acquire-*` directory containing an
@@ -222,7 +222,30 @@ Set the declaration's compressed and decompressed byte bounds for the
 whole dump. The planner verifies every member, including pages past
 the acquisition selection limits. It also caps index lines at 64 KiB
 and XML nesting at 64 levels. The command reads local files and prints
-a plan. Acquisition and indexed replay remain separate steps.
+a plan.
+
+To use member checkpoints during `corpus acquire`, add `multistream_index`
+inside the Wikimedia source's `acquisition` options.
+
+```yaml
+multistream_index:
+  uri: https://dumps.wikimedia.org/enwiki/20261101/enwiki-20261101-pages-articles-multistream-index1.txt-p1p256.bz2
+  expected_sha256: INDEX_SHA256
+  max_bytes: 8388608
+  max_expanded_bytes: 67108864
+  max_members: 10000
+  max_member_expanded_bytes: 67108864
+```
+
+Use the matching dated index and its known SHA-256. Acquisition verifies
+the entire dump at the declared decompressed-byte bound before extracting
+the selected prefix. The XML header must fit `max_header_bytes` (default
+1 MiB). Each visited member must fit the declared expanded-member bound.
+Members run in source order so the scan, selection, and output limits
+apply even inside a member. During assembly the selected JSONL exists
+both in member checkpoints and in the staged snapshot. Acquisition
+removes the checkpoints after publication. A retry checks compressed
+input integrity and verifies the completed output files.
 
 ### What identifies an acquisition
 

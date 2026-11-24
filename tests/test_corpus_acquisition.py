@@ -1925,10 +1925,11 @@ def _wikimedia_fixture(
     *,
     sha1: str,
     sha256: str | None = None,
+    last_page: int = 1,
 ) -> tuple[Path, dict[str, bytes]]:
     date = "20261101"
     prefix = f"https://dumps.wikimedia.org/enwiki/{date}"
-    name = f"enwiki-{date}-pages-articles-multistream1.xml-p1p1.bz2"
+    name = f"enwiki-{date}-pages-articles-multistream1.xml-p1p{last_page}.bz2"
     uri = f"{prefix}/{name}"
     checksum_uri = f"{prefix}/enwiki-{date}-sha1sums.txt"
     recipe = _fixture(
@@ -1951,34 +1952,66 @@ def _wikimedia_fixture(
     return recipe, {checksum_uri: f"{sha1}  {name}\n".encode(), uri: body}
 
 
+def _multistream_wikimedia_fixture(
+    root: Path,
+    *,
+    fault: str | None = None,
+    shared_members: bool = False,
+):
+    header = (
+        b'<?xml version="1.0"?>\n<mediawiki xmlns="http://www.mediawiki.org/xml/export-0.11/" '
+        b'xml:lang="en"><siteinfo><dbname>enwiki</dbname></siteinfo>\n'
+    )
+
+    def page(number: int, title: str, extra: str = "") -> bytes:
+        return (
+            f"<page><title>{title}</title><ns>0</ns><id>{number}</id>{extra}"
+            f"<revision><id>{number + 100}</id><timestamp>2026-10-01T00:00:00Z</timestamp>"
+            f"<text>Article {number} contains usable text.</text></revision></page>\n"
+        ).encode()
+
+    first = page(1, "Topic:A")
+    second = page(2, "Topic B", '<redirect title="Topic:A"/>')
+    last = page(3, "Topic C") + page(4, "Topic D")
+    footer = b"</mediawiki>\n"
+    if fault == "split_page":
+        pieces = (header, first[:22], first[22:] + second, last, footer)
+    elif shared_members:
+        pieces = (header + first + second, last + footer)
+    else:
+        pieces = (header, first + second, last, footer)
+    members = [bz2.compress(piece) for piece in pieces]
+    body = b"".join(members)
+    recipe, responses = _wikimedia_fixture(
+        root, body, sha1=hashlib.sha1(body).hexdigest(), last_page=4
+    )
+    first_offset = 0 if shared_members else len(members[0])
+    third_offset = sum(map(len, members[: 1 if shared_members else -2]))
+    index_text = (
+        f"{first_offset}:1:Topic:A\n"
+        f"{first_offset}:{9 if fault == 'page_id' else 2}:Topic B\n"
+        f"{third_offset}:3:Topic C\n"
+        f"{third_offset}:4:Topic D\n"
+    ).encode()
+    index_uri = next(reversed(responses)).replace(
+        "multistream1.xml", "multistream-index1.txt"
+    )
+    responses[index_uri] = bz2.compress(index_text)
+    return recipe, responses, pieces, members, index_text
+
+
 @pytest.mark.parametrize("fault", [None, "page_id", "split_page", "expanded_bound"])
 def test_wikimedia_range_plan_verifies_index_and_physical_members(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], fault: str | None
 ) -> None:
     from klab.cli.main import build_parser
 
-    header = (
-        b'<?xml version="1.0"?>\n<mediawiki xmlns="http://www.mediawiki.org/xml/export-0.11/" '
-        b'xml:lang="en"><siteinfo><dbname>enwiki</dbname></siteinfo>\n'
+    recipe, responses, pieces, members, index_text = _multistream_wikimedia_fixture(
+        tmp_path, fault=fault
     )
-    first = b"<page><title>Topic:A</title><id>1</id></page>\n"
-    second = b"<page><title>Topic B</title><id>2</id></page>\n"
-    third = b"<page><title>Topic C</title><id>3</id></page>\n"
-    if fault == "split_page":
-        pieces = (header, first[:22], first[22:] + second, third, b"</mediawiki>\n")
-    else:
-        pieces = (header, first + second, third, b"</mediawiki>\n")
-    members = [bz2.compress(piece) for piece in pieces]
-    body = b"".join(members)
-    recipe, _ = _wikimedia_fixture(tmp_path, body, sha1=hashlib.sha1(body).hexdigest())
+    _, body, compressed_index = responses.values()
     first_offset = len(members[0])
     third_offset = len(body) - len(members[-2]) - len(members[-1])
-    index_text = (
-        f"{first_offset}:1:Topic:A\n"
-        f"{first_offset}:{9 if fault == 'page_id' else 2}:Topic B\n"
-        f"{third_offset}:3:Topic C\n"
-    ).encode()
-    compressed_index = bz2.compress(index_text)
     dump = tmp_path / "dump.bz2"
     index = tmp_path / "index.bz2"
     dump.write_bytes(body)
@@ -2029,11 +2062,11 @@ def test_wikimedia_range_plan_verifies_index_and_physical_members(
     assert (plan["dbname"], plan["language"], plan["indexed_pages"]) == (
         "enwiki",
         "en",
-        3,
+        4,
     )
     assert plan["expanded_bytes"] == sum(map(len, pieces))
     ranges = plan["ranges"]
-    assert [item["pages"] for item in ranges] == [0, 2, 1, 0]
+    assert [item["pages"] for item in ranges] == [0, 2, 2, 0]
     assert [item["start"] for item in ranges] == [
         0,
         first_offset,
@@ -2046,6 +2079,113 @@ def test_wikimedia_range_plan_verifies_index_and_physical_members(
     ]
     assert ranges[0]["opens_document"] and ranges[-1]["closes_document"]
     assert ranges[1]["page_ids_sha256"] == hashlib.sha256(b"1\n2\n").hexdigest()
+
+
+@pytest.mark.parametrize(
+    "case", ["scan_boundary", "selected_inside", "damaged", "byte_cap"]
+)
+def test_wikimedia_indexed_acquisition_matches_serial_and_reuses_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    from klab.corpus import acquisition, wikimedia_ranges
+
+    monkeypatch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
+    recipe, responses, pieces, members, index_text = _multistream_wikimedia_fixture(
+        tmp_path, shared_members=case != "scan_boundary"
+    )
+    source_path = recipe.parent / "sources/one.yaml"
+    declaration = yaml.safe_load(source_path.read_text())
+    spec = declaration["acquisition"]
+    spec.update(
+        max_scanned_pages=2 if case == "scan_boundary" else 4,
+        max_selected_pages=2 if case == "selected_inside" else 4,
+        max_emitted_bytes=4096,
+    )
+    _yaml(source_path, declaration)
+    calls = _serve_pinned(monkeypatch, responses)
+    control = acquire(load_project(recipe), tmp_path / "serial")
+    serial_manifest, serial_output = _snapshot_payload(control)
+    assert len(calls) == 2
+    if case == "byte_cap":
+        spec["max_emitted_bytes"] = sum(map(len, serial_output.values())) - 1
+        _yaml(source_path, declaration)
+        with pytest.raises(ValueError, match="emitted JSONL exceeds limit"):
+            acquire(load_project(recipe), tmp_path / "serial-cap")
+    calls.clear()
+    index_uri = next(reversed(responses))
+    index = responses[index_uri]
+    spec["multistream_index"] = {
+        "uri": index_uri,
+        "expected_sha256": hashlib.sha256(index).hexdigest(),
+        "max_bytes": len(index),
+        "max_expanded_bytes": len(index_text),
+        "max_members": len(members),
+        "max_member_expanded_bytes": max(map(len, pieces)),
+    }
+    _yaml(source_path, declaration)
+    indexed = load_project(recipe)
+    work = tmp_path / "indexed"
+    if case == "byte_cap":
+        with pytest.raises(ValueError, match="emitted JSONL exceeds limit"):
+            acquire(indexed, work)
+        assert not (work / "corpora/example/acquisition.json").exists()
+        return
+
+    decoded = []
+    plans = []
+    read_member = wikimedia_ranges.read_wikimedia_member
+    read_plan = wikimedia_ranges.plan_wikimedia_ranges
+    run_stage = acquisition.run_stage
+
+    def record_member(path, member, **options):
+        decoded.append(member.start)
+        return read_member(path, member, **options)
+
+    def record_plan(*args, **options):
+        plans.append(1)
+        return read_plan(*args, **options)
+
+    def interrupt(store, stage, inputs, produce):
+        result = run_stage(store, stage, inputs, produce)
+        if stage == "wikimedia-member":
+            raise OSError("stop after member checkpoint")
+        return result
+
+    monkeypatch.setattr(wikimedia_ranges, "read_wikimedia_member", record_member)
+    monkeypatch.setattr(wikimedia_ranges, "plan_wikimedia_ranges", record_plan)
+    with monkeypatch.context() as fault:
+        fault.setattr(acquisition, "run_stage", interrupt)
+        with pytest.raises(OSError, match="stop after member checkpoint"):
+            acquire(indexed, work)
+    base = work / "corpora/example"
+    assert not (base / "acquisition.json").exists()
+    assert calls == list(responses)
+    calls.clear()
+    (staged,) = (base / "snapshots/one").glob(".wikimedia_dump-parts-*")
+    if case == "damaged":
+        (rows,) = (staged / "ranges/wikimedia-member").glob("*/rows.jsonl")
+        rows.write_bytes(b"damaged")
+
+    lock = acquire(indexed, work)
+    manifest, output = _snapshot_payload(lock)
+    assert output == serial_output
+    assert (
+        manifest["retrieval"]["scanned_pages"]
+        == serial_manifest["retrieval"]["scanned_pages"]
+    )
+    assert (
+        manifest["retrieval"]["selected_pages"]
+        == serial_manifest["retrieval"]["selected_pages"]
+    )
+    assert (
+        manifest["retrieval"]["multistream_index"]["index_sha256"]
+        == hashlib.sha256(index).hexdigest()
+    )
+    first, *remaining = decoded
+    assert remaining.count(first) == (case == "damaged")
+    assert len(set(decoded)) == (1 if case == "scan_boundary" else 2)
+    assert len(plans) == 1
+    assert not calls and not staged.exists()
 
 
 def test_wikimedia_download_checks_sha1_even_with_matching_sha256(

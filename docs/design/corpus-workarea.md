@@ -359,12 +359,25 @@ The [Wikimedia range planner](../corpus-preparation.md#verify-wikimedia-multistr
 validates pinned local dump and index bytes, physical bzip2 member boundaries,
 shared XML context and ordered page IDs. Its metadata is proportional to the
 number of compressed members. The planner emits no decoded payload. The
-planned offsets are the input to the next extraction increment in
-[#587](https://github.com/supernovae/model-lab/issues/587).
+indexed acquisition path uses those offsets to checkpoint selected JSONL
+in source order. A retry verifies the saved range plan and member outputs.
+Only unfinished or damaged members need to be decoded again.
 On tmpfs, three runs of the planner on 256 synthetic pages with separate
 header and footer members took a median 0.75 s for 16 MiB of page text
 and 1.98 s for 64 MiB. Peak RSS was about 81 MiB in both cases, including
 CLI startup. These are serial planning measurements on synthetic input.
+
+With an index declared, the 16 MiB text fixture's three-trial cold median
+was 1.184 s, compared with 0.750 s for serial acquisition of the same
+multistream body. Cold indexed acquisition also verifies the range plan.
+After interruption following the first 100-page checkpoint, the median
+retry was 0.495 s with zero requests. It decoded the remaining 156 pages,
+returned 9.77 MiB of expanded data to the extractor, and peaked at
+40.36 MiB of staged files while assembling the snapshot. Output digests
+matched serial acquisition. Run the replay benchmark with
+`--adapter wikimedia_dump --interrupt-at member-checkpoint` for this
+interruption case. [#587](https://github.com/supernovae/model-lab/issues/587)
+tracks parallel execution and representative dump measurements.
 
 ## Relational Knowledge Microlab
 
