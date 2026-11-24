@@ -32,10 +32,10 @@ import math
 import socket
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import FSDPModule, fully_shard
@@ -72,14 +72,6 @@ PROCESS_GROUP_BACKEND = {
 _GROUP_TIMEOUT = timedelta(minutes=20)
 # Seconds a worker may take to build its model and report ready.
 _READY_SECONDS = 1800.0
-
-
-@dataclass(frozen=True)
-class TensorShape:
-    """Stands in for a tensor a rank only receives a shard of."""
-
-    shape: tuple[int, ...]
-    dtype: torch.dtype
 
 
 def _free_port() -> int:
@@ -125,17 +117,23 @@ def _full(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.full_tensor() if isinstance(tensor, DTensor) else tensor
 
 
-_LOST_SHARD = 1
-_NON_FINITE = 2
 _INTEGER_OF_WIDTH = {1: torch.int8, 2: torch.int16, 4: torch.int32, 8: torch.int64}
+_CHECKSUM_MASK = 2**64 - 1
 
 
-def _same_bits(left: torch.Tensor, right: torch.Tensor) -> bool:
-    """Bit-for-bit equality, so a NaN equals itself."""
-    if left.dtype != right.dtype or left.shape != right.shape:
-        return False
-    width = _INTEGER_OF_WIDTH[left.element_size()]
-    return torch.equal(left.contiguous().view(width), right.contiguous().view(width))
+def _checksum(tensor: torch.Tensor) -> int:
+    """The sum of a tensor's elements as raw integers, modulo 2**64.
+
+    Additive over a tensor's shards, so the ranks' checksums add up to the whole's
+    without any rank seeing another's data. Bits, not values: a NaN counts as itself.
+    """
+    if not tensor.numel():
+        return 0
+    width = _INTEGER_OF_WIDTH[tensor.element_size()]
+    return (
+        int(tensor.contiguous().view(width).to(torch.int64).sum().item())
+        & _CHECKSUM_MASK
+    )
 
 
 class ShardedRank:
@@ -170,6 +168,8 @@ class ShardedRank:
 
         # Tied weights and other aliases are saved once, as in a single device.
         self.aliases = state_dict_aliases(model)
+        # Optimizer-state entries taken by restore_slot, until restore_finish.
+        self._restoring: dict[int, dict[str, Any]] = {}
         self.model = shard_model(model, self.mode)
         self.optimizer = build_optimizer(self.model, config)
         self.replica = SecondaryReplica(
@@ -296,95 +296,50 @@ class ShardedRank:
             return None
         return {"state": whole, "param_groups": state["param_groups"]}
 
-    def _check_restored(
-        self, key: str, index: int, shard: DTensor, source: torch.Tensor | None
-    ) -> None:
-        """Fail on every rank if a restored shard differs from the checkpoint.
+    def restore_slot(self, index: int, key: str, value: Any) -> int | None:
+        """Take one optimizer-state entry; return the checksum of this rank's shard.
 
-        ``source`` is the checkpoint's tensor on the host (rank 0 only). The shards are
-        gathered back, rank 0 compares their bits with it and broadcasts the verdict,
-        so every rank raises together. Bits, not values: a NaN already in the
-        checkpoint is not mistaken for a lost shard, and is reported as what it is. A
-        shard that never arrived would otherwise train on stale memory.
+        Every rank is handed the whole tensor and cuts its own shard out of it
+        (``src_data_rank=None``), so restoring runs no collective. A collective would
+        exchange each tensor between the cards, and every buffer exchanged that way
+        stays resident in host memory for the life of the process: restoring a
+        1.2B-parameter model through them held about 13 GiB of host memory per rank.
         """
-        gathered = shard.full_tensor()
-        verdict = torch.zeros(1, dtype=torch.int64, device=self.device)
-        if self.rank == 0:
-            assert source is not None
-            if source.is_floating_point() and not bool(torch.isfinite(source).all()):
-                verdict[0] = _NON_FINITE
-            elif not _same_bits(gathered.cpu(), source):
-                verdict[0] = _LOST_SHARD
-        del gathered
-        dist.broadcast(verdict, src=0)
-        if int(verdict.item()) == _NON_FINITE:
-            raise ValueError(
-                f"checkpoint optimizer state {key!r} of parameter {index} is "
-                "non-finite; it cannot be restored"
+        parameter = self._restore_parameters()[index]
+        if isinstance(value, np.ndarray):
+            value = torch.from_numpy(value)
+        checksum = None
+        if (
+            isinstance(value, torch.Tensor)
+            and tuple(value.shape) == tuple(parameter.shape)
+            and isinstance(parameter, DTensor)
+        ):
+            whole = value.to(self.device)
+            value = distribute_tensor(
+                whole, parameter.device_mesh, parameter.placements, src_data_rank=None
             )
-        if int(verdict.item()) == _LOST_SHARD:
-            raise ValueError(
-                f"restored optimizer state {key!r} of parameter {index} differs "
-                "from the checkpoint: a shard did not arrive intact"
-            )
+            del whole
+            checksum = _checksum(value.to_local())
+        self._restoring.setdefault(index, {})[key] = value
+        return checksum
 
-    def load_optimizer_state(self, state: dict[str, Any]) -> None:
-        """Take this rank's shards from ``state`` (whole tensors on rank 0 only).
-
-        Other ranks pass :class:`TensorShape` where rank 0 has a tensor.
-        """
+    def restore_finish(self, param_groups: Any) -> None:
+        """Load the entries taken by :meth:`restore_slot` into the optimizer."""
         from klab.training.checkpoints import restore_optimizer_state
 
-        parameters = [
+        restore_optimizer_state(
+            self.optimizer, {"state": self._restoring, "param_groups": param_groups}
+        )
+        self._restoring = {}
+        # One unsharded temporary was made per entry; return the cached blocks.
+        release_cached_memory(self.device)
+
+    def _restore_parameters(self) -> list[torch.nn.Parameter]:
+        return [
             parameter
             for group in self.optimizer.param_groups
             for parameter in group["params"]
         ]
-        sharded: dict[int, dict[str, Any]] = {}
-        for index in sorted(state["state"]):
-            parameter = parameters[index]
-            slots = {}
-            for key in sorted(state["state"][index]):
-                value = state["state"][index][key]
-                if (
-                    isinstance(value, TensorShape | torch.Tensor)
-                    and tuple(value.shape) == tuple(parameter.shape)
-                    and isinstance(parameter, DTensor)
-                ):
-                    # Rank 0 holds the tensor; the others only need a placeholder
-                    # of the right shape, made on the device so the host never holds
-                    # a whole copy. One unsharded tensor lives at a time.
-                    source = value if isinstance(value, torch.Tensor) else None
-                    whole = (
-                        torch.empty(value.shape, dtype=value.dtype, device=self.device)
-                        if isinstance(value, TensorShape)
-                        else value.to(self.device)
-                    )
-                    value = distribute_tensor(
-                        whole,
-                        parameter.device_mesh,
-                        parameter.placements,
-                        src_data_rank=0,
-                    )
-                    # The scatter may still be running on the communication stream;
-                    # freeing or releasing memory under it would corrupt a shard.
-                    synchronize(self.device)
-                    # Free the placeholder before the check gathers a whole tensor
-                    # back, so each rank still peaks at one.
-                    del whole
-                    self._check_restored(key, index, value, source)
-                    # Temporaries of many sizes stay reserved; return them each time so
-                    # the peak is one tensor, not the whole optimizer state.
-                    release_cached_memory(self.device)
-                elif isinstance(value, TensorShape):
-                    value = torch.empty(value.shape, dtype=value.dtype)
-                slots[key] = value
-            sharded[index] = slots
-        restore_optimizer_state(
-            self.optimizer,
-            {"state": sharded, "param_groups": state["param_groups"]},
-        )
-        release_cached_memory(self.device)
 
     def close(self) -> None:
         if dist.is_initialized():
@@ -466,28 +421,15 @@ def _shard_worker_main(
                 worker.gather_weights()
             elif command == "optimizer":
                 worker.gather_optimizer_state()
-            elif command == "restore":
-                worker.load_optimizer_state(message[1])
+            elif command == "restore_slot":
+                result = worker.restore_slot(*message[1:])
+            elif command == "restore_finish":
+                worker.restore_finish(message[1])
             else:
                 raise ValueError(f"unknown shard command {command!r}")
             connection.send(("done", result))
         except Exception:  # noqa: BLE001 - the primary reports the rank's error
             report_failure(connection)
-
-
-def _for_worker(value: Any) -> Any:
-    """What a worker is sent of one optimizer-state entry.
-
-    Sending a tensor over the pipe moves its storage to shared memory, so a
-    scalar such as Adam's step count is sent as a copy (the worker would
-    otherwise increment the primary's), and a large tensor not at all: the
-    worker receives its shard through the collective.
-    """
-    if not isinstance(value, torch.Tensor):
-        return value
-    if value.ndim:
-        return TensorShape(tuple(value.shape), value.dtype)
-    return value.clone()
 
 
 class ShardGroup:
@@ -656,18 +598,50 @@ class ShardGroup:
         return state
 
     def restore_optimizer_state(self, state: dict[str, Any]) -> None:
+        """Hand every rank each entry of ``state`` in turn; no collective runs.
+
+        A tensor goes to the workers as bytes over their pipes, one at a time, so the
+        most that is in flight is one tensor. Each rank keeps its own shard and
+        answers with its checksum; they must add up to the checkpoint tensor's.
+        """
         assert self.rank is not None
-        shapes = {
-            "state": {
-                index: {key: _for_worker(value) for key, value in slots.items()}
-                for index, slots in state["state"].items()
-            },
-            "param_groups": state["param_groups"],
-        }
+        workers = len(self.replicas)
+        for index in sorted(state["state"]):
+            slots = state["state"][index]
+            for key in sorted(slots):
+                value = slots[key]
+                payload = value
+                if isinstance(value, torch.Tensor):
+                    if value.is_floating_point() and not bool(
+                        torch.isfinite(value).all()
+                    ):
+                        raise ValueError(
+                            f"checkpoint optimizer state {key!r} of parameter {index} "
+                            "is non-finite; it cannot be restored"
+                        )
+                    # Bytes through the pipe, not a tensor: pickling a tensor moves its
+                    # storage into shared memory, and a scalar sent as one would be
+                    # the primary's own (the worker would increment it).
+                    payload = value.detach().cpu().numpy()
+                mine, theirs = self.run(
+                    "restore_slot",
+                    lambda index=index, key=key, value=value: self.rank.restore_slot(
+                        index, key, value
+                    ),
+                    [(index, key, payload)] * workers,
+                )
+                if mine is None:
+                    continue
+                arrived = sum([mine, *theirs]) & _CHECKSUM_MASK
+                if arrived != _checksum(value):
+                    raise ValueError(
+                        f"restored optimizer state {key!r} of parameter {index} differs "
+                        "from the checkpoint: a shard did not arrive intact"
+                    )
         self.run(
-            "restore",
-            lambda: self.rank.load_optimizer_state(state),
-            [(shapes,)] * len(self.replicas),
+            "restore_finish",
+            lambda: self.rank.restore_finish(state["param_groups"]),
+            [(state["param_groups"],)] * workers,
         )
 
     def close(self) -> None:

@@ -184,6 +184,15 @@ model a `zero1` run holds 26.8 GiB on every 32 GiB card, fresh or resumed (27.7
 after a restore), and a resumed run trains at the fresh rate (36.5k tokens per
 second).
 
+Every buffer an xccl collective exchanges between Arc cards stays resident in host
+memory for the life of the process (`drm-resident-gtt` in a rank's
+`/proc/PID/fdinfo`), so host memory, not device memory, is what a sharded run on
+several cards runs out of. A resume therefore restores the optimizer state without
+a collective: each rank is handed the checkpoint tensors over its pipe and keeps its
+own shard. Resumed from a real checkpoint of that model, a run leaves 38 GB of 96 GB
+available while it trains (24 GB when the restore scattered and gathered the state)
+and 35 GB during a checkpoint write.
+
 The Level Zero GPU driver matters more than any Lab setting. With
 `libze-intel-gpu1` 26.40.40196.8 every xccl collective above about 1 MiB hangs in
 `zeMemGetIpcHandle` (each rank spins a core, the kernel log stays clean); with
