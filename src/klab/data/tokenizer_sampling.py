@@ -38,7 +38,12 @@ from klab.corpus import release_verify
 from klab.corpus.mixture import _source_rights
 from klab.corpus.mixture_index import MAX_ROW_BYTES
 from klab.corpus.release_verify import range_records, read_at
-from klab.corpus.shards import declare_stage, plan_ranges, run_sharded
+from klab.corpus.shards import (
+    declare_stage,
+    plan_ranges,
+    range_file_identity,
+    run_sharded,
+)
 from klab.training.manifest import sha256_file
 
 BUCKET_BITS = 12
@@ -91,6 +96,17 @@ class Selection(NamedTuple):
     fit: dict[str, list[_Candidate]]
     reserve: dict[str, list[_Candidate]]
     train_documents: int
+    inputs: dict[Path, list[int]]
+
+    def check_inputs(self) -> None:
+        """Refuse to reuse offsets and rights decisions from a changed release."""
+        for path, identity in self.inputs.items():
+            try:
+                unchanged = range_file_identity(path) == identity
+            except OSError as error:
+                raise ValueError(f"tokenizer sampling input changed: {path}") from error
+            if not unchanged:
+                raise ValueError(f"tokenizer sampling input changed: {path}")
 
 
 def rank(seed: int, content_sha256: str) -> int:
@@ -229,6 +245,12 @@ def select_documents(
     release = config.dataset.corpus_release_path
     assert release is not None
     caps = quotas(config) if caps is None else caps
+    lineage = release / "lm/train.lineage.jsonl"
+    documents_path = release / "documents.jsonl"
+    source_generation = {
+        path: range_file_identity(path)
+        for path in (lineage, documents_path, release / "sources.json")
+    }
     _source_rights(release, spec.source_strata)
     inputs = {}
     if release_verify.current_settings().scratch_dir is not None:
@@ -238,7 +260,6 @@ def select_documents(
             "max_row_bytes": MAX_ROW_BYTES,
         }
     selected: set[str] = set()
-    lineage = release / "lm/train.lineage.jsonl"
     for ids in run_sharded(
         plan_ranges(LINEAGE_STAGE, lineage, inputs=inputs), _lineage_ids
     ):
@@ -248,7 +269,6 @@ def select_documents(
             "tokenizer seeded sampling needs every TRAIN document: "
             f"max_documents {config.max_documents} is below {len(selected)}"
         )
-    documents_path = release / "documents.jsonl"
     totals = {stratum: [[0, 0] for _ in range(BUCKETS)] for stratum in caps}
     results = run_sharded(
         plan_ranges(
@@ -320,11 +340,14 @@ def select_documents(
                 pending.discard(stratum)
             else:
                 oversample[stratum] *= 2
-    return Selection(
+    selection = Selection(
         {stratum: chosen[stratum][0] for stratum in caps},
         {stratum: chosen[stratum][1] for stratum in caps},
         len(selected),
+        source_generation,
     )
+    selection.check_inputs()
+    return selection
 
 
 def _text(release: Path, candidate: _Candidate) -> str:
@@ -345,6 +368,7 @@ def documents(
     assert spec is not None
     caps = quotas(config)
     selection = selection or select_documents(config, caps)
+    selection.check_inputs()
     used = {key: sum(c.size for c in selection.fit[key]) for key in caps}
     counts = {key: len(selection.fit[key]) for key in caps}
     missing = [key for key, count in counts.items() if not count]
@@ -367,6 +391,7 @@ def documents(
             if selected_hashes is not None:
                 selected_hashes.add(row.content_sha256)
             yield text
+    selection.check_inputs()
     stats.update(
         acquired=selection.train_documents,
         selected=sum(counts.values()),
@@ -397,6 +422,7 @@ def audit(
     spec = config.sampling
     assert spec is not None
     selection = selection or select_documents(config)
+    selection.check_inputs()
     fit_hashes = {row.content_sha256 for rows in selection.fit.values() for row in rows}
     groups = {
         key: {
@@ -438,6 +464,7 @@ def audit(
             )
             total_bytes += row.size
             digest.update(canonical_json([row.document_id, row.content_sha256]) + b"\n")
+    selection.check_inputs()
     for group in groups.values():
         group["bytes_per_token"] = (
             group["bytes"] / group["tokens"] if group["tokens"] else None
