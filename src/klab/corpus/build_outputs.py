@@ -13,7 +13,7 @@ import shutil
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from klab.canonical import canonical_json
 from klab.corpus.project import declaration_payload, source_declaration_payload
@@ -21,6 +21,9 @@ from klab.corpus.quota import estimate_supply
 from klab.corpus.rights import reported_spdx_expression
 from klab.corpus.split_assignments import SPLITS, UNIT_FIELDS, copy_assignments
 from klab.training.manifest import sha256_file
+
+if TYPE_CHECKING:
+    from klab.corpus.view_checkpoints import ViewFileDigest
 
 _UNREPRODUCIBLE_MODES = frozenset(
     {
@@ -517,6 +520,7 @@ def write_release_files(
     stages: list[dict[str, Any]],
     lock: Mapping[str, Any],
     tokenizer_sha256: str | None = None,
+    view_digests: Mapping[str, ViewFileDigest] | None = None,
 ) -> None:
     """Write `report.json`, `report.md` and the file inventory `build.json`."""
     write_json(staging / "report.json", report)
@@ -533,21 +537,37 @@ def write_release_files(
         + source_ledger_markdown(report["source_ledger"]),
         encoding="utf-8",
     )
+    view_digests = view_digests or {}
+    paths = {
+        path.relative_to(staging).as_posix(): path
+        for path in sorted(staging.rglob("*"))
+        if path.is_file()
+    }
+    if missing := view_digests.keys() - paths.keys():
+        raise ValueError(
+            f"corpus views missing before manifest publication: {sorted(missing)}"
+        )
+    files = {
+        name: {"sha256": sha256_file(path), "size": path.stat().st_size}
+        for name, path in paths.items()
+        if name not in view_digests
+    }
+    files.update(
+        (name, digest.inventory_entry(paths[name]))
+        for name, digest in view_digests.items()
+    )
+    stage_inventory = [
+        {**stage, "output_sha256": files[f"stages/{stage['id']}.jsonl"]["sha256"]}
+        for stage in stages
+    ]
     write_json(
         staging / "build.json",
         {
             "schema_version": 1,
             "build_id": build_id,
             "identity": identity,
-            "stages": stages,
-            "files": {
-                str(path.relative_to(staging)): {
-                    "sha256": sha256_file(path),
-                    "size": path.stat().st_size,
-                }
-                for path in sorted(staging.rglob("*"))
-                if path.is_file()
-            },
+            "stages": stage_inventory,
+            "files": files,
             "snapshots": [
                 {"source_id": source_id, "sha256": entry["snapshot_sha256"]}
                 for source_id, entry in sorted(lock["sources"].items())

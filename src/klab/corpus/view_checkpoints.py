@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -17,6 +19,21 @@ from klab.result_publication import (
     sync_directory,
     write_bytes_exclusive,
 )
+from klab.verification_proofs import ArtifactFingerprint, artifact_fingerprint
+
+
+@dataclass(frozen=True)
+class ViewFileDigest:
+    """Whole-file SHA-256 tied to the generation observed by the writer."""
+
+    sha256: str
+    size: int
+    generation: ArtifactFingerprint
+
+    def inventory_entry(self, path: Path) -> dict[str, str | int]:
+        if artifact_fingerprint(path) != self.generation:
+            raise ValueError(f"corpus view changed before manifest publication: {path}")
+        return {"sha256": self.sha256, "size": self.size}
 
 
 class ViewOutput:
@@ -26,11 +43,13 @@ class ViewOutput:
         self.stream = stream
         self.offset = 0
         self.digest = hashlib.sha256()
+        self.whole = hashlib.sha256()
 
     def write(self, data: bytes) -> None:
         if self.stream.write(data) != len(data):
             raise OSError("short corpus view write")
         self.digest.update(data)
+        self.whole.update(data)
 
     def seal(self) -> dict[str, Any]:
         end = self.stream.tell()
@@ -43,7 +62,7 @@ class ViewOutput:
         self.offset = end
         self.digest = hashlib.sha256()
 
-    def matches(self, part: dict[str, Any]) -> bool:
+    def matches(self, part: dict[str, Any], observe: Callable[[bytes], None]) -> bool:
         end = part["end"]
         if type(end) is not int or end < self.offset:
             return False
@@ -55,7 +74,21 @@ class ViewOutput:
                 return False
             remaining -= len(block)
             digest.update(block)
+            observe(block)
         return digest.hexdigest() == part["sha256"]
+
+    def file_digest(self) -> ViewFileDigest:
+        descriptor = self.stream.fileno()
+        if (
+            self.stream.tell() != self.offset
+            or os.fstat(descriptor).st_size != self.offset
+        ):
+            raise ValueError(
+                "corpus view has uncommitted bytes at manifest publication"
+            )
+        return ViewFileDigest(
+            self.whole.hexdigest(), self.offset, artifact_fingerprint(descriptor)
+        )
 
 
 class ViewCheckpoints:
@@ -76,7 +109,13 @@ class ViewCheckpoints:
     def restore(self) -> dict[str, Any]:
         """Verify the committed prefix, discard damaged or uncommitted tails."""
         state = {}
+        generations = {
+            name: artifact_fingerprint(out.stream.fileno())
+            for name, out in self.outputs.items()
+        }
         for path in sorted(self.root.glob("commit-*.json")):
+            # Discard candidate hash state for every file if any range is bad.
+            candidates = {name: out.whole.copy() for name, out in self.outputs.items()}
             try:
                 entry = read_canonical(path)
                 body, digest = entry["body"], entry["sha256"]
@@ -89,7 +128,8 @@ class ViewCheckpoints:
                     and isinstance(parts, dict)
                     and parts.keys() == self.outputs.keys()
                     and all(
-                        out.matches(parts[name]) for name, out in self.outputs.items()
+                        out.matches(parts[name], candidates[name].update)
+                        for name, out in self.outputs.items()
                     )
                 )
                 if not valid:
@@ -98,6 +138,7 @@ class ViewCheckpoints:
             except ValueError, TypeError, KeyError:
                 break
             for name, output in self.outputs.items():
+                output.whole = candidates[name]
                 output.advance(parts[name]["end"])
             self.previous = digest
             self.sequence += 1
@@ -106,11 +147,18 @@ class ViewCheckpoints:
             if path.name >= self._name():
                 path.unlink()
                 self.damaged = True
-        for output in self.outputs.values():
+        for name, output in self.outputs.items():
+            if artifact_fingerprint(output.stream.fileno()) != generations[name]:
+                raise ValueError(
+                    f"corpus view changed during checkpoint verification: {name}"
+                )
             output.stream.seek(output.offset)
             if os.fstat(output.stream.fileno()).st_size != output.offset:
                 output.stream.truncate()
         return state
+
+    def file_digests(self) -> dict[str, ViewFileDigest]:
+        return {name: out.file_digest() for name, out in self.outputs.items()}
 
     def commit(self, state: dict[str, Any]) -> None:
         body = {
