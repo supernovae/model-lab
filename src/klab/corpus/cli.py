@@ -82,7 +82,11 @@ def _handle(args: argparse.Namespace) -> None:
         scratch_dir=getattr(args, "scratch_dir", None),
         workers=getattr(args, "workers", None),
         echo=sys.stderr,
-        **verification_options(root, cold=getattr(args, "cold", False)),
+        **verification_options(
+            root,
+            cold=getattr(args, "cold", False),
+            read_only=args.corpus_command == "plan",
+        ),
     ):
         _run(args)
 
@@ -96,6 +100,29 @@ def _run(args: argparse.Namespace) -> None:
 
     root = resolve_work_dir(args.work_dir)
     command = args.corpus_command
+    if command == "plan":
+        from klab.corpus.planning import plan_build
+
+        plan = plan_build(load_project(args.project, verify_inputs=False), root)
+        if args.json:
+            print(json.dumps(plan, sort_keys=True))
+        elif plan["status"] == "planned":
+            print(f"{plan['project_id']} native build plan")
+            for source in plan["sources"]:
+                print(source["source_id"])
+                for partition in source["partitions"]:
+                    print(
+                        f"  {partition['action']} {partition['path']} ({partition['reason']})"
+                    )
+            print(
+                f"{plan['normalization_source_bytes']:,} source bytes need normalization if a new build runs"
+            )
+            print(
+                "Build verifies cache candidates before reuse and resolves downstream stages."
+            )
+        else:
+            print(f"{plan['project_id']} {plan['status']} ({plan['reason']})")
+        return
     if command == "plan-wikimedia-ranges":
         from klab.corpus.wikimedia_ranges import plan_wikimedia_ranges
 
@@ -592,6 +619,12 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "corpus", help="Acquire, derive, freeze and inspect corpus releases"
     )
     sub = corpus.add_subparsers(dest="corpus_command", required=True)
+    command = sub.add_parser(
+        "plan", help="Estimate native normalization work from local metadata"
+    )
+    command.add_argument("project", type=Path)
+    command.add_argument("--json", action="store_true")
+    command.set_defaults(handler=_handle)
     command = sub.add_parser(
         "plan-wikimedia-ranges",
         help="Verify a pinned local Wikimedia dump and its multistream index",

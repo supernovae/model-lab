@@ -350,7 +350,16 @@ def _spill_path(path):
 
 
 class _Reader:
-    def __init__(self, stream, store, input_limit, header_limit, row_limit):
+    def __init__(
+        self,
+        stream,
+        store,
+        input_limit,
+        header_limit,
+        row_limit,
+        *,
+        inventory_only=False,
+    ):
         self.stream, self.store = stream, store
         self.input_limit, self.header_limit, self.row_limit = (
             input_limit,
@@ -360,6 +369,7 @@ class _Reader:
         self.buffer = b""
         self.offset = self.total = self.header = 0
         self.row_bytes = None
+        self.inventory_only = inventory_only
 
     def peek(self):
         if self.offset == len(self.buffer):
@@ -468,7 +478,11 @@ class _Reader:
                 result[key] = self.value(
                     depth + 1,
                     path=(*path, key),
-                    spill=self.row_bytes is None and _spill_path((*path, key)),
+                    spill=(
+                        self.row_bytes is None
+                        and _spill_path((*path, key))
+                        and (not self.inventory_only or key != "files")
+                    ),
                 )
                 self.whitespace()
                 end = self.take()
@@ -478,7 +492,7 @@ class _Reader:
                     raise ValueError("malformed metadata object")
         if char == b"[":
             self.take()
-            result = self.store.new_rows() if spill else []
+            result = self.store.new_rows() if spill and not self.inventory_only else []
             self.whitespace()
             if self.peek() == b"]":
                 self.take()
@@ -489,7 +503,8 @@ class _Reader:
                         item = self.value(depth + 1, path=(*path, None))
                         self.whitespace()
                         end = self.take()
-                    self.store.append(result, item)
+                    if not self.inventory_only:
+                        self.store.append(result, item)
                 else:
                     result.append(self.value(depth + 1, path=(*path, None)))
                     self.whitespace()
@@ -553,6 +568,29 @@ def read_metadata(path: Path):
         else max(1, path.stat().st_size)
     )
     return store.load(path, max_input_bytes=limit)
+
+
+def read_inventory_metadata(path: Path):
+    """Read the inventory and headers, discarding large row lists without SQLite."""
+    initial = _input_stat(path)
+    stamp = _fingerprint(initial)
+    with path.open("rb") as stream:
+        if _fingerprint(os.fstat(stream.fileno())) != stamp:
+            raise ValueError("metadata input changed while opening")
+        value = _Reader(
+            stream,
+            None,
+            initial.st_size,
+            4 * 1024**2,
+            8 * 1024**2,
+            inventory_only=True,
+        ).read()
+        if (
+            _fingerprint(os.fstat(stream.fileno())) != stamp
+            or _fingerprint(_input_stat(path)) != stamp
+        ):
+            raise ValueError("metadata input changed while reading")
+        return value
 
 
 class DiskDecisions(dict):

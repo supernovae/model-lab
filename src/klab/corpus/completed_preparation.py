@@ -143,7 +143,7 @@ def _build_completed(project, root, workspace):
     from klab.corpus.large_build import _emit_build
     from klab.corpus.pipeline import (
         _ordered_transforms,
-        _uses_disk_lm_builder,
+        uses_disk_lm_builder,
     )
     from klab.corpus.progress import BuildProgress
     from klab.corpus.split_inventory_adoption import (
@@ -153,7 +153,7 @@ def _build_completed(project, root, workspace):
 
     transforms = _ordered_transforms(project)
     if (
-        not _uses_disk_lm_builder(project, transforms)
+        not uses_disk_lm_builder(project, transforms)
         or not is_strict_chain(project.release.policy.duplicates)
         or project.splits.unit != "document"
         or any(source.kind != "huggingface_dataset" for source in project.sources)
