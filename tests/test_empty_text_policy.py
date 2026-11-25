@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from corpus_fixtures import neutral_corpus
 
-from klab.corpus.large_build import _prepare_file
-from klab.corpus.pipeline import EmptyDocumentError
+from klab.corpus.document_normalization import EmptyDocumentError
+from klab.corpus.prepared_shards import prepare_file
 from klab.corpus.rights import resolve_file_rights
 from klab.training.manifest import sha256_file
 
@@ -55,7 +55,7 @@ def _prepare(tmp_path: Path, empty_text: str) -> Path:
     project = neutral_corpus(tmp_path)
     source = project.sources[0]
     path = _shard(tmp_path)
-    return _prepare_file(
+    return prepare_file(
         build_id="b" * 64,
         prepared_root=tmp_path / "prepared",
         source=source,

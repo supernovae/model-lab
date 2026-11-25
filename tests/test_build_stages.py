@@ -19,6 +19,7 @@ from klab.corpus import (
     completed_preparation,
     large_build,
     measurement,
+    pipeline,
 )
 from klab.corpus.dedup_policy import STRICT_CHAIN
 from klab.corpus.progress import BuildProgress
@@ -377,6 +378,34 @@ def test_a_stage_that_does_not_verify_is_rebuilt_and_leftovers_are_ignored(
     shutil.rmtree(resumed)
     lab.run("corpus", "build", project, "--offline", "--keep-stages", "1")
     assert len(stage_dirs(lab.work)) == 2
+
+    def shard_receipts():
+        return set(lab.work.glob("corpora/*/builds/prepared/*/*/*/receipt.json"))
+
+    receipts = shard_receipts()
+    assert receipts
+    changed_producer = "large_build.py"
+
+    def bumped_digest(path, *args, **kwargs):
+        digest = sha256_file(path, *args, **kwargs)
+        if Path(path).name == changed_producer:
+            return canonical_digest(digest)
+        return digest
+
+    monkeypatch.setattr(pipeline, "sha256_file", bumped_digest)
+    monkeypatch.setattr(build_stages, "sha256_file", bumped_digest)
+    updated = Path(lab.run("corpus", "build", project, "--offline"))
+    assert updated != resumed
+    assert shard_receipts() == receipts
+    assert sha256_file(updated / "documents.jsonl") == expected["documents.jsonl"]
+    assert sha256_file(updated / "spans.jsonl") == expected["spans.jsonl"]
+
+    changed_producer = "document_normalization.py"
+    rebuilt = Path(lab.run("corpus", "build", project, "--offline"))
+    assert rebuilt not in {resumed, updated}
+    assert len(shard_receipts() - receipts) == len(receipts)
+    assert sha256_file(rebuilt / "documents.jsonl") == expected["documents.jsonl"]
+    assert sha256_file(rebuilt / "spans.jsonl") == expected["spans.jsonl"]
 
 
 def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(

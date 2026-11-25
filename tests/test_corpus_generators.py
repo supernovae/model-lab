@@ -12,13 +12,12 @@ import yaml
 from corpus_fixtures import PLAIN_OPTIONS, STRICT_POLICY, fixture_rights
 
 from klab.corpus.acquisition import acquire
+from klab.corpus.document_normalization import markdown_sections, records_for_file
 from klab.corpus.pipeline import (
     _path_scenario,
-    _records_for_file,
     _scenario,
     _scenario_messages,
     _scenario_v2,
-    _sections,
     build,
 )
 from klab.corpus.project import DocumentPolicy, SourceDeclaration, load_project
@@ -314,7 +313,7 @@ def test_markdown_navigation_does_not_leak_across_source_families() -> None:
         "## Diagnosis\n\n"
         "A failed probe needs its configured endpoint inspected.\n"
     )
-    sections = _sections(document, True)
+    sections = markdown_sections(document, True)
     assert len(sections) == 1
     assert "Shared cross-family link" not in sections[0][0]
     assert "configured endpoint" in sections[0][0]
@@ -327,7 +326,7 @@ def test_cnxml_extracts_prose_skips_local_media_and_rejects_entities_external_me
     from types import SimpleNamespace
 
     records = partial(
-        _records_for_file, normalizer_options=PLAIN_OPTIONS, document_policy=STRICT_DOCS
+        records_for_file, normalizer_options=PLAIN_OPTIONS, document_policy=STRICT_DOCS
     )
 
     source = SimpleNamespace(

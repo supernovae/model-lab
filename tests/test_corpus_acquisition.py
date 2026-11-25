@@ -1906,7 +1906,7 @@ def test_mediawiki_dump_of_any_site_yields_one_row_per_article(
 ) -> None:
     import gzip
 
-    from klab.corpus.pipeline import _records_for_file
+    from klab.corpus.document_normalization import records_for_file
 
     url = "https://cynefin.example.org/dumps/cynefinwiki-20261101.xml.gz"
     export = "http://www.mediawiki.org/xml/export-0.10/"
@@ -1960,7 +1960,7 @@ def test_mediawiki_dump_of_any_site_yields_one_row_per_article(
         for row in map(json.loads, raw.splitlines())
     ] == [("Complex domain", "https://cynefin.example.org/index.php?curid=1")]
     assert manifest["retrieval"]["scanned_pages"] == 3
-    documents = _records_for_file(
+    documents = records_for_file(
         raw,
         name,
         project.sources[0],
