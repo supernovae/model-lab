@@ -1620,7 +1620,10 @@ def test_freeze_rejects_missing_admission_and_mismatched_normalizer_or_inventory
 
 def test_real_lineage_audit_blocks_protected_family_moved_to_train(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from klab.corpus import large_build
+
     root = tmp_path / "work"
     root.mkdir()
     prior_release, prior_family, strata = _prior(root)
@@ -1663,9 +1666,33 @@ def test_real_lineage_audit_blocks_protected_family_moved_to_train(
             "splits": selected.name,
         },
     )
-    release = freeze(
-        build(load_project(recipe / "build.yaml"), root, offline=True), root
-    )
+    loaded = load_project(recipe / "build.yaml")
+    verify_coverage = large_build._verify_admitted_inventory
+
+    def expect_a_missing_row(connection, admissions, admission_files):
+        key = admission_files[0]
+        admitted = admissions[key]
+        decisions = dict(admitted["decisions"])
+        decisions[max(decisions, default=-1) + 1] = {"decision": "qualify"}
+        return verify_coverage(
+            connection,
+            {**admissions, key: {**admitted, "decisions": decisions}},
+            admission_files,
+        )
+
+    with monkeypatch.context() as fault:
+        fault.setattr(large_build, "_verify_admitted_inventory", expect_a_missing_row)
+        with pytest.raises(ValueError, match="admitted source row inventory differs"):
+            build(loaded, root, offline=True)
+    native_builds = root / "corpora" / loaded.config.id / "builds"
+    assert not list(native_builds.glob("*/build.json"))
+
+    def unexpected_reindex(*args, **kwargs):
+        pytest.fail("retry should reuse the indexed admission evidence")
+
+    with monkeypatch.context() as check:
+        check.setattr(large_build, "_index_prepared", unexpected_reindex)
+        release = freeze(build(loaded, root, offline=True), root)
     family = recipe / "family.jsonl"
     finalize_family_inventory(release, selected, family)
     profile = recipe / "profile.json"

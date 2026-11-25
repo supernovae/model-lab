@@ -1359,7 +1359,7 @@ needs measurement where the table gives historical or fixture evidence.
 | Acquisition and transport cache | Published source snapshot, verified transport body or adapter-specific checkpoint. See [recovery by source adapter](#recovery-by-source-adapter). | Adapter-specific work and verification. Indexed Wikimedia retains committed planning groups and selected member groups. A partial pinned transfer restarts its body. | On a 287 MiB Wikimedia shard, a stop after 128 planned members avoided 539.88 MiB of retry decompression. [#592](https://github.com/supernovae/model-lab/pull/592) |
 | Snapshot verification | Signed byte checks of eligible files in published snapshots, then a complete snapshot proof. | Reuse completed eligible file hashes at the same path; restart an incomplete file. An explicit cold check reads the bytes again. | Historical Workshop cold pass, about 15 min for 33 snapshots and 108 GB. See [snapshot hash recovery measurements](#snapshot-hash-recovery-measurements). |
 | Native disk build, normalize | Receipted shard per source file. | Verify completed shards and re-normalize unfinished files. | Historical Workshop normalize, about 25 min for the 6.7M-document workload. [#491](https://github.com/supernovae/model-lab/pull/491) |
-| Native disk build, index and dedup | Whole index and whole dedup stage, separately. | Verify earlier outputs and rebuild the interrupted stage. Keep the index when only duplicate policy changes. | Historical Workshop index, about 30 min for roughly 13M rows. The HDD incident measured 3.4k docs/s against 19.8k docs/s on NVMe. Current dedup interruption cost is unmeasured. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
+| Native disk build, index and dedup | Whole index and whole dedup stage, separately. Reviewed row admission reuses source file and row numbers in the completed index. | Verify earlier outputs and rebuild the interrupted stage. Keep the index when only duplicate policy changes. | Historical Workshop index, about 30 min for roughly 13M rows. The HDD incident measured 3.4k docs/s against 19.8k docs/s on NVMe. See [native admission coverage measurements](#native-admission-coverage-measurements). Current dedup interruption cost is unmeasured. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB. Final publication by rename. | Verify the committed prefix, reconstruct its digest and render the uncommitted tail. Report measurement or manifest hashing can restart as a whole pass. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. These figures cover the append helper. [#579](https://github.com/supernovae/model-lab/pull/579) |
 | Completed-preparation build | Authenticated per-source render and completed sorting, deduplication, inventory and emission phases. | An unfinished phase repeats. View emission on this route reruns its complete pass. The small in-memory builder likewise has a whole-build boundary. | Production restart cost unmeasured. |
 | Freeze | Native staging rename and build tombstone, signed verification after a staged replay, then the public release. Completed preparation seals a retained release against its existing build. | Reuse the complete staged receipt at the same path, or resume an unfinished check from eligible file and replay proofs. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. See [staged freeze recovery measurements](#staged-freeze-recovery-measurements). [#501](https://github.com/supernovae/model-lab/pull/501) |
@@ -1585,6 +1585,33 @@ files and sorted index overlapped. A completed-index retry took about
 took 1.172 s before and 1.242 s with checkpoints. These timings
 cover index construction. Production-scale and slower-storage results
 remain open. [#450](https://github.com/supernovae/model-lab/issues/450), [#485](https://github.com/supernovae/model-lab/issues/485)
+
+#### Native admission coverage measurements
+
+The disk builder records file numbers and source row ordinals in the
+narrow index when a file has reviewed row-level admission. The
+`checking_admissions` phase checks exact coverage using those rows once
+the index is verified. A file-level review requires no row scan. The
+index key binds the ordered reviewed file list and the prepared shard
+receipts. The updated producer key causes older in-progress native build
+checkpoints to rebuild on first use.
+
+One worker indexed 150,000 synthetic normalized documents (798 MB),
+including 100,000 reviewed rows, on NVMe. The table shows median times
+over three runs. Cold coverage trials requested eviction of the index
+files before checking.
+
+| Phase | Previous time | Narrow admission evidence | Storage reads before and after |
+| --- | ---: | ---: | ---: |
+| Index construction | 2.957 s | 3.009 s | 814 MB in both |
+| Warm coverage | 1.081 s | 0.346 s | 0 MB in both |
+| Cold coverage | 1.219 s | 0.404 s | 961 MB to 1.18 MB |
+
+The narrow index grew by 1.16 MB. The separate document index matched
+byte for byte. These timings cover indexing and the coverage check.
+The native builder still stores document payloads in its index, and
+build-wide restart cost and slower-storage performance remain open.
+[#450](https://github.com/supernovae/model-lab/issues/450), [#485](https://github.com/supernovae/model-lab/issues/485)
 
 ### Select families, screen duplicates, and build a schedule
 

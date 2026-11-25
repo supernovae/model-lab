@@ -618,53 +618,71 @@ def finish_index(connection: sqlite3.Connection, schema: str = "wide") -> None:
 
 
 def _index_prepared(
-    directory: Path, prepared: list[Path], project: Any, progress: BuildProgress
-) -> sqlite3.Connection:
+    directory: Path,
+    prepared: list[Path],
+    project: Any,
+    progress: BuildProgress,
+    *,
+    admission_files: tuple[tuple[str, str], ...],
+) -> int:
+    from klab.corpus.dedup_policy import source_rank
     from klab.corpus.pipeline import _origin_keys
     from klab.corpus.split_assignments import assign_split, split_policy
 
-    connection = create_index(directory)
     policy = split_policy(project)
-    from klab.corpus.dedup_policy import source_rank
-
     rank = {source.id: source_rank(source) for source in project.sources}
     declared_keys = set(project.release.policy.duplicates.keys)
+    file_ids = {key: ordinal for ordinal, key in enumerate(admission_files)}
     total = 0
-    for shard in prepared:
-        with (
-            (shard / "docs.jsonl").open("rb") as docs,
-            (shard / "spans.jsonl").open("rb") as spans,
-        ):
-            for raw_doc, raw_span in zip(docs, spans, strict=True):
-                doc = json.loads(raw_doc)
-                span = json.loads(raw_span)
-                if doc["document_id"] != span["record_id"]:
-                    raise ValueError("prepared document/span identity mismatch")
-                origins = (
-                    ("raw", doc["raw_content_sha256"]),
-                    ("normalized", doc["content_sha256"]),
-                    *(("canonical_origin", value) for value in _origin_keys(doc)),
-                )
-                insert_indexed(
-                    connection,
-                    doc,
-                    raw_doc.rstrip(b"\n"),
-                    raw_span.rstrip(b"\n"),
-                    assign_split(doc, policy),
-                    rank[doc["source_id"]],
-                    [
-                        (method, key)
-                        for method, key in origins
-                        if method in declared_keys
-                    ],
-                )
-                total += 1
-                progress.update(documents=1)
-                if total % 10_000 == 0:
-                    connection.commit()
-    connection.commit()
-    finish_index(connection)
-    return connection
+    with closing(create_index(directory)) as connection:
+        if file_ids:
+            connection.execute(
+                "CREATE TABLE admitted_document_rows ("
+                "file_number INTEGER NOT NULL, source_row_index INTEGER NOT NULL)"
+            )
+        for shard in prepared:
+            with (
+                (shard / "docs.jsonl").open("rb") as docs,
+                (shard / "spans.jsonl").open("rb") as spans,
+            ):
+                for raw_doc, raw_span in zip(docs, spans, strict=True):
+                    doc = json.loads(raw_doc)
+                    span = json.loads(raw_span)
+                    if doc["document_id"] != span["record_id"]:
+                        raise ValueError("prepared document/span identity mismatch")
+                    origins = (
+                        ("raw", doc["raw_content_sha256"]),
+                        ("normalized", doc["content_sha256"]),
+                        *(("canonical_origin", value) for value in _origin_keys(doc)),
+                    )
+                    insert_indexed(
+                        connection,
+                        doc,
+                        raw_doc.rstrip(b"\n"),
+                        raw_span.rstrip(b"\n"),
+                        assign_split(doc, policy),
+                        rank[doc["source_id"]],
+                        [
+                            (method, key)
+                            for method, key in origins
+                            if method in declared_keys
+                        ],
+                    )
+                    if file_ids:
+                        path = doc["source_location"].split("#", 1)[0]
+                        number = file_ids.get((doc["source_id"], path))
+                        if number is not None:
+                            connection.execute(
+                                "INSERT INTO admitted_document_rows VALUES (?,?)",
+                                (number, doc["metadata"]["source_row_index"]),
+                            )
+                    total += 1
+                    progress.update(documents=1)
+                    if total % 10_000 == 0:
+                        connection.commit()
+        connection.commit()
+        finish_index(connection)
+    return total
 
 
 def open_dedup(index: Path, database: Path) -> sqlite3.Connection:
@@ -1372,25 +1390,23 @@ def _emit_build(
 
 
 def _verify_admitted_inventory(
-    connection: sqlite3.Connection, admissions: dict
+    connection: sqlite3.Connection,
+    admissions: dict,
+    admission_files: tuple[tuple[str, str], ...],
 ) -> None:
     """Compare qualified and observed source identities without materialized sets."""
     from klab.corpus.admission_coverage import AdmissionCoverage
 
-    if not admissions:
-        return
     with AdmissionCoverage(connection) as coverage:
-        for (source, path), admitted in admissions.items():
-            for index, choice in admitted.get("decisions", {}).items():
+        for source, path in admission_files:
+            for index, choice in admissions[source, path]["decisions"].items():
                 if choice["decision"] == "qualify":
                     coverage.expect(source, path, index)
-        for source, raw in connection.execute(
-            "SELECT source_id,payload FROM documents"
+        for number, index in connection.execute(
+            "SELECT file_number, source_row_index FROM indexed.admitted_document_rows"
         ):
-            doc = json.loads(raw)
-            path = doc["source_location"].split("#", 1)[0]
-            if "decisions" in admissions.get((source, path), {}):
-                coverage.observe(source, path, doc["metadata"]["source_row_index"])
+            source, path = admission_files[number]
+            coverage.observe(source, path, index)
         coverage.verify()
 
 
@@ -1415,13 +1431,19 @@ def _open_decided(index_dir: Path, dedup_dir: Path):
     return closing(connection)
 
 
-def _stage_inputs(project: Any, prepared: list[Path]) -> dict[str, dict[str, Any]]:
+def _stage_inputs(
+    project: Any,
+    prepared: list[Path],
+    *,
+    admission_files: tuple[tuple[str, str], ...] = (),
+) -> dict[str, dict[str, Any]]:
     """Exactly what each checkpointed stage depends on.
 
     The index follows the receipts of the prepared shards (which bind the
     source bytes, rights, normalizer and document policy), the split
-    declaration, the declared duplicate keys and the source ranks. Deduplication
-    adds the full duplicate policy to the index it reads.
+    declaration, duplicate keys, source ranks and the ordered files with
+    row-level admission evidence. Deduplication adds the full duplicate policy
+    to the index it reads.
     """
     from klab.corpus.dedup_policy import source_rank
 
@@ -1443,6 +1465,8 @@ def _stage_inputs(project: Any, prepared: list[Path]) -> dict[str, dict[str, Any
             "large_build.py", "pipeline.py", "split_assignments.py", "dedup_policy.py"
         ),
     }
+    if admission_files:
+        index["row_admission_files"] = admission_files
     return {
         "index": {"stage": "index", **index},
         "dedup": {
@@ -1698,17 +1722,18 @@ def build_large(
             finish_one()
 
     stages = StageStore(root / "stages")
-    stage_inputs = _stage_inputs(project, prepared)
+    admission_files = tuple(
+        sorted(
+            key for key, admitted in record_admission.items() if "decisions" in admitted
+        )
+    )
+    stage_inputs = _stage_inputs(project, prepared, admission_files=admission_files)
     progress.update(phase="indexing")
 
     def index_stage(staging: Path, result: dict[str, Any]) -> None:
-        connection = _index_prepared(staging, prepared, project, progress)
-        try:
-            result["documents"] = connection.execute(
-                "SELECT COUNT(*) FROM documents"
-            ).fetchone()[0]
-        finally:
-            connection.close()
+        result["documents"] = _index_prepared(
+            staging, prepared, project, progress, admission_files=admission_files
+        )
 
     index_dir, _ = run_stage(
         stages,
@@ -1720,7 +1745,8 @@ def build_large(
     stages.prune("index", keep=_PRUNE_ON_PUBLISH, protect=index_dir.name)
     with _open_read_only(index_dir / "documents.sqlite") as connection:
         _require_every_source_has_documents(connection, project, source_events)
-    if record_admission:
+    if admission_files:
+        progress.update(phase="checking_admissions")
         # The coverage check writes a table, so it runs in a scratch database
         # that reads the checkpointed index and never changes it.
         with tempfile.TemporaryDirectory(prefix=".coverage-", dir=root) as scratch:
@@ -1730,9 +1756,11 @@ def build_large(
             ) as connection:
                 connection.execute(
                     "ATTACH DATABASE ? AS indexed",
-                    (f"file:{quote(str(index_dir / 'documents.sqlite'))}?mode=ro",),
+                    (f"file:{quote(str(index_dir / 'narrow.sqlite'))}?mode=ro",),
                 )
-                _verify_admitted_inventory(connection, record_admission)
+                _verify_admitted_inventory(
+                    connection, record_admission, admission_files
+                )
     progress.update(phase="deduplicating")
     dedup_inputs = {**stage_inputs["dedup"], "index": index_dir.name}
 
