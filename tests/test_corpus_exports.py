@@ -283,14 +283,43 @@ def test_export_rejects_malformed_split_inventory(
     _reject(exported)
 
 
-def test_lm_export_fits_every_train_document(frozen_sample: tuple[Path, Path]) -> None:
-    release, root = frozen_sample
-    exported = export_release(
-        release, "lm", Path("configs/runtime_smoke_cpu.yaml"), 300, root
-    )
-    assert exported == export_release(
-        release, "lm", Path("configs/runtime_smoke_cpu.yaml"), 300, root
-    )
+def test_lm_export_fits_every_train_document(
+    frozen_sample: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from klab.corpus import export, shards
+    from klab.corpus.release_verify import verification_settings
+
+    release, _ = frozen_sample
+    root = tmp_path / "work"
+    base = Path("configs/runtime_smoke_cpu.yaml")
+    documents = release / "documents.jsonl"
+    monkeypatch.setattr(shards, "CHUNK_BYTES", 512)
+    expected_ranges = shards.chunk_ranges(documents)
+    assert len(expected_ranges) > 1
+    observed = []
+    scan = export._license_range
+
+    def record_range(path, start, end):
+        observed.append((start, end))
+        return scan(path, start, end)
+
+    with monkeypatch.context() as probe:
+        probe.setattr(export, "_license_range", record_range)
+        with verification_settings(workers=1, scratch_dir=tmp_path / "export-scratch"):
+            with monkeypatch.context() as fault:
+                fault.setenv("KLAB_FAULT", f"{export.LICENSE_SCAN_STAGE}:1")
+                with pytest.raises(RuntimeError, match="KLAB_FAULT"):
+                    export_release(release, "lm", base, 300, root)
+            assert observed == expected_ranges[:1]
+            assert not list(root.rglob("export.json"))
+            observed.clear()
+            exported = export_release(release, "lm", base, 300, root)
+            assert observed == expected_ranges[1:]
+
+    # Independent export recomputes the licenses, counts and authenticated metadata.
+    assert exported == export_release(release, "lm", base, 300, root)
     tokenizer_config = load_tokenizer_config(exported / "tokenizer.yaml")
     run_config = load_config(exported / "run.yaml")
     dataset = run_config.dataset
