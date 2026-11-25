@@ -791,10 +791,12 @@ Each receipt binds the committed output offsets, range
 digests, cursor and report counts. On retry the writer verifies the committed
 prefix, truncates uncommitted or damaged suffixes and seeks to the last
 verified row. It re-reads bytes to verify the prefix and restore the stage
-digest. A stop near the end can still repeat report measurement or manifest
-hashing. The staged view files become the published build, so checkpointing
-adds receipt metadata and keeps one staged payload. Successful publication
-removes the view checkpoint. Abandoned checkpoints from other build
+digest. Report measurement uses the existing lineage and view range
+checkpoints. The finished census has its own receipt bound to the verified
+view frontier and release options. A retry with the same frontier reuses the
+finished census and can still repeat final manifest hashing. The staged
+view files become the published build. The census scratch and receipts are
+removed after successful publication. Abandoned checkpoints from other build
 identities can be removed between builds once they are no longer needed.
 Changing the code revision can require new builder checkpoints, with acquired
 snapshots still available for reuse.
@@ -1375,7 +1377,7 @@ needs measurement where the table gives historical or fixture evidence.
 | Snapshot verification | Signed byte checks of eligible files in published snapshots, then a complete snapshot proof. | Reuse completed eligible file hashes at the same path; restart an incomplete file. An explicit cold check reads the bytes again. | Historical Workshop cold pass, about 15 min for 33 snapshots and 108 GB. See [snapshot hash recovery measurements](#snapshot-hash-recovery-measurements). |
 | Native disk build, normalize | Receipted shard per source file. | Verify completed shards and re-normalize unfinished files. | Historical Workshop normalize, about 25 min for the 6.7M-document workload. [#491](https://github.com/supernovae/model-lab/pull/491) |
 | Native disk build, index and dedup | Verified groups of prepared file references, then the assembled index and complete dedup stage. Reviewed row admission uses indexed file and row numbers. | Reuse verified input groups. Repeat the unfinished group, compact index assembly or dedup stage as applicable. | See [native index and payload read measurements](#native-index-and-payload-read-measurements) and [native admission coverage measurements](#native-admission-coverage-measurements). Historical Workshop indexing took about 30 min for roughly 13M rows. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
-| Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB. Final publication by rename. | Verify the committed prefix, reconstruct its digest and render the uncommitted tail. Report measurement or manifest hashing can restart as a whole pass. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. These figures cover the append helper. [#579](https://github.com/supernovae/model-lab/pull/579) |
+| Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB, lineage and view measurement checkpoints, and a receipted census. Final publication by rename. | Verify the committed view prefix, reconstruct its digest and render the uncommitted tail. Reuse finished census work for matching inputs, then repeat final manifest hashing. A stop in the final lineage sort or measurement merge may repeat that step. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. [Native build census measurements](#native-build-census-measurements) cover the report phase. [#579](https://github.com/supernovae/model-lab/pull/579) |
 | Completed-preparation build | Authenticated per-source render and completed sorting, deduplication, inventory and emission phases. | An unfinished phase repeats. View emission on this route reruns its complete pass. The small in-memory builder likewise has a whole-build boundary. | Production restart cost unmeasured. |
 | Freeze | Native staging rename and build tombstone, signed verification after a staged replay, then the public release. Completed preparation seals a retained release against its existing build. | Reuse the complete staged receipt at the same path, or resume an unfinished check from eligible file and replay proofs. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. See [staged freeze recovery measurements](#staged-freeze-recovery-measurements). [#501](https://github.com/supernovae/model-lab/pull/501) |
 | Release verification, `audit`, and `sources` | Signed checks of eligible inventory files, stage outputs and streaming raw source replay, then the complete release proof. `audit` and `sources` read the corresponding published report after verification. | A receipt-backed retry skips eligible completed checks and continues the remaining work. Cold mode starts the checks from bytes. | See [inventory hash recovery measurements](#inventory-hash-recovery-measurements), [stage output verification measurements](#stage-output-verification-measurements) and [raw source replay recovery](#raw-source-replay-recovery). An earlier cold audit took 67.3 s on 13.2 GB synthetic data, and the first receipt-backed audit took 0.94 s. [#500](https://github.com/supernovae/model-lab/pull/500), [#450](https://github.com/supernovae/model-lab/issues/450) |
@@ -1660,6 +1662,37 @@ The sum of index and cold-read times fell from 7.369 s to 5.832 s.
 These were separate timed phases with byte-identical ordered payloads.
 Production-scale restart and slower storage remain open.
 [#450](https://github.com/supernovae/model-lab/issues/450), [#485](https://github.com/supernovae/model-lab/issues/485)
+
+#### Native build census measurements
+
+The census uses the measured training origins to skip replay when there are
+no generated training records. For mixed releases it uses the existing
+lineage lookup for held-out rows and scans training lineage in file order.
+SQLite holds only unique selected IDs, so there is no second copy of the
+lineage payload. The held-out overlap and generated-record rules stay the same.
+
+One-worker synthetic trials on NVMe used cold file pages. The 608 MB native
+fixture included 304,000 lineage rows and LM view rows. The mixed fixture
+included 92,000 rows and was measured with disposable scratch on both runs.
+The measurements cover the census after view emission and exclude final
+manifest hashing. Logical reads and device I/O are Linux process
+counters. Report digests matched for every run of each fixture.
+
+| Census run | Wall time | Logical reads | Device reads | Device writes | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Native, prior implementation | 11.209 s | 6.78 GB | 601 MB | 495 MB | 205 MiB |
+| Native, new with checkpointing | 6.975 s | 1.24 GB | 609 MB | 76 MB | 207 MiB |
+| Native, retry after SIGKILL following one view range | 5.178 s | 488 MB | 487 MB | 50 MB | 206 MiB |
+| Native, retry with all measurement ranges and no final census receipt | 0.482 s | 65 MB | 65 MB | 4 KiB | 197 MiB |
+| Mixed, prior implementation | 3.636 s | 1.46 GB | 173 MB | 149 MB | 113 MiB |
+| Mixed, new with disposable scratch | 2.755 s | 782 MB | 184 MB | 8.8 MB | 115 MiB |
+
+The native SIGKILL retry reused one of seven view ranges, the assembled
+lineage lookup, and every view link and line-count result. The completed
+measurement cache held about 70 MB before publication cleanup.
+A connected build fixture covers reuse of the finished census after a
+publication stop. Larger mixed releases, production NVMe and slower storage
+remain unmeasured.
 
 ### Select families, screen duplicates, and build a schedule
 

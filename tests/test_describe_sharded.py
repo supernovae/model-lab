@@ -65,6 +65,10 @@ def release(tmp_path: Path) -> Path:
             row["scenario_id"] = f"scenario-{index}"
         elif index % 7 == 2:
             row["semantic_id"] = "semantic"
+        if index % 2:
+            row["verification"] = {
+                "status": "formally_verified" if index == 5 else "schema_validated"
+            }
         lineage.append(row)
         ids[index] = record_id
     generator.shuffle(lineage)
@@ -87,13 +91,19 @@ def release(tmp_path: Path) -> Path:
         ],
     )
     cursor = 0
+    _write(root / "lexical/candidates.jsonl", [])
     for view, splits in (
-        ("lm", {"train": 40, "validation": 8, "test": 0}),
+        ("lm", {"train": 40, "validation": 8, "test": 1}),
         ("chat", {"train": 24, "validation": 6, "test": 0}),
     ):
         for split, count in splits.items():
-            chosen = [ids[cursor + k] for k in range(count)]
-            cursor += count
+            if split == "test":
+                chosen = [ids[81]] if count else []
+            else:
+                chosen = [ids[cursor + k] for k in range(count)]
+                cursor += count
+                if (view, split) == ("chat", "train"):
+                    chosen[1] = ids[1]
             texts = _texts(generator, count) if count else []
             if view == "lm":
                 payload = [{"text": text} for text in texts]
@@ -182,7 +192,21 @@ def test_worker_processes_give_the_same_answer(
     monkeypatch.setattr(shards, "PARALLEL_MIN_BYTES", 0)
     expected = serial_measure_views(release, tokenizer, release_spec=RELEASE_SPEC)
     with verification_settings(workers=3):
-        assert measure_views(release, tokenizer, release_spec=RELEASE_SPEC) == expected
+        census = measurement.summarize_release(
+            release, release_spec=RELEASE_SPEC, tokenizer=tokenizer
+        )
+    assert all(census[key] == value for key, value in expected.items())
+    inventory = census["inventory"]
+    assert inventory["generated_training_records"] == 31
+    assert inventory["unverified_generated_training_records"] == 30
+    assert inventory["generated_test_shared_parent_ids"] == ["parent-1"]
+    assert inventory["generated_heldout_lineage_by_shape"]["shape-1"] == {
+        "parent_document_ids": ["parent-1"],
+        "source_family_ids": ["family-1"],
+        "generator_world_id": [],
+        "scenario_family_id": [],
+        "template_family_id": ["template-1"],
+    }
 
 
 def test_a_killed_describe_reuses_its_finished_runs(

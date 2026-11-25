@@ -1569,15 +1569,43 @@ def _emit_build(
         warnings=warnings,
     )
     progress.update(phase="measuring")
-    report["measurement"] = (
-        summarize_release(staging, release_spec=release_spec, tokenizer=None)
-        if descriptive_census
-        else {
+    if not descriptive_census:
+        report["measurement"] = {
             "status": "deferred",
             "reason": "Descriptive lineage census is outside the selected completed local preparation scope",
             "token_count_reason": "tokenizer_not_declared",
         }
-    )
+    elif checkpoints is None:
+        report["measurement"] = summarize_release(staging, release_spec=release_spec)
+    else:
+        store = StageStore(checkpoints.root / "census")
+        store.discard_incomplete("measurement")
+
+        def measure(output: Path, result: dict[str, Any]) -> None:
+            summary = summarize_release(
+                staging,
+                release_spec=release_spec,
+                cache=checkpoints.root / "measurement-cache",
+            )
+            write_json(output / "measurement.json", summary)
+
+        census_dir, _ = run_stage(
+            store,
+            "measurement",
+            {
+                "views": checkpoints.identity,
+                "frontier": checkpoints.previous,
+                "release": canonical_digest(release_spec),
+                "implementation": implementation_digests(
+                    "measurement.py", "provenance.py", "release_verify.py"
+                ),
+            },
+            measure,
+            on_reuse=lambda: progress.record("reused_build_census"),
+        )
+        report["measurement"] = json.loads(
+            (census_dir / "measurement.json").read_text(encoding="utf-8")
+        )
     write_release_files(
         staging,
         project,
