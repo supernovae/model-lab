@@ -192,7 +192,12 @@ def test_a_killed_describe_reuses_its_finished_runs(
     cache = tmp_path / "cache"
     expected = serial_measure_views(release, None, release_spec=RELEASE_SPEC)
     scan, measure = measurement._scan_view_links, measurement._measure_shard
-    links_read, views_read = [], []
+    write_range = measurement._write_index_range
+    index_ranges_read, links_read, views_read = [], [], []
+
+    def read_index_range(staging, path, start, end):
+        index_ranges_read.append((start, end))
+        return write_range(staging, path, start, end)
 
     def read_links(path, *args):
         links_read.append(Path(path))
@@ -202,14 +207,30 @@ def test_a_killed_describe_reuses_its_finished_runs(
         views_read.append(args[:5])
         return measure(*args)
 
+    monkeypatch.setattr(measurement, "_write_index_range", read_index_range)
     monkeypatch.setattr(measurement, "_scan_view_links", read_links)
     monkeypatch.setattr(measurement, "_measure_shard", read_view)
 
     with verification_settings(workers=1):
         with monkeypatch.context() as stop:
+            stop.setenv("KLAB_FAULT", f"{measurement.INDEX_STAGE}:2")
+            with pytest.raises(RuntimeError, match="KLAB_FAULT"):
+                measure_views(release, release_spec=RELEASE_SPEC, cache=cache)
+        committed_ranges = set(index_ranges_read)
+        assert len(committed_ranges) == 2 and not links_read
+        damaged = next(cache.rglob("rows.npy"))
+        content = bytearray(damaged.read_bytes())
+        content[-1] ^= 1
+        damaged.write_bytes(content)
+        index_ranges_read.clear()
+
+        with monkeypatch.context() as stop:
             stop.setenv("KLAB_FAULT", f"{measurement.LINK_STAGE}:1")
             with pytest.raises(RuntimeError, match="KLAB_FAULT"):
                 measure_views(release, release_spec=RELEASE_SPEC, cache=cache)
+        assert len(committed_ranges.intersection(index_ranges_read)) == 1
+        assert not list(cache.rglob("rows.npy")), "committed index replaces the ranges"
+        index_ranges_read.clear()
         [committed_links] = links_read
         assert not views_read
         links_read.clear()
@@ -232,7 +253,7 @@ def test_a_killed_describe_reuses_its_finished_runs(
         assert (
             measure_views(release, release_spec=RELEASE_SPEC, cache=cache) == expected
         )
-        assert not links_read and not views_read
+        assert not index_ranges_read and not links_read and not views_read
 
         # A replacement can have the same length and modification time.
         info = committed_links.stat()

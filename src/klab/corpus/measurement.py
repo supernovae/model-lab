@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import tempfile
 import unicodedata
@@ -18,6 +20,7 @@ from typing import Any
 
 import numpy as np
 
+from klab.canonical import canonical_digest
 from klab.corpus.build_stages import implementation_digests
 from klab.corpus.release_verify import (
     current_settings,
@@ -31,8 +34,10 @@ from klab.corpus.shards import (
     declare_stage,
     range_file_identity,
     run_sharded,
+    run_sharded_files,
 )
-from klab.safe_io import read_file_range
+from klab.result_publication import sync_directory
+from klab.safe_io import read_file_range, rename_noreplace
 from klab.training.manifest import sha256_file
 
 SPLITS = ("train", "validation", "test")
@@ -362,6 +367,7 @@ _PARENT_ID_LIMIT = 100_000
 # Every Nth link line gets an offset, so a shard finds its first link by skipping
 # fewer than this many lines.
 _LINK_STRIDE = 4096
+_INDEX_FIELDS = (("hashes", np.uint64), ("offsets", np.uint64), ("lengths", np.uint32))
 
 
 def _scratch_cache() -> Path | None:
@@ -419,40 +425,98 @@ def _index_range(path: str, start: int, end: int) -> tuple[np.ndarray, ...]:
     )
 
 
-def _build_lineage_index(lineage: Path, directory: Path) -> None:
-    """Write the sorted (id hash, offset, length) arrays of `lineage.jsonl`.
+def _write_index_range(
+    staging: Path, path: str, start: int, end: int
+) -> dict[str, int]:
+    columns = _index_range(path, start, end)
+    rows = np.empty(len(columns[0]), dtype=list(_INDEX_FIELDS))
+    for (name, _), column in zip(_INDEX_FIELDS, columns, strict=True):
+        rows[name] = column
+    np.save(staging / "rows.npy", rows)
+    return {"rows": rows.size}
 
-    A lookup reads the one row it needs and checks its `record_id`, so a hash
-    collision or a stale index is detected, never silently used.
-    """
-    if (directory / "complete").exists():
-        return
-    plan = ShardPlan(
-        INDEX_STAGE,
-        [(str(lineage), *r) for r in chunk_ranges(lineage)],
-        lineage.stat().st_size,
-    )
-    parts = list(run_sharded(plan, _index_range, ordered=True))
-    hashes, offsets, lengths = (
-        (np.concatenate([part[column] for part in parts]) for column in range(3))
-        if parts
-        else (np.empty(0, np.uint64), np.empty(0, np.uint64), np.empty(0, np.uint32))
-    )
-    order = np.argsort(hashes, kind="stable")
-    staging = directory.with_name(directory.name + f".partial-{os.getpid()}")
-    staging.mkdir(parents=True, exist_ok=True)
-    for name, column in (
-        ("hashes", hashes),
-        ("offsets", offsets),
-        ("lengths", lengths),
-    ):
-        np.save(staging / f"{name}.npy", column[order])
-    (staging / "complete").write_text("1")
-    if directory.exists():
-        for old in directory.iterdir():
-            old.unlink()
-        directory.rmdir()
-    staging.rename(directory)
+
+def _lineage_columns(plan: ShardPlan) -> tuple[np.ndarray, ...]:
+    if plan.store is None:
+        parts = list(run_sharded(plan, _index_range, ordered=True))
+        return tuple(
+            np.concatenate([part[index] for part in parts])
+            if parts
+            else np.empty(0, dtype)
+            for index, (_, dtype) in enumerate(_INDEX_FIELDS)
+        )
+
+    ranges = list(run_sharded_files(plan, _write_index_range, ordered=True))
+    size = sum(result["rows"] for _, result in ranges)
+    columns = tuple(np.empty(size, dtype) for _, dtype in _INDEX_FIELDS)
+    start = 0
+    for directory, result in ranges:
+        rows = np.load(directory / "rows.npy", mmap_mode="r")
+        end = start + result["rows"]
+        for (name, _), column in zip(_INDEX_FIELDS, columns, strict=True):
+            column[start:end] = rows[name]
+        del rows
+        start = end
+    return columns
+
+
+def _build_lineage_index(
+    lineage: Path, work: Path, *, cache: Path | None = None
+) -> Path:
+    """Assemble the sorted lookup, with verified range checkpoints in persistent scratch."""
+    lineage = lineage.resolve()
+    generation = range_file_identity(lineage)
+    inputs = {
+        "file": generation,
+        "lineage": str(lineage),
+        "producer": implementation_digests("measurement.py"),
+    }
+    directory = cache or work
+    index = directory / f"lineage-index-{canonical_digest(inputs)}"
+    staging = index.with_suffix(".pending")
+    runs = None if cache is None else index.with_suffix(".ranges")
+    directory.mkdir(parents=True, exist_ok=True)
+    with index.with_suffix(".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if staging.exists():
+            shutil.rmtree(staging)
+        complete = (index / "complete").is_file() and all(
+            (index / f"{name}.npy").is_file() for name, _ in _INDEX_FIELDS
+        )
+        if not complete:
+            plan = ShardPlan(
+                INDEX_STAGE,
+                [(str(lineage), *r) for r in chunk_ranges(lineage)],
+                generation[2],
+                inputs,
+                runs,
+            )
+            columns = _lineage_columns(plan)
+            order = np.argsort(columns[0], kind="stable")
+            staging.mkdir()
+            try:
+                for (name, _), column in zip(_INDEX_FIELDS, columns, strict=True):
+                    with (staging / f"{name}.npy").open("xb") as stream:
+                        np.save(stream, column[order])
+                        if runs is not None:
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                (staging / "complete").touch()
+                if runs is not None:
+                    sync_directory(staging)
+                if range_file_identity(lineage) != generation:
+                    raise ValueError("lineage changed during index construction")
+                if index.exists():
+                    shutil.rmtree(index)
+                rename_noreplace(staging, index)
+                if runs is not None:
+                    sync_directory(directory)
+            finally:
+                if staging.exists():
+                    shutil.rmtree(staging)
+        if runs is not None and runs.exists():
+            shutil.rmtree(runs)
+    return index
 
 
 class _LineageIndex:
@@ -814,13 +878,9 @@ def measure_views(
     root = Path(root)
     cache = cache or _scratch_cache()
     with tempfile.TemporaryDirectory(prefix=".describe-", dir=scratch_root()) as work:
-        directory = (cache or Path(work)) / "lineage-index"
-        info = (root / "lineage.jsonl").stat()
-        directory = directory.with_name(
-            f"lineage-index-{info.st_size}-{info.st_mtime_ns}"
+        directory = _build_lineage_index(
+            root / "lineage.jsonl", Path(work), cache=cache
         )
-        directory.parent.mkdir(parents=True, exist_ok=True)
-        _build_lineage_index(root / "lineage.jsonl", directory)
         tasks, plan, owners = _plan_views(root, directory, tokenizer, cache)
         states: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         results = run_sharded(plan, _measure_shard, ordered=True)
