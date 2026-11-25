@@ -1420,6 +1420,7 @@ def test_archive_recovery_checks_staged_body_and_derivation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
 ) -> None:
     from klab.corpus import acquisition, acquisition_parts
+    from klab.training import manifest
 
     text = b"pinned source text\n"
     body = _tar_gz([("rfc1.txt", text, None)])
@@ -1492,13 +1493,14 @@ def test_archive_recovery_checks_staged_body_and_derivation(
     body_hashes = []
     real_hash = acquisition.sha256_file
 
-    def record_hash(path: Path) -> str:
+    def record_hash(path: Path, *args, **kwargs) -> str:
         if path.name == "rfc1.txt":
             output_hashes.append(path)
         elif path.name == "RFC-all.tar.gz":
             body_hashes.append(path)
-        return real_hash(path)
+        return real_hash(path, *args, **kwargs)
 
+    monkeypatch.setattr(manifest, "sha256_file", record_hash)
     monkeypatch.setattr(acquisition, "sha256_file", record_hash)
     monkeypatch.setattr(acquisition_parts, "sha256_file", record_hash)
     assert acquire(project, work, **step)["status"] == "source_verified"
