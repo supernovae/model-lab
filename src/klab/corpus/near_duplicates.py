@@ -12,9 +12,10 @@ training split past that index, so memory grows with the held-out side and the
 longest single document, not with the corpus. Training documents are compared
 with held-out ones and held-out splits with each other; training documents are
 never compared with each other. Every document is screened: a held-out side
-over its caps raises before anything is reported. Both passes split the file
-into line-aligned byte shards read by a pool of forked workers that share the
-held-out index; the report is the same for any number of workers.
+over its caps raises before anything is reported. Both passes use line-aligned
+byte shards. The checkpointed first pass writes compact evidence through the
+shared runner. Forked training-pass workers share the held-out index, and the
+report is the same for any number of workers.
 
 Template-aware mode also scores each pair on its content: shingles that are
 boilerplate (very frequent among the held-out documents or a deterministic
@@ -24,21 +25,36 @@ similar only through them is counted as `template_only` instead of a candidate.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import itertools
 import json
 import multiprocessing
 import os
 import re
+import shutil
+import struct
 import tempfile
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import numpy as np
 
 from klab.canonical import canonical_digest, canonical_json
+from klab.corpus.build_stages import implementation_digests
+from klab.corpus.release_verify import verification_settings
+from klab.corpus.shards import (
+    ShardPlan,
+    declare_stage,
+    range_file_identity,
+    run_sharded_files,
+)
+
+EVIDENCE_STAGE = declare_stage("near-duplicate evidence")
 
 _SPLITS = ("train", "validation", "test")
 _HELD_OUT = ("validation", "test")
@@ -520,16 +536,12 @@ def _sampled(document_id: str, stride: int) -> bool:
     return int.from_bytes(digest, "big") % stride == 0
 
 
-def _scan(shard: int) -> dict[str, Any]:
-    """First pass over one shard: its held-out documents and a training sample."""
-    options: _Options = _JOB["options"]
+def _scan_rows(rows, options: _Options, add_held, add_sample):
+    """Read one shard into its held-out shingle evidence and training sample."""
     shingler = _Shingler()
-    start, end = _JOB["shards"][shard]
-    held: list[tuple[dict[str, Any], np.ndarray]] = []
     tally = _Tally(options.max_candidates)
-    sample: dict[str, list[np.ndarray]] = defaultdict(list)
     sampled: Counter[str] = Counter()
-    for _, row in _JOB["read"](start, end):
+    for _, row in rows:
         if row["split"] not in _SPLITS:
             raise ValueError("near-duplicate invalid document split")
         if row["split"] == "train":
@@ -537,18 +549,80 @@ def _scan(shard: int) -> dict[str, Any]:
                 row["document_id"], options.boilerplate_sample_stride
             ):
                 source = str(row.get("source_id"))
-                sample[source].append(shingler(row["text"]))
+                add_sample(source, shingler(row["text"]))
                 sampled[source] += 1
             continue
         shingles = shingler(row["text"])
-        held.append(({field: row.get(field) for field in _FIELDS}, shingles))
+        add_held({field: row.get(field) for field in _FIELDS}, shingles)
         tally.account(row, shingles)
-    return {
-        "held": held,
-        "tally": tally.state(),
-        "sample": {s: np.concatenate(parts) for s, parts in sample.items()},
-        "sampled": sampled,
-    }
+    return {"tally": tally.state(), "sampled": sampled}
+
+
+def _scan(shard: int) -> dict[str, Any]:
+    held: list[tuple[dict[str, Any] | str, np.ndarray]] = []
+    sample: dict[str, list[np.ndarray]] = defaultdict(list)
+    result = _scan_rows(
+        _JOB["read"](*_JOB["shards"][shard]),
+        _JOB["options"],
+        lambda fields, shingles: held.append((fields, shingles)),
+        lambda source, shingles: sample[source].append(shingles),
+    )
+    held.extend((source, np.concatenate(parts)) for source, parts in sample.items())
+    return {**result, "evidence": held}
+
+
+_EVIDENCE_HEADER = struct.Struct("<II")
+
+
+def _write_evidence(stream: BinaryIO, fields, shingles: np.ndarray) -> None:
+    header = canonical_json(fields)
+    stream.write(_EVIDENCE_HEADER.pack(len(header), len(shingles)))
+    stream.write(header)
+    stream.write(memoryview(shingles.astype("<u8", copy=False)))
+
+
+def _read_evidence(path: Path):
+    with path.open("rb") as stream:
+        size = os.fstat(stream.fileno()).st_size
+        offset = 0
+        while raw := stream.read(_EVIDENCE_HEADER.size):
+            length, count = _EVIDENCE_HEADER.unpack(raw)
+            offset += len(raw) + length + count * 8
+            if offset > size:
+                raise ValueError("truncated near-duplicate shingle evidence")
+            fields = json.loads(stream.read(length))
+            values = stream.read(count * 8)
+            if len(values) != count * 8:
+                raise ValueError("truncated near-duplicate shingle evidence")
+            yield fields, np.frombuffer(values, dtype="<u8")
+
+
+def _scan_file(staging, path, start, end, options):
+    with (staging / "evidence.bin").open("xb") as stream:
+
+        def emit(fields, shingles):
+            _write_evidence(stream, fields, shingles)
+
+        return _scan_rows(
+            _document_rows(Path(path), start, end),
+            _Options(**options),
+            emit,
+            emit,
+        )
+
+
+def _scan_results(shards, workers, options, evidence):
+    if evidence is None:
+        yield from _run(_scan, len(shards), workers)
+        return
+    plan = replace(evidence, tasks=[(*task, vars(options)) for task in evidence.tasks])
+    with (
+        verification_settings(workers=workers),
+        closing(run_sharded_files(plan, _scan_file, ordered=True)) as segments,
+    ):
+        for directory, result in segments:
+            with closing(_read_evidence(directory / "evidence.bin")) as rows:
+                yield {**result, "evidence": rows}
 
 
 def _stream(shard: int) -> dict[str, Any]:
@@ -614,13 +688,14 @@ def screen(
     boilerplate_sketch_bits: int = 27,
     workers: int = 1,
     checkpoint: Checkpoint | None = None,
+    _evidence: ShardPlan | None = None,
 ) -> dict[str, Any]:
     """Screen every normalized document, including excluded or duplicate records.
 
     ``read(start, end)`` yields ``(end offset, row)`` for the documents whose
     lines start in ``[start, end)`` of the source; ``shards`` are consecutive
-    line-aligned ranges that cover it. Two passes read every shard, on up to
-    ``workers`` forked processes. The first indexes the held-out splits and
+    line-aligned ranges that cover it. Both passes use up to ``workers``
+    processes. The first indexes the held-out splits and
     refuses past ``max_heldout_documents`` or ``max_heldout_shingles``: the
     index is about 8 bytes per held-out shingle plus about 4 KB per held-out
     document, shared by the workers. The second streams the training split past
@@ -676,30 +751,33 @@ def screen(
     _JOB.update(read=read, shards=list(shards), options=options)
     held: list[tuple[dict[str, Any], np.ndarray]] = []
     total_shingles = 0
-    for result in _run(_scan, len(shards), workers):
-        base.merge(_Tally.from_state(result["tally"], max_candidates))
-        for source, values in result["sample"].items():
-            sketch.add(source, values)
-        sampled.update(result["sampled"])
-        for fields, shingles in result["held"]:
-            if fields["document_id"] in seen:
-                raise ValueError("near-duplicate duplicate document ID")
-            seen.add(fields["document_id"])
-            if len(held) >= max_heldout_documents:
-                raise ValueError(
-                    "near-duplicate held-out document cap exceeded "
-                    f"({max_heldout_documents})"
-                )
-            total_shingles += len(shingles)
-            if total_shingles > max_heldout_shingles:
-                raise ValueError(
-                    "near-duplicate held-out shingle cap exceeded "
-                    f"({max_heldout_shingles})"
-                )
-            held.append((fields, shingles))
+    with closing(_scan_results(shards, workers, options, _evidence)) as results:
+        for result in results:
+            base.merge(_Tally.from_state(result["tally"], max_candidates))
+            sampled.update(result["sampled"])
+            for fields, shingles in result["evidence"]:
+                if isinstance(fields, str):
+                    sketch.add(fields, shingles)
+                    continue
+                if fields["document_id"] in seen:
+                    raise ValueError("near-duplicate duplicate document ID")
+                seen.add(fields["document_id"])
+                if len(held) >= max_heldout_documents:
+                    raise ValueError(
+                        "near-duplicate held-out document cap exceeded "
+                        f"({max_heldout_documents})"
+                    )
+                total_shingles += len(shingles)
+                if total_shingles > max_heldout_shingles:
+                    raise ValueError(
+                        "near-duplicate held-out shingle cap exceeded "
+                        f"({max_heldout_shingles})"
+                    )
+                held.append((fields, shingles))
     index.held = [fields for fields, _ in held]
     index.held_shingles = [shingles for _, shingles in held]
-    index.find_boilerplate(sketch, sampled)
+    if template_aware:
+        index.find_boilerplate(sketch, sampled)
     held_fields, held_shingles = index.held, index.held_shingles
     index.held, index.held_shingles = [], []
     for fields, shingles in zip(held_fields, held_shingles, strict=True):
@@ -812,6 +890,21 @@ def _line_ranges(path: Path, shard_bytes: int) -> list[tuple[int, int]]:
     return list(itertools.pairwise(bounds))
 
 
+def _document_rows(
+    path: Path, start: int, end: int
+) -> Iterable[tuple[int, dict[str, Any]]]:
+    with path.open("rb") as handle:
+        handle.seek(start)
+        offset = start
+        while offset < end:
+            line = handle.readline()
+            if not line:
+                break
+            offset += len(line)
+            if line.strip():
+                yield offset, json.loads(line)
+
+
 def screen_documents(
     documents: Path,
     *,
@@ -824,55 +917,80 @@ def screen_documents(
 ) -> dict[str, Any]:
     """Screen a `documents.jsonl` file in line-aligned shards of `shard_bytes`.
 
-    With `checkpoint_dir` each shard saves its progress there and a killed run
-    resumes from it; the checkpoints are named by `identity` (what the file is),
-    every option and the shard plan, never by `workers`.
+    With `checkpoint_dir` each shard saves first-pass shingle evidence and
+    training progress. The key binds the file, every option and the shard plan.
     """
+    observed = range_file_identity(documents)
     shards = _line_ranges(documents, shard_bytes)
 
-    def read(start: int, end: int) -> Iterable[tuple[int, dict[str, Any]]]:
-        with documents.open("rb") as handle:
-            handle.seek(start)
-            offset = start
-            while offset < end:
-                line = handle.readline()
-                if not line:
-                    break
-                offset += len(line)
-                if line.strip():
-                    yield offset, json.loads(line)
+    def read(start: int, end: int):
+        return _document_rows(documents, start, end)
 
-    checkpoint = None
-    if checkpoint_dir is not None:
-        key = canonical_digest(
-            {
-                "identity": identity,
-                "algorithm": "word_shingle_minhash_lsh_v2",
-                "options": options,
-                "shards": shards,
-                "implementation": hashlib.sha256(
-                    Path(__file__).read_bytes()
-                ).hexdigest(),
-            }
-        )
+    if checkpoint_dir is None:
+        report = screen(read, shards, workers=workers, **options)
+    else:
+        inputs = {
+            "identity": identity,
+            "file": observed,
+            "algorithm": "word_shingle_minhash_lsh_v2",
+            "options": options,
+            "shards": shards,
+            "implementation": implementation_digests("near_duplicates.py"),
+        }
+        key = canonical_digest(inputs)
+        root = Path(checkpoint_dir)
         checkpoint = Checkpoint(
-            Path(checkpoint_dir) / f"near-duplicates-{key[:16]}.json",
-            key,
-            checkpoint_every,
+            root / f"near-duplicates-{key[:16]}.json", key, checkpoint_every
         )
-    return screen(read, shards, workers=workers, checkpoint=checkpoint, **options)
+        evidence = checkpoint.path.with_suffix(".evidence")
+        plan = ShardPlan(
+            EVIDENCE_STAGE,
+            [(str(documents), start, end) for start, end in shards],
+            observed[2],
+            inputs={"screen": key},
+            store=evidence,
+        )
+        root.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(
+            checkpoint.path.with_suffix(".lock"),
+            os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as lock:
+            # Unlike flock, a process record lock does not survive in forked workers.
+            fcntl.lockf(lock, fcntl.LOCK_EX)
+            if evidence.is_symlink():
+                raise ValueError(f"symlinked near-duplicate evidence: {evidence}")
+            report = screen(
+                read,
+                shards,
+                workers=workers,
+                checkpoint=checkpoint,
+                _evidence=plan,
+                **options,
+            )
+            if evidence.exists():
+                shutil.rmtree(evidence)
+    if range_file_identity(documents) != observed:
+        raise ValueError("documents changed during near-duplicate screen")
+    return report
 
 
 def audit_release(path: Path, **options: Any) -> dict[str, Any]:
     """Verify the immutable release, then screen its original normalized text."""
     from klab.corpus.release import verify_release
 
+    documents = Path(path) / "documents.jsonl"
+    observed = range_file_identity(documents)
     manifest = verify_release(path)
+    if range_file_identity(documents) != observed:
+        raise ValueError("documents changed during release verification")
+    report = screen_documents(documents, identity=manifest["release_id"], **options)
+    if range_file_identity(documents) != observed:
+        raise ValueError("documents changed during near-duplicate screen")
     return {
         "release_id": manifest["release_id"],
-        **screen_documents(
-            Path(path) / "documents.jsonl", identity=manifest["release_id"], **options
-        ),
+        **report,
     }
 
 
