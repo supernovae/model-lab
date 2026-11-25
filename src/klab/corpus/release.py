@@ -11,6 +11,7 @@ from collections import Counter
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +22,7 @@ from klab.corpus.project import NormalizerOptions
 from klab.corpus.quota import require_estimated_supply
 from klab.corpus.release_receipt import receipt_first
 from klab.corpus.release_verify import (
+    INVENTORY_RECEIPT_MIN_BYTES,
     current_settings,
     hash_inventory,
     line_boundaries,
@@ -1826,6 +1828,9 @@ def _verify_stages(
     identity: dict[str, Any],
     inventory: dict[str, Any],
     progress: BuildProgress | None = None,
+    *,
+    proof_store: ProofStore | None = None,
+    verification_mode: VerificationMode = "cold",
 ) -> None:
     declarations = {spec["id"]: spec for spec in identity["transforms"]}
     if len(stages) != len(declarations) or {stage["id"] for stage in stages} != set(
@@ -1852,55 +1857,81 @@ def _verify_stages(
             raise ValueError(f"tampered artifact: {name}")
         if stage["output_sha256"] != entry["sha256"]:
             raise ValueError("stage receipt does not match output")
-        # Workers confirm every line is the canonical encoding of its row; this
-        # process then streams the file once, deriving the file digest and the
-        # stage identity (a hash over the canonical rows) from the same bytes.
-        canonical_count = 0
-        total = entry["size"]
-
-        def progress_bytes(size: int) -> None:
-            if progress is not None:
-                progress.update(input_bytes=size)
-
-        def consume(result: tuple[int, int]) -> None:
-            nonlocal canonical_count
-            canonical_count += result[0]
-            progress_bytes(result[1])
-
-        run_tasks(
-            _canonical_lines,
-            ((str(output), start, end) for start, end in chunk_ranges(output)),
-            consume,
-            total_bytes=total,
-        )
-        file_digest, identity_digest = hashlib.sha256(), hashlib.sha256()
-        identity_digest.update(canonical_json([stage["id"]])[:-1] + b",[")
-        count = size = reported = 0
-        with output.open("rb") as stream:
-            for line in stream:
-                file_digest.update(line)
-                size += len(line)
-                if size - reported >= 64 * 1024**2:
-                    progress_bytes(size - reported)
-                    reported = size
-                if not line.strip():
-                    continue
-                if count:
-                    identity_digest.update(b",")
-                identity_digest.update(line.rstrip(b"\n"))
-                count += 1
-        progress_bytes(size - reported)
-        identity_digest.update(b"]]")
-        if range_file_identity(output) != generation:
-            raise ValueError(f"stage output changed during verification: {name}")
+        verify = partial(_verify_stage_output, output, stage, generation, progress)
         if (
-            size != total
-            or file_digest.hexdigest() != entry["sha256"]
-            or count != stage["output_count"]
-            or count != canonical_count
-            or identity_digest.hexdigest() != stage["output_id"]
+            proof_store is not None
+            and verification_mode == "verified_reuse"
+            and entry["size"] >= INVENTORY_RECEIPT_MIN_BYTES
         ):
-            raise ValueError("stage receipt does not match output")
+            receipt_first(
+                "stage_output",
+                output,
+                canonical_digest({"stage": stage, "file": entry}),
+                [],
+                proof_store,
+                verification_mode,
+                verify,
+                partial(progress.update, input_bytes_reused=2 * generation[2])
+                if progress is not None
+                else lambda: None,
+            )
+        else:
+            verify()
+
+
+def _verify_stage_output(
+    output: Path,
+    stage: dict[str, Any],
+    generation: list[int],
+    progress: BuildProgress | None,
+) -> None:
+    """Validate canonical rows, then hash the raw file and ordered stage identity."""
+    canonical_count = 0
+    total = generation[2]
+
+    def progress_bytes(size: int) -> None:
+        if progress is not None:
+            progress.update(input_bytes=size)
+
+    def consume(result: tuple[int, int]) -> None:
+        nonlocal canonical_count
+        canonical_count += result[0]
+        progress_bytes(result[1])
+
+    run_tasks(
+        _canonical_lines,
+        ((str(output), start, end) for start, end in chunk_ranges(output)),
+        consume,
+        total_bytes=total,
+    )
+    file_digest, identity_digest = hashlib.sha256(), hashlib.sha256()
+    identity_digest.update(canonical_json([stage["id"]])[:-1] + b",[")
+    count = size = reported = 0
+    with output.open("rb") as stream:
+        for line in stream:
+            file_digest.update(line)
+            size += len(line)
+            if size - reported >= 64 * 1024**2:
+                progress_bytes(size - reported)
+                reported = size
+            if not line.strip():
+                continue
+            if count:
+                identity_digest.update(b",")
+            identity_digest.update(line.rstrip(b"\n"))
+            count += 1
+    progress_bytes(size - reported)
+    identity_digest.update(b"]]")
+    if range_file_identity(output) != generation:
+        raise ValueError(f"stage output changed during verification: {output}")
+    if (
+        size != total
+        or file_digest.hexdigest() != stage["output_sha256"]
+        or count != stage["output_count"]
+        or count != canonical_count
+        or identity_digest.hexdigest() != stage["output_id"]
+    ):
+        raise ValueError("stage receipt does not match output")
 
 
 def _verify_native_outputs(
@@ -1938,7 +1969,15 @@ def _verify_native_outputs(
         "stage_receipts",
         expected_input_bytes=2 * sum(inventory[name]["size"] for name in stage_outputs),
     )
-    _verify_stages(path, stages, identity, inventory, progress)
+    _verify_stages(
+        path,
+        stages,
+        identity,
+        inventory,
+        progress,
+        proof_store=proof_store,
+        verification_mode=verification_mode,
+    )
 
 
 def verify_build(

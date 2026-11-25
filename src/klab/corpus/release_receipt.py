@@ -51,6 +51,8 @@ def verifier_digest(kind: str) -> str:
     screen, the trainer or the command line does not make a release unverified,
     and editing anything that verification runs does.
     """
+    if kind == "stage_output":
+        return verifier_digest("release")
     from klab.verifier_authority import CHAT_RENDERER_MODULES, SHARED, scoped_modules
 
     exported = kind == "export"
@@ -234,8 +236,8 @@ def receipt_first(
 ) -> tuple[Any, str]:
     """Return `reused()` and the files' fingerprint, running `verify` only without a receipt.
 
-    The one place a release, build or export is trusted without reading its
-    bytes: a signed receipt for this id and verifier whose stat index still
+    Reuse a completed Corpus check through a signed receipt for this id
+    and verifier whose stat index still
     matches the files. Without one, `verify` runs the complete check and, when a
     proof store is available, a receipt is recorded for it, so `--cold` refreshes
     the receipt a later command reuses. The fingerprint is taken before verifying.
