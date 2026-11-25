@@ -19,8 +19,8 @@ from klab.corpus.bounded_metadata import (
     metadata_operation,
     read_metadata,
 )
+from klab.corpus.document_normalization import records_for_file
 from klab.corpus.jsonl_records import records_from_bytes, records_from_path
-from klab.corpus.pipeline import _records_for_file
 from klab.corpus.project import Project
 from klab.corpus.rights import resolve_file_rights
 from klab.training.manifest import sha256_file
@@ -134,7 +134,7 @@ def _file_documents(
                 # Validate every acquired row, including any beyond the parser limit.
                 if ordinal > source.acquisition.max_rows:
                     continue
-                for document, span in _records_for_file(
+                for document, span in records_for_file(
                     record.raw,
                     file["path"],
                     source,
@@ -174,7 +174,7 @@ def _file_documents(
     rights = (
         resolve_file_rights(source.rights, file["path"], raw) if source.rights else None
     )
-    for document, span in _records_for_file(
+    for document, span in records_for_file(
         raw,
         file["path"],
         source,

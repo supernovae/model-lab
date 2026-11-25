@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from recipe_fixtures import Lab, write_recipe
 
-from klab.corpus.pipeline import EmptyDocumentError
+from klab.corpus.document_normalization import EmptyDocumentError
 
 
 def acquire(tmp_path: Path, monkeypatch, capsys, **recipe_options):

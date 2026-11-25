@@ -746,6 +746,11 @@ The disk builder reuses verified outputs after a failure or a kill:
 The key of a stage is the SHA-256 of exactly the inputs it depends on, recorded
 in its `receipt.json` next to the SHA-256 and size of every output file:
 
+- **normalize**: the pinned source and file, resolved rights, applicable
+  admission decisions, normalizer and document options, row limit and source
+  digests for the parser, shard writer and their normalization dependencies.
+  The completed-preparation build passes the same document policy into its
+  renderer and also binds the execution and admission adapter.
 - **index**: the receipt digest of every prepared shard in order (which bind the
   source bytes, rights decision, normalizer options and document policy), the
   split declaration (with the digest of its assignment file), the declared
@@ -761,10 +766,15 @@ the digest of the recorded inputs, the directory holds exactly the receipted
 files, and every size and hash matches. File names and modification times prove
 nothing. An output that fails is deleted and rebuilt, incomplete
 (`.incomplete-*`) directories are never inputs, and an output appears by one
-atomic rename. Changing only a duplicate option (for example
-`duplicates.rights_conflict` after a failure in deduplication) reuses the index
-and reruns only deduplication; changing a source, split or normalizer option
-changes the shard receipts and so reruns the index.
+atomic rename. In the ordinary disk build, a change to indexing,
+deduplication or view code can reuse the normalized shard receipts. A split
+change reruns indexing with the same normalized shards. Changing only a
+duplicate option such as `duplicates.rights_conflict` reuses the index
+and reruns deduplication.
+Changing the normalizer, its implementation or the document policy produces
+new shard receipts. Moving normalization into its own implementation changes
+the shard key once for work prepared before the change. Ordinary published
+releases remain readable and acquisition snapshots can supply the rebuild.
 
 The checks that fail fast, such as the empty-source check and the admitted
 inventory check, run on every start against the verified index, so a fix to the
@@ -1425,7 +1435,7 @@ needs measurement where the table gives historical or fixture evidence.
 | --- | --- | --- | --- |
 | Acquisition and transport cache | Published source snapshot, verified transport body or adapter-specific checkpoint. See [recovery by source adapter](#recovery-by-source-adapter). | Adapter-specific work and verification. Indexed Wikimedia retains committed planning groups and selected member groups. A partial pinned transfer restarts its body. | On a 287 MiB Wikimedia shard, a stop after 128 planned members avoided 539.88 MiB of retry decompression. [#592](https://github.com/supernovae/model-lab/pull/592) |
 | Snapshot verification | Signed byte checks of eligible files in published snapshots, then a complete snapshot proof. | Reuse completed eligible file hashes at the same path; restart an incomplete file. An explicit cold check reads the bytes again. | Historical Workshop cold pass, about 15 min for 33 snapshots and 108 GB. See [snapshot hash recovery measurements](#snapshot-hash-recovery-measurements). |
-| Native disk build, normalize | Receipted shard per source file. | Verify completed shards and re-normalize unfinished files. | Historical Workshop normalize, about 25 min for the 6.7M-document workload. [#491](https://github.com/supernovae/model-lab/pull/491) |
+| Native disk build, normalize | Receipted shard per source file with normalization-specific producer identity. | Verify completed shards and re-normalize unfinished files or shards with changed normalization inputs. | See [native normalization reuse measurements](#native-normalization-reuse-measurements). Historical Workshop normalize took about 25 min for the 6.7M-document workload. [#491](https://github.com/supernovae/model-lab/pull/491) |
 | Native disk build, index and dedup | Verified prepared-file groups and ranges, transactional compact index parts, duplicate-group windows, and chain decision windows. Reviewed row admission uses indexed file and row numbers. | Repeat the unfinished index group or range, verify the merged prefix, and append missing parts. Final SQL index creation can repeat. Restore group links and rescan unfinished windows. Reuse completed chain decision windows, and apply a complete decision log directly. Representative compression or ranked component resolution can still repeat after a partial stop. | See [native compact assembly recovery measurements](#native-compact-assembly-recovery-measurements) and [native dedup recovery measurements](#native-dedup-recovery-measurements). Historical Workshop indexing took about 30 min for roughly 13M rows. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB, lineage and view measurement checkpoints, and a receipted census. Final publication by rename. | Verify the committed view prefix, reconstruct its digests and render the uncommitted tail. Reuse finished census work for matching inputs. The manifest hashes ancillary outputs and reuses the view checksums. A stop in the final lineage sort or measurement merge may repeat that step. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. [Native build census measurements](#native-build-census-measurements) cover the report phase. [#579](https://github.com/supernovae/model-lab/pull/579) |
 | Completed-preparation build | Authenticated per-source render, completed sort and dedup phases, view range checkpoints and a signed receipt before publication. | Repeat an unfinished upstream phase. During view recovery, verify the committed prefix and resume from the stored span and document cursors. Intact staged views can publish directly, and a renamed build can recover completion from the signed receipt. A partial emission retry can recopy the frozen control inputs. | See [completed-preparation view recovery measurements](#completed-preparation-view-recovery-measurements). Production restart cost unmeasured. |
@@ -1839,6 +1849,18 @@ The reason pass streams its query rows and holds only the updates and
 checkpoint records for the current window. A complete log skips group-link
 replay and representative compression on retry. Production-size chain
 compression and ranked reduction recovery remain open.
+
+#### Native normalization reuse measurements
+
+One cold NVMe run per case used a 200,000-row, 399 MB synthetic JSONL
+source. Each implementation first normalized the source, then ran the
+same phase with a changed digest for `large_build.py`. The old key caused
+re-normalization in 7.539 s with 399 MB of device reads and 591 MB of
+writes. The new key reused the shard in 0.441 s with 591 MB of reads to
+verify all prepared files and zero device writes. Fresh times were
+7.736 s and 7.567 s respectively. The three prepared output digests
+matched across all runs. These timings exclude acquisition verification
+and downstream work. Production and slower-storage results remain open.
 
 #### Native index range recovery measurements
 

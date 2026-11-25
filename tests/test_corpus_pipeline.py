@@ -17,8 +17,8 @@ from corpus_fixtures import (
 )
 
 from klab.corpus.acquisition import acquire
+from klab.corpus.document_normalization import records_for_file
 from klab.corpus.pipeline import (
-    _records_for_file,
     _uses_disk_lm_builder,
     build,
 )
@@ -57,7 +57,7 @@ def test_markdown_ancestry_fences_and_raw_evidence() -> None:
             },
         }
     )
-    docs = _records_for_file(
+    docs = records_for_file(
         raw,
         "any.md",
         source,
@@ -86,7 +86,7 @@ def test_markdown_ancestry_fences_and_raw_evidence() -> None:
     whole = SourceDeclaration.model_validate(
         {**source.model_dump(mode="json"), "markdown_documents": "files"}
     )
-    [(document, span)] = _records_for_file(
+    [(document, span)] = records_for_file(
         raw,
         "any.md",
         whole,
@@ -101,7 +101,7 @@ def test_markdown_ancestry_fences_and_raw_evidence() -> None:
 def test_raw_spans_count_physical_lf_lines_not_unicode_separators() -> None:
     source = next(item for item in _project().sources if item.id == "sample_docs")
     raw = "first\fspace\vtab\u2028paragraph\u2029next\nsecond\n".encode()
-    document, span = _records_for_file(
+    document, span = records_for_file(
         raw,
         "document.txt",
         source,
@@ -114,7 +114,7 @@ def test_raw_spans_count_physical_lf_lines_not_unicode_separators() -> None:
     assert (span["byte_start"], span["byte_end"]) == (0, len(raw))
 
     lone_cr = b"first\rsecond"
-    normalized, physical = _records_for_file(
+    normalized, physical = records_for_file(
         lone_cr,
         "document.txt",
         source,
@@ -127,7 +127,7 @@ def test_raw_spans_count_physical_lf_lines_not_unicode_separators() -> None:
     assert (physical["byte_start"], physical["byte_end"]) == (0, len(lone_cr))
 
     markdown = b"# Heading\nline \f and \v stay inside one raw line\n## Next\nbody\n"
-    sections = _records_for_file(
+    sections = records_for_file(
         markdown,
         "document.md",
         source,
@@ -164,7 +164,7 @@ def test_normalized_duplicates_preserve_distinct_raw_origins() -> None:
             },
         }
     )
-    composed, _ = _records_for_file(
+    composed, _ = records_for_file(
         "café\r\n".encode(),
         "any.txt",
         source,
@@ -172,7 +172,7 @@ def test_normalized_duplicates_preserve_distinct_raw_origins() -> None:
         normalizer_options=PLAIN_OPTIONS,
         document_policy=STRICT_DOCS,
     )[0]
-    decomposed, _ = _records_for_file(
+    decomposed, _ = records_for_file(
         "cafe\u0301\n".encode(),
         "any.txt",
         source,
@@ -216,7 +216,7 @@ def test_prospective_hf_rows_keep_provenance_and_exclude_private_material(
         json.dumps(row).encode() + b"\n" for row in (safe, secret, excluded_platform)
     )
     name = "sample/10BT/000_00000.parquet.sample.jsonl"
-    pairs = _records_for_file(
+    pairs = records_for_file(
         raw,
         name,
         source,
@@ -265,7 +265,7 @@ def test_scholarly_abstracts_and_full_papers_keep_distinct_kinds_and_corpus_ids(
         )
         name = source.acquisition.bounded_shards[0].path + ".sample.jsonl"
         rejected: list[dict[str, object]] = []
-        rows = _records_for_file(
+        rows = records_for_file(
             raw,
             name,
             source,
@@ -300,7 +300,7 @@ def test_wikimedia_rows_keep_page_revision_not_jsonl_envelope(tmp_path: Path) ->
         }
     ).encode()
     name = "enwikibooks-20260901-pages-articles-multistream.xml.bz2.sample.jsonl"
-    documents = _records_for_file(
+    documents = records_for_file(
         raw + b"\n",
         name,
         source,

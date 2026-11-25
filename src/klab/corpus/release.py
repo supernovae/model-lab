@@ -299,10 +299,10 @@ def _verify_structure_replay(
     doc: dict[str, Any], raw_text: str, *, options: NormalizerOptions
 ) -> None:
     """Recreate the declared cleaning from the authenticated source text."""
-    from klab.corpus.pipeline import _normalized
+    from klab.corpus.document_normalization import normalize_text
     from klab.corpus.structure_cleaning import clean_structure
 
-    original = _normalized(raw_text)
+    original = normalize_text(raw_text)
     if (doc.get("structure") or {}).get("normalizer") != options.identity:
         raise ValueError("structured document normalizer mismatch")
     replay = clean_structure(original, source_id=doc["source_id"], options=options)
@@ -475,8 +475,8 @@ def _raw_group(
     options: NormalizerOptions,
 ):
     """Replay one raw snapshot file against every document that cites it."""
+    from klab.corpus.document_normalization import normalize_text
     from klab.corpus.jsonl_records import iter_jsonl_records, verified_line_replay
-    from klab.corpus.pipeline import _normalized
 
     if file is None or file["role"] != "document":
         raise ValueError("document lacks pinned file rights")
@@ -617,7 +617,7 @@ def _raw_group(
                     if options.structure_cleaning and normalizer == options.identity:
                         _verify_structure_replay(doc, source_text, options=options)
                     elif (
-                        _normalized(source_text) != doc["text"]
+                        normalize_text(source_text) != doc["text"]
                         or doc["raw_content_sha256"] != doc["content_sha256"]
                     ):
                         raise ValueError("document raw row content mismatch")
@@ -1454,7 +1454,7 @@ def _validate_rows_stored(
         ):
             raise ValueError("structured document identity mismatch")
         if "_admission_decisions" in file:
-            from klab.corpus.pipeline import _normalized
+            from klab.corpus.document_normalization import normalize_text
 
             line_number = span["line_start"]
             if (
@@ -1465,7 +1465,7 @@ def _validate_rows_stored(
                 or doc["source_location"] != f"{span['raw_path']}#row={line_number}"
                 or (
                     not options.structure_cleaning
-                    and _normalized(selected_row[text_field]) != doc["text"]
+                    and normalize_text(selected_row[text_field]) != doc["text"]
                 )
             ):
                 raise ValueError("admitted document differs from selected source row")

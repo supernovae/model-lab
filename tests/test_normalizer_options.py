@@ -19,7 +19,7 @@ import pytest
 import yaml
 from corpus_fixtures import STRICT_POLICY, fixture_rights
 
-from klab.corpus.pipeline import _records_for_file
+from klab.corpus.document_normalization import records_for_file
 from klab.corpus.project import (
     DocumentPolicy,
     NormalizerOptions,
@@ -126,7 +126,7 @@ def test_options_reproduce_document_and_evidence_rows(version: str) -> None:
         try:
             rows: Any = [
                 list(row)
-                for row in _records_for_file(
+                for row in records_for_file(
                     GOLDEN["cases"][case].encode(),
                     "a.txt",
                     _source(source_id),
@@ -170,7 +170,7 @@ def test_identity_names_the_options_and_document_ids_follow_it() -> None:
     assert reordered.identity not in names.values()
 
     def document_id(options: NormalizerOptions) -> str:
-        [(document, _)] = _records_for_file(
+        [(document, _)] = records_for_file(
             b"Plain prose.\n",
             "a.txt",
             _source("plain_source"),

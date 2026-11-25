@@ -37,6 +37,7 @@ from klab.corpus.preparation_inputs import (
     local_dependencies,
     local_scope,
 )
+from klab.corpus.prepared_shards import prepare_file
 from klab.corpus.project import (
     load_project,
     project_path,
@@ -278,8 +279,7 @@ def _admissions(directory, path, expected, declarations):
     return {"files": files, "sources": sources}
 
 
-def _prepared_source(directory, source, header, path, build_id, progress, normalizer):
-    from klab.corpus.large_build import _prepare_file
+def _prepared_source(directory, source, header, path, build_id, progress, release):
     from klab.corpus.rights import FileRights
 
     rights = FileRights.model_validate(header["rights"])
@@ -299,7 +299,7 @@ def _prepared_source(directory, source, header, path, build_id, progress, normal
                 "policy_sha256",
             )
         } | {"rights": rights, "decisions": lookup}
-        prepared = _prepare_file(
+        prepared = prepare_file(
             build_id=build_id,
             prepared_root=directory,
             source=source,
@@ -312,7 +312,8 @@ def _prepared_source(directory, source, header, path, build_id, progress, normal
             source_path=path,
             decision=rights,
             progress=progress,
-            normalizer_options=normalizer,
+            normalizer_options=release.normalizer,
+            document_policy=release.policy.documents,
             record_admission=admitted,
             admission_sha256=header["admission_sha256"],
         )
@@ -520,6 +521,7 @@ def _build_completed(project, root, workspace):
             "producer": _producer(),
             "source": declarations[source.id],
             "normalizer": project.release.normalizer.model_dump(mode="json"),
+            "document_policy": project.release.policy.documents.model_dump(mode="json"),
             "admission": {
                 **{key: value for key, value in header.items() if key != "decisions"},
                 "decisions": {
@@ -604,7 +606,7 @@ def _build_completed(project, root, workspace):
                     source_paths[source.id],
                     source_identity,
                     progress,
-                    project.release.normalizer,
+                    project.release,
                 )
             ),
         )
