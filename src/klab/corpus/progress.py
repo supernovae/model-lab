@@ -63,11 +63,13 @@ class BuildProgress:
         self.phase_started = self.started
         self.phase_documents = 0
         self.phase_bytes = 0
+        self.phase_reused_bytes = 0
         self.last_time = self.started
         self.last_documents = 0
         self.last_bytes = 0
         self.documents = 0
         self.input_bytes = 0
+        self.input_bytes_reused = 0
         self.output_records = 0
         self.phase = "starting"
         self.attempt = f"{os.getpid()}-{time.time_ns()}"
@@ -82,6 +84,7 @@ class BuildProgress:
         self.phase_started = time.monotonic()
         self.phase_documents = self.documents
         self.phase_bytes = self.input_bytes
+        self.phase_reused_bytes = self.input_bytes_reused
         self.record("phase")
 
     def update(
@@ -89,13 +92,15 @@ class BuildProgress:
         *,
         documents: int = 0,
         input_bytes: int = 0,
+        input_bytes_reused: int = 0,
         output_records: int = 0,
         phase: str | None = None,
     ) -> None:
-        if min(documents, input_bytes, output_records) < 0:
+        if min(documents, input_bytes, input_bytes_reused, output_records) < 0:
             raise ValueError("progress counters must be nonnegative")
         self.documents += documents
         self.input_bytes += input_bytes
+        self.input_bytes_reused += input_bytes_reused
         self.output_records += output_records
         if phase is not None and phase != self.phase:
             self.phase = phase
@@ -114,15 +119,18 @@ class BuildProgress:
         phase_elapsed = max(now - self.phase_started, 1e-9)
         phase_documents = self.documents - self.phase_documents
         phase_bytes = self.input_bytes - self.phase_bytes
+        phase_reused_bytes = self.input_bytes_reused - self.phase_reused_bytes
         rss, peak, available = memory_bytes()
         remaining = (
-            max(self.expected_input_bytes - phase_bytes, 0)
+            max(self.expected_input_bytes - phase_bytes - phase_reused_bytes, 0)
             if self.expected_input_bytes is not None
             else None
         )
         estimate = (
             remaining * phase_elapsed / phase_bytes
             if remaining is not None and phase_bytes
+            else 0
+            if remaining == 0
             else None
         )
         row = {
@@ -132,6 +140,7 @@ class BuildProgress:
             "phase": self.phase,
             "documents_processed": self.documents,
             "input_bytes_processed": self.input_bytes,
+            "input_bytes_reused": self.input_bytes_reused,
             "output_records_written": self.output_records,
             "elapsed_seconds": round(elapsed, 3),
             "documents_per_second": round(phase_documents / phase_elapsed, 3),

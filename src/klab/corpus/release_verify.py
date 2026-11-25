@@ -8,7 +8,6 @@ an operator-chosen scratch directory. Nothing here is evidence.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import tempfile
@@ -22,9 +21,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
 
 from klab.corpus.progress import BuildProgress
+from klab.training import manifest as file_manifest
 
 if TYPE_CHECKING:
     from klab.verification_proofs import ProofStore, VerificationMode
+
+INVENTORY_RECEIPT_MIN_BYTES = 64 * 1024**2
+_HASH_CHUNK_BYTES = 8 * 1024**2
 
 
 def default_workers() -> int:
@@ -124,34 +127,79 @@ def hash_inventory(
     inventory: dict[str, Any],
     resolve: Callable[[Path, str], Path],
     progress: BuildProgress | None = None,
+    *,
+    proof_store: ProofStore | None = None,
+    verification_mode: VerificationMode = "cold",
 ) -> None:
-    """Check every inventoried file's size and SHA-256, concurrently."""
+    """Check every size and SHA-256, reusing signed evidence for completed hashes."""
 
     lock = threading.Lock()
 
-    def advance(size: int) -> None:
+    def advance(chunk: bytes) -> None:
         if progress is not None:
             with lock:
-                progress.update(input_bytes=size)
+                progress.update(input_bytes=len(chunk))
 
-    def check(name: str) -> None:
+    def check(name: str) -> int | None:
         path = resolve(root, name)
         entry = inventory[name]
-        if not path.is_file() or path.stat().st_size != entry["size"]:
+        size, expected = entry["size"], entry["sha256"]
+        if not path.is_file() or path.stat().st_size != size:
             raise ValueError(f"tampered artifact: {name}")
-        # sha256_file has no byte callback; a multi-gigabyte file must not go
-        # minutes without a progress line.
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            while block := stream.read(8 * 1024**2):
-                digest.update(block)
-                advance(len(block))
-        if digest.hexdigest() != entry["sha256"]:
+        if (
+            proof_store is not None
+            and verification_mode == "verified_reuse"
+            and size >= INVENTORY_RECEIPT_MIN_BYTES
+        ):
+            from klab.data.verification import verify_file
+
+            try:
+                proof = verify_file(
+                    path,
+                    expected_sha256=expected,
+                    proof_store=proof_store,
+                    verification_mode=verification_mode,
+                    chunk_size=_HASH_CHUNK_BYTES,
+                    hash_chunk=advance if progress is not None else None,
+                )
+            except ValueError as error:
+                raise ValueError(f"tampered artifact: {name}: {error}") from error
+            if proof.size_bytes != size or proof.sha256 != expected:
+                raise ValueError(f"tampered artifact: {name}")
+            if not proof.cold_verified:
+                if progress is not None:
+                    with lock:
+                        progress.update(input_bytes_reused=size)
+                return size
+        elif (
+            file_manifest.sha256_file(
+                path,
+                chunk_size=_HASH_CHUNK_BYTES,
+                hash_chunk=advance if progress is not None else None,
+            )
+            != expected
+        ):
             raise ValueError(f"tampered artifact: {name}")
+        return None
 
     names = sorted(inventory, key=lambda name: -inventory[name]["size"])
-    with ThreadPoolExecutor(max_workers=worker_count()) as pool:
-        list(pool.map(check, names))
+    workers = min(worker_count(), len(names))
+    if workers < 2:
+        reused = [size for name in names if (size := check(name)) is not None]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            reused = [
+                size
+                for size in pool.map(check, names, buffersize=workers)
+                if size is not None
+            ]
+    settings = current_settings()
+    if reused and settings.echo is not None:
+        print(
+            f"inventory hashes: reused {len(reused)}/{len(names)} files, {sum(reused)} bytes",
+            file=settings.echo,
+            flush=True,
+        )
 
 
 def range_records(path: Path, start: int, end: int) -> Iterator[tuple[Any, int, int]]:

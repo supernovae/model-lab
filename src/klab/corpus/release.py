@@ -110,6 +110,9 @@ def _files(
     root: Path,
     inventory: dict[str, Any],
     progress: BuildProgress | None = None,
+    *,
+    proof_store: ProofStore | None = None,
+    verification_mode: VerificationMode = "cold",
 ) -> None:
     if not isinstance(inventory, dict):
         raise TypeError("missing artifact inventory")
@@ -125,7 +128,14 @@ def _files(
             "hash_files",
             expected_input_bytes=sum(entry["size"] for entry in inventory.values()),
         )
-    hash_inventory(root, inventory, _safe, progress)
+    hash_inventory(
+        root,
+        inventory,
+        _safe,
+        progress,
+        proof_store=proof_store,
+        verification_mode=verification_mode,
+    )
 
 
 def _verify_rights_files(
@@ -1930,6 +1940,8 @@ def _verify_build_cold(
             },
         },
         progress,
+        proof_store=proof_store,
+        verification_mode=verification_mode,
     )
     progress.start_phase("stage_receipts")
     _verify_stages(path, manifest["stages"], manifest["identity"], progress)
@@ -2035,7 +2047,13 @@ def _freeze(
     )
     if staging.exists():
         return _publish(
-            staging, build_dir, manifest, releases, proof_store, verified=False
+            staging,
+            build_dir,
+            manifest,
+            releases,
+            proof_store,
+            verification_mode=verification_mode,
+            verified=False,
         )
     if (released := consumed_release(build_dir)) is not None:
         destination = releases / released
@@ -2082,7 +2100,15 @@ def _freeze(
     from klab.safe_io import rename_noreplace
 
     rename_noreplace(build_dir, staging)
-    return _publish(staging, build_dir, build, releases, proof_store, verified=True)
+    return _publish(
+        staging,
+        build_dir,
+        build,
+        releases,
+        proof_store,
+        verification_mode=verification_mode,
+        verified=True,
+    )
 
 
 def _publish(
@@ -2092,6 +2118,7 @@ def _publish(
     releases: Path,
     proof_store: ProofStore | None,
     *,
+    verification_mode: VerificationMode,
     verified: bool,
 ) -> Path:
     """Finish a freeze from the renamed build: tombstone, manifest, one rename.
@@ -2128,7 +2155,12 @@ def _publish(
         _write_durably(manifest_path, sealed)
     tombstone_json.unlink(missing_ok=True)
     if not verified:
-        _verify_release_cold(staging, expected_id=release_id, verification_mode="cold")
+        _verify_release_cold(
+            staging,
+            expected_id=release_id,
+            proof_store=proof_store,
+            verification_mode=verification_mode,
+        )
     for entry in sorted(staging.rglob("*"), reverse=True):
         if entry.is_dir():
             sync_directory(entry)
@@ -2279,6 +2311,8 @@ def _verify_release_cold(
             },
         },
         progress,
+        proof_store=proof_store,
+        verification_mode=verification_mode,
     )
     progress.start_phase("stage_receipts")
     _verify_stages(path, manifest["stages"], manifest["build_identity"], progress)

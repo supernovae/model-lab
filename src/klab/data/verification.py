@@ -9,6 +9,7 @@ import stat
 import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from types import MappingProxyType
 
@@ -135,13 +136,18 @@ def verify_file(
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
     binding: dict[str, object] | None = None,
+    hash_chunk: Callable[[bytes], None] | None = None,
+    chunk_size: int = 1024**2,
 ) -> VerifiedFile:
     """Hash actual bytes, or reuse a fingerprint-matched same-operation proof."""
+    hasher = manifest_module.sha256_file
+    if hash_chunk is not None or chunk_size != 1024**2:
+        hasher = partial(hasher, chunk_size=chunk_size, hash_chunk=hash_chunk)
     return _verify_file_with_hasher(
         path,
         expected_sha256=expected_sha256,
         memo=memo,
-        hash_file=manifest_module.sha256_file,
+        hash_file=hasher,
         proof_store=proof_store,
         verification_mode=verification_mode,
         binding=binding,

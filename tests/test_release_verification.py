@@ -365,33 +365,80 @@ def test_receipt_survives_changes_to_code_that_does_not_verify() -> None:
 
 
 def test_audit_command_reports_progress_and_honours_scratch(
-    release: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    release: Path,
+    receipts: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
 ) -> None:
     from klab.cli.main import main
+    from klab.corpus import release_verify
+    from klab.training import manifest
 
     scratch = tmp_path / "fast-disk"
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "settings"))
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "klab",
-            "--work-dir",
-            str(release.parents[3]),
-            "corpus",
-            "audit",
-            str(release),
-            "--cold",
-            "--workers",
-            "2",
-            "--scratch-dir",
-            str(scratch),
-        ],
-    )
+    args = [
+        "klab",
+        "--work-dir",
+        str(receipts),
+        "corpus",
+        "audit",
+        str(release),
+        "--workers",
+        "1",
+        "--scratch-dir",
+        str(scratch),
+    ]
+    monkeypatch.setattr("sys.argv", args)
+    monkeypatch.setattr(release_verify, "INVENTORY_RECEIPT_MIN_BYTES", 0)
+    hash_file = manifest.sha256_file
+    hashed = []
+
+    def observe_inventory(path, *args, hash_chunk=None, **options):
+        if hash_chunk is not None and path.is_relative_to(release):
+            hashed.append(path)
+        return hash_file(path, *args, hash_chunk=hash_chunk, **options)
+
+    def stop_after_first(path, *args, hash_chunk=None, **options):
+        if hashed and hash_chunk is not None and path.is_relative_to(release):
+            raise RuntimeError("stopped during inventory")
+        return observe_inventory(path, *args, hash_chunk=hash_chunk, **options)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(manifest, "sha256_file", stop_after_first)
+        with pytest.raises(RuntimeError, match="stopped during inventory"):
+            main()
+    [finished] = hashed
+    assert not _release_receipts(receipts)
+    hashed.clear()
+    capsys.readouterr()
+    monkeypatch.setattr(manifest, "sha256_file", observe_inventory)
     main()
     output = capsys.readouterr()
     assert json.loads(output.out) == json.loads((release / "audit.json").read_text())
+    assert finished not in hashed and hashed
+    assert "inventory hashes: reused 1/" in output.err
     assert "[raw_replay]" in output.err and "documents/s" in output.err
-    assert list(scratch.glob("verify-*.progress.jsonl"))
+    [journal] = scratch.glob("verify-*.progress.jsonl")
+    assert any(
+        json.loads(line)["input_bytes_reused"] == finished.stat().st_size
+        for line in journal.read_text().splitlines()
+    )
+
+    hashed.clear()
+    monkeypatch.setattr("sys.argv", [*args, "--cold"])
+    main()
+    assert finished in hashed
+
+    monkeypatch.setattr("sys.argv", args)
+    documents = release / "documents.jsonl"
+    original, stamp = documents.read_bytes(), documents.stat()
+    try:
+        documents.write_bytes(b" " + original[1:])
+        os.utime(documents, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        with pytest.raises(ValueError, match="tampered artifact: documents.jsonl"):
+            main()
+    finally:
+        documents.write_bytes(original)
 
 
 def test_altered_snapshot_bytes_are_refused(release: Path) -> None:
