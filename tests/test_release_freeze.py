@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -24,10 +26,15 @@ TEXTS = {
 
 
 @pytest.fixture
-def prepared(tmp_path: Path) -> tuple[Path, Path]:
-    loaded = load_project(write_prose_project(tmp_path, TEXTS) / "corpus.yaml")
-    acquire(loaded, tmp_path / "work")
-    return build(loaded, tmp_path / "work", offline=True), tmp_path / "work"
+def prepared(tmp_path: Path) -> Iterator[tuple[Path, Path]]:
+    original_umask = os.umask(0o077)
+    try:
+        loaded = load_project(write_prose_project(tmp_path, TEXTS) / "corpus.yaml")
+        work = tmp_path / "work"
+        acquire(loaded, work)
+        yield build(loaded, work, offline=True), work
+    finally:
+        os.umask(original_umask)
 
 
 def _payload(root: Path) -> dict[str, tuple[str, int]]:
@@ -200,27 +207,88 @@ def test_interrupted_freeze_resumes_to_the_identical_release(
     assert consumed_release(build_dir) == release.name
 
 
-def test_resumed_freeze_verifies_the_staged_files_from_their_bytes(
+def test_resumed_freeze_reuses_verified_staging_after_another_stop(
     prepared: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from klab import safe_io
+    from klab.verification_proofs import verification_options
+
     build_dir, work = prepared
-    writer = release_module._write_durably
-    monkeypatch.setattr(
-        release_module,
-        "_write_durably",
-        lambda *args: (_ for _ in ()).throw(OSError("killed")),
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(work.parent / "settings"))
+    options = verification_options(work)
+    original_rename = safe_io.rename_noreplace
+    verify = release_module._verify_release_cold
+    checks = []
+
+    def observe(path, **kwargs):
+        checks.append(path)
+        return verify(path, **kwargs)
+
+    def stop_before_publish(source, target):
+        if source.name.startswith(".freezing-"):
+            raise OSError("stopped before publication")
+        return original_rename(source, target)
+
+    monkeypatch.setattr(release_module, "_verify_release_cold", observe)
+    with monkeypatch.context() as fault:
+        fault.setattr(safe_io, "rename_noreplace", stop_before_publish)
+        with pytest.raises(OSError, match="stopped before publication"):
+            freeze(build_dir, work, **options)
+        assert not checks
+        with pytest.raises(OSError, match="stopped before publication"):
+            freeze(build_dir, work, **options)
+        [staged] = checks
+        assert list(staged.parent.iterdir()) == [staged]
+        with pytest.raises(OSError, match="stopped before publication"):
+            freeze(build_dir, work, **verification_options(work, cold=True))
+        assert checks == [staged, staged], "cold freeze must recheck the staged files"
+
+    sealed = (staged / "manifest.json").read_bytes()
+    release = freeze(build_dir, work, **options)
+    assert verify_release(release, **options)["release_id"] == release.name
+    assert checks == [staged, staged], (
+        "both the staged and final receipts should be reusable"
     )
-    with pytest.raises(OSError, match="killed"):
-        freeze(build_dir, work)
-    monkeypatch.setattr(release_module, "_write_durably", writer)
+    assert (release / "manifest.json").read_bytes() == sealed
+    assert (
+        release.name == consumed_release(build_dir) == json.loads(sealed)["release_id"]
+    )
+    assert list(release.parent.iterdir()) == [release]
+
+
+def test_resumed_freeze_refuses_an_edit_after_staged_verification(
+    prepared: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from klab import result_publication
+    from klab.verification_proofs import verification_options
+
+    build_dir, work = prepared
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(work.parent / "settings"))
+    options = verification_options(work)
+    with monkeypatch.context() as fault:
+        fault.setattr(
+            release_module,
+            "_write_durably",
+            lambda *args: (_ for _ in ()).throw(OSError("killed")),
+        )
+        with pytest.raises(OSError, match="killed"):
+            freeze(build_dir, work, **options)
     staged = work / "corpora/prose-fixture/releases" / f".freezing-{build_dir.name}"
-    with (staged / "lm/train.jsonl").open("ab") as stream:
-        stream.write(b'{"text": "edited while stopped"}\n')
+    sync = result_publication.sync_directory
+
+    def edit_staged_file(path):
+        sync(path)
+        if path == staged:
+            with (staged / "lm/train.jsonl").open("ab") as stream:
+                stream.write(b'{"text": "late edit"}\n')
+
+    with monkeypatch.context() as fault:
+        fault.setattr(result_publication, "sync_directory", edit_staged_file)
+        with pytest.raises(ValueError, match="staged release changed"):
+            freeze(build_dir, work, **options)
     with pytest.raises(ValueError, match="tampered artifact: lm/train.jsonl"):
-        freeze(build_dir, work)
-    assert not list((work / "corpora/prose-fixture/releases").glob("[0-9a-f]*")), (
-        "a tampered stage is never published"
-    )
+        freeze(build_dir, work, **options)
+    assert list(staged.parent.iterdir()) == [staged]
 
 
 def test_freeze_authenticates_each_snapshot_once(

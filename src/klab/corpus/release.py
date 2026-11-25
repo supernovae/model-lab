@@ -2220,7 +2220,7 @@ def _freeze(
     path is left as a small tombstone (its `build.json` and a `consumed.json`
     naming the release): the build is consumed, so its files exist once. A
     freeze that stopped part way finds the staging directory on the next run and
-    finishes it after verifying the staged files from their bytes.
+    authenticates it before publication.
     """
     from klab.corpus.release_receipt import fingerprint
 
@@ -2311,8 +2311,9 @@ def _publish(
     """Finish a freeze from the renamed build: tombstone, manifest, one rename.
 
     `verified` says the staged files are the ones just verified. A resumed freeze
-    cannot say so and verifies them from their bytes before publishing.
+    needs a check of the staging path itself before publishing.
     """
+    from klab.corpus.release_receipt import stat_index
     from klab.result_publication import sync_directory
     from klab.safe_io import rename_noreplace
 
@@ -2342,16 +2343,35 @@ def _publish(
         _write_durably(manifest_path, sealed)
     tombstone_json.unlink(missing_ok=True)
     if not verified:
-        _verify_release_cold(
-            staging,
-            expected_id=release_id,
-            proof_store=proof_store,
-            verification_mode=verification_mode,
+        # Staging will be renamed, so keep this check out of the operation's
+        # memo of releases whose paths must still exist when the call returns.
+        staged_path = staging.absolute()
+        dependencies = list(snapshot_dependencies(staged_path, "manifest.json"))
+        _, generation = receipt_first(
+            "staged_release",
+            staged_path,
+            release_id,
+            dependencies,
+            proof_store,
+            verification_mode,
+            partial(
+                _verify_release_cold,
+                staged_path,
+                expected_id=release_id,
+                proof_store=proof_store,
+                verification_mode=verification_mode,
+            ),
+            lambda: None,
         )
     for entry in sorted(staging.rglob("*"), reverse=True):
         if entry.is_dir():
             sync_directory(entry)
     sync_directory(staging)
+    if (
+        not verified
+        and stat_index([staged_path, *dependencies], strict=False)[0] != generation
+    ):
+        raise ValueError("staged release changed while it was being verified")
     rename_noreplace(staging, destination)
     sync_directory(releases)
     # The files are the verified build's, unchanged; record that for the release.

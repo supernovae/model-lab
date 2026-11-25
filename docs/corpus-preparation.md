@@ -715,12 +715,14 @@ only `build.json` and `consumed.json` naming the release, `freeze BUILD` again
 returns that release, and `build` of the same project returns the consumed
 build. A build file written while `freeze` was verifying is refused, so a
 change after verification is never published. A `freeze` that was stopped part
-way leaves `releases/.freezing-BUILD_ID`; run `freeze BUILD` again and it
-verifies the staged files from their bytes before publishing them. The release
-is not verified a second time: `freeze` records its receipt, and every later
-command reuses it ([Verification cost, scratch and
-receipts](#verification-cost-scratch-and-receipts)). Progress goes to
-`--scratch-dir`.
+way leaves `releases/.freezing-BUILD_ID`. Run `freeze BUILD` again to verify
+the staging directory and publish it. Once that check completes, a signed
+receipt covers the staged files and pinned snapshots. A further retry can
+reuse it at the same staging path, and `--cold` verifies the bytes again.
+Before the publishing rename, `freeze` refuses changes since the staged
+check. It writes the release receipt at the final path for later commands.
+See [verification cost, scratch and receipts](#verification-cost-scratch-and-receipts).
+Progress goes to `--scratch-dir`.
 
 `release.build.strategy` chooses the builder: `auto` (the default) uses the
 disk-backed builder for a language-model-only release without a `fraction`, so
@@ -1359,10 +1361,31 @@ needs measurement where the table gives historical or fixture evidence.
 | Native disk build, index and dedup | Whole index and whole dedup stage, separately. | Verify earlier outputs and rebuild the interrupted stage. Keep the index when only duplicate policy changes. | Historical Workshop index, about 30 min for roughly 13M rows. The HDD incident measured 3.4k docs/s against 19.8k docs/s on NVMe. Current dedup interruption cost is unmeasured. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB. Final publication by rename. | Verify the committed prefix, reconstruct its digest and render the uncommitted tail. Report measurement or manifest hashing can restart as a whole pass. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. These figures cover the append helper. [#579](https://github.com/supernovae/model-lab/pull/579) |
 | Completed-preparation build | Authenticated per-source render and completed sorting, deduplication, inventory and emission phases. | An unfinished phase repeats. View emission on this route reruns its complete pass. The small in-memory builder likewise has a whole-build boundary. | Production restart cost unmeasured. |
-| Freeze | Native staging rename and build tombstone, then the verified release. Completed preparation seals a retained release against its existing build. | An interrupted recheck of the staged files can resume from eligible file proofs for that staging path. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. [#501](https://github.com/supernovae/model-lab/pull/501) |
+| Freeze | Native staging rename and build tombstone, signed verification after a staged replay, then the public release. Completed preparation seals a retained release against its existing build. | Reuse the complete staged receipt at the same path, or resume an unfinished check from eligible file and replay proofs. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. See [staged freeze recovery measurements](#staged-freeze-recovery-measurements). [#501](https://github.com/supernovae/model-lab/pull/501) |
 | Release verification, `audit`, and `sources` | Signed checks of eligible inventory files, stage outputs and streaming raw source replay, then the complete release proof. `audit` and `sources` read the corresponding published report after verification. | A receipt-backed retry skips eligible completed checks and continues the remaining work. Cold mode starts the checks from bytes. | See [inventory hash recovery measurements](#inventory-hash-recovery-measurements), [stage output verification measurements](#stage-output-verification-measurements) and [raw source replay recovery](#raw-source-replay-recovery). An earlier cold audit took 67.3 s on 13.2 GB synthetic data, and the first receipt-backed audit took 0.94 s. [#500](https://github.com/supernovae/model-lab/pull/500), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | `describe` | Cached measurement runs and lineage position index when a proof store is available. Release verification has its own receipt. | Resume missing measurement ranges and merge results. Chat view measurement uses a whole run. A stopped cold release verification can still repeat. | 55.1 s for 5M synthetic rows (23 GB), 12 workers, without a tokenizer. [#502](https://github.com/supernovae/model-lab/pull/502) |
 | Corpus `export` | Document license labels and LM or chat split statistics by range with persistent scratch. Final export directory and verification receipt. | Reuse valid license and split statistics. Repeat unfinished ranges and final publication. | See [export license scan measurements](#export-license-scan-measurements) and [chat export split measurements](#chat-export-split-measurements). |
+
+#### Staged freeze recovery measurements
+
+A synthetic NVMe fixture contained 896 local documents, 401 MB of build
+artifacts and 131 MB of pinned source files. An initial SIGKILL stopped
+freeze with a sealed staging directory. Three trials measured the retry
+up to the publishing rename, with cache eviction requested between
+attempts. Only the staged receipt was removed for the receipt-backed
+control. Earlier eligible file and stage proofs could still be used.
+
+| Staged freeze attempt | Median wall time | Storage reads |
+| --- | ---: | ---: |
+| Complete staged check required | 2.234 s | 534 MB |
+| Completed staged receipt available | 0.234 s | 72 KiB |
+| Explicit cold check | 2.606 s | 534 MB |
+
+The final retry published in 0.247 s and preserved the staged manifest
+and release ID. Reuse requires a complete signed check at that staging
+path. A first interruption before the staged check is recorded can still
+require replay. The timings cover this fixture on NVMe.
+[#450](https://github.com/supernovae/model-lab/issues/450), [#485](https://github.com/supernovae/model-lab/issues/485)
 
 #### Snapshot hash recovery measurements
 
