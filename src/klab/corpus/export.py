@@ -228,6 +228,20 @@ def _export_metadata(
     return sidecar
 
 
+def _export_receipt_dependencies(export_dir: Path, release_dir: Path) -> list[Path]:
+    from klab.experiments.artifacts import snapshot_dependencies
+
+    if export_dir.is_symlink():
+        raise ValueError("symlinked corpus export directory")
+    # Tokenizer artifacts and prepared data can be added after the export.
+    return [
+        export_dir / "run.yaml",
+        export_dir / "tokenizer.yaml",
+        release_dir,
+        *snapshot_dependencies(release_dir, "manifest.json"),
+    ]
+
+
 def export_release(
     release_dir: Path,
     view: str,
@@ -240,24 +254,32 @@ def export_release(
     verification_mode: VerificationMode = "cold",
 ) -> Path:
     """Create two complete configs bound to one verified immutable release."""
-    if view not in {"lm", "chat"} or vocab_size < 260:
+    if view not in {"lm", "chat"} or type(vocab_size) is not int or vocab_size < 260:
         raise ValueError("view must be lm or chat and vocab_size must be >= 260")
+    from klab.corpus import release_receipt
+
     release_dir = Path(release_dir).resolve()
+    release_key = release_receipt.fingerprint(release_dir)
     manifest = _release(
         release_dir, proof_store=proof_store, verification_mode=verification_mode
     )
-    from klab.corpus.release_receipt import fingerprint
 
-    release_key = fingerprint(release_dir)
     base = load_config(Path(base_run_config))
     base_digest = sha256_file(Path(base_run_config))
     release_id = str(manifest["release_id"])
+    corpus_id = manifest["corpus_id"]
+    if (
+        not isinstance(corpus_id, str)
+        or corpus_id in {"", ".", ".."}
+        or Path(corpus_id).name != corpus_id
+    ):
+        raise ValueError("invalid corpus ID in export release")
     request = _export_request(release_id, view, base_digest, vocab_size, min_frequency)
     identity = canonical_digest(request)
     destination = (
         Path(work_root).resolve()
         / "corpora"
-        / str(manifest["corpus_id"])
+        / corpus_id
         / "exports"
         / release_id
         / view
@@ -323,39 +345,46 @@ def export_release(
         run_sha256=hashlib.sha256(run_bytes).hexdigest(),
         tokenizer_sha256=hashlib.sha256(tokenizer_bytes).hexdigest(),
     )
-    if destination.exists():
-        if any(
-            not (destination / filename).is_file()
-            for filename in ("export.json", "run.yaml", "tokenizer.yaml")
-        ):
+    existing = destination.exists()
+    if not existing:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=".export-", dir=destination.parent
+        ) as temporary:
+            staging = Path(temporary)
+            _write_yaml(staging / "tokenizer.yaml", tokenizer)
+            _write_yaml(staging / "run.yaml", run_payload)
+            write_canonical_json(staging / "export.json", sidecar, exclusive=True)
+            if destination.exists():
+                raise FileExistsError(
+                    f"corpus export appeared during publication: {destination}"
+                )
+            if release_receipt.fingerprint(release_dir) != release_key:
+                raise ValueError("release changed during export creation")
+            staging.rename(destination)
+
+    sidecar_path = destination / "export.json"
+    expected = {
+        sidecar_path: canonical_json(sidecar) + b"\n",
+        destination / "run.yaml": run_bytes,
+        destination / "tokenizer.yaml": tokenizer_bytes,
+    }
+    if existing or proof_store is not None:
+        if any(not path.is_file() for path in expected):
             raise ValueError("incomplete immutable corpus export")
-        if (
-            json.loads((destination / "export.json").read_text(encoding="utf-8"))
-            != sidecar
-            or (destination / "run.yaml").read_bytes() != run_bytes
-            or (destination / "tokenizer.yaml").read_bytes() != tokenizer_bytes
-        ):
-            raise ValueError("existing corpus export has changed")
-        if fingerprint(release_dir) != release_key:
-            raise ValueError("release changed during export creation")
-        return destination
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(
-        prefix=".export-", dir=destination.parent
-    ) as temporary:
-        staging = Path(temporary)
-        _write_yaml(staging / "tokenizer.yaml", tokenizer)
-        _write_yaml(staging / "run.yaml", run_payload)
-        write_canonical_json(staging / "export.json", sidecar, exclusive=True)
-        if destination.exists():
-            raise FileExistsError(
-                f"corpus export appeared during publication: {destination}"
+        if proof_store is not None:
+            dependencies = _export_receipt_dependencies(destination, release_dir)
+            index = release_receipt.stat_index(
+                [sidecar_path, *dependencies], strict=False
             )
-        if fingerprint(release_dir) != release_key:
-            raise ValueError("release changed during export creation")
-        staging.rename(destination)
-    if fingerprint(release_dir) != release_key:
+        if any(path.read_bytes() != content for path, content in expected.items()):
+            raise ValueError("existing corpus export has changed")
+    if release_receipt.fingerprint(release_dir) != release_key:
         raise ValueError("release changed during export creation")
+    if proof_store is not None:
+        release_receipt.record(
+            proof_store, "export", sidecar_path, identity, dependencies, index=index
+        )
     return destination
 
 
@@ -373,7 +402,6 @@ def verify_release_export(
     from klab.corpus.release import _verification_operation
     from klab.corpus.release_receipt import receipt_first
     from klab.corpus.release_verify import current_settings
-    from klab.experiments.artifacts import snapshot_dependencies
 
     if dataset.corpus_export_path is None or dataset.corpus_release_path is None:
         raise ValueError("dataset does not reference a frozen corpus export")
@@ -396,9 +424,9 @@ def verify_release_export(
     with _verification_operation():
         binding, _ = receipt_first(
             "export",
-            export_dir,
+            export_dir / "export.json",
             export_dir.name,
-            [release_dir, *snapshot_dependencies(release_dir, "manifest.json")],
+            _export_receipt_dependencies(export_dir, release_dir),
             proof_store,
             verification_mode,
             lambda: _verify_release_export_cold(

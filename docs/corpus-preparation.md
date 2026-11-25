@@ -1364,7 +1364,7 @@ needs measurement where the table gives historical or fixture evidence.
 | Freeze | Native staging rename and build tombstone, signed verification after a staged replay, then the public release. Completed preparation seals a retained release against its existing build. | Reuse the complete staged receipt at the same path, or resume an unfinished check from eligible file and replay proofs. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. See [staged freeze recovery measurements](#staged-freeze-recovery-measurements). [#501](https://github.com/supernovae/model-lab/pull/501) |
 | Release verification, `audit`, and `sources` | Signed checks of eligible inventory files, stage outputs and streaming raw source replay, then the complete release proof. `audit` and `sources` read the corresponding published report after verification. | A receipt-backed retry skips eligible completed checks and continues the remaining work. Cold mode starts the checks from bytes. | See [inventory hash recovery measurements](#inventory-hash-recovery-measurements), [stage output verification measurements](#stage-output-verification-measurements) and [raw source replay recovery](#raw-source-replay-recovery). An earlier cold audit took 67.3 s on 13.2 GB synthetic data, and the first receipt-backed audit took 0.94 s. [#500](https://github.com/supernovae/model-lab/pull/500), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | `describe` | Cached measurement runs and lineage position index when a proof store is available. Release verification has its own receipt. | Resume missing measurement ranges and merge results. Chat view measurement uses a whole run. A stopped cold release verification can still repeat. | 55.1 s for 5M synthetic rows (23 GB), 12 workers, without a tokenizer. [#502](https://github.com/supernovae/model-lab/pull/502) |
-| Corpus `export` | Document license labels and LM or chat split statistics by range with persistent scratch. Final export directory and verification receipt. | Reuse valid license and split statistics. Repeat unfinished ranges and final publication. | See [export license scan measurements](#export-license-scan-measurements) and [chat export split measurements](#chat-export-split-measurements). |
+| Corpus `export` | Document license labels and LM or chat split statistics by range with persistent scratch. Final export directory and verification receipt. | Reuse valid license and split statistics. Repeat unfinished ranges and final publication. Later consumers can use the complete receipt. | See [export verification measurements](#export-verification-measurements), [export license scan measurements](#export-license-scan-measurements) and [chat export split measurements](#chat-export-split-measurements). |
 
 #### Staged freeze recovery measurements
 
@@ -1608,6 +1608,14 @@ An export writes a tokenizer config and a run config whose `dataset` binds the
 release, view, base config and vocabulary. Consumers must keep that `dataset`
 section exactly; `verify-export` checks it.
 
+When a host-local proof store is available, export creation records a signed
+verification receipt for `export.json`, both configs, the release and its
+pinned inputs. The first consumer can reuse the export's verified counts and
+license labels. Tokenizer output under `tokenizer/` and prepared data under
+`prepared/` have their own verification and can be added without invalidating
+the export receipt. Use `klab corpus verify-export RUN.yaml --cold` to replay
+the release and export checks from bytes.
+
 Export combines declared source licenses with the exact license labels on
 normalized documents. When document-level labels are present, the scan uses
 line-aligned ranges under the Corpus worker limit. Pass the same
@@ -1615,6 +1623,25 @@ line-aligned ranges under the Corpus worker limit. Pass the same
 ranges and LM or chat split counts. Chat range results bind the renderer and
 report errors at the original file's line numbers. Release verification checks
 the artifact and its provenance before these results are used.
+
+### Export verification measurements
+
+A synthetic NVMe fixture had 896 documents. The documents and the train
+and validation views totaled 224 MB. A release verification receipt was
+already present. The table reports medians of three trials, with page-cache
+eviction requested before each timed operation. The last row adds files at
+the paths used for tokenizer output and prepared data before verification.
+
+| Operation | Previous time | Export receipt at publication | Storage reads before and after |
+| --- | ---: | ---: | ---: |
+| Export creation | 0.500 s | 0.508 s | 224 MB in both |
+| First export verification | 0.476 s | 0.228 s | 224 MB to 0 MB |
+| Export verification after adding derived outputs | 0.474 s | 0.229 s | 224 MB to 0 MB |
+
+Process reads for verification fell from 229 MB to 1.4 MB. These runs
+measure export creation and verification. Production-scale and slower
+storage measurements remain open.
+[#450](https://github.com/supernovae/model-lab/issues/450)
 
 ### Export license scan measurements
 

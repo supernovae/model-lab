@@ -884,9 +884,10 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     )
     command.set_defaults(handler=_handle)
     command = sub.add_parser(
-        "verify-export", help="Cold-verify one run configuration's shared corpus export"
+        "verify-export", help="Verify one run configuration's shared corpus export"
     )
     command.add_argument("config")
+    _verification_flags(command)
     command.set_defaults(handler=_handle)
     command = sub.add_parser("tokenizer-bakeoff")
     command.add_argument("declaration")

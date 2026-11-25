@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -25,16 +27,26 @@ from klab.data.tokenizer import load_tokenizer, train_tokenizer
 from klab.training.manifest import sha256_file
 
 
+@contextmanager
+def _private_corpus_files():
+    previous = os.umask(0o077)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
 @pytest.fixture(scope="module")
 def frozen_sample(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
     root = tmp_path_factory.mktemp("forge-export")
-    project = load_project(Path("tests/fixtures/corpus-sample/corpus.yaml"))
-    acquire(project, root)
-    build_dir = build(project, root, offline=True)
-    assert build(project, root, offline=True) == build_dir
-    release_dir = freeze(build_dir, root)
-    assert freeze(build_dir, root) == release_dir
-    return release_dir, root
+    with _private_corpus_files():
+        project = load_project(Path("tests/fixtures/corpus-sample/corpus.yaml"))
+        acquire(project, root)
+        build_dir = build(project, root, offline=True)
+        assert build(project, root, offline=True) == build_dir
+        release_dir = freeze(build_dir, root)
+        assert freeze(build_dir, root) == release_dir
+        return release_dir, root
 
 
 @pytest.fixture
@@ -114,6 +126,52 @@ def test_export_verifies_from_same_and_independent_work_roots(
         _sidecar(adjacent)["base_config_sha256"]
         == _sidecar(independent)["base_config_sha256"]
     )
+
+
+def test_export_seals_immutable_inputs_before_first_verification(
+    frozen_sample: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from klab.corpus import export
+    from klab.verification_proofs import verification_options
+
+    release, _ = frozen_sample
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "settings"))
+    root = tmp_path / "work"
+    root.mkdir(mode=0o700)
+    options = verification_options(root)
+    checks = []
+    verify = export._verify_release_export_cold
+
+    def observe(*args, **kwargs):
+        checks.append(1)
+        return verify(*args, **kwargs)
+
+    monkeypatch.setattr(export, "_verify_release_export_cold", observe)
+    with _private_corpus_files():
+        exported = export_release(
+            release, "lm", Path("configs/runtime_smoke_cpu.yaml"), 300, root, **options
+        )
+        dataset = _dataset(exported)
+        binding = verify_release_export(dataset, **options)
+        for member in ("tokenizer/tokenizer.json", "prepared/shard.bin"):
+            path = exported / member
+            path.parent.mkdir()
+            path.write_bytes(b"derived output")
+        assert verify_release_export(dataset, **options) == binding
+        assert len(checks) == 0
+        assert (
+            verify_release_export(dataset, **verification_options(root, cold=True))
+            == binding
+        )
+        assert len(checks) == 1
+        config = exported / "tokenizer.yaml"
+        original = config.read_bytes()
+        edited = original.replace(b"vocab_size: 300", b"vocab_size: 301")
+        assert edited != original
+        config.write_bytes(edited)
+        with pytest.raises(ValueError, match="corpus export config changed"):
+            verify_release_export(dataset, **options)
+        assert len(checks) == 2
 
 
 @pytest.mark.parametrize(
