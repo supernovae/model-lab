@@ -92,10 +92,19 @@ def _drop_last_link(root: Path) -> None:
 
 
 def _edit_stage_output(root: Path) -> None:
+    from klab.training.manifest import sha256_file
+
     path = root / "stages/lm.jsonl"
     rows = _lines(path)
     rows[0]["text"] += "edited"
     _write(path, rows)
+    # Re-seal the raw bytes while leaving the ordered canonical-row identity stale.
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    next(stage for stage in manifest["stages"] if stage["id"] == "lm")[
+        "output_sha256"
+    ] = sha256_file(path)
+    manifest_path.write_bytes(canonical_json(manifest) + b"\n")
 
 
 def _relicense(row):
@@ -237,6 +246,22 @@ def test_scratch_and_progress_live_where_the_operator_points(
     assert {"hash_files", "documents", "raw_replay", "lineage"} <= phases
     assert events[-1]["event"] == "complete"
     assert events[-1]["documents_processed"] > 0
+    phase_start = {
+        event["phase"]: event["input_bytes_processed"]
+        for event in events
+        if event["event"] == "phase"
+    }
+    manifest_path = release / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    stage_bytes = sum(
+        manifest["files"][f"stages/{stage['id']}.jsonl"]["size"]
+        for stage in manifest["stages"]
+    )
+    inventory_bytes = sum(entry["size"] for entry in manifest["files"].values())
+    assert phase_start["stage_receipts"] == (
+        inventory_bytes + manifest_path.stat().st_size - stage_bytes
+    )
+    assert phase_start["snapshots"] - phase_start["stage_receipts"] == 2 * stage_bytes
     assert not list(scratch.glob(".verify-corpus-*"))
 
 
@@ -319,13 +344,15 @@ def test_tampered_file_is_found_through_a_receipt(
 ) -> None:
     from klab.verification_proofs import verification_options
 
-    victim = release / "report.md"
+    victim = release / "stages/lm.jsonl"
     original = victim.read_bytes()
+    edited = original.replace(b"document", b"documenT", 1)
+    assert edited != original and len(edited) == len(original)
     with verification_settings(**verification_options(receipts)):
         audit(release)
         try:
-            victim.write_bytes(original + b"x")
-            with pytest.raises(ValueError, match="tampered"):
+            victim.write_bytes(edited)
+            with pytest.raises(ValueError, match="stage receipt does not match output"):
                 audit(release)
         finally:
             victim.write_bytes(original)
