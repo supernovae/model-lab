@@ -19,6 +19,8 @@ from klab.corpus import (
     completed_preparation,
     large_build,
     measurement,
+    native_dedup,
+    native_index,
     pipeline,
 )
 from klab.corpus.dedup_policy import STRICT_CHAIN
@@ -44,16 +46,16 @@ class Calls:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.counts = dict.fromkeys(("index", "dedup", "emit"), 0)
         self.fail: str | None = None
-        for stage, name in (
-            ("index", "_index_prepared"),
-            ("dedup", "_deduplicate"),
-            ("emit", "_emit_build"),
+        for stage, module, name in (
+            ("index", native_index, "index_prepared"),
+            ("dedup", native_dedup, "deduplicate"),
+            ("emit", large_build, "_emit_build"),
         ):
-            monkeypatch.setattr(large_build, name, self.counted(stage, name))
+            monkeypatch.setattr(
+                module, name, self.counted(stage, getattr(module, name))
+            )
 
-    def counted(self, stage: str, name: str):
-        original = getattr(large_build, name)
-
+    def counted(self, stage: str, original):
         def run(*args, **kwargs):
             self.counts[stage] += 1
             if self.fail == stage:
@@ -93,8 +95,8 @@ def test_a_build_killed_at_any_stage_resumes_without_redoing_earlier_stages(
     assert stage_dirs(lab.work) == []
 
     shutil.rmtree(reference)
-    run_stage = large_build.run_stage
-    index_rows = large_build._index_rows
+    run_stage = native_index.run_stage
+    index_rows = native_index._index_rows
     scanned = []
 
     def observe_index_rows(connection, group, *args, **kwargs):
@@ -108,10 +110,10 @@ def test_a_build_killed_at_any_stage_resumes_without_redoing_earlier_stages(
         return output
 
     with monkeypatch.context() as recovery:
-        recovery.setattr(large_build, "_INDEX_GROUP_BYTES", 1)
-        recovery.setattr(large_build, "_index_rows", observe_index_rows)
+        recovery.setattr(native_index, "_INDEX_GROUP_BYTES", 1)
+        recovery.setattr(native_index, "_index_rows", observe_index_rows)
         with monkeypatch.context() as fault:
-            fault.setattr(large_build, "run_stage", stop_after_group)
+            fault.setattr(native_index, "run_stage", stop_after_group)
             with pytest.raises(OSError, match="interrupted after index group"):
                 lab.run("corpus", "build", project, "--offline")
         [committed] = scanned
@@ -124,7 +126,7 @@ def test_a_build_killed_at_any_stage_resumes_without_redoing_earlier_stages(
     calls.reset()
 
     shutil.rmtree(reference)
-    append_part = large_build._append_index_part
+    append_part = native_index._append_index_part
     assembly_operations = []
     stop_on_append = False
 
@@ -149,9 +151,11 @@ def test_a_build_killed_at_any_stage_resumes_without_redoing_earlier_stages(
         return saved
 
     with monkeypatch.context() as recovery:
-        recovery.setattr(large_build, "_INDEX_GROUP_BYTES", 1)
+        recovery.setattr(native_index, "_INDEX_GROUP_BYTES", 1)
         with monkeypatch.context() as fault:
-            fault.setattr(large_build, "_append_index_part", stop_after_assembly_append)
+            fault.setattr(
+                native_index, "_append_index_part", stop_after_assembly_append
+            )
             with monkeypatch.context() as first:
                 first.setattr(ProofStore, "publish", stop_after_assembly_proof)
                 with pytest.raises(
@@ -221,11 +225,11 @@ def test_a_build_killed_at_any_stage_resumes_without_redoing_earlier_stages(
         return part, result
 
     with monkeypatch.context() as recovery:
-        recovery.setattr(large_build, "_INDEX_GROUP_BYTES", 1)
-        recovery.setattr(large_build, "_INDEX_RANGE_BYTES", 1)
-        recovery.setattr(large_build, "_index_rows", observe_range)
+        recovery.setattr(native_index, "_INDEX_GROUP_BYTES", 1)
+        recovery.setattr(native_index, "_INDEX_RANGE_BYTES", 1)
+        recovery.setattr(native_index, "_index_rows", observe_range)
         with monkeypatch.context() as fault:
-            fault.setattr(large_build, "run_stage", stop_inside_prepared_file)
+            fault.setattr(native_index, "run_stage", stop_inside_prepared_file)
             with pytest.raises(OSError, match="interrupted inside prepared file"):
                 lab.run("corpus", "build", project, "--offline")
         assert not reference.exists()
@@ -239,7 +243,7 @@ def test_a_build_killed_at_any_stage_resumes_without_redoing_earlier_stages(
     calls.reset()
 
     shutil.rmtree(reference)
-    scan_keys = large_build._duplicate_keys
+    scan_keys = native_dedup._duplicate_keys
     dedup_scans = []
     committed_windows = []
     committed_size = 0
@@ -263,8 +267,8 @@ def test_a_build_killed_at_any_stage_resumes_without_redoing_earlier_stages(
                     raise OSError("interrupted after dedup windows")
 
     with monkeypatch.context() as recovery:
-        recovery.setattr(large_build, "_DEDUP_WINDOW_KEYS", 2)
-        recovery.setattr(large_build, "_duplicate_keys", observe_dedup_scan)
+        recovery.setattr(native_dedup, "_DEDUP_WINDOW_KEYS", 2)
+        recovery.setattr(native_dedup, "_duplicate_keys", observe_dedup_scan)
         with monkeypatch.context() as fault:
             fault.setattr(ViewCheckpoints, "commit", stop_after_dedup_windows)
             with pytest.raises(OSError, match="interrupted after dedup windows"):
@@ -298,7 +302,7 @@ def test_a_build_killed_at_any_stage_resumes_without_redoing_earlier_stages(
                 raise OSError("interrupted after final decisions")
 
     with monkeypatch.context() as recovery:
-        recovery.setattr(large_build, "_DEDUP_DECISION_ROWS", 2)
+        recovery.setattr(native_dedup, "_DEDUP_DECISION_ROWS", 2)
         with monkeypatch.context() as fault:
             fault.setattr(ViewCheckpoints, "commit", stop_in_final_decisions)
             with pytest.raises(OSError, match="interrupted final decision window"):
@@ -316,7 +320,7 @@ def test_a_build_killed_at_any_stage_resumes_without_redoing_earlier_stages(
             pytest.fail("replayed groups with final decisions already committed")
 
         recovery.setattr(
-            large_build, "_resolve_duplicate_groups", unexpected_group_replay
+            native_dedup, "_resolve_duplicate_groups", unexpected_group_replay
         )
         reference = Path(lab.run("corpus", "build", project, "--offline"))
         assert tree(reference) == expected
@@ -378,13 +382,14 @@ def test_a_stage_that_does_not_verify_is_rebuilt_and_leftovers_are_ignored(
     shutil.rmtree(resumed)
     lab.run("corpus", "build", project, "--offline", "--keep-stages", "1")
     assert len(stage_dirs(lab.work)) == 2
+    calls.reset()
 
     def shard_receipts():
         return set(lab.work.glob("corpora/*/builds/prepared/*/*/*/receipt.json"))
 
     receipts = shard_receipts()
     assert receipts
-    changed_producer = "large_build.py"
+    changed_producer = ""
 
     def bumped_digest(path, *args, **kwargs):
         digest = sha256_file(path, *args, **kwargs)
@@ -394,18 +399,26 @@ def test_a_stage_that_does_not_verify_is_rebuilt_and_leftovers_are_ignored(
 
     monkeypatch.setattr(pipeline, "sha256_file", bumped_digest)
     monkeypatch.setattr(build_stages, "sha256_file", bumped_digest)
-    updated = Path(lab.run("corpus", "build", project, "--offline"))
-    assert updated != resumed
-    assert shard_receipts() == receipts
-    assert sha256_file(updated / "documents.jsonl") == expected["documents.jsonl"]
-    assert sha256_file(updated / "spans.jsonl") == expected["spans.jsonl"]
-
-    changed_producer = "document_normalization.py"
-    rebuilt = Path(lab.run("corpus", "build", project, "--offline"))
-    assert rebuilt not in {resumed, updated}
-    assert len(shard_receipts() - receipts) == len(receipts)
-    assert sha256_file(rebuilt / "documents.jsonl") == expected["documents.jsonl"]
-    assert sha256_file(rebuilt / "spans.jsonl") == expected["spans.jsonl"]
+    builds = {resumed}
+    for changed_producer, rebuilt_index, rebuilt_dedup, new_shards in (
+        ("large_build.py", 0, 0, 0),
+        ("dedup_policy.py", 0, 1, 0),
+        ("native_index.py", 1, 1, 0),
+        ("document_normalization.py", 1, 1, len(receipts)),
+    ):
+        updated = Path(
+            lab.run("corpus", "build", project, "--offline", "--keep-stages", "1")
+        )
+        assert updated not in builds
+        builds.add(updated)
+        assert calls.reset() == {
+            "index": rebuilt_index,
+            "dedup": rebuilt_dedup,
+            "emit": 1,
+        }
+        assert len(shard_receipts() - receipts) == new_shards
+        for name in ("documents.jsonl", "spans.jsonl", "lineage.jsonl", "audit.json"):
+            assert sha256_file(updated / name) == expected[name]
 
 
 def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(

@@ -1622,7 +1622,7 @@ def test_real_lineage_audit_blocks_protected_family_moved_to_train(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from klab.corpus import large_build
+    from klab.corpus import large_build, native_index
 
     root = tmp_path / "work"
     root.mkdir()
@@ -1691,7 +1691,7 @@ def test_real_lineage_audit_blocks_protected_family_moved_to_train(
         pytest.fail("retry should reuse the indexed admission evidence")
 
     with monkeypatch.context() as check:
-        check.setattr(large_build, "_index_prepared", unexpected_reindex)
+        check.setattr(native_index, "index_prepared", unexpected_reindex)
         release = freeze(build(loaded, root, offline=True), root)
     family = recipe / "family.jsonl"
     finalize_family_inventory(release, selected, family)

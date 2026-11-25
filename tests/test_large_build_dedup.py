@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from klab.corpus.large_build import INDEX_SCHEMA, _deduplicate, insert_indexed
+from klab.corpus.native_dedup import deduplicate
+from klab.corpus.native_index import INDEX_SCHEMA, insert_indexed
 from klab.corpus.project import DuplicatePolicy
 from klab.corpus.view_checkpoints import ViewCheckpoints
 
@@ -67,7 +68,7 @@ RANKED = DuplicatePolicy(
 def _run(
     connection: sqlite3.Connection, tmp_path: Path, policy=CHAIN, *, checkpoints=None
 ):
-    return _deduplicate(
+    return deduplicate(
         connection,
         tmp_path / "groups.jsonl",
         policy=policy,
@@ -182,8 +183,8 @@ from klab.corpus.dedup_policy import (
     DuplicateError,
     deduplicate_documents,
     drop_reason,
-    is_metadata_only,
 )
+from klab.corpus.duplicate_evidence import is_metadata_only
 
 _RIGHTS = {
     "training_eligibility": "eligible",
@@ -387,7 +388,7 @@ def test_deduplication_never_reads_a_payload(
 
     progress = Phases()
     connection.set_authorizer(authorizer)
-    _deduplicate(
+    deduplicate(
         connection,
         tmp_path / "groups.jsonl",
         policy=CHAIN,

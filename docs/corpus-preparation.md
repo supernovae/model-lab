@@ -754,27 +754,31 @@ in its `receipt.json` next to the SHA-256 and size of every output file:
 - **index**: the receipt digest of every prepared shard in order (which bind the
   source bytes, rights decision, normalizer options and document policy), the
   split declaration (with the digest of its assignment file), the declared
-  duplicate keys, source ranks, reviewed row-level files and the implementation
-  files `large_build.py`, `pipeline.py`, `split_assignments.py` and
-  `dedup_policy.py`.
+  duplicate keys, source ranks, reviewed row-level files and the digests of
+  `native_index.py`, `duplicate_evidence.py` and `split_assignments.py`.
 - **dedup**: the verified index receipt digest, the whole
-  `release.policy.duplicates` section and the digests of `large_build.py`,
-  `dedup_policy.py` and `view_checkpoints.py`.
+  `release.policy.duplicates` section and the digests of `native_dedup.py`,
+  `dedup_policy.py` and `view_checkpoints.py`. The shared checkpoint
+  implementation is part of the dependency because dedup uses it for its
+  group and decision journals.
 
 A stage output is trusted only after its receipt verifies: the recorded key is
 the digest of the recorded inputs, the directory holds exactly the receipted
 files, and every size and hash matches. File names and modification times prove
 nothing. An output that fails is deleted and rebuilt, incomplete
 (`.incomplete-*`) directories are never inputs, and an output appears by one
-atomic rename. In the ordinary disk build, a change to indexing,
-deduplication or view code can reuse the normalized shard receipts. A split
-change reruns indexing with the same normalized shards. Changing only a
-duplicate option such as `duplicates.rights_conflict` reuses the index
-and reruns deduplication.
+atomic rename. In the ordinary disk build, changes confined to view emission
+reuse both retained stages. A resolver change or an option such as
+`duplicates.rights_conflict` reuses the retained index and reruns deduplication.
+A split or index change reuses the normalized shards and reruns both stages.
 Changing the normalizer, its implementation or the document policy produces
-new shard receipts. Moving normalization into its own implementation changes
-the shard key once for work prepared before the change. Ordinary published
-releases remain readable and acquisition snapshots can supply the rebuild.
+new shard receipts. A successful build removes these stage outputs by default.
+Use `--keep-stages` to retain them for another iteration.
+
+The separated stage implementations change older index and dedup keys once.
+Shards with normalization-specific identities can supply that rebuild.
+Ordinary published releases remain readable. The completed-preparation
+route still checks its own execution producer scope.
 
 The checks that fail fast, such as the empty-source check and the admitted
 inventory check, run on every start against the verified index, so a fix to the
@@ -1884,6 +1888,27 @@ before and 0.329 s after. Timings cover indexing through final SQL index
 creation. Verification of the prepared shards and the final stage receipt
 are outside the timing. This range-only implementation rebuilt compact
 assembly and SQL indexes from the saved parts on retry.
+
+#### Native index and dedup reuse measurements
+
+One cold NVMe run per case used the 843 MB prepared input above, with
+400,000 documents and 32,101 duplicate groups. After building each baseline,
+the run changed only the recorded view or resolver source digest. Timings
+include index and dedup receipt verification and any work triggered by the
+changed key. Acquisition, prepared-shard verification and view emission are
+outside the timed phase.
+
+| Stage inputs | Elapsed before / after | Device reads before / after | Device writes before / after |
+| --- | ---: | ---: | ---: |
+| Fresh | 10.974 / 10.440 s | 843 / 843 MB | 870 / 870 MB |
+| Changed view producer | 10.784 / 0.410 s | 843 / 486 MB | 870 / 0 MB |
+| Changed duplicate resolver | 10.830 / 2.735 s | 843 / 364 MB | 870 / 158 MB |
+
+The view change reused both retained stages. The resolver change reused the
+index and rebuilt the duplicate decisions. Ordered index rows, the decision
+database and the duplicate-group report matched across runs. Cold
+verification still reads retained stage files. Production and slower-storage
+wall time and I/O remain unmeasured.
 
 #### Native compact assembly recovery measurements
 

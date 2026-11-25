@@ -402,12 +402,12 @@ def _span_rows(spans: str, start: int, end: int):
 
 def _declared_keys(doc: dict[str, Any], methods: tuple[str, ...]) -> list[str]:
     """The duplicate keys a release's policy declares for one document."""
-    from klab.corpus.pipeline import _origin_keys
+    from klab.corpus.duplicate_evidence import origin_keys
 
     by_method = {
         "raw": lambda: ["raw:" + doc["raw_content_sha256"]],
         "normalized": lambda: ["normalized:" + doc["content_sha256"]],
-        "canonical_origin": lambda: ["origin:" + key for key in _origin_keys(doc)],
+        "canonical_origin": lambda: ["origin:" + key for key in origin_keys(doc)],
     }
     return [key for method in methods for key in by_method[method]()]
 
