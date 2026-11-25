@@ -12,6 +12,7 @@ import itertools
 import json
 import mmap
 import os
+import re
 import sqlite3
 import struct
 import threading
@@ -43,10 +44,9 @@ def _phase(
     stage_root,
     name,
     *,
-    expected_producer=None,
+    expected_producer,
 ):
     """Authenticate the latest live phase and its original signed binding."""
-    expected_producer = _producer() if expected_producer is None else expected_producer
     root, stage_root = Path(root), Path(stage_root)
     if not stage_root.is_relative_to(root) or not stage_root.is_dir():
         raise ValueError("retained mixture stage is outside the work root")
@@ -98,8 +98,10 @@ def _phase(
     if not cache.proofs.lookup_recorded_execution(saved):
         raise ValueError("retained mixture historical proof invalid")
     before, after = saved["upstream_identities"], binding["upstream_identities"]
+    producer = before["authority"].get("streaming_producer")
     if (
-        before["authority"].get("streaming_producer") != expected_producer
+        not producer
+        or (expected_producer is not None and producer != expected_producer)
         or before.get("mutable_dependencies", {})
         or after.get("mutable_dependencies", {})
     ):
@@ -115,10 +117,22 @@ def _phase(
     )
     if normalized != saved:
         raise ValueError("retained mixture semantic binding differs")
+    allowed_roots = [stage_root]
+    if name in {
+        "build-frozen-family-bindings",
+        "build-duplicate-keys",
+        "build-deduplicate",
+    }:
+        scoped = stage_root.parents[1] / "build-row-stages"
+        allowed_roots.append(scoped / name)
+        if name == "build-frozen-family-bindings":
+            # The family join keeps the ordinal IDs from split assignment.
+            allowed_roots.append(scoped / "build-join-splits")
     for item in payload["files"]:
         path = Path(item["path"])
         if (
-            not path.is_relative_to(stage_root)
+            ".." in path.parts
+            or not any(path.is_relative_to(directory) for directory in allowed_roots)
             or checkpoint_stamp(path) != item["stamp"]
         ):
             raise ValueError("retained mixture stage output changed")
@@ -164,16 +178,21 @@ def prepared_release(root, release):
             # original unambiguous selection and global admission binding.
             events = list(source_root.glob("*/completion-*.json"))
         else:
-            events = list(
-                (source_root / stage_ids[source_id]).glob("completion-*.json")
-            )
+            stage_id = stage_ids.get(source_id)
+            if not isinstance(stage_id, str) or not re.fullmatch(
+                "[0-9a-f]{64}", stage_id
+            ):
+                raise ValueError("invalid retained source render identity")
+            events = list((source_root / stage_id).glob("completion-*.json"))
         if len(events) != 1:
             raise ValueError("retained source render is missing or ambiguous")
         payload, proof = _phase(
             root,
             events[0].parent,
             "native-shard-render",
-            expected_producer=request["producer"],
+            # Exact stage IDs were committed in the authenticated build identity.
+            # Their digests bind the source producer even when it is narrower.
+            expected_producer=request["producer"] if stage_ids is None else None,
         )
         prepared = Path(payload["prepared"])
         receipt = json.loads(_small(prepared / "receipt.json", root))
