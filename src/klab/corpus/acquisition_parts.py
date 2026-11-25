@@ -43,10 +43,14 @@ class CheckedCheckpoint[T]:
     fingerprint: ArtifactFingerprint | None
 
     def matches(self, path: Path, *, renamed: bool = False) -> bool:
-        if self.fingerprint is None or (not renamed and self.path != path):
+        if not renamed and self.path != path:
             return False
-        current = _checkpoint_fingerprint(path)
-        if current is None:
+        return self._matches_fingerprint(_checkpoint_fingerprint(path), renamed=renamed)
+
+    def _matches_fingerprint(
+        self, current: ArtifactFingerprint | None, *, renamed: bool
+    ) -> bool:
+        if self.fingerprint is None or current is None:
             return False
         if renamed:
             # The atomic directory rename can change the root's ctime.
@@ -56,6 +60,13 @@ class CheckedCheckpoint[T]:
                 and current[1:] == self.fingerprint[1:]
             )
         return current == self.fingerprint
+
+    def after_rename(self, path: Path) -> CheckedCheckpoint[T]:
+        """Bind checked bytes to the same artifact after an atomic rename."""
+        current = _checkpoint_fingerprint(path)
+        if not self._matches_fingerprint(current, renamed=True):
+            raise ValueError(f"checkpoint changed during promotion: {path}")
+        return CheckedCheckpoint(path, self.value, current)
 
 
 def check_checkpoint[T](
@@ -131,6 +142,7 @@ class AcquisitionParts:
 class PinnedBody:
     sha256: str
     size: int
+    sha1: str | None = None
 
 
 class PinnedBodyParts(AcquisitionParts):
@@ -171,7 +183,16 @@ class PinnedBodyParts(AcquisitionParts):
             return previous
         return check_checkpoint(self.body, self._verify_body)
 
-    def recover_download(self) -> PinnedBody | None:
+    def promote_body(
+        self, checked: CheckedCheckpoint[PinnedBody]
+    ) -> CheckedCheckpoint[PinnedBody]:
+        if not checked.matches(checked.path):
+            raise ValueError(f"checkpoint changed before promotion: {checked.path}")
+        rename_noreplace(checked.path, self.body)
+        sync_directory(self.body.parent)
+        return checked.after_rename(self.body)
+
+    def recover_download(self) -> CheckedCheckpoint[PinnedBody] | None:
         """Recheck the official-download candidate before discarding it."""
         self._check_root()
         self.staged_file_size(self.cache_download)
@@ -182,9 +203,7 @@ class PinnedBodyParts(AcquisitionParts):
             return None
         with self.download.open("rb") as body:
             os.fsync(body.fileno())
-        rename_noreplace(self.download, self.body)
-        sync_directory(self.body.parent)
-        return checked.value
+        return self.promote_body(checked)
 
     def _verify_body(self, path: Path) -> PinnedBody | None:
         if self.sha1 is None:
@@ -198,7 +217,7 @@ class PinnedBodyParts(AcquisitionParts):
         sha256 = sha256_file(path, hash_chunk=sha1.update)
         if sha1.hexdigest() != self.sha1 or (self.sha256 and sha256 != self.sha256):
             return None
-        return PinnedBody(sha256, size)
+        return PinnedBody(sha256, size, self.sha1)
 
     def manifest_size(self) -> int | None:
         self._check_root()

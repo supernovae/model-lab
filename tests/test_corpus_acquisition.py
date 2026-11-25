@@ -2099,11 +2099,13 @@ def test_wikimedia_range_plan_verifies_index_and_physical_members(
     assert ranges[1]["page_ids_sha256"] == hashlib.sha256(b"1\n2\n").hexdigest()
 
 
-@pytest.mark.parametrize("case", ["resume", "damaged", "invalid_suffix"])
+@pytest.mark.parametrize(
+    "case", ["resume", "damaged", "invalid_suffix", "changed_dump"]
+)
 def test_indexed_wikimedia_resumes_range_verification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
-    from klab.corpus import wikimedia_ranges
+    from klab.corpus import acquisition_parts, wikimedia_ranges
 
     monkeypatch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
     recipe, responses, pieces, compressed, index_text = _multistream_wikimedia_fixture(
@@ -2116,10 +2118,19 @@ def test_indexed_wikimedia_resumes_range_verification(
     _yaml(source_path, declaration)
     project = load_project(recipe)
     calls = _serve_pinned(monkeypatch, responses)
+    cache = tmp_path / "cache" if case == "resume" else None
     monkeypatch.setattr(wikimedia_ranges, "_PLAN_GROUP_MEMBERS", 2)
     run_stage = wikimedia_ranges.run_stage
     scan = wikimedia_ranges._scan_members
     scanned = []
+    hashed = []
+    real_hash = wikimedia_ranges.sha256_file
+    dump_name = Path(project.sources[0].canonical_uri).name
+
+    def record_hash(path: Path, **kwargs):
+        if path.name in {dump_name, "dump.bz2"}:
+            hashed.append(path)
+        return real_hash(path, **kwargs)
 
     def record_scan(*args, **kwargs):
         for member in scan(*args, **kwargs):
@@ -2131,46 +2142,76 @@ def test_indexed_wikimedia_resumes_range_verification(
         raise RuntimeError("stop after verified range group")
 
     monkeypatch.setattr(wikimedia_ranges, "_scan_members", record_scan)
+    monkeypatch.setattr(wikimedia_ranges, "sha256_file", record_hash)
+    monkeypatch.setattr(acquisition_parts, "sha256_file", record_hash)
     work = tmp_path / "work"
     base = work / "corpora/example"
     with monkeypatch.context() as fault:
         fault.setattr(wikimedia_ranges, "run_stage", interrupt)
         with pytest.raises(RuntimeError, match="stop after verified range group"):
-            acquire(project, work)
+            acquire(project, work, transport_cache=cache)
     assert scanned == [0, len(compressed[0])]
     assert not (base / "acquisition.json").exists()
     assert calls == list(responses)
+    assert not hashed  # The download was checked as it was copied.
     calls.clear()
     scanned.clear()
     (parts,) = (base / "snapshots/one").glob(".wikimedia_dump-parts-*")
+    dump_path = parts / "input" / dump_name
+    if case == "changed_dump":
+        plan = wikimedia_ranges.plan_wikimedia_ranges
+
+        def change_after_verification(source, dump, index_path, **kwargs):
+            original = dump.stat()
+            dump.write_bytes(b"!" + dump.read_bytes()[1:])
+            os.utime(dump, ns=(original.st_atime_ns, original.st_mtime_ns))
+            return plan(source, dump, index_path, **kwargs)
+
+        monkeypatch.setattr(
+            wikimedia_ranges, "plan_wikimedia_ranges", change_after_verification
+        )
+        with pytest.raises(ValueError, match="dump changed after pin verification"):
+            acquire(project, work)
+        assert hashed == [dump_path]
+        assert not calls and not scanned
+        assert not (base / "acquisition.json").exists()
+        return
     if case == "invalid_suffix":
         with pytest.raises(ValueError, match="page IDs or offset differ"):
             acquire(project, work)
         assert not calls and not scanned
+        assert hashed == [dump_path]
         assert not (base / "acquisition.json").exists()
         return
     if case == "damaged":
         (group,) = (parts / "ranges/wikimedia-plan-group").glob("*/ranges.json")
         group.write_bytes(b"damaged")
 
-    manifest, _ = _snapshot_payload(acquire(project, work))
+    recovered = acquire(project, work, transport_cache=cache)
+    manifest, _ = _snapshot_payload(recovered)
     starts = [sum(map(len, compressed[:i])) for i in range(len(compressed))]
     assert scanned == (starts if case == "damaged" else starts[2:])
     assert not calls and not parts.exists()
+    assert hashed == [dump_path]
+    if cache is not None:
+        control = acquire(project, tmp_path / "cache-copy", transport_cache=cache)
+        assert _snapshot_payload(control) == _snapshot_payload(recovered)
+        assert not calls and hashed == [dump_path]
 
-    dump_path = tmp_path / "dump.bz2"
+    local_dump = tmp_path / "dump.bz2"
     index_path = tmp_path / "index.bz2"
-    dump_path.write_bytes(b"".join(compressed))
+    local_dump.write_bytes(b"".join(compressed))
     index_path.write_bytes(responses[index["uri"]])
     control = wikimedia_ranges.plan_wikimedia_ranges(
         project.sources[0],
-        dump_path,
+        local_dump,
         index_path,
         index_sha256=index["expected_sha256"],
         max_index_bytes=index["max_bytes"],
         max_index_expanded_bytes=index["max_expanded_bytes"],
         max_members=index["max_members"],
     )
+    assert hashed == [dump_path, local_dump]
     assert manifest["retrieval"]["multistream_index"][
         "plan_sha256"
     ] == canonical_digest(asdict(control))
@@ -2387,7 +2428,7 @@ def test_wikimedia_download_checks_sha1_even_with_matching_sha256(
 def test_wikimedia_retry_verifies_and_reuses_completed_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str
 ) -> None:
-    from klab.corpus import acquisition
+    from klab.corpus import acquisition, acquisition_parts
 
     monkeypatch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
     xml = (
@@ -2408,7 +2449,7 @@ def test_wikimedia_retry_verifies_and_reuses_completed_work(
     work = tmp_path / "work"
     real_verify = acquisition.verify_snapshot
     real_extract = acquisition._wiki_jsonl
-    real_rename = acquisition.rename_noreplace
+    real_rename = acquisition_parts.rename_noreplace
     extractions = []
 
     def stop_before_verification(path, **options):
@@ -2433,7 +2474,7 @@ def test_wikimedia_retry_verifies_and_reuses_completed_work(
         if stop == "sealed":
             fault.setattr(acquisition, "verify_snapshot", stop_before_verification)
         elif stop in {"before_promote", "partial_download"}:
-            fault.setattr(acquisition, "rename_noreplace", stop_before_promote)
+            fault.setattr(acquisition_parts, "rename_noreplace", stop_before_promote)
         with pytest.raises(OSError, match="interrupted Wikimedia acquisition"):
             acquire(project, work)
     base = work / "corpora/example"

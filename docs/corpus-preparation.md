@@ -243,14 +243,16 @@ the selected prefix. The XML header must fit `max_header_bytes` (default
 1 MiB). Each visited member must fit the declared expanded-member bound.
 
 While building the range plan, acquisition commits verification metadata
-after each group of up to 64 physical bzip2 members. A retry rechecks the
-compressed pins and index, verifies the saved receipts, and resumes the
-XML scan from verified member boundaries. It may reread the bounded XML
-header to restore the parser context. A stop during planning loses at most
+after each group of up to 64 physical bzip2 members. A retry checks the
+dump pins once and passes the verified file fingerprint to the planner.
+The planner reads the pinned index, verifies saved receipts, and resumes
+the XML scan from verified member boundaries. It may reread the bounded
+XML header to restore the parser context. A stop during planning loses at most
 one uncommitted group of verification work. A damaged receipt makes its
 group eligible for rebuilding. The final plan still covers every member,
-including those beyond the selected prefix. `corpus plan-wikimedia-ranges`
-remains read-only.
+including those beyond the selected prefix. The standalone
+`corpus plan-wikimedia-ranges` command verifies both input digests itself
+and writes no checkpoint files.
 
 Selection runs in source order so the scan, selection, and output limits
 apply even inside a member. During assembly the selected JSONL exists

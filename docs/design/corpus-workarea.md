@@ -433,7 +433,8 @@ members remain on the resumability checklist. [Performance review](https://githu
 Indexed acquisition now checkpoints whole-dump verification every 64
 physical members. Each receipt binds the dump and index digests, range
 bounds, and XML context at the group boundary. The temporary payloads
-are range metadata. On retry, Lab still hashes the compressed inputs
+are range metadata. On retry, acquisition verifies the dump pins in one
+pass. The planner reuses that check if the file fingerprint still matches,
 and reads the entire index. It can restore the parser with the bounded
 XML header and skip decoding verified groups. The public range planner
 continues to run read-only.
@@ -454,6 +455,10 @@ cold and 0.974 s on retry. Both selections matched their uninterrupted
 snapshot digests with zero retry requests. Run
 `tools/benchmark_acquisition_replay.py --adapter wikimedia_dump --interrupt-at plan-group`
 with `--selected-pages 8` or `--selected-pages 256` to reproduce the fixtures.
+
+Across five retries of the 8-page fixture, passing the checked dump to the
+planner reduced full-body hash reads from 17,163,290 to 8,581,645 bytes
+per attempt. Plan and payload digests matched the two-pass baseline.
 
 ## Relational Knowledge Microlab
 

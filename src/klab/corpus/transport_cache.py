@@ -32,6 +32,7 @@ from typing import Any
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.result_publication import sync_directory
+from klab.verification_proofs import ArtifactFingerprint, artifact_fingerprint
 
 TRANSPORT_CACHE_ENV = "KLAB_TRANSPORT_CACHE"
 _CHUNK = 1024 * 1024
@@ -87,6 +88,7 @@ class Served:
     sha256: str
     size: int
     meta: dict[str, Any] | None = None
+    copy_fingerprint: ArtifactFingerprint | None = None
 
 
 @dataclass
@@ -196,6 +198,7 @@ class TransportCache:
         sums = _Sums(sha1=git_blob_hasher(size) if key.git_blob_oid else None)
         plain_sha1 = hashlib.sha1() if key.sha1 else None
         output = None
+        copy_fingerprint = None
         try:
             if target is not None:
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -220,6 +223,7 @@ class TransportCache:
             if output is not None:
                 output.flush()
                 os.fsync(output.fileno())
+                copy_fingerprint = artifact_fingerprint(output.fileno())
         except OSError as error:
             self._discard(target, output)
             self._reject(key, f"unreadable body: {error}")
@@ -240,7 +244,9 @@ class TransportCache:
             self._discard(target, None)
             self._reject(key, problem)
             return None
-        served = Served("cache", key.digest, sha256, size, entry.get("meta"))
+        served = Served(
+            "cache", key.digest, sha256, size, entry.get("meta"), copy_fingerprint
+        )
         self._note(key, served)
         return served
 

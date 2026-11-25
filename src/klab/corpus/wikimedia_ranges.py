@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from xml.parsers import expat
 
 from klab.corpus.acquisition import declaration_sha256
+from klab.corpus.acquisition_parts import CheckedCheckpoint, PinnedBody
 from klab.corpus.build_stages import StageStore, implementation_digests, run_stage
 from klab.corpus.project import SourceDeclaration, WikimediaDumpAcquisition
 from klab.corpus.release_verify import current_settings
@@ -544,6 +545,7 @@ def plan_wikimedia_ranges(
     max_members: int,
     checkpoint_store: StageStore | None = None,
     on_expanded: Callable[[int], None] | None = None,
+    verified_dump: CheckedCheckpoint[PinnedBody] | None = None,
 ) -> WikimediaRangePlan:
     """Check local pinned bytes, then verify each bzip2 member against the index."""
     spec = source.acquisition
@@ -571,9 +573,16 @@ def plan_wikimedia_ranges(
                 raise ValueError("Wikimedia range input changed during verification")
 
         dump_size = initial[0][2]
-        sha1 = hashlib.sha1()
-        sha256 = sha256_file(dump, hash_chunk=sha1.update)
-        if sha1.hexdigest() != spec.expected_sha1.lower() or (
+        if verified_dump is None:
+            sha1_hasher = hashlib.sha1()
+            sha256 = sha256_file(dump, hash_chunk=sha1_hasher.update)
+            sha1 = sha1_hasher.hexdigest()
+        else:
+            body = verified_dump.value
+            if body.size != dump_size or not verified_dump.matches(dump):
+                raise ValueError("Wikimedia dump changed after pin verification")
+            sha256, sha1 = body.sha256, body.sha1
+        if sha1 != spec.expected_sha1.lower() or (
             spec.expected_sha256 is not None and sha256 != spec.expected_sha256.lower()
         ):
             raise ValueError("Wikimedia dump digest differs from the declaration")

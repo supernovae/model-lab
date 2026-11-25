@@ -82,6 +82,7 @@ from klab.hf_auth import hub_access_errors, hub_auth_kwargs, raise_for_hub_auth
 from klab.result_publication import sync_directory
 from klab.safe_io import rename_noreplace, symlinked, write_canonical_json
 from klab.training.manifest import sha256_file
+from klab.verification_proofs import artifact_fingerprint
 
 if TYPE_CHECKING:
     from klab.corpus.wikimedia_ranges import WikimediaRange
@@ -274,6 +275,7 @@ def _copy_stream(
     *,
     exact: bool = False,
     hash_chunk: Callable[[bytes], None] | None = None,
+    on_written: Callable[[int], None] | None = None,
 ) -> tuple[str, int]:
     target.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()
@@ -297,6 +299,8 @@ def _copy_stream(
             raise ValueError("source ended before declared size")
         output.flush()
         os.fsync(output.fileno())
+        if on_written is not None:
+            on_written(output.fileno())
     return digest.hexdigest(), size
 
 
@@ -1984,7 +1988,7 @@ def _wikimedia_body(
     *,
     verify_only: bool = False,
     parts: PinnedBodyParts | None = None,
-) -> PinnedBody:
+) -> CheckedCheckpoint[PinnedBody]:
     """The compressed dump: from the cache when it verifies, else downloaded."""
     key = BodyKey(
         "wikimedia_dump",
@@ -2004,13 +2008,16 @@ def _wikimedia_body(
         else None
     )
     body = (
-        PinnedBody(served.sha256, served.size)
+        CheckedCheckpoint(
+            cache_target,
+            PinnedBody(served.sha256, served.size, spec.expected_sha1.lower()),
+            served.copy_fingerprint,
+        )
         if served is not None
         else _download_wikimedia(source, spec, compressed, resources)
     )
     if parts is not None:
-        rename_noreplace(cache_target if served is not None else compressed, parts.body)
-        sync_directory(parts.body.parent)
+        body = parts.promote_body(body)
     if cache is not None and served is None:
         cache.store(key, parts.body if parts is not None else compressed)
     return body
@@ -2021,7 +2028,7 @@ def _download_wikimedia(
     spec: WikimediaDumpAcquisition,
     compressed: Path,
     resources: _AcquisitionResources,
-) -> PinnedBody:
+) -> CheckedCheckpoint[PinnedBody]:
     name = source_file_name(source.canonical_uri)
     opener = urllib.request.build_opener()
     headers = {
@@ -2045,6 +2052,12 @@ def _download_wikimedia(
     if len(matches) != 1 or matches[0][0].lower() != spec.expected_sha1.lower():
         raise ValueError("Wikimedia official SHA-1 manifest mismatch")
     source_sha1 = hashlib.sha1()
+    fingerprint = None
+
+    def record_copy(descriptor: int) -> None:
+        nonlocal fingerprint
+        fingerprint = artifact_fingerprint(descriptor)
+
     with opener.open(
         urllib.request.Request(source.canonical_uri, headers=headers), timeout=60
     ) as response:
@@ -2056,6 +2069,7 @@ def _download_wikimedia(
             spec.max_compressed_bytes,
             resources,
             hash_chunk=source_sha1.update,
+            on_written=record_copy,
         )
     resources.observe()
     if spec.expected_sha256 and digest != spec.expected_sha256.lower():
@@ -2064,13 +2078,17 @@ def _download_wikimedia(
     if source_sha1.hexdigest() != spec.expected_sha1.lower():
         compressed.unlink()
         raise ValueError("Wikimedia compressed SHA-1 mismatch")
-    return PinnedBody(digest, compressed_bytes)
+    return CheckedCheckpoint(
+        compressed,
+        PinnedBody(digest, compressed_bytes, source_sha1.hexdigest()),
+        fingerprint,
+    )
 
 
 def _extract_indexed_wikimedia(
     source: SourceDeclaration,
     parts: PinnedBodyParts,
-    body: PinnedBody,
+    body: CheckedCheckpoint[PinnedBody],
     output_path: Path,
     resources: _AcquisitionResources,
     cache: TransportCache | None,
@@ -2103,7 +2121,7 @@ def _extract_indexed_wikimedia(
     store = StageStore(parts.root / "ranges")
     inputs = {
         "request": parts.identity,
-        "dump_sha256": body.sha256,
+        "dump_sha256": body.value.sha256,
         "index_sha256": index.expected_sha256,
         "planner_sha256": sha256_file(Path(wikimedia_ranges.__file__)),
     }
@@ -2125,6 +2143,7 @@ def _extract_indexed_wikimedia(
             max_members=index.max_members,
             checkpoint_store=store,
             on_expanded=record_plan_bytes,
+            verified_dump=body,
         )
         write_canonical_json(staging / "plan.json", asdict(plan))
 
@@ -2273,13 +2292,15 @@ def _acquire_wikimedia(
     source: SourceDeclaration,
     staging: Path,
     parts: PinnedBodyParts,
-    body: PinnedBody,
+    body: CheckedCheckpoint[PinnedBody],
     resources: _AcquisitionResources,
     cache: TransportCache | None,
     prefetch_bytes: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     spec = source.acquisition
     assert isinstance(spec, WikimediaDumpAcquisition)
+    if not body.matches(parts.body):
+        raise ValueError("Wikimedia dump changed after pin verification")
     output_name = parts.name + ".sample.jsonl"
     output_path = staging / "files" / output_name
     if spec.multistream_index is None:
@@ -2293,6 +2314,8 @@ def _acquire_wikimedia(
             source, parts, body, output_path, resources, cache, prefetch_bytes
         )
         evidence = {"multistream_index": indexed}
+    if not body.matches(parts.body):
+        raise ValueError("Wikimedia dump changed during extraction")
     return [
         {
             "path": output_name,
@@ -2303,8 +2326,8 @@ def _acquire_wikimedia(
         "source_uri": source.canonical_uri,
         "checksum_uri": spec.checksum_uri,
         "source_sha1": spec.expected_sha1.lower(),
-        "source_sha256": body.sha256,
-        "compressed_bytes": body.size,
+        "source_sha256": body.value.sha256,
+        "compressed_bytes": body.value.size,
         **evidence,
         "scanned_pages": scanned,
         "selected_pages": rows,
@@ -2419,7 +2442,7 @@ def _resume_pinned_body(
     *,
     admit_body: bool,
     previous: CheckedCheckpoint[PinnedBody] | None,
-) -> PinnedBody:
+) -> CheckedCheckpoint[PinnedBody]:
     checked = parts.checked_body(previous)
     if admit_body and checked is None:
         raise ValueError(f"pinned body checkpoint changed after admission: {source.id}")
@@ -2443,7 +2466,7 @@ def _resume_pinned_body(
     if checked is not None:
         if budget is not None:
             budget.recover_staged_transfer(source.id, parts.name, checked.value.size)
-        return checked.value
+        return checked
     parts.body.parent.mkdir(exist_ok=True)
     sync_directory(parts.root)
     if isinstance(source.acquisition, WikimediaDumpAcquisition):
@@ -2463,7 +2486,7 @@ def _resume_pinned_body(
         cache,
         parts=parts,
     )
-    return PinnedBody(parts.sha256, size)
+    return CheckedCheckpoint(parts.body, PinnedBody(parts.sha256, size), None)
 
 
 class _CountedStream:
@@ -3595,7 +3618,7 @@ def acquire(
                             else _acquire_mediawiki
                         )
                         files, retrieval = derive(
-                            source, staging, pinned.body, body.size, resources
+                            source, staging, pinned.body, body.value.size, resources
                         )
                 elif source.kind == "local":
                     files, retrieval = _acquire_local(source, project.root, staging)

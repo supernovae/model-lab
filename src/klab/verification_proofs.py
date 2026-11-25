@@ -47,8 +47,8 @@ def _json_native(value: object) -> object:
     return value
 
 
-def _fingerprint(path: Path) -> list[int]:
-    info = path.lstat()
+def _fingerprint(path: Path | int) -> list[int]:
+    info = os.fstat(path) if isinstance(path, int) else path.lstat()
     if not stat.S_ISREG(info.st_mode) and not stat.S_ISDIR(info.st_mode):
         raise ValueError(f"nonregular verification path: {path}")
     return [
@@ -64,8 +64,10 @@ def _fingerprint(path: Path) -> list[int]:
 type ArtifactFingerprint = tuple[tuple[str, int, int, int, int, int, int], ...]
 
 
-def artifact_fingerprint(path: Path) -> ArtifactFingerprint:
-    """Capture filesystem metadata for the exact file or relative directory tree."""
+def artifact_fingerprint(path: Path | int) -> ArtifactFingerprint:
+    """Capture metadata for an open file, file path or relative directory tree."""
+    if isinstance(path, int):
+        return ((".", *_fingerprint(path)),)
     members = [path] if path.is_file() else [path, *sorted(path.rglob("*"))]
     return tuple(
         (member.relative_to(path).as_posix(), *_fingerprint(member))
