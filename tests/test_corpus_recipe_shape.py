@@ -329,13 +329,54 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         assert not Path(tokenizer["output_dir"]).exists()
     finally:
         sources.write_bytes(source_bytes)
+
+    output = Path(tokenizer["output_dir"])
+
+    def stop_before_manifest(path, value):
+        raise RuntimeError("stopped before tokenizer manifest")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(tokenizer_module, "_atomic_json", stop_before_manifest)
+        with pytest.raises(RuntimeError, match="stopped before tokenizer manifest"):
+            lab.run("tokenizer", "train", str(tokenizer_config), *scratch)
+    assert not output.exists()
+
+    rename = tokenizer_module.rename_noreplace
+
+    def occupy_output_at_commit(source, destination):
+        destination.mkdir()
+        (destination / "keep").write_text("another publisher's data")
+        rename(source, destination)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(tokenizer_module, "rename_noreplace", occupy_output_at_commit)
+        with pytest.raises(FileExistsError):
+            lab.run("tokenizer", "train", str(tokenizer_config), *scratch)
+    assert sorted(path.name for path in output.iterdir()) == ["keep"]
+    assert (output / "keep").read_text() == "another publisher's data"
+    (output / "keep").unlink()
+    output.rmdir()
+
+    def refuse_refit(*args, **kwargs):
+        pytest.fail("retry refit an already complete staged tokenizer")
+
     capsys.readouterr()
-    lab.run("tokenizer", "train", str(tokenizer_config), *scratch)
+    with monkeypatch.context() as fault:
+        fault.setattr(tokenizer_module, "BpeTrainer", refuse_refit)
+        lab.run("tokenizer", "train", str(tokenizer_config), *scratch)
     assert lab.stderr.count("tokenizer sampling: rank histogram:") == 2
     assert any(
         "tokenizer sampling: candidates:" in line and "reused 1/" in line
         for line in lab.stderr.splitlines()
     )
+    clean_output = tmp_path / "clean-tokenizer"
+    clean_config = tmp_path / "clean-tokenizer.yaml"
+    clean_config.write_text(
+        yaml.safe_dump({**tokenizer, "output_dir": str(clean_output)})
+    )
+    lab.run("tokenizer", "train", str(clean_config), *scratch)
+    for name in ("tokenizer.json", "tokenizer_manifest.json"):
+        assert (output / name).read_bytes() == (clean_output / name).read_bytes()
     verify = ("tokenizer", "verify", str(export / "run.yaml"), "--json")
     cold = lab.json(*verify)
     assert lab.json(*verify, *scratch) == cold

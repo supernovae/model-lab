@@ -1351,7 +1351,7 @@ needs measurement where the table gives historical or fixture evidence.
 | `finalize-family-inventory` | Final inventory. Completed preparation can reuse the release's authenticated family inventory. | Rebuild the native candidate-to-document join and output, or republish the authenticated retained inventory. | Production restart cost unmeasured. |
 | Near-duplicate screen | Training-pass offset and accumulators per range, every 200,000 training documents by default. | Rebuild the held-out index and template evidence when enabled. Replay training records after each range's commit. | Historical 6.7M-document Workshop screen, 1–2 h on one core. Held-out rebuild cost unmeasured. [#491](https://github.com/supernovae/model-lab/pull/491) |
 | Seeded tokenizer sample and verification | TRAIN lineage, rank histogram, and candidate range receipts with `--scratch-dir` on `tokenizer train` and `tokenizer verify`. | Reuse completed ranges and scan missing or damaged ranges. Reassemble the sample and read its selected payloads. A run without scratch does its own selection scans. | 13 s at 12 workers on a warm-page-cache synthetic 11.9 GB, 2M-document release with a 32 MiB fit quota. This measures selection. [#499](https://github.com/supernovae/model-lab/pull/499) |
-| Tokenizer fit and bakeoff | Complete tokenizer and provenance, or completed bakeoff artifacts. | Fit BPE again after an interruption during training. A completed matching fit can be reused after verifying its inputs. An interruption between tokenizer and manifest publication can leave a partial output directory that blocks reuse of that path. | A 16 MiB synthetic fit took 1.04 s, and its retry spent 1.03 s in the trainer call. See [the fitting measurements](#tokenizer-fit-timings). |
+| Tokenizer fit and bakeoff | Complete staged tokenizer and provenance, published together, or completed bakeoff artifacts. | Verify and publish a matching staged pair without fitting again. A stop before both staged files are complete repeats the native fit. Concurrent fits coordinate on the destination and publication preserves an existing destination. | A 16 MiB synthetic fit took 1.04 s, and its retry after a stop inside BPE spent 1.03 s in the trainer call. See [the fitting measurements](#tokenizer-fit-timings). |
 | `materialize-mixture` | Candidate and output segments and a reusable content token cache. Default commit thresholds are 4,096 candidates, 64 MiB or 30 s. | Verify committed segments, rebuild or verify indexes as needed, replay the uncommitted segment, and finish assembly. Reuse unchanged token encodings. | 24.2 s cold and 12.9 s with warm token cache on a synthetic 210M-token mixture. These are build timings. [Mixture speed](token-store.md#mixture-speed) |
 | `verify-mixture`, `--reseal`, and `--audit` | Complete verification or completion receipt. | Routine verification and reseal may repeat output checks and hashes. `--audit` reruns an independent schedule in fresh scratch with token reuse disabled. | A real full audit took 94 min. The synthetic 6,000-document audit took 1.1 s with a mocked tokenizer. [#521](https://github.com/supernovae/model-lab/pull/521) |
 
@@ -1477,6 +1477,14 @@ different from the fit, and checks round-trip failures, unknown tokens and bytes
 per token; it refuses to publish on a failure. No validation or test document is
 used.
 
+The fit writes the tokenizer and manifest in a private sibling workspace and
+publishes them together. A retry at the same output verifies the training
+contract and file digest, and reruns the sample audit on the reused selection.
+A complete staged pair skips BPE. If the stop left only partial staging, the
+retry rebuilds that fit. Keep the sibling workspace while retrying. The command
+preserves an occupied destination and refuses an unverifiable published pair,
+including partial outputs left by older versions.
+
 #### Tokenizer fit timings
 
 The fixture used 8,192 generated documents, a 16 MiB fit quota, a 2,048-token
@@ -1498,6 +1506,17 @@ and before it returned. The retry fed all 16,766,888 selected bytes again.
 The sample and tokenizer digests matched across runs. Observed peak RSS was
 379 MiB on the baseline and 376 MiB with one selection per attempt. Production
 fit, audit and recovery costs remain unmeasured. [#485](https://github.com/supernovae/model-lab/issues/485)
+
+In a separate publication test on NVMe, SIGKILL stopped fits on an
+8,192-document synthetic release with a 16 MiB quota and a 2,048-token
+vocabulary. The fixture supplied the export binding and the retries reused
+sampling receipts. The destination was absent after both stops. Each retry
+published the same tokenizer and manifest bytes as an uninterrupted fit.
+
+| Stop point | Staged artifact bytes | Retry time in BPE | Total retry time |
+| --- | ---: | ---: | ---: |
+| After writing the tokenizer, before its manifest | 120,508 | 1.787 s | 3.276 s |
+| After syncing both files, before publishing | 124,141 | 0 s | 1.372 s |
 
 #### Indexed reads and sequential scans
 
