@@ -284,6 +284,7 @@ def benchmark(
     interruption: str,
     prefetch_bytes: int,
     parse_bytes: int,
+    checkpoint_members: int,
     selected_pages: int | None,
 ) -> None:
     with pytest.MonkeyPatch.context() as patch:
@@ -373,6 +374,7 @@ def benchmark(
                                 trial_root / "cold",
                                 wikimedia_prefetch_bytes=prefetch_bytes,
                                 wikimedia_parse_bytes=parse_bytes,
+                                wikimedia_checkpoint_members=checkpoint_members,
                             )
                         cold_elapsed.append(time.perf_counter() - started)
                         if first is None:
@@ -403,6 +405,7 @@ def benchmark(
                                 transport_cache=cache,
                                 wikimedia_prefetch_bytes=prefetch_bytes,
                                 wikimedia_parse_bytes=parse_bytes,
+                                wikimedia_checkpoint_members=checkpoint_members,
                             )
                         except (Interrupted, ValueError) as error:
                             # The range planner wraps I/O errors.
@@ -429,6 +432,7 @@ def benchmark(
                         transport_cache=cache,
                         wikimedia_prefetch_bytes=prefetch_bytes,
                         wikimedia_parse_bytes=parse_bytes,
+                        wikimedia_checkpoint_members=checkpoint_members,
                     )
                     elapsed.append(time.perf_counter() - started)
                     entry = lock["sources"]["one"]
@@ -475,6 +479,7 @@ def benchmark(
                         "worker_limit": worker_count(),
                         "wikimedia_prefetch_bytes": prefetch_bytes,
                         "wikimedia_parse_bytes": parse_bytes,
+                        "wikimedia_checkpoint_members": checkpoint_members,
                         "selected_pages_limit": selected_pages,
                         "median_cold_seconds": round(statistics.median(cold_elapsed), 6)
                         if cold_elapsed
@@ -520,6 +525,13 @@ def main() -> None:
     parser.add_argument("--wikimedia-prefetch-bytes", type=int, default=0)
     parser.add_argument("--wikimedia-parse-bytes", type=int, default=0)
     parser.add_argument(
+        "--wikimedia-checkpoint-members",
+        type=int,
+        choices=range(1, 65),
+        default=1,
+        metavar="1..64",
+    )
+    parser.add_argument(
         "--selected-pages", type=int, choices=range(1, 257), metavar="1..256"
     )
     parser.add_argument(
@@ -563,6 +575,7 @@ def main() -> None:
                 args.interrupt_at,
                 args.wikimedia_prefetch_bytes,
                 args.wikimedia_parse_bytes,
+                args.wikimedia_checkpoint_members,
                 args.selected_pages,
             )
 

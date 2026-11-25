@@ -263,6 +263,20 @@ outputs, including those committed before the whole plan finished. A
 failure anywhere in the range plan prevents snapshot publication.
 Acquisition removes its checkpoints after publication.
 
+Use `--wikimedia-checkpoint-members` to commit up to 64 consecutive
+extraction members in one receipt. The default is one. Extraction groups
+stay within a verified range group and share one staged JSONL file. A
+restart checks and copies a finished group's JSONL in a single read. If
+verification fails, Lab discards that copy and rebuilds the group. A hard
+stop during extraction can require redoing the active group, up to the
+configured number of members. Use the same group size on retry to reuse
+those checkpoints. Changing the group size can leave the earlier receipts
+in staging until publication.
+
+```sh
+klab corpus acquire PROJECT --wikimedia-checkpoint-members 8
+```
+
 Indexed acquisition can overlap bzip2 decoding with ordered selection.
 Set an explicit budget for expanded bytes held ahead of the current
 member. The largest member eligible in the current batch sets the per-slot
