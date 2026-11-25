@@ -275,6 +275,24 @@ staged, and the output and its identity are independent of worker count.
 klab corpus acquire PROJECT --workers 3 --wikimedia-prefetch-bytes 67108864
 ```
 
+To try process-based XML parsing, pass `--wikimedia-parse-bytes` along with
+the decode budget. When there is room for multiple worker slots, Lab
+divides the candidate JSONL budget across them. Each worker decodes and
+parses its member. The coordinator cuts the candidates in source order
+at the exact remaining scan, selection, and output limits. A worker that
+cannot prepare a valid candidate within its bound leaves that member for
+ordered serial extraction if needed. Candidate results stay in memory.
+The selected member checkpoints are reusable across worker settings.
+
+```sh
+klab corpus acquire PROJECT --workers 3 --wikimedia-prefetch-bytes 67108864 \
+  --wikimedia-parse-bytes 67108864
+```
+
+`--wikimedia-parse-bytes` defaults to zero. The byte budget covers candidate
+JSONL payloads across the active window. The host memory estimate also
+accounts for parser state, row positions, and process serialization.
+
 A partial indexed acquisition is bound to the adapter implementation. After
 an adapter update, the next attempt uses a new staging directory, verifies a
 new range plan and extracts the selected prefix again. It downloads the
@@ -1045,6 +1063,7 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   | Stage | Parallelism |
   | --- | --- |
   | `wikimedia member decode` | opt-in threaded decoding of verified compressed members, consumed and checkpointed in source order |
+  | `wikimedia member parse` | opt-in process decoding and XML parsing of verified members, with bounded candidates consumed in source order |
   | `release verification` | shardable: byte ranges of the release files |
   | `tokenizer sampling: TRAIN lineage` | shardable: byte ranges of the lineage view |
   | `family inventory` | shardable: byte ranges of `documents.jsonl`, written in file order |

@@ -283,6 +283,7 @@ def benchmark(
     trials: int,
     interruption: str,
     prefetch_bytes: int,
+    parse_bytes: int,
     selected_pages: int | None,
 ) -> None:
     with pytest.MonkeyPatch.context() as patch:
@@ -371,6 +372,7 @@ def benchmark(
                                 project,
                                 trial_root / "cold",
                                 wikimedia_prefetch_bytes=prefetch_bytes,
+                                wikimedia_parse_bytes=parse_bytes,
                             )
                         cold_elapsed.append(time.perf_counter() - started)
                         if first is None:
@@ -400,6 +402,7 @@ def benchmark(
                                 work,
                                 transport_cache=cache,
                                 wikimedia_prefetch_bytes=prefetch_bytes,
+                                wikimedia_parse_bytes=parse_bytes,
                             )
                         except (Interrupted, ValueError) as error:
                             # The range planner wraps I/O errors.
@@ -425,6 +428,7 @@ def benchmark(
                         work,
                         transport_cache=cache,
                         wikimedia_prefetch_bytes=prefetch_bytes,
+                        wikimedia_parse_bytes=parse_bytes,
                     )
                     elapsed.append(time.perf_counter() - started)
                     entry = lock["sources"]["one"]
@@ -470,6 +474,7 @@ def benchmark(
                         "warm_transport_cache": cached,
                         "worker_limit": worker_count(),
                         "wikimedia_prefetch_bytes": prefetch_bytes,
+                        "wikimedia_parse_bytes": parse_bytes,
                         "selected_pages_limit": selected_pages,
                         "median_cold_seconds": round(statistics.median(cold_elapsed), 6)
                         if cold_elapsed
@@ -513,6 +518,7 @@ def main() -> None:
     parser.add_argument("--scratch-dir", type=Path, default=None)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--wikimedia-prefetch-bytes", type=int, default=0)
+    parser.add_argument("--wikimedia-parse-bytes", type=int, default=0)
     parser.add_argument(
         "--selected-pages", type=int, choices=range(1, 257), metavar="1..256"
     )
@@ -531,9 +537,12 @@ def main() -> None:
         parser.error("--interrupt-at requires an eligible adapter")
     if args.selected_pages is not None and args.interrupt_at not in INDEXED_INTERRUPTS:
         parser.error("--selected-pages requires an indexed interruption case")
-    if args.workers < 1 or args.wikimedia_prefetch_bytes < 0:
+    if (
+        args.workers < 1
+        or min(args.wikimedia_prefetch_bytes, args.wikimedia_parse_bytes) < 0
+    ):
         parser.error(
-            "--workers must be positive and --wikimedia-prefetch-bytes nonnegative"
+            "--workers must be positive and the Wikimedia byte budgets nonnegative"
         )
     for kind in kinds:
         with (
@@ -553,6 +562,7 @@ def main() -> None:
                 args.trials,
                 args.interrupt_at,
                 args.wikimedia_prefetch_bytes,
+                args.wikimedia_parse_bytes,
                 args.selected_pages,
             )
 

@@ -490,6 +490,41 @@ staging. Total acquisition was 50.40 and 48.68 s. Those are single runs
 with one worker and local inputs on NVMe. Peak RSS was 193 and 195 MiB.
 Plan digest, payload bytes, and ordered page and revision IDs matched.
 
+Indexed acquisition can also send verified members to the process runner
+for XML parsing. `--wikimedia-prefetch-bytes` bounds decoded lookahead.
+`--wikimedia-parse-bytes` bounds candidate JSONL across the active worker
+window. The coordinator applies the remaining limits in order from row
+positions and writes the selected member receipts. Candidates stay in
+memory. An exhausted candidate budget or a speculative parser error leads
+to ordered serial extraction if that member is still required. The shared
+runner's process workers exit when the coordinator dies.
+
+Three trials per selection on the 16 MiB synthetic fixture used three
+workers and a 64 MiB decode budget, with a 64 MiB candidate budget for
+process parsing. The replay tool stopped after the first verification group.
+
+| Selection | Cold, threaded / process | Retry, threaded / process | Peak process-tree RSS, threaded / process |
+| --- | ---: | ---: | ---: |
+| 8 pages | 0.412 / 0.645 s | 0.223 / 0.465 s | 157 / 317 MiB |
+| 256 pages | 0.871 / 1.226 s | 0.674 / 1.024 s | 157 / 328 MiB |
+
+RSS is the sampled sum across the benchmark and its children, including
+fixture construction and shared pages. Snapshot digests and staging
+bytes matched. The short batches took longer with process startup and
+candidate transfer. Run `tools/benchmark_acquisition_replay.py` with
+`--adapter wikimedia_dump --interrupt-at plan-group --workers 3`,
+`--wikimedia-prefetch-bytes 67108864`, and compare
+`--wikimedia-parse-bytes 0` and `--wikimedia-parse-bytes 67108864`.
+
+On the pinned 287 MiB English Wikipedia shard, three process workers
+finished the cold acquisition in 40.63 s versus 43.73 s with threaded
+decode. The first extraction checkpoint took 11.57 s versus 7.52 s.
+Sampled process-tree RSS was 590 versus 205 MiB. Both runs used 455.97 MiB
+of peak logical staging and produced the same snapshot, payload, and
+ordered page and revision IDs. These are single runs on NVMe with local
+inputs. Process parsing stays opt-in because startup and candidate transfer
+costs vary with member size, and the larger run used more host memory.
+
 ## Relational Knowledge Microlab
 
 Keep named recipes and study outputs in Workshop. Start with deterministic

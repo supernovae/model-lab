@@ -2349,6 +2349,102 @@ def test_wikimedia_indexed_acquisition_matches_serial_and_reuses_members(
     assert not calls and not staged.exists()
 
 
+@pytest.mark.parametrize("case", ["selected", "scanned", "fallback", "byte_cap"])
+def test_wikimedia_process_parsing_preserves_ordered_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    from klab.corpus import acquisition, shards, wikimedia_ranges
+
+    monkeypatch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
+    recipe, responses, pieces, _, index_text = _multistream_wikimedia_fixture(
+        tmp_path, shared_members=True
+    )
+    source = recipe.parent / "sources/one.yaml"
+    declaration = yaml.safe_load(source.read_text())
+    index = _fixture_index_options(responses, pieces, index_text)
+    spec = declaration["acquisition"]
+    spec.update(
+        multistream_index=index,
+        max_scanned_pages=3 if case == "scanned" else 4,
+        max_selected_pages=4 if case == "scanned" else 2,
+        max_emitted_bytes=4096,
+    )
+    _yaml(source, declaration)
+    calls = _serve_pinned(monkeypatch, responses)
+    control = acquire(load_project(recipe), tmp_path / "control")
+    if case == "byte_cap":
+        spec["max_emitted_bytes"] = (
+            sum(map(len, _snapshot_payload(control)[1].values())) - 1
+        )
+        _yaml(source, declaration)
+    project = load_project(recipe)
+    work = tmp_path / "process"
+    worker_pool = shards._worker_pool
+    pools = []
+
+    def record_pool(workers, *, threaded):
+        pools.append((workers, threaded))
+        return worker_pool(workers, threaded=threaded)
+
+    monkeypatch.setattr(shards, "_worker_pool", record_pool)
+    for module in (acquisition, shards):
+        monkeypatch.setattr(module, "worker_count", lambda: 2)
+    monkeypatch.setattr(
+        shards,
+        "plan_host_workers",
+        lambda *_, operator_cap, **__: SimpleNamespace(workers=operator_cap),
+    )
+    options = {
+        "wikimedia_prefetch_bytes": index["max_member_expanded_bytes"],
+        "wikimedia_parse_bytes": 2 if case == "fallback" else 8192,
+    }
+    if case == "byte_cap":
+        with pytest.raises(ValueError, match="emitted JSONL exceeds limit"):
+            acquire(project, work, **options)
+        assert pools == [(2, False)]
+        assert not (work / "corpora/example/acquisition.json").exists()
+        return
+    decoded_by_coordinator = []
+    read_member = wikimedia_ranges.read_wikimedia_member
+
+    def record_member(path, member, **kwargs):
+        decoded_by_coordinator.append(member.start)
+        return read_member(path, member, **kwargs)
+
+    monkeypatch.setattr(wikimedia_ranges, "read_wikimedia_member", record_member)
+    run_stage = acquisition.run_stage
+
+    def stop_at_member(store, stage, inputs, produce):
+        result = run_stage(store, stage, inputs, produce)
+        if stage == "wikimedia-member":
+            raise OSError("stop after process member checkpoint")
+        return result
+
+    if case == "selected":
+        with monkeypatch.context() as fault:
+            fault.setattr(acquisition, "run_stage", stop_at_member)
+            with pytest.raises(OSError, match="stop after process member checkpoint"):
+                acquire(project, work, **options)
+        calls.clear()
+        (parts,) = (work / "corpora/example/snapshots/one").glob(
+            ".wikimedia_dump-parts-*"
+        )
+        assert (
+            len(list((parts / "ranges/wikimedia-member").glob("*/receipt.json"))) == 1
+        )
+        threaded = acquire(project, work)
+        assert not calls and not parts.exists()
+        assert len(decoded_by_coordinator) == 1 and decoded_by_coordinator[0] > 0
+        direct = acquire(project, tmp_path / "process-cold", **options)
+        assert _snapshot_payload(direct) == _snapshot_payload(control)
+        assert len(decoded_by_coordinator) == 1
+    else:
+        threaded = acquire(project, work, **options)
+        assert len(decoded_by_coordinator) == (2 if case == "fallback" else 0)
+    assert pools == [(2, False)] * (2 if case == "selected" else 1)
+    assert _snapshot_payload(threaded) == _snapshot_payload(control)
+
+
 def test_wikimedia_prefetch_overlaps_decode_without_changing_selected_prefix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
