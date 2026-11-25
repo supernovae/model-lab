@@ -29,7 +29,7 @@ from klab.corpus.completed_release import verify_retained_release
 from klab.corpus.mixture_index import MAX_ROW_BYTES, MixtureIndex, document_rank
 from klab.corpus.split_runs import (
     SplitStages,
-    _stamp,
+    checkpoint_stamp,
     external_sort,
     rows,
     write_rows,
@@ -117,7 +117,10 @@ def _phase(
         raise ValueError("retained mixture semantic binding differs")
     for item in payload["files"]:
         path = Path(item["path"])
-        if not path.is_relative_to(stage_root) or _stamp(path) != item["stamp"]:
+        if (
+            not path.is_relative_to(stage_root)
+            or checkpoint_stamp(path) != item["stamp"]
+        ):
             raise ValueError("retained mixture stage output changed")
     unchanged(dependencies)
     evidence = {

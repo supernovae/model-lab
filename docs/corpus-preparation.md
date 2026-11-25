@@ -1058,9 +1058,17 @@ strict policy (`heldout_overlap: error`, `keys: [raw, normalized]`,
 preparation: `build` renders admitted shards without replaying the acquisition
 audit, and `freeze` publishes the release in place without copying the payload.
 Both record what was deferred. Keep the work root and its completion records
-with the release. Completed phases are keyed by their inputs, configuration
-and every corpus module they can run, so a change to the corpus code renders
-them again rather than reusing old shards.
+with the release. Admission materialization binds the reviewed manifest, source
+declarations and its producer. Each source render binds that source's
+fingerprint, resolved normalizer and document policy, reviewed decision
+digests and renderer. A downstream edit can reuse authenticated input phases
+without reading their source bodies again. A changed input generation or
+renderer invalidates the affected source receipt. The shared decision-table
+adapter participates in both input phases.
+
+The complete build and later phases retain their broader execution producer
+checks. The narrower input keys require a one-time materialization and render
+for a build that has only older completion records.
 
 The completed-preparation builder uses the same view checkpoints as the
 native disk builder. The checkpoint records the input shard and byte
@@ -1442,7 +1450,7 @@ needs measurement where the table gives historical or fixture evidence.
 | Native disk build, normalize | Receipted shard per source file with normalization-specific producer identity. | Verify completed shards and re-normalize unfinished files or shards with changed normalization inputs. | See [native normalization reuse measurements](#native-normalization-reuse-measurements). Historical Workshop normalize took about 25 min for the 6.7M-document workload. [#491](https://github.com/supernovae/model-lab/pull/491) |
 | Native disk build, index and dedup | Verified prepared-file groups and ranges, transactional compact index parts, duplicate-group windows, and chain decision windows. Reviewed row admission uses indexed file and row numbers. | Repeat the unfinished index group or range, verify the merged prefix, and append missing parts. Final SQL index creation can repeat. Restore group links and rescan unfinished windows. Reuse completed chain decision windows, and apply a complete decision log directly. Representative compression or ranked component resolution can still repeat after a partial stop. | See [native compact assembly recovery measurements](#native-compact-assembly-recovery-measurements) and [native dedup recovery measurements](#native-dedup-recovery-measurements). Historical Workshop indexing took about 30 min for roughly 13M rows. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB, lineage and view measurement checkpoints, and a receipted census. Final publication by rename. | Verify the committed view prefix, reconstruct its digests and render the uncommitted tail. Reuse finished census work for matching inputs. The manifest hashes ancillary outputs and reuses the view checksums. A stop in the final lineage sort or measurement merge may repeat that step. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. [Native build census measurements](#native-build-census-measurements) cover the report phase. [#579](https://github.com/supernovae/model-lab/pull/579) |
-| Completed-preparation build | Authenticated per-source render, completed sort and dedup phases, view range checkpoints and a signed receipt before publication. | Repeat an unfinished upstream phase. During view recovery, verify the committed prefix and resume from the stored span and document cursors. Intact staged views can publish directly, and a renamed build can recover completion from the signed receipt. A partial emission retry can recopy the frozen control inputs. | See [completed-preparation view recovery measurements](#completed-preparation-view-recovery-measurements). Production restart cost unmeasured. |
+| Completed-preparation build | Authenticated admission materialization and per-source render, completed sort and dedup phases, view range checkpoints and a signed receipt before publication. | Reuse authenticated input phases after downstream changes. Repeat an unfinished phase. During view recovery, verify the committed prefix and resume from the stored span and document cursors. Intact staged views can publish directly, and a renamed build can recover completion from the signed receipt. A partial emission retry can recopy the frozen control inputs. | See [completed-preparation input reuse measurements](#completed-preparation-input-reuse-measurements) and [view recovery measurements](#completed-preparation-view-recovery-measurements). Production restart cost unmeasured. |
 | Freeze | Native staging rename and build tombstone, signed verification after a staged replay, then the public release. Completed preparation seals a retained release against its existing build. | Reuse the complete staged receipt at the same path, or resume an unfinished check from eligible file and replay proofs. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. See [staged freeze recovery measurements](#staged-freeze-recovery-measurements). [#501](https://github.com/supernovae/model-lab/pull/501) |
 | Release verification, `audit`, and `sources` | Signed checks of eligible inventory files, stage outputs and streaming raw source replay, then the complete release proof. `audit` and `sources` read the corresponding published report after verification. | A receipt-backed retry skips eligible completed checks and continues the remaining work. Cold mode starts the checks from bytes. | See [inventory hash recovery measurements](#inventory-hash-recovery-measurements), [stage output verification measurements](#stage-output-verification-measurements) and [raw source replay recovery](#raw-source-replay-recovery). An earlier cold audit took 67.3 s on 13.2 GB synthetic data, and the first receipt-backed audit took 0.94 s. [#500](https://github.com/supernovae/model-lab/pull/500), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | `describe` | Cached measurement runs, per-split link offsets and verified lineage index ranges when a proof store or persistent scratch is available. Release verification has its own receipt. | Resume missing index ranges, link files and measurement ranges. An unfinished index sort or cold release check can repeat. Each chat view is one measurement run. | See [describe lineage index recovery measurements](#describe-lineage-index-recovery-measurements) and [describe link planning recovery measurements](#describe-link-planning-recovery-measurements). An earlier full measurement took 55.1 s for 5M synthetic rows (23 GB), 12 workers, without a tokenizer. [#502](https://github.com/supernovae/model-lab/pull/502) |
@@ -1777,6 +1785,21 @@ Device reads were about 465 MB for fresh emission and 1.49 GB for a retry
 with either implementation. The older extra reads came from the page cache
 on this fixture. Whole-phase wall times varied with host load. Larger
 working sets and slower storage remain unmeasured.
+
+#### Completed-preparation input reuse measurements
+
+A synthetic NVMe fixture used one reviewed source with 150,000 rows,
+147 MB of source data and a 20 MB admission manifest. The first run
+materialized admission and rendered the source in 16.273 s, reading
+168 MB and writing 465 MB at the device. A second checkout changed
+the downstream build module's digest. It reused both authenticated
+input phases in 0.029 s and reported zero source bytes rendered and
+zero device bytes read or written in those phases. The stage identity,
+decisions and all prepared output digests matched.
+
+Each elapsed measurement is a single run. The timing excludes acquisition,
+split work, final build processing and publication. Production-scale and
+slower-storage evidence is still open.
 
 #### Completed-preparation view recovery measurements
 

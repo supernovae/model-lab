@@ -8,58 +8,51 @@ it does not turn a checksum into historical execution or redistribution rights.
 from __future__ import annotations
 
 import fcntl
-import hashlib
 import json
-import mmap
 import os
-import re
 import shutil
-import struct
-from collections.abc import Mapping
-from contextlib import ExitStack
 from copy import copy
 from pathlib import Path
 
-from klab.canonical import canonical_digest, canonical_json
+from klab.canonical import canonical_digest
 from klab.corpus.admission_inspection_cache import (
     InspectionCache,
     capture,
     unchanged,
 )
-from klab.corpus.bounded_metadata import _HashedInput, _Reader
 from klab.corpus.build_outputs import (
     publish_staging,
     rights_file_entry,
     stage_declared_inputs,
+)
+from klab.corpus.completed_build_inputs import (
+    materialize_admission,
+    render_source,
+    source_render_stage,
 )
 from klab.corpus.preparation_inputs import (
     corpus_work_root,
     local_dependencies,
     local_scope,
 )
-from klab.corpus.prepared_shards import prepare_file
 from klab.corpus.project import (
+    declaration_payload,
     load_project,
     project_path,
     source_build_declarations,
 )
-from klab.corpus.rights import RightsPolicy, resolve_file_rights
 from klab.corpus.split_runs import (
     SplitStages,
-    _stamp,
-    external_sort,
-    rows,
+    checkpoint_stamp,
     write_rows,
 )
 from klab.corpus.streaming_build_rows import StreamBuildRows
-from klab.corpus.streaming_split_freeze import _AdmissionSpools
 from klab.corpus.view_checkpoints import ViewCheckpoints
 from klab.result_publication import sync_directory
 from klab.safe_io import symlinked
 from klab.training.manifest import sha256_file
 from klab.verification_proofs import artifact_fingerprint
 
-_HEX = re.compile(r"[0-9a-f]{64}\Z")
 _PHASE = "native-build-publication"
 _POLICY = "completed_local_preparation"
 
@@ -93,252 +86,10 @@ def _producer():
 
 
 def _small(path):
-    _stamp(path)
+    checkpoint_stamp(path)
     if path.stat().st_size > 4 * 1024**2:
         raise ValueError("completed preparation control metadata too large")
     return json.loads(path.read_bytes())
-
-
-class _FullDecisions(_AdmissionSpools):
-    def append(self, spool, item):
-        if (
-            not isinstance(item, dict)
-            or type(item.get("source_row_index")) is not int
-            or item["source_row_index"] < 0
-            or item.get("decision") not in {"qualify", "exclude", "quarantine"}
-            or not isinstance(item.get("source_row_sha256"), str)
-            or not _HEX.fullmatch(item["source_row_sha256"])
-        ):
-            raise ValueError("invalid completed row decision")
-        spool.stream.write(canonical_json(item) + b"\n")
-        spool.count += 1
-
-
-def _decision_table(directory, spool):
-    ordered = external_sort(
-        rows(spool.path), directory / "sorted", key=lambda row: row["source_row_index"]
-    )
-    data, keys = directory / "decisions.jsonl", directory / "keys.bin"
-    previous, count, qualified, offset = None, 0, 0, 0
-    data_sha, keys_sha = hashlib.sha256(), hashlib.sha256()
-    with data.open("xb") as target, keys.open("xb") as index:
-        for row in rows(ordered["path"]):
-            key = row["source_row_index"]
-            if key == previous:
-                raise ValueError("duplicate completed admission row")
-            raw = canonical_json(row) + b"\n"
-            entry = struct.pack("<QQQ", key, offset, len(raw))
-            target.write(raw)
-            data_sha.update(raw)
-            index.write(entry)
-            keys_sha.update(entry)
-            offset += len(raw)
-            previous, count = key, count + 1
-            qualified += row["decision"] == "qualify"
-        for stream in (target, index):
-            stream.flush()
-            os.fsync(stream.fileno())
-    files = [
-        ordered,
-        {
-            "path": str(data),
-            "sha256": data_sha.hexdigest(),
-            "bytes": data.stat().st_size,
-        },
-        {
-            "path": str(keys),
-            "sha256": keys_sha.hexdigest(),
-            "bytes": keys.stat().st_size,
-        },
-    ]
-    return {
-        "files": files,
-        "data": str(data),
-        "keys": str(keys),
-        "rows": count,
-        "qualified": qualified,
-    }
-
-
-class _DecisionLookup(Mapping):
-    def __init__(self, reference):
-        self.count = reference["rows"]
-        with ExitStack() as stack:
-            self.stream = stack.enter_context(Path(reference["data"]).open("rb"))
-            source = stack.enter_context(Path(reference["keys"]).open("rb"))
-            self.keys = (
-                stack.enter_context(
-                    mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ)
-                )
-                if self.count
-                else None
-            )
-            self.owned = stack.pop_all()
-        self.previous = None
-        self.cached = None
-
-    def __getitem__(self, key):
-        if type(key) is not int:
-            raise KeyError(key)
-        if key == self.previous:
-            return self.cached
-        left, right = 0, self.count
-        while left < right:
-            middle = (left + right) // 2
-            observed = struct.unpack_from("<Q", self.keys, middle * 24)[0]
-            if observed < key:
-                left = middle + 1
-            else:
-                right = middle
-        if left == self.count:
-            raise KeyError(key)
-        observed, offset, length = struct.unpack_from("<QQQ", self.keys, left * 24)
-        if observed != key:
-            raise KeyError(key)
-        self.stream.seek(offset)
-        self.previous, self.cached = key, json.loads(self.stream.read(length))
-        return self.cached
-
-    def __iter__(self):
-        for ordinal in range(self.count):
-            yield struct.unpack_from("<Q", self.keys, ordinal * 24)[0]
-
-    def __len__(self):
-        return self.count
-
-    def close(self):
-        self.owned.close()
-
-
-def _admissions(directory, path, expected, declarations):
-    before = _stamp(path)
-    store = _FullDecisions(directory)
-    try:
-        with path.open("rb") as stream:
-            hashed = _HashedInput(stream)
-            manifest = _Reader(
-                hashed, store, path.stat().st_size + 1, 4 * 1024**2, 8 * 1024**2
-            ).read()
-        if hashed.digest.hexdigest() != expected or _stamp(path) != before:
-            raise ValueError("completed admission digest mismatch")
-        if (
-            set(manifest) != {"schema_version", "policy_id", "policy_sha256", "sources"}
-            or manifest["schema_version"] != 2
-            or not manifest["policy_id"]
-            or not _HEX.fullmatch(manifest["policy_sha256"])
-        ):
-            raise ValueError("complete reviewed v2 admission required")
-        store.close(True)
-    except BaseException:
-        store.close(False)
-        raise
-    sources, files = {}, []
-    for item in manifest["sources"]:
-        source_id = item["source_id"]
-        if source_id not in declarations or source_id in sources:
-            raise ValueError("completed admission source inventory differs")
-        source = declarations[source_id]
-        if (
-            source["kind"] != "huggingface_dataset"
-            or source["schema_version"] != 2
-            or item["source_revision"] != source["revision"]
-        ):
-            raise ValueError("completed build requires unchanged v2 HF sources")
-        for key in ("snapshot_sha256", "sample_sha256"):
-            if not _HEX.fullmatch(item[key]):
-                raise ValueError("invalid completed source digest")
-        policy = RightsPolicy.model_validate(item["rights"])
-        rights = resolve_file_rights(
-            policy, item["sample_path"], b"", prospective_private_research=True
-        )
-        if (
-            policy.training_eligibility not in {"eligible", "eligible_with_obligations"}
-            or policy.redistribution_mode != "metadata_reconstruction_only"
-            or not policy.license_references
-            or rights.training_eligibility
-            not in {"eligible", "eligible_with_obligations"}
-        ):
-            raise ValueError("completed source lacks admitted local training rights")
-        subdirectory = directory / source_id
-        subdirectory.mkdir()
-        decisions = _decision_table(subdirectory, item["records"])
-        files.extend(decisions.pop("files"))
-        sources[source_id] = {
-            "snapshot_sha256": item["snapshot_sha256"],
-            "sample_path": item["sample_path"],
-            "sample_sha256": item["sample_sha256"],
-            "rights": rights.model_dump(mode="json"),
-            "decisions": decisions,
-            "license_label": item["license_label"],
-            "policy_spdx_expression": policy.spdx_expression,
-            "policy_id": manifest["policy_id"],
-            "policy_sha256": manifest["policy_sha256"],
-        }
-    if set(sources) != set(declarations):
-        raise ValueError("completed admission source inventory differs")
-    return {"files": files, "sources": sources}
-
-
-def _prepared_source(directory, source, header, path, build_id, progress, release):
-    from klab.corpus.rights import FileRights
-
-    rights = FileRights.model_validate(header["rights"])
-    decision_paths = [Path(header["decisions"][name]) for name in ("data", "keys")]
-    decision_dependencies = capture(decision_paths)
-    for name, decision_path in zip(("data", "keys"), decision_paths, strict=True):
-        if sha256_file(decision_path) != header["decision_digests"][name + "_sha256"]:
-            raise ValueError("source admission decisions changed before rendering")
-    lookup = _DecisionLookup(header["decisions"])
-    try:
-        admitted = {
-            name: header[name]
-            for name in (
-                "license_label",
-                "policy_spdx_expression",
-                "policy_id",
-                "policy_sha256",
-            )
-        } | {"rights": rights, "decisions": lookup}
-        prepared = prepare_file(
-            build_id=build_id,
-            prepared_root=directory,
-            source=source,
-            file={
-                "path": header["sample_path"],
-                "sha256": header["sample_sha256"],
-                "size": path.stat().st_size,
-            },
-            snapshot_sha=header["snapshot_sha256"],
-            source_path=path,
-            decision=rights,
-            progress=progress,
-            normalizer_options=release.normalizer,
-            document_policy=release.policy.documents,
-            record_admission=admitted,
-            admission_sha256=header["admission_sha256"],
-        )
-    finally:
-        lookup.close()
-    unchanged(decision_dependencies)
-    receipt = _small(prepared / "receipt.json")
-    if receipt["counts"]["documents"] != header["decisions"]["qualified"]:
-        raise ValueError("admitted source row inventory differs from documents")
-    outputs = [
-        {
-            "path": str(prepared / name),
-            "sha256": value["sha256"],
-            "bytes": value["size"],
-        }
-        for name, value in receipt["files"].items()
-    ]
-    outputs.append(
-        {
-            "path": str(prepared / "receipt.json"),
-            "sha256": sha256_file(prepared / "receipt.json"),
-            "bytes": (prepared / "receipt.json").stat().st_size,
-        }
-    )
-    return {"files": outputs, "prepared": str(prepared), "counts": receipt["counts"]}
 
 
 def _check_completed_producer(project, producer):
@@ -392,7 +143,6 @@ def _build_completed(project, root, workspace):
     from klab.corpus.dedup_policy import is_strict_chain
     from klab.corpus.large_build import _emit_build
     from klab.corpus.pipeline import (
-        _model,
         _ordered_transforms,
         _uses_disk_lm_builder,
     )
@@ -410,7 +160,7 @@ def _build_completed(project, root, workspace):
         or any(source.kind != "huggingface_dataset" for source in project.sources)
     ):
         raise ValueError(
-            "completed preparation build requires v2 HF document-split LM inputs"
+            "completed preparation build requires HF document-split LM inputs"
         )
     split = project_path(project.root, project.config.splits)
     receipt_path = split.with_name(split.stem + ".receipt.json")
@@ -454,8 +204,9 @@ def _build_completed(project, root, workspace):
     assignment = project.splits.model_dump(mode="json").get("assignment_file")
     if assignment is not None:
         inputs.append(split.parent / ("assignments-" + assignment["sha256"] + ".jsonl"))
+    producer_implementation = _producer()
     invocation = {
-        "producer": _producer(),
+        "producer": producer_implementation,
         "project": project.model_dump(mode="json"),
         "inputs": capture(inputs),
     }
@@ -473,23 +224,17 @@ def _build_completed(project, root, workspace):
         "source_validation": "Completed producer evidence reused; row admission was not replayed by this local build.",
     }
     base_request = {
-        "producer": _producer(),
+        "producer": producer_implementation,
         "project": project.model_dump(mode="json"),
-        "inputs": {**capture(inputs), **adopted.dependencies},
+        "inputs": {**invocation["inputs"], **adopted.dependencies},
         "inventory_execution": provenance,
     }
-    admission_stages = SplitStages(
-        workspace / "build-input-stages", base_request, work_root=root
-    )
-    if admission_stages.cache.proofs is None or not admission_stages.cache.writable:
-        raise ValueError(
-            "completed preparation requires existing trusted native completion storage"
-        )
-    admission = admission_stages.phase(
-        "build-admission-materialization",
-        lambda d: _admissions(
-            d, admission_path, project.release.record_admission.sha256, declarations
-        ),
+    admission = materialize_admission(
+        workspace / "build-input-stages",
+        root,
+        admission_path,
+        project.release.record_admission.sha256,
+        declarations,
     )
     source_paths, lock = {}, {"sources": {}}
     for source in project.sources:
@@ -498,7 +243,7 @@ def _build_completed(project, root, workspace):
         path = snapshot / "files" / header["sample_path"]
         if not path.resolve().is_relative_to(snapshot / "files"):
             raise ValueError("completed source shard escapes snapshot")
-        _stamp(path)
+        checkpoint_stamp(path)
         source_paths[source.id] = path
         lock["sources"][source.id] = {
             "declaration_sha256": declaration_sha256(source),
@@ -513,31 +258,17 @@ def _build_completed(project, root, workspace):
         "inputs": {**base_request["inputs"], **source_configuration},
     }
     stages = SplitStages(workspace / "build-stages", request, work_root=root)
-    source_stages_by_id = {}
-    for source in project.sources:
-        header = admission["sources"][source.id]
-        decisions = header["decisions"]
-        source_request = {
-            "producer": _producer(),
-            "source": declarations[source.id],
-            "normalizer": project.release.normalizer.model_dump(mode="json"),
-            "document_policy": project.release.policy.documents.model_dump(mode="json"),
-            "admission": {
-                **{key: value for key, value in header.items() if key != "decisions"},
-                "decisions": {
-                    "rows": decisions["rows"],
-                    "qualified": decisions["qualified"],
-                    "data_sha256": sha256_file(Path(decisions["data"])),
-                    "keys_sha256": sha256_file(Path(decisions["keys"])),
-                },
-            },
-            "inputs": capture([source_paths[source.id]]),
-        }
-        source_stages_by_id[source.id] = SplitStages(
+    source_stages_by_id = {
+        source.id: source_render_stage(
             workspace / "source-build-stages" / source.id,
-            source_request,
-            work_root=root,
+            root,
+            declarations[source.id],
+            admission["sources"][source.id],
+            source_paths[source.id],
+            project.release,
         )
+        for source in project.sources
+    }
     scope = {
         "source_stage_ids": {
             key: value.identity for key, value in source_stages_by_id.items()
@@ -554,15 +285,15 @@ def _build_completed(project, root, workspace):
     }
     identity = {
         "project_id": project.config.id,
-        "project": _model(project.config),
+        "project": declaration_payload(project.config),
         "lock": {
             key: {k: value[k] for k in ("declaration_sha256", "snapshot_sha256")}
             for key, value in sorted(lock["sources"].items())
         },
         "sources": declarations,
-        "transforms": [_model(t) for t in transforms],
-        "split": _model(project.splits),
-        "release": _model(project.release),
+        "transforms": [declaration_payload(t) for t in transforms],
+        "split": declaration_payload(project.splits),
+        "release": declaration_payload(project.release),
         "implementation_sha256": sha256_file(Path(__file__).with_name("pipeline.py")),
         "schema_implementation_sha256": sha256_file(
             Path(__file__).with_name("project.py")
@@ -595,20 +326,13 @@ def _build_completed(project, root, workspace):
             "admission_sha256": project.release.record_admission.sha256,
         }
         source_stages = source_stages_by_id[source.id]
-        header["decision_digests"] = source_stages.request["admission"]["decisions"]
-        result = source_stages.phase(
-            "native-shard-render",
-            lambda d, source=source, header=header, source_identity=source_stages.identity: (
-                _prepared_source(
-                    d,
-                    source,
-                    header,
-                    source_paths[source.id],
-                    source_identity,
-                    progress,
-                    project.release,
-                )
-            ),
+        result = render_source(
+            source_stages,
+            source,
+            header,
+            source_paths[source.id],
+            progress,
+            project.release,
         )
         prepared.append(Path(result["prepared"]))
         rendered_sources.extend(result["files"])

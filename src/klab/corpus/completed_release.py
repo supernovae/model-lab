@@ -13,7 +13,7 @@ from pathlib import Path
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.admission_inspection_cache import capture, unchanged
 from klab.corpus.preparation_inputs import corpus_work_root, local_scope
-from klab.corpus.split_runs import SplitStages, _stamp, write_rows
+from klab.corpus.split_runs import SplitStages, checkpoint_stamp, write_rows
 from klab.result_publication import sync_directory
 from klab.training.manifest import sha256_file
 from klab.verification_proofs import read_trusted_small as _small
@@ -147,7 +147,7 @@ def retained_payload(path):
         if (
             not output.is_relative_to(path)
             or ".." in output.parts
-            or _stamp(output) != item["stamp"]
+            or checkpoint_stamp(output) != item["stamp"]
         ):
             raise ValueError("retained native build output changed")
     for name, item in build["files"].items():
