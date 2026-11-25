@@ -739,7 +739,7 @@ The disk builder reuses verified outputs after a failure or a kill:
 | --- | --- | --- |
 | normalize | `prepared/normalized-source-v2/<source>/<digest>`, one shard per source file | the shard's receipt and three output hashes verify |
 | index | `stages/.index-<key>.groups` for incomplete work, then `stages/index/<key>/index.sqlite` | each group or the completed index has a matching verified receipt |
-| dedup | `stages/dedup/<key>/dedup.sqlite`, `groups.jsonl` | its receipt verifies; key below |
+| dedup | `stages/.dedup-<key>.groups` for incomplete work, then `stages/dedup/<key>/dedup.sqlite` and `groups.jsonl` | the ordered group prefix verifies or the completed stage receipt verifies |
 | views | `../.views-<key>/build` with receipts beside the staged output | matching build and stage inputs, with a verified append boundary |
 | publish | the build directory itself, renamed into place atomically | the build exists and verifies |
 
@@ -752,8 +752,9 @@ in its `receipt.json` next to the SHA-256 and size of every output file:
   duplicate keys, source ranks, reviewed row-level files and the implementation
   files `large_build.py`, `pipeline.py`, `split_assignments.py` and
   `dedup_policy.py`.
-- **dedup**: the index key, the whole `release.policy.duplicates` section and
-  the digests of `large_build.py` and `dedup_policy.py`.
+- **dedup**: the verified index receipt digest, the whole
+  `release.policy.duplicates` section and the digests of `large_build.py`,
+  `dedup_policy.py` and `view_checkpoints.py`.
 
 A stage output is trusted only after its receipt verifies: the recorded key is
 the digest of the recorded inputs, the directory holds exactly the receipted
@@ -813,6 +814,17 @@ briefly. Deduplication reads the index metadata and writes its
 decisions into `dedup.sqlite` beside `groups.jsonl`. Its passes
 report progress as `dedup_groups`, `dedup_compress` and `dedup_reasons`.
 Use fast storage for `WORK/corpora/<id>/builds/stages`. A symlink works.
+
+Native dedup checkpoints the ordered group report and a binary file of
+document links. A window covers up to 100,000 origin rows, including unique
+origins, and can close after 64 MiB of group and link output. An entire
+duplicate group stays together and can cross either bound. Retry verifies
+the append prefix and replays its links in a fresh decisions database.
+It scans the index and calls the duplicate policy only for the unfinished
+suffix. The final report is linked into the published stage on the same
+filesystem, and the link file and journal are reclaimed after publication.
+The representative compression, component and drop-reason passes can
+still repeat. The scratch database from an interrupted pass is discarded.
 
 - Publishing a stage output removes incomplete directories and every older
   output of that stage except the newest one, so at most two of each remain
@@ -1393,7 +1405,7 @@ needs measurement where the table gives historical or fixture evidence.
 | Acquisition and transport cache | Published source snapshot, verified transport body or adapter-specific checkpoint. See [recovery by source adapter](#recovery-by-source-adapter). | Adapter-specific work and verification. Indexed Wikimedia retains committed planning groups and selected member groups. A partial pinned transfer restarts its body. | On a 287 MiB Wikimedia shard, a stop after 128 planned members avoided 539.88 MiB of retry decompression. [#592](https://github.com/supernovae/model-lab/pull/592) |
 | Snapshot verification | Signed byte checks of eligible files in published snapshots, then a complete snapshot proof. | Reuse completed eligible file hashes at the same path; restart an incomplete file. An explicit cold check reads the bytes again. | Historical Workshop cold pass, about 15 min for 33 snapshots and 108 GB. See [snapshot hash recovery measurements](#snapshot-hash-recovery-measurements). |
 | Native disk build, normalize | Receipted shard per source file. | Verify completed shards and re-normalize unfinished files. | Historical Workshop normalize, about 25 min for the 6.7M-document workload. [#491](https://github.com/supernovae/model-lab/pull/491) |
-| Native disk build, index and dedup | Verified groups of prepared file references, then the assembled index and complete dedup stage. Reviewed row admission uses indexed file and row numbers. | Reuse verified input groups. Repeat the unfinished group, compact index assembly or dedup stage as applicable. | See [native index and payload read measurements](#native-index-and-payload-read-measurements) and [native admission coverage measurements](#native-admission-coverage-measurements). Historical Workshop indexing took about 30 min for roughly 13M rows. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
+| Native disk build, index and dedup | Verified groups of prepared file references, the assembled index, verified duplicate-group windows, and the complete dedup stage. Reviewed row admission uses indexed file and row numbers. | Repeat the unfinished index group or compact index assembly. Verify and replay committed dedup group links, scan unfinished windows, and repeat the final representative and drop-reason passes as needed. | See [native index and payload read measurements](#native-index-and-payload-read-measurements) and [native dedup recovery measurements](#native-dedup-recovery-measurements). Historical Workshop indexing took about 30 min for roughly 13M rows. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB, lineage and view measurement checkpoints, and a receipted census. Final publication by rename. | Verify the committed view prefix, reconstruct its digests and render the uncommitted tail. Reuse finished census work for matching inputs. The manifest hashes ancillary outputs and reuses the view checksums. A stop in the final lineage sort or measurement merge may repeat that step. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. [Native build census measurements](#native-build-census-measurements) cover the report phase. [#579](https://github.com/supernovae/model-lab/pull/579) |
 | Completed-preparation build | Authenticated per-source render, completed sort and dedup phases, view range checkpoints and a signed receipt before publication. | Repeat an unfinished upstream phase. During view recovery, verify the committed prefix and resume from the stored span and document cursors. Intact staged views can publish directly, and a renamed build can recover completion from the signed receipt. A partial emission retry can recopy the frozen control inputs. | See [completed-preparation view recovery measurements](#completed-preparation-view-recovery-measurements). Production restart cost unmeasured. |
 | Freeze | Native staging rename and build tombstone, signed verification after a staged replay, then the public release. Completed preparation seals a retained release against its existing build. | Reuse the complete staged receipt at the same path, or resume an unfinished check from eligible file and replay proofs. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. See [staged freeze recovery measurements](#staged-freeze-recovery-measurements). [#501](https://github.com/supernovae/model-lab/pull/501) |
@@ -1754,6 +1766,35 @@ fresh. The retained checkpoint checksum now doubles as the manifest checksum
 at the final boundary. On a separate stop immediately after rename,
 the retry recorded completion in 76 ms, read 8 KiB from storage, and rendered
 zero documents. Production and slower-storage timings remain open.
+
+#### Native dedup recovery measurements
+
+Three single-process cold trials per case on NVMe used 400,000 documents
+and a 221 MB index per fixture. Both fixtures used the chain resolver and
+two duplicate methods, with 8,000 groups in the sparse fixture and 320,000
+in the dense fixture. An early SIGKILL followed two committed windows.
+The late dense SIGKILL followed all nine windows and preceded
+representative compression. The timings include opening the decisions
+database and running dedup. They exclude input-index and final stage receipt
+verification. All group report and ordered decision digests matched within
+each fixture.
+
+| Run | Median wall time | Logical reads | Device reads | Device writes |
+| --- | ---: | ---: | ---: | ---: |
+| Sparse, prior full pass | 0.846 s | 419 MB | 153 MB | 119 MB |
+| Sparse, fresh with checkpoints | 0.929 s | 471 MB | 153 MB | 119 MB |
+| Sparse, early retry | 0.836 s | 439 MB | 137 MB | 119 MB |
+| Dense, prior full pass | 4.189 s | 579 MB | 153 MB | 227 MB |
+| Dense, fresh with checkpoints | 4.512 s | 634 MB | 153 MB | 232 MB |
+| Dense, early retry | 4.051 s | 658 MB | 165 MB | 204 MB |
+| Dense, late retry | 2.518 s | 727 MB | 199 MB | 116 MB |
+
+The dense link journal used 5.12 MB beyond the report that becomes the final
+audit input. Median peak RSS in the dense runs stayed near 196 MiB. The
+logical read overhead includes bounded index look-ahead and prefix
+verification. The late retry still replays links and recomputes final
+decisions. Production-scale, slower-storage and ranked resolver performance
+remain unmeasured.
 
 ### Select families, screen duplicates, and build a schedule
 

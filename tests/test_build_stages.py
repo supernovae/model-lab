@@ -119,6 +119,49 @@ def test_a_build_killed_at_any_stage_resumes_without_redoing_earlier_stages(
         assert not list(lab.work.glob("corpora/*/builds/stages/.index-*.groups"))
     calls.reset()
 
+    shutil.rmtree(reference)
+    scan_keys = large_build._duplicate_keys
+    dedup_scans = []
+    committed_windows = []
+    committed_size = 0
+    commit = ViewCheckpoints.commit
+
+    def observe_dedup_scan(connection, method, after, end):
+        dedup_scans.append((method, after))
+        return scan_keys(connection, method, after, end)
+
+    def stop_after_dedup_windows(checkpoints, state):
+        nonlocal committed_size
+        commit(checkpoints, state)
+        if checkpoints.root.name.startswith(".dedup-"):
+            report_size = (checkpoints.root / "build" / "groups.jsonl").stat().st_size
+            if report_size > committed_size:
+                committed_size = report_size
+                committed_windows.append(
+                    (dedup_scans[-1], max(checkpoints.root.glob("commit-*.json")))
+                )
+                if len(committed_windows) == 2:
+                    raise OSError("interrupted after dedup windows")
+
+    with monkeypatch.context() as recovery:
+        recovery.setattr(large_build, "_DEDUP_WINDOW_KEYS", 2)
+        recovery.setattr(large_build, "_duplicate_keys", observe_dedup_scan)
+        with monkeypatch.context() as fault:
+            fault.setattr(ViewCheckpoints, "commit", stop_after_dedup_windows)
+            with pytest.raises(OSError, match="interrupted after dedup windows"):
+                lab.run("corpus", "build", project, "--offline")
+        assert not reference.exists()
+        intact, (damaged, cursor) = committed_windows
+        with cursor.open("r+b") as stream:
+            stream.write(b"x")
+        dedup_scans.clear()
+        reference = Path(lab.run("corpus", "build", project, "--offline"))
+        assert intact[0] not in dedup_scans
+        assert damaged in dedup_scans
+        assert tree(reference) == expected
+        assert not list(lab.work.glob("corpora/*/builds/stages/.dedup-*.groups"))
+    calls.reset()
+
     for failing, redone, kept in (
         ("index", {"index": 1, "dedup": 1, "emit": 1}, set()),
         ("dedup", {"index": 0, "dedup": 1, "emit": 1}, {"index"}),
@@ -211,7 +254,7 @@ def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(
 
     def interrupt_after_commit(checkpoints, state):
         commit(checkpoints, state)
-        if state["count"] == 2:
+        if state.get("count") == 2:
             with (checkpoints.root / "build" / "documents.jsonl").open("ab") as stream:
                 stream.write(b"uncommitted tail")
             raise OSError("interrupted view emission")

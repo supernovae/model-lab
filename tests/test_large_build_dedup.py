@@ -8,10 +8,14 @@ import pytest
 
 from klab.corpus.large_build import INDEX_SCHEMA, _deduplicate, insert_indexed
 from klab.corpus.project import DuplicatePolicy
+from klab.corpus.view_checkpoints import ViewCheckpoints
 
 
 class _Progress:
     def update(self, **_: object) -> None:
+        pass
+
+    def record(self, _: str) -> None:
         pass
 
 
@@ -60,13 +64,16 @@ RANKED = DuplicatePolicy(
 )
 
 
-def _run(connection: sqlite3.Connection, tmp_path: Path, policy=CHAIN):
+def _run(
+    connection: sqlite3.Connection, tmp_path: Path, policy=CHAIN, *, checkpoints=None
+):
     return _deduplicate(
         connection,
         tmp_path / "groups.jsonl",
         policy=policy,
         diagnostics=tmp_path / "diagnostics.json",
         progress=_Progress(),
+        checkpoints=checkpoints,
     )
 
 
@@ -139,13 +146,31 @@ def test_chain_and_component_resolution_agree_on_a_simple_corpus(
         ("e-train", "train", "r3", "n3"),
     ]
     outcomes = []
+    checkpoint_root = tmp_path / "ranked-checkpoint"
     for index, policy in enumerate((CHAIN, RANKED)):
         directory = tmp_path / str(index)
         directory.mkdir()
         connection = _database(rows)
-        _run(connection, directory, policy)
+        checkpoints = (
+            ViewCheckpoints(checkpoint_root, "ranked") if policy is RANKED else None
+        )
+        _run(connection, directory, policy, checkpoints=checkpoints)
         outcomes.append(_outcome(connection))
     assert outcomes[0] == outcomes[1]
+
+    resumed = tmp_path / "resumed"
+    resumed.mkdir()
+    connection = _database(rows)
+    _run(
+        connection,
+        resumed,
+        RANKED,
+        checkpoints=ViewCheckpoints(checkpoint_root, "ranked"),
+    )
+    assert _outcome(connection) == outcomes[1]
+    assert (resumed / "groups.jsonl").read_bytes() == (
+        tmp_path / "1/groups.jsonl"
+    ).read_bytes()
 
 
 # --- parity: the in-memory and disk-backed builders must decide identically ---

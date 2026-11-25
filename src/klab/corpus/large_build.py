@@ -14,10 +14,11 @@ import os
 import re
 import shutil
 import sqlite3
+import struct
 import tempfile
 from array import array
 from collections import Counter, OrderedDict, defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from concurrent.futures import Future, ProcessPoolExecutor
 from contextlib import ExitStack, closing, nullcontext
 from dataclasses import dataclass
@@ -809,7 +810,10 @@ def open_dedup(index: Path, database: Path) -> sqlite3.Connection:
 
 
 def _duplicate_diagnostics(
-    groups_path: Path, rejected_path: Path | None, diagnostics: Path, error: str
+    groups_path: Path,
+    source_events: Iterable[Path | dict[str, Any]],
+    diagnostics: Path,
+    error: str,
 ) -> None:
     """Preserve the complete observed groups without loading them."""
     diagnostics.parent.mkdir(parents=True, exist_ok=True)
@@ -821,15 +825,48 @@ def _duplicate_diagnostics(
                     report.write(b",")
                 report.write(row.rstrip(b"\n"))
         report.write(b'],"error":' + canonical_json(error) + b',"rejected":[')
-        if rejected_path is not None:
-            with rejected_path.open("rb") as rejected:
-                for index, row in enumerate(rejected):
-                    if index:
-                        report.write(b",")
-                    report.write(row.rstrip(b"\n"))
+        for index, row in enumerate(_rejected_rows(source_events)):
+            if index:
+                report.write(b",")
+            report.write(row.rstrip(b"\n"))
         report.write(b"]}\n")
         report.flush()
         os.fsync(report.fileno())
+
+
+_DEDUP_WINDOW_KEYS = 100_000
+_DEDUP_WINDOW_BYTES = 64 * 1024**2
+_DEDUP_LINK_COUNTS = struct.Struct("<II")
+
+
+def _duplicate_key_bounds(connection, method, after):
+    """Seek a batch boundary in the covering index, including unique origins."""
+    predicate, values = _duplicate_key_start(method, after)
+    row = connection.execute(
+        f"SELECT origin FROM origins WHERE {predicate} ORDER BY origin LIMIT 1 OFFSET ?",
+        (*values, _DEDUP_WINDOW_KEYS - 1),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _duplicate_key_start(method, after):
+    return (
+        ("method=?", (method,))
+        if after is None
+        else ("method=? AND origin>?", (method, after))
+    )
+
+
+def _duplicate_keys(connection, method, after, end):
+    predicate, values = _duplicate_key_start(method, after)
+    if end is not None:
+        predicate += " AND origin<=?"
+        values = (*values, end)
+    return connection.execute(
+        f"SELECT origin FROM origins WHERE {predicate} "
+        "GROUP BY origin HAVING COUNT(*)>1 ORDER BY origin",
+        values,
+    )
 
 
 def _deduplicate(
@@ -839,7 +876,8 @@ def _deduplicate(
     policy: Any,
     diagnostics: Path,
     progress: BuildProgress,
-    rejected_path: Path | None = None,
+    source_events: Iterable[Path | dict[str, Any]] = (),
+    checkpoints: ViewCheckpoints | None = None,
 ) -> tuple[int, int]:
     """Apply `release.policy.duplicates` with disk-backed joins.
 
@@ -863,104 +901,183 @@ def _deduplicate(
         for method in ("raw", "normalized", "canonical_origin")
         if method in policy.keys
     ]
-    total = connection.execute("SELECT COUNT(*) FROM dedup").fetchone()[0]
-    parents = array("I", range(total + 1))
+    parents = None
+    if not chain:
+        total = connection.execute("SELECT COUNT(*) FROM dedup").fetchone()[0]
+        parents = array("I", range(total + 1))
     progress.update(phase="dedup_groups")
 
     if chain:
         connection.execute("UPDATE dedup SET representative_id=document_id")
 
-    def members_query() -> str:
-        return (
-            "SELECT x.document_number,x.document_id,x.split,x.source_rank,"
-            "x.document_kind,x.rights_signature FROM origins o "
-            "JOIN dedup x ON x.document_number=o.document_number "
-            "WHERE o.method=? AND o.origin=? ORDER BY x.document_id"
-        )
-
+    members_query = (
+        "SELECT x.document_number,x.document_id,x.split,x.source_rank,"
+        "x.document_kind,x.rights_signature FROM origins o "
+        "JOIN dedup x ON x.document_number=o.document_number "
+        "WHERE o.method=? AND o.origin=? ORDER BY x.document_id"
+    )
     groups = 0
-    with groups_path.open("wb") as output:
-        for method in methods:
-            keys = connection.execute(
-                "SELECT origin FROM origins WHERE method=? GROUP BY origin "
-                "HAVING COUNT(*)>1 ORDER BY origin",
-                (method,),
-            )
-            needs_rights = method == "normalized" and policy.rights_conflict == "error"
-            for (key,) in keys:
-                members: list[Member] = []
-                rows: list[tuple[int, str, str]] = []
-                for (
-                    number,
-                    identifier,
-                    split,
-                    rank,
-                    kind,
-                    signature,
-                ) in connection.execute(members_query(), (method, key)):
-                    members.append(
-                        Member(
-                            identifier,
-                            split,
-                            rank,
-                            kind,
-                            signature if needs_rights else None,
-                        )
-                    )
-                    rows.append((number, identifier, split))
-                group = resolve_group(method, members, policy)
-                _output(
-                    output,
-                    {
-                        "method": method,
-                        "sha256": (
-                            hashlib.sha256(key.encode()).hexdigest()
-                            if method == "canonical_origin"
-                            else key
-                        ),
-                        "origins": [row[1] for row in rows],
-                        "splits": group.splits,
-                        "representative": group.representative,
-                    },
+
+    def apply(representative, linked, train):
+        nonlocal groups
+        if chain:
+            if train:
+                connection.executemany(
+                    "UPDATE dedup SET representative_id=? WHERE document_number=?",
+                    ((representative, number) for number in train),
                 )
-                if group.error:
-                    output.flush()
-                    os.fsync(output.fileno())
-                    _duplicate_diagnostics(
-                        groups_path, rejected_path, diagnostics, group.error
+            connection.executemany(
+                "UPDATE dedup SET "
+                "representative_id=MIN(representative_id,?) WHERE document_number=?",
+                ((representative, number) for number in linked),
+            )
+        else:
+            assert parents is not None
+            members = iter(linked)
+            first = find_root(parents, next(members))
+            for number in members:
+                parents[find_root(parents, number)] = first
+        groups += 1
+        progress.update(documents=len(linked) + len(train))
+
+    report_path = groups_path
+    if checkpoints is not None:
+        report_path = checkpoints.root / "build" / "groups.jsonl"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        if any(
+            path.is_symlink()
+            for path in (
+                report_path.parent,
+                report_path,
+                report_path.with_name("links.bin"),
+            )
+        ):
+            raise ValueError(f"symlinked dedup output: {report_path.parent}")
+    with ExitStack() as stack:
+        output = stack.enter_context(report_path.open("a+b" if checkpoints else "wb"))
+        links = None
+        first_method, after = 0, None
+        if checkpoints is not None:
+            links_stream = stack.enter_context(
+                report_path.with_name("links.bin").open("a+b")
+            )
+            output_view = checkpoints.add("groups.jsonl", output)
+            links = checkpoints.add("links.bin", links_stream)
+            state = checkpoints.restore()
+            if checkpoints.damaged:
+                progress.record("discarded_damaged_dedup_checkpoint")
+            if state:
+                first_method, after = state["method"], state["after"]
+                progress.record("reused_dedup_group_windows")
+                output.seek(0)
+                links_stream.seek(0)
+                for rendered in output:
+                    linked, train = _DEDUP_LINK_COUNTS.unpack(
+                        links_stream.read(_DEDUP_LINK_COUNTS.size)
                     )
-                    raise ValueError(
-                        describe_failure(
-                            group.error,
-                            method,
-                            key,
-                            [row[1] for row in rows],
-                            group.splits,
+                    numbers = struct.unpack(
+                        f"<{linked + train}I", links_stream.read(4 * (linked + train))
+                    )
+                    representative = (
+                        json.loads(rendered)["representative"] if chain else None
+                    )
+                    apply(representative, numbers[:linked], numbers[linked:])
+                if links_stream.read(1):
+                    raise ValueError("dedup links and group report disagree")
+                output.seek(0, os.SEEK_END)
+                links_stream.seek(0, os.SEEK_END)
+            target = output_view
+        else:
+            target = output
+
+        def scan(method, after, end):
+            needs_rights = method == "normalized" and policy.rights_conflict == "error"
+            written = 0
+            with closing(_duplicate_keys(connection, method, after, end)) as keys:
+                for (key,) in keys:
+                    rows = connection.execute(members_query, (method, key)).fetchall()
+                    group = resolve_group(
+                        method,
+                        (
+                            Member(
+                                identifier,
+                                split,
+                                rank,
+                                kind,
+                                signature if needs_rights else None,
+                            )
+                            for _, identifier, split, rank, kind, signature in rows
+                        ),
+                        policy,
+                    )
+                    ids = [row[1] for row in rows]
+                    rendered = (
+                        canonical_json(
+                            {
+                                "method": method,
+                                "sha256": hashlib.sha256(key.encode()).hexdigest()
+                                if method == "canonical_origin"
+                                else key,
+                                "origins": ids,
+                                "splits": group.splits,
+                                "representative": group.representative,
+                            }
                         )
+                        + b"\n"
                     )
-                if chain:
-                    train = [row[0] for row in rows if row[2] == "train"]
-                    linked = [row[0] for row in rows]
-                    if group.contaminated:
-                        # Train copies follow the held-out document.
-                        connection.executemany(
-                            "UPDATE dedup SET representative_id=? WHERE document_number=?",
-                            ((group.representative, number) for number in train),
+                    target.write(rendered)
+                    if group.error:
+                        output.flush()
+                        os.fsync(output.fileno())
+                        _duplicate_diagnostics(
+                            report_path, source_events, diagnostics, group.error
                         )
-                        linked = [row[0] for row in rows if row[2] != "train"]
-                    connection.executemany(
-                        "UPDATE dedup SET "
-                        "representative_id=MIN(representative_id,?) WHERE document_number=?",
-                        ((group.representative, number) for number in linked),
-                    )
-                else:
-                    first = find_root(parents, rows[0][0])
-                    for row in rows[1:]:
-                        parents[find_root(parents, row[0])] = first
-                groups += 1
-                progress.update(documents=len(rows))
+                        raise ValueError(
+                            describe_failure(
+                                group.error, method, key, ids, group.splits
+                            )
+                        )
+                    linked, train = [], []
+                    for number, _, split, *_ in rows:
+                        if chain and group.contaminated and split == "train":
+                            train.append(number)
+                        else:
+                            linked.append(number)
+                    if links is not None:
+                        encoded_links = _DEDUP_LINK_COUNTS.pack(
+                            len(linked), len(train)
+                        ) + struct.pack(
+                            f"<{len(linked) + len(train)}I", *linked, *train
+                        )
+                        links.write(encoded_links)
+                        written += len(rendered) + len(encoded_links)
+                    apply(group.representative, linked, train)
+                    if written >= _DEDUP_WINDOW_BYTES:
+                        return key
+            return end
+
+        for index in range(first_method, len(methods)):
+            method = methods[index]
+            if checkpoints is None:
+                scan(method, None, None)
+                continue
+            while True:
+                end = _duplicate_key_bounds(connection, method, after)
+                after = scan(method, after, end)
+                checkpoints.commit(
+                    {
+                        "method": index if after is not None else index + 1,
+                        "after": after,
+                    }
+                )
+                if after is None:
+                    break
         output.flush()
         os.fsync(output.fileno())
+
+    if checkpoints is not None:
+        # The stage can seal this immutable link without copying the report.
+        os.link(report_path, groups_path)
 
     if chain:
         connection.commit()
@@ -1015,6 +1132,7 @@ def _deduplicate(
     # A connected component can link distinct raw, normalized and page origins.
     # Whole components select one deterministic representative, preserving the
     # validation/test isolation gate even for transitive overlaps.
+    assert parents is not None
     winner: dict[int, tuple[Any, ...]] = {}
     heldout_mask: dict[int, int] = defaultdict(int)
     cleaning_mask: dict[int, int] = defaultdict(int)
@@ -1161,15 +1279,18 @@ def _document_lineage(
     return row
 
 
+def _rejected_rows(source_events: Iterable[Path | dict[str, Any]]) -> Iterator[bytes]:
+    for event in source_events:
+        if isinstance(event, Path):
+            with (event / "rejected.jsonl").open("rb") as source:
+                yield from source
+        else:
+            yield canonical_json(event) + b"\n"
+
+
 def _write_rejected(target: Path, source_events: list[Path | dict[str, Any]]) -> None:
     with target.open("wb") as output:
-        for event in source_events:
-            if isinstance(event, Path):
-                with (event / "rejected.jsonl").open("rb") as source:
-                    for line in source:
-                        output.write(line)
-            else:
-                _output(output, event)
+        output.writelines(_rejected_rows(source_events))
         output.flush()
         os.fsync(output.fileno())
 
@@ -1694,7 +1815,7 @@ def _stage_inputs(
             "stage": "dedup",
             "duplicates": project.release.policy.duplicates.model_dump(mode="json"),
             "implementation": implementation_digests(
-                "large_build.py", "dedup_policy.py"
+                "large_build.py", "dedup_policy.py", "view_checkpoints.py"
             ),
         },
     }
@@ -2008,34 +2129,45 @@ def build_large(
                     connection, record_admission, admission_files
                 )
     progress.update(phase="deduplicating")
-    dedup_inputs = {**stage_inputs["dedup"], "index": index_dir.name}
+    dedup_inputs = {
+        **stage_inputs["dedup"],
+        "index": sha256_file(index_dir / "receipt.json"),
+    }
+    dedup_groups_root = stages.root / f".dedup-{stages.key(dedup_inputs)}.groups"
+    if dedup_groups_root.is_symlink():
+        raise ValueError(f"symlinked dedup checkpoint: {dedup_groups_root}")
 
     def dedup_stage(staging: Path, result: dict[str, Any]) -> None:
         # The decisions are a narrow table beside the index, not a copy of it.
         connection = open_dedup(index_dir, staging / "dedup.sqlite")
         try:
-            with tempfile.TemporaryDirectory(prefix=".rejected-", dir=root) as scratch:
-                rejected_path = Path(scratch) / "rejected.jsonl"
-                _write_rejected(rejected_path, source_events)
-                result["groups"], result["dropped"] = _deduplicate(
-                    connection,
-                    staging / "groups.jsonl",
-                    diagnostics=root / "diagnostics" / f"{build_id}.json",
-                    progress=progress,
-                    policy=project.release.policy.duplicates,
-                    rejected_path=rejected_path,
-                )
+            result["groups"], result["dropped"] = _deduplicate(
+                connection,
+                staging / "groups.jsonl",
+                diagnostics=root / "diagnostics" / f"{build_id}.json",
+                progress=progress,
+                policy=project.release.policy.duplicates,
+                source_events=source_events,
+                checkpoints=ViewCheckpoints(
+                    dedup_groups_root, stages.key(dedup_inputs)
+                ),
+            )
         finally:
             connection.close()
 
-    dedup_dir, dedup_result = run_stage(
-        stages,
-        "dedup",
-        dedup_inputs,
-        dedup_stage,
-        on_reuse=lambda: progress.record("reused_dedup_stage"),
-    )
-    stages.prune("dedup", keep=_PRUNE_ON_PUBLISH, protect=dedup_dir.name)
+    with (workspace / ".dedup.lock").open("a") as dedup_lock:
+        fcntl.flock(dedup_lock, fcntl.LOCK_EX)
+        stages.discard_incomplete("dedup")
+        dedup_dir, dedup_result = run_stage(
+            stages,
+            "dedup",
+            dedup_inputs,
+            dedup_stage,
+            on_reuse=lambda: progress.record("reused_dedup_stage"),
+        )
+        if dedup_groups_root.exists():
+            shutil.rmtree(dedup_groups_root)
+        stages.prune("dedup", keep=_PRUNE_ON_PUBLISH, protect=dedup_dir.name)
     progress.update(phase="writing_views")
     view_key = canonical_digest(
         {
@@ -2087,7 +2219,9 @@ def build_large(
         progress.update(phase="publishing")
         publish_staging(staging, target)
         shutil.rmtree(view_root)
-    stages.prune("dedup", keep=keep_stages)
+    with (workspace / ".dedup.lock").open("a") as dedup_lock:
+        fcntl.flock(dedup_lock, fcntl.LOCK_EX)
+        stages.prune("dedup", keep=keep_stages)
     with (workspace / ".index.lock").open("a") as index_lock:
         fcntl.flock(index_lock, fcntl.LOCK_EX)
         stages.prune("index", keep=keep_stages)
