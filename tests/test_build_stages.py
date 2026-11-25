@@ -9,7 +9,7 @@ import pytest
 from corpus_fixtures import neutral_corpus
 from recipe_fixtures import Lab, write_recipe
 
-from klab.corpus import build_stages, large_build
+from klab.corpus import build_stages, large_build, measurement
 from klab.corpus.view_checkpoints import ViewCheckpoints
 from klab.training.manifest import sha256_file
 
@@ -204,6 +204,24 @@ def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(
 
     monkeypatch.setattr(large_build, "_document_lineage", count_lineage)
 
+    measured = []
+    measure = measurement._measure_shard
+
+    def count_measure(*args):
+        measured.append(args[:5])
+        return measure(*args)
+
+    monkeypatch.setattr(measurement, "_measure_shard", count_measure)
+    with monkeypatch.context() as fault:
+        fault.setenv("KLAB_FAULT", f"{measurement.VIEW_STAGE}:1")
+        with pytest.raises(RuntimeError, match="KLAB_FAULT after shard 1"):
+            lab.run("corpus", "build", project, "--offline")
+    total_documents = len((staging / "documents.jsonl").read_bytes().splitlines())
+    assert len(rendered) == total_documents - 2
+    (first_run,) = measured
+    rendered.clear()
+    measured.clear()
+
     def interrupt_publication(staging, target):
         assert (staging / "build.json").exists()
         raise OSError("interrupted publication")
@@ -213,8 +231,8 @@ def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(
         with pytest.raises(OSError, match="interrupted publication"):
             lab.run("corpus", "build", project, "--offline")
     assert not reference.exists()
-    total_documents = len((staging / "documents.jsonl").read_bytes().splitlines())
-    assert len(rendered) == total_documents - 2
+    assert not rendered
+    assert first_run not in measured
 
     # Damage only the last committed group after the manifest was produced.
     # A new attempt must retain the valid prefix and rebuild that group.
@@ -222,6 +240,12 @@ def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(
         stream.seek(-2, 2)
         stream.write(b"x")
     rendered.clear()
+
+    # A repaired frontier with identical output can reuse a verified census.
+    def unexpected_census(*args, **kwargs):
+        pytest.fail("reran completed native census")
+
+    monkeypatch.setattr(measurement, "summarize_release", unexpected_census)
     resumed = Path(lab.run("corpus", "build", project, "--offline"))
     assert len(rendered) == (total_documents % 2 or 2)
     assert tree(resumed) == expected

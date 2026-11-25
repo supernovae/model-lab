@@ -14,7 +14,7 @@ import tempfile
 import unicodedata
 from collections import Counter, defaultdict
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,7 @@ import numpy as np
 
 from klab.canonical import canonical_digest
 from klab.corpus.build_stages import implementation_digests
+from klab.corpus.provenance import HUMAN_ORIGIN, SOURCE_ORIGIN
 from klab.corpus.release_verify import (
     current_settings,
     line_boundaries,
@@ -51,30 +52,6 @@ def _rows(path: Path) -> Iterator[dict[str, Any]]:
         for line in stream:
             if line:
                 yield json.loads(line)
-
-
-@contextmanager
-def _lineage_index(root: Path) -> Iterator[sqlite3.Connection]:
-    """Keep the release read-only and remove the on-disk index on exit."""
-    with tempfile.TemporaryDirectory(
-        prefix=".measurement-", dir=root.parent
-    ) as directory:
-        connection = sqlite3.connect(str(Path(directory) / "index.sqlite"))
-        try:
-            connection.execute(
-                "CREATE TABLE lineage (id TEXT PRIMARY KEY, data TEXT NOT NULL)"
-            )
-            connection.executemany(
-                "INSERT INTO lineage VALUES (?, ?)",
-                (
-                    (row["record_id"], json.dumps(row))
-                    for row in _rows(root / "lineage.jsonl")
-                ),
-            )
-            connection.commit()
-            yield connection
-        finally:
-            connection.close()
 
 
 RIGHTS_STAGE = declare_stage("describe: source rights")
@@ -847,11 +824,14 @@ def _plan_views(
             first += lines
         total += size
     inputs = {
-        "files": files,
-        "lineage": [
-            (info := (root / "lineage.jsonl").stat()).st_size,
-            info.st_mtime_ns,
-        ],
+        # Empty outputs are recreated by a resumed native build. They cannot
+        # affect a nonempty view run, so their file generations are immaterial.
+        "files": {
+            name: generation for name, generation in files.items() if generation[2]
+        },
+        "lineage": range_file_identity(root / "lineage.jsonl"),
+        "generations": _nonempty_generation(Path(generations)),
+        "scenarios": _nonempty_generation(Path(scenarios)),
         "tokenizer": sha256_file(tokenizer) if tokenizer is not None else None,
         "measurement": implementation["measurement.py"],
     }
@@ -859,6 +839,11 @@ def _plan_views(
         VIEW_STAGE, tasks, total, inputs, None if cache is None else cache / "shards"
     )
     return tasks, plan, owners
+
+
+def _nonempty_generation(path: Path) -> list[int] | None:
+    generation = range_file_identity(path)
+    return generation if generation[2] else None
 
 
 def measure_views(
@@ -875,7 +860,17 @@ def measure_views(
     `cache` so a rerun, or a run stopped part way, measures only the runs that
     are not there. Merging reproduces the serial pass exactly.
     """
-    root = Path(root)
+    with _measured_views(Path(root), tokenizer, release_spec, cache) as (summary, _, _):
+        return summary
+
+
+@contextmanager
+def _measured_views(
+    root: Path,
+    tokenizer: Path | None,
+    release_spec: dict[str, Any] | None,
+    cache: Path | None,
+) -> Iterator[tuple[dict[str, Any], Path, Path]]:
     cache = cache or _scratch_cache()
     with tempfile.TemporaryDirectory(prefix=".describe-", dir=scratch_root()) as work:
         directory = _build_lineage_index(
@@ -886,7 +881,11 @@ def measure_views(
         results = run_sharded(plan, _measure_shard, ordered=True)
         for task, state in zip(tasks, results, strict=True):
             states[task[0], task[1]].append(state)
-    return _combine(root, states, owners, tokenizer, release_spec)
+        yield (
+            _combine(root, states, owners, tokenizer, release_spec),
+            directory,
+            Path(work),
+        )
 
 
 def _combine(
@@ -974,41 +973,34 @@ def summarize_release(
     *,
     release_spec: dict[str, Any] | None = None,
     tokenizer: Path | None = None,
+    cache: Path | None = None,
 ) -> dict[str, Any]:
     """Frozen descriptive census, with measured tokens only for a pinned tokenizer."""
     root = Path(root)
-    summary = measure_views(root, tokenizer, release_spec=release_spec)
-    with _lineage_index(root) as connection:
-        return _summarize_release(root, connection, summary, release_spec)
-
-
-def _summarize_release(
-    root: Path,
-    connection: sqlite3.Connection,
-    summary: dict[str, Any],
-    release_spec: dict[str, Any] | None,
-) -> dict[str, Any]:
-    views = summary["views"]
-    totals: dict[str, Counter[str]] = defaultdict(Counter)
-    for splits in views.values():
-        for item in splits.values():
-            for dimension, values in item["dimensions"].items():
-                for value, count in values.items():
-                    totals[dimension][value] += count["records"]
-    connection.execute("CREATE TABLE selected (id TEXT PRIMARY KEY)")
-    for view in ("lm", "chat"):
-        if (
-            release_spec is not None
+    with _measured_views(root, tokenizer, release_spec, cache) as (
+        summary,
+        index,
+        work,
+    ):
+        training_views = [
+            view
+            for view, splits in summary["views"].items()
+            if release_spec is not None
             and release_spec[view]["selected"]
             and "train" in release_spec[view]["training_splits"]
-        ):
-            connection.executemany(
-                "INSERT OR IGNORE INTO selected VALUES (?)",
-                (
-                    (link["record_id"],)
-                    for link in _rows(root / view / "train.lineage.jsonl")
-                ),
-            )
+            and set(splits.get("train", {}).get("dimensions", {}).get("origin", {}))
+            - {SOURCE_ORIGIN, HUMAN_ORIGIN}
+        ]
+        if training_views:
+            generated = _generated_lineage(root, index, work, training_views)
+        else:
+            generated = (0, 0, [], {})
+    return _summarize_release(root, summary, *generated)
+
+
+def _generated_lineage(
+    root: Path, index: Path, work: Path, training_views: list[str]
+) -> tuple[int, int, list[str], dict[str, dict[str, list[str]]]]:
     heldout_keys = (
         "parent_document_ids",
         "source_family_ids",
@@ -1017,51 +1009,81 @@ def _summarize_release(
         "template_family_id",
     )
     heldout: dict[str, set[str]] = {key: set() for key in heldout_keys}
-    test_parents: set[str] = set()
-    connection.execute("CREATE TABLE test_ids (id TEXT PRIMARY KEY)")
-    for view in ("lm", "chat"):
-        connection.executemany(
-            "INSERT OR IGNORE INTO test_ids VALUES (?)",
-            (
-                (link["record_id"],)
-                for link in _rows(root / view / "test.lineage.jsonl")
-            ),
-        )
-    for (data,) in connection.execute(
-        "SELECT lineage.data FROM lineage JOIN test_ids ON lineage.id = test_ids.id"
-    ):
-        row = json.loads(data)
-        test_parents.update(row["parent_document_ids"])
-        for key in heldout_keys:
-            values = row.get(key, []) if key.endswith("_ids") else [row.get(key)]
-            heldout[key].update(value for value in values if value is not None)
+    lineage = root / "lineage.jsonl"
+    lookup = _LineageIndex(lineage, index)
+    with lookup.stream:
+        for view in ("lm", "chat"):
+            for link in _rows(root / view / "test.lineage.jsonl"):
+                row = lookup.get(link["record_id"])
+                if row is not None:
+                    for key in heldout_keys:
+                        values = (
+                            row.get(key, []) if key.endswith("_ids") else [row.get(key)]
+                        )
+                        heldout[key].update(
+                            value for value in values if value is not None
+                        )
     generated_count = unverified_generated = 0
-    generated_parents: set[str] = set()
     shared: dict[str, dict[str, set[str]]] = {}
-    for (data,) in connection.execute(
-        "SELECT lineage.data FROM lineage JOIN selected ON lineage.id = selected.id"
-    ):
-        row = json.loads(data)
-        if row["origin"] in {"primary_source", "human_authored"}:
-            continue
-        generated_count += 1
-        unverified_generated += row["verification"]["status"] in {
-            "unverified",
-            "schema_validated",
-        }
-        generated_parents.update(
-            parent for parent in row["parent_document_ids"] if parent in test_parents
-        )
-        shape = row["shape"]["id"]
-        groups = shared.setdefault(shape, {key: set() for key in heldout_keys})
-        for key in heldout_keys:
-            values = row.get(key, []) if key.endswith("_ids") else [row.get(key)]
-            groups[key].update(value for value in values if value in heldout[key])
-    generated_test_overlap = sorted(generated_parents & test_parents)
+    with closing(sqlite3.connect(work / "training-ids.sqlite")) as connection:
+        # Membership is on disk; the training lineage payload is read sequentially.
+        connection.execute("CREATE TABLE selected (id TEXT PRIMARY KEY) WITHOUT ROWID")
+        for view in training_views:
+            connection.executemany(
+                "INSERT OR IGNORE INTO selected VALUES (?)",
+                (
+                    (link["record_id"],)
+                    for link in _rows(root / view / "train.lineage.jsonl")
+                ),
+            )
+        for row in _rows(lineage):
+            if (
+                row["origin"] in {SOURCE_ORIGIN, HUMAN_ORIGIN}
+                or not connection.execute(
+                    "SELECT 1 FROM selected WHERE id = ?", (row["record_id"],)
+                ).fetchone()
+            ):
+                continue
+            generated_count += 1
+            unverified_generated += row["verification"]["status"] in {
+                "unverified",
+                "schema_validated",
+            }
+            shape = row["shape"]["id"]
+            groups = shared.setdefault(shape, {key: set() for key in heldout_keys})
+            for key in heldout_keys:
+                values = row.get(key, []) if key.endswith("_ids") else [row.get(key)]
+                groups[key].update(value for value in values if value in heldout[key])
     shared_by_shape = {
         shape: {key: sorted(values) for key, values in groups.items()}
         for shape, groups in sorted(shared.items())
     }
+    generated_parents = {
+        parent for groups in shared.values() for parent in groups["parent_document_ids"]
+    }
+    return (
+        generated_count,
+        unverified_generated,
+        sorted(generated_parents),
+        shared_by_shape,
+    )
+
+
+def _summarize_release(
+    root: Path,
+    summary: dict[str, Any],
+    generated_count: int,
+    unverified_generated: int,
+    generated_test_overlap: list[str],
+    shared_by_shape: dict[str, dict[str, list[str]]],
+) -> dict[str, Any]:
+    views = summary["views"]
+    totals: dict[str, Counter[str]] = defaultdict(Counter)
+    for splits in views.values():
+        for item in splits.values():
+            for dimension, values in item["dimensions"].items():
+                for value, count in values.items():
+                    totals[dimension][value] += count["records"]
     lexical_count = 0
     lexical_terms: set[str] = set()
     for row in _rows(root / "lexical/candidates.jsonl"):

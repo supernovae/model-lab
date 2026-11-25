@@ -108,7 +108,8 @@ class ViewCheckpoints:
                 self.damaged = True
         for output in self.outputs.values():
             output.stream.seek(output.offset)
-            output.stream.truncate()
+            if os.fstat(output.stream.fileno()).st_size != output.offset:
+                output.stream.truncate()
         return state
 
     def commit(self, state: dict[str, Any]) -> None:
