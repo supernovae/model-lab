@@ -154,6 +154,10 @@ candidate lock against both the origins and the copies before publication.
   same source and adapter. It checks the newest eligible candidate against
   the current byte cap and pins, then moves the verified file under the
   source's adapter lock. Extraction uses the current generation's rules.
+  When opening a staging generation or adopting its body, acquisition uses
+  the lock to remove older staging directories that contain only the empty
+  directory layout. Older generations with bodies, derived output, or other
+  entries stay available for inspection.
   A standalone plan verifies bytes without moving them. Within the same
   command, the locked retry and publication reuse admission verification
   when the filesystem fingerprint still matches. Publishing
@@ -336,10 +340,10 @@ one eligible older committed dump and moves it into the current generation
 if its SHA-1 and any declared SHA-256 match. The transport cache or a fresh
 download supplies the dump if the candidate fails verification. The pinned
 index is fetched if its cache entry is missing or invalid. Lab reports and
-retains the old `.wikimedia_dump-parts-<key>` directory for inspection.
-Its derived checkpoints and any unmatched or partial inputs still occupy
-disk space. Inspect and remove abandoned directories after all acquisitions
-for that source have stopped. Published snapshots remain reusable after verification.
+retains old `.wikimedia_dump-parts-<key>` directories with derived checkpoints,
+unmatched or partial inputs, or other entries. Once all acquisitions for
+that source have stopped, inspect those directories before removing abandoned
+ones. Published snapshots remain reusable after verification.
 
 ### What identifies an acquisition
 
