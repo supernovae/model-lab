@@ -13,7 +13,6 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Protocol
-from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.models import StrictModel
@@ -37,6 +36,7 @@ from klab.corpus.document_normalization import (
     EmptyDocumentError,
     records_for_file,
 )
+from klab.corpus.duplicate_evidence import is_metadata_only, origin_keys, source_rank
 from klab.corpus.project import (
     SPLITS,
     declaration_payload,
@@ -207,53 +207,6 @@ def _rows(path: Path) -> list[dict[str, Any]]:
 def _line_count(path: Path) -> int:
     with path.open("rb") as stream:
         return sum(bool(line.strip()) for line in stream)
-
-
-def _origin_keys(document: dict[str, Any]) -> tuple[str, ...]:
-    """Identify a source page or paper without grouping unrelated host pages."""
-    metadata = document.get("metadata") or {}
-    keys: set[str] = set()
-    for field in ("url", "page_uri"):
-        value = metadata.get(field)
-        if not isinstance(value, str):
-            continue
-        try:
-            parsed = urlsplit(value)
-            host = (parsed.hostname or "").lower().removeprefix("www.")
-        except ValueError:
-            continue
-        if not host:
-            continue
-        query = urlencode(
-            sorted(
-                (key, val)
-                for key, val in parse_qsl(parsed.query, keep_blank_values=True)
-                if not key.lower().startswith("utm_")
-                and key.lower() not in {"fbclid", "gclid"}
-            )
-        )
-        path = parsed.path.rstrip("/") or "/"
-        keys.add("url:" + host + path + ("?" + query if query else ""))
-        if host in {"en.wikipedia.org", "en.wikibooks.org"} and path.startswith(
-            "/wiki/"
-        ):
-            keys.add(
-                "wiki:" + host + ":" + unquote(path[6:]).replace("_", " ").casefold()
-            )
-    if document["source_id"].startswith("pes2o") and metadata.get("id"):
-        keys.add("paper:semantic_scholar:" + str(metadata["id"]))
-    page_title = metadata.get("page_title")
-    if isinstance(page_title, str) and document["source_id"] in {
-        "wikipedia_20260901",
-        "wikibooks_20260901",
-    }:
-        wiki_host = (
-            "en.wikipedia.org"
-            if document["source_id"] == "wikipedia_20260901"
-            else "en.wikibooks.org"
-        )
-        keys.add("wiki:" + wiki_host + ":" + page_title.replace("_", " ").casefold())
-    return tuple(sorted(keys))
 
 
 def _lineage(
@@ -1091,15 +1044,26 @@ def _build_stored(
     }
     large_lm_build = _uses_disk_lm_builder(project, transforms)
     if large_lm_build:
+        from klab.corpus.native_dedup import DEDUP_IMPLEMENTATION_FILES
+        from klab.corpus.native_index import INDEX_IMPLEMENTATION_FILES
         from klab.corpus.prepared_shards import prepared_shard_implementation
 
         identity["large_builder_implementation_sha256"] = sha256_file(
             Path(__file__).with_name("large_build.py")
         )
         identity["normalization_implementation"] = prepared_shard_implementation()
+        identity["native_stage_implementation"] = implementation_digests(
+            *INDEX_IMPLEMENTATION_FILES,
+            *DEDUP_IMPLEMENTATION_FILES,
+            "build_outputs.py",
+            "measurement.py",
+        )
     else:
         identity["normalization_implementation"] = implementation_digests(
             *NORMALIZATION_IMPLEMENTATION_FILES
+        )
+        identity["duplicate_implementation"] = implementation_digests(
+            "dedup_policy.py", "duplicate_evidence.py"
         )
     if canary is not None:
         if not large_lm_build:
@@ -1306,8 +1270,6 @@ def _build_stored(
             DuplicateError,
             deduplicate_documents,
             drop_reason,
-            is_metadata_only,
-            source_rank,
         )
 
         by_id = {d["document_id"]: d for d in documents}
@@ -1316,7 +1278,7 @@ def _build_stored(
                 documents,
                 {source.id: source_rank(source) for source in project.sources},
                 project.release.policy.duplicates,
-                _origin_keys,
+                origin_keys,
             )
         except DuplicateError as error:
             diagnostic = {

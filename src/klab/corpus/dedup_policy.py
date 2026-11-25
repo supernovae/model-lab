@@ -13,23 +13,13 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from klab.canonical import canonical_json
-from klab.corpus.project import CURATED_SOURCE_KINDS, DuplicatePolicy
+from klab.corpus.duplicate_evidence import is_metadata_only, rights_signature
+from klab.corpus.project import DuplicatePolicy
 
 CROSS_SPLIT_OVERLAP = "cross-split exact text overlap"
 RIGHTS_CONFLICT = "duplicate source text has incompatible rights evidence"
 PAGE_OVERLAP = "validation/test page or paper origin overlap"
 CLEANING_CONFLICT = "discordant metadata-only cleaning decisions in duplicate component"
-METADATA_ONLY = "exclude_lm_metadata_only"
-
-_RIGHTS_FIELDS = (
-    "training_eligibility",
-    "license_references",
-    "notices",
-    "training_restriction",
-)
-
-
 STRICT_CHAIN = DuplicatePolicy(
     heldout_overlap="error",
     keys=("raw", "normalized"),
@@ -41,31 +31,6 @@ STRICT_CHAIN = DuplicatePolicy(
 def is_strict_chain(policy: DuplicatePolicy) -> bool:
     """The only duplicate policy the completed-preparation build implements."""
     return policy == STRICT_CHAIN
-
-
-def source_rank(source: Any) -> int:
-    """Curated sources outrank pes2o, which outranks the rest."""
-    if source.kind in CURATED_SOURCE_KINDS:
-        return 0
-    return 1 if source.id.startswith("pes2o") else 2
-
-
-def rights_signature(doc: dict[str, Any]) -> bytes:
-    """The rights evidence two copies of the same text must agree on."""
-    rights = doc["rights"]
-    return hashlib.sha256(
-        canonical_json(
-            {
-                "license": doc["license"],
-                "redistribution": doc["redistribution"],
-                **{name: rights[name] for name in _RIGHTS_FIELDS},
-            }
-        )
-    ).digest()
-
-
-def is_metadata_only(doc: dict[str, Any]) -> bool:
-    return (doc.get("structure") or {}).get("decision") == METADATA_ONLY
 
 
 @dataclass(frozen=True)
