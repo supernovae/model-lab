@@ -389,7 +389,7 @@ def test_a_stage_that_does_not_verify_is_rebuilt_and_leftovers_are_ignored(
     calls.reset()
 
     def shard_receipts():
-        return set(lab.work.glob("corpora/*/builds/prepared/*/*/*/receipt.json"))
+        return set(lab.work.glob("cache/corpus/normalized/*/*/receipt.json"))
 
     receipts = shard_receipts()
     assert receipts

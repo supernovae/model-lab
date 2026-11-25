@@ -96,6 +96,13 @@ have separate purposes:
 | Payload digest | Byte integrity. Hash exactly what was published. Re-encoding a table changes its byte digest even when its records are equivalent. |
 | Record ID | Stable reference within a typed contract. Source occurrence IDs retain a pinned location, input digest and parser/normalizer identity. Semantic IDs follow the typed identity rules and retain links to all supporting or conflicting occurrences. Dictionary ordinals stay local to their index. |
 
+Native LM builds now share normalized source partitions by computation key
+within one Lab work root. The typed receipt binds the pinned source,
+resolved rights and admission, renderer options and three payload digests.
+Projects resolve eligibility before lookup. The shared cache is outside
+project-specific stage retention. Reference publication, dependency
+inspection and closure-aware pruning remain in #567.
+
 Start with typed document, passage, annotation, duplicate-group, selection,
 entity, assertion, evidence, edge, index, and compiled sequence payloads.
 An assertion carries subject, predicate, typed value or object, qualifiers,

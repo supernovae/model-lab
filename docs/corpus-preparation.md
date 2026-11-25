@@ -735,11 +735,11 @@ the in-memory builder. Both builders decide every duplicate group with the same 
 
 The disk builder reuses verified outputs after a failure or a kill:
 
-| Stage | Output under `WORK/corpora/<id>/builds` | Reused when |
+| Stage | Output | Reused when |
 | --- | --- | --- |
-| normalize | `prepared/normalized-source-v2/<source>/<digest>`, one shard per source file | the shard's receipt and three output hashes verify |
-| index | `stages/.index-<key>.groups` for parts and private assembly, then `stages/index/<key>/index.sqlite` | a part receipt, exact retained-row comparison or completed index receipt verifies |
-| dedup | `stages/.dedup-<key>.groups` for incomplete work, then `stages/dedup/<key>/dedup.sqlite` and `groups.jsonl` | the ordered group prefix verifies or the completed stage receipt verifies |
+| normalize | `WORK/cache/corpus/normalized/<source>/<key>`, one shard per source file | the typed shard receipt and three output hashes verify |
+| index | `WORK/corpora/<id>/builds/stages/.index-<key>.groups` for parts and assembly, then `stages/index/<key>/index.sqlite` under the build root | a part receipt, exact retained-row comparison or completed index receipt verifies |
+| dedup | `WORK/corpora/<id>/builds/stages/.dedup-<key>.groups` for incomplete work, then `stages/dedup/<key>/dedup.sqlite` and `groups.jsonl` under the build root | the ordered group prefix verifies or the completed stage receipt verifies |
 | views | `../.views-<key>/build` with receipts beside the staged output | matching build and stage inputs, with a verified append boundary |
 | publish | the build directory itself, renamed into place atomically | the build exists and verifies |
 
@@ -751,6 +751,7 @@ in its `receipt.json` next to the SHA-256 and size of every output file:
   digests for the parser, shard writer and their normalization dependencies.
   The completed-preparation build passes the same document policy into its
   renderer and also binds the execution and admission adapter.
+
 - **index**: the receipt digest of every prepared shard in order (which bind the
   source bytes, rights decision, normalizer options and document policy), the
   split declaration (with the digest of its assignment file), the declared
@@ -762,12 +763,28 @@ in its `receipt.json` next to the SHA-256 and size of every output file:
   implementation is part of the dependency because dedup uses it for its
   group and decision journals.
 
+Native LM builds in the same work root share normalized source partitions.
+Each project resolves rights and admission from its own declarations before
+the lookup. Matching pins and resolved options reuse the same computation
+key. The `normalized_source_partition` receipt records that key and the
+digests of the document, span and rejection payloads. Document IDs keep their
+pinned snapshot and source locations. Appending a source reuses the
+unaffected partitions. Replacing a source snapshot can change document IDs
+and rebuilds partitions bound to that snapshot.
+
+Each key has one writer and one private staging directory. An interrupted
+writer can promote a complete verified partition on retry. The native cache
+is outside project-specific `--keep-stages` retention. Canary builds keep
+their own scratch. After upgrading, the first native build materializes the
+new shared generation from verified snapshots. Completed-preparation
+renders retain their authenticated project stage placement.
+
 A stage output is trusted only after its receipt verifies: the recorded key is
 the digest of the recorded inputs, the directory holds exactly the receipted
 files, and every size and hash matches. File names and modification times prove
-nothing. An output that fails is deleted and rebuilt, incomplete
-(`.incomplete-*`) directories are never inputs, and an output appears by one
-atomic rename. In the ordinary disk build, changes confined to view emission
+nothing. An index or dedup stage with a bad receipt is rebuilt. A damaged
+shared normalized partition stops the build. Shards become visible only
+after a complete receipt and an atomic rename. In the ordinary disk build, changes confined to view emission
 reuse both retained stages. A resolver change or an option such as
 `duplicates.rights_conflict` reuses the retained index and reruns deduplication.
 A split or index change reuses the normalized shards and reruns both stages.
@@ -777,6 +794,16 @@ Use `--keep-stages` to retain them for another iteration.
 
 The separated stage implementations change older index and dedup keys once.
 Shards with normalization-specific identities can supply that rebuild.
+
+In one NVMe pair, the normalization phase used 200,000 synthetic rows,
+425 MB of pinned input and 767 MB of prepared payloads. Fresh runs
+took 19.65 s with project-local storage and 19.77 s with the shared
+cache. The second project took 19.59 s to produce its own partition
+and 1.73 s to verify the shared partition. Both produced identical
+document and span digests. The shared hit wrote zero payload bytes
+and read 767 MB from storage to verify the prepared files. The
+project-local miss read 425 MB of input and wrote 767 MB. Acquisition
+and downstream build stages were outside the timed interval.
 Ordinary published releases remain readable. The completed-preparation
 route still checks its own execution producer scope.
 

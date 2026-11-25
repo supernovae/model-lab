@@ -12,6 +12,7 @@ stage, the properties those failures violated.
 from __future__ import annotations
 
 import json
+import shutil
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,11 +26,13 @@ from recipe_fixtures import (
     STRATA,
     Lab,
     Recipe,
+    commit_git_fixture,
     write_recipe,
     write_training_files,
 )
 
 from klab.canonical import canonical_json
+from klab.corpus import prepared_shards
 from klab.corpus import release as release_module
 from klab.corpus.release_verify import verification_settings
 
@@ -207,6 +210,72 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
             retry.setattr(release_module, "_span_rows", reran)
             assert verify_indexes() == expected_manifest
     assert not list(scratch.glob("release-indexes/*/*/*/*.sqlite"))
+
+    # Independently acquire the same pins under another project, then append a source.
+    other = tmp_path / "second-corpus"
+    shutil.copytree(recipe.corpus, other)
+    config_path = other / "corpus.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    config["id"] = "second-recipe"
+    config["transport_budget"]["attempt_id"] = "second-recipe-acquire-1"
+    config_path.write_text(yaml.safe_dump(config))
+    cache = str(tmp_path / "transport-cache")
+    lab.run("corpus", "budget-init", str(config_path))
+    lab.run("corpus", "acquire", str(config_path), "--transport-cache", cache)
+    normalized = []
+    parse = prepared_shards.records_for_file
+
+    def observe(raw, name, source, *args, **kwargs):
+        normalized.append(source.id)
+        return parse(raw, name, source, *args, **kwargs)
+
+    monkeypatch.setattr(prepared_shards, "records_for_file", observe)
+    other_build = Path(lab.run("corpus", "build", str(config_path), "--offline"))
+    assert normalized == []
+    for name in ("documents.jsonl", "spans.jsonl"):
+        assert (other_build / name).read_bytes() == (release / name).read_bytes()
+
+    appended = yaml.safe_load((other / "sources/ref_tldr_pages.yaml").read_text())
+    repo = tmp_path / "appended-reference"
+    name = "docs/append.md"
+    appended.update(
+        id="ref_append",
+        source_family="ref_append",
+        canonical_uri=str(repo),
+        revision=commit_git_fixture(
+            repo, {name: "# Extra\n\nAn independent reference.\n"}
+        ),
+        acquisition={"include": [name], "max_bytes": 1 << 20},
+    )
+    (other / "sources/ref_append.yaml").write_text(yaml.safe_dump(appended))
+    config["sources"].append("sources/ref_append.yaml")
+    config["sources"].sort()
+    config_path.write_text(yaml.safe_dump(config))
+    for relative, key, change in (
+        (
+            "splits.yaml",
+            "assignments",
+            lambda mapping: mapping.update(ref_append="train"),
+        ),
+        ("transforms/lm.yaml", "inputs", lambda inputs: inputs.append("ref_append")),
+    ):
+        path = other / relative
+        payload = yaml.safe_load(path.read_text())
+        change(payload[key])
+        path.write_text(yaml.safe_dump(payload))
+    lab.run("corpus", "acquire", str(config_path), "--transport-cache", cache)
+    appended_build = Path(lab.run("corpus", "build", str(config_path), "--offline"))
+    assert normalized == ["ref_append"]
+    assert {doc["source_id"] for doc in documents(appended_build)} == set(DECLARED) | {
+        "ref_append"
+    }
+    (partition,) = (lab.work / "cache/corpus/normalized/ref_append").glob(
+        "*/docs.jsonl"
+    )
+    partition.write_bytes(b"damaged normalized partition")
+    shutil.rmtree(appended_build)
+    with pytest.raises(ValueError, match="prepared source shard changed"):
+        lab.run("corpus", "build", str(config_path), "--offline")
 
     # A rights field edited after the build is refused, even with every digest resealed.
     forged = forge_release(

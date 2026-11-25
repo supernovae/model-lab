@@ -1085,6 +1085,7 @@ def _build_stored(
         return target
     if large_lm_build:
         from klab.corpus.large_build import build_large
+        from klab.corpus.prepared_shards import normalized_store_root
         from klab.corpus.progress import BuildProgress
 
         progress = BuildProgress(workspace / "progress" / f"{build_id}.jsonl", build_id)
@@ -1096,6 +1097,7 @@ def _build_stored(
             build_id,
             target,
             progress,
+            prepared_root=normalized_store_root(Path(work_root)),
             proof_store=proof_store,
             verification_mode=verification_mode,
             record_admission=record_admission,
