@@ -6,12 +6,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import torch
-from tokenizers import Tokenizer
-
 from klab.chat_template import PLAIN, ChatTemplate
 
 if TYPE_CHECKING:
+    import torch
+    from tokenizers import Tokenizer
+
     from klab.engines.mlx import MLXEngine
 
 

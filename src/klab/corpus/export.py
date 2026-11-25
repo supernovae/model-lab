@@ -90,11 +90,9 @@ def _licenses(release_dir: Path) -> str:
     return "; ".join(sorted(names))
 
 
-def _lm_range_stats(
-    path: str, start: int, end: int
-) -> tuple[int, int, int, int | None]:
-    """Lines, valid records and rendered bytes of one range, and its first bad line."""
-    lines = count = size = 0
+def _lm_range_stats(path: str, start: int, end: int) -> tuple[int, int, str | None]:
+    """Valid records and rendered bytes before the first bad line, if any."""
+    count = size = 0
     with Path(path).open("rb") as stream:
         stream.seek(start)
         offset = start
@@ -102,42 +100,70 @@ def _lm_range_stats(
             if offset >= end:
                 break
             offset += len(raw)
-            lines += 1
             try:
                 record = json.loads(raw.decode("utf-8"))
             except ValueError:
-                return lines, count, size, lines
+                return count, size, "invalid LM record"
             if (
                 not isinstance(record, dict)
                 or set(record) != {"text"}
                 or not isinstance(record["text"], str)
                 or not record["text"].strip()
             ):
-                return lines, count, size, lines
+                return count, size, "invalid LM record"
             count += 1
             size += len(record["text"].encode("utf-8"))
-    return lines, count, size, None
+    return count, size, None
+
+
+def _chat_range_stats(path: str, start: int, end: int) -> tuple[int, int, str | None]:
+    from klab.data.conversations import (
+        ConversationRecordError,
+        render_conversation_line,
+    )
+
+    count = size = 0
+    source = Path(path)
+    with source.open("rb") as stream:
+        stream.seek(start)
+        offset = start
+        while offset < end:
+            raw = stream.readline()
+            if not raw:
+                return count, size, "truncated chat split"
+            try:
+                text = render_conversation_line(raw, source, count + 1).text
+                size += len(text.encode("utf-8"))
+            except ConversationRecordError as error:
+                return count, size, error.detail
+            except ValueError as error:
+                return count, size, str(error)
+            count += 1
+            offset += len(raw)
+    return count, size, None
 
 
 def _split_stats(path: Path, view: str) -> tuple[int, int]:
-    count = size = 0
-    if view == "lm":
-        before = 0
-        plan = plan_ranges(SPLIT_STATS_STAGE, path, inputs=_export_range_inputs())
-        for lines, kept, rendered, bad in run_sharded(
-            plan, _lm_range_stats, ordered=True
-        ):
-            if bad is not None:
-                raise ValueError(f"invalid LM record at {path}:{before + bad}")
-            before += lines
-            count += kept
-            size += rendered
-    else:
-        from klab.data.conversations import iter_conversations
+    inputs = _export_range_inputs()
+    if inputs is not None:
+        inputs["view"] = view
+        if view == "chat":
+            from klab.verifier_authority import CHAT_RENDERER_MODULES, scoped_modules
 
-        for text in iter_conversations(path):
-            count += 1
-            size += len(text.encode("utf-8"))
+            inputs["renderer"] = canonical_digest(
+                scoped_modules(leaves=(*CHAT_RENDERER_MODULES, "canonical"))
+            )
+    plan = plan_ranges(SPLIT_STATS_STAGE, path, inputs=inputs)
+    worker = _lm_range_stats if view == "lm" else _chat_range_stats
+    count = size = 0
+    for kept, rendered, error in run_sharded(plan, worker, ordered=True):
+        if error is not None:
+            location = f"{path}:{count + kept + 1}"
+            raise ValueError(
+                f"{error} at {location}" if view == "lm" else f"{location}: {error}"
+            )
+        count += kept
+        size += rendered
     return count, size
 
 

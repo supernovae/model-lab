@@ -283,43 +283,66 @@ def test_export_rejects_malformed_split_inventory(
     _reject(exported)
 
 
-def test_lm_export_fits_every_train_document(
-    frozen_sample: tuple[Path, Path],
+@pytest.fixture
+def resume_export(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+):
+    """Stop a real export after one range and verify exactly what the retry reads."""
     from klab.corpus import export, shards
     from klab.corpus.release_verify import verification_settings
 
-    release, _ = frozen_sample
     root = tmp_path / "work"
     base = Path("configs/runtime_smoke_cpu.yaml")
-    documents = release / "documents.jsonl"
-    monkeypatch.setattr(shards, "CHUNK_BYTES", 512)
-    expected_ranges = shards.chunk_ranges(documents)
-    assert len(expected_ranges) > 1
-    observed = []
-    scan = export._license_range
+    monkeypatch.setattr(shards, "CHUNK_BYTES", 256)
 
-    def record_range(path, start, end):
-        observed.append((start, end))
-        return scan(path, start, end)
+    def resume(release, view, stage, worker, inputs):
+        expected_ranges = [
+            (str(path), start, end)
+            for path in inputs
+            for start, end in shards.chunk_ranges(path)
+        ]
+        assert len(expected_ranges) > 1
+        observed = []
+        scan = getattr(export, worker)
 
-    with monkeypatch.context() as probe:
-        probe.setattr(export, "_license_range", record_range)
-        with verification_settings(workers=1, scratch_dir=tmp_path / "export-scratch"):
-            with monkeypatch.context() as fault:
-                fault.setenv("KLAB_FAULT", f"{export.LICENSE_SCAN_STAGE}:1")
-                with pytest.raises(RuntimeError, match="KLAB_FAULT"):
-                    export_release(release, "lm", base, 300, root)
-            assert observed == expected_ranges[:1]
-            assert not list(root.rglob("export.json"))
-            observed.clear()
-            exported = export_release(release, "lm", base, 300, root)
-            assert observed == expected_ranges[1:]
+        def record_range(path, start, end):
+            observed.append((path, start, end))
+            return scan(path, start, end)
 
-    # Independent export recomputes the licenses, counts and authenticated metadata.
-    assert exported == export_release(release, "lm", base, 300, root)
+        with monkeypatch.context() as probe:
+            probe.setattr(export, worker, record_range)
+            with verification_settings(
+                workers=1, scratch_dir=tmp_path / "export-scratch"
+            ):
+                with monkeypatch.context() as fault:
+                    fault.setenv("KLAB_FAULT", f"{stage}:1")
+                    with pytest.raises(RuntimeError, match="KLAB_FAULT"):
+                        export_release(release, view, base, 300, root)
+                assert observed == expected_ranges[:1]
+                assert not list(root.rglob("export.json"))
+                observed.clear()
+                exported = export_release(release, view, base, 300, root)
+                assert observed == expected_ranges[1:]
+        assert exported == export_release(release, view, base, 300, root)
+        return exported
+
+    return resume
+
+
+def test_lm_export_fits_every_train_document(
+    frozen_sample: tuple[Path, Path], resume_export
+) -> None:
+    from klab.corpus.export import LICENSE_SCAN_STAGE
+
+    release, _ = frozen_sample
+    exported = resume_export(
+        release,
+        "lm",
+        LICENSE_SCAN_STAGE,
+        "_license_range",
+        [release / "documents.jsonl"],
+    )
     tokenizer_config = load_tokenizer_config(exported / "tokenizer.yaml")
     run_config = load_config(exported / "run.yaml")
     dataset = run_config.dataset
@@ -368,20 +391,33 @@ def binding_split_count(exported: Path, split: str) -> int:
     ]
 
 
-def test_chat_export_preserves_v2_records(frozen_sample: tuple[Path, Path]) -> None:
-    release, root = frozen_sample
-    exported = export_release(
-        release, "chat", Path("configs/runtime_smoke_cpu.yaml"), 300, root
+def test_chat_export_preserves_v2_records(
+    frozen_sample: tuple[Path, Path], resume_export
+) -> None:
+    from klab.corpus.export import SPLIT_STATS_STAGE
+
+    release, _ = frozen_sample
+    exported = resume_export(
+        release,
+        "chat",
+        SPLIT_STATS_STAGE,
+        "_chat_range_stats",
+        [release / "chat" / f"{split}.jsonl" for split in ("train", "validation")],
     )
     dataset = load_config(exported / "run.yaml").dataset
     assert dataset.source == "local_chat"
     assert verify_release_export(dataset)["view"] == "chat"
+    stats = _sidecar(exported)["splits"]
     for split in ("train", "validation"):
         path = dataset.train_path if split == "train" else dataset.validation_path
         assert path is not None
-        assert list(iter_documents(dataset, split)) == [
-            row.text for row in iter_rendered_conversations(path)
-        ]
+        texts = [row.text for row in iter_rendered_conversations(path)]
+        assert list(iter_documents(dataset, split)) == texts
+        item = stats[split]
+        assert item["records"] == len(texts)
+        assert item["rendered_bytes"] == sum(
+            len(text.encode("utf-8")) for text in texts
+        )
         assert all(
             set(json.loads(row)) == {"format_version", "loss_mode", "messages"}
             for row in path.read_text().splitlines()
@@ -476,3 +512,16 @@ def test_sharded_split_statistics_match_a_single_pass_and_name_the_bad_line(
         path.write_bytes(b"\n".join(rows) + b"\n")
         with pytest.raises(ValueError, match=r"invalid LM record at .*:138"):
             export._split_stats(path, "lm")
+
+        chat = tmp_path / "chat.jsonl"
+        good = canonical_json(
+            {
+                "messages": [
+                    {"role": "user", "content": "¿Qué?"},
+                    {"role": "assistant", "content": "Éste."},
+                ]
+            }
+        )
+        chat.write_bytes((good + b"\n") * 35 + b'{"messages":[],"messages":[]}\n')
+        with pytest.raises(ValueError, match=r"chat\.jsonl:36: .*duplicate JSON key"):
+            export._split_stats(chat, "chat")

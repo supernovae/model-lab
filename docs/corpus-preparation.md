@@ -1139,7 +1139,7 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   | `tokenizer sampling: TRAIN lineage` | shardable: byte ranges of the lineage view |
   | `family inventory` | shardable: byte ranges of `documents.jsonl`, written in file order |
   | `export document licenses` | shardable: byte ranges of `documents.jsonl`, merged as a set |
-  | `export split statistics` | shardable: byte ranges of each exported LM split |
+  | `export split statistics` | shardable: byte ranges of LM and chat splits, with chat bytes counted by the training reader's renderer |
   | `describe: lineage index` | shardable: byte ranges of `lineage.jsonl`, merged into one sorted index of row positions |
   | `describe: view lines` | shardable: byte ranges of each view file, counting rows |
   | `describe: view rows` | shardable: runs of consecutive view rows, merged by sums and set unions |
@@ -1340,7 +1340,7 @@ needs measurement where the table gives historical or fixture evidence.
 | Freeze | Native staging rename and build tombstone, then the verified release. Completed preparation seals a retained release against its existing build. | A stopped native freeze can reuse the staged files and verify them from bytes before publishing. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. [#501](https://github.com/supernovae/model-lab/pull/501) |
 | Release verification, `audit`, and `sources` | Complete release proof. `audit` and `sources` read the corresponding published report after verification. | In cold mode, restart inventory hashing and unfinished row and lineage checks. A receipt-backed retry can reuse eligible dependency proofs. | 67.3 s for cold audit on 13.2 GB synthetic data, 0.94 s for the first receipt-backed audit. A historical 57 GB HDD audit was stopped after 1 h 45 min. [#500](https://github.com/supernovae/model-lab/pull/500), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | `describe` | Cached measurement runs and lineage position index when a proof store is available. Release verification has its own receipt. | Resume missing measurement ranges and merge results. Chat view measurement uses a whole run. A stopped cold release verification can still repeat. | 55.1 s for 5M synthetic rows (23 GB), 12 workers, without a tokenizer. [#502](https://github.com/supernovae/model-lab/pull/502) |
-| Corpus `export` | Document license labels and LM split statistics by range with persistent scratch. Final export directory and verification receipt. | Reuse valid license and LM statistics. Repeat unfinished ranges, chat split scans and final publication. | See [export license scan measurements](#export-license-scan-measurements). |
+| Corpus `export` | Document license labels and LM or chat split statistics by range with persistent scratch. Final export directory and verification receipt. | Reuse valid license and split statistics. Repeat unfinished ranges and final publication. | See [export license scan measurements](#export-license-scan-measurements) and [chat export split measurements](#chat-export-split-measurements). |
 
 ### Select families, screen duplicates, and build a schedule
 
@@ -1422,8 +1422,9 @@ Export combines declared source licenses with the exact license labels on
 normalized documents. When document-level labels are present, the scan uses
 line-aligned ranges under the Corpus worker limit. Pass the same
 `--scratch-dir` on local storage you control to resume completed license
-ranges and LM split counts. Release verification still checks the artifact
-and its provenance before these results are used.
+ranges and LM or chat split counts. Chat range results bind the renderer and
+report errors at the original file's line numbers. Release verification checks
+the artifact and its provenance before these results are used.
 
 ### Export license scan measurements
 
@@ -1447,8 +1448,27 @@ ranges. The retry took 0.434 s and read 531 MB at the process boundary,
 compared with 800 MB for a fresh four-worker pass. With all ranges
 complete, a warm scan took 1.2 ms and logical reads fell to 1.5 MB,
 including range-boundary probes. Twelve receipts occupied 1,428 bytes of
-file contents. Every run produced the same labels. Release verification
-and chat counting remain separate from these timings. [#485](https://github.com/supernovae/model-lab/issues/485)
+file contents. Every run produced the same labels. [#485](https://github.com/supernovae/model-lab/issues/485)
+
+### Chat export split measurements
+
+A synthetic 821 MB split contained 600,000 v2 chat records with non-ASCII
+text. Three runs per condition on NVMe produced the same 742,628,890
+rendered UTF-8 bytes. Cold runs requested eviction of the fixture from
+the page cache.
+
+| Chat split counting | Workers | Warm | Cold |
+| --- | ---: | ---: | ---: |
+| Serial baseline | 1 | 3.962 s | 4.011 s |
+| Range scan | 1 | 3.754 s | |
+| Range scan | 4 | 1.167 s | 1.185 s |
+
+Both cold scans fetched about 821 MB from storage. After SIGKILL at the
+fourth of thirteen commits, the four-worker retry reused four ranges and
+took 0.921 s. A warm pass with all receipts took 1.5 ms and read 1.6 MB,
+including the range-boundary probes. The thirteen receipts contained
+1,404 bytes. These timings cover split counting. Release verification,
+total export time and slower storage remain separate measurements.
 
 ### Fitting a tokenizer on a byte sample
 
