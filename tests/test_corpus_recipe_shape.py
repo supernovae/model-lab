@@ -236,6 +236,24 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     assert plan["status"] == "planned", plan
     assert plan["normalization_source_bytes"] == 0
     assert plan["verification_candidate_source_bytes"] > 0
+
+    # Formatting discarded HF evidence preserves the plan. A malformed array
+    # still blocks planning, including after a run of compact selected rows.
+    lock_path = lab.work / "corpora/second-recipe/acquisition.json"
+    lock_bytes = lock_path.read_bytes()
+    hf = json.loads(lock_bytes)["sources"]["math_finemath"]["receipt"]["retrieval"]
+    rows = next(
+        shard["selected_rows"] for shard in hf["shards"] if shard["selected_rows"]
+    )
+    compact = b'"selected_rows":' + canonical_json(rows)
+    assert compact in lock_bytes
+    pretty = b'"selected_rows":' + json.dumps(rows, indent=2).encode()
+    lock_path.write_bytes(lock_bytes.replace(compact, pretty, 1))
+    assert lab.json(*plan_args) == plan
+    lock_path.write_bytes(lock_bytes.replace(compact, compact[:-1] + b",]", 1))
+    assert lab.json(*plan_args)["status"] == "blocked"
+    lock_path.write_bytes(lock_bytes)
+
     other_build = Path(lab.run("corpus", "build", str(config_path), "--offline"))
     assert normalized == []
     for name in ("documents.jsonl", "spans.jsonl"):
