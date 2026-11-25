@@ -306,6 +306,53 @@ def _declare(recipe: Path, edit) -> None:
     _yaml(path, source)
 
 
+def test_retained_origin_checked_before_replacing_active_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from klab.corpus import acquisition
+
+    _, recipe = _identity_repo(tmp_path)
+    work = tmp_path / "work"
+    original = acquire(load_project(recipe), work)["sources"]["one"]
+    declaration = yaml.safe_load(recipe.read_text())
+    declaration["id"] = "retained"
+    declaration["source_effects"] = [
+        {
+            "source_id": "one",
+            "effect": "reuse_only",
+            "origin_project_id": "example",
+            "snapshot_sha256": original["snapshot_sha256"],
+            "declaration_sha256": original["declaration_sha256"],
+        }
+    ]
+    _yaml(recipe, declaration)
+    project = load_project(recipe)
+    active = acquire(project, work)
+    assert active["sources"]["one"]["snapshot_sha256"] == original["snapshot_sha256"]
+    lock_path = work / "corpora/retained/acquisition.json"
+    inode = lock_path.stat().st_ino
+    origin_manifest = Path(original["snapshot_path"]) / "manifest.json"
+    original_manifest = origin_manifest.read_bytes()
+    changed = json.loads(original_manifest)
+    changed["retrieval"]["late_change"] = True
+
+    def change_origin_during_finalization(*args, **kwargs):
+        # Git's retrieval metadata is outside the byte identity. It still
+        # has to match the origin receipt in the original preflight.
+        origin_manifest.write_text(json.dumps(changed))
+        return verify_acquisition(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            acquisition, "verify_acquisition", change_origin_during_finalization
+        )
+        with pytest.raises(ValueError, match="retained origin differs from lock"):
+            acquire(project, work)
+    assert lock_path.stat().st_ino == inode
+    origin_manifest.write_bytes(original_manifest)
+    assert acquire(project, work, offline=True) == active
+
+
 _BUILD_ONLY_EDITS = {
     "license": lambda s: (
         s.update(license="Apache-2.0")
@@ -620,7 +667,7 @@ def test_reacquire_reads_advisory_lock_once_and_can_fall_back(
 
     monkeypatch.setattr(acquisition, "read_metadata", read)
     assert acquire(project, work, require_existing=True) == first
-    assert reads == [lock_path, lock_path]  # Advisory lookup, then final verification.
+    assert reads == [lock_path]  # The existing lock is read once for advisory reuse.
     assert not calls
     if memory_exhausted:
         assert "MemoryError" in capsys.readouterr().err

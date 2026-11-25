@@ -3467,7 +3467,7 @@ def verify_acquisition(
                 raise ValueError(f"declaration changed: {source.id}")
             effect = effects[source.id] if effects is not None else None
             if effect is not None and effect.effect == "reuse_only":
-                origin, _ = _verify_retained(
+                origin, retained_manifest = _verify_retained(
                     project,
                     Path(work_root),
                     source,
@@ -3482,6 +3482,11 @@ def verify_acquisition(
                     "path": str(origin),
                 }:
                     raise ValueError("retained origin binding mismatch")
+                if (
+                    entry["snapshot_sha256"] != retained_manifest["snapshot_sha256"]
+                    or entry["receipt"]["retrieval"] != retained_manifest["retrieval"]
+                ):
+                    raise ValueError(f"retained origin differs from lock: {source.id}")
             elif effect is not None and "reuse_origin" in entry:
                 raise ValueError("acquired source claims an undeclared reuse origin")
             snapshot = base / "snapshots" / source.id / entry["snapshot_sha256"]
@@ -3999,23 +4004,24 @@ def acquire(
                 if resources is not None:
                     resources.status = "complete"
                     resources.persist()
-    if effects is not None:
-        # An origin changed during the permitted transfer cannot be sealed in
-        # the new lock merely because its preflight passed earlier.
-        for source in project.sources:
-            if effects[source.id].effect != "reuse_only":
-                continue
-            _, current = _verify_retained(
-                project,
-                Path(work_root),
-                source,
-                effects[source.id],
-                proof_store=proof_store,
-                verification_mode=verification_mode,
-            )
-            if current != retained[source.id][1]:
-                raise ValueError(f"retained origin changed before lock: {source.id}")
     if step is not None:
+        # A source step has no lock to verify. Recheck the full retained-origin
+        # preflight after the permitted work and before returning success.
+        for source in project.sources:
+            if source.id in retained:
+                assert effects is not None
+                _, current = _verify_retained(
+                    project,
+                    Path(work_root),
+                    source,
+                    effects[source.id],
+                    proof_store=proof_store,
+                    verification_mode=verification_mode,
+                )
+                if current != retained[source.id][1]:
+                    raise ValueError(
+                        f"retained origin changed during step: {source.id}"
+                    )
         entry = entries[source_id]
         return {
             "status": "source_verified",
@@ -4052,14 +4058,19 @@ def acquire(
             output.write(b"\n")
             output.flush()
             os.fsync(output.fileno())
+        verified_lock = verify_acquisition(
+            project,
+            work_root,
+            lock_path=Path(name),
+            proof_store=proof_store,
+            verification_mode=verification_mode,
+        )
         os.replace(name, base / "acquisition.json")
         sync_directory(base)
     finally:
         if os.path.exists(name):
             os.unlink(name)
-    return verify_acquisition(
-        project, work_root, proof_store=proof_store, verification_mode=verification_mode
-    )
+    return verified_lock
 
 
 def _fill_source(
