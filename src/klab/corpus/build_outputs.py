@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import shutil
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -86,7 +86,9 @@ def stage_declared_inputs(
         )
 
 
-def publish_staging(staging: Path, target: Path) -> None:
+def publish_staging(
+    staging: Path, target: Path, *, before_rename: Callable[[], None] | None = None
+) -> None:
     """Make the staged files durable, then rename the directory into place."""
     from klab.result_publication import sync_directory
     from klab.safe_io import rename_noreplace
@@ -99,6 +101,8 @@ def publish_staging(staging: Path, target: Path) -> None:
             sync_directory(entry)
     sync_directory(staging)
     target.parent.mkdir(parents=True, exist_ok=True)
+    if before_rename is not None:
+        before_rename()
     rename_noreplace(staging, target)
     sync_directory(target.parent)
 

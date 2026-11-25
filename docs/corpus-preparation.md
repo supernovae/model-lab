@@ -787,11 +787,12 @@ row may exceed the batch byte limit.
 
 The native disk builder commits ordered span and view boundaries on reaching
 25,000 rows or 64 MiB of input. A row can cross the byte threshold.
-Each receipt binds the committed output offsets, range
-digests, cursor and report counts. On retry the writer verifies the committed
+Each receipt binds the committed output offsets, prefix SHA-256 digests,
+cursor and report counts. On retry the writer verifies the committed
 prefix, truncates uncommitted or damaged suffixes and seeks to the last
-verified row. The writer computes whole-file SHA-256 checksums as it writes
-views and validates committed ranges. The manifest reuses those checksums
+verified row. The writer extends each prefix checksum during writes and
+validates each checkpoint by reading only its new range. The final prefix
+checksum is the whole-file SHA-256. The manifest reuses those checksums
 after confirming that the file generations still match. The stage and file
 inventory use the same checksum for a stage's JSONL file. Resume still reads
 the committed prefix and reconstructs the framed stage output identity.
@@ -1013,6 +1014,17 @@ Both record what was deferred. Keep the work root and its completion records
 with the release. Completed phases are keyed by their inputs, configuration
 and every corpus module they can run, so a change to the corpus code renders
 them again rather than reusing old shards.
+
+The completed-preparation builder uses the same view checkpoints as the
+native disk builder. The checkpoint records the input shard and byte
+position for spans and the ordinal and byte position in the sorted
+document references. Retry validates the written prefix and seeks to those
+positions. Earlier documents do not need to be read from their source shards
+again. A signed local receipt binds the finished staging files to their
+generations before rename. Retry can publish those intact files or finish
+recording completion after a stop between rename and the completion record.
+A replacement directory with the same bytes cannot supply that receipt.
+Keep the work root and its verification key available across retries.
 
 Each transform file in the project names one `kind`:
 
@@ -1383,7 +1395,7 @@ needs measurement where the table gives historical or fixture evidence.
 | Native disk build, normalize | Receipted shard per source file. | Verify completed shards and re-normalize unfinished files. | Historical Workshop normalize, about 25 min for the 6.7M-document workload. [#491](https://github.com/supernovae/model-lab/pull/491) |
 | Native disk build, index and dedup | Verified groups of prepared file references, then the assembled index and complete dedup stage. Reviewed row admission uses indexed file and row numbers. | Reuse verified input groups. Repeat the unfinished group, compact index assembly or dedup stage as applicable. | See [native index and payload read measurements](#native-index-and-payload-read-measurements) and [native admission coverage measurements](#native-admission-coverage-measurements). Historical Workshop indexing took about 30 min for roughly 13M rows. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB, lineage and view measurement checkpoints, and a receipted census. Final publication by rename. | Verify the committed view prefix, reconstruct its digests and render the uncommitted tail. Reuse finished census work for matching inputs. The manifest hashes ancillary outputs and reuses the view checksums. A stop in the final lineage sort or measurement merge may repeat that step. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. [Native build census measurements](#native-build-census-measurements) cover the report phase. [#579](https://github.com/supernovae/model-lab/pull/579) |
-| Completed-preparation build | Authenticated per-source render and completed sorting, deduplication, inventory and emission phases. | An unfinished phase repeats. View emission on this route reruns its complete pass. The small in-memory builder likewise has a whole-build boundary. | Production restart cost unmeasured. |
+| Completed-preparation build | Authenticated per-source render, completed sort and dedup phases, view range checkpoints and a signed receipt before publication. | Repeat an unfinished upstream phase. During view recovery, verify the committed prefix and resume from the stored span and document cursors. Intact staged views can publish directly, and a renamed build can recover completion from the signed receipt. A partial emission retry can recopy the frozen control inputs. | See [completed-preparation view recovery measurements](#completed-preparation-view-recovery-measurements). Production restart cost unmeasured. |
 | Freeze | Native staging rename and build tombstone, signed verification after a staged replay, then the public release. Completed preparation seals a retained release against its existing build. | Reuse the complete staged receipt at the same path, or resume an unfinished check from eligible file and replay proofs. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. See [staged freeze recovery measurements](#staged-freeze-recovery-measurements). [#501](https://github.com/supernovae/model-lab/pull/501) |
 | Release verification, `audit`, and `sources` | Signed checks of eligible inventory files, stage outputs and streaming raw source replay, then the complete release proof. `audit` and `sources` read the corresponding published report after verification. | A receipt-backed retry skips eligible completed checks and continues the remaining work. Cold mode starts the checks from bytes. | See [inventory hash recovery measurements](#inventory-hash-recovery-measurements), [stage output verification measurements](#stage-output-verification-measurements) and [raw source replay recovery](#raw-source-replay-recovery). An earlier cold audit took 67.3 s on 13.2 GB synthetic data, and the first receipt-backed audit took 0.94 s. [#500](https://github.com/supernovae/model-lab/pull/500), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | `describe` | Cached measurement runs, per-split link offsets and verified lineage index ranges when a proof store or persistent scratch is available. Release verification has its own receipt. | Resume missing index ranges, link files and measurement ranges. An unfinished index sort or cold release check can repeat. Each chat view is one measurement run. | See [describe lineage index recovery measurements](#describe-lineage-index-recovery-measurements) and [describe link planning recovery measurements](#describe-link-planning-recovery-measurements). An earlier full measurement took 55.1 s for 5M synthetic rows (23 GB), 12 workers, without a tokenizer. [#502](https://github.com/supernovae/model-lab/pull/502) |
@@ -1718,6 +1730,30 @@ Device reads were about 465 MB for fresh emission and 1.49 GB for a retry
 with either implementation. The older extra reads came from the page cache
 on this fixture. Whole-phase wall times varied with host load. Larger
 working sets and slower storage remain unmeasured.
+
+#### Completed-preparation view recovery measurements
+
+An 80,000-document NVMe fixture emitted 657 MB of inventory files. Three
+fresh and three interrupted runs per implementation measured the renderer
+through publication from prebuilt references. The injected SIGKILL followed
+25,000 rendered documents. It followed a committed boundary with the new
+writer. All manifest bytes matched with the fixture build identity held fixed.
+These timings exclude source rendering, sorting, deduplication, and copying
+reviewed control inputs.
+
+| Run | Median wall time | Documents rendered | Logical reads | Device reads | Device writes | Median peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Prior, fresh | 4.505 s | 80,000 | 902 MB | 248 MB | 658 MB | 78 MiB |
+| Prefix checkpoints, fresh | 4.582 s | 80,000 | 245 MB | 248 MB | 658 MB | 78 MiB |
+| Prior, retry | 4.440 s | 80,000 | 902 MB | 248 MB | 658 MB | 78 MiB |
+| Prefix checkpoints, retry | 3.371 s | 55,000 | 426 MB | 376 MB | 448 MB | 76 MiB |
+
+The retry reads the written prefix from storage and writes 209 MB less.
+An earlier checkpoint prototype hashed each byte twice and took 4.940 s
+fresh. The retained checkpoint checksum now doubles as the manifest checksum
+at the final boundary. On a separate stop immediately after rename,
+the retry recorded completion in 76 ms, read 8 KiB from storage, and rendered
+zero documents. Production and slower-storage timings remain open.
 
 ### Select families, screen duplicates, and build a schedule
 

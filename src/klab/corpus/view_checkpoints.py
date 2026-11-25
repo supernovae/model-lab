@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -42,13 +41,11 @@ class ViewOutput:
     def __init__(self, stream: BinaryIO):
         self.stream = stream
         self.offset = 0
-        self.digest = hashlib.sha256()
         self.whole = hashlib.sha256()
 
     def write(self, data: bytes) -> None:
         if self.stream.write(data) != len(data):
             raise OSError("short corpus view write")
-        self.digest.update(data)
         self.whole.update(data)
 
     def seal(self) -> dict[str, Any]:
@@ -56,26 +53,22 @@ class ViewOutput:
         if end != self.offset:
             self.stream.flush()
             os.fsync(self.stream.fileno())
-        return {"end": end, "sha256": self.digest.hexdigest()}
+        return {"end": end, "prefix_sha256": self.whole.hexdigest()}
 
-    def advance(self, end: int) -> None:
-        self.offset = end
-        self.digest = hashlib.sha256()
-
-    def matches(self, part: dict[str, Any], observe: Callable[[bytes], None]) -> bool:
+    def validated_prefix(self, part: dict[str, Any]):
+        """Extend the last verified prefix, reading only the newly committed range."""
         end = part["end"]
         if type(end) is not int or end < self.offset:
-            return False
+            return None
         self.stream.seek(self.offset)
         remaining = end - self.offset
-        digest = hashlib.sha256()
+        digest = self.whole.copy()
         while remaining:
             if not (block := self.stream.read(min(remaining, 1024**2))):
-                return False
+                return None
             remaining -= len(block)
             digest.update(block)
-            observe(block)
-        return digest.hexdigest() == part["sha256"]
+        return digest if digest.hexdigest() == part["prefix_sha256"] else None
 
     def file_digest(self) -> ViewFileDigest:
         descriptor = self.stream.fileno()
@@ -115,7 +108,7 @@ class ViewCheckpoints:
         }
         for path in sorted(self.root.glob("commit-*.json")):
             # Discard candidate hash state for every file if any range is bad.
-            candidates = {name: out.whole.copy() for name, out in self.outputs.items()}
+            candidates = {}
             try:
                 entry = read_canonical(path)
                 body, digest = entry["body"], entry["sha256"]
@@ -127,19 +120,22 @@ class ViewCheckpoints:
                     and body["previous"] == self.previous
                     and isinstance(parts, dict)
                     and parts.keys() == self.outputs.keys()
-                    and all(
-                        out.matches(parts[name], candidates[name].update)
-                        for name, out in self.outputs.items()
-                    )
                 )
                 if not valid:
+                    break
+                for name, out in self.outputs.items():
+                    candidate = out.validated_prefix(parts[name])
+                    if candidate is None:
+                        break
+                    candidates[name] = candidate
+                if len(candidates) != len(self.outputs):
                     break
                 state = body["state"]
             except ValueError, TypeError, KeyError:
                 break
             for name, output in self.outputs.items():
                 output.whole = candidates[name]
-                output.advance(parts[name]["end"])
+                output.offset = parts[name]["end"]
             self.previous = digest
             self.sequence += 1
 
@@ -180,7 +176,7 @@ class ViewCheckpoints:
             canonical_json({"body": body, "sha256": digest}) + b"\n",
         )
         for name, output in self.outputs.items():
-            output.advance(body["outputs"][name]["end"])
+            output.offset = body["outputs"][name]["end"]
         self.previous = digest
         self.sequence += 1
 
