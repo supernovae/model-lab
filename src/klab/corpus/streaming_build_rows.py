@@ -474,7 +474,7 @@ class StreamBuildRows:
                     if root != ordinal
                     else None
                 )
-                yield raw.rstrip(b"\n"), row[4], representative, reason
+                yield raw.rstrip(b"\n"), row[4], representative, reason, row[0]
 
     def family_inventory(self):
         count = self.assigned["documents"]

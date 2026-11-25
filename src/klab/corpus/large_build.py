@@ -16,11 +16,12 @@ import shutil
 import sqlite3
 import tempfile
 from array import array
-from collections import Counter, defaultdict, deque
+from collections import Counter, OrderedDict, defaultdict, deque
 from collections.abc import Iterable
 from concurrent.futures import Future, ProcessPoolExecutor
 from contextlib import ExitStack, closing, nullcontext
 from dataclasses import dataclass
+from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -41,7 +42,7 @@ from klab.corpus.build_outputs import (
     write_release_files,
 )
 from klab.corpus.build_stages import StageStore, implementation_digests, run_stage
-from klab.corpus.progress import BuildProgress
+from klab.corpus.progress import BuildProgress, memory_bytes
 from klab.corpus.project import (
     ROW_SOURCE_KINDS,
     SPLITS,
@@ -60,7 +61,9 @@ from klab.corpus.rights import (
     FILE_ADMISSION_KINDS,
     resolve_file_rights,
 )
+from klab.corpus.shards import range_file_identity
 from klab.corpus.view_checkpoints import ViewCheckpoints
+from klab.safe_io import read_file_range
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
@@ -502,11 +505,14 @@ def _require_every_source_has_documents(
     )
 
 
-WIDE_SCHEMA = """
+DOCUMENT_INDEX_SCHEMA = """
 CREATE TABLE documents (
     document_id TEXT NOT NULL UNIQUE,
-    payload BLOB NOT NULL,
-    span BLOB NOT NULL,
+    shard INTEGER NOT NULL,
+    document_offset INTEGER NOT NULL,
+    document_length INTEGER NOT NULL,
+    span_offset INTEGER NOT NULL,
+    span_length INTEGER NOT NULL,
     split TEXT NOT NULL,
     source_id TEXT NOT NULL,
     source_family TEXT NOT NULL,
@@ -532,19 +538,23 @@ CREATE TABLE dedup (
     drop_reason TEXT
 );
 """
-INDEX_SCHEMA = WIDE_SCHEMA + DEDUP_SCHEMA
-# `documents` and `origins` hold the wide, immutable records. `dedup` holds only
-# what the duplicate passes read and write, so those passes never touch a
-# payload; the metadata-only flag and the rights signature are computed once, at
-# index time, from the payload. The index stage keeps them in two files so the narrow table is
-# contiguous on disk: `documents.sqlite` and `narrow.sqlite`.
+INDEX_SCHEMA = (
+    DOCUMENT_INDEX_SCHEMA
+    + DEDUP_SCHEMA
+    + """
+CREATE TABLE admitted_document_rows (
+    file_number INTEGER NOT NULL,
+    source_row_index INTEGER NOT NULL
+);
+"""
+)
+_INDEX_GROUP_BYTES = 64 * 1024**2
 
 
 def insert_indexed(
     connection: sqlite3.Connection,
     doc: dict[str, Any],
-    raw_doc: bytes,
-    raw_span: bytes,
+    references: tuple[int, int, int, int, int],
     split: str,
     rank: int,
     origins: Iterable[tuple[str, str]],
@@ -553,12 +563,10 @@ def insert_indexed(
     from klab.corpus.dedup_policy import is_metadata_only, rights_signature
 
     number = connection.execute(
-        "INSERT INTO documents (document_id,payload,span,split,source_id,"
-        "source_family,document_kind,source_rank) VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO documents VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (
             doc["document_id"],
-            raw_doc,
-            raw_span,
+            *references,
             split,
             doc["source_id"],
             doc["source_family"],
@@ -587,34 +595,109 @@ def insert_indexed(
 
 
 def create_index(directory: Path) -> sqlite3.Connection:
-    """An empty index in `directory`: `narrow.sqlite` with `documents.sqlite` attached."""
-    wide = sqlite3.connect(directory / "documents.sqlite")
-    wide.executescript(WIDE_SCHEMA)
-    wide.close()
-    connection = sqlite3.connect(directory / "narrow.sqlite")
+    """Create a private index of document references and duplicate evidence."""
+    connection = sqlite3.connect(directory / "index.sqlite")
     connection.execute("PRAGMA cache_size=-16384")
     connection.execute("PRAGMA temp_store=FILE")
     # The files are private to a staging directory that is discarded on failure
     # and published only whole, so they need no journal.
     connection.execute("PRAGMA synchronous=OFF")
     connection.execute("PRAGMA journal_mode=OFF")
-    connection.execute(
-        "ATTACH DATABASE ? AS wide", (str(directory / "documents.sqlite"),)
-    )
-    connection.execute("PRAGMA wide.synchronous=OFF")
-    connection.execute("PRAGMA wide.journal_mode=OFF")
-    connection.executescript(DEDUP_SCHEMA)
+    connection.executescript(INDEX_SCHEMA)
     return connection
 
 
-def finish_index(connection: sqlite3.Connection, schema: str = "wide") -> None:
+def finish_index(connection: sqlite3.Connection) -> None:
     connection.execute(
-        f"CREATE INDEX {schema}.origins_by_key ON origins(method,origin,document_number)"
+        "CREATE INDEX origins_by_key ON origins(method,origin,document_number)"
     )
-    connection.execute(
-        f"CREATE INDEX {schema}.documents_source ON documents(source_id)"
-    )
+    connection.execute("CREATE INDEX documents_source ON documents(source_id)")
     connection.commit()
+
+
+def _index_rows(
+    connection: sqlite3.Connection,
+    group: list[tuple[int, Path]],
+    policy: dict,
+    rank: dict[str, int],
+    declared_keys: set[str],
+    file_ids: dict[tuple[str, str], int],
+    progress: BuildProgress,
+) -> int:
+    from klab.corpus.pipeline import _origin_keys
+    from klab.corpus.split_assignments import assign_split
+
+    total = 0
+    for shard_number, shard in group:
+        with (
+            (shard / "docs.jsonl").open("rb") as docs,
+            (shard / "spans.jsonl").open("rb") as spans,
+        ):
+            document_offset = span_offset = 0
+            for raw_doc, raw_span in zip(docs, spans, strict=True):
+                doc = json.loads(raw_doc)
+                span = json.loads(raw_span)
+                if doc["document_id"] != span["record_id"]:
+                    raise ValueError("prepared document/span identity mismatch")
+                document_size, span_size = len(raw_doc), len(raw_span)
+                origins = (
+                    ("raw", doc["raw_content_sha256"]),
+                    ("normalized", doc["content_sha256"]),
+                    *(("canonical_origin", value) for value in _origin_keys(doc)),
+                )
+                insert_indexed(
+                    connection,
+                    doc,
+                    (
+                        shard_number,
+                        document_offset,
+                        document_size,
+                        span_offset,
+                        span_size,
+                    ),
+                    assign_split(doc, policy),
+                    rank[doc["source_id"]],
+                    [
+                        (method, key)
+                        for method, key in origins
+                        if method in declared_keys
+                    ],
+                )
+                document_offset += document_size
+                span_offset += span_size
+                if file_ids:
+                    path = doc["source_location"].split("#", 1)[0]
+                    number = file_ids.get((doc["source_id"], path))
+                    if number is not None:
+                        connection.execute(
+                            "INSERT INTO admitted_document_rows VALUES (?,?)",
+                            (number, doc["metadata"]["source_row_index"]),
+                        )
+                total += 1
+                progress.update(documents=1)
+                if total % 10_000 == 0:
+                    connection.commit()
+    connection.commit()
+    return total
+
+
+def _index_groups(
+    prepared: list[Path], generations: list[list[int]]
+) -> list[list[tuple[int, Path]]]:
+    """Group small prepared files into sequential, approximately 64 MiB inputs."""
+    groups = []
+    group = []
+    size = 0
+    for number, shard in enumerate(prepared):
+        cost = generations[2 * number][2] + generations[2 * number + 1][2]
+        if group and size + cost > _INDEX_GROUP_BYTES:
+            groups.append(group)
+            group, size = [], 0
+        group.append((number, shard))
+        size += cost
+    if group:
+        groups.append(group)
+    return groups
 
 
 def _index_prepared(
@@ -624,63 +707,75 @@ def _index_prepared(
     progress: BuildProgress,
     *,
     admission_files: tuple[tuple[str, str], ...],
+    checkpoint_store: StageStore,
+    index_key: str,
+    generations: list[list[int]],
 ) -> int:
     from klab.corpus.dedup_policy import source_rank
-    from klab.corpus.pipeline import _origin_keys
-    from klab.corpus.split_assignments import assign_split, split_policy
+    from klab.corpus.split_assignments import split_policy
 
-    policy = split_policy(project)
     rank = {source.id: source_rank(source) for source in project.sources}
     declared_keys = set(project.release.policy.duplicates.keys)
     file_ids = {key: ordinal for ordinal, key in enumerate(admission_files)}
+    policy = None
+
+    def index_group(connection, group):
+        nonlocal policy
+        if policy is None:
+            policy = split_policy(project)
+        return _index_rows(
+            connection, group, policy, rank, declared_keys, file_ids, progress
+        )
+
+    groups = _index_groups(prepared, generations)
     total = 0
     with closing(create_index(directory)) as connection:
-        if file_ids:
-            connection.execute(
-                "CREATE TABLE admitted_document_rows ("
-                "file_number INTEGER NOT NULL, source_row_index INTEGER NOT NULL)"
-            )
-        for shard in prepared:
-            with (
-                (shard / "docs.jsonl").open("rb") as docs,
-                (shard / "spans.jsonl").open("rb") as spans,
-            ):
-                for raw_doc, raw_span in zip(docs, spans, strict=True):
-                    doc = json.loads(raw_doc)
-                    span = json.loads(raw_span)
-                    if doc["document_id"] != span["record_id"]:
-                        raise ValueError("prepared document/span identity mismatch")
-                    origins = (
-                        ("raw", doc["raw_content_sha256"]),
-                        ("normalized", doc["content_sha256"]),
-                        *(("canonical_origin", value) for value in _origin_keys(doc)),
-                    )
-                    insert_indexed(
-                        connection,
-                        doc,
-                        raw_doc.rstrip(b"\n"),
-                        raw_span.rstrip(b"\n"),
-                        assign_split(doc, policy),
-                        rank[doc["source_id"]],
-                        [
-                            (method, key)
-                            for method, key in origins
-                            if method in declared_keys
+        if len(groups) == 1:
+            total = index_group(connection, groups[0])
+        elif groups:
+            for group in groups:
+
+                def produce(staging, result, group=group):
+                    with closing(create_index(staging)) as part:
+                        result["documents"] = index_group(part, group)
+
+                part, result = run_stage(
+                    checkpoint_store,
+                    "index-group",
+                    {
+                        "index": index_key,
+                        "shards": [number for number, _ in group],
+                        "generations": [
+                            generations[2 * number : 2 * number + 2]
+                            for number, _ in group
                         ],
-                    )
-                    if file_ids:
-                        path = doc["source_location"].split("#", 1)[0]
-                        number = file_ids.get((doc["source_id"], path))
-                        if number is not None:
-                            connection.execute(
-                                "INSERT INTO admitted_document_rows VALUES (?,?)",
-                                (number, doc["metadata"]["source_row_index"]),
-                            )
-                    total += 1
-                    progress.update(documents=1)
-                    if total % 10_000 == 0:
-                        connection.commit()
-        connection.commit()
+                    },
+                    produce,
+                    on_reuse=lambda: progress.record("reused_index_group"),
+                )
+                connection.execute(
+                    "ATTACH DATABASE ? AS part",
+                    (f"file:{quote(str(part / 'index.sqlite'))}?mode=ro",),
+                )
+                connection.execute(
+                    "INSERT INTO documents SELECT * FROM part.documents ORDER BY rowid"
+                )
+                connection.execute(
+                    "INSERT INTO origins SELECT method,origin,document_number+? FROM part.origins",
+                    (total,),
+                )
+                connection.execute(
+                    "INSERT INTO dedup SELECT document_number+?, document_id, split, source_rank, "
+                    "document_kind, metadata_only, rights_signature, representative_id, drop_reason "
+                    "FROM part.dedup",
+                    (total,),
+                )
+                connection.execute(
+                    "INSERT INTO admitted_document_rows SELECT * FROM part.admitted_document_rows"
+                )
+                connection.commit()
+                connection.execute("DETACH DATABASE part")
+                total += result["documents"]
         finish_index(connection)
     return total
 
@@ -697,17 +792,16 @@ def open_dedup(index: Path, database: Path) -> sqlite3.Connection:
     connection.execute("PRAGMA journal_mode=OFF")
     connection.execute("PRAGMA temp_store=FILE")
     connection.execute("PRAGMA cache_size=-65536")
-    for name, file in (("wide", "documents.sqlite"), ("narrow", "narrow.sqlite")):
-        connection.execute(
-            f"ATTACH DATABASE ? AS {name}",
-            (f"file:{quote(str(index / file))}?mode=ro",),
-        )
+    connection.execute(
+        "ATTACH DATABASE ? AS indexed",
+        (f"file:{quote(str(index / 'index.sqlite'))}?mode=ro",),
+    )
     connection.executescript(
         DEDUP_SCHEMA
         + "INSERT INTO main.dedup (document_number,document_id,split,source_rank,"
         "document_kind,metadata_only,rights_signature) SELECT document_number,"
         "document_id,split,source_rank,document_kind,metadata_only,rights_signature "
-        "FROM narrow.dedup "
+        "FROM indexed.dedup "
         "ORDER BY document_number;"
     )
     connection.commit()
@@ -1080,28 +1174,132 @@ def _write_rejected(target: Path, source_events: list[Path | dict[str, Any]]) ->
         os.fsync(output.fileno())
 
 
+_DOCUMENT_READ_BYTES = 8 * 1024**2
+_DOCUMENT_READ_ROWS = 2048
+_DOCUMENT_OPEN_FILES = 64
+_MAX_DOCUMENT_CACHE_BYTES = 1024**3
+
+
 class _SQLBuildRows:
     """The ordinary builder's ordered inputs to the shared release writer."""
 
-    def __init__(self, connection):
+    def __init__(self, connection, prepared):
         self.connection = connection
+        self.prepared = prepared
 
     def spans(self):
         for _, span in self.span_rows(0):
             yield span
 
     def span_rows(self, after: int):
-        yield from self.connection.execute(
-            "SELECT rowid,span FROM documents WHERE rowid>? ORDER BY rowid", (after,)
-        )
+        with ExitStack() as sources:
+            current, position = None, 0
+            for rowid, shard, offset, length in self.connection.execute(
+                "SELECT rowid,shard,span_offset,span_length FROM documents "
+                "WHERE rowid>? ORDER BY rowid",
+                (after,),
+            ):
+                if shard != current:
+                    sources.close()
+                    stream = sources.enter_context(
+                        (self.prepared[shard] / "spans.jsonl").open("rb")
+                    )
+                    current, position = shard, 0
+                if offset != position:
+                    stream.seek(offset)
+                raw = stream.read(length)
+                if len(raw) != length:
+                    raise ValueError("prepared span is truncated")
+                position = offset + length
+                yield rowid, raw.removesuffix(b"\n")
 
     def documents(self, after: str = ""):
-        yield from self.connection.execute(
-            "SELECT d.payload,d.split,x.representative_id,x.drop_reason "
+        references = self.connection.execute(
+            "SELECT d.shard,d.document_offset,d.document_length,d.split,"
+            "x.representative_id,x.drop_reason,d.document_id "
             "FROM documents d CROSS JOIN dedup x ON x.document_number=d.rowid "
             "WHERE d.document_id>? ORDER BY d.document_id",
             (after,),
         )
+        streams = OrderedDict()
+        try:
+            if not after and self._warm_document_cache():
+                for shard, offset, length, *metadata in references:
+                    stream = self._document_stream(streams, shard)
+                    raw = read_file_range(stream, offset, length)
+                    yield raw.removesuffix(b"\n"), *metadata
+                return
+            batch = []
+            size = 0
+            for reference in references:
+                if batch and (
+                    size + reference[2] > _DOCUMENT_READ_BYTES
+                    or len(batch) >= _DOCUMENT_READ_ROWS
+                ):
+                    yield from self._read_documents(batch, streams)
+                    batch, size = [], 0
+                batch.append(reference)
+                size += reference[2]
+            yield from self._read_documents(batch, streams)
+        finally:
+            for stream in streams.values():
+                stream.close()
+
+    def _document_stream(self, streams, shard):
+        if shard not in streams:
+            if len(streams) == _DOCUMENT_OPEN_FILES:
+                streams.popitem(last=False)[1].close()
+            streams[shard] = (self.prepared[shard] / "docs.jsonl").open("rb")
+        streams.move_to_end(shard)
+        return streams[shard]
+
+    def _warm_document_cache(self) -> bool:
+        """Use sequential reads for a cold working set that fits a bounded cache budget."""
+        nowait = getattr(os, "RWF_NOWAIT", None)
+        if nowait is None or not hasattr(os, "preadv"):
+            return False
+        files = [shard / "docs.jsonl" for shard in self.prepared]
+        sizes = [path.stat().st_size for path in files]
+        _, _, available = memory_bytes()
+        if not available or sum(sizes) > min(available // 8, _MAX_DOCUMENT_CACHE_BYTES):
+            return False
+        buffer = bytearray(1024**2)
+        probe = memoryview(buffer)[:1]
+        for path, size in zip(files, sizes, strict=True):
+            if not size:
+                continue
+            with path.open("rb") as stream:
+                try:
+                    for offset in (0, size // 2, size - 1):
+                        os.preadv(stream.fileno(), [probe], offset, nowait)
+                except BlockingIOError:
+                    while stream.readinto(buffer):
+                        pass
+                except OSError:
+                    return False
+        return True
+
+    def _read_documents(self, batch, streams):
+        # Improve locality within a bounded batch and emit the original ID order.
+        payloads = [b""] * len(batch)
+        order = sorted(range(len(batch)), key=lambda i: batch[i][:2])
+        advise = getattr(os, "posix_fadvise", None)
+        for shard, indices in groupby(order, key=lambda i: batch[i][0]):
+            stream = self._document_stream(streams, shard)
+            indices = list(indices)
+            if advise is not None and len(indices) > 1:
+                try:
+                    descriptor = stream.fileno()
+                    for index in indices:
+                        _, offset, length, *_ = batch[index]
+                        advise(descriptor, offset, length, os.POSIX_FADV_WILLNEED)
+                except OSError:
+                    advise = None
+            for index in indices:
+                _, offset, length, *_ = batch[index]
+                payloads[index] = read_file_range(stream, offset, length)
+        for raw, (_, _, _, *metadata) in zip(payloads, batch, strict=True):
+            yield raw.removesuffix(b"\n"), *metadata
 
     def family_splits(self):
         for (family,) in self.connection.execute(
@@ -1147,7 +1345,7 @@ def _emit_build(
 ) -> None:
     from klab.corpus.measurement import summarize_release
 
-    ordered_rows = ordered_rows or _SQLBuildRows(connection)
+    ordered_rows = ordered_rows or _SQLBuildRows(connection, prepared)
     sources = source_declarations(project, lock)
     rights = rights_report(project, sources, rights_files)
     source_origins = {source.id: source.origin for source in project.sources}
@@ -1251,10 +1449,12 @@ def _emit_build(
             if checkpoints is not None
             else ordered_rows.documents()
         )
-        for raw_doc, split, representative, reason in stack.enter_context(
+        for raw_doc, split, representative, reason, document_id in stack.enter_context(
             closing(document_rows)
         ):
             doc = json.loads(raw_doc)
+            if doc["document_id"] != document_id:
+                raise ValueError("prepared document differs from the indexed identity")
             doc["split"] = split
             doc["representative_id"] = representative
             doc["drop_reason"] = reason
@@ -1426,7 +1626,7 @@ def _open_decided(index_dir: Path, dedup_dir: Path):
     )
     connection.execute(
         "ATTACH DATABASE ? AS indexed",
-        (f"file:{quote(str(index_dir / 'documents.sqlite'))}?mode=ro",),
+        (f"file:{quote(str(index_dir / 'index.sqlite'))}?mode=ro",),
     )
     return closing(connection)
 
@@ -1728,22 +1928,47 @@ def build_large(
         )
     )
     stage_inputs = _stage_inputs(project, prepared, admission_files=admission_files)
+    prepared_files = [
+        shard / name for shard in prepared for name in ("docs.jsonl", "spans.jsonl")
+    ]
+    generations = [range_file_identity(path) for path in prepared_files]
+    index_key = stages.key(stage_inputs["index"])
+    groups_root = stages.root / f".index-{index_key}.groups"
+    group_store = StageStore(groups_root)
     progress.update(phase="indexing")
+
+    def require_prepared_generation() -> None:
+        if [range_file_identity(path) for path in prepared_files] != generations:
+            raise ValueError("prepared payloads changed during native build")
 
     def index_stage(staging: Path, result: dict[str, Any]) -> None:
         result["documents"] = _index_prepared(
-            staging, prepared, project, progress, admission_files=admission_files
+            staging,
+            prepared,
+            project,
+            progress,
+            admission_files=admission_files,
+            checkpoint_store=group_store,
+            index_key=index_key,
+            generations=generations,
         )
+        require_prepared_generation()
 
-    index_dir, _ = run_stage(
-        stages,
-        "index",
-        stage_inputs["index"],
-        index_stage,
-        on_reuse=lambda: progress.record("reused_index_stage"),
-    )
-    stages.prune("index", keep=_PRUNE_ON_PUBLISH, protect=index_dir.name)
-    with _open_read_only(index_dir / "documents.sqlite") as connection:
+    with (workspace / ".index.lock").open("a") as index_lock:
+        fcntl.flock(index_lock, fcntl.LOCK_EX)
+        stages.discard_incomplete("index")
+        group_store.discard_incomplete("index-group")
+        index_dir, _ = run_stage(
+            stages,
+            "index",
+            stage_inputs["index"],
+            index_stage,
+            on_reuse=lambda: progress.record("reused_index_stage"),
+        )
+        if groups_root.exists():
+            shutil.rmtree(groups_root)
+        stages.prune("index", keep=_PRUNE_ON_PUBLISH, protect=index_dir.name)
+    with _open_read_only(index_dir / "index.sqlite") as connection:
         _require_every_source_has_documents(connection, project, source_events)
     if admission_files:
         progress.update(phase="checking_admissions")
@@ -1756,7 +1981,7 @@ def build_large(
             ) as connection:
                 connection.execute(
                     "ATTACH DATABASE ? AS indexed",
-                    (f"file:{quote(str(index_dir / 'narrow.sqlite'))}?mode=ro",),
+                    (f"file:{quote(str(index_dir / 'index.sqlite'))}?mode=ro",),
                 )
                 _verify_admitted_inventory(
                     connection, record_admission, admission_files
@@ -1796,6 +2021,7 @@ def build_large(
             "build": build_id,
             "index_receipt": sha256_file(index_dir / "receipt.json"),
             "dedup_receipt": sha256_file(dedup_dir / "receipt.json"),
+            "prepared_generations": generations,
             "implementation": implementation_digests(
                 "view_checkpoints.py", "build_outputs.py"
             ),
@@ -1836,10 +2062,13 @@ def build_large(
             checkpoints=ViewCheckpoints(view_root, view_key),
             diagnostics=root / "diagnostics" / f"{build_id}.json",
         )
+        require_prepared_generation()
         progress.update(phase="publishing")
         publish_staging(staging, target)
         shutil.rmtree(view_root)
-    for stage in ("dedup", "index"):
-        stages.prune(stage, keep=keep_stages)
+    stages.prune("dedup", keep=keep_stages)
+    with (workspace / ".index.lock").open("a") as index_lock:
+        fcntl.flock(index_lock, fcntl.LOCK_EX)
+        stages.prune("index", keep=keep_stages)
     progress.record("complete")
     return target

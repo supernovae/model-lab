@@ -115,6 +115,11 @@ class StageStore:
             rename_noreplace(staging, destination)
             _sync(parent)
 
+    def discard_incomplete(self, stage: str) -> None:
+        """Clear abandoned staging directories while the caller owns the writer lock."""
+        for directory in (self.root / stage).glob(f"{_INCOMPLETE}*"):
+            shutil.rmtree(directory, ignore_errors=True)
+
     def prune(self, stage: str, *, keep: int, protect: str | None = None) -> list[str]:
         """Remove incomplete directories and all but the newest `keep` outputs.
 
@@ -124,12 +129,15 @@ class StageStore:
         parent = self.root / stage
         if not parent.is_dir():
             return []
+        self.discard_incomplete(stage)
         removed = []
         outputs = []
         for item in parent.iterdir():
-            if item.name.startswith(_INCOMPLETE):
-                shutil.rmtree(item, ignore_errors=True)
-            elif item.is_dir() and item.name != protect:
+            if (
+                item.is_dir()
+                and not item.name.startswith(_INCOMPLETE)
+                and item.name != protect
+            ):
                 outputs.append(item)
         outputs.sort(key=lambda item: item.stat().st_mtime_ns, reverse=True)
         for item in outputs[max(keep - (protect is not None), 0) :]:

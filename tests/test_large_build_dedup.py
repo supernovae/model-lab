@@ -38,8 +38,7 @@ def _database(documents: list[tuple[str, str, str, str]]) -> sqlite3.Connection:
         insert_indexed(
             connection,
             doc,
-            json.dumps(doc).encode(),
-            b"{}",
+            (0, 0, 0, 0, 0),
             split,
             2,
             [("raw", raw), ("normalized", normalized)],
@@ -210,15 +209,7 @@ def _disk_database(docs: list[dict], keys: tuple[str, ...]) -> sqlite3.Connectio
         insert_indexed(
             connection,
             record,
-            json.dumps(
-                {
-                    "license": doc["license"],
-                    "redistribution": doc["redistribution"],
-                    "rights": doc["rights"],
-                    "structure": doc["structure"],
-                }
-            ).encode(),
-            b"{}",
+            (0, 0, 0, 0, 0),
             doc["split"],
             {"s0": 0, "s1": 2}[doc["source_id"]],
             [(method, origins[method]) for method in keys],

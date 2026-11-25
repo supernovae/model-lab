@@ -738,7 +738,7 @@ The disk builder reuses verified outputs after a failure or a kill:
 | Stage | Output under `WORK/corpora/<id>/builds` | Reused when |
 | --- | --- | --- |
 | normalize | `prepared/normalized-source-v2/<source>/<digest>`, one shard per source file | the shard's receipt and three output hashes verify |
-| index | `stages/index/<key>/documents.sqlite`, `narrow.sqlite` | its receipt verifies; key below |
+| index | `stages/.index-<key>.groups` for incomplete work, then `stages/index/<key>/index.sqlite` | each group or the completed index has a matching verified receipt |
 | dedup | `stages/dedup/<key>/dedup.sqlite`, `groups.jsonl` | its receipt verifies; key below |
 | views | `../.views-<key>/build` with receipts beside the staged output | matching build and stage inputs, with a verified append boundary |
 | publish | the build directory itself, renamed into place atomically | the build exists and verifies |
@@ -749,7 +749,7 @@ in its `receipt.json` next to the SHA-256 and size of every output file:
 - **index**: the receipt digest of every prepared shard in order (which bind the
   source bytes, rights decision, normalizer options and document policy), the
   split declaration (with the digest of its assignment file), the declared
-  duplicate keys, every source's rank, and the digests of the implementation
+  duplicate keys, source ranks, reviewed row-level files and the implementation
   files `large_build.py`, `pipeline.py`, `split_assignments.py` and
   `dedup_policy.py`.
 - **dedup**: the index key, the whole `release.policy.duplicates` section and
@@ -769,6 +769,22 @@ The checks that fail fast, such as the empty-source check and the admitted
 inventory check, run on every start against the verified index, so a fix to the
 recipe is judged in seconds, not after the stage that produced the data.
 
+The index stores file and byte offsets into the verified prepared shards,
+alongside split, duplicate and admission metadata. The builder indexes groups
+of prepared files up to about 64 MiB. A larger indivisible prepared file gets
+its own group. Each completed group is verified on retry before its metadata
+is assembled into the index. A stop during assembly may repeat the merge and
+SQL index creation. After the final index is durable, the build removes the
+group files. A changed input or producer starts a new index generation.
+
+Spans retain acquisition order and documents and views retain document-ID
+order. The emitter reads the original normalized payloads by reference. When
+the operating system supports cache probes, a complete view with a working
+set below 1 GiB and one eighth of available memory can read cold source files
+sequentially before its indexed access. Other reads use batches of up to
+8 MiB or 2,048 requested rows with at most 64 open payload files. An individual
+row may exceed the batch byte limit.
+
 The native disk builder commits ordered span and view boundaries on reaching
 25,000 rows or 64 MiB of input. A row can cross the byte threshold.
 Each receipt binds the committed output offsets, range
@@ -783,20 +799,19 @@ identities can be removed between builds once they are no longer needed.
 Changing the code revision can require new builder checkpoints, with acquired
 snapshots still available for reuse.
 
-**Disk cost.** The index holds every prepared record, so it is about as large
-as the prepared shards plus their spans (`documents.sqlite`), with a small
-narrow table beside it (`narrow.sqlite`: ID, split, rank, kind, a metadata-only
-flag and a rights signature per document, computed once while indexing).
-Deduplication reads and writes only that narrow table, never a payload, and
-stores its decisions in `dedup.sqlite` (a few bytes per document) next to
-`groups.jsonl`; it does not copy the index. Its time therefore does not grow
-with document size, and it reports progress per pass (`dedup_groups`,
-`dedup_compress`, `dedup_reasons`). The checkpoints are I/O-heavy, so point
-`WORK/corpora/<id>/builds/stages` at fast storage (a symlink works). Cleanup rules:
+**Disk cost.** The index holds compact references and metadata per
+record. Completed index groups and the assembled index overlap
+briefly. Deduplication reads the index metadata and writes its
+decisions into `dedup.sqlite` beside `groups.jsonl`. Its passes
+report progress as `dedup_groups`, `dedup_compress` and `dedup_reasons`.
+Use fast storage for `WORK/corpora/<id>/builds/stages`. A symlink works.
 
 - Publishing a stage output removes incomplete directories and every older
   output of that stage except the newest one, so at most two of each remain
   while a build is failing and being retried.
+- A same-generation index retry clears abandoned staging directories and
+  retains its verified groups until the final index is durable. Abandoned
+  group directories from other generations can be removed between builds.
 - A successful build removes all index and dedup outputs. `--keep-stages N`
   keeps the newest N of each, for example to try several duplicate policies
   against one index.
@@ -1359,7 +1374,7 @@ needs measurement where the table gives historical or fixture evidence.
 | Acquisition and transport cache | Published source snapshot, verified transport body or adapter-specific checkpoint. See [recovery by source adapter](#recovery-by-source-adapter). | Adapter-specific work and verification. Indexed Wikimedia retains committed planning groups and selected member groups. A partial pinned transfer restarts its body. | On a 287 MiB Wikimedia shard, a stop after 128 planned members avoided 539.88 MiB of retry decompression. [#592](https://github.com/supernovae/model-lab/pull/592) |
 | Snapshot verification | Signed byte checks of eligible files in published snapshots, then a complete snapshot proof. | Reuse completed eligible file hashes at the same path; restart an incomplete file. An explicit cold check reads the bytes again. | Historical Workshop cold pass, about 15 min for 33 snapshots and 108 GB. See [snapshot hash recovery measurements](#snapshot-hash-recovery-measurements). |
 | Native disk build, normalize | Receipted shard per source file. | Verify completed shards and re-normalize unfinished files. | Historical Workshop normalize, about 25 min for the 6.7M-document workload. [#491](https://github.com/supernovae/model-lab/pull/491) |
-| Native disk build, index and dedup | Whole index and whole dedup stage, separately. Reviewed row admission reuses source file and row numbers in the completed index. | Verify earlier outputs and rebuild the interrupted stage. Keep the index when only duplicate policy changes. | Historical Workshop index, about 30 min for roughly 13M rows. The HDD incident measured 3.4k docs/s against 19.8k docs/s on NVMe. See [native admission coverage measurements](#native-admission-coverage-measurements). Current dedup interruption cost is unmeasured. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
+| Native disk build, index and dedup | Verified groups of prepared file references, then the assembled index and complete dedup stage. Reviewed row admission uses indexed file and row numbers. | Reuse verified input groups. Repeat the unfinished group, compact index assembly or dedup stage as applicable. | See [native index and payload read measurements](#native-index-and-payload-read-measurements) and [native admission coverage measurements](#native-admission-coverage-measurements). Historical Workshop indexing took about 30 min for roughly 13M rows. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB. Final publication by rename. | Verify the committed prefix, reconstruct its digest and render the uncommitted tail. Report measurement or manifest hashing can restart as a whole pass. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. These figures cover the append helper. [#579](https://github.com/supernovae/model-lab/pull/579) |
 | Completed-preparation build | Authenticated per-source render and completed sorting, deduplication, inventory and emission phases. | An unfinished phase repeats. View emission on this route reruns its complete pass. The small in-memory builder likewise has a whole-build boundary. | Production restart cost unmeasured. |
 | Freeze | Native staging rename and build tombstone, signed verification after a staged replay, then the public release. Completed preparation seals a retained release against its existing build. | Reuse the complete staged receipt at the same path, or resume an unfinished check from eligible file and replay proofs. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. See [staged freeze recovery measurements](#staged-freeze-recovery-measurements). [#501](https://github.com/supernovae/model-lab/pull/501) |
@@ -1609,8 +1624,41 @@ files before checking.
 
 The narrow index grew by 1.16 MB. The separate document index matched
 byte for byte. These timings cover indexing and the coverage check.
-The native builder still stores document payloads in its index, and
-build-wide restart cost and slower-storage performance remain open.
+This fixture used the prior document index layout. Build-wide restart
+cost and slower-storage performance remain open.
+[#450](https://github.com/supernovae/model-lab/issues/450), [#485](https://github.com/supernovae/model-lab/issues/485)
+
+#### Native index and payload read measurements
+
+The synthetic NVMe fixture contained 144,000 documents in 24 prepared
+shards, totaling 700 MB with their spans. Three trials per condition
+compared index construction and the ordered payload read used by view
+emission. Cold trials requested eviction of the relevant inputs. Every
+condition emitted the same ordered payloads and decisions.
+
+| Operation | Previous time | References and index checkpoints |
+| --- | ---: | ---: |
+| Fresh index construction | 2.724 s | 2.641 s |
+| Index retry after SIGKILL following six committed groups | | 1.578 s |
+| Cold ordered span and document reads | 1.669 s | 1.531 s |
+| Warm ordered span and document reads | 0.799 s | 0.767 s |
+
+The index shrank from 833 MB to 113 MB. The group files occupied 86 MB
+while they overlapped the new index, and fresh index writes fell from
+857 MB to 223 MB. Each retry reused groups covering 350 MB of prepared
+input. Cold ordered reads fetched 809 MB before and 767 MB after.
+The buffered sequential cache assist was eligible for this fixture.
+An initial batch-only reference reader took 5.588 s for the same cold
+ordered reads.
+
+A separate 1.70 GB fixture with 96,000 rows exceeded the cache budget.
+In one paired run, index construction including the final receipt took
+4.979 s before and 2.557 s with references. The index shrank from 1.83 GB
+to 74 MB. Cold ordered reads took 2.390 s before and 3.275 s with
+references. Warm ordered reads took 1.216 s before and 1.149 s after.
+The sum of index and cold-read times fell from 7.369 s to 5.832 s.
+These were separate timed phases with byte-identical ordered payloads.
+Production-scale restart and slower storage remain open.
 [#450](https://github.com/supernovae/model-lab/issues/450), [#485](https://github.com/supernovae/model-lab/issues/485)
 
 ### Select families, screen duplicates, and build a schedule

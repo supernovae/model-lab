@@ -76,6 +76,37 @@ def test_a_build_killed_at_any_stage_resumes_without_redoing_earlier_stages(
     # A successful build prunes its checkpoints.
     assert stage_dirs(lab.work) == []
 
+    shutil.rmtree(reference)
+    run_stage = large_build.run_stage
+    index_rows = large_build._index_rows
+    scanned = []
+
+    def observe_index_rows(connection, group, *args):
+        scanned.extend(number for number, _ in group)
+        return index_rows(connection, group, *args)
+
+    def stop_after_group(store, stage, *args, **kwargs):
+        output = run_stage(store, stage, *args, **kwargs)
+        if stage == "index-group":
+            raise OSError("interrupted after index group")
+        return output
+
+    with monkeypatch.context() as recovery:
+        recovery.setattr(large_build, "_INDEX_GROUP_BYTES", 1)
+        recovery.setattr(large_build, "_index_rows", observe_index_rows)
+        with monkeypatch.context() as fault:
+            fault.setattr(large_build, "run_stage", stop_after_group)
+            with pytest.raises(OSError, match="interrupted after index group"):
+                lab.run("corpus", "build", project, "--offline")
+        [committed] = scanned
+        assert not reference.exists()
+        scanned.clear()
+        reference = Path(lab.run("corpus", "build", project, "--offline"))
+        assert scanned and committed not in scanned
+        assert tree(reference) == expected
+        assert not list(lab.work.glob("corpora/*/builds/stages/.index-*.groups"))
+    calls.reset()
+
     for failing, redone, kept in (
         ("index", {"index": 1, "dedup": 1, "emit": 1}, set()),
         ("dedup", {"index": 0, "dedup": 1, "emit": 1}, {"index"}),
