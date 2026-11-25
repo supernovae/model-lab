@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 
+from klab.corpus import native_dedup
 from klab.corpus.native_dedup import deduplicate
 from klab.corpus.native_index import INDEX_SCHEMA, insert_indexed
 from klab.corpus.project import DuplicatePolicy
@@ -134,6 +136,68 @@ def test_error_policy_rejects_any_cross_split_overlap(tmp_path: Path) -> None:
     # The failure names the group's documents and the option that changes it.
     assert "a-train, b-valid" in str(failure.value)
     assert "release.policy.duplicates.heldout_overlap" in str(failure.value)
+
+
+def test_chain_compression_resumes_inside_a_pass(tmp_path: Path, monkeypatch) -> None:
+    # Reverse ordinal order forces transitive links to cross several windows.
+    rows = [
+        (
+            f"{index:02d}",
+            "train" if index else "validation",
+            f"r{index // 2}",
+            f"n{(index + 1) // 2}",
+        )
+        for index in reversed(range(13))
+    ]
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    with closing(_database(rows)) as connection:
+        expected_counts = _run(connection, clean)
+        expected = _outcome(connection)
+    assert expected["12"] == ("00", "contaminated_heldout")
+    assert expected["00"] == ("00", None)
+
+    recovered = tmp_path / "recovered"
+    recovered.mkdir()
+    checkpoints = tmp_path / "checkpoints"
+    commit = ViewCheckpoints.commit
+    windows = []
+
+    def stop_after_compression_window(journal, state):
+        commit(journal, state)
+        if journal.root.name == "chain-compression":
+            windows.append(state["last"])
+            raise InterruptedError("stopped after compression window")
+
+    monkeypatch.setattr(native_dedup, "_DEDUP_COMPRESSION_ROWS", 3)
+    with monkeypatch.context() as fault:
+        fault.setattr(ViewCheckpoints, "commit", stop_after_compression_window)
+        for index in range(2):
+            interrupted = tmp_path / f"interrupted-{index}"
+            interrupted.mkdir()
+            with (
+                closing(_database(rows)) as connection,
+                pytest.raises(
+                    InterruptedError, match="stopped after compression window"
+                ),
+            ):
+                _run(
+                    connection,
+                    interrupted,
+                    checkpoints=ViewCheckpoints(checkpoints, "chain"),
+                )
+    assert windows == [3, 6]
+    assert not list((checkpoints / "chain-decisions").glob("commit-*.json"))
+
+    with closing(_database(rows)) as connection:
+        counts = _run(
+            connection, recovered, checkpoints=ViewCheckpoints(checkpoints, "chain")
+        )
+        assert _outcome(connection) == expected
+    assert counts == expected_counts
+    assert (recovered / "groups.jsonl").read_bytes() == (
+        clean / "groups.jsonl"
+    ).read_bytes()
 
 
 def test_chain_and_component_resolution_agree_on_a_simple_corpus(

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mmap
 import os
 import sqlite3
 import struct
+import tempfile
 from array import array
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
@@ -119,6 +121,8 @@ def _duplicate_keys(connection, method, after, end):
 
 
 _DEDUP_DECISION_ROWS = 100_000
+_DEDUP_COMPRESSION_ROWS = 100_000
+_DEDUP_REPRESENTATIVE = struct.Struct("<II")
 _DEDUP_DECISION = struct.Struct("<IIB")
 _DEDUP_DROP_REASONS = (
     "metadata_only_front_matter",
@@ -128,20 +132,30 @@ _DEDUP_DROP_REASONS = (
 _DEDUP_REASON_CODES = {reason: code for code, reason in enumerate(_DEDUP_DROP_REASONS)}
 
 
-class _ChainDecisions:
-    """Receipted sparse final decisions, separate from the disposable SQLite table."""
+class _ChainJournal:
+    """Receipted sparse changes to the disposable SQLite decisions table."""
 
-    def __init__(self, checkpoints: ViewCheckpoints, stack: ExitStack) -> None:
-        self.root = checkpoints.root / "chain-decisions"
+    def __init__(
+        self,
+        checkpoints: ViewCheckpoints,
+        stack: ExitStack,
+        *,
+        stage: str,
+        filename: str,
+        record: struct.Struct,
+    ) -> None:
+        self.root = checkpoints.root / stage
         self.identity = checkpoints.identity
+        self.filename = filename
+        self.record = record
         directory = self.root / "build"
-        path = directory / "decisions.bin"
+        path = directory / filename
         if any(part.is_symlink() for part in (self.root, directory, path)):
             raise ValueError(f"symlinked dedup decision checkpoint: {path}")
         directory.mkdir(parents=True, exist_ok=True)
         self.stream: BinaryIO = stack.enter_context(path.open("a+b"))
         self.journal = ViewCheckpoints(self.root, self.identity)
-        self.output = self.journal.add("decisions.bin", self.stream)
+        self.output = self.journal.add(filename, self.stream)
         self.state = self.journal.restore()
 
     def reset(self) -> None:
@@ -150,32 +164,33 @@ class _ChainDecisions:
         self.stream.seek(0)
         self.stream.truncate()
         self.journal = ViewCheckpoints(self.root, self.identity)
-        self.output = self.journal.add("decisions.bin", self.stream)
+        self.output = self.journal.add(self.filename, self.stream)
         self.state = {}
 
-    def records(self) -> Iterator[tuple[int, int, int]]:
+    def records(self) -> Iterator[tuple[int, ...]]:
         self.stream.seek(0)
-        for block in iter(lambda: self.stream.read(16_384 * _DEDUP_DECISION.size), b""):
-            yield from _DEDUP_DECISION.iter_unpack(block)
+        for block in iter(lambda: self.stream.read(16_384 * self.record.size), b""):
+            yield from self.record.iter_unpack(block)
 
-    def replay(self, connection: sqlite3.Connection, *, representatives: bool) -> None:
-        if representatives:
-            connection.executemany(
-                "UPDATE dedup SET representative_id=(SELECT p.document_id FROM dedup p "
-                "WHERE p.document_number=?), drop_reason=? WHERE document_number=?",
-                (
-                    (representative, _DEDUP_DROP_REASONS[code], number)
-                    for number, representative, code in self.records()
-                ),
-            )
-        else:
-            connection.executemany(
-                "UPDATE dedup SET drop_reason=? WHERE document_number=?",
-                (
-                    (_DEDUP_DROP_REASONS[code], number)
-                    for number, _, code in self.records()
-                ),
-            )
+
+def _replay_decisions(connection, decisions, *, representatives):
+    if representatives:
+        connection.executemany(
+            "UPDATE dedup SET representative_id=(SELECT p.document_id FROM dedup p "
+            "WHERE p.document_number=?), drop_reason=? WHERE document_number=?",
+            (
+                (representative, _DEDUP_DROP_REASONS[code], number)
+                for number, representative, code in decisions.records()
+            ),
+        )
+    else:
+        connection.executemany(
+            "UPDATE dedup SET drop_reason=? WHERE document_number=?",
+            (
+                (_DEDUP_DROP_REASONS[code], number)
+                for number, _, code in decisions.records()
+            ),
+        )
 
 
 def deduplicate(
@@ -192,7 +207,15 @@ def deduplicate(
     chain = policy.resolution == "chain_smallest_id"
     with ExitStack() as stack:
         decisions = (
-            _ChainDecisions(checkpoints, stack) if chain and checkpoints else None
+            _ChainJournal(
+                checkpoints,
+                stack,
+                stage="chain-decisions",
+                filename="decisions.bin",
+                record=_DEDUP_DECISION,
+            )
+            if chain and checkpoints
+            else None
         )
         if decisions is not None:
             if decisions.journal.damaged:
@@ -208,7 +231,7 @@ def deduplicate(
                 if sha256_file(report) == state["groups_sha256"]:
                     progress.record("reused_completed_dedup_decisions")
                     connection.execute("UPDATE dedup SET representative_id=document_id")
-                    decisions.replay(connection, representatives=True)
+                    _replay_decisions(connection, decisions, representatives=True)
                     connection.commit()
                     if range_file_identity(report) != generation:
                         raise ValueError(
@@ -227,8 +250,25 @@ def deduplicate(
             checkpoints=checkpoints,
         )
         if chain:
+            compression = (
+                _ChainJournal(
+                    checkpoints,
+                    stack,
+                    stage="chain-compression",
+                    filename="representatives.bin",
+                    record=_DEDUP_REPRESENTATIVE,
+                )
+                if groups and checkpoints
+                else None
+            )
             return groups, _finalize_chain(
-                connection, groups, report_digest, decisions, progress
+                connection,
+                groups,
+                report_digest,
+                compression,
+                decisions,
+                groups_path.parent,
+                progress,
             )
         assert parents is not None
         return groups, _finalize_ranked(connection, parents, diagnostics, progress)
@@ -441,30 +481,138 @@ def _resolve_duplicate_groups(
     return groups, parents, report_digest
 
 
+def _chain_root(parents, roots, number: int) -> int:
+    """Resolve one ordinal and memoize the traversed path without a Python list."""
+    cursor = number
+    while parents[cursor] and not roots[cursor]:
+        cursor = parents[cursor]
+    root = roots[cursor] or cursor
+    while parents[number] and not roots[number]:
+        roots[number] = root
+        number = parents[number]
+    return root
+
+
+_SET_CHAIN_ROOT = (
+    "UPDATE dedup SET representative_id=(SELECT p.document_id FROM dedup p "
+    "WHERE p.document_number=?) WHERE document_number=?"
+)
+
+
+def _compress_chain(
+    connection: sqlite3.Connection,
+    total: int,
+    report_digest: str | None,
+    compression: _ChainJournal | None,
+    scratch: Path,
+    progress: BuildProgress,
+) -> None:
+    progress.update(phase="dedup_compress")
+    last = 0
+    if compression is not None:
+        if compression.journal.damaged:
+            progress.record("discarded_damaged_dedup_compression")
+        state = compression.state
+        if state and state["groups_sha256"] != report_digest:
+            compression.reset()
+            progress.record("discarded_dedup_compression_for_changed_groups")
+        elif state:
+            connection.executemany(
+                _SET_CHAIN_ROOT,
+                (
+                    (representative, number)
+                    for number, representative in compression.records()
+                ),
+            )
+            progress.record("reused_dedup_compression_windows")
+            if state["complete"]:
+                return
+            last = state["last"]
+
+    # Train copies can link to held-out documents, which never link back.
+    # Other links decrease lexicographically, so paths terminate.
+    edges = (
+        "FROM dedup x JOIN dedup p ON p.document_id=x.representative_id "
+        "WHERE x.document_id<>x.representative_id"
+    )
+    transitive = connection.execute(
+        "SELECT 1 FROM dedup WHERE document_id<>representative_id "
+        "AND representative_id<>(SELECT p.representative_id FROM dedup p "
+        "WHERE p.document_id=dedup.representative_id) LIMIT 1"
+    ).fetchone()
+    if transitive is None:
+        if compression is not None:
+            compression.journal.commit(
+                {"last": total, "complete": True, "groups_sha256": report_digest}
+            )
+        return
+
+    # Zero denotes a self link in the first array and an unknown root in the
+    # second. The scratch file can be paged out under memory pressure.
+    with tempfile.TemporaryFile(dir=scratch) as stream:
+        width = total + 1
+        stream.truncate(2 * width * struct.calcsize("I"))
+        with (
+            mmap.mmap(stream.fileno(), 0) as mapping,
+            memoryview(mapping).cast("I") as ordinals,
+            ordinals[:width] as parents,
+            ordinals[width:] as roots,
+        ):
+            for number, parent in connection.execute(
+                "SELECT x.document_number,p.document_number " + edges
+            ):
+                parents[number] = parent
+            while last < total:
+                end = min(total, last + _DEDUP_COMPRESSION_ROWS)
+                updates = bytearray()
+                for number in range(last + 1, end + 1):
+                    parent = parents[number]
+                    if parent and parents[parent]:
+                        updates.extend(
+                            _DEDUP_REPRESENTATIVE.pack(
+                                number, _chain_root(parents, roots, number)
+                            )
+                        )
+                connection.executemany(
+                    _SET_CHAIN_ROOT,
+                    (
+                        (root, number)
+                        for number, root in _DEDUP_REPRESENTATIVE.iter_unpack(updates)
+                    ),
+                )
+                if compression is not None:
+                    compression.output.write(bytes(updates))
+                    compression.journal.commit(
+                        {
+                            "last": end,
+                            "complete": end == total,
+                            "groups_sha256": report_digest,
+                        }
+                    )
+                progress.update(documents=len(updates) // _DEDUP_REPRESENTATIVE.size)
+                last = end
+
+
 def _finalize_chain(
     connection: sqlite3.Connection,
     groups: int,
     report_digest: str | None,
-    decisions: _ChainDecisions | None,
+    compression: _ChainJournal | None,
+    decisions: _ChainJournal | None,
+    scratch: Path,
     progress: BuildProgress,
 ) -> int:
     from klab.corpus.dedup_policy import drop_reason
 
     connection.commit()
-    progress.update(phase="dedup_compress")
-    # Train copies can link to held-out documents, which never link back.
-    # Other links decrease lexicographically, so this compression terminates.
-    while True:
-        changed = connection.execute(
-            "UPDATE dedup SET representative_id=(SELECT p.representative_id "
-            "FROM dedup p WHERE p.document_id=dedup.representative_id) "
-            "WHERE document_id<>representative_id AND representative_id<>"
-            "(SELECT p.representative_id FROM dedup p "
-            "WHERE p.document_id=dedup.representative_id)"
-        ).rowcount
-        progress.update(documents=changed)
-        if not changed:
-            break
+    # Range over document numbers, even where no representatives change.
+    total = connection.execute(
+        "SELECT COALESCE(MAX(document_number), 0) FROM dedup"
+    ).fetchone()[0]
+    if groups:
+        _compress_chain(
+            connection, total, report_digest, compression, scratch, progress
+        )
     connection.commit()
     progress.update(phase="dedup_reasons")
     last, dropped = 0, 0
@@ -472,16 +620,12 @@ def _finalize_chain(
         if decisions.state["groups_sha256"] == report_digest:
             last = decisions.state["last"]
             dropped = decisions.state["dropped"]
-            decisions.replay(connection, representatives=False)
+            _replay_decisions(connection, decisions, representatives=False)
             progress.record("reused_dedup_decision_windows")
         else:
             decisions.reset()
             progress.record("discarded_dedup_decisions_for_changed_groups")
 
-    # Range over document numbers, even in stretches with no changed decisions.
-    total = connection.execute(
-        "SELECT COALESCE(MAX(document_number), 0) FROM dedup"
-    ).fetchone()[0]
     while last < total:
         end = min(total, last + _DEDUP_DECISION_ROWS)
         updates = []
