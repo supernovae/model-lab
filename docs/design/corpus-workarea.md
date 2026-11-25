@@ -424,6 +424,14 @@ and per-member commits remain part of the elapsed time. Parallel
 decoding stays opt-in because the improvement and memory cost depend on
 the input and storage. Slower storage and wider ranges remain unmeasured.
 
+The #590 review measured 3.3 to 3.5 s in serial XML selection on a
+160-member synthetic dump. Three workers reduced total time from about
+7.4 to 6.1 s, and eight workers gave no further measured gain. The
+resumability issue tracks bounded process-based XML selection, recoverable
+whole-dump planning, and measuring shared commits for consecutive members.
+Each change needs serial output parity and a measured replay bound after
+interruption. [Performance review](https://github.com/supernovae/model-lab/pull/590#discussion_r4688320386) · [Resumability follow-ups](https://github.com/supernovae/model-lab/issues/485)
+
 ## Relational Knowledge Microlab
 
 Keep named recipes and study outputs in Workshop. Start with deterministic

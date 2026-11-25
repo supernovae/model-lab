@@ -102,9 +102,9 @@ per source and then an acquisition lock binding them.
   Checkpoints live under the source's hidden `.hf-parts-<key>` directory
   beside the snapshots. They are bound to the acquisition declaration,
   adapter and ledger scope. Successful acquisition removes its checkpoint.
-  Git, PDF and Hugging Face acquisition list checkpoints for other requests so
-  you can find retained staging data. Remove abandoned checkpoints only
-  when no attempt uses them. The published
+  Acquisition for Git, PDF, Hugging Face, archives and wiki dumps reports
+  checkpoints for other requests so you can find retained staging data. Remove
+  abandoned checkpoints only when no attempt uses them. The published
   snapshot format is unchanged.
 - **Retry a bounded Git source.** Rerun acquisition with the same
   `bounded_blobs` declaration and transport ledger. Lab retains downloaded
@@ -254,13 +254,22 @@ allowance. Available RAM, CPU affinity and `--workers` can lower
 concurrency. The default budget is zero. Near a selection limit, workers
 may finish decoding unused members in memory. Only selected rows are
 staged, and the output and its identity are independent of worker count.
-Member checkpoints are bound to the acquisition adapter implementation.
-After updating the adapter, a partial indexed acquisition starts a new
-plan. Published snapshots remain reusable after verification.
 
 ```sh
 klab corpus acquire PROJECT --workers 3 --wikimedia-prefetch-bytes 67108864
 ```
+
+A partial indexed acquisition is bound to the adapter implementation. After
+an adapter update, the next attempt uses a new staging directory, verifies a
+new range plan and extracts the selected prefix again. It downloads the
+official checksum manifest and full compressed dump unless
+`--transport-cache` or `KLAB_TRANSPORT_CACHE` supplies the verified dump.
+The pinned index is also fetched if its cache entry is missing or invalid.
+Lab reports the old `.wikimedia_dump-parts-<key>` directory on stderr and
+keeps its staged dump and member checkpoints. Allow disk space for both
+generations until you remove the old directory after all acquisitions for
+that source have stopped. Published snapshots remain reusable after
+verification.
 
 ### What identifies an acquisition
 
