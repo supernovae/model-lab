@@ -63,9 +63,26 @@ def ranked_choice(
 def resolve_group(
     method: str, members: Iterable[Member], policy: DuplicatePolicy
 ) -> Group:
-    """Decide one duplicate group (documents sharing one key)."""
-    ordered = sorted(members, key=lambda member: member.id)
-    splits = {member.split for member in ordered}
+    """Decide one duplicate group with one candidate per split."""
+    ranked = policy.resolution == "component_ranked"
+    check_rights = method == "normalized" and policy.rights_conflict == "error"
+    best: dict[str, tuple[tuple[Any, ...], Member]] = {}
+    signature = None
+    incompatible = False
+    for member in members:
+        split = member.split
+        candidate = (
+            ranked_choice(split, None, member.rank, member.kind, member.id)
+            if ranked
+            else (member.id,)
+        )
+        if not best:
+            signature = member.signature
+        incompatible |= check_rights and member.signature != signature
+        prior = best.get(split)
+        if prior is None or candidate < prior[0]:
+            best[split] = (candidate, member)
+    splits = set(best)
     heldout = splits - {"train"}
     contaminated = (
         len(splits) > 1
@@ -74,22 +91,21 @@ def resolve_group(
         and len(heldout) == 1
     )
     priority = next(iter(heldout)) if heldout else None
-    if policy.resolution == "component_ranked":
-        representative = min(
-            ordered,
-            key=lambda m: ranked_choice(m.split, priority, m.rank, m.kind, m.id),
-        ).id
+    if ranked and priority:
+        representative = best[priority][1].id
     else:
-        kept = [m for m in ordered if not contaminated or m.split != "train"]
-        representative = kept[0].id
+        representative = min(
+            (
+                row
+                for split, row in best.items()
+                if not contaminated or split != "train"
+            ),
+            key=lambda row: row[0],
+        )[1].id
     error = None
     if len(splits) > 1 and not contaminated:
         error = CROSS_SPLIT_OVERLAP
-    elif (
-        method == "normalized"
-        and policy.rights_conflict == "error"
-        and len({member.signature for member in ordered}) > 1
-    ):
+    elif incompatible:
         error = RIGHTS_CONFLICT
     return Group(representative, sorted(splits), error, contaminated)
 

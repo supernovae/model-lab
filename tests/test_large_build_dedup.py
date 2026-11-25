@@ -114,7 +114,10 @@ def test_train_copies_of_held_out_text_are_dropped_not_the_held_out_document(
     assert record["representative"] == "b-valid"
 
 
-def test_text_shared_by_two_held_out_splits_still_fails(tmp_path: Path) -> None:
+def test_text_shared_by_two_held_out_splits_still_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(native_dedup, "_DEDUP_GROUP_ROWS", 2)
     connection = _database(
         [
             ("a-train", "train", "r1", "n1"),
@@ -124,6 +127,8 @@ def test_text_shared_by_two_held_out_splits_still_fails(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="cross-split exact text overlap"):
         _run(connection, tmp_path)
+    diagnostics = json.loads((tmp_path / "diagnostics.json").read_bytes())
+    assert diagnostics["duplicates"][0]["origins"] == ["a-train", "b-valid", "c-test"]
 
 
 def test_error_policy_rejects_any_cross_split_overlap(tmp_path: Path) -> None:
@@ -149,6 +154,7 @@ def test_chain_compression_resumes_inside_a_pass(tmp_path: Path, monkeypatch) ->
         )
         for index in reversed(range(13))
     ]
+    rows.append(("extra-train", "train", "r0", "extra"))
     clean = tmp_path / "clean"
     clean.mkdir()
     with closing(_database(rows)) as connection:
@@ -170,6 +176,7 @@ def test_chain_compression_resumes_inside_a_pass(tmp_path: Path, monkeypatch) ->
             raise InterruptedError("stopped after compression window")
 
     monkeypatch.setattr(native_dedup, "_DEDUP_COMPRESSION_ROWS", 3)
+    monkeypatch.setattr(native_dedup, "_DEDUP_GROUP_ROWS", 2)
     with monkeypatch.context() as fault:
         fault.setattr(ViewCheckpoints, "commit", stop_after_compression_window)
         for index in range(2):
@@ -209,7 +216,7 @@ def test_ranked_recovery_preserves_audit_and_heldout_winners(
         ("b-valid", "validation", "r1", "n1"),
         ("c-train", "train", "r2", "n2"),
         ("d-train", "train", "r2", "n2"),
-        ("e-train", "train", "r3", "n3"),
+        ("e-train", "train", "r1", "n3"),
     ]
     outcomes = []
     for index, policy in enumerate((CHAIN, RANKED)):
@@ -235,6 +242,7 @@ def test_ranked_recovery_preserves_audit_and_heldout_winners(
             raise InterruptedError(f"stopped at {name} frontier")
 
     monkeypatch.setattr(native_dedup, "_DEDUP_DECISION_ROWS", 2)
+    monkeypatch.setattr(native_dedup, "_DEDUP_GROUP_ROWS", 2)
     with monkeypatch.context() as fault:
         fault.setattr(ViewCheckpoints, "commit", interrupt)
         for index, (stop_stage, stop_after) in enumerate(
