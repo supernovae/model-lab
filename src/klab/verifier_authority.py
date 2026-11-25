@@ -497,6 +497,7 @@ SHARED = (
     "verification_proofs",
     "verifier_authority",
 )
+CHAT_RENDERER_MODULES = ("data.conversations", "chat_template", "evaluation.chat")
 _TOKENIZER_CORPUS = ("corpus.release", "corpus.export", "corpus.tokenizer_bakeoff")
 _PREPARED_DATA = ("data.verification", "data.packing")
 _TOKENIZER_DATA = ("data.tokenizer",)

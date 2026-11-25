@@ -51,7 +51,7 @@ def verifier_digest(kind: str) -> str:
     screen, the trainer or the command line does not make a release unverified,
     and editing anything that verification runs does.
     """
-    from klab.verifier_authority import SHARED, scoped_modules
+    from klab.verifier_authority import CHAT_RENDERER_MODULES, SHARED, scoped_modules
 
     exported = kind == "export"
     return canonical_digest(
@@ -59,7 +59,7 @@ def verifier_digest(kind: str) -> str:
             corpus=("corpus.release", *(("corpus.export",) if exported else ())),
             leaves=(
                 *SHARED,
-                "data.conversations",
+                *CHAT_RENDERER_MODULES,
                 *(("config.loading",) if exported else ()),
             ),
         )

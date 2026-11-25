@@ -30,8 +30,16 @@ class RenderedPair:
     rejected: str
 
 
-def _error(path: Path, line_number: int, detail: str) -> ValueError:
-    return ValueError(f"{path}:{line_number}: {detail}")
+class ConversationRecordError(ValueError):
+    """A malformed row with a detail that can be reported at a global line number."""
+
+    detail: str
+
+
+def _error(path: Path, line_number: int, detail: str) -> ConversationRecordError:
+    error = ConversationRecordError(f"{path}:{line_number}: {detail}")
+    error.detail = detail
+    return error
 
 
 def _nonblank_string(value: object) -> bool:
@@ -395,20 +403,31 @@ def _preference_pair(
     )
 
 
+def _decode_record(line: str | bytes, path: Path, line_number: int) -> object:
+    try:
+        return json.loads(
+            line.decode("utf-8") if isinstance(line, bytes) else line,
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"nonfinite JSON value: {value}")
+            ),
+        )
+    except ValueError as error:
+        raise _error(path, line_number, f"invalid JSON: {error}") from error
+
+
 def _records(path: Path) -> Iterator[tuple[int, object]]:
     with path.open("r", encoding="utf-8", newline="") as source:
         for line_number, line in enumerate(source, start=1):
-            try:
-                record = json.loads(
-                    line,
-                    object_pairs_hook=reject_duplicate_keys,
-                    parse_constant=lambda value: (_ for _ in ()).throw(
-                        ValueError(f"nonfinite JSON value: {value}")
-                    ),
-                )
-            except (json.JSONDecodeError, ValueError) as error:
-                raise _error(path, line_number, f"invalid JSON: {error}") from error
-            yield line_number, record
+            yield line_number, _decode_record(line, path, line_number)
+
+
+def render_conversation_line(
+    line: str | bytes, path: Path, line_number: int, template: ChatTemplate = PLAIN
+) -> RenderedConversation:
+    """Decode and render one physical JSONL line, with its location on errors."""
+    record = _decode_record(line, path, line_number)
+    return _conversation_document(record, path, line_number, template)
 
 
 def render_conversation(
@@ -422,8 +441,9 @@ def iter_rendered_conversations(
     path: Path, template: ChatTemplate = PLAIN
 ) -> Iterator[RenderedConversation]:
     """Yield validated local-chat records with explicit loss spans for v2."""
-    for line_number, record in _records(path):
-        yield _conversation_document(record, path, line_number, template)
+    with path.open("r", encoding="utf-8", newline="") as source:
+        for line_number, line in enumerate(source, start=1):
+            yield render_conversation_line(line, path, line_number, template)
 
 
 def iter_preference_pairs(
