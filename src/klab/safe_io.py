@@ -10,6 +10,7 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import BinaryIO
 
 from klab.canonical import canonical_json
 
@@ -17,6 +18,17 @@ from klab.canonical import canonical_json
 def symlinked(path: Path) -> bool:
     """Whether the path or any ancestor is a symbolic link."""
     return any(part.is_symlink() for part in (path, *path.parents))
+
+
+def read_file_range(stream: BinaryIO, offset: int, length: int) -> bytes:
+    """Read an indexed byte range without Python buffering or moving the cursor."""
+    raw = os.pread(stream.fileno(), length, offset)
+    if len(raw) != length:
+        raise ValueError(
+            f"short read from {stream.name} at byte {offset}: "
+            f"expected {length} bytes, got {len(raw)}"
+        )
+    return raw
 
 
 @contextmanager

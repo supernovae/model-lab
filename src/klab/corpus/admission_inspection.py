@@ -37,7 +37,7 @@ from klab.corpus.project import (
 from klab.corpus.rights import FILE_ADMISSION_KINDS, verify_record_admission
 from klab.corpus.structure_cleaning import clean_structure
 from klab.result_publication import sync_directory
-from klab.safe_io import symlinked
+from klab.safe_io import read_file_range, symlinked
 from klab.training.manifest import sha256_file
 
 _MAX_RECORD_BYTES = 8 * 1024**2
@@ -207,7 +207,6 @@ def _scan_candidates(
                     raw=record.decode("utf-8"),
                     digest=decision["sha256"],
                 )
-                offset = 0
             else:
                 value = record.value
                 field = source.acquisition.text_field
@@ -233,8 +232,9 @@ def _scan_candidates(
                     if isinstance(value.get("metadata"), dict)
                     else {},
                 )
-                offset = record.byte_offset
-            candidate["_ordinal"], candidate["_offset"] = ordinal, offset
+                candidate["_offset"] = record.byte_offset
+                candidate["_size"] = len(record.raw)
+            candidate["_ordinal"] = ordinal
             visit(source_id, candidate)
 
         verify_record_admission(
@@ -309,10 +309,7 @@ def _fetch_candidate(source, entry, snapshot, row, stats):
         decision = entry["files"][row["_ordinal"]]
     else:
         with path.open("rb") as stream:
-            stream.seek(row["_offset"])
-            raw = stream.readline(_MAX_RECORD_BYTES + 1)
-        if len(raw) > _MAX_RECORD_BYTES:
-            raise ValueError("JSONL record-byte cap exceeded")
+            raw = read_file_range(stream, row["_offset"], row["_size"])
         record = next(records_from_bytes(raw, source=str(path)))
         original = {
             key: value for key, value in record.value.items() if key != "_klab_source"

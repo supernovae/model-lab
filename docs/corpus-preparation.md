@@ -1351,7 +1351,7 @@ needs measurement where the table gives historical or fixture evidence.
 | `finalize-family-inventory` | Final inventory. Completed preparation can reuse the release's authenticated family inventory. | Rebuild the native candidate-to-document join and output, or republish the authenticated retained inventory. | Production restart cost unmeasured. |
 | Near-duplicate screen | Training-pass offset and accumulators per range, every 200,000 training documents by default. | Rebuild the held-out index and template evidence when enabled. Replay training records after each range's commit. | Historical 6.7M-document Workshop screen, 1–2 h on one core. Held-out rebuild cost unmeasured. [#491](https://github.com/supernovae/model-lab/pull/491) |
 | Seeded tokenizer sample and verification | TRAIN lineage, rank histogram, and candidate range receipts with `--scratch-dir` on `tokenizer train` and `tokenizer verify`. | Reuse completed ranges and scan missing or damaged ranges. Reassemble the sample and read its selected payloads. A run without scratch does its own selection scans. | 13 s at 12 workers on a warm-page-cache synthetic 11.9 GB, 2M-document release with a 32 MiB fit quota. This measures selection. [#499](https://github.com/supernovae/model-lab/pull/499) |
-| Tokenizer fit and bakeoff | Complete tokenizer and provenance, or completed bakeoff artifacts. | Fit BPE again after an interruption during training. A completed matching fit can be reused after verifying its inputs. | Current fit and restart costs unmeasured. |
+| Tokenizer fit and bakeoff | Complete tokenizer and provenance, or completed bakeoff artifacts. | Fit BPE again after an interruption during training. A completed matching fit can be reused after verifying its inputs. An interruption between tokenizer and manifest publication can leave a partial output directory that blocks reuse of that path. | A 16 MiB synthetic fit took 1.04 s, and its retry spent 1.03 s in the trainer call. See [the fitting measurements](#tokenizer-fit-timings). |
 | `materialize-mixture` | Candidate and output segments and a reusable content token cache. Default commit thresholds are 4,096 candidates, 64 MiB or 30 s. | Verify committed segments, rebuild or verify indexes as needed, replay the uncommitted segment, and finish assembly. Reuse unchanged token encodings. | 24.2 s cold and 12.9 s with warm token cache on a synthetic 210M-token mixture. These are build timings. [Mixture speed](token-store.md#mixture-speed) |
 | `verify-mixture`, `--reseal`, and `--audit` | Complete verification or completion receipt. | Routine verification and reseal may repeat output checks and hashes. `--audit` reruns an independent schedule in fresh scratch with token reuse disabled. | A real full audit took 94 min. The synthetic 6,000-document audit took 1.1 s with a mocked tokenizer. [#521](https://github.com/supernovae/model-lab/pull/521) |
 
@@ -1466,14 +1466,70 @@ klab tokenizer verify RUN.yaml --scratch-dir SCRATCH
 
 Receipts bind the input files, range options and sampling implementation. An
 interrupted run skips intact ranges and rebuilds missing ones. The scratch
-directory holds disposable sampling and LM export counting work. The fit itself
-restarts if interrupted.
+directory holds disposable sampling and LM export counting work. Within
+each attempt, the byte check, fit and sample audit share one selection of
+document offsets. Lab checks the input file identities when using that
+selection. The native BPE fit restarts if interrupted.
 For verification with independent range scans, omit `--scratch-dir`.
 
 The audit then takes the documents that follow the fit in the same order,
 different from the fit, and checks round-trip failures, unknown tokens and bytes
 per token; it refuses to publish on a failure. No validation or test document is
 used.
+
+#### Tokenizer fit timings
+
+The fixture used 8,192 generated documents, a 16 MiB fit quota, a 2,048-token
+vocabulary and Tokenizers 0.22.2 on CPU with one selection worker. It supplied
+the export binding from the fixture so the timings isolate sampling, the
+native fit and the audit. Each row is one local run on NVMe. The fit column
+includes feeding the selected text into the trainer. Earlier runs include
+repeated selection in the fit and audit columns. These runs preceded the
+indexed-read change below.
+
+| Operation | Selection calls | Native fit | Sample audit | Total |
+| --- | ---: | ---: | ---: | ---: |
+| Baseline `e35a2fce` | 3 | 1.158 s | 0.345 s | 1.656 s |
+| One selection per attempt | 1 | 1.040 s | 0.130 s | 1.320 s |
+| Retry after a stop inside the fit, with saved ranges | 1 | 1.035 s | 0.130 s | 1.217 s |
+
+SIGKILL stopped the trainer after it consumed the input iterator's documents
+and before it returned. The retry fed all 16,766,888 selected bytes again.
+The sample and tokenizer digests matched across runs. Observed peak RSS was
+379 MiB on the baseline and 376 MiB with one selection per attempt. Production
+fit, audit and recovery costs remain unmeasured. [#485](https://github.com/supernovae/model-lab/issues/485)
+
+#### Indexed reads and sequential scans
+
+Tokenizer fit and audit replay the selected rows in seeded order. They keep
+the document file open for each pass and read exactly the byte range of each
+selected row. Where the OS accepts prefetch hints, the fit stream looks
+ahead at up to 256 rows and 1 MiB of requested byte ranges at a time.
+Release source replay, disk-backed build assembly, view lineage measurement,
+and admission inspection also use exact byte ranges for indexed lookups.
+Keep sequential scans buffered, including candidate selection and mixture
+exposure replay.
+
+On a 143 MiB synthetic JSONL file on NVMe, replaying an existing selection of
+8,192 rows requested 17.8 MiB. Five runs per condition on Linux and Python
+3.14.8 gave these medians. The cold runs requested eviction of the fixture
+from the page cache before replay. All readers produced the same sample
+digest.
+
+| Tokenizer sample replay | Bytes returned to the process | Warm time | Cold time | Cold storage bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Buffered open and seek per row | 1,023.4 MiB | 119 ms | 337 ms | 142.6 MiB |
+| Exact positional reads | 17.8 MiB | 44 ms | 536 ms | 50.0 MiB |
+| Exact positional reads with bounded prefetch | 17.8 MiB | 46 ms | 84 ms | 44.5 MiB |
+
+On the same fixture, keeping one buffered file open for shuffled lookups
+still returned 57× the requested bytes. A buffered scan of 8,192 consecutive
+rows took 8.5 ms versus 9.7 ms for individual positional reads. Linux `rchar`
+reports bytes returned by read calls, and `read_bytes` tracks bytes fetched
+from storage by the process. Production stage throughput and slower storage
+remain to be measured. [#485](https://github.com/supernovae/model-lab/issues/485)
+
+### Tokenizer bakeoff
 
 `klab corpus tokenizer-bakeoff DECLARATION --output DIR` instead fits several
 vocabulary sizes on one training sample, scores them on held-out families and

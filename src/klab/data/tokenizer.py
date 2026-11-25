@@ -30,6 +30,7 @@ FIT_STAGE = declare_stage(
 )
 
 if TYPE_CHECKING:
+    from klab.data.tokenizer_sampling import Selection
     from klab.verification_proofs import ProofStore, VerificationMode
 
 SPECIAL_TOKENS = ["<pad>", "<unk>", "<bos>", "<eos>"]
@@ -338,12 +339,13 @@ def _bounded_documents(
     stats: dict[str, object],
     *,
     whole_documents: bool = False,
+    selection: Selection | None = None,
 ):
     """Replay the same train prefix without retaining corpus strings in memory."""
     if config.sampling is not None:
         from klab.data.tokenizer_sampling import documents
 
-        yield from documents(config, stats)
+        yield from documents(config, stats, selection=selection)
         return
     selected = acquired = byte_count = 0
     digest = hashlib.sha256()
@@ -435,6 +437,7 @@ def train_tokenizer(
     source_manifest_sha256 = _snapshot_digest(config)
     whole_documents = config.dataset.source in {"local_text", "snapshot"}
     stats: dict[str, object] = {}
+    selection = None
     source_started = time.monotonic()
     with progress_phase(
         "tokenizer_dataset_initialization_and_source_iteration",
@@ -446,7 +449,13 @@ def train_tokenizer(
             "source_bytes": 0,
         },
     ) as progress:
-        for _ in _bounded_documents(config, stats, whole_documents=whole_documents):
+        if config.sampling is not None:
+            from klab.data.tokenizer_sampling import select_documents
+
+            selection = select_documents(config)
+        for _ in _bounded_documents(
+            config, stats, whole_documents=whole_documents, selection=selection
+        ):
             pass
         selected = int(stats["selected"])
         selected_input_bytes = int(stats["bytes"])
@@ -536,7 +545,12 @@ def train_tokenizer(
     ) as progress:
         replay_stats: dict[str, object] = {}
         tokenizer.train_from_iterator(
-            _bounded_documents(config, replay_stats, whole_documents=whole_documents),
+            _bounded_documents(
+                config,
+                replay_stats,
+                whole_documents=whole_documents,
+                selection=selection,
+            ),
             trainer=trainer,
             length=selected,
         )
@@ -566,7 +580,7 @@ def train_tokenizer(
     if config.sampling is not None:
         from klab.data.tokenizer_sampling import audit
 
-        sampling_audit = audit(config, tokenizer)
+        sampling_audit = audit(config, tokenizer, selection=selection)
         if any(
             group["unknown_tokens"] or group["roundtrip_failures"]
             for group in sampling_audit["strata"].values()

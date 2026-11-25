@@ -25,6 +25,7 @@ from klab.corpus.release_verify import (
     scratch_root,
 )
 from klab.corpus.shards import ShardPlan, chunk_ranges, declare_stage, run_sharded
+from klab.safe_io import read_file_range
 from klab.training.manifest import sha256_file
 
 SPLITS = ("train", "validation", "test")
@@ -460,8 +461,13 @@ class _LineageIndex:
         low = int(np.searchsorted(self.hashes, key, side="left"))
         high = int(np.searchsorted(self.hashes, key, side="right"))
         for position in range(low, high):
-            self.stream.seek(int(self.offsets[position]))
-            row = json.loads(self.stream.read(int(self.lengths[position])))
+            row = json.loads(
+                read_file_range(
+                    self.stream,
+                    int(self.offsets[position]),
+                    int(self.lengths[position]),
+                )
+            )
             if row["record_id"] == record_id:
                 return row
         return None

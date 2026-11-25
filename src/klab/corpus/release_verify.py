@@ -179,13 +179,6 @@ def range_records(path: Path, start: int, end: int) -> Iterator[tuple[Any, int, 
                 ) from error
 
 
-def read_at(path: Path, offset: int, length: int) -> Any:
-    """Parse one JSON record from a known byte range."""
-    with path.open("rb") as stream:
-        stream.seek(offset)
-        return json.loads(stream.read(length))
-
-
 def line_boundaries(path: Path, every: int) -> tuple[list[int], int]:
     """Byte offsets of every `every`-th line start, and the file's line count."""
     starts, lines, position, target = [0], 0, 0, every

@@ -310,7 +310,28 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         with pytest.raises(RuntimeError, match="KLAB_FAULT"):
             lab.run("tokenizer", "train", str(tokenizer_config), *scratch)
     capsys.readouterr()
+    from klab.data import tokenizer as tokenizer_module
+
+    sources = release / "sources.json"
+    source_bytes = sources.read_bytes()
+    progress_phase = tokenizer_module.progress_phase
+
+    def change_sources_before_fit(name, **options):
+        if name == "tokenizer_bpe_training":
+            sources.write_bytes(source_bytes + b"\n")
+        return progress_phase(name, **options)
+
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(tokenizer_module, "progress_phase", change_sources_before_fit)
+            with pytest.raises(ValueError, match="tokenizer sampling input changed"):
+                lab.run("tokenizer", "train", str(tokenizer_config), *scratch)
+        assert not Path(tokenizer["output_dir"]).exists()
+    finally:
+        sources.write_bytes(source_bytes)
+    capsys.readouterr()
     lab.run("tokenizer", "train", str(tokenizer_config), *scratch)
+    assert lab.stderr.count("tokenizer sampling: rank histogram:") == 2
     assert any(
         "tokenizer sampling: candidates:" in line and "reused 1/" in line
         for line in lab.stderr.splitlines()
