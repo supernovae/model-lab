@@ -18,13 +18,20 @@ from typing import Any
 
 import numpy as np
 
+from klab.corpus.build_stages import implementation_digests
 from klab.corpus.release_verify import (
     current_settings,
     line_boundaries,
     range_records,
     scratch_root,
 )
-from klab.corpus.shards import ShardPlan, chunk_ranges, declare_stage, run_sharded
+from klab.corpus.shards import (
+    ShardPlan,
+    chunk_ranges,
+    declare_stage,
+    range_file_identity,
+    run_sharded,
+)
 from klab.safe_io import read_file_range
 from klab.training.manifest import sha256_file
 
@@ -349,6 +356,7 @@ class _Concentration:
 
 INDEX_STAGE = declare_stage("describe: lineage index")
 COUNT_STAGE = declare_stage("describe: view lines")
+LINK_STAGE = declare_stage("describe: view links")
 VIEW_STAGE = declare_stage("describe: view rows")
 _PARENT_ID_LIMIT = 100_000
 # Every Nth link line gets an offset, so a shard finds its first link by skipping
@@ -667,71 +675,113 @@ def _merge_parents(states: list[dict[str, Any]]) -> tuple[int, int, dict[str, in
     return int(unique.size), int(totals.max(initial=0)), dict(ids)
 
 
+def _scan_view_links(
+    path: str, stride: int, generation: list[int]
+) -> tuple[list[int], int]:
+    links = Path(path)
+    result = line_boundaries(links, stride)
+    if range_file_identity(links) != generation:
+        raise ValueError(f"view links changed during measurement: {links}")
+    return result
+
+
 def _plan_views(
     root: Path, lineage_index: Path, tokenizer: Path | None, cache: Path | None
 ) -> tuple[list[tuple], ShardPlan, list[tuple[str, str]]]:
     """One task per run of view rows, in view/split order, and the key that names them."""
-    tasks, owners, total, files = [], [], 0, {}
+    tasks, owners, total = [], [], 0
     generations = str(root / "generations.jsonl")
     scenarios = str(root / "scenarios.jsonl")
-    for view in ("lm", "chat"):
-        for split in SPLITS:
-            payload, links = (
-                root / view / f"{split}.jsonl",
-                root / view / f"{split}.lineage.jsonl",
-            )
-            size = payload.stat().st_size
-            for path in (payload, links):
-                info = path.stat()
-                files[str(path)] = [info.st_size, info.st_mtime_ns]
-            if size == 0:
-                if links.stat().st_size:
-                    raise ValueError("view and lineage lengths disagree")
-                owners.append((view, split))
-                continue
-            offsets, link_lines = line_boundaries(links, _LINK_STRIDE)
-            if view == "lm":
-                ranges = chunk_ranges(payload)
-                counts = list(
-                    run_sharded(
-                        ShardPlan(
-                            COUNT_STAGE,
-                            [(str(payload), *r) for r in ranges],
-                            size,
-                            {"file": files[str(payload)]},
-                            None if cache is None else cache / "shards",
-                        ),
-                        _count_lines,
-                        ordered=True,
-                    )
-                )
-            else:
-                ranges, counts = [(0, size)], [link_lines]
-            if sum(counts) != link_lines:
+    views = [
+        (
+            view,
+            split,
+            root / view / f"{split}.jsonl",
+            root / view / f"{split}.lineage.jsonl",
+        )
+        for view in ("lm", "chat")
+        for split in SPLITS
+    ]
+    files = {
+        str(path): range_file_identity(path)
+        for _, _, payload, links in views
+        for path in (payload, links)
+    }
+    link_tasks = [
+        (str(links), _LINK_STRIDE, files[str(links)])
+        for _, _, payload, links in views
+        if files[str(payload)][2]
+    ]
+    implementation = implementation_digests("measurement.py", "release_verify.py")
+    link_plan = ShardPlan(
+        LINK_STAGE,
+        link_tasks,
+        sum(generation[2] for _, _, generation in link_tasks),
+        implementation,
+        None if cache is None else cache / "shards",
+        # Keep sequential reads and avoid starting a pool for a few split files.
+        operator_cap=1,
+    )
+    indexed_links = dict(
+        zip(
+            (name for name, _, _ in link_tasks),
+            run_sharded(link_plan, _scan_view_links, ordered=True),
+            strict=True,
+        )
+    )
+    for view, split, payload, links in views:
+        size = files[str(payload)][2]
+        if size == 0:
+            if files[str(links)][2]:
                 raise ValueError("view and lineage lengths disagree")
-            first = 0
-            for (start, end), lines in zip(ranges, counts, strict=True):
-                tasks.append(
-                    (
-                        view,
-                        split,
-                        str(payload),
-                        start,
-                        end,
-                        str(links),
-                        offsets[first // _LINK_STRIDE],
-                        first % _LINK_STRIDE,
-                        lines,
-                        str(root / "lineage.jsonl"),
-                        str(lineage_index),
-                        generations,
-                        scenarios,
-                        str(tokenizer) if tokenizer is not None else None,
-                    )
+            owners.append((view, split))
+            continue
+        offsets, link_lines = indexed_links[str(links)]
+        if view == "lm":
+            ranges = chunk_ranges(payload)
+            counts = list(
+                run_sharded(
+                    ShardPlan(
+                        COUNT_STAGE,
+                        [(str(payload), *r) for r in ranges],
+                        size,
+                        {
+                            "file": files[str(payload)],
+                            "measurement": implementation["measurement.py"],
+                        },
+                        None if cache is None else cache / "shards",
+                    ),
+                    _count_lines,
+                    ordered=True,
                 )
-                owners.append((view, split))
-                first += lines
-            total += size
+            )
+        else:
+            ranges, counts = [(0, size)], [link_lines]
+        if sum(counts) != link_lines:
+            raise ValueError("view and lineage lengths disagree")
+        first = 0
+        for (start, end), lines in zip(ranges, counts, strict=True):
+            tasks.append(
+                (
+                    view,
+                    split,
+                    str(payload),
+                    start,
+                    end,
+                    str(links),
+                    offsets[first // _LINK_STRIDE],
+                    first % _LINK_STRIDE,
+                    lines,
+                    str(root / "lineage.jsonl"),
+                    str(lineage_index),
+                    generations,
+                    scenarios,
+                    str(tokenizer) if tokenizer is not None else None,
+                )
+            )
+            owners.append((view, split))
+            first += lines
+        total += size
     inputs = {
         "files": files,
         "lineage": [
@@ -739,7 +789,7 @@ def _plan_views(
             info.st_mtime_ns,
         ],
         "tokenizer": sha256_file(tokenizer) if tokenizer is not None else None,
-        "measurement": sha256_file(Path(__file__)),
+        "measurement": implementation["measurement.py"],
     }
     plan = ShardPlan(
         VIEW_STAGE, tasks, total, inputs, None if cache is None else cache / "shards"
