@@ -8,7 +8,6 @@ import os
 import shutil
 import stat
 import sys
-import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -24,7 +23,13 @@ from klab.result_publication import (
 )
 from klab.safe_io import rename_noreplace, symlinked
 from klab.training.manifest import sha256_file
-from klab.verification_proofs import ArtifactFingerprint, artifact_fingerprint
+from klab.verification_proofs import (
+    ArtifactFingerprint,
+    artifact_fingerprint,
+    writable_by_others,
+)
+
+_DISPOSABLE_STAGING = ".disposable-staging"
 
 
 def _checkpoint_fingerprint(path: Path) -> ArtifactFingerprint | None:
@@ -465,16 +470,126 @@ def _parts_lock(parts: AcquisitionParts) -> Iterator[bool]:
 
 
 @contextmanager
+def _disposable_lock(parent: Path) -> Iterator[bool]:
+    info = parent.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or writable_by_others(info)
+        or symlinked(parent)
+    ):
+        raise ValueError(f"unsafe acquisition staging parent: {parent}")
+    path = parent / f"{_DISPOSABLE_STAGING}.lock"
+    descriptor = os.open(
+        path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600
+    )
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+            or writable_by_others(info)
+        ):
+            raise ValueError(f"unsafe acquisition staging lock: {path}")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+        else:
+            yield True
+    finally:
+        os.close(descriptor)
+
+
+def _disposable_snapshot(root: Path, *, create: bool) -> Path:
+    if create:
+        root.mkdir(mode=0o700, exist_ok=True)
+    info = root.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) & 0o077
+    ):
+        raise ValueError(f"unsafe acquisition staging directory: {root}")
+    # An empty marker is created atomically in the private staging directory.
+    # Keep it outside the payload so it survives publication or interrupted cleanup.
+    owner = root / ".klab-disposable"
+    if create and not os.path.lexists(owner) and not any(root.iterdir()):
+        with owner.open("xb"):
+            pass
+        sync_directory(root)
+        sync_directory(root.parent)
+    try:
+        info = owner.lstat()
+    except FileNotFoundError as error:
+        raise ValueError(f"unmarked acquisition staging directory: {root}") from error
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_nlink != 1
+        or info.st_size != 0
+    ):
+        raise ValueError(f"invalid acquisition staging owner marker: {owner}")
+    return root / "snapshot"
+
+
+def _discard_disposable_snapshot(snapshot: Path) -> bool:
+    try:
+        info = snapshot.lstat()
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise ValueError(f"unsafe acquisition staging payload: {snapshot}")
+    shutil.rmtree(snapshot)
+    return True
+
+
+def reclaim_disposable_staging(parent: Path) -> None:
+    """Reclaim a stopped attempt without disturbing a live writer or checkpoints."""
+    root = parent / _DISPOSABLE_STAGING
+    if not os.path.lexists(root / "snapshot"):
+        return
+    try:
+        with _disposable_lock(parent) as locked:
+            if locked and _discard_disposable_snapshot(
+                _disposable_snapshot(root, create=False)
+            ):
+                sync_directory(root)
+                print(
+                    f"reclaimed abandoned acquisition staging at {root}",
+                    file=sys.stderr,
+                )
+    except (OSError, ValueError) as error:
+        print(f"cannot reclaim acquisition staging at {root}: {error}", file=sys.stderr)
+
+
+@contextmanager
 def acquisition_staging(parent: Path, parts: AcquisitionParts | None) -> Iterator[Path]:
-    for sibling in sorted(parent.glob(".acquire-*")):
+    for sibling in sorted((*parent.glob(".acquire-*"), *parent.glob(".reuse-*"))):
         if not sibling.is_symlink() and sibling.is_dir():
             print(
                 f"existing acquisition staging retained at {sibling}",
                 file=sys.stderr,
             )
     if parts is None:
-        with tempfile.TemporaryDirectory(prefix=".acquire-", dir=parent) as temporary:
-            yield Path(temporary)
+        root = parent / _DISPOSABLE_STAGING
+        with _disposable_lock(parent) as locked:
+            if not locked:
+                raise ValueError("another acquisition is writing this source")
+            snapshot = _disposable_snapshot(root, create=True)
+            if _discard_disposable_snapshot(snapshot):
+                print(
+                    f"reclaimed abandoned acquisition staging at {root}",
+                    file=sys.stderr,
+                )
+            snapshot.mkdir(mode=0o700)
+            sync_directory(root)
+            try:
+                yield snapshot
+            finally:
+                _discard_disposable_snapshot(snapshot)
+                sync_directory(root)
         return
     with _parts_lock(parts) as locked:
         if not locked:

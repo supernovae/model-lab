@@ -44,6 +44,7 @@ from klab.corpus.acquisition_parts import (
     acquisition_staging,
     check_checkpoint,
     pinned_pdf_path,
+    reclaim_disposable_staging,
 )
 from klab.corpus.bounded_metadata import read_metadata
 from klab.corpus.build_stages import StageStore, run_stage
@@ -3588,6 +3589,7 @@ def acquire(
                 min_free_bytes=min_free_bytes,
                 proof_store=proof_store,
                 verification_mode=verification_mode,
+                plan_only=plan_only,
             )
         )
         if plan_only:
@@ -3655,6 +3657,8 @@ def acquire(
     for source in active_sources:
         declared_digest = declaration_sha256(source)
         parent = snapshot_root / source.id
+        if not require_existing and step is None:
+            reclaim_disposable_staging(parent)
         effect = effects[source.id] if effects is not None else None
         if effect is not None and effect.effect == "reuse_only":
             origin, manifest = retained[source.id]
@@ -3666,12 +3670,8 @@ def acquire(
                         f"existing verified snapshot unavailable: {source.id}"
                     )
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                staging = Path(
-                    tempfile.mkdtemp(prefix=".reuse-", dir=destination.parent)
-                )
-                try:
-                    shutil.rmtree(staging)
-                    shutil.copytree(origin, staging, symlinks=True)
+                with acquisition_staging(destination.parent, None) as staging:
+                    shutil.copytree(origin, staging, dirs_exist_ok=True, symlinks=True)
                     if (
                         verify_snapshot(staging, _staged=True)["snapshot_sha256"]
                         != manifest["snapshot_sha256"]
@@ -3686,9 +3686,6 @@ def acquire(
                     sync_directory(staging)
                     rename_noreplace(staging, destination)
                     sync_directory(destination.parent)
-                finally:
-                    if staging.exists():
-                        shutil.rmtree(staging)
             copied = verify_snapshot(
                 destination,
                 proof_store=proof_store,

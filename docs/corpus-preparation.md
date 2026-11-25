@@ -86,6 +86,15 @@ per source and then an acquisition lock binding them.
   `--plan` verifies everything without network access or writes. A step returns
   `source_verified` and `complete: false`; once every source is present, plain
   `corpus acquire PROJECT` publishes the lock, reusing the snapshots.
+- **Restart interrupted acquisition.** Lab uses one disposable staging slot
+  per source for work that has no verified checkpoints, including retained
+  snapshot copies. The next online attempt reclaims the slot if its ownership
+  marker matches and it can acquire the source's staging lock. An executing
+  source step reclaims before measuring disk headroom. Planning, offline
+  verification and existing-snapshot finalization leave disposable staging
+  alone. Legacy `.acquire-*` and `.reuse-*` directories and checkpoints for
+  other requests are retained for inspection. Published snapshots and the
+  acquisition lock keep their existing formats.
 - **Retry a bounded Hugging Face source.** Rerun the same acquisition after an
   interruption. With `bounded_shards`, completed selections are receipted
   individually. Lab skips those shards after verifying their selected bytes.
