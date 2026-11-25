@@ -7,6 +7,7 @@ it does not turn a checksum into historical execution or redistribution rights.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import mmap
@@ -16,6 +17,7 @@ import shutil
 import struct
 from collections.abc import Mapping
 from contextlib import ExitStack
+from copy import copy
 from pathlib import Path
 
 from klab.canonical import canonical_digest, canonical_json
@@ -50,7 +52,11 @@ from klab.corpus.split_runs import (
 )
 from klab.corpus.streaming_build_rows import StreamBuildRows
 from klab.corpus.streaming_split_freeze import _AdmissionSpools
+from klab.corpus.view_checkpoints import ViewCheckpoints
+from klab.result_publication import sync_directory
+from klab.safe_io import symlinked
 from klab.training.manifest import sha256_file
+from klab.verification_proofs import artifact_fingerprint
 
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _PHASE = "native-build-publication"
@@ -358,6 +364,29 @@ def _check_completed_producer(project, producer):
 
 
 def build_completed(project, work_root):
+    root = Path(work_root).resolve()
+    workspace = root / "corpora" / project.config.id
+    if symlinked(workspace):
+        raise ValueError("symlinked completed preparation workspace")
+    workspace.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(
+        workspace / ".completed-build.lock",
+        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ValueError(
+                "another completed preparation build is running"
+            ) from error
+        return _build_completed(project, root, workspace)
+    finally:
+        os.close(descriptor)
+
+
+def _build_completed(project, root, workspace):
     from klab.corpus.acquisition import declaration_sha256
     from klab.corpus.dedup_policy import is_strict_chain
     from klab.corpus.large_build import _emit_build
@@ -372,7 +401,6 @@ def build_completed(project, work_root):
         adopt_completed_inventory,
     )
 
-    root = Path(work_root).resolve()
     transforms = _ordered_transforms(project)
     if (
         not _uses_disk_lm_builder(project, transforms)
@@ -449,7 +477,6 @@ def build_completed(project, work_root):
         "inputs": {**capture(inputs), **adopted.dependencies},
         "inventory_execution": provenance,
     }
-    workspace = root / "corpora" / project.config.id
     admission_stages = SplitStages(
         workspace / "build-input-stages", base_request, work_root=root
     )
@@ -552,13 +579,14 @@ def build_completed(project, work_root):
     build_id = canonical_digest(identity)
     target = workspace / "builds" / build_id
     progress = BuildProgress(workspace / "progress" / (build_id + ".jsonl"), build_id)
-    if _PHASE in stages.authenticated:
-        result = stages.phase(_PHASE, lambda _: None)
+    result = stages.completed_phase(_PHASE)
+    if result is not None:
         if result["build_path"] != str(target) or result["build_id"] != build_id:
             raise ValueError("completed native build identity differs")
+        _clean_completed_views(stages)
         progress.record("reused_completed_build")
         return target
-    prepared, rights_files = [], []
+    prepared, rights_files, rendered_sources = [], [], []
     for source in sorted(project.sources, key=lambda value: value.id):
         header = {
             **admission["sources"][source.id],
@@ -581,6 +609,7 @@ def build_completed(project, work_root):
             ),
         )
         prepared.append(Path(result["prepared"]))
+        rendered_sources.extend(result["files"])
         rights_files.append(
             rights_file_entry(
                 source,
@@ -604,15 +633,8 @@ def build_completed(project, work_root):
         },
     )
 
-    def emit(directory):
-        if target.exists():
-            # No unsigned existing output is mistaken for executed completion.
-            raise ValueError(
-                "unsealed completed build exists; preserve it for explicit recovery"
-            )
-        staging = directory / "build"
-        staging.mkdir()
-        stage_declared_inputs(project, staging, admission_path)
+    def emit(staging, checkpoints):
+        stage_declared_inputs(project, staging, admission_path, resume=True)
         shutil.copyfile(
             families["files"][0]["path"], staging / "family-inventory.jsonl"
         )
@@ -631,31 +653,21 @@ def build_completed(project, work_root):
             group_count=ordered.deduplicated["group_count"],
             dropped=ordered.deduplicated["dropped"],
             progress=progress,
+            checkpoints=checkpoints,
             ordered_rows=ordered,
             descriptive_census=False,
         )
-        unchanged(request["inputs"])
-        unchanged(source_configuration)
-        publish_staging(staging, target)
-        manifest = _small(target / "build.json")
-        outputs = [
-            {
-                "path": str(target / name),
-                "sha256": item["sha256"],
-                "bytes": item["size"],
-            }
-            for name, item in manifest["files"].items()
-        ]
-        outputs.append(
-            {
-                "path": str(target / "build.json"),
-                "sha256": sha256_file(target / "build.json"),
-                "bytes": (target / "build.json").stat().st_size,
-            }
-        )
-        return {"files": outputs, "build_path": str(target), "build_id": build_id}
 
-    stages.phase(_PHASE, emit)
+    input_files = [
+        item["path"]
+        for item in (
+            *rendered_sources,
+            *ordered.assigned["files"],
+            *ordered.deduplicated["files"],
+            *families["files"],
+        )
+    ]
+    _publish_completed_views(stages, target, input_files, emit, progress)
     invocation_cache.publish(
         "completed-build-invocation",
         invocation,
@@ -665,6 +677,106 @@ def build_completed(project, work_root):
     )
     progress.record("complete")
     return target
+
+
+def _build_members(path):
+    if symlinked(path) or not path.is_dir():
+        raise ValueError(f"unsafe completed build directory: {path}")
+    # Rename updates metadata on the containing directory, not its members.
+    return [list(member) for member in artifact_fingerprint(path)[1:]]
+
+
+def _clean_completed_views(stages):
+    view_root = stages.root / "view-emission"
+    if view_root.exists():
+        shutil.rmtree(view_root)
+
+
+def _publish_completed_views(stages, target, input_files, emit, progress):
+    view_root = stages.root / "view-emission"
+    staging = view_root / "build"
+    if symlinked(staging) or symlinked(target):
+        raise ValueError("symlinked completed build output")
+    inputs = stages.request["inputs"]
+    views = capture(input_files)
+    binding = {"build_path": str(target), "views": canonical_digest(views)}
+    kind = "completed-build-ready"
+    limit = 4 * 1024**2
+    # An optional ready receipt failure must leave the phase signer enabled.
+    ready_cache = copy(stages.cache)
+
+    def publish(directory):
+        # View staging is stable across attempts. The phase still owns completion.
+        directory.rmdir()
+        unchanged(inputs)
+        ready = ready_cache.load(kind, binding, limit=limit)
+        if target.exists():
+            if (
+                staging.exists()
+                or ready is None
+                or _build_members(target) != ready[0]["members"]
+            ):
+                raise ValueError(
+                    "unsealed completed build exists; preserve it for explicit recovery"
+                )
+            sync_directory(target.parent)
+            progress.record("recovered_completed_build_publication")
+            return ready[0]["result"]
+
+        if (
+            ready is not None
+            and staging.is_dir()
+            and _build_members(staging) == ready[0]["members"]
+        ):
+            payload = ready[0]
+            progress.record("reused_completed_build_views")
+        else:
+            staging.mkdir(parents=True, exist_ok=True)
+            (staging / "build.json").unlink(missing_ok=True)
+            progress.update(phase="writing_views")
+            emit(staging, ViewCheckpoints(view_root, canonical_digest(binding)))
+            manifest_path = staging / "build.json"
+            manifest = _small(manifest_path)
+            outputs = [
+                {
+                    "path": str(target / name),
+                    "sha256": item["sha256"],
+                    "bytes": item["size"],
+                }
+                for name, item in manifest["files"].items()
+            ]
+            outputs.append(
+                {
+                    "path": str(target / "build.json"),
+                    "sha256": sha256_file(manifest_path),
+                    "bytes": manifest_path.stat().st_size,
+                }
+            )
+            payload = {
+                "members": _build_members(staging),
+                "result": {
+                    "files": outputs,
+                    "build_path": str(target),
+                    "build_id": target.name,
+                },
+            }
+
+        def seal():
+            unchanged(inputs)
+            unchanged(views)
+            if _build_members(staging) != payload["members"]:
+                raise ValueError("completed build changed before publication")
+            if ready is None or ready[0] != payload:
+                ready_cache.publish(kind, binding, payload, views, limit=limit)
+                if not ready_cache.writable:
+                    progress.record("completed_build_ready_proof_unavailable")
+
+        progress.update(phase="publishing")
+        publish_staging(staging, target, before_rename=seal)
+        return payload["result"]
+
+    stages.phase(_PHASE, publish)
+    _clean_completed_views(stages)
 
 
 def verify_completed_build(path, manifest=None):

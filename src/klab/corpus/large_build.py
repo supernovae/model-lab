@@ -1187,17 +1187,13 @@ class _SQLBuildRows:
         self.connection = connection
         self.prepared = prepared
 
-    def spans(self):
-        for _, span in self.span_rows(0):
-            yield span
-
-    def span_rows(self, after: int):
+    def span_rows(self, after: int | None):
         with ExitStack() as sources:
             current, position = None, 0
             for rowid, shard, offset, length in self.connection.execute(
                 "SELECT rowid,shard,span_offset,span_length FROM documents "
                 "WHERE rowid>? ORDER BY rowid",
-                (after,),
+                (after or 0,),
             ):
                 if shard != current:
                     sources.close()
@@ -1213,13 +1209,13 @@ class _SQLBuildRows:
                 position = offset + length
                 yield rowid, raw.removesuffix(b"\n")
 
-    def documents(self, after: str = ""):
+    def documents(self, after: str | None):
         references = self.connection.execute(
             "SELECT d.shard,d.document_offset,d.document_length,d.split,"
             "x.representative_id,x.drop_reason,d.document_id "
             "FROM documents d CROSS JOIN dedup x ON x.document_number=d.rowid "
             "WHERE d.document_id>? ORDER BY d.document_id",
-            (after,),
+            (after or "",),
         )
         streams = OrderedDict()
         try:
@@ -1227,7 +1223,7 @@ class _SQLBuildRows:
                 for shard, offset, length, *metadata in references:
                     stream = self._document_stream(streams, shard)
                     raw = read_file_range(stream, offset, length)
-                    yield raw.removesuffix(b"\n"), *metadata
+                    yield raw.removesuffix(b"\n"), *metadata, metadata[-1]
                 return
             batch = []
             size = 0
@@ -1299,7 +1295,7 @@ class _SQLBuildRows:
                 _, offset, length, *_ = batch[index]
                 payloads[index] = read_file_range(stream, offset, length)
         for raw, (_, _, _, *metadata) in zip(payloads, batch, strict=True):
-            yield raw.removesuffix(b"\n"), *metadata
+            yield raw.removesuffix(b"\n"), *metadata, metadata[-1]
 
     def family_splits(self):
         for (family,) in self.connection.execute(
@@ -1338,9 +1334,9 @@ def _emit_build(
     group_count: int,
     dropped: int,
     progress: BuildProgress,
+    checkpoints: ViewCheckpoints,
     ordered_rows=None,
     descriptive_census=True,
-    checkpoints: ViewCheckpoints | None = None,
     diagnostics: Path | None = None,
 ) -> None:
     from klab.corpus.measurement import summarize_release
@@ -1365,7 +1361,7 @@ def _emit_build(
         def writer(name: str, *, resumable: bool = True) -> Any:
             path = staging / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            if checkpoints is not None and resumable:
+            if resumable:
                 if path.is_symlink():
                     raise ValueError(f"symlinked corpus view: {path}")
                 stream = stack.enter_context(path.open("a+b"))
@@ -1391,29 +1387,29 @@ def _emit_build(
             writer(f"chat/{split}.jsonl", resumable=False)
             writer(f"chat/{split}.lineage.jsonl", resumable=False)
 
-        span_rowid, last_id = 0, ""
+        span_cursor = document_cursor = None
         pending_rows, pending_bytes = 0, 0
-        if checkpoints is not None:
-            state = checkpoints.restore()
-            if checkpoints.damaged:
-                progress.record("discarded_damaged_view_checkpoint")
-            if state:
-                tally.restore(state["tally"])
-                lm_counts.update(state["lm_counts"])
-                span_rowid, last_id = state["span_rowid"], state["last_id"]
-                count, stage_count = state["count"], state["stage_count"]
-                with (staging / f"stages/{stage_id}.jsonl").open("rb") as prefix:
-                    for index, line in enumerate(prefix):
-                        if index:
-                            stage_digest.update(b",")
-                        stage_digest.update(line.removesuffix(b"\n"))
-                progress.update(output_records=sum(lm_counts.values()))
-                progress.record("reused_view_checkpoints")
+        state = checkpoints.restore()
+        if checkpoints.damaged:
+            progress.record("discarded_damaged_view_checkpoint")
+        if state:
+            tally.restore(state["tally"])
+            lm_counts.update(state["lm_counts"])
+            span_cursor, document_cursor = (
+                state["span_cursor"],
+                state["document_cursor"],
+            )
+            count, stage_count = state["count"], state["stage_count"]
+            with (staging / f"stages/{stage_id}.jsonl").open("rb") as prefix:
+                for index, line in enumerate(prefix):
+                    if index:
+                        stage_digest.update(b",")
+                    stage_digest.update(line.removesuffix(b"\n"))
+            progress.update(output_records=sum(lm_counts.values()))
+            progress.record("reused_view_checkpoints")
 
         def boundary(size: int, *, finished: bool = False) -> None:
             nonlocal pending_rows, pending_bytes
-            if checkpoints is None:
-                return
             pending_rows += not finished
             pending_bytes += size
             if not (
@@ -1424,8 +1420,8 @@ def _emit_build(
                 return
             checkpoints.commit(
                 {
-                    "span_rowid": span_rowid,
-                    "last_id": last_id,
+                    "span_cursor": span_cursor,
+                    "document_cursor": document_cursor,
                     "count": count,
                     "stage_count": stage_count,
                     "lm_counts": lm_counts,
@@ -1435,23 +1431,20 @@ def _emit_build(
             pending_bytes = pending_rows = 0
 
         # Source spans retain acquisition order; documents and views use ID order.
-        span_rows = (
-            ordered_rows.span_rows(span_rowid)
-            if checkpoints is not None
-            else ((0, span) for span in ordered_rows.spans())
-        )
-        for span_rowid, span in stack.enter_context(closing(span_rows)):
+        span_rows = ordered_rows.span_rows(span_cursor)
+        for span_cursor, span in stack.enter_context(closing(span_rows)):
             spans.write(span + b"\n")
             boundary(len(span))
         boundary(0, finished=True)
-        document_rows = (
-            ordered_rows.documents(last_id)
-            if checkpoints is not None
-            else ordered_rows.documents()
-        )
-        for raw_doc, split, representative, reason, document_id in stack.enter_context(
-            closing(document_rows)
-        ):
+        document_rows = ordered_rows.documents(document_cursor)
+        for (
+            raw_doc,
+            split,
+            representative,
+            reason,
+            document_id,
+            document_cursor,
+        ) in stack.enter_context(closing(document_rows)):
             doc = json.loads(raw_doc)
             if doc["document_id"] != document_id:
                 raise ValueError("prepared document differs from the indexed identity")
@@ -1466,7 +1459,7 @@ def _emit_build(
                 ),
             )
             count += 1
-            record_id = last_id = doc["document_id"]
+            record_id = doc["document_id"]
             origin = (
                 HUMAN_ORIGIN
                 if source_origins[doc["source_id"]] == HUMAN_ORIGIN
@@ -1508,7 +1501,7 @@ def _emit_build(
             boundary(len(raw_doc))
         boundary(0, finished=True)
 
-        view_digests = checkpoints.file_digests() if checkpoints is not None else None
+        view_digests = checkpoints.file_digests()
 
     stage_digest.update(b"]]")
     stages = [
@@ -1575,8 +1568,6 @@ def _emit_build(
             "reason": "Descriptive lineage census is outside the selected completed local preparation scope",
             "token_count_reason": "tokenizer_not_declared",
         }
-    elif checkpoints is None:
-        report["measurement"] = summarize_release(staging, release_spec=release_spec)
     else:
         store = StageStore(checkpoints.root / "census")
         store.discard_incomplete("measurement")

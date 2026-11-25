@@ -7,10 +7,21 @@ import shutil
 from pathlib import Path
 
 import pytest
-from corpus_fixtures import neutral_corpus
+from corpus_fixtures import fixture_rights, neutral_corpus
 from recipe_fixtures import Lab, write_recipe
 
-from klab.corpus import build_outputs, build_stages, large_build, measurement
+from klab.canonical import canonical_digest
+from klab.corpus import (
+    build_outputs,
+    build_stages,
+    completed_preparation,
+    large_build,
+    measurement,
+)
+from klab.corpus.dedup_policy import STRICT_CHAIN
+from klab.corpus.progress import BuildProgress
+from klab.corpus.split_runs import SplitStages, write_rows
+from klab.corpus.streaming_build_rows import StreamBuildRows
 from klab.corpus.view_checkpoints import ViewCheckpoints
 from klab.training.manifest import sha256_file
 
@@ -278,6 +289,176 @@ def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(
     assert len(rendered) == (total_documents % 2 or 2)
     assert tree(resumed) == expected
     assert not list(lab.work.glob("corpora/*/.views-*"))
+
+
+def test_completed_preparation_recovers_views_and_signed_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    lab = Lab(tmp_path, monkeypatch, capsys)
+    project = neutral_corpus(lab.work)
+    policy = project.release.policy.model_copy(update={"duplicates": STRICT_CHAIN})
+    project = project.model_copy(
+        update={"release": project.release.model_copy(update={"policy": policy})}
+    )
+    source = project.sources[0]
+    prepared = []
+    for first in (1, 4):
+        shard = lab.work / f"shard-{first}"
+        shard.mkdir()
+        documents = []
+        for index in range(first, first + 3):
+            identifier = f"{index:064x}"
+            documents.append(
+                {
+                    "document_id": identifier,
+                    "raw_content_sha256": identifier,
+                    "content_sha256": identifier,
+                    "source_id": source.id,
+                    "source_family": source.source_family,
+                    "document_kind": "prose",
+                    "modality": "text",
+                    "domains": source.domains,
+                    "text": f"example {index}",
+                    "license": "MIT",
+                    "redistribution": "allowed",
+                    "rights": {
+                        **fixture_rights(),
+                        "notices": [],
+                        "training_restriction": "none_found",
+                    },
+                }
+            )
+        write_rows(shard / "docs.jsonl", documents)
+        write_rows(
+            shard / "spans.jsonl",
+            ({"record_id": doc["document_id"]} for doc in documents),
+        )
+        write_rows(shard / "rejected.jsonl", ())
+        prepared.append(shard)
+    workspace = lab.work / "corpora" / project.config.id
+    request = {"producer": completed_preparation._producer(), "inputs": {}}
+
+    def stages():
+        return SplitStages(workspace / "build-stages", request, work_root=lab.work)
+
+    ordered = StreamBuildRows.create(stages(), prepared, project)
+    inputs = [
+        *[path for shard in prepared for path in shard.glob("*.jsonl")],
+        *[
+            item["path"]
+            for item in ordered.assigned["files"] + ordered.deduplicated["files"]
+        ],
+    ]
+    identity = {
+        "implementation_sha256": "a" * 64,
+        "completed_preparation": {
+            "policy": "completed_local_preparation",
+            "request": request,
+            "source_bindings": {},
+        },
+    }
+    build_id = canonical_digest(identity)
+    target = workspace / "builds" / build_id
+    progress = BuildProgress(workspace / "progress.jsonl", build_id)
+    monkeypatch.setattr(large_build, "_VIEW_CHECKPOINT_ROWS", 2)
+
+    def emit(staging, checkpoints):
+        large_build._emit_build(
+            connection=None,
+            staging=staging,
+            project=project,
+            lock={"sources": {}},
+            identity=identity,
+            build_id=build_id,
+            transform=project.transforms[0],
+            prepared=prepared,
+            rights_files=[],
+            source_events=prepared,
+            groups_path=Path(ordered.deduplicated["groups"]),
+            group_count=ordered.deduplicated["group_count"],
+            dropped=ordered.deduplicated["dropped"],
+            progress=progress,
+            ordered_rows=ordered,
+            descriptive_census=False,
+            checkpoints=checkpoints,
+        )
+
+    # Fix the build identity and compare to an uninterrupted renderer.
+    reference = lab.work / "reference"
+    (reference / "build").mkdir(parents=True)
+    emit(reference / "build", ViewCheckpoints(reference, "reference"))
+    expected = tree(reference / "build")
+
+    def run():
+        completed_preparation._publish_completed_views(
+            stages(), target, inputs, emit, progress
+        )
+
+    commit = ViewCheckpoints.commit
+
+    def stop_after_documents(checkpoints, state):
+        commit(checkpoints, state)
+        if state["count"] == 2:
+            raise OSError("stopped after document checkpoint")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(ViewCheckpoints, "commit", stop_after_documents)
+        with pytest.raises(OSError, match="stopped after document checkpoint"):
+            run()
+    assert not target.exists()
+
+    documents = ordered.documents
+    read_ids = []
+
+    def observe_document_reads(after):
+        for row in documents(after):
+            read_ids.append(row[4])
+            yield row
+
+    monkeypatch.setattr(ordered, "documents", observe_document_reads)
+    publish = completed_preparation.publish_staging
+
+    def stop_before_rename(staging, target, *, before_rename):
+        def stop_after_seal():
+            before_rename()
+            raise OSError("stopped before rename")
+
+        publish(staging, target, before_rename=stop_after_seal)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(completed_preparation, "publish_staging", stop_before_rename)
+        with pytest.raises(OSError, match="stopped before rename"):
+            run()
+    assert read_ids == [f"{index:064x}" for index in range(3, 7)]
+    assert not target.exists()
+    read_ids.clear()
+
+    def stop_after_rename(*args, **kwargs):
+        publish(*args, **kwargs)
+        raise OSError("stopped after rename")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(completed_preparation, "publish_staging", stop_after_rename)
+        with pytest.raises(OSError, match="stopped after rename"):
+            run()
+    assert not read_ids
+    with pytest.raises(ValueError, match="completion|build evidence"):
+        completed_preparation.verify_completed_build(target)
+
+    # A replacement containing the same bytes still does not prove execution.
+    authentic = target.with_name("authentic")
+    target.rename(authentic)
+    shutil.copytree(authentic, target)
+    with pytest.raises(ValueError, match="unsealed completed build"):
+        run()
+    shutil.rmtree(target)
+    authentic.rename(target)
+
+    run()
+    assert not read_ids
+    assert tree(target) == expected
+    assert completed_preparation.verify_completed_build(target)["build_id"] == build_id
+    assert not (stages().root / "view-emission").exists()
 
 
 def test_stage_keys_follow_exactly_their_inputs(tmp_path: Path) -> None:

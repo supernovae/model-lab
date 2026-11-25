@@ -425,16 +425,20 @@ class StreamBuildRows:
         )
         return cls(prepared, assigned, deduplicated)
 
-    def spans(self):
-        for shard in self.prepared:
-            with (shard / "spans.jsonl").open("rb") as stream:
+    def span_rows(self, after):
+        first, offset = after or (0, 0)
+        for number in range(first, len(self.prepared)):
+            with (self.prepared[number] / "spans.jsonl").open("rb") as stream:
+                stream.seek(offset)
                 for raw in stream:
-                    yield raw.rstrip(b"\n")
+                    offset += len(raw)
+                    yield (number, offset), raw.removesuffix(b"\n")
+            offset = 0
 
     def family_splits(self):
         yield from self.assigned["family_splits"]
 
-    def documents(self):
+    def documents(self, after):
         with ExitStack() as stack:
             docs = [
                 stack.enter_context((path / "docs.jsonl").open("rb"))
@@ -459,7 +463,14 @@ class StreamBuildRows:
                 if count
                 else None
             )
-            for ordinal, row in enumerate(rows(self.assigned["references"])):
+            references = stack.enter_context(
+                Path(self.assigned["references"]).open("rb")
+            )
+            first, offset = after or (0, 0)
+            references.seek(offset)
+            for ordinal, line in enumerate(references, start=first):
+                offset += len(line)
+                row = json.loads(line)
                 root = ordinal
                 while (
                     parent := struct.unpack_from("<Q", parent_map, root * 8)[0]
@@ -474,7 +485,14 @@ class StreamBuildRows:
                     if root != ordinal
                     else None
                 )
-                yield raw.rstrip(b"\n"), row[4], representative, reason, row[0]
+                yield (
+                    raw.rstrip(b"\n"),
+                    row[4],
+                    representative,
+                    reason,
+                    row[0],
+                    (ordinal + 1, offset),
+                )
 
     def family_inventory(self):
         count = self.assigned["documents"]
