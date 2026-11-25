@@ -625,7 +625,109 @@ def _raw_group(
                     raise ValueError("unsupported document snapshot span")
     finally:
         db.close()
-    return count, raw_path.stat().st_size
+    return source["id"], raw_name, count, raw_path.stat().st_size
+
+
+def _replay_sources(
+    root: Path,
+    database: str,
+    groups: list[tuple[str, str, int]],
+    receipt: dict[str, Any],
+    sources: dict[str, dict],
+    snapshots: dict[str, dict],
+    rights: dict[tuple[str, str], dict],
+    options: NormalizerOptions,
+    progress: BuildProgress | None,
+    *,
+    proof_store: ProofStore | None,
+    verification_mode: VerificationMode,
+) -> None:
+    """Replay source files or reuse checks of the exact sealed replay inputs."""
+    from klab.corpus import release_receipt
+
+    files_roots = {
+        source_id: root.parent.parent
+        / "snapshots"
+        / source_id
+        / sources[source_id]["snapshot_sha256"]
+        / "files"
+        for source_id in {group[0] for group in groups}
+    }
+    documents = root / "documents.jsonl"
+    spans = root / "spans.jsonl"
+    dependencies = [
+        documents,
+        spans,
+        root / "license-report.json",
+        root / "sources.json",
+    ]
+    use_receipts = proof_store is not None and verification_mode == "verified_reuse"
+    if use_receipts:
+        # The path separates build, staged, and release checks at distinct locations.
+        replay_inputs = canonical_digest(
+            [
+                str(root),
+                receipt["build_id"],
+                [receipt["files"][p.name] for p in dependencies],
+            ]
+        )
+    tasks = []
+    unfinished = {}
+    total = reused = 0
+    for source_id, raw_name, count in groups:
+        raw_path = _safe(files_roots[source_id], raw_name)
+        size = raw_path.stat().st_size
+        total += size
+        file = rights.get((source_id, raw_name))
+        if use_receipts and file is not None and size >= INVENTORY_RECEIPT_MIN_BYTES:
+            identity = canonical_digest(
+                [
+                    replay_inputs,
+                    source_id,
+                    raw_name,
+                    count,
+                    sources[source_id]["snapshot_sha256"],
+                    file["sha256"],
+                ]
+            )
+            check = release_receipt.lookup(
+                proof_store, "raw_replay", raw_path, identity, dependencies
+            )
+            if check.hit:
+                reused += size
+                continue
+            if check.index is not None:
+                unfinished[source_id, raw_name] = raw_path, identity, check.index
+        tasks.append(
+            (
+                database,
+                str(documents),
+                str(spans),
+                sources[source_id],
+                raw_name,
+                file,
+                str(files_roots[source_id]),
+                snapshots[source_id]["declaration"]["acquisition"].get("text_field"),
+                options,
+            )
+        )
+
+    if progress is not None:
+        progress.start_phase("raw_replay", expected_input_bytes=total)
+        progress.update(input_bytes_reused=reused)
+
+    def consume(result):
+        source_id, raw_name, count, size = result
+        if proof := unfinished.pop((source_id, raw_name), None):
+            path, identity, index = proof
+            release_receipt.record(
+                proof_store, "raw_replay", path, identity, dependencies, index=index
+            )
+        if progress is not None:
+            progress.update(documents=count, input_bytes=size)
+
+    if tasks:
+        run_tasks(_raw_group, tasks, consume, total_bytes=total - reused)
 
 
 def _lineage_rows(database: str, lineage: str, start: int, end: int, origins):
@@ -968,43 +1070,18 @@ def _validate_rows_streaming(
                 "SELECT source, raw_path, COUNT(*) FROM docs GROUP BY source, raw_path "
                 "ORDER BY COUNT(*) DESC"
             ).fetchall()
-            files_roots = {
-                source_id: root.parent.parent
-                / "snapshots"
-                / source_id
-                / sources[source_id]["snapshot_sha256"]
-                / "files"
-                for source_id in {group[0] for group in groups}
-            }
-            for source_id, raw_name, _ in groups:
-                # Fail on an unsafe path before spending any time on the replay.
-                _safe(files_roots[source_id], raw_name)
-            total = sum(
-                _safe(files_roots[source_id], raw_name).stat().st_size
-                for source_id, raw_name, _ in groups
-            )
-            if progress is not None:
-                progress.start_phase("raw_replay", expected_input_bytes=total)
-            run_tasks(
-                _raw_group,
-                (
-                    (
-                        database,
-                        str(documents_path),
-                        str(spans_path),
-                        sources[source_id],
-                        raw_name,
-                        rights.get((source_id, raw_name)),
-                        str(files_roots[source_id]),
-                        snapshots[source_id]["declaration"]["acquisition"].get(
-                            "text_field"
-                        ),
-                        options,
-                    )
-                    for source_id, raw_name, _ in groups
-                ),
-                lambda result: advance(*result),
-                total_bytes=total,
+            _replay_sources(
+                root,
+                database,
+                groups,
+                receipt,
+                sources,
+                snapshots,
+                rights,
+                options,
+                progress,
+                proof_store=proof_store,
+                verification_mode=verification_mode,
             )
 
             lineage_path = root / "lineage.jsonl"
