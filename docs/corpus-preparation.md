@@ -1193,6 +1193,11 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   A retry hashes incomplete or changed files, including any file moved to a
   new path. The verifier still runs the remaining source, row and lineage
   checks before it signs a complete proof.
+  Stage outputs of at least 64 MiB get a signed checkpoint after the checksum,
+  canonical rows and ordered stage identity pass validation. The proof also
+  binds the exact stage receipt and inventory entry. A retry at the same path
+  can skip both stage scans, which are recorded as reused bytes in progress.
+  An independent cold check reads the stage again.
 
   The completed-mixture, tokenizer, prepared-data and stage-bundle receipts are
   keyed the same way: on the data identities they bind and the source of only
@@ -1349,7 +1354,7 @@ needs measurement where the table gives historical or fixture evidence.
 | Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB. Final publication by rename. | Verify the committed prefix, reconstruct its digest and render the uncommitted tail. Report measurement or manifest hashing can restart as a whole pass. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. These figures cover the append helper. [#579](https://github.com/supernovae/model-lab/pull/579) |
 | Completed-preparation build | Authenticated per-source render and completed sorting, deduplication, inventory and emission phases. | An unfinished phase repeats. View emission on this route reruns its complete pass. The small in-memory builder likewise has a whole-build boundary. | Production restart cost unmeasured. |
 | Freeze | Native staging rename and build tombstone, then the verified release. Completed preparation seals a retained release against its existing build. | An interrupted recheck of the staged files can resume from eligible file proofs for that staging path. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. [#501](https://github.com/supernovae/model-lab/pull/501) |
-| Release verification, `audit`, and `sources` | Signed checks of eligible inventory files, then the complete release proof. `audit` and `sources` read the corresponding published report after verification. | A receipt-backed retry skips eligible completed file hashes and continues the remaining checks. Cold mode starts the checks from bytes. | See [inventory hash recovery measurements](#inventory-hash-recovery-measurements). An earlier cold audit took 67.3 s on 13.2 GB synthetic data, and the first receipt-backed audit took 0.94 s. [#500](https://github.com/supernovae/model-lab/pull/500), [#450](https://github.com/supernovae/model-lab/issues/450) |
+| Release verification, `audit`, and `sources` | Signed checks of eligible inventory files and stage outputs, then the complete release proof. `audit` and `sources` read the corresponding published report after verification. | A receipt-backed retry skips eligible completed file hashes and stage scans and continues the remaining checks. Cold mode starts the checks from bytes. | See [inventory hash recovery measurements](#inventory-hash-recovery-measurements) and [stage output verification measurements](#stage-output-verification-measurements). An earlier cold audit took 67.3 s on 13.2 GB synthetic data, and the first receipt-backed audit took 0.94 s. [#500](https://github.com/supernovae/model-lab/pull/500), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | `describe` | Cached measurement runs and lineage position index when a proof store is available. Release verification has its own receipt. | Resume missing measurement ranges and merge results. Chat view measurement uses a whole run. A stopped cold release verification can still repeat. | 55.1 s for 5M synthetic rows (23 GB), 12 workers, without a tokenizer. [#502](https://github.com/supernovae/model-lab/pull/502) |
 | Corpus `export` | Document license labels and LM or chat split statistics by range with persistent scratch. Final export directory and verification receipt. | Reuse valid license and split statistics. Repeat unfinished ranges and final publication. | See [export license scan measurements](#export-license-scan-measurements) and [chat export split measurements](#chat-export-split-measurements). |
 
@@ -1392,6 +1397,16 @@ For the four-worker cold trial, process reads fell from 1.96 GB to 1.31 GB.
 Storage reads were 644 MB in both cases. The fixture fit in the page cache,
 so the measured savings came from avoiding repeated processing of cached
 bytes. Production and HDD results remain to be measured. [#450](https://github.com/supernovae/model-lab/issues/450)
+
+On the same 644 MB fixture, a separate SIGKILL trial stopped just after the
+stage proof was durable. The first retry in a new process took 214 ms and
+skipped both stage scans, accounting for 1.287 GB of reused verification
+work. A full pass took a median of 1.757 s. With checkpointing enabled and
+no existing proof, the median was 1.777 s. An explicit cold pass after the
+stop took a median of 1.750 s and read the stage again. The signed proof
+contained 464 bytes. The fixture measures stage and inventory verification.
+It leaves interruption inside a stage and end-to-end production recovery
+for the long-stage audit. [#485](https://github.com/supernovae/model-lab/issues/485)
 
 ### Select families, screen duplicates, and build a schedule
 

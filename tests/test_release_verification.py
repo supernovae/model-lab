@@ -295,20 +295,47 @@ def _release_receipts(work: Path) -> list[Path]:
 
 
 def test_one_verification_serves_every_later_command(
-    release: Path, receipts: Path, cold_runs: list[Path], capsys
+    release: Path,
+    receipts: Path,
+    cold_runs: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
 ) -> None:
     from klab.verification_proofs import verification_options
 
+    monkeypatch.setattr(release_module, "INVENTORY_RECEIPT_MIN_BYTES", 0)
+    verify_stage = release_module._verify_stage_output
+    stage_reads = []
+
+    def observe_stage(path, *args):
+        stage_reads.append(path)
+        verify_stage(path, *args)
+
+    def stop_before_snapshots(*args, **kwargs):
+        raise RuntimeError("stopped before snapshot checks")
+
+    monkeypatch.setattr(release_module, "_verify_stage_output", observe_stage)
     with verification_settings(echo=sys.stderr, **verification_options(receipts)):
+        with monkeypatch.context() as fault:
+            fault.setattr(release_module, "_verified_snapshot", stop_before_snapshots)
+            with pytest.raises(RuntimeError, match="stopped before snapshot checks"):
+                audit(release)
+        assert not _release_receipts(receipts)
+        finished = stage_reads.copy()
+        assert finished
+
         first = audit(release)
-        assert len(cold_runs) == 1 and len(_release_receipts(receipts)) == 1
+        assert stage_reads == finished
+        assert len(cold_runs) == 2 and len(_release_receipts(receipts)) == 1
+        capsys.readouterr()
         assert sources(release) and sample(release) and describe(release)
         assert audit(release) == first
-    assert len(cold_runs) == 1, "later commands must verify by receipt"
+    assert len(cold_runs) == 2, "later commands must verify by receipt"
     assert capsys.readouterr().err.count("verified by receipt") == 4
     with verification_settings(**verification_options(receipts, cold=True)):
         audit(release)
-    assert len(cold_runs) == 2, "--cold ignores receipts"
+    assert stage_reads == finished + finished
+    assert len(cold_runs) == 3, "--cold ignores receipts"
 
 
 @pytest.mark.parametrize("cause", ["rewritten", "forged", "verifier changed"])
@@ -340,10 +367,14 @@ def test_receipt_is_refused_when_its_cause_no_longer_holds(
 
 
 def test_tampered_file_is_found_through_a_receipt(
-    release: Path, receipts: Path, cold_runs: list[Path]
+    release: Path,
+    receipts: Path,
+    cold_runs: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from klab.verification_proofs import verification_options
 
+    monkeypatch.setattr(release_module, "INVENTORY_RECEIPT_MIN_BYTES", 0)
     victim = release / "stages/lm.jsonl"
     original = victim.read_bytes()
     edited = original.replace(b"document", b"documenT", 1)
