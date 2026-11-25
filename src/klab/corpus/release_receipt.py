@@ -51,7 +51,7 @@ def verifier_digest(kind: str) -> str:
     screen, the trainer or the command line does not make a release unverified,
     and editing anything that verification runs does.
     """
-    if kind in {"stage_output", "raw_replay"}:
+    if kind in {"stage_output", "raw_replay", "staged_release"}:
         return verifier_digest("release")
     from klab.verifier_authority import CHAT_RENDERER_MODULES, SHARED, scoped_modules
 
