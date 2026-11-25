@@ -308,6 +308,27 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     (partition,) = (lab.work / "cache/corpus/normalized/ref_append").glob(
         "*/docs.jsonl"
     )
+    staged = partition.parent.parent / (".incomplete-" + "f" * 64)
+    staged.mkdir()
+    (staged / "docs.jsonl").write_bytes(b"partial generation")
+    inventory_args = ("corpus", "artifacts", "--json")
+    inventory = lab.json(*inventory_args, "--source-id", "ref_append")
+    assert inventory["published_partitions"] == 1
+    assert inventory["staging_directories"] == 1
+    assert inventory["retained_bytes"] == sum(
+        member.stat().st_size for member in partition.parent.iterdir()
+    )
+    assert inventory["partitions"][0]["computation_key"] == partition.parent.name
+    first = lab.json(*inventory_args, "--limit", "1")
+    second = lab.json(*inventory_args, "--limit", "1", "--after", first["next_after"])
+    assert (
+        first["partitions"][0]["artifact_id"] < second["partitions"][0]["artifact_id"]
+    )
+    assert (
+        second["retained_bytes"]
+        == first["retained_bytes"]
+        > inventory["retained_bytes"]
+    )
     partition.write_bytes(b"damaged normalized partition")
     shutil.rmtree(appended_build)
     with pytest.raises(ValueError, match="prepared source shard changed"):
