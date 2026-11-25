@@ -31,6 +31,7 @@ from recipe_fixtures import (
 
 from klab.canonical import canonical_json
 from klab.corpus import release as release_module
+from klab.corpus.release_verify import verification_settings
 
 VOCAB_SIZE = 300
 DECLARED = sorted(SOURCE_STRATA)
@@ -169,6 +170,43 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     reused = len(cold)
     assert lab.run("corpus", "audit", str(release)) == first
     assert len(cold) == reused <= 1
+
+    scratch = tmp_path / "verification-scratch"
+    expected_manifest = json.loads((release / "manifest.json").read_bytes())
+
+    def verify_indexes():
+        return release_module.verify_release(
+            release, verification_mode="verified_reuse"
+        )
+
+    def interrupted(*args, **kwargs):
+        raise InterruptedError("stop after durable verification index")
+
+    def reran(*args, **kwargs):
+        pytest.fail("a verified row index was rebuilt")
+
+    with verification_settings(scratch_dir=scratch, workers=1):
+        with monkeypatch.context() as stop:
+            stop.setattr(release_module, "_document_rows", interrupted)
+            with pytest.raises(InterruptedError):
+                verify_indexes()
+        assert list(scratch.glob("release-indexes/*/spans/*/spans.sqlite"))
+        assert not list(scratch.glob("release-indexes/*/documents/*/documents.sqlite"))
+        with monkeypatch.context() as stop:
+            stop.setattr(release_module, "_span_rows", reran)
+            stop.setattr(release_module, "_replay_sources", interrupted)
+            with pytest.raises(InterruptedError):
+                verify_indexes()
+            with monkeypatch.context() as retry:
+                retry.setattr(release_module, "_document_rows", reran)
+                with pytest.raises(InterruptedError):
+                    verify_indexes()
+        (index,) = scratch.glob("release-indexes/*/documents/*/documents.sqlite")
+        index.write_bytes(b"damaged verification index")
+        with monkeypatch.context() as retry:
+            retry.setattr(release_module, "_span_rows", reran)
+            assert verify_indexes() == expected_manifest
+    assert not list(scratch.glob("release-indexes/*/*/*/*.sqlite"))
 
     # A rights field edited after the build is refused, even with every digest resealed.
     forged = forge_release(

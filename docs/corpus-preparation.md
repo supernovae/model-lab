@@ -1221,6 +1221,14 @@ language-model-only release with a reviewed admission or a `fraction`, and any
 release with chat views, still uses the row-store verifier, whose index can be as
 large as the release's documents.
 
+On the streaming LM path, receipt-backed verification with an owned
+`--scratch-dir` commits the narrow span and document indexes separately.
+An interrupted document scan can reuse the completed span index. Once the
+document index commits, restart can skip both input scans and use the
+verified index for raw replay, lineage and view checks. An interruption
+inside an unfinished index still repeats that index. The independent
+`--cold` pass rebuilds both indexes.
+
 ```sh
 klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
 ```
@@ -1478,9 +1486,39 @@ needs measurement where the table gives historical or fixture evidence.
 | Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB, lineage and view measurement checkpoints, and a receipted census. Final publication by rename. | Verify the committed view prefix, reconstruct its digests and render the uncommitted tail. Reuse finished census work for matching inputs. The manifest hashes ancillary outputs and reuses the view checksums. A stop in the final lineage sort or measurement merge may repeat that step. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. [Native build census measurements](#native-build-census-measurements) cover the report phase. [#579](https://github.com/supernovae/model-lab/pull/579) |
 | Completed-preparation build | Authenticated admission and source renders, reusable row phases, view range checkpoints and a signed receipt before publication. | Reuse authenticated upstream phases after downstream changes. Repeat an unfinished phase. View recovery verifies the committed prefix and resumes from stored span and document cursors. Intact staged views can publish directly, and a renamed build can recover completion from the signed receipt. A partial emission retry can recopy the frozen control inputs. | See [completed-preparation input reuse measurements](#completed-preparation-input-reuse-measurements), [row phase measurements](#completed-preparation-row-phase-measurements) and [view recovery measurements](#completed-preparation-view-recovery-measurements). Production restart cost unmeasured. |
 | Freeze | Native staging rename and build tombstone, signed verification after a staged replay, then the public release. Completed preparation seals a retained release against its existing build. | Reuse the complete staged receipt at the same path, or resume an unfinished check from eligible file and replay proofs. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. See [staged freeze recovery measurements](#staged-freeze-recovery-measurements). [#501](https://github.com/supernovae/model-lab/pull/501) |
+| Native release verification row indexes | Verified span and document indexes at completion, with explicitly chosen owned scratch in receipt-backed mode. | Reuse the finished document index, or reuse the span index and rebuild the unfinished document pass. Raw replay and downstream tally checks retain their own recovery boundaries. | See [native release row index measurements](#native-release-row-index-measurements). |
 | Release verification, `audit`, and `sources` | Signed checks of eligible inventory files, stage outputs and streaming raw source replay, then the complete release proof. `audit` and `sources` read the corresponding published report after verification. | A receipt-backed retry skips eligible completed checks and continues the remaining work. Cold mode starts the checks from bytes. | See [inventory hash recovery measurements](#inventory-hash-recovery-measurements), [stage output verification measurements](#stage-output-verification-measurements) and [raw source replay recovery](#raw-source-replay-recovery). An earlier cold audit took 67.3 s on 13.2 GB synthetic data, and the first receipt-backed audit took 0.94 s. [#500](https://github.com/supernovae/model-lab/pull/500), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | `describe` | Cached measurement runs, per-split link offsets and verified lineage index ranges when a proof store or persistent scratch is available. Release verification has its own receipt. | Resume missing index ranges, link files and measurement ranges. An unfinished index sort or cold release check can repeat. Each chat view is one measurement run. | See [describe lineage index recovery measurements](#describe-lineage-index-recovery-measurements) and [describe link planning recovery measurements](#describe-link-planning-recovery-measurements). An earlier full measurement took 55.1 s for 5M synthetic rows (23 GB), 12 workers, without a tokenizer. [#502](https://github.com/supernovae/model-lab/pull/502) |
 | Corpus `export` | Document license labels and LM or chat split statistics by range with persistent scratch. Final export directory and verification receipt. | Reuse valid license and split statistics. Repeat unfinished ranges and final publication. Later consumers can use the complete receipt. | See [export verification measurements](#export-verification-measurements), [export license scan measurements](#export-license-scan-measurements) and [chat export split measurements](#chat-export-split-measurements). |
+
+#### Native release row index measurements
+
+One cold NVMe pair used 300,000 synthetic documents, 875 MB of
+document JSONL and 41 MB of span rows. The measured interval covered
+index construction or restore through planning raw-source replay.
+Release inventory hashing, raw replay, lineage and view checks were
+outside the interval. Retry followed SIGKILL after both indexes were
+complete. Ordered index rows matched across all cases.
+
+| NVMe run | Wall | Logical reads | Device reads | Device writes | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Prior fresh | 7.431 s | 5.93 GB | 916 MB | 342 MB | 194 MiB |
+| Checkpointed fresh | 8.125 s | 6.22 GB | 916 MB | 342 MB | 201 MiB |
+| Prior retry | 7.803 s | 5.93 GB | 916 MB | 342 MB | 194 MiB |
+| Checkpointed retry | 0.955 s | 326 MB | 287 MB | 16 KiB | 98 MiB |
+
+The two indexes totaled 342 MB. Sealing added a read of the new
+index files. With a same-generation retry, the completed document
+index is checked by digest and opened read-only. The verifier keeps
+one generation per index for the selected release path, reclaims its
+abandoned tally scratch when restarting and clears the indexes after
+successful row verification.
+
+With source files on NVMe and scratch on a rotational ZFS pool, one
+pair took 14.473 s before and 18.623 s with checkpoints when fresh.
+Retry took 7.881 s before and 0.558 s with checkpoints. The retry
+used the pool's warm cache, so it measures saved work with that cache
+state. Both backends produced the same index rows.
 
 #### Staged freeze recovery measurements
 
