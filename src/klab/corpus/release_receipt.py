@@ -59,6 +59,7 @@ def verifier_digest(kind: str) -> str:
             corpus=("corpus.release", *(("corpus.export",) if exported else ())),
             leaves=(
                 *SHARED,
+                "data.verification",
                 *CHAT_RENDERER_MODULES,
                 *(("config.loading",) if exported else ()),
             ),
