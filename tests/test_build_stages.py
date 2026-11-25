@@ -24,10 +24,11 @@ from klab.corpus import (
     native_dedup,
     native_index,
     pipeline,
+    retained_mixture,
 )
 from klab.corpus.dedup_policy import STRICT_CHAIN
 from klab.corpus.progress import BuildProgress
-from klab.corpus.project import source_build_declarations
+from klab.corpus.project import SplitDeclaration, source_build_declarations
 from klab.corpus.split_runs import SplitStages, write_rows
 from klab.corpus.streaming_build_rows import StreamBuildRows
 from klab.corpus.view_checkpoints import ViewCheckpoints
@@ -620,6 +621,11 @@ def test_completed_source_reuses_admission_and_render_with_scoped_proofs(
     rendered = render(initial, fresh)
     assert fresh.input_bytes == raw_rows["bytes"]
     assert rendered["counts"]["documents"] == 1
+    stage_root = next((lab.work / "source-build-stages").iterdir())
+    adopted, _ = retained_mixture._phase(
+        lab.work, stage_root, "native-shard-render", expected_producer=None
+    )
+    assert adopted == rendered
 
     def unexpected_snapshot_verification(*args):
         pytest.fail("an input phase depends on the downstream corpus verifier")
@@ -696,10 +702,116 @@ def test_completed_preparation_recovers_views_and_signed_publication(
     workspace = lab.work / "corpora" / project.config.id
     request = {"producer": completed_preparation._producer(), "inputs": {}}
 
-    def stages():
-        return SplitStages(workspace / "build-stages", request, work_root=lab.work)
+    def stages(current=request):
+        return SplitStages(workspace / "build-stages", current, work_root=lab.work)
 
-    ordered = StreamBuildRows.create(stages(), prepared, project)
+    def declare_assignments(first_split):
+        candidates = [
+            {
+                "document_id": f"{index:064x}",
+                "content_sha256": f"{index:064x}",
+                "family_id": f"fixture-{index}",
+                "stratum": source.domains[0],
+                "split": first_split if index == 1 else "train",
+            }
+            for index in range(1, 7)
+        ]
+        assignment = write_rows(
+            lab.work / f"assignments-{first_split}.jsonl",
+            (
+                {"document_id": row["document_id"], "split": row["split"]}
+                for row in candidates
+            ),
+        )
+        Path(assignment["path"]).rename(
+            lab.work / f"assignments-{assignment['sha256']}.jsonl"
+        )
+        families = write_rows(lab.work / f"families-{first_split}.jsonl", candidates)
+        splits = SplitDeclaration.model_validate(
+            {
+                "schema_version": 1,
+                "unit": "document",
+                "assignment_file": {key: assignment[key] for key in ("sha256", "rows")},
+            }
+        )
+        return project.model_copy(update={"splits": splits}), families
+
+    project, family_reference = declare_assignments("train")
+    original_stages = stages()
+    ordered = StreamBuildRows.create(
+        original_stages, prepared, project, family_reference=family_reference
+    )
+    inventory = ordered.final_family_stage(original_stages)
+
+    view_edit = {
+        **request,
+        "producer": {**request["producer"], "corpus.large_build": "f" * 64},
+    }
+    view_stages = stages(view_edit)
+    same_rows = StreamBuildRows.create(
+        view_stages, prepared, project, family_reference=family_reference
+    )
+    assert same_rows.final_family_stage(view_stages) == inventory
+    assert set(view_stages.reused) == {
+        "build-document-references",
+        "build-join-splits",
+        "build-frozen-family-bindings",
+        "build-duplicate-keys",
+        "build-deduplicate",
+        "build-final-family-inventory",
+    }
+    for name, expected in (
+        ("build-frozen-family-bindings", same_rows.assigned),
+        ("build-duplicate-keys", view_stages.completed["build-duplicate-keys"]),
+        ("build-deduplicate", same_rows.deduplicated),
+    ):
+        recorded, _ = retained_mixture._phase(
+            lab.work, view_stages.root, name, expected_producer=view_edit["producer"]
+        )
+        assert recorded == expected
+
+    with monkeypatch.context() as edited:
+
+        def resolver_digest(path, *args, **kwargs):
+            digest = sha256_file(path, *args, **kwargs)
+            return (
+                canonical_digest(digest)
+                if Path(path).name == "completed_row_dedup.py"
+                else digest
+            )
+
+        edited.setattr(build_stages, "sha256_file", resolver_digest)
+        resolver_stages = stages(
+            {
+                **request,
+                "producer": {
+                    **request["producer"],
+                    "corpus.completed_row_dedup": "f" * 64,
+                },
+            }
+        )
+        new_resolver = StreamBuildRows.create(
+            resolver_stages, prepared, project, family_reference=family_reference
+        )
+        assert resolver_stages.reused == [
+            "build-document-references",
+            "build-join-splits",
+            "build-frozen-family-bindings",
+            "build-duplicate-keys",
+        ]
+        assert (
+            new_resolver.final_family_stage(resolver_stages)["files"][0]["sha256"]
+            == inventory["files"][0]["sha256"]
+        )
+
+    resplit, resplit_families = declare_assignments("validation")
+    split_stages = stages({**request, "split": resplit.splits.model_dump(mode="json")})
+    changed_rows = StreamBuildRows.create(
+        split_stages, prepared, resplit, family_reference=resplit_families
+    )
+    assert split_stages.reused == ["build-document-references"]
+    assert next(changed_rows.family_inventory())["split"] == "validation"
+
     inputs = [
         *[path for shard in prepared for path in shard.glob("*.jsonl")],
         *[

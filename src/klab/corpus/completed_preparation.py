@@ -44,7 +44,6 @@ from klab.corpus.project import (
 from klab.corpus.split_runs import (
     SplitStages,
     checkpoint_stamp,
-    write_rows,
 )
 from klab.corpus.streaming_build_rows import StreamBuildRows
 from klab.corpus.view_checkpoints import ViewCheckpoints
@@ -350,14 +349,9 @@ def _build_completed(project, root, workspace):
     ordered = StreamBuildRows.create(
         stages, prepared, project, family_reference=family_reference
     )
-    families = stages.phase(
-        "build-final-family-inventory",
-        lambda d: {
-            "files": [
-                write_rows(d / "family-inventory.jsonl", ordered.family_inventory())
-            ]
-        },
-    )
+    families = ordered.final_family_stage(stages)
+    for name in stages.reused:
+        progress.record("reused_" + name.replace("-", "_"))
 
     def emit(staging, checkpoints):
         stage_declared_inputs(project, staging, admission_path, resume=True)
