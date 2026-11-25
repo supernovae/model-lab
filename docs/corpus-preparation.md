@@ -845,12 +845,19 @@ Use fast storage for `WORK/corpora/<id>/builds/stages`. A symlink works.
 
 Native dedup checkpoints the ordered group report and a binary file of
 document links. A window covers up to 100,000 origin rows, including unique
-origins, and can close after 64 MiB of group and link output. An entire
-duplicate group stays together and can cross either bound. Retry verifies
-the append prefix and replays its links in a fresh decisions database.
-It scans the index and calls the duplicate policy only for the unfinished
-suffix. The final report is linked into the published stage on the same
-filesystem, and the link file and journal are reclaimed after publication.
+origins, and can close after 64 MiB of group and link output. Groups through
+4,096 members are resolved in memory. Larger groups stream sorted member
+IDs to the audit and use four bytes of ordinal spool per member. SQLite's
+sort may also use scratch. A group stays atomic and can cross either window
+bound, so a stop inside a large group can repeat that group. Retry verifies
+the append prefixes and restores links in bounded batches directly from the
+binary journal. It scans the index and calls the duplicate policy only for
+the unfinished suffix. The final report is linked into the published stage
+on the same filesystem, and the link file and journal are reclaimed after
+publication.
+The binary link layout is part of the dedup producer identity. After upgrading,
+an unfinished build starts a new dedup checkpoint generation from its verified
+normalization and index stages.
 The chain resolver checkpoints compression and final drop decisions in
 windows of 100,000 document numbers. For transitive links it resolves roots
 through two file-backed ordinal arrays and records only changed final
@@ -1468,7 +1475,7 @@ needs measurement where the table gives historical or fixture evidence.
 | Acquisition and transport cache | Published source snapshot, verified transport body or adapter-specific checkpoint. See [recovery by source adapter](#recovery-by-source-adapter). | Adapter-specific work and verification. Indexed Wikimedia retains committed planning groups and selected member groups. A partial pinned transfer restarts its body. | On a 287 MiB Wikimedia shard, a stop after 128 planned members avoided 539.88 MiB of retry decompression. [#592](https://github.com/supernovae/model-lab/pull/592) |
 | Snapshot verification | Signed byte checks of eligible files in published snapshots, then a complete snapshot proof. | Reuse completed eligible file hashes at the same path; restart an incomplete file. An explicit cold check reads the bytes again. | Historical Workshop cold pass, about 15 min for 33 snapshots and 108 GB. See [snapshot hash recovery measurements](#snapshot-hash-recovery-measurements). |
 | Native disk build, normalize | Receipted shard per source file with normalization-specific producer identity. | Verify completed shards and re-normalize unfinished files or shards with changed normalization inputs. | See [native normalization reuse measurements](#native-normalization-reuse-measurements). Historical Workshop normalize took about 25 min for the 6.7M-document workload. [#491](https://github.com/supernovae/model-lab/pull/491) |
-| Native disk build, index and dedup | Verified prepared-file groups and ranges, transactional compact index parts, duplicate-group windows, chain compression and ranked component windows, and final decision journals. Reviewed row admission uses indexed file and row numbers. | Repeat the unfinished index group or range, verify the merged prefix, and append missing parts. Final SQL index creation can repeat. Restore group links and unfinished windows. Apply a complete decision journal directly. Partial chain compression and ranked reduction can still reconstruct ordinal state. | See [native compact assembly recovery measurements](#native-compact-assembly-recovery-measurements), [chain compression](#native-chain-compression-measurements), and [ranked reduction](#native-ranked-reduction-measurements). Historical Workshop indexing took about 30 min for roughly 13M rows. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
+| Native disk build, index and dedup | Verified prepared-file groups and ranges, transactional compact index parts, duplicate-group windows, chain compression and ranked component windows, and final decision journals. Reviewed row admission uses indexed file and row numbers. | Repeat the unfinished index group or range, verify the merged prefix, and append missing parts. Final SQL index creation can repeat. Restore verified binary group links and repeat the unfinished window, which can include an oversized group. Apply a complete decision journal directly. Partial chain compression and ranked reduction can still reconstruct ordinal state. | See [native compact assembly recovery measurements](#native-compact-assembly-recovery-measurements), [chain compression](#native-chain-compression-measurements), [ranked reduction](#native-ranked-reduction-measurements), and [large duplicate groups](#native-large-duplicate-group-measurements). Historical Workshop indexing took about 30 min for roughly 13M rows. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB, lineage and view measurement checkpoints, and a receipted census. Final publication by rename. | Verify the committed view prefix, reconstruct its digests and render the uncommitted tail. Reuse finished census work for matching inputs. The manifest hashes ancillary outputs and reuses the view checksums. A stop in the final lineage sort or measurement merge may repeat that step. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. [Native build census measurements](#native-build-census-measurements) cover the report phase. [#579](https://github.com/supernovae/model-lab/pull/579) |
 | Completed-preparation build | Authenticated admission and source renders, reusable row phases, view range checkpoints and a signed receipt before publication. | Reuse authenticated upstream phases after downstream changes. Repeat an unfinished phase. View recovery verifies the committed prefix and resumes from stored span and document cursors. Intact staged views can publish directly, and a renamed build can recover completion from the signed receipt. A partial emission retry can recopy the frozen control inputs. | See [completed-preparation input reuse measurements](#completed-preparation-input-reuse-measurements), [row phase measurements](#completed-preparation-row-phase-measurements) and [view recovery measurements](#completed-preparation-view-recovery-measurements). Production restart cost unmeasured. |
 | Freeze | Native staging rename and build tombstone, signed verification after a staged replay, then the public release. Completed preparation seals a retained release against its existing build. | Reuse the complete staged receipt at the same path, or resume an unfinished check from eligible file and replay proofs. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. See [staged freeze recovery measurements](#staged-freeze-recovery-measurements). [#501](https://github.com/supernovae/model-lab/pull/501) |
@@ -1975,6 +1982,40 @@ journals. Fresh device reads stayed near 153 MB, and writes rose from
 the finished decisions directly. Stops before the final decision receipt
 still replay group links. Production and slower-storage measurements
 remain open.
+
+#### Native large duplicate group measurements
+
+Cold NVMe trials covered 400,000 synthetic documents in three layouts.
+The single-group fixture put one validation document and 399,999 training
+copies in the same raw group. The dense and sparse fixtures had 320,000
+and 8,000 groups across the raw and normalized passes. The timed interval
+included opening the decisions database and resolving duplicates. Retry
+followed SIGKILL after the last group receipt and before any later pass.
+Group reports and ordered decisions had identical digests.
+
+| Layout and resolver | Phase | Elapsed, prior → streamed | CPU, prior → streamed | Peak RSS, prior → streamed | Logical reads, prior → streamed |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Single group, chain | Fresh | 2.814 → 2.787 s | 2.298 → 2.332 s | 342 → 176 MiB | 478 → 425 MB |
+| Single group, chain | Retry | 2.288 → 2.055 s | 1.708 → 1.636 s | 236 → 134 MiB | 360 → 330 MB |
+| Single group, ranked | Fresh | 2.775 → 5.323 s | 2.331 → 2.286 s | 344 → 177 MiB | 307 → 308 MB |
+| Single group, ranked | Retry | 2.002 → 2.131 s | 1.593 → 1.642 s | 175 → 125 MiB | 216 → 189 MB |
+| Dense pairs, chain | Retry | 2.785 → 3.431 s | 2.557 → 2.625 s | 125 → 125 MiB | 712 → 604 MB |
+| Dense pairs, ranked | Retry | 1.870 → 1.805 s | 1.663 → 1.705 s | 146 → 145 MiB | 376 → 268 MB |
+| Sparse pairs, chain | Retry | 0.833 → 0.780 s | 0.808 → 0.757 s | 119 → 120 MiB | 254 → 252 MB |
+
+The single large group used 1.6 MB of ordinal spool. The dense journal
+grew from 5.12 MB to 6.40 MB to store representative ordinals. Fresh
+device reads remained near 167 MB for the single-group fixture and
+153 MB for the dense one. Dense retries still read about 199–200 MB
+from storage. Removing the second report scan primarily saved logical
+reads on these fixtures. Chain replay also looks up the representative
+ordinal in SQLite. Fresh ranked elapsed time varied with similar CPU
+times and device reads. In a reversed-order pair the single group took
+2.860 → 5.028 s and dense pairs took 10.960 → 4.838 s. A third single-group
+pair with phase timing took 3.317 → 2.637 s and recorded a 567 ms report
+sync in the prior run. Treat the elapsed results as local observations.
+Production-scale group sizes, a stop within a group, and slower storage
+still need measurement.
 
 #### Native normalization reuse measurements
 

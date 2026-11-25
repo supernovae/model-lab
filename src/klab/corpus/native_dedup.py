@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import mmap
 import os
 import sqlite3
@@ -12,11 +11,14 @@ import tempfile
 from array import array
 from collections.abc import Iterable, Iterator
 from contextlib import ExitStack, closing, contextmanager
+from functools import partial
+from itertools import chain as iter_chain
 from pathlib import Path
 from typing import Any, BinaryIO
 from urllib.parse import quote
 
 from klab.canonical import canonical_json
+from klab.corpus.dedup_policy import Member, describe_failure, find_root, resolve_group
 from klab.corpus.native_index import DEDUP_SCHEMA
 from klab.corpus.progress import BuildProgress
 from klab.corpus.shards import range_file_identity
@@ -70,10 +72,13 @@ def _duplicate_diagnostics(
     with diagnostics.open("wb") as report:
         report.write(b'{"duplicates":[')
         with groups_path.open("rb") as rows:
-            for index, row in enumerate(rows):
-                if index:
-                    report.write(b",")
-                report.write(row.rstrip(b"\n"))
+            # Only record separators are literal newlines in canonical JSONL.
+            tail = b""
+            while block := rows.read(64 * 1024):
+                report.write((tail + block[:-1]).replace(b"\n", b","))
+                tail = block[-1:]
+            if tail != b"\n":
+                report.write(tail)
         report.write(b'],"error":' + canonical_json(error) + b',"rejected":[')
         for index, row in enumerate(rejected_rows(source_events)):
             if index:
@@ -86,7 +91,93 @@ def _duplicate_diagnostics(
 
 _DEDUP_WINDOW_KEYS = 100_000
 _DEDUP_WINDOW_BYTES = 64 * 1024**2
-_DEDUP_LINK_COUNTS = struct.Struct("<II")
+_DEDUP_GROUP_ROWS = 4096
+_DEDUP_LINK = struct.Struct("<I")
+_DEDUP_LINK_HEADER = struct.Struct("<III")
+
+
+def _link_numbers(stream: BinaryIO, count: int, journal=None) -> Iterator[int]:
+    """Read or copy one bounded binary member list as it is consumed."""
+    while count:
+        batch = min(count, _DEDUP_GROUP_ROWS)
+        raw = stream.read(batch * _DEDUP_LINK.size)
+        if len(raw) != batch * _DEDUP_LINK.size:
+            raise ValueError("truncated duplicate group link journal")
+        if journal is not None:
+            journal.write(raw)
+        yield from struct.unpack(f"<{batch}I", raw)
+        count -= batch
+
+
+def _write_large_duplicate_group(
+    rows, method, digest, policy, target, links, connection, apply, reject, scratch
+):
+    """Write an oversized audit record and its links without holding the group."""
+    chain = policy.resolution == "chain_smallest_id"
+    target.write(b'{"method":' + canonical_json(method) + b',"origins":[')
+    with (
+        tempfile.TemporaryFile(dir=scratch) as other,
+        tempfile.TemporaryFile(dir=scratch) as train,
+    ):
+        batch = []
+        sample = []
+        count = train_count = 0
+
+        def write_ids():
+            if batch:
+                if count > len(batch):
+                    target.write(b",")
+                target.write(canonical_json(batch)[1:-1])
+                batch.clear()
+
+        def members():
+            nonlocal count, train_count
+            for number, identifier, split, rank, kind, signature in rows:
+                count += 1
+                batch.append(identifier)
+                if len(batch) == _DEDUP_GROUP_ROWS:
+                    write_ids()
+                if len(sample) < 5:
+                    sample.append(identifier)
+                if chain and split == "train":
+                    train.write(_DEDUP_LINK.pack(number))
+                    train_count += 1
+                else:
+                    other.write(_DEDUP_LINK.pack(number))
+                yield Member(identifier, split, rank, kind, signature)
+
+        group = resolve_group(method, members(), policy)
+        write_ids()
+        target.write(
+            b'],"representative":'
+            + canonical_json(group.representative)
+            + b',"sha256":'
+            + canonical_json(digest)
+            + b',"splits":'
+            + canonical_json(group.splits)
+            + b"}\n"
+        )
+        if group.error:
+            reject(group, sample, count)
+        train_links = train_count if group.contaminated else 0
+        if links is not None:
+            number = 0
+            if chain:
+                number = connection.execute(
+                    "SELECT document_number FROM dedup WHERE document_id=?",
+                    (group.representative,),
+                ).fetchone()[0]
+            links.write(
+                _DEDUP_LINK_HEADER.pack(number, count - train_links, train_links)
+            )
+        other.seek(0)
+        train.seek(0)
+        ordinary = _link_numbers(other, count - train_count, links)
+        trainees = _link_numbers(train, train_count, links)
+        if not train_links:
+            ordinary = iter_chain(ordinary, trainees)
+            trainees = ()
+        apply(group.representative, ordinary, trainees, count)
 
 
 def _duplicate_key_bounds(connection, method, after):
@@ -314,13 +405,6 @@ def _resolve_duplicate_groups(
     parents: memoryview | None = None,
 ) -> tuple[int, str | None]:
     """Find or replay ordered group links and retain the audit report."""
-    from klab.corpus.dedup_policy import (
-        Member,
-        describe_failure,
-        find_root,
-        resolve_group,
-    )
-
     chain = policy.resolution == "chain_smallest_id"
     methods = [
         method
@@ -340,19 +424,19 @@ def _resolve_duplicate_groups(
     )
     groups = 0
 
-    def apply(representative, linked, train):
+    def apply(representative, linked, train, count):
         nonlocal groups
         if chain:
-            if train:
-                connection.executemany(
-                    "UPDATE dedup SET representative_id=? WHERE document_number=?",
-                    ((representative, number) for number in train),
-                )
             connection.executemany(
                 "UPDATE dedup SET "
                 "representative_id=MIN(representative_id,?) WHERE document_number=?",
                 ((representative, number) for number in linked),
             )
+            if train:
+                connection.executemany(
+                    "UPDATE dedup SET representative_id=? WHERE document_number=?",
+                    ((representative, number) for number in train),
+                )
         else:
             assert parents is not None
             members = iter(linked)
@@ -360,7 +444,7 @@ def _resolve_duplicate_groups(
             for number in members:
                 parents[find_root(parents, number)] = first
         groups += 1
-        progress.update(documents=len(linked) + len(train))
+        progress.update(documents=count)
 
     report_path = groups_path
     if checkpoints is not None:
@@ -392,19 +476,30 @@ def _resolve_duplicate_groups(
             if state:
                 first_method, after = state["method"], state["after"]
                 progress.record("reused_dedup_group_windows")
-                output.seek(0)
                 links_stream.seek(0)
-                for rendered in output:
-                    linked, train = _DEDUP_LINK_COUNTS.unpack(
-                        links_stream.read(_DEDUP_LINK_COUNTS.size)
+                for _ in range(state["groups"]):
+                    number, linked, train = _DEDUP_LINK_HEADER.unpack(
+                        links_stream.read(_DEDUP_LINK_HEADER.size)
                     )
-                    numbers = struct.unpack(
-                        f"<{linked + train}I", links_stream.read(4 * (linked + train))
-                    )
-                    representative = (
-                        json.loads(rendered)["representative"] if chain else None
-                    )
-                    apply(representative, numbers[:linked], numbers[linked:])
+                    representative = None
+                    if chain:
+                        representative = connection.execute(
+                            "SELECT document_id FROM dedup WHERE document_number=?",
+                            (number,),
+                        ).fetchone()[0]
+                    count = linked + train
+                    if count <= _DEDUP_GROUP_ROWS:
+                        numbers = struct.unpack(
+                            f"<{count}I", links_stream.read(count * _DEDUP_LINK.size)
+                        )
+                        apply(representative, numbers[:linked], numbers[linked:], count)
+                    else:
+                        apply(
+                            representative,
+                            _link_numbers(links_stream, linked),
+                            _link_numbers(links_stream, train) if train else (),
+                            count,
+                        )
                 if links_stream.read(1):
                     raise ValueError("dedup links and group report disagree")
                 output.seek(0, os.SEEK_END)
@@ -413,12 +508,53 @@ def _resolve_duplicate_groups(
         else:
             target = output
 
+        def reject(method, key, group, ids, count):
+            output.flush()
+            os.fsync(output.fileno())
+            _duplicate_diagnostics(report_path, source_events, diagnostics, group.error)
+            raise ValueError(
+                describe_failure(
+                    group.error, method, key, ids, group.splits, member_count=count
+                )
+            )
+
         def scan(method, after, end):
             needs_rights = method == "normalized" and policy.rights_conflict == "error"
             written = 0
-            with closing(_duplicate_keys(connection, method, after, end)) as keys:
+            with (
+                closing(connection.cursor()) as cursor,
+                closing(_duplicate_keys(connection, method, after, end)) as keys,
+            ):
                 for (key,) in keys:
-                    rows = connection.execute(members_query, (method, key)).fetchall()
+                    digest = (
+                        hashlib.sha256(key.encode()).hexdigest()
+                        if method == "canonical_origin"
+                        else key
+                    )
+                    rows = cursor.execute(members_query, (method, key)).fetchmany(
+                        _DEDUP_GROUP_ROWS + 1
+                    )
+                    if len(rows) > _DEDUP_GROUP_ROWS:
+                        report_start = output.tell()
+                        links_start = links_stream.tell() if links is not None else 0
+                        _write_large_duplicate_group(
+                            iter_chain(rows, cursor),
+                            method,
+                            digest,
+                            policy,
+                            target,
+                            links,
+                            connection,
+                            apply,
+                            partial(reject, method, key),
+                            report_path.parent,
+                        )
+                        if links is not None:
+                            written += output.tell() - report_start
+                            written += links_stream.tell() - links_start
+                        if written >= _DEDUP_WINDOW_BYTES:
+                            return key
+                        continue
                     group = resolve_group(
                         method,
                         (
@@ -438,9 +574,7 @@ def _resolve_duplicate_groups(
                         canonical_json(
                             {
                                 "method": method,
-                                "sha256": hashlib.sha256(key.encode()).hexdigest()
-                                if method == "canonical_origin"
-                                else key,
+                                "sha256": digest,
                                 "origins": ids,
                                 "splits": group.splits,
                                 "representative": group.representative,
@@ -450,16 +584,7 @@ def _resolve_duplicate_groups(
                     )
                     target.write(rendered)
                     if group.error:
-                        output.flush()
-                        os.fsync(output.fileno())
-                        _duplicate_diagnostics(
-                            report_path, source_events, diagnostics, group.error
-                        )
-                        raise ValueError(
-                            describe_failure(
-                                group.error, method, key, ids, group.splits
-                            )
-                        )
+                        reject(method, key, group, ids, len(rows))
                     linked, train = [], []
                     for number, _, split, *_ in rows:
                         if chain and group.contaminated and split == "train":
@@ -467,14 +592,21 @@ def _resolve_duplicate_groups(
                         else:
                             linked.append(number)
                     if links is not None:
-                        encoded_links = _DEDUP_LINK_COUNTS.pack(
-                            len(linked), len(train)
+                        number = (
+                            next(
+                                row[0] for row in rows if row[1] == group.representative
+                            )
+                            if chain
+                            else 0
+                        )
+                        encoded_links = _DEDUP_LINK_HEADER.pack(
+                            number, len(linked), len(train)
                         ) + struct.pack(
                             f"<{len(linked) + len(train)}I", *linked, *train
                         )
                         links.write(encoded_links)
                         written += len(rendered) + len(encoded_links)
-                    apply(group.representative, linked, train)
+                    apply(group.representative, linked, train, len(rows))
                     if written >= _DEDUP_WINDOW_BYTES:
                         return key
             return end
@@ -491,6 +623,7 @@ def _resolve_duplicate_groups(
                     {
                         "method": index if after is not None else index + 1,
                         "after": after,
+                        "groups": groups,
                     }
                 )
                 if after is None:
