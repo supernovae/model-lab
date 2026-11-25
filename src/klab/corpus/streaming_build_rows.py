@@ -18,7 +18,7 @@ from pathlib import Path
 
 from klab.canonical import canonical_json
 from klab.corpus.jsonl_records import records_from_path
-from klab.corpus.split_runs import _stamp, external_sort, rows, write_rows
+from klab.corpus.split_runs import checkpoint_stamp, external_sort, rows, write_rows
 from klab.safe_io import read_file_range
 
 
@@ -160,7 +160,7 @@ def _assign(directory, references, project):
         path = project_path(project.root, project.config.splits).parent / (
             "assignments-" + reference["sha256"] + ".jsonl"
         )
-        _stamp(path)
+        checkpoint_stamp(path)
         assignments = iter(
             records_from_path(
                 path, max_record_bytes=8 * 1024**2, expected_sha256=reference["sha256"]

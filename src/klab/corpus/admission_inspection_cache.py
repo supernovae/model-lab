@@ -60,7 +60,7 @@ def unchanged(dependencies):
 class InspectionCache:
     """Reuse successful native results, including completed sources after a stop."""
 
-    def __init__(self, root, *, proof_store=None):
+    def __init__(self, root, *, proof_store=None, phase_producer=None):
         self.root = Path(root).resolve(strict=True)
         self.proofs = (
             proof_store
@@ -74,19 +74,23 @@ class InspectionCache:
         if self.proofs is None:
             return
         try:
-            self.authority = {
-                "corpus": verifier_authority("source_snapshot", 1),
-                "inspection": {
-                    name: sha256_file(Path(__file__).with_name(name))
-                    for name in (
-                        "admission_inspection.py",
-                        "admission_inspection_cache.py",
-                        "rights.py",
-                        "jsonl_records.py",
-                        "structure_cleaning.py",
-                    )
-                },
-            }
+            self.authority = (
+                {"streaming_producer": phase_producer}
+                if phase_producer
+                else {
+                    "corpus": verifier_authority("source_snapshot", 1),
+                    "inspection": {
+                        name: sha256_file(Path(__file__).with_name(name))
+                        for name in (
+                            "admission_inspection.py",
+                            "admission_inspection_cache.py",
+                            "rights.py",
+                            "jsonl_records.py",
+                            "structure_cleaning.py",
+                        )
+                    },
+                }
+            )
         except OSError, ValueError, TypeError, KeyError, SyntaxError:
             self.proofs = None
             self._unavailable("verifier_authority_unavailable")

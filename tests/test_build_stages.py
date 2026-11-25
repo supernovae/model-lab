@@ -12,10 +12,12 @@ import pytest
 from corpus_fixtures import fixture_rights, neutral_corpus
 from recipe_fixtures import Lab, write_recipe
 
-from klab.canonical import canonical_digest
+from klab.canonical import canonical_digest, canonical_json
 from klab.corpus import (
+    admission_inspection_cache,
     build_outputs,
     build_stages,
+    completed_build_inputs,
     completed_preparation,
     large_build,
     measurement,
@@ -25,6 +27,7 @@ from klab.corpus import (
 )
 from klab.corpus.dedup_policy import STRICT_CHAIN
 from klab.corpus.progress import BuildProgress
+from klab.corpus.project import source_build_declarations
 from klab.corpus.split_runs import SplitStages, write_rows
 from klab.corpus.streaming_build_rows import StreamBuildRows
 from klab.corpus.view_checkpoints import ViewCheckpoints
@@ -534,6 +537,116 @@ def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(
     assert len(rendered) == (total_documents % 2 or 2)
     assert tree(resumed) == expected
     assert not list(lab.work.glob("corpora/*/.views-*"))
+
+
+def test_completed_source_reuses_admission_and_render_with_scoped_proofs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    lab = Lab(tmp_path, monkeypatch, capsys)
+    project = neutral_corpus(lab.work)
+    source = project.sources[0]
+    declarations = source_build_declarations([source])
+    source_path = lab.work / "source.jsonl"
+    raw_rows = write_rows(
+        source_path,
+        [
+            {
+                "text": "A public tutorial explains reliable deployments. " * 4,
+                "url": "https://example.org/tutorial",
+                "_klab_source": {"source_row_index": 0},
+            }
+        ],
+    )
+    admission = lab.work / "admission.json"
+    admission.write_bytes(
+        canonical_json(
+            {
+                "schema_version": 2,
+                "policy_id": "fixture",
+                "policy_sha256": "a" * 64,
+                "sources": [
+                    {
+                        "source_id": source.id,
+                        "source_revision": source.revision,
+                        "snapshot_sha256": "b" * 64,
+                        "sample_path": "source.jsonl",
+                        "sample_sha256": raw_rows["sha256"],
+                        "rights": source.rights.model_dump(mode="json"),
+                        "license_label": source.license,
+                        "records": [
+                            {
+                                "source_row_index": 0,
+                                "source_row_sha256": raw_rows["sha256"],
+                                "decision": "qualify",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+        + b"\n"
+    )
+    manifest_sha = sha256_file(admission)
+
+    def materialize():
+        return completed_build_inputs.materialize_admission(
+            lab.work / "build-input-stages",
+            lab.work,
+            admission,
+            manifest_sha,
+            declarations,
+        )["sources"][source.id]
+
+    def render(header, progress):
+        stages = completed_build_inputs.source_render_stage(
+            lab.work / "source-build-stages",
+            lab.work,
+            declarations[source.id],
+            header,
+            source_path,
+            project.release,
+        )
+        return completed_build_inputs.render_source(
+            stages,
+            source,
+            {**header, "admission_sha256": manifest_sha},
+            source_path,
+            progress,
+            project.release,
+        )
+
+    initial = materialize()
+    fresh = BuildProgress(lab.work / "fresh.jsonl", "fresh")
+    rendered = render(initial, fresh)
+    assert fresh.input_bytes == raw_rows["bytes"]
+    assert rendered["counts"]["documents"] == 1
+
+    def unexpected_snapshot_verification(*args):
+        pytest.fail("an input phase depends on the downstream corpus verifier")
+
+    monkeypatch.setattr(
+        admission_inspection_cache,
+        "verifier_authority",
+        unexpected_snapshot_verification,
+    )
+    resumed = BuildProgress(lab.work / "resumed.jsonl", "retry")
+    assert materialize() == initial
+    assert render(initial, resumed) == rendered
+    assert resumed.input_bytes == 0
+    assert "reused_completed_source_render" in resumed.journal.read_text()
+
+    decision_table = Path(initial["decisions"]["data"])
+    with decision_table.open("ab") as stream:
+        stream.write(b"\n")
+    recovered = materialize()
+    assert recovered["decisions"]["data"] != str(decision_table)
+    assert render(recovered, resumed) == rendered
+    assert resumed.input_bytes == 0
+
+    with source_path.open("ab") as stream:
+        stream.write(b"\n")
+    with pytest.raises(ValueError, match="admitted source shard bytes differ"):
+        render(recovered, resumed)
 
 
 def test_completed_preparation_recovers_views_and_signed_publication(

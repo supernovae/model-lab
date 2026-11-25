@@ -103,7 +103,8 @@ def external_sort(
     }
 
 
-def _stamp(path):
+def checkpoint_stamp(path: Path | str) -> list[int]:
+    """Capture the generation of a non-symlinked checkpoint file."""
     path = Path(path)
     if any(part.is_symlink() for part in (path, *path.parents)) or not path.is_file():
         raise ValueError("unsafe split checkpoint file")
@@ -119,7 +120,12 @@ class SplitStages:
     not an execution-authority grant. Invalidated work is recomputed.
     """
 
-    def __init__(self, directory, request, *, work_root=None):
+    def __init__(self, directory, request, *, work_root=None, producer_scoped=False):
+        # The completed input phases supply a scoped implementation map built
+        # from installed code. Other callers keep their existing verifier.
+        phase_producer = request["producer"] if producer_scoped else None
+        if producer_scoped and not phase_producer:
+            raise ValueError("scoped split checkpoint requires a producer")
         self.request = request
         self.identity = canonical_digest(request)
         self.root = Path(directory) / self.identity
@@ -129,7 +135,10 @@ class SplitStages:
         self.journal = self.root / "completion.jsonl"
         self.completed, self.previous, self.reused = {}, None, []
         self.authenticated = set()
-        self.cache = InspectionCache(work_root or self.root)
+        self.cache = InspectionCache(
+            work_root or self.root,
+            phase_producer=phase_producer,
+        )
         self.cache.directory = self.root / "sealed"
         self.cache.authority = {
             **self.cache.authority,
@@ -174,7 +183,8 @@ class SplitStages:
         if prior is not None:
             try:
                 valid = all(
-                    _stamp(item["path"]) == item["stamp"] for item in prior["files"]
+                    checkpoint_stamp(item["path"]) == item["stamp"]
+                    for item in prior["files"]
                 )
             except OSError, ValueError:
                 valid = False
@@ -201,7 +211,8 @@ class SplitStages:
             os.fsync(stream.fileno())
         result = produce(directory)
         result["files"] = [
-            {**item, "stamp": _stamp(item["path"])} for item in result["files"]
+            {**item, "stamp": checkpoint_stamp(item["path"])}
+            for item in result["files"]
         ]
         body = {
             "previous": self.previous,

@@ -28,7 +28,7 @@ from klab.corpus.rights import (
 from klab.corpus.split_runs import (
     BUFFER_BYTES,
     SplitStages,
-    _stamp,
+    checkpoint_stamp,
     external_sort,
     rows,
     write_rows,
@@ -78,7 +78,7 @@ class _AdmissionSpools:
 
 def _admission_phase(directory, path, expected, declarations):
     store = _AdmissionSpools(directory)
-    before = _stamp(path)
+    before = checkpoint_stamp(path)
     try:
         with path.open("rb") as stream:
             hashed = _HashedInput(stream)
@@ -86,7 +86,7 @@ def _admission_phase(directory, path, expected, declarations):
                 hashed, store, path.stat().st_size + 1, 4 * 1024**2, 8 * 1024**2
             )
             manifest = reader.read()
-        if hashed.digest.hexdigest() != expected or _stamp(path) != before:
+        if hashed.digest.hexdigest() != expected or checkpoint_stamp(path) != before:
             raise ValueError("reviewed admission changed or has wrong digest")
         if (
             set(manifest) != {"schema_version", "policy_id", "policy_sha256", "sources"}
@@ -186,7 +186,7 @@ def _admission_phase(directory, path, expected, declarations):
 
 def _inventory_phase(directory, path, expected, headers, source_strata):
     count = 0
-    before = _stamp(path)
+    before = checkpoint_stamp(path)
 
     def records():
         nonlocal count
@@ -218,7 +218,7 @@ def _inventory_phase(directory, path, expected, headers, source_strata):
                 row["family_hint"],
                 source_strata[source],
             ]
-        if _stamp(path) != before:
+        if checkpoint_stamp(path) != before:
             raise ValueError("completed inventory changed or has wrong digest")
 
     sorted_file = external_sort(
