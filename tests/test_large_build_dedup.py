@@ -200,8 +200,9 @@ def test_chain_compression_resumes_inside_a_pass(tmp_path: Path, monkeypatch) ->
     ).read_bytes()
 
 
-def test_chain_and_component_resolution_agree_on_a_simple_corpus(
+def test_ranked_recovery_preserves_audit_and_heldout_winners(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     rows = [
         ("a-train", "train", "r1", "n1"),
@@ -211,28 +212,65 @@ def test_chain_and_component_resolution_agree_on_a_simple_corpus(
         ("e-train", "train", "r3", "n3"),
     ]
     outcomes = []
-    checkpoint_root = tmp_path / "ranked-checkpoint"
     for index, policy in enumerate((CHAIN, RANKED)):
         directory = tmp_path / str(index)
         directory.mkdir()
-        connection = _database(rows)
-        checkpoints = (
-            ViewCheckpoints(checkpoint_root, "ranked") if policy is RANKED else None
-        )
-        _run(connection, directory, policy, checkpoints=checkpoints)
-        outcomes.append(_outcome(connection))
+        with closing(_database(rows)) as connection:
+            _run(connection, directory, policy)
+            outcomes.append(_outcome(connection))
     assert outcomes[0] == outcomes[1]
 
+    checkpoint_root = tmp_path / "ranked-checkpoint"
+    commit = ViewCheckpoints.commit
+    reduction_windows, decision_windows = [], []
+
+    def interrupt(journal, state):
+        commit(journal, state)
+        name = journal.root.name
+        if name == "ranked-components":
+            reduction_windows.append(state["last"])
+        elif name == "ranked-decisions":
+            decision_windows.append(state["last"])
+        if name == stop_stage and state["last"] == stop_after:
+            raise InterruptedError(f"stopped at {name} frontier")
+
+    monkeypatch.setattr(native_dedup, "_DEDUP_DECISION_ROWS", 2)
+    with monkeypatch.context() as fault:
+        fault.setattr(ViewCheckpoints, "commit", interrupt)
+        for index, (stop_stage, stop_after) in enumerate(
+            (("ranked-components", 2), ("ranked-decisions", 2), ("ranked-decisions", 5))
+        ):
+            attempt = tmp_path / f"attempt-{index}"
+            attempt.mkdir()
+            with (
+                closing(_database(rows)) as connection,
+                pytest.raises(InterruptedError, match="stopped at ranked-"),
+            ):
+                _run(
+                    connection,
+                    attempt,
+                    RANKED,
+                    checkpoints=ViewCheckpoints(checkpoint_root, "ranked"),
+                )
+    assert reduction_windows == [2, 4, 5]
+    assert decision_windows == [2, 4, 5]
+
+    def unexpected_group_replay(*args, **kwargs):
+        pytest.fail("complete ranked decisions should skip group replay")
+
+    monkeypatch.setattr(
+        native_dedup, "_resolve_duplicate_groups", unexpected_group_replay
+    )
     resumed = tmp_path / "resumed"
     resumed.mkdir()
-    connection = _database(rows)
-    _run(
-        connection,
-        resumed,
-        RANKED,
-        checkpoints=ViewCheckpoints(checkpoint_root, "ranked"),
-    )
-    assert _outcome(connection) == outcomes[1]
+    with closing(_database(rows)) as connection:
+        _run(
+            connection,
+            resumed,
+            RANKED,
+            checkpoints=ViewCheckpoints(checkpoint_root, "ranked"),
+        )
+        assert _outcome(connection) == outcomes[1]
     assert (resumed / "groups.jsonl").read_bytes() == (
         tmp_path / "1/groups.jsonl"
     ).read_bytes()

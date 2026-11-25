@@ -134,12 +134,22 @@ _OPTIONS = {
 
 
 def describe_failure(
-    error: str, method: str, key: str, ids: Sequence[str], splits: Iterable[str]
+    error: str,
+    method: str,
+    key: str,
+    ids: Sequence[str],
+    splits: Iterable[str],
+    *,
+    member_count: int | None = None,
 ) -> str:
     """A duplicate-policy failure with its group and the option that changes it."""
-    listed = ", ".join(ids[:5]) + (f" and {len(ids) - 5} more" if len(ids) > 5 else "")
+    count = len(ids) if member_count is None else member_count
+    sample = ids[:5]
+    listed = ", ".join(sample) + (
+        f" and {count - len(sample)} more" if count > len(sample) else ""
+    )
     return (
-        f"{error}: {method} duplicate group {key[:16]} has {len(ids)} documents "
+        f"{error}: {method} duplicate group {key[:16]} has {count} documents "
         f"({listed}) in splits {', '.join(sorted(splits))}; change {_OPTIONS[error]}"
     )
 

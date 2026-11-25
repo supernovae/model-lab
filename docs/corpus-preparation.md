@@ -862,8 +862,15 @@ reconstructs the ordinal arrays when more work remains, and continues from
 the saved document number. A completed compression receipt skips that
 reconstruction. After the last decision window commits, retry verifies the
 report hash and applies the final decisions directly to a fresh database.
-The disposable decisions database still rebuilds after a stop. Global
-ranked component resolution retains its existing replay boundary.
+The ranked resolver keeps union parents, component winners and flags in
+file-backed ordinal arrays. Singletons select themselves. It checkpoints
+component reduction and final decisions in 100,000-document windows and
+retains only component state changes and nontrivial decisions. A partial
+retry still replays group links to reconstruct components. A complete
+decision journal skips group replay and reduction. Conflict checks still
+run before final decisions, and conflict diagnostics report the total
+membership with up to five example IDs. The disposable decisions database
+rebuilds after a stop.
 
 - Publishing a stage output removes incomplete directories and every older
   output of that stage except the newest one, so at most two of each remain
@@ -1461,7 +1468,7 @@ needs measurement where the table gives historical or fixture evidence.
 | Acquisition and transport cache | Published source snapshot, verified transport body or adapter-specific checkpoint. See [recovery by source adapter](#recovery-by-source-adapter). | Adapter-specific work and verification. Indexed Wikimedia retains committed planning groups and selected member groups. A partial pinned transfer restarts its body. | On a 287 MiB Wikimedia shard, a stop after 128 planned members avoided 539.88 MiB of retry decompression. [#592](https://github.com/supernovae/model-lab/pull/592) |
 | Snapshot verification | Signed byte checks of eligible files in published snapshots, then a complete snapshot proof. | Reuse completed eligible file hashes at the same path; restart an incomplete file. An explicit cold check reads the bytes again. | Historical Workshop cold pass, about 15 min for 33 snapshots and 108 GB. See [snapshot hash recovery measurements](#snapshot-hash-recovery-measurements). |
 | Native disk build, normalize | Receipted shard per source file with normalization-specific producer identity. | Verify completed shards and re-normalize unfinished files or shards with changed normalization inputs. | See [native normalization reuse measurements](#native-normalization-reuse-measurements). Historical Workshop normalize took about 25 min for the 6.7M-document workload. [#491](https://github.com/supernovae/model-lab/pull/491) |
-| Native disk build, index and dedup | Verified prepared-file groups and ranges, transactional compact index parts, duplicate-group windows, and chain compression and decision windows. Reviewed row admission uses indexed file and row numbers. | Repeat the unfinished index group or range, verify the merged prefix, and append missing parts. Final SQL index creation can repeat. Restore group links and rescan unfinished windows. Reuse completed chain compression and decision windows, and apply a complete decision log directly. Partial compression still reconstructs ordinal arrays. Ranked component resolution can repeat. | See [native compact assembly recovery measurements](#native-compact-assembly-recovery-measurements) and [native chain compression measurements](#native-chain-compression-measurements). Historical Workshop indexing took about 30 min for roughly 13M rows. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
+| Native disk build, index and dedup | Verified prepared-file groups and ranges, transactional compact index parts, duplicate-group windows, chain compression and ranked component windows, and final decision journals. Reviewed row admission uses indexed file and row numbers. | Repeat the unfinished index group or range, verify the merged prefix, and append missing parts. Final SQL index creation can repeat. Restore group links and unfinished windows. Apply a complete decision journal directly. Partial chain compression and ranked reduction can still reconstruct ordinal state. | See [native compact assembly recovery measurements](#native-compact-assembly-recovery-measurements), [chain compression](#native-chain-compression-measurements), and [ranked reduction](#native-ranked-reduction-measurements). Historical Workshop indexing took about 30 min for roughly 13M rows. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB, lineage and view measurement checkpoints, and a receipted census. Final publication by rename. | Verify the committed view prefix, reconstruct its digests and render the uncommitted tail. Reuse finished census work for matching inputs. The manifest hashes ancillary outputs and reuses the view checksums. A stop in the final lineage sort or measurement merge may repeat that step. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. [Native build census measurements](#native-build-census-measurements) cover the report phase. [#579](https://github.com/supernovae/model-lab/pull/579) |
 | Completed-preparation build | Authenticated admission and source renders, reusable row phases, view range checkpoints and a signed receipt before publication. | Reuse authenticated upstream phases after downstream changes. Repeat an unfinished phase. View recovery verifies the committed prefix and resumes from stored span and document cursors. Intact staged views can publish directly, and a renamed build can recover completion from the signed receipt. A partial emission retry can recopy the frozen control inputs. | See [completed-preparation input reuse measurements](#completed-preparation-input-reuse-measurements), [row phase measurements](#completed-preparation-row-phase-measurements) and [view recovery measurements](#completed-preparation-view-recovery-measurements). Production restart cost unmeasured. |
 | Freeze | Native staging rename and build tombstone, signed verification after a staged replay, then the public release. Completed preparation seals a retained release against its existing build. | Reuse the complete staged receipt at the same path, or resume an unfinished check from eligible file and replay proofs. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. See [staged freeze recovery measurements](#staged-freeze-recovery-measurements). [#501](https://github.com/supernovae/model-lab/pull/501) |
@@ -1939,8 +1946,35 @@ The deep-chain run recorded 387,500 changed final representatives in
 to resolve. A stop after the final compression receipt skipped root
 resolution on retry. Group link replay and initial construction of the
 disposable database still ran. Peak RSS on the fresh deep-chain runs
-rounded to 134 MiB for both implementations. Production scale, slower
-storage and ranked reduction recovery remain open.
+rounded to 134 MiB for both implementations. Production scale and slower
+storage remain open.
+
+#### Native ranked reduction measurements
+
+One cold NVMe run per case reused the three 400,000-document fixtures
+above with the ranked resolver. The timings include opening the temporary
+decision database and deduplication. Final stage hashing and view emission
+are outside the interval. Ordered decision and group report digests matched.
+
+| Run | Elapsed | Logical reads | Peak RSS |
+| --- | ---: | ---: | ---: |
+| Sparse pairs, prior fresh | 1.934 s | 258 MB | 322 MiB |
+| Sparse pairs, checkpointed fresh | 1.382 s | 284 MB | 124 MiB |
+| Dense pairs, prior fresh | 4.452 s | 253 MB | 235 MiB |
+| Dense pairs, checkpointed fresh | 4.256 s | 283 MB | 146 MiB |
+| Deep chains, prior fresh | 4.790 s | 263 MB | 128 MiB |
+| Deep chains, checkpointed fresh | 4.652 s | 279 MB | 128 MiB |
+| Dense pairs, prior retry after group scan | 1.794 s | 350 MB | 235 MiB |
+| Dense pairs, checkpointed retry after group scan | 1.607 s | 376 MB | 147 MiB |
+| Dense pairs, retry after 200,000 reduction rows | 1.367 s | 375 MB | 146 MiB |
+| Dense pairs, retry after final decisions | 0.834 s | 265 MB | 122 MiB |
+
+The dense fixture wrote 1.44 MB each for the component and decision
+journals. Fresh device reads stayed near 153 MB, and writes rose from
+232 MB to 238 MB. The final retry read 195 MB from storage and applied
+the finished decisions directly. Stops before the final decision receipt
+still replay group links. Production and slower-storage measurements
+remain open.
 
 #### Native normalization reuse measurements
 

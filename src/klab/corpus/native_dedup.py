@@ -10,9 +10,8 @@ import sqlite3
 import struct
 import tempfile
 from array import array
-from collections import defaultdict
 from collections.abc import Iterable, Iterator
-from contextlib import ExitStack, closing
+from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 from typing import Any, BinaryIO
 from urllib.parse import quote
@@ -124,6 +123,7 @@ _DEDUP_DECISION_ROWS = 100_000
 _DEDUP_COMPRESSION_ROWS = 100_000
 _DEDUP_REPRESENTATIVE = struct.Struct("<II")
 _DEDUP_DECISION = struct.Struct("<IIB")
+_RANKED_COMPONENT = struct.Struct("<IIB")
 _DEDUP_DROP_REASONS = (
     "metadata_only_front_matter",
     "duplicate",
@@ -132,7 +132,7 @@ _DEDUP_DROP_REASONS = (
 _DEDUP_REASON_CODES = {reason: code for code, reason in enumerate(_DEDUP_DROP_REASONS)}
 
 
-class _ChainJournal:
+class _DedupJournal:
     """Receipted sparse changes to the disposable SQLite decisions table."""
 
     def __init__(
@@ -173,24 +173,32 @@ class _ChainJournal:
             yield from self.record.iter_unpack(block)
 
 
-def _replay_decisions(connection, decisions, *, representatives):
+def _apply_decisions(connection, records, *, representatives):
     if representatives:
         connection.executemany(
             "UPDATE dedup SET representative_id=(SELECT p.document_id FROM dedup p "
             "WHERE p.document_number=?), drop_reason=? WHERE document_number=?",
             (
                 (representative, _DEDUP_DROP_REASONS[code], number)
-                for number, representative, code in decisions.records()
+                for number, representative, code in records
             ),
         )
     else:
         connection.executemany(
             "UPDATE dedup SET drop_reason=? WHERE document_number=?",
-            (
-                (_DEDUP_DROP_REASONS[code], number)
-                for number, _, code in decisions.records()
-            ),
+            ((_DEDUP_DROP_REASONS[code], number) for number, _, code in records),
         )
+
+
+@contextmanager
+def _mapped_array(scratch: Path, length: int, format: str) -> Iterator[memoryview]:
+    with tempfile.TemporaryFile(dir=scratch) as stream:
+        stream.truncate(length * struct.calcsize(format))
+        with (
+            mmap.mmap(stream.fileno(), 0) as mapping,
+            memoryview(mapping).cast(format) as values,
+        ):
+            yield values
 
 
 def deduplicate(
@@ -207,14 +215,14 @@ def deduplicate(
     chain = policy.resolution == "chain_smallest_id"
     with ExitStack() as stack:
         decisions = (
-            _ChainJournal(
+            _DedupJournal(
                 checkpoints,
                 stack,
-                stage="chain-decisions",
+                stage="chain-decisions" if chain else "ranked-decisions",
                 filename="decisions.bin",
                 record=_DEDUP_DECISION,
             )
-            if chain and checkpoints
+            if checkpoints
             else None
         )
         if decisions is not None:
@@ -231,7 +239,9 @@ def deduplicate(
                 if sha256_file(report) == state["groups_sha256"]:
                     progress.record("reused_completed_dedup_decisions")
                     connection.execute("UPDATE dedup SET representative_id=document_id")
-                    _replay_decisions(connection, decisions, representatives=True)
+                    _apply_decisions(
+                        connection, decisions.records(), representatives=True
+                    )
                     connection.commit()
                     if range_file_identity(report) != generation:
                         raise ValueError(
@@ -240,7 +250,14 @@ def deduplicate(
                     os.link(report, groups_path)
                     return state["groups"], state["dropped"]
 
-        groups, parents, report_digest = _resolve_duplicate_groups(
+        parents = None
+        if not chain:
+            width = _document_count(connection) + 1
+            parents = stack.enter_context(_mapped_array(groups_path.parent, width, "I"))
+            for start in range(0, width, _DEDUP_DECISION_ROWS):
+                end = min(width, start + _DEDUP_DECISION_ROWS)
+                parents[start:end] = array("I", range(start, end))
+        groups, report_digest = _resolve_duplicate_groups(
             connection,
             groups_path,
             policy=policy,
@@ -248,10 +265,11 @@ def deduplicate(
             progress=progress,
             source_events=source_events,
             checkpoints=checkpoints,
+            parents=parents,
         )
         if chain:
             compression = (
-                _ChainJournal(
+                _DedupJournal(
                     checkpoints,
                     stack,
                     stage="chain-compression",
@@ -271,7 +289,17 @@ def deduplicate(
                 progress,
             )
         assert parents is not None
-        return groups, _finalize_ranked(connection, parents, diagnostics, progress)
+        return groups, _finalize_ranked(
+            connection,
+            parents,
+            groups,
+            report_digest,
+            diagnostics,
+            progress,
+            checkpoints=checkpoints,
+            decisions=decisions,
+            scratch=groups_path.parent,
+        )
 
 
 def _resolve_duplicate_groups(
@@ -283,7 +311,8 @@ def _resolve_duplicate_groups(
     progress: BuildProgress,
     source_events: Iterable[Path | dict[str, Any]] = (),
     checkpoints: ViewCheckpoints | None = None,
-) -> tuple[int, array | None, str | None]:
+    parents: memoryview | None = None,
+) -> tuple[int, str | None]:
     """Find or replay ordered group links and retain the audit report."""
     from klab.corpus.dedup_policy import (
         Member,
@@ -298,10 +327,6 @@ def _resolve_duplicate_groups(
         for method in ("raw", "normalized", "canonical_origin")
         if method in policy.keys
     ]
-    parents = None
-    if not chain:
-        total = connection.execute("SELECT COUNT(*) FROM dedup").fetchone()[0]
-        parents = array("I", range(total + 1))
     progress.update(phase="dedup_groups")
 
     if chain:
@@ -478,7 +503,7 @@ def _resolve_duplicate_groups(
     if checkpoints is not None:
         # The stage can seal this immutable link without copying the report.
         os.link(report_path, groups_path)
-    return groups, parents, report_digest
+    return groups, report_digest
 
 
 def _chain_root(parents, roots, number: int) -> int:
@@ -503,7 +528,7 @@ def _compress_chain(
     connection: sqlite3.Connection,
     total: int,
     report_digest: str | None,
-    compression: _ChainJournal | None,
+    compression: _DedupJournal | None,
     scratch: Path,
     progress: BuildProgress,
 ) -> None:
@@ -597,8 +622,8 @@ def _finalize_chain(
     connection: sqlite3.Connection,
     groups: int,
     report_digest: str | None,
-    compression: _ChainJournal | None,
-    decisions: _ChainJournal | None,
+    compression: _DedupJournal | None,
+    decisions: _DedupJournal | None,
     scratch: Path,
     progress: BuildProgress,
 ) -> int:
@@ -620,7 +645,7 @@ def _finalize_chain(
         if decisions.state["groups_sha256"] == report_digest:
             last = decisions.state["last"]
             dropped = decisions.state["dropped"]
-            _replay_decisions(connection, decisions, representatives=False)
+            _apply_decisions(connection, decisions.records(), representatives=False)
             progress.record("reused_dedup_decision_windows")
         else:
             decisions.reset()
@@ -683,107 +708,248 @@ def _finalize_chain(
     return dropped
 
 
-def _finalize_ranked(
-    connection: sqlite3.Connection,
-    parents: array,
-    diagnostics: Path,
-    progress: BuildProgress,
-) -> int:
+_RANKED_SPLIT_MASK = {"train": 0, "validation": 1, "test": 2}
+_RANKED_HOLDOUT = 3
+_RANKED_CLEANING = 12
+_RANKED_GROUPED = 16
+
+
+def _document_count(connection: sqlite3.Connection) -> int:
+    return connection.execute(
+        "SELECT COALESCE(MAX(document_number), 0) FROM dedup"
+    ).fetchone()[0]
+
+
+def _choose_ranked_components(
+    connection, parents, masks, winners, report_digest, journal, progress
+):
+    from klab.corpus.dedup_policy import find_root, ranked_choice
+
+    def key(identifier, split, rank, kind):
+        # A valid component has at most one held-out split. Put held-out
+        # members first while accumulating the evidence that enforces that.
+        return (
+            split == "train",
+            *ranked_choice(split, None, rank, kind, identifier)[1:],
+        )
+
+    last, conflicts = 0, 0
+    if journal is not None:
+        if journal.journal.damaged:
+            progress.record("discarded_damaged_ranked_components")
+        state = journal.state
+        if state and state["groups_sha256"] != report_digest:
+            journal.reset()
+            progress.record("discarded_ranked_components_for_changed_groups")
+        elif state:
+            for root, winner, mask in journal.records():
+                masks[root], winners[root] = mask, winner
+            progress.record("reused_ranked_component_windows")
+            if state["complete"]:
+                return state["conflicts"]
+            last, conflicts = state["last"], state["conflicts"]
+
+    # Singletons select themselves. Give only real components reducer state.
+    total = len(parents) - 1
+    for number in range(1, total + 1):
+        if parents[number] != number:
+            masks[find_root(parents, number)] |= _RANKED_GROUPED
+
+    progress.update(phase="dedup_components")
+    while last < total:
+        end = min(total, last + _DEDUP_DECISION_ROWS)
+        # Winner keys live only for the current window. A prior window
+        # carries its winner ordinal, resolved with one indexed row lookup.
+        keys, changed = {}, set()
+        for number, identifier, split, rank, kind, metadata_only in connection.execute(
+            "SELECT document_number,document_id,split,source_rank,document_kind,metadata_only "
+            "FROM dedup WHERE document_number>? AND document_number<=? ORDER BY document_number",
+            (last, end),
+        ):
+            root = find_root(parents, number)
+            old_mask = masks[root]
+            if not old_mask & _RANKED_GROUPED:
+                continue
+            mask = old_mask | _RANKED_SPLIT_MASK[split] | (8 if metadata_only else 4)
+            if mask != old_mask:
+                masks[root] = mask
+                changed.add(root)
+                conflicts |= int(mask & _RANKED_HOLDOUT == _RANKED_HOLDOUT)
+                conflicts |= int(mask & _RANKED_CLEANING == _RANKED_CLEANING) << 1
+            candidate = key(identifier, split, rank, kind)
+            winner = winners[root]
+            if winner and root not in keys:
+                keys[root] = key(
+                    *connection.execute(
+                        "SELECT document_id,split,source_rank,document_kind "
+                        "FROM dedup WHERE document_number=?",
+                        (winner,),
+                    ).fetchone()
+                )
+            if not winner or candidate < keys[root]:
+                winners[root] = number
+                keys[root] = candidate
+                changed.add(root)
+        if journal is not None:
+            journal.output.write(
+                b"".join(
+                    _RANKED_COMPONENT.pack(root, winners[root], masks[root])
+                    for root in sorted(changed)
+                )
+            )
+            journal.journal.commit(
+                {
+                    "last": end,
+                    "conflicts": conflicts,
+                    "complete": end == total,
+                    "groups_sha256": report_digest,
+                }
+            )
+        progress.update(documents=end - last)
+        last = end
+    return conflicts
+
+
+def _ranked_conflict(connection, parents, masks, conflicts, diagnostics):
     from klab.corpus.dedup_policy import (
         CLEANING_CONFLICT,
         PAGE_OVERLAP,
         describe_failure,
-        drop_reason,
         find_root,
-        ranked_choice,
     )
 
-    # A connected component can link distinct raw, normalized and page origins.
-    # Whole components select one deterministic representative, preserving the
-    # validation/test isolation gate even for transitive overlaps.
-    assert parents is not None
-    winner: dict[int, tuple[Any, ...]] = {}
-    heldout_mask: dict[int, int] = defaultdict(int)
-    cleaning_mask: dict[int, int] = defaultdict(int)
-    progress.update(phase="dedup_components")
-    for number, split, metadata_only in connection.execute(
-        "SELECT document_number,split,metadata_only FROM dedup ORDER BY document_number"
-    ):
-        component = find_root(parents, number)
-        heldout_mask[component] |= (
-            1 if split == "validation" else 2 if split == "test" else 0
+    if conflicts & 1:
+        flag, message = _RANKED_HOLDOUT, PAGE_OVERLAP
+    else:
+        flag, message = _RANKED_CLEANING, CLEANING_CONFLICT
+    # Preserve the first offending component in document-number order.
+    root = next(
+        root
+        for (number,) in connection.execute(
+            "SELECT document_number FROM dedup ORDER BY document_number"
         )
-        cleaning_mask[component] |= 2 if metadata_only else 1
-    for masks, ok, message in (
-        (heldout_mask, lambda mask: mask != 3, PAGE_OVERLAP),
-        (cleaning_mask, lambda mask: mask != 3, CLEANING_CONFLICT),
+        if masks[root := find_root(parents, number)] & flag == flag
+    )
+    sample, splits, count = [], set(), 0
+    for number, identifier, split in connection.execute(
+        "SELECT document_number,document_id,split FROM dedup ORDER BY document_number"
     ):
-        bad = next((root for root, mask in masks.items() if not ok(mask)), None)
-        if bad is not None:
-            members = [
-                (identifier, split)
-                for number, identifier, split in connection.execute(
-                    "SELECT document_number,document_id,split FROM dedup "
-                    "ORDER BY document_number"
+        if find_root(parents, number) == root:
+            if count < 5:
+                sample.append(identifier)
+            splits.add(split)
+            count += 1
+    text = describe_failure(
+        message,
+        "component",
+        sample[0],
+        sample,
+        splits,
+        member_count=count,
+    )
+    diagnostics.parent.mkdir(parents=True, exist_ok=True)
+    write_canonical_json(diagnostics, {"error": text})
+    raise ValueError(text)
+
+
+def _finalize_ranked(
+    connection,
+    parents,
+    groups,
+    report_digest,
+    diagnostics,
+    progress,
+    *,
+    checkpoints,
+    decisions,
+    scratch,
+):
+    from klab.corpus.dedup_policy import drop_reason, find_root
+
+    total = len(parents) - 1
+    with ExitStack() as stack:
+        masks = winners = None
+        if groups:
+            masks = stack.enter_context(_mapped_array(scratch, total + 1, "B"))
+            winners = stack.enter_context(_mapped_array(scratch, total + 1, "I"))
+            components = (
+                _DedupJournal(
+                    checkpoints,
+                    stack,
+                    stage="ranked-components",
+                    filename="winners.bin",
+                    record=_RANKED_COMPONENT,
                 )
-                if find_root(parents, number) == bad
-            ]
-            text = describe_failure(
-                message,
-                "component",
-                members[0][0],
-                [item[0] for item in members],
-                {item[1] for item in members},
+                if checkpoints is not None
+                else None
             )
-            diagnostics.parent.mkdir(parents=True, exist_ok=True)
-            write_canonical_json(diagnostics, {"error": text})
-            raise ValueError(text)
-    for number, identifier, split, rank, kind in connection.execute(
-        "SELECT document_number,document_id,split,source_rank,document_kind "
-        "FROM dedup ORDER BY document_number"
-    ):
-        component = find_root(parents, number)
-        preferred_split = (
-            "validation"
-            if heldout_mask[component] == 1
-            else "test"
-            if heldout_mask[component] == 2
-            else None
-        )
-        choice = ranked_choice(split, preferred_split, rank, kind, identifier)
-        if component not in winner or choice < winner[component][:4]:
-            winner[component] = (*choice, identifier, split)
-    dropped = 0
-    updates = []
-    for number, identifier, split, metadata_only in connection.execute(
-        "SELECT document_number,document_id,split,metadata_only FROM dedup "
-        "ORDER BY document_number"
-    ):
-        selected, retained_split = winner[find_root(parents, number)][4:6]
-        reason = drop_reason(
-            metadata_only=bool(metadata_only),
-            split=split,
-            is_representative=selected == identifier,
-            representative_split=retained_split,
-        )
-        dropped += reason is not None
-        updates.append((selected, reason, number))
-        if len(updates) >= 10_000:
-            connection.executemany(
-                "UPDATE dedup SET representative_id=?,drop_reason=? "
-                "WHERE document_number=?",
-                updates,
+            conflicts = _choose_ranked_components(
+                connection, parents, masks, winners, report_digest, components, progress
             )
-            connection.commit()
-            updates.clear()
-    if updates:
-        connection.executemany(
-            "UPDATE dedup SET representative_id=?,drop_reason=? "
-            "WHERE document_number=?",
-            updates,
-        )
+            if conflicts:
+                _ranked_conflict(connection, parents, masks, conflicts, diagnostics)
+
+        connection.execute("UPDATE dedup SET representative_id=document_id")
         connection.commit()
-    return dropped
+        progress.update(phase="dedup_reasons")
+        last, dropped = 0, 0
+        if decisions is not None and decisions.state:
+            if decisions.state["groups_sha256"] == report_digest:
+                last, dropped = decisions.state["last"], decisions.state["dropped"]
+                _apply_decisions(connection, decisions.records(), representatives=True)
+                progress.record("reused_dedup_decision_windows")
+            else:
+                decisions.reset()
+                progress.record("discarded_dedup_decisions_for_changed_groups")
+        while last < total:
+            end = min(total, last + _DEDUP_DECISION_ROWS)
+            records = bytearray()
+            for number, split, metadata_only in connection.execute(
+                "SELECT document_number,split,metadata_only FROM dedup "
+                "WHERE document_number>? AND document_number<=? ORDER BY document_number",
+                (last, end),
+            ):
+                representative, kept = number, split
+                if winners is not None:
+                    root = find_root(parents, number)
+                    winner = winners[root]
+                    if winner:
+                        representative = winner
+                        kept = ("train", "validation", "test")[
+                            masks[root] & _RANKED_HOLDOUT
+                        ]
+                reason = drop_reason(
+                    metadata_only=bool(metadata_only),
+                    split=split,
+                    is_representative=representative == number,
+                    representative_split=kept,
+                )
+                if reason is not None:
+                    records.extend(
+                        _DEDUP_DECISION.pack(
+                            number, representative, _DEDUP_REASON_CODES[reason]
+                        )
+                    )
+            _apply_decisions(
+                connection, _DEDUP_DECISION.iter_unpack(records), representatives=True
+            )
+            dropped += len(records) // _DEDUP_DECISION.size
+            if decisions is not None:
+                decisions.output.write(bytes(records))
+                decisions.journal.commit(
+                    {
+                        "last": end,
+                        "dropped": dropped,
+                        "complete": end == total,
+                        "groups": groups,
+                        "groups_sha256": report_digest,
+                    }
+                )
+            connection.commit()
+            progress.update(documents=end - last)
+            last = end
+        connection.commit()
+        return dropped
 
 
 def rejected_rows(source_events: Iterable[Path | dict[str, Any]]) -> Iterator[bytes]:
