@@ -1187,6 +1187,12 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   files with a single hard link; when they cannot be recorded the command says
   why and verifies every time.
 
+  For published source snapshots that verify files by SHA-256, a receipt-backed
+  retry reuses completed file checks of at least 64 MiB at the same path and
+  file generation. A complete snapshot receipt still requires the snapshot's
+  declared inventory and adapter checks. Wikimedia verification uses its own
+  replay checks, and an explicit cold check reads the evidence again.
+
   When a complete proof is missing, receipt-backed build and release checks
   can reuse independently signed SHA-256 checks of files at least 64 MiB.
   Each proof binds the file's path, filesystem identity and expected digest.
@@ -1348,7 +1354,7 @@ needs measurement where the table gives historical or fixture evidence.
 | Step | Committed unit | Work repeated after a stop | Measured evidence |
 | --- | --- | --- | --- |
 | Acquisition and transport cache | Published source snapshot, verified transport body or adapter-specific checkpoint. See [recovery by source adapter](#recovery-by-source-adapter). | Adapter-specific work and verification. Indexed Wikimedia retains committed planning groups and selected member groups. A partial pinned transfer restarts its body. | On a 287 MiB Wikimedia shard, a stop after 128 planned members avoided 539.88 MiB of retry decompression. [#592](https://github.com/supernovae/model-lab/pull/592) |
-| Snapshot verification | Complete snapshot proof when a trusted proof store is enabled. | Hash the whole interrupted snapshot again. An explicit cold check re-reads all requested snapshots. | Historical Workshop cold pass, about 15 min for 33 snapshots and 108 GB. [#485](https://github.com/supernovae/model-lab/issues/485) |
+| Snapshot verification | Signed byte checks of eligible files in published snapshots, then a complete snapshot proof. | Reuse completed eligible file hashes at the same path; restart an incomplete file. An explicit cold check reads the bytes again. | Historical Workshop cold pass, about 15 min for 33 snapshots and 108 GB. See [snapshot hash recovery measurements](#snapshot-hash-recovery-measurements). |
 | Native disk build, normalize | Receipted shard per source file. | Verify completed shards and re-normalize unfinished files. | Historical Workshop normalize, about 25 min for the 6.7M-document workload. [#491](https://github.com/supernovae/model-lab/pull/491) |
 | Native disk build, index and dedup | Whole index and whole dedup stage, separately. | Verify earlier outputs and rebuild the interrupted stage. Keep the index when only duplicate policy changes. | Historical Workshop index, about 30 min for roughly 13M rows. The HDD incident measured 3.4k docs/s against 19.8k docs/s on NVMe. Current dedup interruption cost is unmeasured. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB. Final publication by rename. | Verify the committed prefix, reconstruct its digest and render the uncommitted tail. Report measurement or manifest hashing can restart as a whole pass. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. These figures cover the append helper. [#579](https://github.com/supernovae/model-lab/pull/579) |
@@ -1357,6 +1363,21 @@ needs measurement where the table gives historical or fixture evidence.
 | Release verification, `audit`, and `sources` | Signed checks of eligible inventory files and stage outputs, then the complete release proof. `audit` and `sources` read the corresponding published report after verification. | A receipt-backed retry skips eligible completed file hashes and stage scans and continues the remaining checks. Cold mode starts the checks from bytes. | See [inventory hash recovery measurements](#inventory-hash-recovery-measurements) and [stage output verification measurements](#stage-output-verification-measurements). An earlier cold audit took 67.3 s on 13.2 GB synthetic data, and the first receipt-backed audit took 0.94 s. [#500](https://github.com/supernovae/model-lab/pull/500), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | `describe` | Cached measurement runs and lineage position index when a proof store is available. Release verification has its own receipt. | Resume missing measurement ranges and merge results. Chat view measurement uses a whole run. A stopped cold release verification can still repeat. | 55.1 s for 5M synthetic rows (23 GB), 12 workers, without a tokenizer. [#502](https://github.com/supernovae/model-lab/pull/502) |
 | Corpus `export` | Document license labels and LM or chat split statistics by range with persistent scratch. Final export directory and verification receipt. | Reuse valid license and split statistics. Repeat unfinished ranges and final publication. | See [export license scan measurements](#export-license-scan-measurements) and [chat export split measurements](#chat-export-split-measurements). |
+
+#### Snapshot hash recovery measurements
+
+A local source snapshot contained four synthetic files totaling 1.22 GB on
+NVMe. Fresh receipt-backed verification took medians of 1.525 s before the
+change and 1.527 s after it, with two workers and three fresh processes per
+condition. Before each run the fixture requested page-cache eviction.
+Both versions read the same 1.22 GB from storage.
+
+Three SIGKILL trials stopped a serial verifier after it signed the largest
+file's check. The two-worker retries took a median of 1.128 s. Each reused
+537 MB of verification and read 688 MB from storage. An explicit cold
+pass read all 1.22 GB. The signed file proof was 1,642 bytes on the fixture.
+These results cover snapshot verification. The historical Workshop workload
+and replay within a single interrupted file are tracked in [#485](https://github.com/supernovae/model-lab/issues/485).
 
 #### Inventory hash recovery measurements
 

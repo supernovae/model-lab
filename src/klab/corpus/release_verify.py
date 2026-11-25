@@ -130,6 +130,8 @@ def hash_inventory(
     *,
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
+    chunk_size: int = _HASH_CHUNK_BYTES,
+    mismatch: str = "tampered artifact",
 ) -> None:
     """Check every size and SHA-256, reusing signed evidence for completed hashes."""
 
@@ -145,7 +147,7 @@ def hash_inventory(
         entry = inventory[name]
         size, expected = entry["size"], entry["sha256"]
         if not path.is_file() or path.stat().st_size != size:
-            raise ValueError(f"tampered artifact: {name}")
+            raise ValueError(f"{mismatch}: {name}")
         if (
             proof_store is not None
             and verification_mode == "verified_reuse"
@@ -159,13 +161,13 @@ def hash_inventory(
                     expected_sha256=expected,
                     proof_store=proof_store,
                     verification_mode=verification_mode,
-                    chunk_size=_HASH_CHUNK_BYTES,
+                    chunk_size=chunk_size,
                     hash_chunk=advance if progress is not None else None,
                 )
             except ValueError as error:
-                raise ValueError(f"tampered artifact: {name}: {error}") from error
+                raise ValueError(f"{mismatch}: {name}: {error}") from error
             if proof.size_bytes != size or proof.sha256 != expected:
-                raise ValueError(f"tampered artifact: {name}")
+                raise ValueError(f"{mismatch}: {name}")
             if not proof.cold_verified:
                 if progress is not None:
                     with lock:
@@ -174,12 +176,12 @@ def hash_inventory(
         elif (
             file_manifest.sha256_file(
                 path,
-                chunk_size=_HASH_CHUNK_BYTES,
+                chunk_size=chunk_size,
                 hash_chunk=advance if progress is not None else None,
             )
             != expected
         ):
-            raise ValueError(f"tampered artifact: {name}")
+            raise ValueError(f"{mismatch}: {name}")
         return None
 
     names = sorted(inventory, key=lambda name: -inventory[name]["size"])
