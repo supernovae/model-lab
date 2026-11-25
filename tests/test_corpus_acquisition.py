@@ -1960,6 +1960,7 @@ def _multistream_wikimedia_fixture(
     *,
     fault: str | None = None,
     shared_members: bool = False,
+    one_page_per_member: bool = False,
 ):
     header = (
         b'<?xml version="1.0"?>\n<mediawiki xmlns="http://www.mediawiki.org/xml/export-0.11/" '
@@ -1975,9 +1976,12 @@ def _multistream_wikimedia_fixture(
 
     first = page(1, "Topic:A")
     second = page(2, "Topic B", '<redirect title="Topic:A"/>')
-    last = page(3, "Topic C") + page(4, "Topic D")
+    third, fourth = page(3, "Topic C"), page(4, "Topic D")
+    last = third + fourth
     footer = b"</mediawiki>\n"
-    if fault == "split_page":
+    if one_page_per_member:
+        pieces = (header + first, second, third, fourth + footer)
+    elif fault == "split_page":
         pieces = (header, first[:22], first[22:] + second, last, footer)
     elif shared_members:
         pieces = (header + first + second, last + footer)
@@ -1996,6 +2000,11 @@ def _multistream_wikimedia_fixture(
         f"{third_offset}:3:Topic C\n"
         f"{third_offset}:{9 if fault == 'late_page_id' else 4}:Topic D\n"
     ).encode()
+    if one_page_per_member:
+        index_text = b"".join(
+            f"{sum(map(len, members[:number]))}:{number + 1}:{title}\n".encode()
+            for number, title in enumerate(("Topic:A", "Topic B", "Topic C", "Topic D"))
+        )
     index_uri = next(reversed(responses)).replace(
         "multistream1.xml", "multistream-index1.txt"
     )
@@ -2119,7 +2128,7 @@ def test_indexed_wikimedia_resumes_range_verification(
     project = load_project(recipe)
     calls = _serve_pinned(monkeypatch, responses)
     cache = tmp_path / "cache" if case == "resume" else None
-    monkeypatch.setattr(wikimedia_ranges, "_PLAN_GROUP_MEMBERS", 2)
+    monkeypatch.setattr(wikimedia_ranges, "PLAN_GROUP_MEMBERS", 2)
     run_stage = wikimedia_ranges.run_stage
     run_acquisition_stage = acquisition.run_stage
     scan = wikimedia_ranges._scan_members
@@ -2443,6 +2452,63 @@ def test_wikimedia_process_parsing_preserves_ordered_selection(
         assert len(decoded_by_coordinator) == (2 if case == "fallback" else 0)
     assert pools == [(2, False)] * (2 if case == "selected" else 1)
     assert _snapshot_payload(threaded) == _snapshot_payload(control)
+
+
+def test_wikimedia_rebuilds_damaged_group_without_replaying_valid_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from klab.corpus import acquisition, wikimedia_ranges
+
+    monkeypatch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
+    recipe, responses, pieces, compressed, index_text = _multistream_wikimedia_fixture(
+        tmp_path, one_page_per_member=True
+    )
+    source_path = recipe.parent / "sources/one.yaml"
+    declaration = yaml.safe_load(source_path.read_text())
+    declaration["acquisition"].update(
+        multistream_index=_fixture_index_options(responses, pieces, index_text),
+        max_scanned_pages=4,
+        max_selected_pages=2,
+        max_emitted_bytes=4096,
+    )
+    _yaml(source_path, declaration)
+    project = load_project(recipe)
+    calls = _serve_pinned(monkeypatch, responses)
+    control = acquire(project, tmp_path / "control")
+    work = tmp_path / "work"
+    visited = []
+    commits = []
+    run_stage = acquisition.run_stage
+    read = wikimedia_ranges.read_wikimedia_member
+
+    def record_decode(path, member, **options):
+        visited.append(member.start)
+        return read(path, member, **options)
+
+    def interrupt(store, stage, inputs, produce):
+        result = run_stage(store, stage, inputs, produce)
+        if stage == "wikimedia-member":
+            commits.append(result[0])
+            if len(commits) == 2:
+                raise OSError("stop after group commit")
+        return result
+
+    monkeypatch.setattr(wikimedia_ranges, "read_wikimedia_member", record_decode)
+    with monkeypatch.context() as fault:
+        fault.setattr(acquisition, "run_stage", interrupt)
+        with pytest.raises(OSError, match="stop after group commit"):
+            acquire(project, work, wikimedia_checkpoint_members=2)
+    expected = [0, len(compressed[0]), len(compressed[0]) + len(compressed[1])]
+    assert visited == expected
+    assert not (work / "corpora/example/acquisition.json").exists()
+    calls.clear()
+    visited.clear()
+    first_rows = commits[0] / "rows.jsonl"
+    first_rows.write_bytes(b"!" + first_rows.read_bytes()[1:])
+    recovered = acquire(project, work, wikimedia_checkpoint_members=2)
+    assert visited == expected[:2]
+    assert not calls
+    assert _snapshot_payload(recovered) == _snapshot_payload(control)
 
 
 def test_wikimedia_prefetch_overlaps_decode_without_changing_selected_prefix(

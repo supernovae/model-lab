@@ -525,6 +525,31 @@ ordered page and revision IDs. These are single runs on NVMe with local
 inputs. Process parsing stays opt-in because startup and candidate transfer
 costs vary with member size, and the larger run used more host memory.
 
+Indexed extraction can group consecutive members into a single JSONL
+payload and receipt. A retry verifies the payload hash while copying it
+to the staged snapshot. A failed receipt discards the provisional copy
+before rebuilding its group. This leaves the hash check and atomic
+publication in the existing stage store.
+
+On the 287 MiB English Wikipedia shard, one cold NVMe run per setting
+compared single-member commits with groups of up to eight. Acquisition
+made 1,217 and 720 `fsync` calls and used 357 and 73 peak staging inodes.
+The first durable extraction commit took 11.31 and 13.41 s. Total times
+were 54.85 and 51.33 s. Snapshot, payload, and ordered page and revision
+IDs matched. The single-member default retains the finer recovery unit.
+
+On tmpfs, three retries per setting on the 16 MiB synthetic fixture
+started after the same eight extracted members were committed. Median
+retry time was 0.934 and 0.901 s, with 876 and 148 `fsync` calls. In both
+settings, verification shared the copy of 1,053,781 committed payload
+bytes. These timings do not characterize rotational storage.
+
+A separate hard stop before publishing the second eight-member group
+kept the first group, rebuilt eight uncommitted members, and decoded one
+new member. The retry made zero transport requests and produced the same
+snapshot as a fresh single-member run. The replay tool accepts
+`--wikimedia-checkpoint-members` for grouped extraction measurements.
+
 ## Relational Knowledge Microlab
 
 Keep named recipes and study outputs in Workshop. Start with deterministic

@@ -16,7 +16,7 @@ import json
 import os
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -48,14 +48,20 @@ class StageStore:
     def key(inputs: dict[str, Any]) -> str:
         return canonical_digest(inputs)
 
-    def verified(self, stage: str, inputs: dict[str, Any]) -> dict[str, Any] | None:
+    def verified(
+        self,
+        stage: str,
+        inputs: dict[str, Any],
+        *,
+        hash_chunks: Mapping[str, Callable[[bytes], None]] | None = None,
+    ) -> dict[str, Any] | None:
         """The receipt of a reusable output for exactly these inputs, else None."""
         key = self.key(inputs)
         path = self.directory(stage, key)
         if not path.is_dir():
             return None
         try:
-            return verify_stage(path, stage, key, inputs)
+            return verify_stage(path, stage, key, inputs, hash_chunks=hash_chunks)
         except OSError, ValueError, KeyError:
             return None
 
@@ -141,9 +147,17 @@ def _sync(path: Path) -> None:
 
 
 def verify_stage(
-    path: Path, stage: str, key: str, inputs: dict[str, Any]
+    path: Path,
+    stage: str,
+    key: str,
+    inputs: dict[str, Any],
+    *,
+    hash_chunks: Mapping[str, Callable[[bytes], None]] | None = None,
 ) -> dict[str, Any]:
-    """Raise unless the directory is a complete, unchanged output of these inputs."""
+    """Verify the stage, optionally observing bytes as selected files are hashed.
+
+    Observed bytes are provisional until the full receipt verifies.
+    """
     if path.is_symlink() or not path.is_dir():
         raise ValueError(f"stage {stage} output is not a directory")
     receipt = json.loads((path / RECEIPT).read_text(encoding="utf-8"))
@@ -162,8 +176,11 @@ def verify_stage(
             item.is_symlink()
             or not item.is_file()
             or item.stat().st_size != expected["size"]
-            or sha256_file(item) != expected["sha256"]
         ):
+            raise ValueError(f"stage {stage} output changed: {name}")
+        observe = hash_chunks.get(name) if hash_chunks is not None else None
+        digest = sha256_file(item, hash_chunk=observe) if observe else sha256_file(item)
+        if digest != expected["sha256"]:
             raise ValueError(f"stage {stage} output changed: {name}")
     return receipt
 

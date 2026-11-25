@@ -28,7 +28,7 @@ _CHUNK = 64 * 1024
 _MAX_INDEX_LINE = 64 * 1024
 _MAX_XML_DEPTH = 64
 _MAX_IDENTIFIER = 256
-_PLAN_GROUP_MEMBERS = 64
+PLAN_GROUP_MEMBERS = 64
 _PLAN_GROUP_STAGE = "wikimedia-plan-group"
 _XML_NAMESPACE = "http://www.mediawiki.org/xml/export-0.11/"
 _NS = _XML_NAMESPACE + "}"
@@ -460,7 +460,7 @@ def _scan_dump(
         assert max_header_bytes is not None
         stage = _PLAN_GROUP_STAGE
         store.prune(
-            stage, keep=(max_members + _PLAN_GROUP_MEMBERS - 1) // _PLAN_GROUP_MEMBERS
+            stage, keep=(max_members + PLAN_GROUP_MEMBERS - 1) // PLAN_GROUP_MEMBERS
         )
         reused = groups = 0
         prefix: bytes | None = None
@@ -480,7 +480,7 @@ def _scan_dump(
                         on_expanded(len(prefix))
                 xml.resume(prefix, boundary, expanded)
                 scanner = scan(stream)
-            group = list(islice(scanner, _PLAN_GROUP_MEMBERS))
+            group = list(islice(scanner, PLAN_GROUP_MEMBERS))
             context = xml.boundary()
             end_expanded = expanded + sum(member.expanded_bytes for member in group)
             header_size = (
@@ -626,7 +626,7 @@ def plan_wikimedia_ranges(
                     max_index_expanded_bytes,
                     max_members,
                 ),
-                "group_members": _PLAN_GROUP_MEMBERS,
+                "group_members": PLAN_GROUP_MEMBERS,
                 "planner": implementation_digests(Path(__file__).name),
             }
             if checkpoint_store is not None
