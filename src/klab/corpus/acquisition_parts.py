@@ -265,7 +265,50 @@ class PinnedBodyParts(AcquisitionParts):
         promoted = self.promote_body(checked)
         sync_directory(checked.path.parent)
         print(f"reused verified acquisition body from {checked.path}", file=sys.stderr)
+        sibling._reclaim_empty()
         return promoted
+
+    def reclaim_empty_previous(self, root: Path) -> bool:
+        """Remove an abandoned empty generation under the source adapter lock."""
+        sibling = self._sibling_parts(root)
+        return sibling is not None and sibling._reclaim_empty()
+
+    def _reclaim_empty(self) -> bool:
+        # Walk only the known scaffold. An unexpected entry can be usable work,
+        # and even a large files directory only needs one entry to retain it.
+        scaffold = {
+            self.root: ("input", "snapshot"),
+            self.root / "input": (),
+            self.staging: ("files",),
+            self.staging / "files": (),
+        }
+        empty = []
+        try:
+            self._check_root()
+            for path, allowed in scaffold.items():
+                try:
+                    info = path.lstat()
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                    return False
+                with os.scandir(path) as entries:
+                    if any(entry.name not in allowed for entry in entries):
+                        return False
+                empty.append(path)
+            if not empty:
+                return False
+            for path in reversed(empty):
+                path.rmdir()
+            sync_directory(self.root.parent)
+        except (OSError, ValueError) as error:
+            print(
+                f"cannot reclaim empty acquisition staging at {self.root}: {error}",
+                file=sys.stderr,
+            )
+            return False
+        print(f"reclaimed empty acquisition staging at {self.root}", file=sys.stderr)
+        return True
 
     def promote_body(
         self, checked: CheckedCheckpoint[PinnedBody]
@@ -689,6 +732,10 @@ def acquisition_staging(parent: Path, parts: AcquisitionParts | None) -> Iterato
             raise ValueError("another acquisition is writing this source")
         for sibling in sorted(parent.glob(f".{parts.adapter}-parts-*")):
             if sibling != parts.root and not sibling.is_symlink() and sibling.is_dir():
+                if isinstance(parts, PinnedBodyParts) and parts.reclaim_empty_previous(
+                    sibling
+                ):
+                    continue
                 print(
                     f"acquisition checkpoint for another request retained at {sibling}",
                     file=sys.stderr,

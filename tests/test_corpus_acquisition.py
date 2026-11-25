@@ -1371,7 +1371,9 @@ def test_archive_plan_step_snapshot_and_reviewed_release(
     assert verify_release(published)["release_id"] == published.name
 
 
-@pytest.mark.parametrize("damage", ["none", "derivation", "both", "adapter_update"])
+@pytest.mark.parametrize(
+    "damage", ["none", "derivation", "both", "adapter_update", "empty_generation"]
+)
 def test_archive_recovery_checks_staged_body_and_derivation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
 ) -> None:
@@ -1397,12 +1399,14 @@ def test_archive_recovery_checks_staged_body_and_derivation(
 
     def count(source, staging, body_path, *args):
         extractions.append(body_path.stat().st_ino)
+        if damage == "empty_generation" and len(extractions) == 1:
+            raise OSError("stop before archive extraction")
         return real_derive(source, staging, body_path, *args)
 
     monkeypatch.setattr(acquisition, "_acquire_archive", count)
     with monkeypatch.context() as fault:
         fault.setattr(acquisition, "verify_snapshot", interrupt)
-        with pytest.raises(OSError, match="stop before staged verification"):
+        with pytest.raises(OSError, match="stop before"):
             acquire(project, work, **step)
     assert not (ledger.parent / "acquisition.json").exists()
     parent = ledger.parent / "snapshots/one"
@@ -1411,13 +1415,21 @@ def test_archive_recovery_checks_staged_body_and_derivation(
         (checkpoint / "snapshot/files/rfc1.txt").write_bytes(b"damaged")
     if damage == "both":
         (checkpoint / "input/RFC-all.tar.gz").write_bytes(b"damaged")
-    elif damage == "adapter_update":
+    elif damage in {"adapter_update", "empty_generation"}:
         adapter = acquisition._adapter
         monkeypatch.setattr(
             acquisition,
             "_adapter",
             lambda source: {**adapter(source), "module_sha256": "a" * 64},
         )
+    if damage == "empty_generation":
+        abandoned = parent / (".archive-parts-" + "0" * 64)
+        for directory in (
+            abandoned,
+            abandoned / "snapshot",
+            abandoned / "snapshot/files",
+        ):
+            directory.mkdir(mode=0o700)
 
     plan = acquire(project, work, plan_only=True, **step)["admission"]
     assert (
@@ -1427,10 +1439,13 @@ def test_archive_recovery_checks_staged_body_and_derivation(
             "derivation": "body",
             "both": None,
             "adapter_update": "body",
+            "empty_generation": "body",
         }[damage]
     )
-    if damage == "adapter_update":
+    if damage in {"adapter_update", "empty_generation"}:
         assert (checkpoint / "input/RFC-all.tar.gz").read_bytes() == body
+    if damage == "empty_generation":
+        assert abandoned.is_dir()
     output_hashes = []
     body_hashes = []
     real_hash = acquisition.sha256_file
@@ -1449,12 +1464,15 @@ def test_archive_recovery_checks_staged_body_and_derivation(
         assert len(output_hashes) == 1
         assert len(body_hashes) == (0 if damage == "none" else 1)
     lock = acquire(project, work, require_existing=True)
-    if damage == "adapter_update":
+    if damage in {"adapter_update", "empty_generation"}:
         assert extractions[0] == extractions[1]
+    if damage == "adapter_update":
         assert not (checkpoint / "input/RFC-all.tar.gz").exists()
         assert (checkpoint / "snapshot/files/rfc1.txt").read_bytes() == text
     else:
         assert not checkpoint.exists()
+    if damage == "empty_generation":
+        assert not abandoned.exists()
     assert _snapshot_payload(lock)[1] == {"rfc1.txt": text}
     assert len(extractions) == (1 if damage == "none" else 2)
     assert len(calls) == (2 if damage == "both" else 1)
