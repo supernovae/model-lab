@@ -320,6 +320,23 @@ peak RSS, physical I/O and time of reading the production lock remain
 unmeasured. Keep wide metadata and production measurements tracked in
 [#450](https://github.com/supernovae/model-lab/issues/450).
 
+Retained copies now use the final candidate-lock check for the origin
+recheck before publication. On ext4 over local NVMe, copying a new retained
+Git snapshot in cold verification mode read one fewer full payload than
+`11b1b9a1`. The medians below are from three runs per revision and fixture
+with the origin already acquired. Reads are Linux process `rchar` counters.
+
+| Synthetic payload | Logical reads before / after | Elapsed before / after | Peak RSS before / after |
+| --- | --- | --- | --- |
+| 128 MiB in one file | 768.50 / 640.34 MiB | 0.411 / 0.354 s | 72.5 / 72.5 MiB |
+| 128 MiB across 512 files | 769.00 / 640.76 MiB | 1.194 / 1.091 s | 77.4 / 77.4 MiB |
+
+Snapshot identities matched across revisions. Origin hashing went from
+384 to 256 MiB for both fixtures. The copy still hashes 256 MiB across
+staging and final validation. Separate cold audits continue to read the
+origin and copy. Production-scale and rotational-disk timing remain
+unmeasured. [#485](https://github.com/supernovae/model-lab/issues/485)
+
 Archive and MediaWiki acquisition now retain the verified body and seal the
 derived output before publication. Using the same fixture on tmpfs, the
 median retry without a transport cache was approximately 0.14 s for the

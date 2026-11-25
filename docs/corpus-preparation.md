@@ -57,7 +57,10 @@ A project (`corpus.yaml`) lists source declarations under `sources/`. A source
 is a pinned Git repository, Hugging Face dataset shard, Wikimedia dump, tar or
 zip archive, list of PDF files, MediaWiki XML dump, local file, HTTP document or
 generator (see [source kinds](#source-kinds)). Acquisition writes one snapshot
-per source and then an acquisition lock binding them.
+per source and verifies the candidate acquisition lock before atomically
+publishing it. A failed check leaves the previous lock intact. Lab checks
+declared retained origins before starting acquisition work and checks the
+candidate lock against both the origins and the copies before publication.
 
 - **Transport budgets.** `corpus budget-init PROJECT` starts a durable ledger
   of bytes, retries, disk and wall time for bounded Hugging Face and Git
