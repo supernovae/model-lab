@@ -19,6 +19,7 @@ from pathlib import Path
 from klab.canonical import canonical_json
 from klab.corpus.jsonl_records import records_from_path
 from klab.corpus.split_runs import _stamp, external_sort, rows, write_rows
+from klab.safe_io import read_file_range
 
 
 class _Writer:
@@ -465,11 +466,7 @@ class StreamBuildRows:
                 ) != root:
                     root = parent
                 representative = ids[root * 64 : (root + 1) * 64].decode("ascii")
-                doc = docs[row[1]]
-                doc.seek(row[2])
-                raw = doc.read(row[3])
-                if len(raw) != row[3]:
-                    raise ValueError("completed prepared shard changed")
+                raw = read_file_range(docs[row[1]], row[2], row[3])
                 reason = (
                     "metadata_only_front_matter"
                     if row[8]

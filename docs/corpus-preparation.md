@@ -1484,7 +1484,8 @@ vocabulary and Tokenizers 0.22.2 on CPU with one selection worker. It supplied
 the export binding from the fixture so the timings isolate sampling, the
 native fit and the audit. Each row is one local run on NVMe. The fit column
 includes feeding the selected text into the trainer. Earlier runs include
-repeated selection in the fit and audit columns.
+repeated selection in the fit and audit columns. These runs preceded the
+indexed-read change below.
 
 | Operation | Selection calls | Native fit | Sample audit | Total |
 | --- | ---: | ---: | ---: | ---: |
@@ -1497,6 +1498,36 @@ and before it returned. The retry fed all 16,766,888 selected bytes again.
 The sample and tokenizer digests matched across runs. Observed peak RSS was
 379 MiB on the baseline and 376 MiB with one selection per attempt. Production
 fit, audit and recovery costs remain unmeasured. [#485](https://github.com/supernovae/model-lab/issues/485)
+
+#### Indexed reads and sequential scans
+
+Tokenizer fit and audit replay the selected rows in seeded order. They keep
+the document file open for each pass and read exactly the byte range of each
+selected row. Where the OS accepts prefetch hints, the fit stream looks
+ahead at up to 256 rows and 1 MiB of requested byte ranges at a time.
+Release source replay, disk-backed build assembly, view lineage measurement,
+and admission inspection also use exact byte ranges for indexed lookups.
+Keep sequential scans buffered, including candidate selection and mixture
+exposure replay.
+
+On a 143 MiB synthetic JSONL file on NVMe, replaying an existing selection of
+8,192 rows requested 17.8 MiB. Five runs per condition on Linux and Python
+3.14.8 gave these medians. The cold runs requested eviction of the fixture
+from the page cache before replay. All readers produced the same sample
+digest.
+
+| Tokenizer sample replay | Bytes returned to the process | Warm time | Cold time | Cold storage bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Buffered open and seek per row | 1,023.4 MiB | 119 ms | 337 ms | 142.6 MiB |
+| Exact positional reads | 17.8 MiB | 44 ms | 536 ms | 50.0 MiB |
+| Exact positional reads with bounded prefetch | 17.8 MiB | 46 ms | 84 ms | 44.5 MiB |
+
+On the same fixture, keeping one buffered file open for shuffled lookups
+still returned 57× the requested bytes. A buffered scan of 8,192 consecutive
+rows took 8.5 ms versus 9.7 ms for individual positional reads. Linux `rchar`
+reports bytes returned by read calls, and `read_bytes` tracks bytes fetched
+from storage by the process. Production stage throughput and slower storage
+remain to be measured. [#485](https://github.com/supernovae/model-lab/issues/485)
 
 ### Tokenizer bakeoff
 

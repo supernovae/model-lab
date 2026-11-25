@@ -222,7 +222,17 @@ def test_the_sample_fills_each_quota_and_states_how_it_was_chosen(
     config = _config(_release(tmp_path))
     stats: dict = {}
     with verification_settings(workers=2):
-        list(tokenizer_sampling.documents(config, stats))
+        selection = tokenizer_sampling.select_documents(config)
+    io_counters = Path("/proc/self/io")
+    before = None
+    if io_counters.is_file():
+        before = int(io_counters.read_text().splitlines()[0].removeprefix("rchar: "))
+    list(tokenizer_sampling.documents(config, stats, selection=selection))
+    if before is not None:
+        after = int(io_counters.read_text().splitlines()[0].removeprefix("rchar: "))
+        requested = sum(row.length for rows in selection.fit.values() for row in rows)
+        # rchar also counts the read of the counters themselves.
+        assert requested <= after - before <= requested + 4096
     result = stats["sampling"]
     assert (result["order"], result["seed"]) == ("seeded_hash", 11)
     for stratum, cap in result["requested_bytes"].items():

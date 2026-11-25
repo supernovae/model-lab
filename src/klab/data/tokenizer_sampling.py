@@ -26,9 +26,12 @@ The scan is parallel and keeps bounded memory:
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 from collections.abc import Iterator
+from itertools import batched
 from pathlib import Path
-from typing import NamedTuple
+from typing import BinaryIO, NamedTuple
 
 from tokenizers import Tokenizer
 
@@ -37,13 +40,14 @@ from klab.config.models import TokenizerTrainConfig
 from klab.corpus import release_verify
 from klab.corpus.mixture import _source_rights
 from klab.corpus.mixture_index import MAX_ROW_BYTES
-from klab.corpus.release_verify import range_records, read_at
+from klab.corpus.release_verify import range_records
 from klab.corpus.shards import (
     declare_stage,
     plan_ranges,
     range_file_identity,
     run_sharded,
 )
+from klab.safe_io import read_file_range
 from klab.training.manifest import sha256_file
 
 BUCKET_BITS = 12
@@ -350,10 +354,30 @@ def select_documents(
     return selection
 
 
-def _text(release: Path, candidate: _Candidate) -> str:
-    return read_at(release / "documents.jsonl", candidate.offset, candidate.length)[
+def _text(stream: BinaryIO, candidate: _Candidate) -> str:
+    return json.loads(read_file_range(stream, candidate.offset, candidate.length))[
         "text"
     ]
+
+
+def _prefetched_rows(stream: BinaryIO, rows: list[_Candidate]) -> Iterator[_Candidate]:
+    """Give the kernel a bounded look ahead without reordering the training stream."""
+    advise = getattr(os, "posix_fadvise", None)
+    descriptor = stream.fileno()
+    for batch in batched(rows, 256):
+        if advise is not None:
+            remaining = 1024**2
+            try:
+                for row in batch:
+                    count = min(row.length, remaining)
+                    advise(descriptor, row.offset, count, os.POSIX_FADV_WILLNEED)
+                    remaining -= count
+                    if not remaining:
+                        break
+            except OSError:
+                # Advice is optional. The exact reads still check every row.
+                advise = None
+        yield from batch
 
 
 def documents(
@@ -381,16 +405,18 @@ def documents(
     identities = hashlib.sha256()
     release = config.dataset.corpus_release_path
     assert release is not None
-    for stratum in caps:
-        for row in selection.fit[stratum]:
-            text = _text(release, row)
-            digest.update(text.encode("utf-8") + b"\0")
-            identities.update(
-                canonical_json([row.document_id, stratum, row.content_sha256]) + b"\n"
-            )
-            if selected_hashes is not None:
-                selected_hashes.add(row.content_sha256)
-            yield text
+    with (release / "documents.jsonl").open("rb") as stream:
+        for stratum in caps:
+            for row in _prefetched_rows(stream, selection.fit[stratum]):
+                text = _text(stream, row)
+                digest.update(text.encode("utf-8") + b"\0")
+                identities.update(
+                    canonical_json([row.document_id, stratum, row.content_sha256])
+                    + b"\n"
+                )
+                if selected_hashes is not None:
+                    selected_hashes.add(row.content_sha256)
+                yield text
     selection.check_inputs()
     stats.update(
         acquired=selection.train_documents,
@@ -442,28 +468,31 @@ def audit(
     # The documents after each stratum's fit, one stratum at a time in turn, so
     # the byte cap is shared evenly and the choice never depends on the scan.
     depth = spec.audit_documents_per_stratum
-    for position in range(depth):
-        for stratum, reserve in selection.reserve.items():
-            if position >= len(reserve):
-                continue
-            row = reserve[position]
-            if row.content_sha256 in fit_hashes or total_bytes + row.size > (
-                spec.max_audit_bytes
-            ):
-                continue
-            fit_hashes.add(row.content_sha256)
-            group = groups[stratum]
-            text = _text(release, row)
-            ids = tokenizer.encode(text).ids
-            group["documents"] += 1
-            group["bytes"] += row.size
-            group["tokens"] += len(ids)
-            group["unknown_tokens"] += ids.count(unknown)
-            group["roundtrip_failures"] += int(
-                tokenizer.decode(ids, skip_special_tokens=False) != text
-            )
-            total_bytes += row.size
-            digest.update(canonical_json([row.document_id, row.content_sha256]) + b"\n")
+    with (release / "documents.jsonl").open("rb") as stream:
+        for position in range(depth):
+            for stratum, reserve in selection.reserve.items():
+                if position >= len(reserve):
+                    continue
+                row = reserve[position]
+                if row.content_sha256 in fit_hashes or total_bytes + row.size > (
+                    spec.max_audit_bytes
+                ):
+                    continue
+                fit_hashes.add(row.content_sha256)
+                group = groups[stratum]
+                text = _text(stream, row)
+                ids = tokenizer.encode(text).ids
+                group["documents"] += 1
+                group["bytes"] += row.size
+                group["tokens"] += len(ids)
+                group["unknown_tokens"] += ids.count(unknown)
+                group["roundtrip_failures"] += int(
+                    tokenizer.decode(ids, skip_special_tokens=False) != text
+                )
+                total_bytes += row.size
+                digest.update(
+                    canonical_json([row.document_id, row.content_sha256]) + b"\n"
+                )
     selection.check_inputs()
     for group in groups.values():
         group["bytes_per_token"] = (

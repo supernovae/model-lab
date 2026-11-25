@@ -344,20 +344,21 @@ class SourceIndex:
         self.connection.execute(
             "CREATE TEMP TABLE inspection_candidates(ordinal INTEGER PRIMARY KEY, "
             "path TEXT,digest TEXT,row_index INTEGER,physical_line INTEGER,"
-            "byte_offset INTEGER,decision TEXT,issues INTEGER,length INTEGER)"
+            "byte_offset INTEGER,byte_size INTEGER,decision TEXT,issues INTEGER,length INTEGER)"
         )
         self.rows = 0
 
     def add(self, row, length):
         self.connection.execute(
-            "INSERT INTO inspection_candidates VALUES(?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO inspection_candidates VALUES(?,?,?,?,?,?,?,?,?,?)",
             (
                 row["_ordinal"],
                 row["path"],
                 row["digest"],
                 row["row_index"],
                 row["physical_line"],
-                row["_offset"],
+                row.get("_offset"),
+                row.get("_size"),
                 row["decision"],
                 bool(row["issues"]),
                 length,
@@ -396,6 +397,7 @@ class SourceIndex:
                             "row_index",
                             "physical_line",
                             "_offset",
+                            "_size",
                             "decision",
                             "issues",
                             "retained_length_bytes",

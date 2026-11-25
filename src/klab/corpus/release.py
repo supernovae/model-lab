@@ -30,6 +30,7 @@ from klab.corpus.release_verify import (
 )
 from klab.corpus.shards import chunk_ranges, run_tasks
 from klab.experiments.artifacts import snapshot_dependencies
+from klab.safe_io import read_file_range
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
@@ -368,11 +369,6 @@ def _streaming_rows(identity: dict[str, Any]) -> bool:
 VIEW_LINES = 50_000
 
 
-def _read_json(stream, offset: int, length: int) -> Any:
-    stream.seek(offset)
-    return json.loads(stream.read(length))
-
-
 def _readonly(database: str) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{database}?mode=ro", uri=True)
 
@@ -487,8 +483,12 @@ def _raw_group(
                 (source["id"], raw_name),
             ):
                 count += 1
-                doc = _read_json(document_stream, doc_offset, doc_length)
-                span = _read_json(span_stream, span_offset, span_length)
+                doc = json.loads(
+                    read_file_range(document_stream, doc_offset, doc_length)
+                )
+                span = json.loads(
+                    read_file_range(span_stream, span_offset, span_length)
+                )
                 if (
                     source.get("explicit_training_restriction", "none_found")
                     != "none_found"
