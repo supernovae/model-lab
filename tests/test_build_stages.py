@@ -26,6 +26,7 @@ from klab.corpus.split_runs import SplitStages, write_rows
 from klab.corpus.streaming_build_rows import StreamBuildRows
 from klab.corpus.view_checkpoints import ViewCheckpoints
 from klab.training.manifest import sha256_file
+from klab.verification_proofs import ProofStore
 
 
 def tree(root: Path) -> dict[str, str]:
@@ -69,7 +70,7 @@ def stage_dirs(work: Path) -> list[str]:
     return sorted(
         f"{path.parent.name}/{path.name}"
         for path in work.glob("corpora/*/builds/stages/*/*")
-        if not path.name.startswith(".")
+        if not path.name.startswith(".") and not path.parent.name.startswith(".")
     )
 
 
@@ -119,6 +120,79 @@ def test_a_build_killed_at_any_stage_resumes_without_redoing_earlier_stages(
         assert scanned and committed not in scanned
         assert tree(reference) == expected
         assert not list(lab.work.glob("corpora/*/builds/stages/.index-*.groups"))
+    calls.reset()
+
+    shutil.rmtree(reference)
+    append_part = large_build._append_index_part
+    assembly_operations = []
+    stop_on_append = False
+
+    def stop_after_assembly_append(
+        connection, part, offsets, *, verify_only, verify_rows
+    ):
+        output = append_part(
+            connection, part, offsets, verify_only=verify_only, verify_rows=verify_rows
+        )
+        assembly_operations.append((verify_only, verify_rows))
+        if stop_on_append and not verify_only:
+            raise OSError("interrupted compact index assembly")
+        return output
+
+    attest = ProofStore.publish
+
+    def stop_after_assembly_proof(store, receipt, payload, **kwargs):
+        saved = attest(store, receipt, payload, **kwargs)
+        if payload.get("kind") == "native-index-assembly":
+            assert saved and store.load(receipt) == payload
+            raise RuntimeError("interrupted signed index assembly")
+        return saved
+
+    with monkeypatch.context() as recovery:
+        recovery.setattr(large_build, "_INDEX_GROUP_BYTES", 1)
+        with monkeypatch.context() as fault:
+            fault.setattr(large_build, "_append_index_part", stop_after_assembly_append)
+            with monkeypatch.context() as first:
+                first.setattr(ProofStore, "publish", stop_after_assembly_proof)
+                with pytest.raises(
+                    RuntimeError, match="interrupted signed index assembly"
+                ):
+                    lab.run("corpus", "build", project, "--offline")
+            assert assembly_operations == [(False, True)]
+            assert not reference.exists()
+            assembly_operations.clear()
+            stop_on_append = True
+            with pytest.raises(OSError, match="interrupted compact index assembly"):
+                lab.run("corpus", "build", project, "--offline")
+            assert assembly_operations == [(True, False), (False, False)]
+            assert not reference.exists()
+        assembly = next(
+            lab.work.glob("corpora/*/builds/stages/.index-*.groups/assembly")
+        )
+        with closing(sqlite3.connect(assembly / "index.sqlite")) as connection:
+            connection.execute(
+                "UPDATE documents SET span_offset=span_offset+1 WHERE rowid=1"
+            )
+            connection.commit()
+        publish = build_stages.StageStore._publish
+
+        def stop_before_index_publish(store, staging, stage, key, inputs):
+            if stage == "index":
+                assert (staging / "receipt.json").is_file()
+                raise OSError("interrupted index publication")
+            publish(store, staging, stage, key, inputs)
+
+        with monkeypatch.context() as fault:
+            fault.setattr(
+                build_stages.StageStore, "_publish", stop_before_index_publish
+            )
+            with pytest.raises(OSError, match="interrupted index publication"):
+                lab.run("corpus", "build", project, "--offline")
+        assert not reference.exists()
+        calls.reset()
+        reference = Path(lab.run("corpus", "build", project, "--offline"))
+        assert calls.reset()["index"] == 0
+        assert tree(reference) == expected
+        assert not assembly.exists()
     calls.reset()
 
     shutil.rmtree(reference)

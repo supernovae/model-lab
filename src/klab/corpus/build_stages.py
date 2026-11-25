@@ -17,7 +17,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -66,18 +66,32 @@ class StageStore:
             return None
 
     @contextmanager
-    def build(self, stage: str, inputs: dict[str, Any]):
+    def build(
+        self, stage: str, inputs: dict[str, Any], *, retained: Path | None = None
+    ):
         """Yield a private staging directory; publish it atomically on success.
 
         The caller writes the stage files into the directory and assigns the
         stage's result values to the dictionary it also receives. Leaving the
-        block with an exception removes the staging directory.
+        block with an exception removes transient staging. A retained directory
+        stays private for a producer that validates its own checkpoints.
         """
         key = self.key(inputs)
         parent = self.root / stage
         parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix=_INCOMPLETE, dir=parent) as temporary:
+        if retained is not None:
+            if retained.is_symlink():
+                raise ValueError(f"symlinked stage checkpoint: {retained}")
+            retained.mkdir(parents=True, exist_ok=True)
+        temporary_directory = (
+            nullcontext(retained)
+            if retained is not None
+            else tempfile.TemporaryDirectory(prefix=_INCOMPLETE, dir=parent)
+        )
+        with temporary_directory as temporary:
             staging = Path(temporary)
+            if retained is not None:
+                (staging / RECEIPT).unlink(missing_ok=True)
             result: dict[str, Any] = {}
             yield staging, result
             files = {
@@ -100,20 +114,24 @@ class StageStore:
                 handle.write(canonical_json(receipt) + b"\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            for item in staging.iterdir():
-                with item.open("rb") as handle:
-                    os.fsync(handle.fileno())
-            _sync(staging)
-            destination = self.directory(stage, key)
-            if destination.exists():
-                try:
-                    verify_stage(destination, stage, key, inputs)
-                    return
-                except OSError, ValueError, KeyError:
-                    # An output that fails its receipt is never kept.
-                    shutil.rmtree(destination)
-            rename_noreplace(staging, destination)
-            _sync(parent)
+            _sync_stage_files(staging)
+            self._publish(staging, stage, key, inputs)
+
+    def _publish(
+        self, staging: Path, stage: str, key: str, inputs: dict[str, Any]
+    ) -> None:
+        destination = self.directory(stage, key)
+        if destination.exists():
+            try:
+                verify_stage(destination, stage, key, inputs)
+                return
+            except OSError, ValueError, KeyError:
+                shutil.rmtree(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        rename_noreplace(staging, destination)
+        _sync(destination.parent)
+        if staging.parent != destination.parent:
+            _sync(staging.parent)
 
     def discard_incomplete(self, stage: str) -> None:
         """Clear abandoned staging directories while the caller owns the writer lock."""
@@ -154,6 +172,13 @@ def _sync(path: Path) -> None:
         os.close(descriptor)
 
 
+def _sync_stage_files(staging: Path) -> None:
+    for item in staging.iterdir():
+        with item.open("rb") as handle:
+            os.fsync(handle.fileno())
+    _sync(staging)
+
+
 def verify_stage(
     path: Path,
     stage: str,
@@ -168,7 +193,10 @@ def verify_stage(
     """
     if path.is_symlink() or not path.is_dir():
         raise ValueError(f"stage {stage} output is not a directory")
-    receipt = json.loads((path / RECEIPT).read_text(encoding="utf-8"))
+    receipt_path = path / RECEIPT
+    if receipt_path.is_symlink():
+        raise ValueError(f"stage {stage} receipt is symlinked")
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     if (
         receipt["stage"] != stage
         or receipt["key"] != key
@@ -200,6 +228,7 @@ def run_stage(
     produce: Callable[[Path, dict[str, Any]], None],
     *,
     on_reuse: Callable[[], None] | None = None,
+    retained: Path | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     """Reuse a verified output for `inputs`, or produce and publish one."""
     receipt = store.verified(stage, inputs)
@@ -207,7 +236,19 @@ def run_stage(
         if on_reuse is not None:
             on_reuse()
         return store.directory(stage, receipt["key"]), receipt["result"]
-    with store.build(stage, inputs) as (staging, result):
+    if retained is not None and (retained / RECEIPT).is_file():
+        key = store.key(inputs)
+        try:
+            receipt = verify_stage(retained, stage, key, inputs)
+        except OSError, ValueError, KeyError:
+            pass
+        else:
+            _sync_stage_files(retained)
+            store._publish(retained, stage, key, inputs)
+            if on_reuse is not None:
+                on_reuse()
+            return store.directory(stage, key), receipt["result"]
+    with store.build(stage, inputs, retained=retained) as (staging, result):
         produce(staging, result)
     path = store.directory(stage, store.key(inputs))
     return path, json.loads((path / RECEIPT).read_text(encoding="utf-8"))["result"]
