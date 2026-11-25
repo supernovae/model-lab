@@ -426,11 +426,39 @@ the input and storage. Slower storage and wider ranges remain unmeasured.
 
 The #590 review measured 3.3 to 3.5 s in serial XML selection on a
 160-member synthetic dump. Three workers reduced total time from about
-7.4 to 6.1 s, and eight workers gave no further measured gain. The
-resumability issue tracks bounded process-based XML selection, recoverable
-whole-dump planning, and measuring shared commits for consecutive members.
-Each change needs serial output parity and a measured replay bound after
-interruption. [Performance review](https://github.com/supernovae/model-lab/pull/590#discussion_r4688320386) · [Resumability follow-ups](https://github.com/supernovae/model-lab/issues/485)
+7.4 to 6.1 s, and eight workers gave no further measured gain. Bounded
+process-based XML selection and shared commits for consecutive extraction
+members remain on the resumability checklist. [Performance review](https://github.com/supernovae/model-lab/pull/590#discussion_r4688320386) · [Resumability follow-ups](https://github.com/supernovae/model-lab/issues/485)
+
+Indexed acquisition now checkpoints whole-dump verification every 64
+physical members. Each receipt binds the dump and index digests, range
+bounds, and XML context at the group boundary. The temporary payloads
+are range metadata. On retry, acquisition verifies the dump pins in one
+pass. The planner reuses that check if the file fingerprint still matches,
+and reads the entire index. It can restore the parser with the bounded
+XML header and skip decoding verified groups. The public range planner
+continues to run read-only.
+
+On the same 287 MiB official shard, a single-worker acquisition took
+50.38 s from a fresh work root. A retry after `SIGKILL` following two
+64-member verification commits took 37.38 s. It reused two of five
+groups, avoided 539.88 MiB of decompression, and made zero transport
+requests. Both runs used about 185 MiB peak RSS and 455.96 MiB of logical
+staging. Snapshot, payload, and ordered page and revision IDs matched.
+The plan digest also matched the earlier continuous scan. The files were
+local on NVMe with the operating system page cache left in place.
+
+On tmpfs, three trials on 16 MiB of synthetic page text stopped after
+the first group of a 130-member dump. An 8-page selection took a median
+0.422 s cold and 0.234 s on retry. Selecting all 256 pages took 1.160 s
+cold and 0.974 s on retry. Both selections matched their uninterrupted
+snapshot digests with zero retry requests. Run
+`tools/benchmark_acquisition_replay.py --adapter wikimedia_dump --interrupt-at plan-group`
+with `--selected-pages 8` or `--selected-pages 256` to reproduce the fixtures.
+
+Across five retries of the 8-page fixture, passing the checked dump to the
+planner reduced full-body hash reads from 17,163,290 to 8,581,645 bytes
+per attempt. Plan and payload digests matched the two-pass baseline.
 
 ## Relational Knowledge Microlab
 

@@ -179,7 +179,7 @@ need available allowance in the ledger.
 | PDF documents | Verified originals and receipted extracted text. | Transfer or extract unfinished and damaged documents as needed. Cold verification also re-extracts the published text. |
 | Tar, compressed tar or ZIP archive | A complete staged body or a verified staged derivation. The optional transport cache can supply a missing body. | An unfinished derivation repeats selection and extraction. A finished derivation is verified and published. |
 | MediaWiki dump | A complete staged body or a verified staged derivation. The optional transport cache can supply a missing body. | An unfinished derivation replays the XML stream from the start. A finished derivation is verified and published. |
-| Wikimedia dump | A verified staged body or derivation. With `multistream_index`, verified member outputs and the range plan also survive a stop. | An indexed retry decodes unfinished members as needed. Other unfinished derivations replay the XML stream from the start. Without a verified staged body or cache entry, acquisition fetches the checksum manifest and dump. |
+| Wikimedia dump | A verified staged body or derivation. With `multistream_index`, verified range groups, the complete range plan and member outputs also survive a stop. | An indexed retry rechecks the pins and decodes unfinished range groups or extraction members as needed. Other unfinished derivations replay the XML stream from the start. Without a verified staged body or cache entry, acquisition fetches the checksum manifest and dump. |
 | Deterministic or recorded-response generator | Acquisition records the declared generator identity without producing documents. | Recreate the metadata-only snapshot if it was unfinished. Generation follows the build workflow. |
 
 A hard kill can leave a transient `.acquire-*` directory containing an
@@ -241,6 +241,19 @@ Use the matching dated index and its known SHA-256. Acquisition verifies
 the entire dump at the declared decompressed-byte bound before extracting
 the selected prefix. The XML header must fit `max_header_bytes` (default
 1 MiB). Each visited member must fit the declared expanded-member bound.
+
+While building the range plan, acquisition commits verification metadata
+after each group of up to 64 physical bzip2 members. A retry checks the
+dump pins once and passes the verified file fingerprint to the planner.
+The planner reads the pinned index, verifies saved receipts, and resumes
+the XML scan from verified member boundaries. It may reread the bounded
+XML header to restore the parser context. A stop during planning loses at most
+one uncommitted group of verification work. A damaged receipt makes its
+group eligible for rebuilding. The final plan still covers every member,
+including those beyond the selected prefix. The standalone
+`corpus plan-wikimedia-ranges` command verifies both input digests itself
+and writes no checkpoint files.
+
 Selection runs in source order so the scan, selection, and output limits
 apply even inside a member. During assembly the selected JSONL exists
 both in member checkpoints and in the staged snapshot. Acquisition
@@ -1214,7 +1227,7 @@ checks all three, and that the screen covered every document of this release.
 
 | Step | Resumable after a kill? | A failure at the end costs |
 | --- | --- | --- |
-| `acquire` | yes: verified snapshots, transport cache, bounded HF selections, bounded Git blobs and pinned PDFs with extracted text receipts | incomplete HF shard, Git blob or PDF transfer or extraction, plus final verification. Other adapters replay the unfinished source. |
+| `acquire` | varies by [source adapter](#recovery-by-source-adapter) | an unfinished unit and required verification. Indexed Wikimedia planning replays at most one uncommitted verification group after a hard stop. |
 | `build` normalize | yes: per-file receipted shards | files being written |
 | `build` index, dedup | yes: receipted stage outputs ([resume](#resume-a-failed-build)) | the stage that was running |
 | `build` views and publish (native disk builder) | yes: verified append boundaries and atomic publication | uncommitted rows, prefix verification and any unfinished report or manifest pass |

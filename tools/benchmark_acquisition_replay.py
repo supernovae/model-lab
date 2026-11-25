@@ -22,7 +22,7 @@ import huggingface_hub
 import pytest
 
 from klab.canonical import canonical_digest
-from klab.corpus import acquisition
+from klab.corpus import acquisition, wikimedia_ranges
 from klab.corpus.project import load_project
 from klab.corpus.release_verify import verification_settings, worker_count
 
@@ -35,6 +35,7 @@ from corpus_fixtures import (
 MIB = 1024**2
 CACHE_CASES = {"archive", "mediawiki_dump", "wikimedia_dump", "git", "http_document"}
 DUMP_CASES = ("mediawiki_dump", "wikimedia_dump")
+INDEXED_INTERRUPTS = ("member-checkpoint", "plan-group")
 CASES = (
     "archive",
     "mediawiki_dump",
@@ -91,14 +92,16 @@ def wiki_xml(records: list[bytes], dbname: str) -> bytes:
     return output.getvalue()
 
 
-def indexed_wiki_xml(xml: bytes, index_uri: str) -> tuple[bytes, bytes, dict]:
+def indexed_wiki_xml(
+    xml: bytes, index_uri: str, pages_per_member: int
+) -> tuple[bytes, bytes, dict]:
     header, _, articles = xml.partition(b"<page>")
     pages = (b"<page>" + articles).split(b"</page>")
     footer = pages.pop()
     parts = [header]
     parts.extend(
-        b"".join(page + b"</page>" for page in pages[start : start + 100])
-        for start in range(0, len(pages), 100)
+        b"".join(page + b"</page>" for page in pages[start : start + pages_per_member])
+        for start in range(0, len(pages), pages_per_member)
     )
     parts.append(footer)
     body = io.BytesIO()
@@ -108,7 +111,8 @@ def indexed_wiki_xml(xml: bytes, index_uri: str) -> tuple[bytes, bytes, dict]:
             rows.extend(
                 f"{body.tell()}:{page}:Article {page}\n"
                 for page in range(
-                    (number - 1) * 100 + 1, min(number * 100, len(pages)) + 1
+                    (number - 1) * pages_per_member + 1,
+                    min(number * pages_per_member, len(pages)) + 1,
                 )
             )
         body.write(bz2.compress(part, compresslevel=3))
@@ -140,7 +144,8 @@ def fixture(
     size: int,
     patch: pytest.MonkeyPatch,
     *,
-    indexed: bool = False,
+    pages_per_member: int | None = None,
+    selected_pages: int | None = None,
 ):
     records = synthetic_records(size, 256 if kind in CASES[:3] else 64)
     site = "https://fixture.example"
@@ -171,8 +176,10 @@ def fixture(
             uri = f"{prefix}/{name}"
             checksum_uri = f"{prefix}/enwiki-{revision}-sha1sums.txt"
             index_uri = uri.replace("multistream1.xml", "multistream-index1.txt")
-            if indexed:
-                body, index_data, index = indexed_wiki_xml(xml, index_uri)
+            if pages_per_member is not None:
+                body, index_data, index = indexed_wiki_xml(
+                    xml, index_uri, pages_per_member
+                )
                 spec = {"multistream_index": index}
             else:
                 body = bz2.compress(xml, compresslevel=3)
@@ -181,7 +188,7 @@ def fixture(
             sha1 = hashlib.sha1(body).hexdigest()
             bodies[checksum_uri] = f"{sha1}  {name}\n".encode()
             spec.update(checksum_uri=checksum_uri, expected_sha1=sha1)
-            if indexed:
+            if pages_per_member is not None:
                 bodies[index_uri] = index_data
         else:
             uri = f"{site}/fixturewiki-{revision}.xml.gz"
@@ -197,7 +204,7 @@ def fixture(
             max_compressed_bytes=len(body),
             max_decompressed_bytes=len(xml),
             max_scanned_pages=len(records),
-            max_selected_pages=len(records),
+            max_selected_pages=selected_pages or len(records),
             max_emitted_bytes=len(xml) + size,
         )
     elif kind == "http_document":
@@ -276,10 +283,19 @@ def benchmark(
     trials: int,
     interruption: str,
     prefetch_bytes: int,
+    selected_pages: int | None,
 ) -> None:
     with pytest.MonkeyPatch.context() as patch:
+        indexed = interruption in INDEXED_INTERRUPTS
         project, http, hub, pinned_bytes = fixture(
-            root, kind, size, patch, indexed=interruption == "member-checkpoint"
+            root,
+            kind,
+            size,
+            patch,
+            pages_per_member={"plan-group": 2, "member-checkpoint": 100}.get(
+                interruption
+            ),
+            selected_pages=selected_pages,
         )
         fetches: list[str] = []
         blob_processes: list[str] = []
@@ -297,6 +313,7 @@ def benchmark(
         verify = acquisition.verify_snapshot
         iterparse = ET.iterparse
         run_stage = acquisition.run_stage
+        run_plan_stage = wikimedia_ranges.run_stage
 
         def interrupt(path, **options):
             if options.get("_staged"):
@@ -319,6 +336,12 @@ def benchmark(
                 raise Interrupted("replay benchmark")
             return result
 
+        def interrupt_plan_group(store, stage, inputs, produce, **options):
+            result = run_plan_stage(store, stage, inputs, produce, **options)
+            if stage == "wikimedia-plan-group":
+                raise Interrupted("replay benchmark")
+            return result
+
         modes = (False, True) if kind in CACHE_CASES else (False,)
         expected_digest = None
         for cached in modes:
@@ -328,7 +351,7 @@ def benchmark(
                 with tempfile.TemporaryDirectory(dir=root) as attempt:
                     trial_root = Path(attempt)
                     cold_entry = None
-                    if interruption == "member-checkpoint" and not cached:
+                    if indexed and not cached:
                         started = time.perf_counter()
                         cold_lock = acquisition.acquire(
                             project,
@@ -346,6 +369,10 @@ def benchmark(
                             fault.setattr(ET, "iterparse", interrupt_xml)
                         elif interruption == "member-checkpoint":
                             fault.setattr(acquisition, "run_stage", interrupt_member)
+                        elif interruption == "plan-group":
+                            fault.setattr(
+                                wikimedia_ranges, "run_stage", interrupt_plan_group
+                            )
                         else:
                             fault.setattr(acquisition, "verify_snapshot", interrupt)
                         try:
@@ -355,8 +382,12 @@ def benchmark(
                                 transport_cache=cache,
                                 wikimedia_prefetch_bytes=prefetch_bytes,
                             )
-                        except Interrupted:
-                            pass
+                        except (Interrupted, ValueError) as error:
+                            # The range planner wraps I/O errors.
+                            if not isinstance(error, Interrupted) and not isinstance(
+                                error.__cause__, Interrupted
+                            ):
+                                raise
                         else:
                             raise RuntimeError(
                                 "did not reach the interruption boundary"
@@ -420,6 +451,7 @@ def benchmark(
                         "warm_transport_cache": cached,
                         "worker_limit": worker_count(),
                         "wikimedia_prefetch_bytes": prefetch_bytes,
+                        "selected_pages_limit": selected_pages,
                         "median_cold_seconds": round(statistics.median(cold_elapsed), 6)
                         if cold_elapsed
                         else None,
@@ -458,18 +490,23 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--wikimedia-prefetch-bytes", type=int, default=0)
     parser.add_argument(
+        "--selected-pages", type=int, choices=range(1, 257), metavar="1..256"
+    )
+    parser.add_argument(
         "--interrupt-at",
-        choices=("prepublish", "mid-xml", "member-checkpoint"),
+        choices=("prepublish", "mid-xml", *INDEXED_INTERRUPTS),
         default="prepublish",
-        help="Stop before publication, halfway through XML, or after the first indexed member",
+        help="Stop before publication, halfway through XML, or after the first indexed member or plan group",
     )
     args = parser.parse_args()
     allowed = DUMP_CASES if args.interrupt_at == "mid-xml" else CASES
-    if args.interrupt_at == "member-checkpoint":
+    if args.interrupt_at in INDEXED_INTERRUPTS:
         allowed = ("wikimedia_dump",)
     kinds = args.adapter or allowed
     if any(kind not in allowed for kind in kinds):
         parser.error("--interrupt-at requires an eligible adapter")
+    if args.selected_pages is not None and args.interrupt_at not in INDEXED_INTERRUPTS:
+        parser.error("--selected-pages requires an indexed interruption case")
     if args.workers < 1 or args.wikimedia_prefetch_bytes < 0:
         parser.error(
             "--workers must be positive and --wikimedia-prefetch-bytes nonnegative"
@@ -492,6 +529,7 @@ def main() -> None:
                 args.trials,
                 args.interrupt_at,
                 args.wikimedia_prefetch_bytes,
+                args.selected_pages,
             )
 
 

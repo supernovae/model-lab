@@ -4,23 +4,32 @@ from __future__ import annotations
 
 import bz2
 import hashlib
+import json
 import re
 import stat
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator
+from dataclasses import asdict, dataclass
+from itertools import islice
 from pathlib import Path
+from typing import BinaryIO
 from urllib.parse import urlparse
 from xml.parsers import expat
 
 from klab.corpus.acquisition import declaration_sha256
+from klab.corpus.acquisition_parts import CheckedCheckpoint, PinnedBody
+from klab.corpus.build_stages import StageStore, implementation_digests, run_stage
 from klab.corpus.project import SourceDeclaration, WikimediaDumpAcquisition
+from klab.corpus.release_verify import current_settings
 from klab.corpus.shards import range_file_identity
-from klab.safe_io import symlinked
+from klab.safe_io import symlinked, write_canonical_json
 from klab.training.manifest import sha256_file
 
 _CHUNK = 64 * 1024
 _MAX_INDEX_LINE = 64 * 1024
 _MAX_XML_DEPTH = 64
 _MAX_IDENTIFIER = 256
+_PLAN_GROUP_MEMBERS = 64
+_PLAN_GROUP_STAGE = "wikimedia-plan-group"
 _XML_NAMESPACE = "http://www.mediawiki.org/xml/export-0.11/"
 _NS = _XML_NAMESPACE + "}"
 _XML_LANG = "http://www.w3.org/XML/1998/namespace}lang"
@@ -79,12 +88,23 @@ def wikimedia_xml_context(
     """Recover the verified prefix and its matching XML closing tag."""
     if not 0 <= plan.root_offset < plan.header_bytes <= limit:
         raise ValueError("Wikimedia XML header exceeds its byte bound")
+    prefix = _read_prefix(dump, plan.header_bytes)
+    return prefix, _closing_tag(prefix, plan.root_offset)
+
+
+def _read_prefix(dump: Path, size: int) -> bytes:
     with bz2.open(dump, "rb") as stream:
-        prefix = stream.read(plan.header_bytes)
-    tag = re.match(rb"<([A-Za-z_][A-Za-z0-9_.:-]*)[\s>]", prefix[plan.root_offset :])
-    if len(prefix) != plan.header_bytes or tag is None:
+        prefix = stream.read(size)
+    if len(prefix) != size:
+        raise ValueError("incomplete Wikimedia XML header")
+    return prefix
+
+
+def _closing_tag(prefix: bytes, root_offset: int) -> bytes:
+    tag = re.match(rb"<([A-Za-z_][A-Za-z0-9_.:-]*)[\s>]", prefix[root_offset:])
+    if tag is None:
         raise ValueError("unsupported Wikimedia XML header for indexed extraction")
-    return prefix, b"</" + tag[1] + b">"
+    return b"</" + tag[1] + b">"
 
 
 def read_wikimedia_member(
@@ -185,6 +205,14 @@ def _reject_doctype(*_args) -> None:
     raise ValueError("Wikimedia XML DTD/entities are forbidden")
 
 
+@dataclass(frozen=True)
+class _XMLBoundary:
+    root_offset: int = 0
+    header_bytes: int | None = None
+    closed: bool = False
+    cdata: bool = False
+
+
 class _WikimediaXML:
     """Check shared XML context and page IDs without materializing page text."""
 
@@ -194,10 +222,14 @@ class _WikimediaXML:
         self.parser.EndElementHandler = self.end
         self.parser.CharacterDataHandler = self.characters
         self.parser.StartDoctypeDeclHandler = _reject_doctype
+        self.parser.StartCdataSectionHandler = self.start_cdata
+        self.parser.EndCdataSectionHandler = self.end_cdata
         self.dbname = dbname
         self.elements: list[str] = []
         self.root_opened = self.root_closed = self.site_verified = False
         self.root_language = ""
+        self.byte_offset = 0
+        self.in_cdata = False
         self.root_offset = 0
         self.root_end = 0
         self.header_bytes: int | None = None
@@ -209,6 +241,39 @@ class _WikimediaXML:
         self.pages = 0
         self.page_ids = hashlib.sha256()
 
+    @property
+    def byte_index(self) -> int:
+        return self.parser.CurrentByteIndex + self.byte_offset
+
+    def boundary(self) -> _XMLBoundary:
+        return _XMLBoundary(
+            self.root_offset, self.header_bytes, self.root_closed, self.in_cdata
+        )
+
+    def start_cdata(self) -> None:
+        self.in_cdata = True
+
+    def end_cdata(self) -> None:
+        self.in_cdata = False
+
+    def resume(self, prefix: bytes, boundary: _XMLBoundary, expanded: int) -> None:
+        self.parser.Parse(prefix, False)
+        consumed = len(prefix)
+        if boundary.header_bytes is not None:
+            # Complete any buffered text immediately before the omitted first
+            # page. The parser keeps the root's namespace and site context.
+            tail = b" "
+            if boundary.closed:
+                tail += _closing_tag(prefix, boundary.root_offset)
+            elif boundary.cdata:
+                tail += b"<![CDATA["
+            self.parser.Parse(tail, False)
+            consumed += len(tail)
+            self.header_bytes = boundary.header_bytes
+        if self.boundary() != boundary or self.parser.CurrentByteIndex != consumed:
+            raise ValueError("Wikimedia XML cannot resume at its verified boundary")
+        self.byte_offset = expanded - consumed
+
     def start(self, name: str, attrs: dict[str, str]) -> None:
         depth = len(self.elements)
         if depth == _MAX_XML_DEPTH:
@@ -219,14 +284,14 @@ class _WikimediaXML:
             if name != _NS + "mediawiki":
                 raise ValueError("unsupported Wikimedia XML namespace")
             self.root_opened = True
-            self.root_offset = self.parser.CurrentByteIndex
+            self.root_offset = self.byte_index
             self.root_language = attrs.get(_XML_LANG, "")
         elif depth == 1:
             if name == _NS + "siteinfo" and not self.site_verified:
                 self.site.clear()
             elif name == _NS + "page" and self.site_verified:
                 self.page_id = None
-                offset = self.parser.CurrentByteIndex
+                offset = self.byte_index
                 if self.header_bytes is None:
                     self.header_bytes = offset
                 if self.member_page_start is None:
@@ -263,7 +328,7 @@ class _WikimediaXML:
             self.field = None
         if not self.elements:
             self.root_closed = True
-            self.root_end = self.parser.CurrentByteIndex
+            self.root_end = self.byte_index
         elif len(self.elements) == 1:
             if name == _NS + "siteinfo":
                 language = self.site.get(_NS + "lang") or self.root_language
@@ -279,78 +344,194 @@ class _WikimediaXML:
                 self.pages += 1
 
 
-def _scan_dump(
-    dump: Path,
+def _scan_members(
+    stream: BinaryIO,
     *,
     dump_size: int,
     max_expanded_bytes: int,
     max_members: int,
     xml: _WikimediaXML,
     indexed: dict[int, _PageGroup],
-) -> tuple[WikimediaRange, ...]:
-    ranges = []
-    start = expanded = 0
+    on_expanded: Callable[[int], None] | None,
+    start: int,
+    expanded: int,
+    members: int,
+) -> Iterator[WikimediaRange]:
+    stream.seek(start)
     pending = b""
-    with dump.open("rb") as stream:
-        while start < dump_size:
-            if len(ranges) == max_members:
-                raise ValueError("Wikimedia dump exceeds its member bound")
-            before = expanded
-            opened, closed = xml.root_opened, xml.root_closed
-            xml.pages, xml.page_ids = 0, hashlib.sha256()
-            xml.member_page_start = None
-            decoder = bz2.BZ2Decompressor()
-            while not decoder.eof:
-                if decoder.needs_input:
-                    compressed = pending or stream.read(
-                        min(_CHUNK, dump_size - stream.tell())
-                    )
-                    pending = b""
-                    if not compressed:
-                        raise ValueError("incomplete Wikimedia bzip2 member")
-                else:
-                    compressed = b""
-                chunk = decoder.decompress(
-                    compressed,
-                    max_length=min(_CHUNK, max_expanded_bytes - expanded + 1),
+    while start < dump_size:
+        if members == max_members:
+            raise ValueError("Wikimedia dump exceeds its member bound")
+        before = expanded
+        opened, closed = xml.root_opened, xml.root_closed
+        xml.pages, xml.page_ids = 0, hashlib.sha256()
+        xml.member_page_start = None
+        decoder = bz2.BZ2Decompressor()
+        while not decoder.eof:
+            if decoder.needs_input:
+                compressed = pending or stream.read(
+                    min(_CHUNK, dump_size - stream.tell())
                 )
-                expanded += len(chunk)
-                if expanded > max_expanded_bytes:
-                    raise ValueError("Wikimedia dump exceeds its expanded byte bound")
-                xml.parser.Parse(chunk, False)
-            end = stream.tell() - len(decoder.unused_data)
-            pending = decoder.unused_data
-            if len(xml.elements) > 1 or xml.parser.CurrentByteIndex != expanded:
-                raise ValueError("Wikimedia XML crosses a compressed member boundary")
-            group = _PageGroup(xml.pages, xml.page_ids.hexdigest())
-            expected = indexed.pop(start, None)
-            if expected != (group if xml.pages else None):
-                raise ValueError(
-                    f"Wikimedia index page IDs or offset differ at member {start}"
-                )
-            ranges.append(
-                WikimediaRange(
-                    start,
-                    end,
-                    expanded - before,
-                    group.count,
-                    group.sha256,
-                    xml.root_opened and not opened,
-                    xml.root_closed and not closed,
-                    xml.member_page_start - before
-                    if xml.member_page_start is not None
-                    else None,
-                    (xml.root_end if xml.root_closed and not closed else expanded)
-                    - before
-                    if xml.member_page_start is not None
-                    else None,
-                )
+                pending = b""
+                if not compressed:
+                    raise ValueError("incomplete Wikimedia bzip2 member")
+            else:
+                compressed = b""
+            chunk = decoder.decompress(
+                compressed,
+                max_length=min(_CHUNK, max_expanded_bytes - expanded + 1),
             )
-            start = end
-    xml.parser.Parse(b"", True)
-    if indexed or not xml.site_verified or not xml.root_closed:
-        raise ValueError("Wikimedia index or XML context is incomplete")
-    return tuple(ranges)
+            expanded += len(chunk)
+            if expanded > max_expanded_bytes:
+                raise ValueError("Wikimedia dump exceeds its expanded byte bound")
+            xml.parser.Parse(chunk, False)
+        end = stream.tell() - len(decoder.unused_data)
+        pending = decoder.unused_data
+        if len(xml.elements) > 1 or xml.byte_index != expanded:
+            raise ValueError("Wikimedia XML crosses a compressed member boundary")
+        group = _PageGroup(xml.pages, xml.page_ids.hexdigest())
+        if indexed.get(start) != (group if xml.pages else None):
+            raise ValueError(
+                f"Wikimedia index page IDs or offset differ at member {start}"
+            )
+        if end == dump_size:
+            xml.parser.Parse(b"", True)
+            if not xml.site_verified or not xml.root_closed:
+                raise ValueError("Wikimedia index or XML context is incomplete")
+        if on_expanded is not None:
+            on_expanded(expanded - before)
+        yield WikimediaRange(
+            start,
+            end,
+            expanded - before,
+            group.count,
+            group.sha256,
+            xml.root_opened and not opened,
+            xml.root_closed and not closed,
+            xml.member_page_start - before
+            if xml.member_page_start is not None
+            else None,
+            (xml.root_end if xml.root_closed and not closed else expanded) - before
+            if xml.member_page_start is not None
+            else None,
+        )
+        start = end
+        members += 1
+
+
+def _scan_dump(
+    dump: Path,
+    *,
+    dump_size: int,
+    max_expanded_bytes: int,
+    max_members: int,
+    dbname: str,
+    indexed: dict[int, _PageGroup],
+    on_expanded: Callable[[int], None] | None,
+    store: StageStore | None,
+    inputs: dict,
+    max_header_bytes: int | None,
+    check_inputs: Callable[[], None],
+) -> tuple[tuple[WikimediaRange, ...], _XMLBoundary]:
+    boundary = _XMLBoundary()
+    start = expanded = 0
+    ranges: list[WikimediaRange] = []
+    xml = _WikimediaXML(dbname)
+
+    def scan(stream: BinaryIO) -> Iterator[WikimediaRange]:
+        return _scan_members(
+            stream,
+            dump_size=dump_size,
+            max_expanded_bytes=max_expanded_bytes,
+            max_members=max_members,
+            xml=xml,
+            indexed=indexed,
+            on_expanded=on_expanded,
+            start=start,
+            expanded=expanded,
+            members=len(ranges),
+        )
+
+    with dump.open("rb") as stream:
+        scanner = scan(stream)
+        if store is None:
+            return tuple(scanner), xml.boundary()
+        assert max_header_bytes is not None
+        stage = _PLAN_GROUP_STAGE
+        store.prune(
+            stage, keep=(max_members + _PLAN_GROUP_MEMBERS - 1) // _PLAN_GROUP_MEMBERS
+        )
+        reused = groups = 0
+        prefix: bytes | None = None
+
+        def produce(staging: Path, _result: dict) -> None:
+            nonlocal scanner, xml, prefix
+            if scanner is None:
+                xml = _WikimediaXML(dbname)
+                prefix_size = (
+                    boundary.header_bytes
+                    if boundary.header_bytes is not None
+                    else expanded
+                )
+                if prefix is None or len(prefix) != prefix_size:
+                    prefix = _read_prefix(dump, prefix_size)
+                    if on_expanded is not None:
+                        on_expanded(len(prefix))
+                xml.resume(prefix, boundary, expanded)
+                scanner = scan(stream)
+            group = list(islice(scanner, _PLAN_GROUP_MEMBERS))
+            context = xml.boundary()
+            end_expanded = expanded + sum(member.expanded_bytes for member in group)
+            header_size = (
+                context.header_bytes
+                if context.header_bytes is not None
+                else end_expanded
+            )
+            if header_size > max_header_bytes:
+                raise ValueError("Wikimedia XML header exceeds its byte bound")
+            check_inputs()
+            write_canonical_json(
+                staging / "ranges.json",
+                {
+                    "ranges": [asdict(member) for member in group],
+                    "xml": asdict(context),
+                },
+            )
+
+        def resume_group() -> None:
+            nonlocal scanner, reused
+            scanner = None
+            reused += 1
+
+        while start < dump_size:
+            path, _ = run_stage(
+                store,
+                stage,
+                {
+                    **inputs,
+                    "start": start,
+                    "expanded": expanded,
+                    "members": len(ranges),
+                    "xml": asdict(boundary),
+                },
+                produce,
+                on_reuse=resume_group,
+            )
+            record = json.loads((path / "ranges.json").read_bytes())
+            group = [WikimediaRange(**member) for member in record["ranges"]]
+            ranges.extend(group)
+            boundary = _XMLBoundary(**record["xml"])
+            start = group[-1].end
+            expanded += sum(member.expanded_bytes for member in group)
+            groups += 1
+        echo = current_settings().echo
+        if echo is not None:
+            print(
+                f"Wikimedia range verification: reused {reused}/{groups} groups",
+                file=echo,
+                flush=True,
+            )
+    return tuple(ranges), boundary
 
 
 def plan_wikimedia_ranges(
@@ -362,6 +543,9 @@ def plan_wikimedia_ranges(
     max_index_bytes: int,
     max_index_expanded_bytes: int,
     max_members: int,
+    checkpoint_store: StageStore | None = None,
+    on_expanded: Callable[[int], None] | None = None,
+    verified_dump: CheckedCheckpoint[PinnedBody] | None = None,
 ) -> WikimediaRangePlan:
     """Check local pinned bytes, then verify each bzip2 member against the index."""
     spec = source.acquisition
@@ -372,15 +556,33 @@ def plan_wikimedia_ranges(
         raise ValueError("Wikimedia index requires a SHA-256 pin")
     if min(max_index_bytes, max_index_expanded_bytes, max_members) < 1:
         raise ValueError("Wikimedia index bounds must be positive")
+    index_options = spec.multistream_index
+    if checkpoint_store is not None and index_options is None:
+        raise ValueError(
+            "Wikimedia range checkpoints need a declared multistream index"
+        )
+    declaration = declaration_sha256(source)
     try:
         initial = (
             _bounded_identity(dump, spec.max_compressed_bytes),
             _bounded_identity(index, max_index_bytes),
         )
+
+        def check_inputs() -> None:
+            if (range_file_identity(dump), range_file_identity(index)) != initial:
+                raise ValueError("Wikimedia range input changed during verification")
+
         dump_size = initial[0][2]
-        sha1 = hashlib.sha1()
-        sha256 = sha256_file(dump, hash_chunk=sha1.update)
-        if sha1.hexdigest() != spec.expected_sha1.lower() or (
+        if verified_dump is None:
+            sha1_hasher = hashlib.sha1()
+            sha256 = sha256_file(dump, hash_chunk=sha1_hasher.update)
+            sha1 = sha1_hasher.hexdigest()
+        else:
+            body = verified_dump.value
+            if body.size != dump_size or not verified_dump.matches(dump):
+                raise ValueError("Wikimedia dump changed after pin verification")
+            sha256, sha1 = body.sha256, body.sha1
+        if sha1 != spec.expected_sha1.lower() or (
             spec.expected_sha256 is not None and sha256 != spec.expected_sha256.lower()
         ):
             raise ValueError("Wikimedia dump digest differs from the declaration")
@@ -394,23 +596,44 @@ def plan_wikimedia_ranges(
             max_members=max_members,
         )
         dbname = urlparse(source.canonical_uri).path.split("/")[1]
-        xml = _WikimediaXML(dbname)
-        ranges = _scan_dump(
+        inputs = (
+            {
+                "declaration_sha256": declaration,
+                "dump_sha256": sha256,
+                "index_sha256": index_digest,
+                "index_bounds": (
+                    max_index_bytes,
+                    max_index_expanded_bytes,
+                    max_members,
+                ),
+                "group_members": _PLAN_GROUP_MEMBERS,
+                "planner": implementation_digests(Path(__file__).name),
+            }
+            if checkpoint_store is not None
+            else {}
+        )
+        ranges, xml = _scan_dump(
             dump,
             dump_size=dump_size,
             max_expanded_bytes=spec.max_decompressed_bytes,
             max_members=max_members,
-            xml=xml,
+            dbname=dbname,
             indexed=indexed,
+            on_expanded=on_expanded,
+            store=checkpoint_store,
+            inputs=inputs,
+            max_header_bytes=index_options.max_header_bytes if index_options else None,
+            check_inputs=check_inputs,
         )
-        if (range_file_identity(dump), range_file_identity(index)) != initial:
-            raise ValueError("Wikimedia range input changed during verification")
+        if sum(bool(member.pages) for member in ranges) != len(indexed):
+            raise ValueError("Wikimedia index or XML context is incomplete")
+        check_inputs()
     except (OSError, EOFError, expat.ExpatError) as error:
         raise ValueError(f"cannot verify Wikimedia dump or index: {error}") from error
     assert xml.header_bytes is not None
     return WikimediaRangePlan(
         source.id,
-        declaration_sha256(source),
+        declaration,
         sha256,
         index_digest,
         dump_size,
