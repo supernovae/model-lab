@@ -442,6 +442,7 @@ def _run(args: argparse.Namespace) -> None:
                 require_existing=args.require_existing,
                 transport_cache=args.transport_cache,
                 wikimedia_prefetch_bytes=args.wikimedia_prefetch_bytes,
+                wikimedia_parse_bytes=args.wikimedia_parse_bytes,
                 **verification,
             )
             if args.require_existing:
@@ -646,6 +647,13 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
                 default=0,
                 metavar="N",
                 help="Additional expanded bytes for indexed Wikimedia decode lookahead (default 0)",
+            )
+            command.add_argument(
+                "--wikimedia-parse-bytes",
+                type=int,
+                default=0,
+                metavar="N",
+                help="Candidate JSONL bytes across Wikimedia parse workers (default 0, decode only)",
             )
             command.add_argument(
                 "--summary",

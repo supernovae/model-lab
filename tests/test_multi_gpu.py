@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import errno
 import json
 import logging
 import os
 import random
+import socket
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -840,10 +842,28 @@ def _assert_sharded_matches_one_device(
     ],
 )
 def test_sharded_training_matches_one_device_and_crosses_layouts(
-    tmp_path: Path, mode: str, options: dict[str, object]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    options: dict[str, object],
 ) -> None:
     """Every mode trains like one device, and checkpoints load across layouts."""
+    init_group = torch.distributed.init_process_group
+    held_ports = []
+
+    def check_listener(*args, store: torch.distributed.TCPStore, **kwargs):
+        with (
+            socket.socket() as contender,
+            pytest.raises(OSError) as busy,
+        ):
+            contender.bind(("127.0.0.1", store.port))
+        assert busy.value.errno == errno.EADDRINUSE
+        held_ports.append(store.port)
+        return init_group(*args, store=store, **kwargs)
+
+    monkeypatch.setattr(torch.distributed, "init_process_group", check_listener)
     _assert_sharded_matches_one_device(tmp_path, mode, options, "cpu", (0,))
+    assert held_ports
 
 
 @pytest.mark.xpu
@@ -1025,7 +1045,7 @@ def test_a_worker_rank_does_not_keep_the_unsharded_weights(
         torch.device("cpu"),
         0,
         1,
-        f"tcp://127.0.0.1:{sharded._free_port()}",
+        dist.HashStore(),
         state,
     )
     try:

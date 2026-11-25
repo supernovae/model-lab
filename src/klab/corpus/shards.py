@@ -31,6 +31,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
+from threading import Thread
 from typing import Any
 
 from klab.corpus.build_stages import StageStore, run_stage
@@ -78,6 +79,7 @@ class ShardPlan:
     worker_memory_bytes: int = 512 * 1024**2
     threaded: bool = False
     operator_cap: int | None = None
+    min_parallel_bytes: int | None = None
 
 
 def chunk_ranges(path: Path) -> list[tuple[int, int]]:
@@ -194,6 +196,17 @@ def _limit_native_threads() -> None:
         )
     )
 
+    parent = multiprocessing.parent_process()
+    if parent is not None:
+
+        def exit_with_coordinator() -> None:
+            parent.join()
+            os._exit(1)
+
+        # A hard stop cannot shut down the pool. Waiting on the coordinator's
+        # process sentinel also wakes workers blocked on an empty work queue.
+        Thread(target=exit_with_coordinator, daemon=True).start()
+
 
 @contextmanager
 def _worker_pool(workers: int, *, threaded: bool):
@@ -219,36 +232,47 @@ def _pool_results(
     ordered: bool,
     *,
     threaded: bool,
+    on_discarded: Callable[[Any], None] | None,
 ) -> Iterator[tuple[tuple, Any, bool]]:
     """Keep at most one running, completed or cached result per slot."""
     pending: dict[Future, tuple[tuple, bool]] = {}
-    with _worker_pool(workers, threaded=threaded) as pool:
-        try:
-            while True:
-                for task, cached in jobs:
-                    if cached is None:
-                        future = pool.submit(function, *task)
+    try:
+        with _worker_pool(workers, threaded=threaded) as pool:
+            try:
+                while True:
+                    for task, cached in jobs:
+                        if cached is None:
+                            future = pool.submit(function, *task)
+                        else:
+                            future = Future()
+                            future.set_result(cached)
+                        pending[future] = (task, cached is not None)
+                        del cached
+                        if len(pending) == workers:
+                            break
+                    if not pending:
+                        return
+                    if len(pending) == 1 or ordered:
+                        ready = (next(iter(pending)),)
                     else:
-                        future = Future()
-                        future.set_result(cached)
-                    pending[future] = (task, cached is not None)
-                    del cached
-                    if len(pending) == workers:
-                        break
-                if not pending:
-                    return
-                if len(pending) == 1 or ordered:
-                    ready = (next(iter(pending)),)
-                else:
-                    ready = wait(pending, return_when=FIRST_COMPLETED).done
-                for future in ready:
-                    task, reused = pending.pop(future)
-                    yield task, future.result(), reused
-                # Futures retain their result even after they leave the window.
-                del ready, future
-        finally:
+                        ready = wait(pending, return_when=FIRST_COMPLETED).done
+                    for future in ready:
+                        task, reused = pending.pop(future)
+                        yield task, future.result(), reused
+                    # Futures retain their result even after they leave the window.
+                    del ready, future
+            finally:
+                for future in pending:
+                    future.cancel()
+    finally:
+        if on_discarded is not None:
             for future in pending:
-                future.cancel()
+                if (
+                    future.done()
+                    and not future.cancelled()
+                    and future.exception() is None
+                ):
+                    on_discarded(future.result())
 
 
 def _run_sharded(
@@ -258,6 +282,7 @@ def _run_sharded(
     save: Callable[[tuple, Any], None] | None,
     *,
     ordered: bool,
+    on_discarded: Callable[[Any], None] | None = None,
 ) -> Iterator[Any]:
     if plan.stage not in STAGES:
         raise ValueError(f"stage {plan.stage!r} is not declared with declare_stage")
@@ -265,10 +290,15 @@ def _run_sharded(
     workers = min(worker_count(), len(plan.tasks))
     if plan.operator_cap is not None:
         workers = min(workers, plan.operator_cap)
+    threshold = (
+        PARALLEL_MIN_BYTES
+        if plan.min_parallel_bytes is None
+        else plan.min_parallel_bytes
+    )
     if (
         workers < 2
         or isinstance(declared, Single)
-        or (not plan.threaded and plan.total_bytes < PARALLEL_MIN_BYTES)
+        or (not plan.threaded and plan.total_bytes < threshold)
     ):
         workers = 1
     else:
@@ -297,7 +327,14 @@ def _run_sharded(
             for task, cached in jobs
         )
         if workers == 1
-        else _pool_results(function, jobs, workers, ordered, threaded=plan.threaded)
+        else _pool_results(
+            function,
+            jobs,
+            workers,
+            ordered,
+            threaded=plan.threaded,
+            on_discarded=on_discarded,
+        )
     )
     try:
         for task, result, from_cache in results:
@@ -328,9 +365,17 @@ def _run_sharded(
 
 
 def run_sharded(
-    plan: ShardPlan, function: Callable[..., Any], *, ordered: bool = False
+    plan: ShardPlan,
+    function: Callable[..., Any],
+    *,
+    ordered: bool = False,
+    on_discarded: Callable[[Any], None] | None = None,
 ) -> Iterator[Any]:
-    """Yield bounded results in plan order or as they finish, checkpointing JSON to store."""
+    """Yield bounded results and account for completed lookahead on close.
+
+    The optional callback receives successful results the consumer did not use.
+    They are reported after the pool joins, without saving them to the store.
+    """
     store = plan.store
     if store is not None:
         store.mkdir(parents=True, exist_ok=True)
@@ -342,7 +387,9 @@ def run_sharded(
         assert store is not None
         _commit(store / f"{_key(plan, task)}.json", result)
 
-    yield from _run_sharded(plan, function, load, save, ordered=ordered)
+    yield from _run_sharded(
+        plan, function, load, save, ordered=ordered, on_discarded=on_discarded
+    )
 
 
 def _file_inputs(stage: str, inputs: dict[str, Any], task: tuple) -> dict[str, Any]:

@@ -29,7 +29,6 @@ worker a command and runs the same operation itself (:meth:`ShardGroup.run`).
 from __future__ import annotations
 
 import math
-import socket
 import time
 from collections.abc import Callable, Iterable
 from datetime import timedelta
@@ -70,14 +69,9 @@ PROCESS_GROUP_BACKEND = {
 }
 # A rank that dies or stalls leaves the others inside a collective; this bounds it.
 _GROUP_TIMEOUT = timedelta(minutes=20)
+_RENDEZVOUS_HOST = "127.0.0.1"
 # Seconds a worker may take to build its model and report ready.
 _READY_SECONDS = 1800.0
-
-
-def _free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
 
 
 def _route_through_call(module: torch.nn.Module) -> None:
@@ -172,7 +166,7 @@ class ShardedRank:
         backend: str,
         rank: int,
         world_size: int,
-        init_method: str,
+        store: dist.Store,
         model: DenseLM,
         device: torch.device,
         compiled_output_head_loss: Any = None,
@@ -186,7 +180,7 @@ class ShardedRank:
             getattr(torch, device.type).set_device(device)
         dist.init_process_group(
             PROCESS_GROUP_BACKEND[backend],
-            init_method=init_method,
+            store=store,
             rank=rank,
             world_size=world_size,
             timeout=_GROUP_TIMEOUT,
@@ -388,7 +382,7 @@ def build_worker_rank(
     device: torch.device,
     rank: int,
     world_size: int,
-    init_method: str,
+    store: dist.Store,
     state: dict[str, torch.Tensor],
     *,
     built: Callable[[], None] = lambda: None,
@@ -406,7 +400,7 @@ def build_worker_rank(
     model, compiled_loss = replica.model, replica.compiled_output_head_loss
     del replica
     return ShardedRank(
-        config, backend, rank, world_size, init_method, model, device, compiled_loss
+        config, backend, rank, world_size, store, model, device, compiled_loss
     )
 
 
@@ -417,19 +411,22 @@ def _shard_worker_main(
     device_index: int,
     rank: int,
     world_size: int,
-    init_method: str,
+    rendezvous_port: int,
     state: dict[str, torch.Tensor],
 ) -> None:
     """A non-primary rank: build its shard of the model, then obey commands."""
     try:
         device = torch_device_for(backend, device_index)
+        store = dist.TCPStore(
+            _RENDEZVOUS_HOST, rendezvous_port, world_size, timeout=_GROUP_TIMEOUT
+        )
         worker = build_worker_rank(
             config,
             backend,
             device,
             rank,
             world_size,
-            init_method,
+            store,
             state,
             built=lambda: connection.send(("built", None)),
         )
@@ -481,7 +478,6 @@ class ShardGroup:
     ) -> None:
         indices = config.runtime.secondary_device_indices
         self.world_size = 1 + len(indices)
-        init_method = f"tcp://127.0.0.1:{_free_port()}"
         state = {
             name: tensor.detach().cpu().share_memory_()
             for name, tensor in model.state_dict().items()
@@ -489,6 +485,16 @@ class ShardGroup:
         self.replicas: list[ReplicaProcess] = []
         self.rank: ShardedRank | None = None
         try:
+            # Hold the kernel-assigned listener through rank startup. A port
+            # probed and closed here could be claimed before rank 0 joins.
+            store = dist.TCPStore(
+                _RENDEZVOUS_HOST,
+                0,
+                self.world_size,
+                is_master=True,
+                timeout=_GROUP_TIMEOUT,
+                wait_for_workers=False,
+            )
             for rank, device_index in enumerate(indices, start=1):
                 self.replicas.append(
                     spawn_replica_process(
@@ -499,7 +505,7 @@ class ShardGroup:
                             device_index,
                             rank,
                             self.world_size,
-                            init_method,
+                            store.port,
                             state,
                         ),
                         backend,
@@ -515,7 +521,7 @@ class ShardGroup:
                 backend,
                 0,
                 self.world_size,
-                init_method,
+                store,
                 model,
                 device,
                 compiled_output_head_loss,
