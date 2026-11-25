@@ -41,7 +41,11 @@ from klab.corpus.build_outputs import (
 )
 from klab.corpus.build_stages import StageStore, implementation_digests, run_stage
 from klab.corpus.duplicate_evidence import source_rank
-from klab.corpus.prepared_shards import SourceParseError, prepare_file
+from klab.corpus.prepared_shards import (
+    SourceParseError,
+    prepare_file,
+    prepared_file_exists,
+)
 from klab.corpus.progress import BuildProgress, memory_bytes
 from klab.corpus.project import (
     ROW_SOURCE_KINDS,
@@ -100,14 +104,21 @@ class _ShardProgress:
     def __init__(self) -> None:
         self.documents = 0
         self.input_bytes = 0
+        self.input_bytes_reused = 0
         self.output_records = 0
         self.reused = False
 
     def update(
-        self, *, documents: int = 0, input_bytes: int = 0, output_records: int = 0
+        self,
+        *,
+        documents: int = 0,
+        input_bytes: int = 0,
+        input_bytes_reused: int = 0,
+        output_records: int = 0,
     ) -> None:
         self.documents += documents
         self.input_bytes += input_bytes
+        self.input_bytes_reused += input_bytes_reused
         self.output_records += output_records
 
     def record(self, event: str) -> None:
@@ -115,7 +126,7 @@ class _ShardProgress:
             self.reused = True
 
 
-def _prepare_shard(**kwargs: Any) -> tuple[Path, int, int, int, bool]:
+def _prepare_shard(**kwargs: Any) -> tuple[Path, _ShardProgress]:
     progress = _ShardProgress()
     try:
         shard = prepare_file(**kwargs, progress=progress)
@@ -124,13 +135,7 @@ def _prepare_shard(**kwargs: Any) -> tuple[Path, int, int, int, bool]:
         error.input_bytes = progress.input_bytes
         error.output_records = progress.output_records
         raise
-    return (
-        shard,
-        progress.documents,
-        progress.input_bytes,
-        progress.output_records,
-        progress.reused,
-    )
+    return shard, progress
 
 
 def _process_shard_workers(count: int) -> int:
@@ -857,6 +862,7 @@ def build_large(
     target: Path,
     progress: BuildProgress,
     *,
+    prepared_root: Path,
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
     record_admission: dict | None = None,
@@ -875,7 +881,8 @@ def build_large(
 
     root = workspace / "builds"
     root.mkdir(parents=True, exist_ok=True)
-    prepared_root = root / "prepared" / "normalized-source-v2"
+    if canary is not None:
+        prepared_root = root / "prepared"
     prepared_root.mkdir(parents=True, exist_ok=True)
     sources = sorted(project.sources, key=lambda source: source.id)
     transform = project.transforms[0]
@@ -917,6 +924,33 @@ def build_large(
                 total_bytes += file["size"]
     progress.expected_input_bytes = total_bytes
     progress.update(phase="normalizing")
+
+    def cached_jsonl(source, file, lock_row, nested_metadata):
+        rights = (
+            resolve_file_rights(
+                source.rights,
+                file["path"],
+                b"",
+                nested_metadata=nested_metadata,
+                prospective_private_research=(
+                    project.release.policy.rights.training_use
+                    == "allowed_unless_explicitly_prohibited"
+                ),
+            )
+            if source.rights
+            else None
+        )
+        return prepared_file_exists(
+            prepared_root,
+            source,
+            lock_row["snapshot_sha256"],
+            file,
+            project.release.normalizer,
+            project.release.policy.documents,
+            rights,
+            canary.rows_per_file if canary is not None else None,
+        )
+
     eligible_jsonl = {
         path
         for source, file, path, lock_row, nested_metadata in inputs
@@ -924,13 +958,11 @@ def build_large(
         and file["path"].endswith(".jsonl")
         and file["size"] >= _PROCESS_SHARD_MIN_BYTES
         and file["path"] not in nested_metadata
+        and not record_admission
         # Cached sources reach exact identity/rights checking in prepare_file.
         # Do not pre-scan their bodies merely to choose parallel workers.
-        and not (prepared_root / source.id).exists()
+        and not cached_jsonl(source, file, lock_row, nested_metadata)
     }
-    if record_admission:
-        # Operation-local SQLite decisions must stay in their owning process.
-        eligible_jsonl.clear()
     workers = _process_shard_workers(len(eligible_jsonl))
     if workers > 1:
         eligible_jsonl = {path for path in eligible_jsonl if _bounded_jsonl_shard(path)}
@@ -939,14 +971,14 @@ def build_large(
         ProcessPoolExecutor(max_workers=workers) if workers > 1 else nullcontext(None)
     )
     sampled: dict[str, tuple[int, int]] = {}
-    pending: deque[
-        tuple[Future[tuple[Path, int, int, int, bool]], Any, dict[str, Any]]
-    ] = deque()
+    pending: deque[tuple[Future[tuple[Path, _ShardProgress]], Any, dict[str, Any]]] = (
+        deque()
+    )
 
     def finish_one() -> None:
         future, source, file = pending.popleft()
         try:
-            shard, documents, input_bytes, output_records, reused = future.result()
+            shard, counters = future.result()
         except SourceParseError as exc:
             source_events.append(
                 {"source_id": source.id, "path": file["path"], "reason": str(exc)}
@@ -959,9 +991,12 @@ def build_large(
             progress.record("source_rejected")
             return
         progress.update(
-            documents=documents, input_bytes=input_bytes, output_records=output_records
+            documents=counters.documents,
+            input_bytes=counters.input_bytes,
+            input_bytes_reused=counters.input_bytes_reused,
+            output_records=counters.output_records,
         )
-        if reused:
+        if counters.reused:
             progress.record("reused_verified_shard")
         prepared.append(shard)
         source_events.append(shard)
@@ -1039,7 +1074,6 @@ def build_large(
                 "decision": decision,
                 "snapshot_sha": lock_row["snapshot_sha256"],
                 "prepared_root": prepared_root,
-                "build_id": build_id,
                 "record_admission": admitted,
                 "admission_sha256": project.release.record_admission.sha256.lower()
                 if admitted is not None

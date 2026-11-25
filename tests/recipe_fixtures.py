@@ -255,7 +255,7 @@ def _git(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def _commit(repo: Path, files: dict[str, str]) -> str:
+def commit_git_fixture(repo: Path, files: dict[str, str]) -> str:
     repo.mkdir(parents=True)
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "test@example.test")
@@ -620,7 +620,7 @@ def write_recipe(
 
     def git_source(name: str, files: dict[str, str], include: list[str], spdx: str):
         repo = root / "git" / name
-        commit = _commit(repo, files)
+        commit = commit_git_fixture(repo, files)
         sources[name] = {
             "id": name,
             "kind": "git",
