@@ -23,6 +23,13 @@ from klab.safe_io import database_byte_cap, symlinked
 
 _MAX_INPUT_BYTES = 256 * 1024**2
 _STRING_SPECIAL = re.compile(rb'["\\]')
+_INVENTORY_READ_BYTES = 64 * 1024
+# Acquisition emits these compact selected-row objects with sorted keys.
+# Requiring a comma leaves the final row and closing bracket to the JSON parser.
+_CANONICAL_SELECTED_ROWS = re.compile(
+    rb'(?:\{"selection_hash":"[0-9a-f]{64}","source_row_index":(?:0|[1-9][0-9]{0,19}),'
+    rb'"source_row_sha256":"[0-9a-f]{64}"\},)+'
+)
 _REUSED_INPUTS = 128
 _REUSED_HEADER_BYTES = 8 * 1024**2  # Eviction budget, not a workload/RSS limit.
 
@@ -370,10 +377,13 @@ class _Reader:
         self.offset = self.total = self.header = 0
         self.row_bytes = None
         self.inventory_only = inventory_only
+        self.read_bytes = _INVENTORY_READ_BYTES if inventory_only else 4096
 
     def peek(self):
         if self.offset == len(self.buffer):
-            self.buffer = self.stream.read(min(4096, self.input_limit - self.total + 1))
+            self.buffer = self.stream.read(
+                min(self.read_bytes, self.input_limit - self.total + 1)
+            )
             self.offset = 0
         return self.buffer[self.offset : self.offset + 1]
 
@@ -493,11 +503,24 @@ class _Reader:
         if char == b"[":
             self.take()
             result = self.store.new_rows() if spill and not self.inventory_only else []
+            batch_selected_rows = (
+                spill
+                and self.inventory_only
+                and path[-1] == "selected_rows"
+                and self.row_limit >= self.read_bytes
+            )
             self.whitespace()
             if self.peek() == b"]":
                 self.take()
                 return result
             while True:
+                if batch_selected_rows:
+                    self.peek()
+                    match = _CANONICAL_SELECTED_ROWS.match(self.buffer, self.offset)
+                    if match is not None:
+                        with self.record():
+                            self.take_run(match.end() - self.offset)
+                        continue
                 if spill:
                     with self.record():
                         item = self.value(depth + 1, path=(*path, None))

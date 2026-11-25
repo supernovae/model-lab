@@ -721,11 +721,20 @@ cache location exists. Build verifies the snapshots and candidate shard
 outputs before reuse. Candidate source byte counts describe the inputs
 associated with those locations. They do not estimate verification I/O.
 
-On a local synthetic scanner workload, 50,000 selected-row receipt entries
-(9.89 MB) took 1.04 s and 250,000 entries (49.64 MB) took 4.29 s. Peak
-process RSS was 22.9 MiB across both scans. These timings cover metadata
-parsing, with no payload reads or temporary database. A production receipt
-inventory still needs its own measurement.
+Planning scans compact Hugging Face selected-row receipts in bounded batches.
+Other valid formatting uses the same strict JSON parser used for the inventory.
+Two warm scans per size on a local synthetic workload measured:
+
+| Selected rows | Metadata read | Per-row parser | Batched scan |
+| --- | ---: | ---: | ---: |
+| 50,000 | 9.89 MB | 0.85–0.87 s | 0.015–0.016 s |
+| 250,000 | 49.64 MB | 3.97–4.52 s | 0.077 s |
+| 1,250,000 | 248.89 MB | 21.98–22.03 s | 0.39–0.47 s |
+
+Peak process RSS was 22.0 MiB with the per-row parser and 22.2 MiB with
+batching. These scans read each metadata file once and use no payload or
+scratch I/O. Measure end-to-end planning separately on a production
+inventory, where storage and the fraction of rows in compact form matter.
 
 `build` normalizes admitted documents, applies the frozen splits, removes exact
 duplicates (refusing cross-split or incompatible-rights duplicates) and writes
