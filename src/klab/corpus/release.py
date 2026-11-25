@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.bounded_metadata import metadata_operation, read_metadata
-from klab.corpus.jsonl_records import iter_rows, read_rows
+from klab.corpus.jsonl_records import read_rows
 from klab.corpus.project import NormalizerOptions
 from klab.corpus.quota import require_estimated_supply
 from klab.corpus.release_receipt import receipt_first
@@ -31,6 +31,7 @@ from klab.corpus.release_verify import (
     scratch_root,
 )
 from klab.corpus.shards import chunk_ranges, range_file_identity, run_tasks
+from klab.corpus.split_assignments import document_assignments
 from klab.experiments.artifacts import snapshot_dependencies
 from klab.safe_io import read_file_range
 from klab.training.manifest import sha256_file
@@ -890,27 +891,42 @@ def _validate_rows_streaming(
             )
             db.commit()
 
-            total = phase("documents", documents_path)
-            run_tasks(
-                _document_rows,
-                (
-                    (
-                        span_database,
-                        str(documents_path),
-                        start,
-                        end,
-                        options,
-                        tuple(identity["release"]["policy"]["duplicates"]["keys"]),
+            with ExitStack() as assignment_scope:
+                if identity["split"].get("assignment_file") is not None:
+                    if progress is not None:
+                        progress.start_phase("document_assignments")
+                    assignment_scope.enter_context(
+                        metadata_operation(Path(temporary), max_database_bytes=None)
                     )
-                    for start, end in chunk_ranges(documents_path)
-                ),
-                lambda result: (
-                    load("docs", result[0], 15),
-                    load("duplicate_keys", result[1], 2),
-                    advance(len(result[0]), result[2]),
-                ),
-                total_bytes=total,
-            )
+                assignments = document_assignments(root, identity)
+
+                def load_documents(result):
+                    rows, duplicate_keys, size = result
+                    if assignments is not None:
+                        # The worker already projected the document ID and split.
+                        for row in rows:
+                            assignments.verify_document(row[0], row[2])
+                    load("docs", rows, 15)
+                    load("duplicate_keys", duplicate_keys, 2)
+                    advance(len(rows), size)
+
+                total = phase("documents", documents_path)
+                run_tasks(
+                    _document_rows,
+                    (
+                        (
+                            span_database,
+                            str(documents_path),
+                            start,
+                            end,
+                            options,
+                            tuple(identity["release"]["policy"]["duplicates"]["keys"]),
+                        )
+                        for start, end in chunk_ranges(documents_path)
+                    ),
+                    load_documents,
+                    total_bytes=total,
+                )
             db.commit()
             _unique_index(db, "docs_id", "docs", "id", "duplicate document identity")
             if (
@@ -1204,10 +1220,13 @@ def _validate_rows_stored(
     document_map = row_index(
         root / "documents.jsonl", "document_id", duplicate="duplicate document identity"
     )
+    assignments = document_assignments(root, identity)
     for doc in document_map.values():
         if doc["content_sha256"] != hashlib.sha256(doc["text"].encode()).hexdigest():
             raise ValueError("document content digest mismatch")
         _verify_cleaning_decision(doc, options)
+        if assignments is not None:
+            assignments.verify_document(doc["document_id"], doc["split"])
     spans = row_index(root / "spans.jsonl")
     sources = {item["id"]: item for item in _load(root / "sources.json")}
 
@@ -2041,8 +2060,6 @@ def _verify_build_cold(
         proof_store=proof_store,
         verification_mode=verification_mode,
     )
-    from klab.corpus.split_assignments import verify_document_assignments
-
     progress.start_phase("snapshots")
     for snapshot in manifest["snapshots"]:
         receipt = _verified_snapshot(
@@ -2065,11 +2082,6 @@ def _verify_build_cold(
         verification_mode=verification_mode,
         progress=progress,
     )
-    progress.start_phase("document_assignments")
-    with metadata_operation(scratch_root(), max_database_bytes=None):
-        verify_document_assignments(
-            path, manifest["identity"], iter_rows(path / "documents.jsonl")
-        )
     progress.close()
     return manifest
 
@@ -2406,8 +2418,6 @@ def _verify_release_cold(
         proof_store=proof_store,
         verification_mode=verification_mode,
     )
-    from klab.corpus.split_assignments import verify_document_assignments
-
     progress.start_phase("snapshots")
     for snapshot in manifest["snapshots"]:
         receipt = _verified_snapshot(
@@ -2430,11 +2440,6 @@ def _verify_release_cold(
         verification_mode=verification_mode,
         progress=progress,
     )
-    progress.start_phase("document_assignments")
-    with metadata_operation(scratch_root(), max_database_bytes=None):
-        verify_document_assignments(
-            path, manifest["build_identity"], iter_rows(path / "documents.jsonl")
-        )
     progress.close()
     return manifest
 

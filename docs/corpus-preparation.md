@@ -1429,6 +1429,30 @@ contained 464 bytes. The fixture measures stage and inventory verification.
 It leaves interruption inside a stage and end-to-end production recovery
 for the long-stage audit. [#485](https://github.com/supernovae/model-lab/issues/485)
 
+#### Frozen document assignment verification
+
+Build and release verification compare frozen assignments with the IDs and
+splits that document validation already decoded. The streaming validator
+checks the projected document batches as they arrive. The validator used
+for reviewed releases checks the same fields in its existing document loop.
+The assignment lookup validates its pinned digest, row order and count as
+it builds the memory-mapped index. Extra assignments for documents outside
+the release are permitted.
+
+On NVMe, an isolated check of 150,000 shuffled document IDs used a 720 MB
+document file and a 15.1 MB assignment file. Each time is the median of
+three runs. The new path consumes previously decoded document IDs and
+splits. The timings exclude the document validation common to both paths.
+
+| Page cache | Previous check | Reused document rows | Storage reads before and after |
+| --- | ---: | ---: | ---: |
+| Warm | 1.386 s | 0.797 s | 0 MB in both |
+| Cold | 1.430 s | 0.800 s | 735 MB to 15.1 MB |
+
+Process reads fell from 751 MB to 15.1 MB in both trials. End-to-end release
+time, peak memory and performance on slower storage remain to be measured.
+[#450](https://github.com/supernovae/model-lab/issues/450)
+
 ### Select families, screen duplicates, and build a schedule
 
 | Step | Committed unit | Work repeated after a stop | Measured evidence |
