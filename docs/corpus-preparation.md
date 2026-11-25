@@ -1453,6 +1453,32 @@ Process reads fell from 751 MB to 15.1 MB in both trials. End-to-end release
 time, peak memory and performance on slower storage remain to be measured.
 [#450](https://github.com/supernovae/model-lab/issues/450)
 
+#### Raw source replay measurements
+
+During native build and release verification, row replay checks raw files
+against the digest pinned by the verified snapshot. The streaming verifier
+hashes bytes as it reads the cited records and completes the hash over any
+unread tail. Rewinding for overlapping spans does not hash the same prefix
+twice. The reviewed verifier uses the pinned digest in its JSONL cursor or
+checks the in-memory bytes it already loaded. Snapshot verification and
+the source, rights and document checks still run independently.
+
+A synthetic NVMe run replayed 85,714 selected documents from a 120,000-row,
+516 MB JSONL source against 423 MB of documents and 44 MB of spans. The
+table shows medians of three trials, with cache eviction requested before
+each cold trial. The timings cover the source replay phase.
+
+| Page cache | Separate checksum pass | Checksum during replay | Storage reads |
+| --- | ---: | ---: | ---: |
+| Warm | 1.363 s | 1.362 s | 0 MB in both |
+| Cold | 1.652 s | 1.421 s | 1.00 GB in both |
+
+Process reads fell from 1.432 GB to 1.002 GB in both cache conditions.
+Peak RSS across individual cold runs ranged from 46 to 52 MiB before and
+48 to 49 MiB after. End-to-end release time and HDD behavior remain
+unmeasured. An interruption can still repeat an entire raw file.
+[#450](https://github.com/supernovae/model-lab/issues/450), [#485](https://github.com/supernovae/model-lab/issues/485)
+
 ### Select families, screen duplicates, and build a schedule
 
 | Step | Committed unit | Work repeated after a stop | Measured evidence |
