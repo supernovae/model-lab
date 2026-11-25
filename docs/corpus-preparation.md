@@ -1258,6 +1258,7 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   | `release verification` | shardable: byte ranges of the release files |
   | `tokenizer sampling: TRAIN lineage` | shardable: byte ranges of the lineage view |
   | `family inventory` | shardable: byte ranges of `documents.jsonl`, written in file order |
+  | `near-duplicate evidence` | shardable: byte ranges of `documents.jsonl`, with ordered compact shingle evidence |
   | `export document licenses` | shardable: byte ranges of `documents.jsonl`, merged as a set |
   | `export split statistics` | shardable: byte ranges of LM and chat splits, with chat bytes counted by the training reader's renderer |
   | `describe: lineage index` | shardable: byte ranges of `lineage.jsonl`, checkpointed as compact arrays and assembled into one sorted index |
@@ -1349,23 +1350,21 @@ past that index. Memory grows with the held-out side, not the corpus: about 8
 bytes per held-out shingle plus about 4 KB per held-out document, so about 6 GB
 at the default bounds. The training split adds only its longest document.
 `documents.jsonl` is cut into line-aligned shards of about `--shard-bytes`
-(default 256 MiB) and both reads run on `--workers` processes (default 8, at
-most the CPU count). The workers are forked, so they share the held-out index
-read-only rather than each building it; a worker's private memory is the
-shard it reads, plus the index pages it touches. The shards merge in a fixed
-order and the report is the same for any number of workers. Throughput is
-about 2 million words per second per core, so the speedup is limited by the
-read bandwidth of the disk, by the cores and by the held-out index.
-A killed screen resumes: every `--checkpoint-every` training documents (default
-200,000) a shard saves its accumulators and its byte offset in
-`documents.jsonl` to `SCRATCH/near-duplicates/near-duplicates-<key>-shard-<n>.json`,
-and a finished shard saves its result. The key names the release, the
-algorithm, the implementation, every option and the shard plan (not
-`--workers`), and each file carries its own digest; a checkpoint that does not
-match is ignored and that shard starts over. A resumed run indexes the held-out
-side again (one parallel read of the file), takes finished shards from their
-checkpoints and screens only the rest; its report equals an uninterrupted
-run's. The checkpoints are removed when the report is complete.
+(default 256 MiB). The shared runner bounds the first pass's worker
+admission by CPU and memory. Training-pass workers fork and share the
+held-out index read-only. Both passes use `--workers` and merge shards in
+file order, so changing worker count preserves the report.
+
+The first pass saves verified ranges of held-out metadata and binary
+shingles, with the sampled training shingles for template analysis.
+The training pass commits its accumulators and byte offset every
+`--checkpoint-every` training documents (default 200,000) and at each
+shard's end. Both use `SCRATCH/near-duplicates`. The key binds the
+release, local file generation, implementation, screen options and
+shard plan. Retry reads healthy evidence shards, regenerates missing or
+damaged ranges, rebuilds the in-memory index and template tables, and
+resumes unfinished training shards. Checkpoint data is reclaimed on
+success. Interrupted generations remain available at the same key.
 `--max-heldout-documents` (default 1,000,000) and `--max-heldout-shingles`
 (default 200,000,000) bound the index; passing one stops the command with no
 report, because every document is screened or none is.
@@ -2112,7 +2111,7 @@ I/O remain unmeasured.
 | `freeze-splits` | Verified final split bundle. Completed preparation also commits external-sort and join phases plus export chunks. | The ordinary path repeats unfinished assignment work. The completed-preparation route resumes at the last authenticated phase and reuses intact export chunks. | Production restart cost unmeasured. |
 | `derive-family-inventory` | Verified file-backed range segments and an ordered assembly receipt per appended range. | Verify the assembled prefix and continue at the next range. Validate cached segments for the unfinished suffix, and regenerate missing or damaged segments. | See [declared family assembly measurements](#declared-family-assembly-measurements). |
 | `finalize-family-inventory` | Receipted native merge windows at 64 MiB of combined input, with document and candidate offsets. Completed preparation can reuse the release's authenticated family inventory. | Verify the frozen candidate bundle and committed output prefix. Resume the ordered merge from the saved offsets, or republish the authenticated retained inventory. | See [native family finalization measurements](#native-family-finalization-measurements). |
-| Near-duplicate screen | Training-pass offset and accumulators per range, every 200,000 training documents by default. | Rebuild the held-out index and template evidence when enabled. Replay training records after each range's commit. | Historical 6.7M-document Workshop screen, 1–2 h on one core. Held-out rebuild cost unmeasured. [#491](https://github.com/supernovae/model-lab/pull/491) |
+| Near-duplicate screen | Verified held-out and sample shingle evidence per range, plus training offsets and accumulators every 200,000 training records by default. | Reuse evidence and rebuild the in-memory tables. Read source ranges with missing or damaged evidence and screen the uncommitted training suffixes. | See [near-duplicate evidence measurements](#near-duplicate-evidence-measurements). The historical 6.7M-document Workshop screen took 1–2 h on one core. [#491](https://github.com/supernovae/model-lab/pull/491) |
 | Seeded tokenizer sample and verification | TRAIN lineage, rank histogram, and candidate range receipts with `--scratch-dir` on `tokenizer train` and `tokenizer verify`. | Reuse completed ranges and scan missing or damaged ranges. Reassemble the sample and read its selected payloads. A run without scratch does its own selection scans. | 13 s at 12 workers on a warm-page-cache synthetic 11.9 GB, 2M-document release with a 32 MiB fit quota. This measures selection. [#499](https://github.com/supernovae/model-lab/pull/499) |
 | Tokenizer fit and bakeoff | Complete staged tokenizer and provenance, published together, or completed bakeoff artifacts. | Verify and publish a matching staged pair without fitting again. A stop before both staged files are complete repeats the native fit. Concurrent fits coordinate on the destination and publication preserves an existing destination. | A 16 MiB synthetic fit took 1.04 s, and its retry after a stop inside BPE spent 1.03 s in the trainer call. See [the fitting measurements](#tokenizer-fit-timings). |
 | `materialize-mixture` | Candidate and output segments and a reusable content token cache. Default commit thresholds are 4,096 candidates, 64 MiB or 30 s. | Verify committed segments, rebuild or verify indexes as needed, replay the uncommitted segment, and finish assembly. Reuse unchanged token encodings. | 24.2 s cold and 12.9 s with warm token cache on a synthetic 210M-token mixture. These are build timings. [Mixture speed](token-store.md#mixture-speed) |
@@ -2171,6 +2170,34 @@ writer hashes bytes during append and links the completed file into place.
 It verifies the committed prefix on retry and takes the remaining segment
 inputs from the existing runner. Producer identity changes start a new
 assembly generation. Published inventories keep their existing format.
+
+#### Near-duplicate evidence measurements
+
+Two cold NVMe pairs used 400,000 synthetic documents, including 8,000
+held-out documents, across 478 MB of JSONL. Setup covered the evidence
+scan, template tables when enabled, held-out comparisons and LSH
+construction. Each trial used one worker, 32 MiB shards and a 22-bit
+template sketch. Release verification and the training pass were outside
+the interval. A SIGKILL immediately after setup left all evidence ranges
+available for the retry.
+
+| Setup | Elapsed, prior → checkpointed | Device reads, prior → checkpointed |
+| --- | ---: | ---: |
+| Lexical, fresh | 1.95–2.10 → 2.16–2.25 s | 478 → 478 MB |
+| Lexical, retry | 1.86–2.01 → 0.32–0.33 s | 478 → 11.5 MB |
+| Template-aware, fresh | 2.69–2.71 → 3.13–3.26 s | 478 → 478 MB |
+| Template-aware, retry | 2.62–2.87 → 0.90–0.91 s | 478 → 12.5 MB |
+
+The lexical and template-aware runs retained 6.8 MB and 7.8 MB of
+evidence respectively. The template-aware setup peaked at about
+98–99 MiB before and 102–104 MiB with the checkpoints. Restored evidence
+still goes through the held-out caps, in-memory template reduction and
+LSH construction. The existing outcome test checks report parity and
+rebuilds one corrupted evidence range after an interrupted screen.
+A separate cold end-to-end template-aware pair used two workers and the
+same inputs. The full screen took 30.340 s before and 31.548 s with
+checkpointing, including the training comparison pass. Both processes
+read 478 MB from storage and produced identical report digests.
 
 ### Prepare data, train, and score
 
