@@ -801,7 +801,9 @@ def _tokenizer_train(args: argparse.Namespace) -> None:
     from klab.corpus.release_verify import verification_settings
     from klab.data.tokenizer import train_tokenizer
 
-    with verification_settings(workers=args.workers, echo=sys.stderr):
+    with verification_settings(
+        workers=args.workers, scratch_dir=args.scratch_dir, echo=sys.stderr
+    ):
         print(train_tokenizer(load_tokenizer_config(Path(args.config))))
 
 
@@ -2647,15 +2649,14 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     )
     tokenizer_train = tokenizer_commands.add_parser("train")
     tokenizer_train.add_argument("config")
-    from klab.corpus.release_verify import add_workers_flag
-
-    add_workers_flag(tokenizer_train)
-    tokenizer_train.set_defaults(handler=_tokenizer_train)
     from klab.data.tokenizer_cli import (
+        add_sampling_flags,
         register_memory_map_parser,
         register_verify_parser,
     )
 
+    add_sampling_flags(tokenizer_train)
+    tokenizer_train.set_defaults(handler=_tokenizer_train)
     register_verify_parser(tokenizer_commands)
     register_memory_map_parser(tokenizer_commands)
     data = commands.add_parser("data")

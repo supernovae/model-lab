@@ -15,6 +15,7 @@ import yaml
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.loading import load_config, load_tokenizer_config
 from klab.config.models import DatasetConfig, RunConfig, TokenizerTrainConfig
+from klab.corpus.release_verify import current_settings
 from klab.corpus.shards import declare_stage, plan_ranges, run_sharded
 from klab.safe_io import write_canonical_json
 from klab.training.manifest import sha256_file
@@ -92,7 +93,10 @@ def _split_stats(path: Path, view: str) -> tuple[int, int]:
     count = size = 0
     if view == "lm":
         before = 0
-        plan = plan_ranges(SPLIT_STATS_STAGE, path)
+        inputs = None
+        if current_settings().scratch_dir is not None:
+            inputs = {"producer": sha256_file(Path(__file__))}
+        plan = plan_ranges(SPLIT_STATS_STAGE, path, inputs=inputs)
         for lines, kept, rendered, bad in run_sharded(
             plan, _lm_range_stats, ordered=True
         ):

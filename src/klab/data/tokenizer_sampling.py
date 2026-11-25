@@ -34,10 +34,12 @@ from tokenizers import Tokenizer
 
 from klab.canonical import canonical_json
 from klab.config.models import TokenizerTrainConfig
+from klab.corpus import release_verify
 from klab.corpus.mixture import _source_rights
 from klab.corpus.mixture_index import MAX_ROW_BYTES
 from klab.corpus.release_verify import range_records, read_at
 from klab.corpus.shards import declare_stage, plan_ranges, run_sharded
+from klab.training.manifest import sha256_file
 
 BUCKET_BITS = 12
 BUCKETS = 1 << BUCKET_BITS
@@ -228,9 +230,18 @@ def select_documents(
     assert release is not None
     caps = quotas(config) if caps is None else caps
     _source_rights(release, spec.source_strata)
+    inputs = {}
+    if release_verify.current_settings().scratch_dir is not None:
+        inputs = {
+            "producer": sha256_file(Path(__file__)),
+            "range_reader": sha256_file(Path(release_verify.__file__)),
+            "max_row_bytes": MAX_ROW_BYTES,
+        }
     selected: set[str] = set()
     lineage = release / "lm/train.lineage.jsonl"
-    for ids in run_sharded(plan_ranges(LINEAGE_STAGE, lineage), _lineage_ids):
+    for ids in run_sharded(
+        plan_ranges(LINEAGE_STAGE, lineage, inputs=inputs), _lineage_ids
+    ):
         selected.update(ids)
     if len(selected) > config.max_documents:
         raise ValueError(
@@ -240,7 +251,13 @@ def select_documents(
     documents_path = release / "documents.jsonl"
     totals = {stratum: [[0, 0] for _ in range(BUCKETS)] for stratum in caps}
     results = run_sharded(
-        plan_ranges(HISTOGRAM_STAGE, documents_path, spec.source_strata, spec.seed),
+        plan_ranges(
+            HISTOGRAM_STAGE,
+            documents_path,
+            spec.source_strata,
+            spec.seed,
+            inputs=inputs,
+        ),
         _histogram_range,
         ordered=True,
     )
@@ -280,7 +297,12 @@ def select_documents(
         found: dict[str, list[_Candidate]] = {stratum: [] for stratum in caps}
         for rows in run_sharded(
             plan_ranges(
-                CANDIDATE_STAGE, documents_path, spec.source_strata, spec.seed, limits
+                CANDIDATE_STAGE,
+                documents_path,
+                spec.source_strata,
+                spec.seed,
+                limits,
+                inputs=inputs,
             ),
             _candidate_range,
         ):
