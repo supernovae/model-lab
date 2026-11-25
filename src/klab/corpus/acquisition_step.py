@@ -238,8 +238,10 @@ def prepare(
                 output_bytes = reused_output_bytes = sum(
                     item["size"] for item in checked_snapshot.value["files"]
                 )
-            elif (checked_body := pinned.checked_body()) is not None:
-                pinned_reuse = "body"
+            else:
+                checked_body = pinned.checked_body() or pinned.checked_previous_body()
+                if checked_body is not None:
+                    pinned_reuse = "body"
             if pinned_reuse is not None:
                 verified_paths = frozenset({pinned.name})
         pending = tuple(item for item in pending if item[0] not in verified_paths)

@@ -2672,8 +2672,13 @@ def _resume_pinned_body(
     previous: CheckedCheckpoint[PinnedBody] | None,
 ) -> CheckedCheckpoint[PinnedBody]:
     checked = parts.checked_body(previous)
-    if admit_body and checked is None:
-        raise ValueError(f"pinned body checkpoint changed after admission: {source.id}")
+    if checked is None and admit_body:
+        if previous is None or previous.path == parts.body:
+            raise ValueError(
+                f"pinned body checkpoint changed after admission: {source.id}"
+            )
+        parts.body.unlink(missing_ok=True)
+        checked = parts.adopt_previous_body(previous)
     if checked is None:
         parts.body.unlink(missing_ok=True)
     # The download candidate is written only after the official checksum manifest passes.
@@ -2684,6 +2689,8 @@ def _resume_pinned_body(
     ):
         resources.observe()
         return recovered
+    if checked is None and (older := parts.checked_previous_body()) is not None:
+        checked = parts.adopt_previous_body(older)
     resources.observe()
     if budget is not None:
         budget.remaining_seconds()

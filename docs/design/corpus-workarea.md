@@ -567,6 +567,19 @@ new member. The retry made zero transport requests and produced the same
 snapshot as a fresh single-member run. The replay tool accepts
 `--wikimedia-checkpoint-members` for grouped extraction measurements.
 
+To reproduce the adapter-upgrade recovery case in
+[#591](https://github.com/supernovae/model-lab/issues/591), an indexed fixture
+was stopped with SIGKILL after the body was committed and before extraction.
+Each retry used a new adapter identity. The fixture had 32 MiB of generated
+text, a 17,121,236-byte compressed body, and local HTTP fixtures without a
+transport cache. On NVMe, the baseline at `5ef6af68` made three requests.
+The retry that moved the verified body made only the index request. At the
+start of extraction, combined compressed bodies across staging generations
+occupied 34,242,472 bytes on the baseline and 17,121,236 bytes with reuse.
+One run per case took 1.466 and 1.345 s respectively. A separate run with an
+altered older body fetched the dump again and left that older body intact.
+All three snapshots had the same digest. These timings use local fixtures.
+
 ## Relational Knowledge Microlab
 
 Keep named recipes and study outputs in Workshop. Start with deterministic

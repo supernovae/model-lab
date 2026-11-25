@@ -149,9 +149,14 @@ candidate lock against both the origins and the copies before publication.
   the snapshots. A finished derivation is verified and published from staging.
   If only the body verifies, extraction starts again from that local body.
   Archive and MediaWiki source-step plans report `pinned_checkpoint_reuse` as
-  `derivation`, `body`, or null. Admission verifies payload bytes. Within the same command, the
-  locked retry and publication reuse that verification when the filesystem
-  fingerprint still matches. A standalone plan stays read-only. Publishing
+  `derivation`, `body`, or null. If the current generation lacks a verified
+  body, Lab can reuse a committed body from an earlier generation for the
+  same source and adapter. It checks the newest eligible candidate against
+  the current byte cap and pins, then moves the verified file under the
+  source's adapter lock. Extraction uses the current generation's rules.
+  A standalone plan verifies bytes without moving them. Within the same
+  command, the locked retry and publication reuse admission verification
+  when the filesystem fingerprint still matches. Publishing
   removes the downloaded body after the snapshot rename is durable. A retry
   that verifies an already-published snapshot reclaims the matching staging
   directory if the snapshot was moved out of it. Wikimedia commits its
@@ -326,15 +331,15 @@ accounts for parser state, row positions, and process serialization.
 
 A partial indexed acquisition is bound to the adapter implementation. After
 an adapter update, the next attempt uses a new staging directory, verifies a
-new range plan and extracts the selected prefix again. It downloads the
-official checksum manifest and full compressed dump unless
-`--transport-cache` or `KLAB_TRANSPORT_CACHE` supplies the verified dump.
-The pinned index is also fetched if its cache entry is missing or invalid.
-Lab reports the old `.wikimedia_dump-parts-<key>` directory on stderr and
-keeps its staged dump and member checkpoints. Allow disk space for both
-generations until you remove the old directory after all acquisitions for
-that source have stopped. Published snapshots remain reusable after
-verification.
+new range plan and extracts the selected prefix again. Lab checks at most
+one eligible older committed dump and moves it into the current generation
+if its SHA-1 and any declared SHA-256 match. The transport cache or a fresh
+download supplies the dump if the candidate fails verification. The pinned
+index is fetched if its cache entry is missing or invalid. Lab reports and
+retains the old `.wikimedia_dump-parts-<key>` directory for inspection.
+Its derived checkpoints and any unmatched or partial inputs still occupy
+disk space. Inspect and remove abandoned directories after all acquisitions
+for that source have stopped. Published snapshots remain reusable after verification.
 
 ### What identifies an acquisition
 
