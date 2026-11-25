@@ -5,15 +5,18 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
+import re
 import shutil
 import stat
 import sys
 import tempfile
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import psutil
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.project import HFBoundedShard, PdfAcquisition, PdfDocument
@@ -197,8 +200,7 @@ class PinnedBodyParts(AcquisitionParts):
             root == self.root
             or root.parent != self.root.parent
             or not root.name.startswith(prefix)
-            or len(identity) != 64
-            or any(char not in "0123456789abcdef" for char in identity)
+            or not re.fullmatch(r"[0-9a-f]{64}", identity)
         ):
             return None
         return PinnedBodyParts(
@@ -574,34 +576,7 @@ class PDFParts(ReceiptedParts):
 
 
 @contextmanager
-def _parts_lock(parts: AcquisitionParts) -> Iterator[bool]:
-    parts._check_root()
-    descriptor = os.open(
-        parts.root.parent / f".{parts.adapter}-parts.lock",
-        os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW,
-        0o600,
-    )
-    with os.fdopen(descriptor, "w") as lock:
-        try:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            yield False
-        else:
-            parts._check_root()
-            yield True
-
-
-@contextmanager
-def _disposable_lock(parent: Path) -> Iterator[bool]:
-    info = parent.lstat()
-    if (
-        not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.getuid()
-        or writable_by_others(info)
-        or symlinked(parent)
-    ):
-        raise ValueError(f"unsafe acquisition staging parent: {parent}")
-    path = parent / f"{_DISPOSABLE_STAGING}.lock"
+def _acquisition_lock(path: Path) -> Iterator[bool]:
     descriptor = os.open(
         path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600
     )
@@ -622,6 +597,97 @@ def _disposable_lock(parent: Path) -> Iterator[bool]:
             yield True
     finally:
         os.close(descriptor)
+
+
+@contextmanager
+def _parts_lock(parts: AcquisitionParts) -> Iterator[bool]:
+    parts._check_root()
+    with _acquisition_lock(
+        parts.root.parent / f".{parts.adapter}-parts.lock"
+    ) as locked:
+        if locked:
+            parts._check_root()
+        yield locked
+
+
+def _staging_inventory(directory: Path, device: int) -> tuple[int, int]:
+    files = size = 0
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            info = entry.stat(follow_symlinks=False)
+            if info.st_dev != device or info.st_uid != os.getuid():
+                raise ValueError(f"unsafe acquisition staging entry: {entry.path}")
+            if stat.S_ISDIR(info.st_mode):
+                nested_files, nested_size = _staging_inventory(Path(entry.path), device)
+                files += nested_files
+                size += nested_size
+            elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                files += 1
+                size += info.st_size
+            else:
+                raise ValueError(f"unsafe acquisition staging entry: {entry.path}")
+    return files, size
+
+
+def prune_staging_generation(
+    current: AcquisitionParts, identity: str, *, apply: bool
+) -> dict[str, Any]:
+    """Inspect or discard one expressly selected older checkpoint generation."""
+    if not re.fullmatch(r"[0-9a-f]{64}", identity):
+        raise ValueError("an exact 64-character staging generation is required")
+    if identity == current.identity:
+        raise ValueError("the current acquisition staging generation is protected")
+    parent = current.root.parent
+    target = AcquisitionParts(parent, identity, adapter=current.adapter)
+    target._check_root()
+    info = parent.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or writable_by_others(info)
+    ):
+        raise ValueError(f"unsafe acquisition staging parent: {parent}")
+    with _parts_lock(target) if apply else nullcontext(True) as locked:
+        if not locked:
+            raise ValueError("another acquisition is writing this source")
+        if target.root.lstat().st_dev != info.st_dev:
+            raise ValueError(
+                f"acquisition staging uses another filesystem: {target.root}"
+            )
+        root = target.root.absolute()
+        for partition in psutil.disk_partitions(all=True):
+            if Path(partition.mountpoint).is_relative_to(root):
+                raise ValueError(
+                    f"mounted acquisition staging entry: {partition.mountpoint}"
+                )
+        files, size = _staging_inventory(target.root, info.st_dev)
+        if apply:
+            if not shutil.rmtree.avoids_symlink_attacks:
+                raise ValueError("safe directory removal is unavailable on this host")
+            shutil.rmtree(target.root)
+            sync_directory(parent)
+    return {
+        "adapter": current.adapter,
+        "generation": identity,
+        "path": str(target.root),
+        "files": files,
+        "logical_bytes": size,
+        "removed": apply,
+    }
+
+
+@contextmanager
+def _disposable_lock(parent: Path) -> Iterator[bool]:
+    info = parent.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or writable_by_others(info)
+        or symlinked(parent)
+    ):
+        raise ValueError(f"unsafe acquisition staging parent: {parent}")
+    with _acquisition_lock(parent / f"{_DISPOSABLE_STAGING}.lock") as locked:
+        yield locked
 
 
 def _check_disposable_root(root: Path, *, create: bool) -> bool:
@@ -737,7 +803,7 @@ def acquisition_staging(parent: Path, parts: AcquisitionParts | None) -> Iterato
                 ):
                     continue
                 print(
-                    f"acquisition checkpoint for another request retained at {sibling}",
+                    f"older acquisition staging found at {sibling}",
                     file=sys.stderr,
                 )
         parts.root.mkdir(mode=0o700, exist_ok=True)

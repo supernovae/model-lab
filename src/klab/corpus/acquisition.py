@@ -44,6 +44,7 @@ from klab.corpus.acquisition_parts import (
     acquisition_staging,
     check_checkpoint,
     pinned_pdf_path,
+    prune_staging_generation,
     reclaim_disposable_staging,
 )
 from klab.corpus.bounded_metadata import read_metadata
@@ -3541,6 +3542,58 @@ def _reusable_snapshot(
     )
 
 
+def _acquisition_parts(
+    parent: Path,
+    source: SourceDeclaration,
+    budget: TransportBudget | None,
+    *,
+    receipt_limit: int | None = None,
+) -> AcquisitionParts | None:
+    if (
+        source.kind == "git"
+        and source.acquisition.bounded_blobs is not None
+        and budget is not None
+    ):
+        return AcquisitionParts(
+            parent, _acquisition_part_identity(source, budget), adapter="git"
+        )
+    if source.kind == "pdf_documents":
+        return pdf_parts(parent, source, budget, receipt_limit=receipt_limit)
+    return pinned_body_parts(parent, source, budget) or bounded_hf_parts(
+        parent, source, budget, receipt_limit=receipt_limit
+    )
+
+
+def prune_acquisition_staging(
+    project: Project,
+    work_root: Path,
+    source_id: str,
+    generation: str,
+    *,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Preview or free storage from an exact, superseded staging generation."""
+    source = next(
+        (source for source in project.sources if source.id == source_id), None
+    )
+    if source is None:
+        raise ValueError("exact declared source ID required")
+    base = work_root / "corpora" / project.config.id
+    budget = (
+        TransportBudget(base / "transport-budget.sqlite", project)
+        if project.config.transport_budget is not None
+        else None
+    )
+    parts = _acquisition_parts(base / "snapshots" / source.id, source, budget)
+    if parts is None:
+        raise ValueError(f"source has no checkpointed acquisition: {source.id}")
+    return {
+        "project_id": project.config.id,
+        "source_id": source.id,
+        **prune_staging_generation(parts, generation, apply=apply),
+    }
+
+
 def acquire(
     project: Project,
     work_root: Path | str,
@@ -3792,22 +3845,8 @@ def acquire(
             raise ValueError(f"existing verified snapshot unavailable: {source.id}")
         parent.mkdir(parents=True, exist_ok=True)
         receipt_limit = acquisition_step.MANIFEST_BYTES if step is not None else None
-        parts: AcquisitionParts | None = bounded_hf_parts(
-            parent, source, budget, receipt_limit=receipt_limit
-        )
-        if (
-            source.kind == "git"
-            and source.acquisition.bounded_blobs is not None
-            and budget is not None
-        ):
-            parts = AcquisitionParts(
-                parent, _acquisition_part_identity(source, budget), adapter="git"
-            )
-        elif source.kind == "pdf_documents":
-            parts = pdf_parts(parent, source, budget, receipt_limit=receipt_limit)
-        pinned = pinned_body_parts(parent, source, budget)
-        if pinned is not None:
-            parts = pinned
+        parts = _acquisition_parts(parent, source, budget, receipt_limit=receipt_limit)
+        pinned = parts if isinstance(parts, PinnedBodyParts) else None
         with acquisition_staging(parent, parts) as staging:
             resources = None
             try:

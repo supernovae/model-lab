@@ -123,6 +123,8 @@ candidate lock against both the origins and the copies before publication.
   checkpoints for other requests so you can find retained staging data. Remove
   abandoned checkpoints only when no attempt uses them. The published
   snapshot format is unchanged.
+  Use [staging-prune](#reclaim-a-superseded-staging-generation) to preview or
+  remove a superseded generation under the source's lock.
 - **Retry a bounded Git source.** Rerun acquisition with the same
   `bounded_blobs` declaration and transport ledger. Lab retains downloaded
   blobs in a private `.git-parts-<key>` directory beside the snapshots. It
@@ -220,6 +222,35 @@ performs the local work listed above. A host-local verification receipt can
 also avoid repeating a cold check on a published snapshot. See the
 [measured replay cases](design/corpus-workarea.md#acquisition-replay-measurements)
 for the distinction between transfer, extraction and publication costs.
+
+### Reclaim a superseded staging generation
+
+Use the generation digest from an `older acquisition staging found` message
+or from the suffix of the source's `.ADAPTER-parts-<generation>` directory.
+Pass the current project recipe to preview that exact generation.
+
+```sh
+klab --work-dir WORK corpus staging-prune PROJECT --source-id SOURCE \
+  --generation GENERATION
+```
+
+The JSON report includes the path, file count and logical bytes. The preview
+reads filesystem metadata. The selected directory can contain reusable work
+for an earlier recipe. After deciding it can be discarded, repeat the same
+command with `--apply`.
+
+```sh
+klab --work-dir WORK corpus staging-prune PROJECT --source-id SOURCE \
+  --generation GENERATION --apply
+```
+
+Removal holds the source's adapter lock and checks the directory again. Lab
+refuses the current recipe's generation, an active adapter writer, and unsafe
+directory trees, including symlinks, hard-linked files, and mounts. The
+command applies to checkpointed archive, MediaWiki, Wikimedia, Hugging Face,
+Git and PDF acquisition. Use the current ledger for a budgeted project. The
+generation's logical bytes can differ from the space released by the
+filesystem.
 
 ### Verify Wikimedia multistream ranges
 

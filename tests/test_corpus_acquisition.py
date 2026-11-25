@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import bz2
+import fcntl
 import hashlib
 import io
 import json
@@ -1522,6 +1523,85 @@ def test_archive_retry_reclaims_body_left_after_snapshot_rename(
     assert not orphan.exists()
     assert (sibling / "snapshot").is_dir()
     assert calls == [_RFC_URL]
+
+
+def test_staging_prune_previews_and_removes_only_the_selected_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from klab.cli.main import build_parser
+    from klab.corpus import acquisition
+
+    monkeypatch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
+    body = _tar_gz([("rfc1.txt", b"pinned archive document\n", None)])
+    recipe = _archive_recipe(tmp_path, body, budget=True)
+    project = load_project(recipe)
+    work = tmp_path / "work"
+    base = work / "corpora/example"
+    TransportBudget.initialize(base / "transport-budget.sqlite", project)
+    _serve_pinned(monkeypatch, {_RFC_URL: body})
+    verify = acquisition.verify_snapshot
+
+    def stop_before_publication(path, **kwargs):
+        if kwargs.get("_staged"):
+            raise OSError("stop before publication")
+        return verify(path, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(acquisition, "verify_snapshot", stop_before_publication)
+        with pytest.raises(OSError, match="stop before publication"):
+            acquire(project, work)
+    source = base / "snapshots/one"
+    (staged,) = source.glob(".archive-parts-*")
+    generation = staged.name.removeprefix(".archive-parts-")
+    arguments = [
+        "--work-dir",
+        str(work),
+        "corpus",
+        "staging-prune",
+        str(recipe),
+        "--source-id",
+        "one",
+        "--generation",
+        generation,
+    ]
+    parser = build_parser()
+
+    def prune(*flags):
+        args = parser.parse_args([*arguments, *flags])
+        args.handler(args)
+        return json.loads(capsys.readouterr().out)
+
+    with pytest.raises(ValueError, match="current acquisition staging generation"):
+        prune("--apply")
+
+    # Publish with a new adapter while retaining the earlier derivation for inspection.
+    adapter = acquisition._adapter
+    monkeypatch.setattr(
+        acquisition,
+        "_adapter",
+        lambda source: {**adapter(source), "module_sha256": "a" * 64},
+    )
+    published = acquire(project, work)
+    assert (staged / "snapshot/files/rfc1.txt").is_file()
+    inventory = prune()
+    assert inventory["path"] == str(staged) and not inventory["removed"]
+    assert inventory["logical_bytes"] == sum(
+        path.stat().st_size for path in staged.rglob("*") if path.is_file()
+    )
+    with (source / ".archive-parts.lock").open("r+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with pytest.raises(ValueError, match="another acquisition"):
+            prune("--apply")
+    alias = staged / "snapshot" / "alias"
+    alias.symlink_to(tmp_path / "outside")
+    with pytest.raises(ValueError, match="unsafe acquisition staging entry"):
+        prune("--apply")
+    assert alias.is_symlink() and staged.is_dir()
+    alias.unlink()
+
+    assert prune("--apply") == {**inventory, "removed": True}
+    assert not staged.exists()
+    assert verify_acquisition(project, work) == published
 
 
 @pytest.mark.parametrize("mutation", ["admitted", "renamed"])
