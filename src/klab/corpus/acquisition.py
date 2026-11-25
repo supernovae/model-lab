@@ -20,7 +20,7 @@ import tempfile
 import threading
 import urllib.request
 import xml.etree.ElementTree as ET
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager, nullcontext
 from dataclasses import asdict
@@ -2132,56 +2132,13 @@ def _extract_indexed_wikimedia(
     def record_plan_bytes(count: int) -> None:
         resources.expanded += count
 
-    def prepare(staging: Path, _result: dict[str, Any]) -> None:
-        plan = wikimedia_ranges.plan_wikimedia_ranges(
-            source,
-            parts.body,
-            index_path,
-            index_sha256=index.expected_sha256,
-            max_index_bytes=index.max_bytes,
-            max_index_expanded_bytes=index.max_expanded_bytes,
-            max_members=index.max_members,
-            checkpoint_store=store,
-            on_expanded=record_plan_bytes,
-            verified_dump=body,
-        )
-        write_canonical_json(staging / "plan.json", asdict(plan))
-
-    plan_directory, _ = run_stage(store, plan_stage, inputs, prepare)
-    plan_record = json.loads((plan_directory / "plan.json").read_bytes())
-    plan = wikimedia_ranges.WikimediaRangePlan.from_record(plan_record)
-    plan_digest = canonical_digest(plan_record)
-    header, footer = wikimedia_ranges.wikimedia_xml_context(
-        parts.body, plan, limit=index.max_header_bytes
-    )
-    resources.expanded += len(header)
-    members = []
-    planned_pages = 0
-    for member in plan.ranges:
-        if planned_pages >= spec.max_scanned_pages:
-            break
-        if member.pages:
-            members.append(member)
-            planned_pages += member.pages
-    largest = max(
-        min(member.expanded_bytes, index.max_member_expanded_bytes)
-        for member in members
-    )
-    jobs = ShardPlan(
-        _WIKIMEDIA_DECODE_STAGE,
-        [(member,) for member in members],
-        sum(member.end - member.start for member in members),
-        threaded=True,
-        operator_cap=1 + prefetch_bytes // largest,
-        # Allow for the decoder buffer, the XML wrapper and parsed text.
-        worker_memory_bytes=largest * 4 + 16 * 1024**2,
-    )
+    request_digest = canonical_digest(inputs)
     decoded_bytes_lock = threading.Lock()
 
     def member_inputs(member: WikimediaRange) -> dict[str, Any]:
-        # The receipted plan pins the declaration and ordering. Each offset
-        # therefore has one valid set of remaining selection limits.
-        return {"plan_sha256": plan_digest, "offset": member.start}
+        # Verified range metadata and pinned request inputs are already
+        # sufficient for a stable key before the final plan is published.
+        return {"plan_inputs_sha256": request_digest, "member": asdict(member)}
 
     def load_or_decode(
         member: WikimediaRange,
@@ -2197,80 +2154,149 @@ def _extract_indexed_wikimedia(
         return member, expanded
 
     rows: list[dict[str, str]] = []
-    scanned = emitted = visited = 0
+    scanned = emitted = visited = consumed_until = 0
+    context: tuple[bytes, bytes] | None = None
     digest = hashlib.sha256()
-    with (
-        resources.output(output_path) as output,
-        closing(run_sharded(jobs, load_or_decode, ordered=True)) as results,
-    ):
-        for member, decoded in results:
-            limits = (
-                spec.max_scanned_pages - scanned,
-                spec.max_selected_pages - len(rows),
-                spec.max_emitted_bytes - emitted,
-            )
 
-            def extract(
-                staging: Path,
-                _result: dict[str, Any],
-                *,
-                member=member,
-                limits=limits,
-                decoded=decoded,
-            ) -> None:
-                xml = io.BytesIO()
-                xml.write(header)
-                xml.write(memoryview(decoded)[member.page_start : member.page_end])
-                xml.write(footer)
-                size = xml.tell()
-                xml.seek(0)
-                selected, page_count, used, _ = _wiki_jsonl(
-                    source,
-                    xml,
-                    staging / "rows.jsonl",
-                    _AcquisitionResources(staging),
-                    limits=(size, *limits),
-                )
-                write_canonical_json(
-                    staging / "member.json",
-                    {
-                        "rows": selected,
-                        "scanned": page_count,
-                        "emitted": used,
-                        "limits": limits,
-                    },
-                )
-
-            if isinstance(decoded, Path):
-                completed = decoded
-            else:
-                completed, _ = run_stage(
-                    store, member_stage, member_inputs(member), extract
-                )
-            del decoded, extract
-            selection = json.loads((completed / "member.json").read_bytes())
-            member_file = completed / "rows.jsonl"
-            if (
-                selection["limits"] != list(limits)
-                or not 0 < selection["scanned"] <= min(member.pages, limits[0])
-                or len(selection["rows"]) > min(selection["scanned"], limits[1])
-                or not 0 <= selection["emitted"] <= limits[2]
-                or member_file.stat().st_size != selection["emitted"]
-            ):
-                raise ValueError("Wikimedia member selection differs from its bounds")
-            with member_file.open("rb") as stream:
-                while chunk := stream.read(1024**2):
-                    digest.update(chunk)
-                    output.write(chunk)
-            rows.extend(selection["rows"])
-            scanned += selection["scanned"]
-            emitted += selection["emitted"]
-            visited += 1
-            if (
-                scanned >= spec.max_scanned_pages
-                or len(rows) >= spec.max_selected_pages
-            ):
+    def select_group(
+        ranges: Sequence[WikimediaRange], root_offset: int, header_bytes: int
+    ) -> None:
+        nonlocal context, scanned, emitted, visited, consumed_until
+        if scanned >= spec.max_scanned_pages or len(rows) >= spec.max_selected_pages:
+            return
+        members = []
+        planned_pages = scanned
+        for member in ranges:
+            if planned_pages >= spec.max_scanned_pages:
                 break
+            if member.pages:
+                members.append(member)
+                planned_pages += member.pages
+        if not members:
+            return
+        if context is None:
+            context = wikimedia_ranges.wikimedia_xml_context(
+                parts.body,
+                root_offset=root_offset,
+                header_bytes=header_bytes,
+                limit=index.max_header_bytes,
+            )
+            resources.expanded += len(context[0])
+        header, footer = context
+        largest = max(
+            min(member.expanded_bytes, index.max_member_expanded_bytes)
+            for member in members
+        )
+        jobs = ShardPlan(
+            _WIKIMEDIA_DECODE_STAGE,
+            [(member,) for member in members],
+            sum(member.end - member.start for member in members),
+            threaded=True,
+            operator_cap=1 + prefetch_bytes // largest,
+            # Allow for the decoder buffer, the XML wrapper and parsed text.
+            worker_memory_bytes=largest * 4 + 16 * 1024**2,
+        )
+        with closing(run_sharded(jobs, load_or_decode, ordered=True)) as results:
+            for member, decoded in results:
+                limits = (
+                    spec.max_scanned_pages - scanned,
+                    spec.max_selected_pages - len(rows),
+                    spec.max_emitted_bytes - emitted,
+                )
+
+                def extract(
+                    staging: Path,
+                    _result: dict[str, Any],
+                    *,
+                    member=member,
+                    limits=limits,
+                    decoded=decoded,
+                ) -> None:
+                    xml = io.BytesIO()
+                    xml.write(header)
+                    xml.write(memoryview(decoded)[member.page_start : member.page_end])
+                    xml.write(footer)
+                    size = xml.tell()
+                    xml.seek(0)
+                    selected, page_count, used, _ = _wiki_jsonl(
+                        source,
+                        xml,
+                        staging / "rows.jsonl",
+                        _AcquisitionResources(staging),
+                        limits=(size, *limits),
+                    )
+                    if not body.matches(parts.body):
+                        raise ValueError("Wikimedia dump changed during extraction")
+                    write_canonical_json(
+                        staging / "member.json",
+                        {
+                            "rows": selected,
+                            "scanned": page_count,
+                            "emitted": used,
+                            "limits": limits,
+                        },
+                    )
+
+                if isinstance(decoded, Path):
+                    completed = decoded
+                else:
+                    completed, _ = run_stage(
+                        store, member_stage, member_inputs(member), extract
+                    )
+                del decoded, extract
+                selection = json.loads((completed / "member.json").read_bytes())
+                member_file = completed / "rows.jsonl"
+                if (
+                    selection["limits"] != list(limits)
+                    or not 0 < selection["scanned"] <= min(member.pages, limits[0])
+                    or len(selection["rows"]) > min(selection["scanned"], limits[1])
+                    or not 0 <= selection["emitted"] <= limits[2]
+                    or member_file.stat().st_size != selection["emitted"]
+                ):
+                    raise ValueError(
+                        "Wikimedia member selection differs from its bounds"
+                    )
+                with member_file.open("rb") as stream:
+                    while chunk := stream.read(1024**2):
+                        digest.update(chunk)
+                        output.write(chunk)
+                rows.extend(selection["rows"])
+                scanned += selection["scanned"]
+                emitted += selection["emitted"]
+                visited += 1
+                if (
+                    scanned >= spec.max_scanned_pages
+                    or len(rows) >= spec.max_selected_pages
+                ):
+                    break
+
+        consumed_until = ranges[-1].end
+
+    def prepare(staging: Path, _result: dict[str, Any]) -> None:
+        plan = wikimedia_ranges.plan_wikimedia_ranges(
+            source,
+            parts.body,
+            index_path,
+            index_sha256=index.expected_sha256,
+            max_index_bytes=index.max_bytes,
+            max_index_expanded_bytes=index.max_expanded_bytes,
+            max_members=index.max_members,
+            checkpoint_store=store,
+            on_expanded=record_plan_bytes,
+            verified_dump=body,
+            on_verified_group=select_group,
+        )
+        write_canonical_json(staging / "plan.json", asdict(plan))
+
+    with resources.output(output_path) as output:
+        plan_directory, _ = run_stage(store, plan_stage, inputs, prepare)
+        plan_record = json.loads((plan_directory / "plan.json").read_bytes())
+        plan = wikimedia_ranges.WikimediaRangePlan.from_record(plan_record)
+        select_group(
+            [member for member in plan.ranges if member.start >= consumed_until],
+            plan.root_offset,
+            plan.header_bytes,
+        )
         output.flush()
         os.fsync(output.fileno())
     if not rows:
@@ -2282,7 +2308,7 @@ def _extract_indexed_wikimedia(
         digest.hexdigest(),
         {
             "index_sha256": index.expected_sha256,
-            "plan_sha256": plan_digest,
+            "plan_sha256": canonical_digest(plan_record),
             "selected_members": visited,
         },
     )

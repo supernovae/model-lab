@@ -460,6 +460,36 @@ Across five retries of the 8-page fixture, passing the checked dump to the
 planner reduced full-body hash reads from 17,163,290 to 8,581,645 bytes
 per attempt. Plan and payload digests matched the two-pass baseline.
 
+On a cold indexed acquisition, Lab now stages the selected prefix as
+verification groups commit. A later verification failure prevents
+snapshot publication. An interruption after staging a member preserves
+that output even if the full range plan is unfinished. Selection and
+verification batches still run in order. The whole-dump validation cost
+therefore remains part of the successful acquisition time.
+
+Three paired trials per setting on the 16 MiB synthetic fixture measured
+the wall time to the first committed extraction member and to a completed
+acquisition. The baseline completes the range plan before extraction.
+
+| Selection | Workers | First member, baseline / prefix | Total cold, baseline / prefix |
+| --- | ---: | ---: | ---: |
+| 8 pages | 1 | 0.397 / 0.203 s | 0.418 / 0.417 s |
+| 256 pages | 1 | 0.393 / 0.202 s | 1.159 / 1.171 s |
+| 8 pages | 3 | 0.396 / 0.203 s | 0.413 / 0.411 s |
+| 256 pages | 3 | 0.399 / 0.204 s | 0.839 / 0.846 s |
+
+The committed prefix was available about twice as early. Total cold
+times differed by at most 12 ms. Payload digests matched at both worker
+counts. The full-selection fixture used 29,425 more logical staging
+bytes for the member range metadata in the receipts. The replay tool's
+`median_cold_first_member_seconds` reports this checkpoint latency.
+
+On the pinned 287 MiB English Wikipedia shard, time to the first durable
+extraction member was 26.57 s on the baseline and 7.19 s with prefix
+staging. Total acquisition was 50.40 and 48.68 s. Those are single runs
+with one worker and local inputs on NVMe. Peak RSS was 193 and 195 MiB.
+Plan digest, payload bytes, and ordered page and revision IDs matched.
+
 ## Relational Knowledge Microlab
 
 Keep named recipes and study outputs in Workshop. Start with deterministic

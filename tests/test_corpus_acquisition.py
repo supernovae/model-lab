@@ -2100,12 +2100,12 @@ def test_wikimedia_range_plan_verifies_index_and_physical_members(
 
 
 @pytest.mark.parametrize(
-    "case", ["resume", "damaged", "invalid_suffix", "changed_dump"]
+    "case", ["resume", "damaged", "invalid_suffix", "changed_dump", "prefix"]
 )
 def test_indexed_wikimedia_resumes_range_verification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
-    from klab.corpus import acquisition_parts, wikimedia_ranges
+    from klab.corpus import acquisition, acquisition_parts, wikimedia_ranges
 
     monkeypatch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
     recipe, responses, pieces, compressed, index_text = _multistream_wikimedia_fixture(
@@ -2121,8 +2121,11 @@ def test_indexed_wikimedia_resumes_range_verification(
     cache = tmp_path / "cache" if case == "resume" else None
     monkeypatch.setattr(wikimedia_ranges, "_PLAN_GROUP_MEMBERS", 2)
     run_stage = wikimedia_ranges.run_stage
+    run_acquisition_stage = acquisition.run_stage
     scan = wikimedia_ranges._scan_members
     scanned = []
+    decoded = []
+    read_member = wikimedia_ranges.read_wikimedia_member
     hashed = []
     real_hash = wikimedia_ranges.sha256_file
     dump_name = Path(project.sources[0].canonical_uri).name
@@ -2137,23 +2140,44 @@ def test_indexed_wikimedia_resumes_range_verification(
             scanned.append(member.start)
             yield member
 
-    def interrupt(*args, **kwargs):
-        run_stage(*args, **kwargs)
+    def record_decode(path, member, **kwargs):
+        decoded.append(member.start)
+        return read_member(path, member, **kwargs)
+
+    def interrupt_group(store, stage, inputs, produce, **kwargs):
+        run_stage(store, stage, inputs, produce, **kwargs)
         raise RuntimeError("stop after verified range group")
 
+    def interrupt_member(store, stage, inputs, produce):
+        result = run_acquisition_stage(store, stage, inputs, produce)
+        if stage == "wikimedia-member":
+            raise OSError("stop after verified prefix extraction")
+        return result
+
     monkeypatch.setattr(wikimedia_ranges, "_scan_members", record_scan)
+    monkeypatch.setattr(wikimedia_ranges, "read_wikimedia_member", record_decode)
     monkeypatch.setattr(wikimedia_ranges, "sha256_file", record_hash)
     monkeypatch.setattr(acquisition_parts, "sha256_file", record_hash)
     work = tmp_path / "work"
     base = work / "corpora/example"
     with monkeypatch.context() as fault:
-        fault.setattr(wikimedia_ranges, "run_stage", interrupt)
-        with pytest.raises(RuntimeError, match="stop after verified range group"):
+        if case == "prefix":
+            fault.setattr(acquisition, "run_stage", interrupt_member)
+            expectation = pytest.raises(
+                OSError, match="stop after verified prefix extraction"
+            )
+        else:
+            fault.setattr(wikimedia_ranges, "run_stage", interrupt_group)
+            expectation = pytest.raises(
+                RuntimeError, match="stop after verified range group"
+            )
+        with expectation:
             acquire(project, work, transport_cache=cache)
     assert scanned == [0, len(compressed[0])]
     assert not (base / "acquisition.json").exists()
     assert calls == list(responses)
     assert not hashed  # The download was checked as it was copied.
+    assert decoded == ([len(compressed[0])] if case == "prefix" else [])
     calls.clear()
     scanned.clear()
     (parts,) = (base / "snapshots/one").glob(".wikimedia_dump-parts-*")
@@ -2182,6 +2206,8 @@ def test_indexed_wikimedia_resumes_range_verification(
         assert not calls and not scanned
         assert hashed == [dump_path]
         assert not (base / "acquisition.json").exists()
+        assert decoded == [len(compressed[0])]
+        assert not list((base / "snapshots/one").glob("*/manifest.json"))
         return
     if case == "damaged":
         (group,) = (parts / "ranges/wikimedia-plan-group").glob("*/ranges.json")
@@ -2192,6 +2218,7 @@ def test_indexed_wikimedia_resumes_range_verification(
     starts = [sum(map(len, compressed[:i])) for i in range(len(compressed))]
     assert scanned == (starts if case == "damaged" else starts[2:])
     assert not calls and not parts.exists()
+    assert decoded == [len(compressed[0])]
     assert hashed == [dump_path]
     if cache is not None:
         control = acquire(project, tmp_path / "cache-copy", transport_cache=cache)

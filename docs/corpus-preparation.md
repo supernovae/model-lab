@@ -238,9 +238,9 @@ multistream_index:
 ```
 
 Use the matching dated index and its known SHA-256. Acquisition verifies
-the entire dump at the declared decompressed-byte bound before extracting
-the selected prefix. The XML header must fit `max_header_bytes` (default
-1 MiB). Each visited member must fit the declared expanded-member bound.
+the entire dump at the declared decompressed-byte bound before publishing
+a snapshot. The XML header must fit `max_header_bytes` (default 1 MiB).
+Each visited member must fit the declared expanded-member bound.
 
 While building the range plan, acquisition commits verification metadata
 after each group of up to 64 physical bzip2 members. A retry checks the
@@ -255,14 +255,17 @@ including those beyond the selected prefix. The standalone
 and writes no checkpoint files.
 
 Selection runs in source order so the scan, selection, and output limits
-apply even inside a member. During assembly the selected JSONL exists
-both in member checkpoints and in the staged snapshot. Acquisition
-removes the checkpoints after publication. A retry checks compressed
-input integrity and verifies the completed output files.
+apply even inside a member. Acquisition can start extracting the selected
+prefix from verified groups while the rest of the range plan is pending.
+The selected JSONL is kept in member checkpoints and in the staged
+snapshot during assembly. A retry verifies and reuses completed member
+outputs, including those committed before the whole plan finished. A
+failure anywhere in the range plan prevents snapshot publication.
+Acquisition removes its checkpoints after publication.
 
 Indexed acquisition can overlap bzip2 decoding with ordered selection.
 Set an explicit budget for expanded bytes held ahead of the current
-member. The largest member eligible for the scan sets the per-slot
+member. The largest member eligible in the current batch sets the per-slot
 allowance. Available RAM, CPU affinity and `--workers` can lower
 concurrency. The default budget is zero. Near a selection limit, workers
 may finish decoding unused members in memory. Only selected rows are
