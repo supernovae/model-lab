@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -93,9 +95,9 @@ def test_a_build_killed_at_any_stage_resumes_without_redoing_earlier_stages(
     index_rows = large_build._index_rows
     scanned = []
 
-    def observe_index_rows(connection, group, *args):
+    def observe_index_rows(connection, group, *args, **kwargs):
         scanned.extend(number for number, _ in group)
-        return index_rows(connection, group, *args)
+        return index_rows(connection, group, *args, **kwargs)
 
     def stop_after_group(store, stage, *args, **kwargs):
         output = run_stage(store, stage, *args, **kwargs)
@@ -115,6 +117,48 @@ def test_a_build_killed_at_any_stage_resumes_without_redoing_earlier_stages(
         scanned.clear()
         reference = Path(lab.run("corpus", "build", project, "--offline"))
         assert scanned and committed not in scanned
+        assert tree(reference) == expected
+        assert not list(lab.work.glob("corpora/*/builds/stages/.index-*.groups"))
+    calls.reset()
+
+    shutil.rmtree(reference)
+    ranges = []
+    committed_range = None
+
+    def observe_range(connection, group, *args, start, max_bytes):
+        if max_bytes is not None:
+            ranges.append((group[0][0], start))
+        return index_rows(connection, group, *args, start=start, max_bytes=max_bytes)
+
+    def stop_inside_prepared_file(store, stage, inputs, produce, **kwargs):
+        nonlocal committed_range
+        part, result = run_stage(store, stage, inputs, produce, **kwargs)
+        if stage == "index-group" and "start" in inputs:
+            with closing(sqlite3.connect(part / "index.sqlite")) as connection:
+                end = connection.execute(
+                    "SELECT document_offset+document_length, span_offset+span_length "
+                    "FROM documents ORDER BY rowid DESC LIMIT 1"
+                ).fetchone()
+            document, span = inputs["generations"][0]
+            if end[0] < document[2] and end[1] < span[2]:
+                committed_range = (inputs["shards"][0], inputs["start"], end)
+                raise OSError("interrupted inside prepared file")
+        return part, result
+
+    with monkeypatch.context() as recovery:
+        recovery.setattr(large_build, "_INDEX_GROUP_BYTES", 1)
+        recovery.setattr(large_build, "_INDEX_RANGE_BYTES", 1)
+        recovery.setattr(large_build, "_index_rows", observe_range)
+        with monkeypatch.context() as fault:
+            fault.setattr(large_build, "run_stage", stop_inside_prepared_file)
+            with pytest.raises(OSError, match="interrupted inside prepared file"):
+                lab.run("corpus", "build", project, "--offline")
+        assert not reference.exists()
+        shard, start, end = committed_range
+        ranges.clear()
+        reference = Path(lab.run("corpus", "build", project, "--offline"))
+        assert (shard, start) not in ranges
+        assert (shard, end) in ranges
         assert tree(reference) == expected
         assert not list(lab.work.glob("corpora/*/builds/stages/.index-*.groups"))
     calls.reset()

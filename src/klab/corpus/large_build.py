@@ -506,9 +506,9 @@ def _require_every_source_has_documents(
     )
 
 
-DOCUMENT_INDEX_SCHEMA = """
+_DOCUMENT_INDEX_SCHEMA = """
 CREATE TABLE documents (
-    document_id TEXT NOT NULL UNIQUE,
+    document_id TEXT NOT NULL{unique},
     shard INTEGER NOT NULL,
     document_offset INTEGER NOT NULL,
     document_length INTEGER NOT NULL,
@@ -526,10 +526,10 @@ CREATE TABLE origins (
     document_number INTEGER NOT NULL
 );
 """
-DEDUP_SCHEMA = """
+_DEDUP_SCHEMA = """
 CREATE TABLE dedup (
     document_number INTEGER PRIMARY KEY,
-    document_id TEXT NOT NULL UNIQUE,
+    document_id TEXT NOT NULL{unique},
     split TEXT NOT NULL,
     source_rank INTEGER NOT NULL,
     document_kind TEXT NOT NULL,
@@ -539,9 +539,9 @@ CREATE TABLE dedup (
     drop_reason TEXT
 );
 """
-INDEX_SCHEMA = (
-    DOCUMENT_INDEX_SCHEMA
-    + DEDUP_SCHEMA
+_INDEX_TABLES = (
+    _DOCUMENT_INDEX_SCHEMA
+    + _DEDUP_SCHEMA
     + """
 CREATE TABLE admitted_document_rows (
     file_number INTEGER NOT NULL,
@@ -549,7 +549,9 @@ CREATE TABLE admitted_document_rows (
 );
 """
 )
+INDEX_SCHEMA = _INDEX_TABLES.format(unique=" UNIQUE")
 _INDEX_GROUP_BYTES = 64 * 1024**2
+_INDEX_RANGE_BYTES = 64 * 1024**2
 
 
 def insert_indexed(
@@ -595,7 +597,7 @@ def insert_indexed(
     return number
 
 
-def create_index(directory: Path) -> sqlite3.Connection:
+def create_index(directory: Path, *, defer_unique: bool = False) -> sqlite3.Connection:
     """Create a private index of document references and duplicate evidence."""
     connection = sqlite3.connect(directory / "index.sqlite")
     connection.execute("PRAGMA cache_size=-16384")
@@ -604,11 +606,20 @@ def create_index(directory: Path) -> sqlite3.Connection:
     # and published only whole, so they need no journal.
     connection.execute("PRAGMA synchronous=OFF")
     connection.execute("PRAGMA journal_mode=OFF")
-    connection.executescript(INDEX_SCHEMA)
+    connection.executescript(
+        _INDEX_TABLES.format(unique="") if defer_unique else INDEX_SCHEMA
+    )
     return connection
 
 
-def finish_index(connection: sqlite3.Connection) -> None:
+def finish_index(
+    connection: sqlite3.Connection, *, deferred_unique: bool = False
+) -> None:
+    if deferred_unique:
+        connection.execute(
+            "CREATE UNIQUE INDEX documents_by_id ON documents(document_id)"
+        )
+        connection.execute("CREATE UNIQUE INDEX dedup_by_id ON dedup(document_id)")
     connection.execute(
         "CREATE INDEX origins_by_key ON origins(method,origin,document_number)"
     )
@@ -624,17 +635,24 @@ def _index_rows(
     declared_keys: set[str],
     file_ids: dict[tuple[str, str], int],
     progress: BuildProgress,
+    *,
+    start: tuple[int, int] = (0, 0),
+    max_bytes: int | None = None,
 ) -> int:
     from klab.corpus.pipeline import _origin_keys
     from klab.corpus.split_assignments import assign_split
 
     total = 0
+    end_at = sum(start) + max_bytes if max_bytes is not None else None
     for shard_number, shard in group:
         with (
             (shard / "docs.jsonl").open("rb") as docs,
             (shard / "spans.jsonl").open("rb") as spans,
         ):
-            document_offset = span_offset = 0
+            document_offset, span_offset = start
+            if document_offset or span_offset:
+                docs.seek(document_offset)
+                spans.seek(span_offset)
             for raw_doc, raw_span in zip(docs, spans, strict=True):
                 doc = json.loads(raw_doc)
                 span = json.loads(raw_span)
@@ -678,6 +696,8 @@ def _index_rows(
                 progress.update(documents=1)
                 if total % 10_000 == 0:
                     connection.commit()
+                if end_at is not None and document_offset + span_offset >= end_at:
+                    break
     connection.commit()
     return total
 
@@ -701,6 +721,40 @@ def _index_groups(
     return groups
 
 
+def _append_index_part(
+    connection: sqlite3.Connection, part: Path, offset: int
+) -> tuple[int, tuple[int, int]]:
+    """Assemble a verified part and derive its count and cursor from its rows."""
+    connection.execute(
+        "ATTACH DATABASE ? AS part",
+        (f"file:{quote(str(part / 'index.sqlite'))}?mode=ro",),
+    )
+    frontier = connection.execute(
+        "SELECT rowid, document_offset+document_length, span_offset+span_length "
+        "FROM part.documents ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    connection.execute(
+        "INSERT INTO documents SELECT * FROM part.documents ORDER BY rowid"
+    )
+    connection.execute(
+        "INSERT INTO origins SELECT method,origin,document_number+? FROM part.origins",
+        (offset,),
+    )
+    connection.execute(
+        "INSERT INTO dedup SELECT document_number+?, document_id, split, source_rank, "
+        "document_kind, metadata_only, rights_signature, representative_id, drop_reason "
+        "FROM part.dedup",
+        (offset,),
+    )
+    connection.execute(
+        "INSERT INTO admitted_document_rows SELECT * FROM part.admitted_document_rows"
+    )
+    connection.commit()
+    connection.execute("DETACH DATABASE part")
+    count, document_end, span_end = frontier or (0, 0, 0)
+    return count, (document_end, span_end)
+
+
 def _index_prepared(
     directory: Path,
     prepared: list[Path],
@@ -720,64 +774,80 @@ def _index_prepared(
     file_ids = {key: ordinal for ordinal, key in enumerate(admission_files)}
     policy = None
 
-    def index_group(connection, group):
+    def index_group(connection, group, start=(0, 0), max_bytes=None):
         nonlocal policy
         if policy is None:
             policy = split_policy(project)
         return _index_rows(
-            connection, group, policy, rank, declared_keys, file_ids, progress
+            connection,
+            group,
+            policy,
+            rank,
+            declared_keys,
+            file_ids,
+            progress,
+            start=start,
+            max_bytes=max_bytes,
         )
+
+    def range_sizes(group):
+        if len(group) == 1:
+            number = group[0][0]
+            sizes = (generations[2 * number][2], generations[2 * number + 1][2])
+            if sum(sizes) > _INDEX_RANGE_BYTES:
+                return sizes
+        return None
 
     groups = _index_groups(prepared, generations)
     total = 0
-    with closing(create_index(directory)) as connection:
-        if len(groups) == 1:
+    direct = len(groups) == 1 and range_sizes(groups[0]) is None
+    with closing(create_index(directory, defer_unique=not direct)) as connection:
+        if direct:
             total = index_group(connection, groups[0])
-        elif groups:
+        else:
             for group in groups:
+                sizes = range_sizes(group)
+                budget = _INDEX_RANGE_BYTES if sizes is not None else None
+                start = (0, 0)
+                inputs = {
+                    "index": index_key,
+                    "shards": [number for number, _ in group],
+                    "generations": [
+                        generations[2 * number : 2 * number + 2] for number, _ in group
+                    ],
+                }
+                while True:
 
-                def produce(staging, result, group=group):
-                    with closing(create_index(staging)) as part:
-                        result["documents"] = index_group(part, group)
+                    def produce(
+                        staging, _result, group=group, start=start, budget=budget
+                    ):
+                        # Part merges use row order. The final index enforces
+                        # ID uniqueness across every file and range together.
+                        with closing(create_index(staging, defer_unique=True)) as part:
+                            index_group(part, group, start, budget)
 
-                part, result = run_stage(
-                    checkpoint_store,
-                    "index-group",
-                    {
-                        "index": index_key,
-                        "shards": [number for number, _ in group],
-                        "generations": [
-                            generations[2 * number : 2 * number + 2]
-                            for number, _ in group
-                        ],
-                    },
-                    produce,
-                    on_reuse=lambda: progress.record("reused_index_group"),
-                )
-                connection.execute(
-                    "ATTACH DATABASE ? AS part",
-                    (f"file:{quote(str(part / 'index.sqlite'))}?mode=ro",),
-                )
-                connection.execute(
-                    "INSERT INTO documents SELECT * FROM part.documents ORDER BY rowid"
-                )
-                connection.execute(
-                    "INSERT INTO origins SELECT method,origin,document_number+? FROM part.origins",
-                    (total,),
-                )
-                connection.execute(
-                    "INSERT INTO dedup SELECT document_number+?, document_id, split, source_rank, "
-                    "document_kind, metadata_only, rights_signature, representative_id, drop_reason "
-                    "FROM part.dedup",
-                    (total,),
-                )
-                connection.execute(
-                    "INSERT INTO admitted_document_rows SELECT * FROM part.admitted_document_rows"
-                )
-                connection.commit()
-                connection.execute("DETACH DATABASE part")
-                total += result["documents"]
-        finish_index(connection)
+                    part, _ = run_stage(
+                        checkpoint_store,
+                        "index-group",
+                        inputs
+                        if sizes is None
+                        else {**inputs, "start": start, "budget": budget},
+                        produce,
+                        on_reuse=lambda: progress.record("reused_index_group"),
+                    )
+                    count, end = _append_index_part(connection, part, total)
+                    total += count
+                    if sizes is None or end == sizes:
+                        break
+                    if not all(
+                        begin < cursor < size
+                        for begin, cursor, size in zip(start, end, sizes, strict=True)
+                    ):
+                        raise ValueError(
+                            "prepared document/span range offsets disagree"
+                        )
+                    start = end
+        finish_index(connection, deferred_unique=not direct)
     return total
 
 
@@ -798,7 +868,7 @@ def open_dedup(index: Path, database: Path) -> sqlite3.Connection:
         (f"file:{quote(str(index / 'index.sqlite'))}?mode=ro",),
     )
     connection.executescript(
-        DEDUP_SCHEMA
+        _DEDUP_SCHEMA.format(unique=" UNIQUE")
         + "INSERT INTO main.dedup (document_number,document_id,split,source_rank,"
         "document_kind,metadata_only,rights_signature) SELECT document_number,"
         "document_id,split,source_rank,document_kind,metadata_only,rights_signature "

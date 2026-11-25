@@ -738,7 +738,7 @@ The disk builder reuses verified outputs after a failure or a kill:
 | Stage | Output under `WORK/corpora/<id>/builds` | Reused when |
 | --- | --- | --- |
 | normalize | `prepared/normalized-source-v2/<source>/<digest>`, one shard per source file | the shard's receipt and three output hashes verify |
-| index | `stages/.index-<key>.groups` for incomplete work, then `stages/index/<key>/index.sqlite` | each group or the completed index has a matching verified receipt |
+| index | `stages/.index-<key>.groups` for incomplete work, then `stages/index/<key>/index.sqlite` | each file group, oversized-file range or completed index has a matching verified receipt |
 | dedup | `stages/.dedup-<key>.groups` for incomplete work, then `stages/dedup/<key>/dedup.sqlite` and `groups.jsonl` | the ordered group prefix verifies or the completed stage receipt verifies |
 | views | `../.views-<key>/build` with receipts beside the staged output | matching build and stage inputs, with a verified append boundary |
 | publish | the build directory itself, renamed into place atomically | the build exists and verifies |
@@ -772,11 +772,17 @@ recipe is judged in seconds, not after the stage that produced the data.
 
 The index stores file and byte offsets into the verified prepared shards,
 alongside split, duplicate and admission metadata. The builder indexes groups
-of prepared files up to about 64 MiB. A larger indivisible prepared file gets
-its own group. Each completed group is verified on retry before its metadata
-is assembled into the index. A stop during assembly may repeat the merge and
-SQL index creation. After the final index is durable, the build removes the
-group files. A changed input or producer starts a new index generation.
+of prepared files up to about 64 MiB. A larger prepared file is indexed in
+paired document and span ranges of about 64 MiB. A document and its span stay
+together and can cross the byte threshold. Retry verifies each completed
+part and derives the next two byte offsets from its last indexed row.
+Parts hold compact row metadata. The assembler builds the document-ID
+uniqueness indexes once across the merged tables. A single small group uses
+the direct index writer.
+
+A stop during assembly may repeat the merge and SQL index creation. After
+the final index is durable, the build removes the part files. A changed input
+or producer starts a new index generation.
 
 Spans retain acquisition order and documents and views retain document-ID
 order. The emitter reads the original normalized payloads by reference. When
@@ -1412,7 +1418,7 @@ needs measurement where the table gives historical or fixture evidence.
 | Acquisition and transport cache | Published source snapshot, verified transport body or adapter-specific checkpoint. See [recovery by source adapter](#recovery-by-source-adapter). | Adapter-specific work and verification. Indexed Wikimedia retains committed planning groups and selected member groups. A partial pinned transfer restarts its body. | On a 287 MiB Wikimedia shard, a stop after 128 planned members avoided 539.88 MiB of retry decompression. [#592](https://github.com/supernovae/model-lab/pull/592) |
 | Snapshot verification | Signed byte checks of eligible files in published snapshots, then a complete snapshot proof. | Reuse completed eligible file hashes at the same path; restart an incomplete file. An explicit cold check reads the bytes again. | Historical Workshop cold pass, about 15 min for 33 snapshots and 108 GB. See [snapshot hash recovery measurements](#snapshot-hash-recovery-measurements). |
 | Native disk build, normalize | Receipted shard per source file. | Verify completed shards and re-normalize unfinished files. | Historical Workshop normalize, about 25 min for the 6.7M-document workload. [#491](https://github.com/supernovae/model-lab/pull/491) |
-| Native disk build, index and dedup | Verified groups of prepared file references, the assembled index, duplicate-group windows, chain decision windows, and the complete dedup stage. Reviewed row admission uses indexed file and row numbers. | Repeat the unfinished index group or compact index assembly. Restore group links and rescan unfinished windows. Reuse completed chain decision windows, and apply a complete decision log directly. Representative compression or ranked component resolution can still repeat after a partial stop. | See [native index and payload read measurements](#native-index-and-payload-read-measurements) and [native dedup recovery measurements](#native-dedup-recovery-measurements). Historical Workshop indexing took about 30 min for roughly 13M rows. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
+| Native disk build, index and dedup | Verified prepared-file groups and oversized-file ranges, the assembled index, duplicate-group windows, chain decision windows, and the complete dedup stage. Reviewed row admission uses indexed file and row numbers. | Repeat the unfinished index group or range, and compact index assembly. Restore group links and rescan unfinished windows. Reuse completed chain decision windows, and apply a complete decision log directly. Representative compression or ranked component resolution can still repeat after a partial stop. | See [native index range recovery measurements](#native-index-range-recovery-measurements) and [native dedup recovery measurements](#native-dedup-recovery-measurements). Historical Workshop indexing took about 30 min for roughly 13M rows. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
 | Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB, lineage and view measurement checkpoints, and a receipted census. Final publication by rename. | Verify the committed view prefix, reconstruct its digests and render the uncommitted tail. Reuse finished census work for matching inputs. The manifest hashes ancillary outputs and reuses the view checksums. A stop in the final lineage sort or measurement merge may repeat that step. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. [Native build census measurements](#native-build-census-measurements) cover the report phase. [#579](https://github.com/supernovae/model-lab/pull/579) |
 | Completed-preparation build | Authenticated per-source render, completed sort and dedup phases, view range checkpoints and a signed receipt before publication. | Repeat an unfinished upstream phase. During view recovery, verify the committed prefix and resume from the stored span and document cursors. Intact staged views can publish directly, and a renamed build can recover completion from the signed receipt. A partial emission retry can recopy the frozen control inputs. | See [completed-preparation view recovery measurements](#completed-preparation-view-recovery-measurements). Production restart cost unmeasured. |
 | Freeze | Native staging rename and build tombstone, signed verification after a staged replay, then the public release. Completed preparation seals a retained release against its existing build. | Reuse the complete staged receipt at the same path, or resume an unfinished check from eligible file and replay proofs. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. See [staged freeze recovery measurements](#staged-freeze-recovery-measurements). [#501](https://github.com/supernovae/model-lab/pull/501) |
@@ -1825,6 +1831,30 @@ The reason pass streams its query rows and holds only the updates and
 checkpoint records for the current window. A complete log skips group-link
 replay and representative compression on retry. Production-size chain
 compression and ranked reduction recovery remain open.
+
+#### Native index range recovery measurements
+
+Three cold NVMe trials per case indexed one prepared file pair with
+400,000 rows and 843 MB of input. The fixture also exercised reviewed
+row admission metadata. Each SIGKILL followed seven committed ranges,
+covering 223,034 rows and 470 MB of paired input. All ordered table
+digests matched, including document and span offsets, origin keys,
+decisions inputs and admitted source row numbers.
+
+| Large file run | Median wall time | Logical reads | Device reads | Device writes | Median peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Prior direct writer | 8.398 s | 2.98 GB | 843 MB | 457 MB | 86 MiB |
+| Fresh with range checkpoints and bulk indexes | 7.819 s | 1.65 GB | 843 MB | 710 MB | 100 MiB |
+| Retry after seven committed ranges | 4.210 s | 1.18 GB | 486 MB | 597 MB | 95 MiB |
+
+The completed parts held 202 MB of compact index data before cleanup.
+The final index was 364 MB, compared with 371 MB in the prior writer.
+The 38 MB, 18,000-row control kept the direct path and ran in 0.333 s
+before and 0.329 s after. Timings cover indexing through final SQL index
+creation. Verification of the prepared shards and the final stage receipt
+are outside the timing. A retry can still repeat compact assembly and
+SQL index creation. Production-size and slower-storage measurements
+remain open.
 
 ### Select families, screen duplicates, and build a schedule
 
