@@ -190,6 +190,83 @@ class PinnedBodyParts(AcquisitionParts):
             return previous
         return check_checkpoint(self.body, self._verify_body)
 
+    def _sibling_parts(self, root: Path) -> PinnedBodyParts | None:
+        prefix = f".{self.adapter}-parts-"
+        identity = root.name.removeprefix(prefix)
+        if (
+            root == self.root
+            or root.parent != self.root.parent
+            or not root.name.startswith(prefix)
+            or len(identity) != 64
+            or any(char not in "0123456789abcdef" for char in identity)
+        ):
+            return None
+        return PinnedBodyParts(
+            root.parent,
+            identity,
+            adapter=self.adapter,
+            name=self.name,
+            sha256=self.sha256,
+            max_bytes=self.max_bytes,
+            sha1=self.sha1,
+        )
+
+    def checked_previous_body(self) -> CheckedCheckpoint[PinnedBody] | None:
+        """Check at most one older body against this request's pins and size cap."""
+        parent = self.root.parent
+        if not parent.is_dir():
+            return None
+        device = (self.root if self.root.exists() else parent).stat().st_dev
+        newest: tuple[int, str] | None = None
+        candidate = None
+        for root in parent.glob(f".{self.adapter}-parts-*"):
+            sibling = self._sibling_parts(root)
+            if sibling is None:
+                continue
+            try:
+                if sibling.staged_file_size(sibling.body) is None:
+                    continue
+                sibling._check_root()
+                info = sibling.body.lstat()
+            except OSError, ValueError:
+                continue
+            if info.st_size > self.max_bytes or info.st_dev != device:
+                continue
+            rank = (info.st_mtime_ns, root.name)
+            if newest is None or rank > newest:
+                newest, candidate = rank, sibling
+        if candidate is None:
+            return None
+        try:
+            return candidate.checked_body()
+        except (OSError, ValueError) as error:
+            print(
+                f"cannot reuse staged acquisition body at {candidate.body}: {error}",
+                file=sys.stderr,
+            )
+            return None
+
+    def adopt_previous_body(
+        self, checked: CheckedCheckpoint[PinnedBody]
+    ) -> CheckedCheckpoint[PinnedBody]:
+        """Move a verified body while holding the source's shared adapter lock."""
+        sibling = self._sibling_parts(checked.path.parent.parent)
+        if (
+            sibling is None
+            or sibling.body != checked.path
+            or sibling.staged_file_size(checked.path) != checked.value.size
+        ):
+            raise ValueError(
+                f"previous acquisition body changed before reuse: {checked.path}"
+            )
+        sibling._check_root()
+        self.body.parent.mkdir(exist_ok=True)
+        sync_directory(self.root)
+        promoted = self.promote_body(checked)
+        sync_directory(checked.path.parent)
+        print(f"reused verified acquisition body from {checked.path}", file=sys.stderr)
+        return promoted
+
     def promote_body(
         self, checked: CheckedCheckpoint[PinnedBody]
     ) -> CheckedCheckpoint[PinnedBody]:

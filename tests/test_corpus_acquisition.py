@@ -1371,7 +1371,7 @@ def test_archive_plan_step_snapshot_and_reviewed_release(
     assert verify_release(published)["release_id"] == published.name
 
 
-@pytest.mark.parametrize("damage", ["none", "derivation", "both"])
+@pytest.mark.parametrize("damage", ["none", "derivation", "both", "adapter_update"])
 def test_archive_recovery_checks_staged_body_and_derivation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
 ) -> None:
@@ -1395,9 +1395,9 @@ def test_archive_recovery_checks_staged_body_and_derivation(
             raise OSError("stop before staged verification")
         return real_verify(path, **options)
 
-    def count(*args, **kwargs):
-        extractions.append(1)
-        return real_derive(*args, **kwargs)
+    def count(source, staging, body_path, *args):
+        extractions.append(body_path.stat().st_ino)
+        return real_derive(source, staging, body_path, *args)
 
     monkeypatch.setattr(acquisition, "_acquire_archive", count)
     with monkeypatch.context() as fault:
@@ -1407,16 +1407,30 @@ def test_archive_recovery_checks_staged_body_and_derivation(
     assert not (ledger.parent / "acquisition.json").exists()
     parent = ledger.parent / "snapshots/one"
     (checkpoint,) = parent.glob(".archive-parts-*")
-    if damage != "none":
+    if damage in {"derivation", "both"}:
         (checkpoint / "snapshot/files/rfc1.txt").write_bytes(b"damaged")
     if damage == "both":
         (checkpoint / "input/RFC-all.tar.gz").write_bytes(b"damaged")
+    elif damage == "adapter_update":
+        adapter = acquisition._adapter
+        monkeypatch.setattr(
+            acquisition,
+            "_adapter",
+            lambda source: {**adapter(source), "module_sha256": "a" * 64},
+        )
 
     plan = acquire(project, work, plan_only=True, **step)["admission"]
     assert (
         plan["pinned_checkpoint_reuse"]
-        == {"none": "derivation", "derivation": "body", "both": None}[damage]
+        == {
+            "none": "derivation",
+            "derivation": "body",
+            "both": None,
+            "adapter_update": "body",
+        }[damage]
     )
+    if damage == "adapter_update":
+        assert (checkpoint / "input/RFC-all.tar.gz").read_bytes() == body
     output_hashes = []
     body_hashes = []
     real_hash = acquisition.sha256_file
@@ -1435,7 +1449,12 @@ def test_archive_recovery_checks_staged_body_and_derivation(
         assert len(output_hashes) == 1
         assert len(body_hashes) == (0 if damage == "none" else 1)
     lock = acquire(project, work, require_existing=True)
-    assert not checkpoint.exists()
+    if damage == "adapter_update":
+        assert extractions[0] == extractions[1]
+        assert not (checkpoint / "input/RFC-all.tar.gz").exists()
+        assert (checkpoint / "snapshot/files/rfc1.txt").read_bytes() == text
+    else:
+        assert not checkpoint.exists()
     assert _snapshot_payload(lock)[1] == {"rfc1.txt": text}
     assert len(extractions) == (1 if damage == "none" else 2)
     assert len(calls) == (2 if damage == "both" else 1)
