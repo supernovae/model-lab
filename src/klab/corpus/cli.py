@@ -441,6 +441,7 @@ def _run(args: argparse.Namespace) -> None:
                 plan_only=args.plan,
                 require_existing=args.require_existing,
                 transport_cache=args.transport_cache,
+                wikimedia_prefetch_bytes=args.wikimedia_prefetch_bytes,
                 **verification,
             )
             if args.require_existing:
@@ -638,6 +639,14 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
                 help="Keep the newest N index and dedup checkpoints after a successful build (default 0)",
             )
         if name == "acquire":
+            add_workers_flag(command)
+            command.add_argument(
+                "--wikimedia-prefetch-bytes",
+                type=int,
+                default=0,
+                metavar="N",
+                help="Additional expanded bytes for indexed Wikimedia decode lookahead (default 0)",
+            )
             command.add_argument(
                 "--summary",
                 action="store_true",

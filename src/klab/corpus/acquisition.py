@@ -22,7 +22,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -65,6 +65,7 @@ from klab.corpus.project import (
     safe_name,
 )
 from klab.corpus.release_verify import worker_count
+from klab.corpus.shards import ShardPlan, declare_stage, run_sharded
 from klab.corpus.transport_budget import (
     PINNED_FILE_KINDS,
     TransportBudget,
@@ -83,9 +84,11 @@ from klab.safe_io import rename_noreplace, symlinked, write_canonical_json
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
+    from klab.corpus.wikimedia_ranges import WikimediaRange
     from klab.verification_proofs import ProofStore, VerificationMode
 
 ADAPTER_VERSION = "corpus-acquisition-v1"
+_WIKIMEDIA_DECODE_STAGE = declare_stage("wikimedia member decode")
 
 
 class _AcquisitionResources:
@@ -2071,6 +2074,7 @@ def _extract_indexed_wikimedia(
     output_path: Path,
     resources: _AcquisitionResources,
     cache: TransportCache | None,
+    prefetch_bytes: int,
 ) -> tuple[list[dict[str, str]], int, int, str, dict[str, Any]]:
     from klab.corpus import wikimedia_ranges
 
@@ -2128,18 +2132,55 @@ def _extract_indexed_wikimedia(
         parts.body, plan, limit=index.max_header_bytes
     )
     resources.expanded += len(header)
+    members = []
+    planned_pages = 0
+    for member in plan.ranges:
+        if planned_pages >= spec.max_scanned_pages:
+            break
+        if member.pages:
+            members.append(member)
+            planned_pages += member.pages
+    largest = max(
+        min(member.expanded_bytes, index.max_member_expanded_bytes)
+        for member in members
+    )
+    jobs = ShardPlan(
+        _WIKIMEDIA_DECODE_STAGE,
+        [(member,) for member in members],
+        sum(member.end - member.start for member in members),
+        threaded=True,
+        operator_cap=1 + prefetch_bytes // largest,
+        # Allow for the decoder buffer, the XML wrapper and parsed text.
+        worker_memory_bytes=largest * 4 + 16 * 1024**2,
+    )
+    decoded_bytes_lock = threading.Lock()
+
+    def member_inputs(member: WikimediaRange) -> dict[str, Any]:
+        # The receipted plan pins the declaration and ordering. Each offset
+        # therefore has one valid set of remaining selection limits.
+        return {"plan_sha256": plan_digest, "offset": member.start}
+
+    def load_or_decode(
+        member: WikimediaRange,
+    ) -> tuple[WikimediaRange, Path | bytearray]:
+        key = member_inputs(member)
+        if store.verified(member_stage, key) is not None:
+            return member, store.directory(member_stage, store.key(key))
+        expanded = wikimedia_ranges.read_wikimedia_member(
+            parts.body, member, limit=index.max_member_expanded_bytes
+        )
+        with decoded_bytes_lock:
+            resources.expanded += len(expanded)
+        return member, expanded
+
     rows: list[dict[str, str]] = []
     scanned = emitted = visited = 0
     digest = hashlib.sha256()
-    with resources.output(output_path) as output:
-        for member in plan.ranges:
-            if (
-                scanned >= spec.max_scanned_pages
-                or len(rows) >= spec.max_selected_pages
-            ):
-                break
-            if not member.pages:
-                continue
+    with (
+        resources.output(output_path) as output,
+        closing(run_sharded(jobs, load_or_decode, ordered=True)) as results,
+    ):
+        for member, decoded in results:
             limits = (
                 spec.max_scanned_pages - scanned,
                 spec.max_selected_pages - len(rows),
@@ -2147,19 +2188,19 @@ def _extract_indexed_wikimedia(
             )
 
             def extract(
-                staging: Path, _result: dict[str, Any], *, member=member, limits=limits
+                staging: Path,
+                _result: dict[str, Any],
+                *,
+                member=member,
+                limits=limits,
+                decoded=decoded,
             ) -> None:
-                expanded = wikimedia_ranges.read_wikimedia_member(
-                    parts.body, member, limit=index.max_member_expanded_bytes
-                )
-                resources.expanded += len(expanded)
                 xml = io.BytesIO()
                 xml.write(header)
-                xml.write(memoryview(expanded)[member.page_start : member.page_end])
+                xml.write(memoryview(decoded)[member.page_start : member.page_end])
                 xml.write(footer)
                 size = xml.tell()
                 xml.seek(0)
-                del expanded
                 selected, page_count, used, _ = _wiki_jsonl(
                     source,
                     xml,
@@ -2169,19 +2210,26 @@ def _extract_indexed_wikimedia(
                 )
                 write_canonical_json(
                     staging / "member.json",
-                    {"rows": selected, "scanned": page_count, "emitted": used},
+                    {
+                        "rows": selected,
+                        "scanned": page_count,
+                        "emitted": used,
+                        "limits": limits,
+                    },
                 )
 
-            completed, _ = run_stage(
-                store,
-                member_stage,
-                {"plan_sha256": plan_digest, "offset": member.start, "limits": limits},
-                extract,
-            )
+            if isinstance(decoded, Path):
+                completed = decoded
+            else:
+                completed, _ = run_stage(
+                    store, member_stage, member_inputs(member), extract
+                )
+            del decoded, extract
             selection = json.loads((completed / "member.json").read_bytes())
             member_file = completed / "rows.jsonl"
             if (
-                not 0 < selection["scanned"] <= min(member.pages, limits[0])
+                selection["limits"] != list(limits)
+                or not 0 < selection["scanned"] <= min(member.pages, limits[0])
                 or len(selection["rows"]) > min(selection["scanned"], limits[1])
                 or not 0 <= selection["emitted"] <= limits[2]
                 or member_file.stat().st_size != selection["emitted"]
@@ -2195,6 +2243,11 @@ def _extract_indexed_wikimedia(
             scanned += selection["scanned"]
             emitted += selection["emitted"]
             visited += 1
+            if (
+                scanned >= spec.max_scanned_pages
+                or len(rows) >= spec.max_selected_pages
+            ):
+                break
         output.flush()
         os.fsync(output.fileno())
     if not rows:
@@ -2219,6 +2272,7 @@ def _acquire_wikimedia(
     body: PinnedBody,
     resources: _AcquisitionResources,
     cache: TransportCache | None,
+    prefetch_bytes: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     spec = source.acquisition
     assert isinstance(spec, WikimediaDumpAcquisition)
@@ -2232,7 +2286,7 @@ def _acquire_wikimedia(
         evidence = {"resources": resources.receipt()}
     else:
         rows, scanned, emitted, digest, indexed = _extract_indexed_wikimedia(
-            source, parts, body, output_path, resources, cache
+            source, parts, body, output_path, resources, cache, prefetch_bytes
         )
         evidence = {"multistream_index": indexed}
     return [
@@ -3233,12 +3287,17 @@ def acquire(
     plan_only: bool = False,
     require_existing: bool = False,
     transport_cache: Path | str | None = None,
+    wikimedia_prefetch_bytes: int = 0,
 ) -> dict[str, Any]:
     """Publish verified snapshots independently; replace the active lock only on success.
 
     `transport_cache` (else `KLAB_TRANSPORT_CACHE`) names operator-local cold
     storage for raw transport bodies; see `klab.corpus.transport_cache`.
+    `wikimedia_prefetch_bytes` bounds expanded bytes buffered ahead of the
+    current member during indexed extraction.
     """
+    if type(wikimedia_prefetch_bytes) is not int or wikimedia_prefetch_bytes < 0:
+        raise ValueError("Wikimedia prefetch bytes must be a nonnegative integer")
     if require_existing and (offline or source_id is not None or plan_only):
         raise ValueError(
             "existing-snapshot finalization requires the full project without --offline or a source step"
@@ -3517,7 +3576,13 @@ def acquire(
                     )
                     if source.kind == "wikimedia_dump":
                         files, retrieval = _acquire_wikimedia(
-                            source, staging, pinned, body, resources, cache
+                            source,
+                            staging,
+                            pinned,
+                            body,
+                            resources,
+                            cache,
+                            wikimedia_prefetch_bytes,
                         )
                     else:
                         derive = (
