@@ -3,25 +3,31 @@
 from __future__ import annotations
 
 import hashlib
-import os
-import tempfile
 from collections import Counter
 from contextlib import closing
 from itertools import zip_longest
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
+from uuid import uuid4
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.acquisition import verify_acquisition
+from klab.corpus.admission_inspection_cache import capture, unchanged
 from klab.corpus.bounded_metadata import (
     decision_index,
     metadata_operation,
     read_metadata,
 )
-from klab.corpus.document_normalization import records_for_file
+from klab.corpus.build_stages import implementation_digests
+from klab.corpus.document_normalization import (
+    NORMALIZATION_IMPLEMENTATION_FILES,
+    records_for_file,
+)
+from klab.corpus.inventory_writer import INVENTORY_WINDOW_BYTES, inventory_writer
 from klab.corpus.jsonl_records import records_from_bytes, records_from_path
 from klab.corpus.project import Project
+from klab.corpus.release_verify import current_settings
 from klab.corpus.rights import resolve_file_rights
 from klab.training.manifest import sha256_file
 from klab.verification_proofs import verification_options
@@ -295,15 +301,35 @@ def write_split_inventory_stored(
     )
     if cache is not None and cache.root != root:
         raise ValueError("inventory completion cache work root differs")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    counts: Counter[str] = Counter()
-    temporary: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb", prefix=".split-inventory-", dir=destination.parent, delete=False
-        ) as stream:
-            temporary = stream.name
-            for source in project.sources:
+    identity = canonical_digest(
+        {
+            "request": cache.request(project, destination)
+            if cache is not None
+            else uuid4().hex,
+            "documents": project.release.policy.documents.model_dump(mode="json"),
+            "inputs": dependencies,
+            "producer": implementation_digests(
+                "split_inventory.py",
+                "inventory_writer.py",
+                "view_checkpoints.py",
+                *NORMALIZATION_IMPLEMENTATION_FILES,
+            ),
+        }
+    )
+    with inventory_writer(destination, identity) as (checkpoints, view, state):
+        counts = Counter(state.get("counts", {}))
+        echo = current_settings().echo
+        if state and echo is not None:
+            print(
+                f"split inventory: reused {sum(counts.values())} document rows",
+                file=echo,
+            )
+        if not state.get("complete"):
+            source_start = state.get("source", 0)
+            pending_bytes = pending_files = 0
+            for number, source in enumerate(
+                project.sources[source_start:], start=source_start
+            ):
                 qualification = getattr(source.acquisition, "qualification", None)
                 overrides = getattr(
                     getattr(project, "splits", None), "family_fields_by_source", {}
@@ -322,7 +348,10 @@ def write_split_inventory_stored(
                     continue
                 snapshot_path = Path(entry["snapshot_path"])
                 manifest = read_metadata(snapshot_path / "manifest.json")
-                for file in sorted(manifest["files"], key=lambda item: item["path"]):
+                files = sorted(manifest["files"], key=lambda item: item["path"])
+                first_file = state.get("file", 0) if number == source_start else 0
+                for file_number in range(first_file, len(files)):
+                    file = files[file_number]
                     path = file["path"]
                     if source.rights and path == source.rights.nested_metadata_path:
                         continue
@@ -355,31 +384,34 @@ def write_split_inventory_stored(
                                 ),
                                 "source_row_index": index,
                             }
-                            stream.write(canonical_json(row) + b"\n")
+                            view.write(canonical_json(row) + b"\n")
                             counts[source.id] += 1
-            stream.flush()
-            os.fsync(stream.fileno())
-        try:
-            os.link(temporary, destination)
-        except FileExistsError as error:
-            raise ValueError("split inventory output already exists") from error
-        os.unlink(temporary)
-        temporary = None
-    finally:
-        if temporary is not None:
-            Path(temporary).unlink(missing_ok=True)
+                    pending_bytes += file["size"]
+                    pending_files += 1
+                    if pending_bytes >= INVENTORY_WINDOW_BYTES or pending_files >= 128:
+                        checkpoints.commit(
+                            {
+                                "source": number,
+                                "file": file_number + 1,
+                                "counts": dict(counts),
+                            }
+                        )
+                        pending_bytes = pending_files = 0
+            if dependencies is not None:
+                unchanged(dependencies)
+            checkpoints.commit({"complete": True, "counts": dict(counts)})
+        elif dependencies is not None:
+            unchanged(dependencies)
+        digest = view.file_digest().sha256
     report = {
         "schema_version": 1,
         "project_id": project.config.id,
         "path": str(destination),
-        "sha256": sha256_file(destination),
+        "sha256": digest,
         "counts": dict(sorted(counts.items())),
         "documents": sum(counts.values()),
     }
-    from klab.corpus.admission_inspection_cache import capture, unchanged
-
     if dependencies is not None:
-        unchanged(dependencies)
         dependencies.update(capture([destination]))
         cache.record_completed(project, destination, report, dependencies)
     return report

@@ -1736,7 +1736,8 @@ def test_real_lineage_audit_blocks_protected_family_moved_to_train(
 def test_split_preparation_reuses_verified_snapshots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from klab.corpus import acquisition
+    from klab.corpus import acquisition, split_inventory
+    from klab.corpus.view_checkpoints import ViewCheckpoints
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "settings"))
     root = tmp_path / "work"
@@ -1757,7 +1758,33 @@ def test_split_preparation_reuses_verified_snapshots(
             lambda *args, **kwargs: pytest.fail("verified snapshot was read again"),
         )
         inventory = recipe / "inventory.jsonl"
-        write_split_inventory(project, root, inventory)
+        expected = write_split_inventory(
+            project, root, recipe / "clean-inventory.jsonl"
+        )
+        commit = ViewCheckpoints.commit
+        scanned = []
+        produce = split_inventory._file_documents
+
+        def trace(source, file, *args):
+            scanned.append((source.id, file["path"]))
+            return produce(source, file, *args)
+
+        def interrupt(journal, state):
+            commit(journal, state)
+            raise InterruptedError("stop after committed source inventory file")
+
+        patch.setattr(split_inventory, "INVENTORY_WINDOW_BYTES", 1)
+        patch.setattr(split_inventory, "_file_documents", trace)
+        with monkeypatch.context() as fault:
+            fault.setattr(ViewCheckpoints, "commit", interrupt)
+            with pytest.raises(InterruptedError):
+                write_split_inventory(project, root, inventory)
+        assert not inventory.exists() and len(scanned) == 1
+        first_file = scanned.pop()
+        resumed = write_split_inventory(project, root, inventory)
+        assert scanned and first_file not in scanned
+        assert resumed["sha256"] == expected["sha256"]
+        assert resumed["counts"] == expected["counts"]
         clusters = recipe / "clusters.json"
         _clusters(clusters, inventory, strata)
         frozen = recipe / "splits-reviewed.yaml"
