@@ -100,8 +100,10 @@ Native LM builds now share normalized source partitions by computation key
 within one Lab work root. The typed receipt binds the pinned source,
 resolved rights and admission, renderer options and three payload digests.
 Projects resolve eligibility before lookup. The shared cache is outside
-project-specific stage retention. Reference publication, dependency
-inspection and closure-aware pruning remain in #567.
+project-specific stage retention. `klab corpus plan PROJECT` reads the pinned
+inventory and reports expected normalization work and cache candidates for
+full native builds. Build resolves and verifies artifact reuse. Downstream
+stage planning, reference publication and closure-aware pruning remain in #567.
 
 Start with typed document, passage, annotation, duplicate-group, selection,
 entity, assertion, evidence, edge, index, and compiled sequence payloads.

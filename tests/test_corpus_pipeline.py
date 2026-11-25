@@ -19,8 +19,8 @@ from corpus_fixtures import (
 from klab.corpus.acquisition import acquire
 from klab.corpus.document_normalization import records_for_file
 from klab.corpus.pipeline import (
-    _uses_disk_lm_builder,
     build,
+    uses_disk_lm_builder,
 )
 from klab.corpus.project import DocumentPolicy, SourceDeclaration, load_project
 from klab.corpus.release import freeze, lineage, review, sample, verify_release
@@ -494,17 +494,17 @@ def _disk_builder_project(strategy="auto", **release_overrides):
 
 def test_an_lm_only_release_uses_the_disk_builder_without_reviewed_admission():
     # Large corpora must stay memory-bounded without a reviewed admission.
-    assert _uses_disk_lm_builder(*_disk_builder_project())
+    assert uses_disk_lm_builder(*_disk_builder_project())
 
 
 def test_a_fractional_release_keeps_the_in_memory_builder_under_auto():
-    assert not _uses_disk_lm_builder(*_disk_builder_project(fraction=0.5))
+    assert not uses_disk_lm_builder(*_disk_builder_project(fraction=0.5))
 
 
 def test_the_build_strategy_can_force_either_builder():
-    assert not _uses_disk_lm_builder(*_disk_builder_project(strategy="memory"))
+    assert not uses_disk_lm_builder(*_disk_builder_project(strategy="memory"))
     with pytest.raises(ValueError, match="build.strategy is disk"):
-        _uses_disk_lm_builder(*_disk_builder_project(strategy="disk", fraction=0.5))
+        uses_disk_lm_builder(*_disk_builder_project(strategy="disk", fraction=0.5))
 
 
 def test_source_ledger_names_a_source_whose_files_were_all_set_aside() -> None:

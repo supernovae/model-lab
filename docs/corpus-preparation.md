@@ -698,9 +698,34 @@ splits.
 ## Build and freeze
 
 ```sh
+klab --work-dir WORK corpus plan PROJECT --json
 klab --work-dir WORK corpus build PROJECT
 klab --work-dir WORK corpus freeze BUILD
 ```
+
+Run `plan` to see the local acquisition pins, eligible source partitions,
+candidate normalized cache hits and the source bytes that would need
+normalization if a new native disk build runs. A missing lock reports
+`acquisition_required`.
+An inconsistent source inventory reports `blocked` with a reason. The
+dependency list shows the order through freeze. Reuse and resource costs for
+indexing, deduplication and view construction are resolved during the build.
+In-memory and reviewed-row-admission builds report `unsupported`.
+
+Planning writes no artifacts or verification receipts. It streams the
+acquisition lock and snapshot manifests, discards row-level inventories and
+reads bounded file rights evidence where needed. Each lock or snapshot
+manifest has a 4 MiB retained metadata limit. Large acquisition receipts
+still cost a sequential metadata scan. `verify_candidate` means a matching
+cache location exists. Build verifies the snapshots and candidate shard
+outputs before reuse. Candidate source byte counts describe the inputs
+associated with those locations. They do not estimate verification I/O.
+
+On a local synthetic scanner workload, 50,000 selected-row receipt entries
+(9.89 MB) took 1.04 s and 250,000 entries (49.64 MB) took 4.29 s. Peak
+process RSS was 22.9 MiB across both scans. These timings cover metadata
+parsing, with no payload reads or temporary database. A production receipt
+inventory still needs its own measurement.
 
 `build` normalizes admitted documents, applies the frozen splits, removes exact
 duplicates (refusing cross-split or incompatible-rights duplicates) and writes

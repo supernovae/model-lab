@@ -220,6 +220,8 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     config["transport_budget"]["attempt_id"] = "second-recipe-acquire-1"
     config_path.write_text(yaml.safe_dump(config))
     cache = str(tmp_path / "transport-cache")
+    plan_args = ("corpus", "plan", str(config_path), "--json")
+    assert lab.json(*plan_args)["status"] == "acquisition_required"
     lab.run("corpus", "budget-init", str(config_path))
     lab.run("corpus", "acquire", str(config_path), "--transport-cache", cache)
     normalized = []
@@ -230,6 +232,10 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         return parse(raw, name, source, *args, **kwargs)
 
     monkeypatch.setattr(prepared_shards, "records_for_file", observe)
+    plan = lab.json(*plan_args)
+    assert plan["status"] == "planned", plan
+    assert plan["normalization_source_bytes"] == 0
+    assert plan["verification_candidate_source_bytes"] > 0
     other_build = Path(lab.run("corpus", "build", str(config_path), "--offline"))
     assert normalized == []
     for name in ("documents.jsonl", "spans.jsonl"):
@@ -263,7 +269,19 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         payload = yaml.safe_load(path.read_text())
         change(payload[key])
         path.write_text(yaml.safe_dump(payload))
+    assert lab.json(*plan_args)["status"] == "blocked"
     lab.run("corpus", "acquire", str(config_path), "--transport-cache", cache)
+    plan = lab.json(*plan_args)
+    assert plan["status"] == "planned", plan
+    scheduled = [
+        (source["source_id"], partition["path"], partition["source_bytes"])
+        for source in plan["sources"]
+        for partition in source["partitions"]
+        if partition["action"] == "normalize"
+    ]
+    source_bytes = len(b"# Extra\n\nAn independent reference.\n")
+    assert scheduled == [("ref_append", name, source_bytes)]
+    assert plan["normalization_source_bytes"] == source_bytes
     appended_build = Path(lab.run("corpus", "build", str(config_path), "--offline"))
     assert normalized == ["ref_append"]
     assert {doc["source_id"] for doc in documents(appended_build)} == set(DECLARED) | {

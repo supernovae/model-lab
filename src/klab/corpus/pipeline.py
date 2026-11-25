@@ -891,7 +891,7 @@ def _staged_build(root: Path, build_id: str) -> Iterator[Path]:
             raise
 
 
-def _uses_disk_lm_builder(project: Any, transforms: list[Any]) -> bool:
+def uses_disk_lm_builder(project: Any, transforms: list[Any]) -> bool:
     """Whether the bounded-memory builder applies, per `release.policy.build`."""
     strategy = project.release.policy.build.strategy
     if strategy == "memory":
@@ -1042,7 +1042,7 @@ def _build_stored(
             Path(__file__).with_name("rights.py")
         ),
     }
-    large_lm_build = _uses_disk_lm_builder(project, transforms)
+    large_lm_build = uses_disk_lm_builder(project, transforms)
     if large_lm_build:
         from klab.corpus.native_dedup import DEDUP_IMPLEMENTATION_FILES
         from klab.corpus.native_index import INDEX_IMPLEMENTATION_FILES

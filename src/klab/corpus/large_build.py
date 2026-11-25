@@ -197,6 +197,22 @@ def _read_rights_header(path: Path, name: str) -> bytes:
     return bytes(header)
 
 
+def native_file_rights(project, source, name, path, nested_metadata):
+    """Resolve a native partition's file-level admission before cache lookup."""
+    if source.rights is None:
+        return None
+    return resolve_file_rights(
+        source.rights,
+        name,
+        _read_rights_header(path, name),
+        nested_metadata=nested_metadata,
+        prospective_private_research=(
+            project.release.policy.rights.training_use
+            == "allowed_unless_explicitly_prohibited"
+        ),
+    )
+
+
 def _require_every_source_has_documents(
     connection: sqlite3.Connection,
     project: Any,
@@ -1013,20 +1029,7 @@ def build_large(
                     )
                 )
                 continue
-            decision = (
-                resolve_file_rights(
-                    source.rights,
-                    name,
-                    _read_rights_header(path, name),
-                    nested_metadata=nested_metadata,
-                    prospective_private_research=(
-                        project.release.policy.rights.training_use
-                        == "allowed_unless_explicitly_prohibited"
-                    ),
-                )
-                if source.rights
-                else None
-            )
+            decision = native_file_rights(project, source, name, path, nested_metadata)
             admitted = record_admission.get((source.id, name))
             if admitted is not None:
                 decision = admitted["rights"]
