@@ -183,6 +183,7 @@ def prepare_file(
         decision,
         row_limit,
     )
+    source_label = "admitted source" if record_admission is not None else "source"
     if record_admission is not None:
         # Bind only this verified file's decisions, not the admission plan for
         # unrelated sources. Stream disk-backed decisions without materializing.
@@ -307,7 +308,7 @@ def prepare_file(
                             and input_digest.hexdigest() != file["sha256"]
                         ):
                             raise ValueError(
-                                "source shard bytes differ from acquisition"
+                                f"{source_label} shard bytes differ from acquisition"
                             )
                 else:
                     if record_admission is not None:
@@ -318,7 +319,9 @@ def prepare_file(
                     else:
                         raw = source_path.read_bytes()
                     if hashlib.sha256(raw).hexdigest() != file["sha256"]:
-                        raise ValueError("source bytes differ from acquisition")
+                        raise ValueError(
+                            f"{source_label} bytes differ from acquisition"
+                        )
                     dropped = []
                     try:
                         rows = records_for_file(
