@@ -1093,8 +1093,10 @@ None of them is a quality score.
 A release is verified from its bytes once. Every command that reads a release
 then checks a signed receipt instead: `freeze` records one, and so does any
 verification that had none. A verification checks each file's size and SHA-256
-against the manifest, then every stage output, document, span, lineage and view
-row against the pinned source snapshots. It runs on several processes and keeps
+against the manifest. For stage outputs, the ordered replay computes the
+inventory checksum alongside the stage identity. It checks stage outputs,
+documents, spans, lineage and view rows against the pinned source snapshots.
+It runs on several processes and keeps
 only identities and byte offsets in a disposable index, so memory stays bounded
 and the index is a small fraction of the release, not a copy of it. A
 language-model-only release with a reviewed admission or a `fraction`, and any
@@ -1368,6 +1370,28 @@ files. The four signed proofs contained 6,196 bytes. An explicit cold
 pass still hashed every file. These times cover inventory hashing.
 An unfinished file repeats as a whole, so production restart cost
 still depends on the largest in-flight file. [#450](https://github.com/supernovae/model-lab/issues/450)
+
+#### Stage output verification measurements
+
+Stage verification reads line-aligned ranges for canonical JSON validation,
+then streams those rows in order to check the stage identity and the file
+checksum. Both passes are counted in verification progress. The verifier
+checks that the file generation stays stable across the two passes.
+
+A synthetic stage had 600,000 records and occupied 644 MB on NVMe. The table
+uses medians of three runs. Cold trials requested eviction of the fixture from
+the page cache. These times cover inventory and stage-output verification.
+
+| Cache and workers | Previous time | Combined checksum and identity pass |
+| --- | ---: | ---: |
+| Warm, four workers | 2.049 s | 1.771 s |
+| Cold, four workers | 2.359 s | 1.757 s |
+| Cold, one worker | 4.092 s | 3.548 s |
+
+For the four-worker cold trial, process reads fell from 1.96 GB to 1.31 GB.
+Storage reads were 644 MB in both cases. The fixture fit in the page cache,
+so the measured savings came from avoiding repeated processing of cached
+bytes. Production and HDD results remain to be measured. [#450](https://github.com/supernovae/model-lab/issues/450)
 
 ### Select families, screen duplicates, and build a schedule
 

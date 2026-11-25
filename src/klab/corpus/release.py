@@ -28,7 +28,7 @@ from klab.corpus.release_verify import (
     range_records,
     scratch_root,
 )
-from klab.corpus.shards import chunk_ranges, run_tasks
+from klab.corpus.shards import chunk_ranges, range_file_identity, run_tasks
 from klab.experiments.artifacts import snapshot_dependencies
 from klab.safe_io import read_file_range
 from klab.training.manifest import sha256_file
@@ -111,6 +111,7 @@ def _files(
     inventory: dict[str, Any],
     progress: BuildProgress | None = None,
     *,
+    stage_outputs: frozenset[str] = frozenset(),
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
 ) -> None:
@@ -123,14 +124,19 @@ def _files(
     }
     if actual != set(inventory):
         raise ValueError("release artifact inventory mismatch")
+    to_hash = (
+        {name: entry for name, entry in inventory.items() if name not in stage_outputs}
+        if stage_outputs
+        else inventory
+    )
     if progress is not None:
         progress.start_phase(
             "hash_files",
-            expected_input_bytes=sum(entry["size"] for entry in inventory.values()),
+            expected_input_bytes=sum(entry["size"] for entry in to_hash.values()),
         )
     hash_inventory(
         root,
-        inventory,
+        to_hash,
         _safe,
         progress,
         proof_store=proof_store,
@@ -1818,6 +1824,7 @@ def _verify_stages(
     root: Path,
     stages: list[dict[str, Any]],
     identity: dict[str, Any],
+    inventory: dict[str, Any],
     progress: BuildProgress | None = None,
 ) -> None:
     declarations = {spec["id"]: spec for spec in identity["transforms"]}
@@ -1835,19 +1842,29 @@ def _verify_stages(
             or stage["implementation_sha256"] != identity["implementation_sha256"]
         ):
             raise ValueError("stage declaration identity mismatch")
-        output = _safe(root, f"stages/{stage['id']}.jsonl")
+        name = f"stages/{stage['id']}.jsonl"
+        output = _safe(root, name)
+        entry = inventory[name]
+        if not output.is_file():
+            raise ValueError(f"tampered artifact: {name}")
+        generation = range_file_identity(output)
+        if generation[2] != entry["size"]:
+            raise ValueError(f"tampered artifact: {name}")
+        if stage["output_sha256"] != entry["sha256"]:
+            raise ValueError("stage receipt does not match output")
         # Workers confirm every line is the canonical encoding of its row; this
         # process then streams the file once, deriving the file digest and the
         # stage identity (a hash over the canonical rows) from the same bytes.
-        rows = []
-        total = output.stat().st_size
+        canonical_count = 0
+        total = entry["size"]
 
         def progress_bytes(size: int) -> None:
             if progress is not None:
                 progress.update(input_bytes=size)
 
-        def consume(result: tuple[int, int], rows: list[int] = rows) -> None:
-            rows.append(result[0])
+        def consume(result: tuple[int, int]) -> None:
+            nonlocal canonical_count
+            canonical_count += result[0]
             progress_bytes(result[1])
 
         run_tasks(
@@ -1858,24 +1875,70 @@ def _verify_stages(
         )
         file_digest, identity_digest = hashlib.sha256(), hashlib.sha256()
         identity_digest.update(canonical_json([stage["id"]])[:-1] + b",[")
-        count = 0
+        count = size = reported = 0
         with output.open("rb") as stream:
             for line in stream:
                 file_digest.update(line)
+                size += len(line)
+                if size - reported >= 64 * 1024**2:
+                    progress_bytes(size - reported)
+                    reported = size
                 if not line.strip():
                     continue
                 if count:
                     identity_digest.update(b",")
                 identity_digest.update(line.rstrip(b"\n"))
                 count += 1
+        progress_bytes(size - reported)
         identity_digest.update(b"]]")
+        if range_file_identity(output) != generation:
+            raise ValueError(f"stage output changed during verification: {name}")
         if (
-            file_digest.hexdigest() != stage["output_sha256"]
+            size != total
+            or file_digest.hexdigest() != entry["sha256"]
             or count != stage["output_count"]
-            or count != sum(rows)
+            or count != canonical_count
             or identity_digest.hexdigest() != stage["output_id"]
         ):
             raise ValueError("stage receipt does not match output")
+
+
+def _verify_native_outputs(
+    path: Path,
+    manifest: dict[str, Any],
+    identity: dict[str, Any],
+    metadata_name: str,
+    progress: BuildProgress,
+    *,
+    proof_store: ProofStore | None,
+    verification_mode: VerificationMode,
+) -> None:
+    """Check file membership, deferring stage checksums to ordered stage replay."""
+    metadata = path / metadata_name
+    inventory = {
+        **manifest["files"],
+        metadata_name: {
+            "sha256": sha256_file(metadata),
+            "size": metadata.stat().st_size,
+        },
+    }
+    stages = manifest["stages"]
+    stage_outputs = frozenset(f"stages/{stage['id']}.jsonl" for stage in stages)
+    if not stage_outputs <= inventory.keys():
+        raise ValueError("stage output missing from artifact inventory")
+    _files(
+        path,
+        inventory,
+        progress,
+        stage_outputs=stage_outputs,
+        proof_store=proof_store,
+        verification_mode=verification_mode,
+    )
+    progress.start_phase(
+        "stage_receipts",
+        expected_input_bytes=2 * sum(inventory[name]["size"] for name in stage_outputs),
+    )
+    _verify_stages(path, stages, identity, inventory, progress)
 
 
 def verify_build(
@@ -1930,21 +1993,15 @@ def _verify_build_cold(
     ):
         raise ValueError("invalid build identity")
     progress = open_progress(manifest["build_id"])
-    _files(
+    _verify_native_outputs(
         path,
-        {
-            **manifest["files"],
-            "build.json": {
-                "sha256": sha256_file(path / "build.json"),
-                "size": (path / "build.json").stat().st_size,
-            },
-        },
+        manifest,
+        manifest["identity"],
+        "build.json",
         progress,
         proof_store=proof_store,
         verification_mode=verification_mode,
     )
-    progress.start_phase("stage_receipts")
-    _verify_stages(path, manifest["stages"], manifest["identity"], progress)
     from klab.corpus.split_assignments import verify_document_assignments
 
     progress.start_phase("snapshots")
@@ -2301,21 +2358,15 @@ def _verify_release_cold(
     if canonical_digest(manifest["build_identity"]) != manifest["build_id"]:
         raise ValueError("release build identity differs from its build")
     progress = open_progress(release_id)
-    _files(
+    _verify_native_outputs(
         path,
-        {
-            **manifest["files"],
-            "manifest.json": {
-                "sha256": sha256_file(path / "manifest.json"),
-                "size": (path / "manifest.json").stat().st_size,
-            },
-        },
+        manifest,
+        manifest["build_identity"],
+        "manifest.json",
         progress,
         proof_store=proof_store,
         verification_mode=verification_mode,
     )
-    progress.start_phase("stage_receipts")
-    _verify_stages(path, manifest["stages"], manifest["build_identity"], progress)
     from klab.corpus.split_assignments import verify_document_assignments
 
     progress.start_phase("snapshots")
