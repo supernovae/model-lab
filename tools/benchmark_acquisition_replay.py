@@ -347,18 +347,37 @@ def benchmark(
         for cached in modes:
             elapsed = []
             cold_elapsed = []
+            cold_first_member = []
             for _ in range(trials):
                 with tempfile.TemporaryDirectory(dir=root) as attempt:
                     trial_root = Path(attempt)
                     cold_entry = None
                     if indexed and not cached:
+                        first = None
                         started = time.perf_counter()
-                        cold_lock = acquisition.acquire(
-                            project,
-                            trial_root / "cold",
-                            wikimedia_prefetch_bytes=prefetch_bytes,
-                        )
+
+                        def time_member(
+                            store, stage, inputs, produce, *, started=started
+                        ):
+                            nonlocal first
+                            result = run_stage(store, stage, inputs, produce)
+                            if stage == "wikimedia-member" and first is None:
+                                first = time.perf_counter() - started
+                            return result
+
+                        with pytest.MonkeyPatch.context() as timing:
+                            timing.setattr(acquisition, "run_stage", time_member)
+                            cold_lock = acquisition.acquire(
+                                project,
+                                trial_root / "cold",
+                                wikimedia_prefetch_bytes=prefetch_bytes,
+                            )
                         cold_elapsed.append(time.perf_counter() - started)
+                        if first is None:
+                            raise RuntimeError(
+                                "cold acquisition did not commit a member"
+                            )
+                        cold_first_member.append(first)
                         cold_entry = cold_lock["sources"]["one"]
                     work = trial_root / "work"
                     cache = trial_root / "cache" if cached else None
@@ -454,6 +473,11 @@ def benchmark(
                         "selected_pages_limit": selected_pages,
                         "median_cold_seconds": round(statistics.median(cold_elapsed), 6)
                         if cold_elapsed
+                        else None,
+                        "median_cold_first_member_seconds": round(
+                            statistics.median(cold_first_member), 6
+                        )
+                        if cold_first_member
                         else None,
                         "median_retry_seconds": round(statistics.median(elapsed), 6),
                         "trials": trials,

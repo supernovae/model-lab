@@ -83,13 +83,13 @@ class WikimediaRangePlan:
 
 
 def wikimedia_xml_context(
-    dump: Path, plan: WikimediaRangePlan, *, limit: int
+    dump: Path, *, root_offset: int, header_bytes: int, limit: int
 ) -> tuple[bytes, bytes]:
     """Recover the verified prefix and its matching XML closing tag."""
-    if not 0 <= plan.root_offset < plan.header_bytes <= limit:
+    if not 0 <= root_offset < header_bytes <= limit:
         raise ValueError("Wikimedia XML header exceeds its byte bound")
-    prefix = _read_prefix(dump, plan.header_bytes)
-    return prefix, _closing_tag(prefix, plan.root_offset)
+    prefix = _read_prefix(dump, header_bytes)
+    return prefix, _closing_tag(prefix, root_offset)
 
 
 def _read_prefix(dump: Path, size: int) -> bytes:
@@ -432,6 +432,7 @@ def _scan_dump(
     inputs: dict,
     max_header_bytes: int | None,
     check_inputs: Callable[[], None],
+    on_verified_group: Callable[[list[WikimediaRange], int, int], None] | None,
 ) -> tuple[tuple[WikimediaRange, ...], _XMLBoundary]:
     boundary = _XMLBoundary()
     start = expanded = 0
@@ -524,6 +525,13 @@ def _scan_dump(
             start = group[-1].end
             expanded += sum(member.expanded_bytes for member in group)
             groups += 1
+            if (
+                on_verified_group is not None
+                and start < dump_size
+                and boundary.header_bytes is not None
+            ):
+                check_inputs()
+                on_verified_group(group, boundary.root_offset, boundary.header_bytes)
         echo = current_settings().echo
         if echo is not None:
             print(
@@ -546,6 +554,7 @@ def plan_wikimedia_ranges(
     checkpoint_store: StageStore | None = None,
     on_expanded: Callable[[int], None] | None = None,
     verified_dump: CheckedCheckpoint[PinnedBody] | None = None,
+    on_verified_group: Callable[[list[WikimediaRange], int, int], None] | None = None,
 ) -> WikimediaRangePlan:
     """Check local pinned bytes, then verify each bzip2 member against the index."""
     spec = source.acquisition
@@ -561,7 +570,18 @@ def plan_wikimedia_ranges(
         raise ValueError(
             "Wikimedia range checkpoints need a declared multistream index"
         )
+    if on_verified_group is not None and checkpoint_store is None:
+        raise ValueError("Wikimedia group delivery requires a checkpoint store")
     declaration = declaration_sha256(source)
+    consuming_group = False
+
+    def report_group(group: list[WikimediaRange], root: int, header: int) -> None:
+        nonlocal consuming_group
+        assert on_verified_group is not None
+        consuming_group = True
+        on_verified_group(group, root, header)
+        consuming_group = False
+
     try:
         initial = (
             _bounded_identity(dump, spec.max_compressed_bytes),
@@ -624,11 +644,14 @@ def plan_wikimedia_ranges(
             inputs=inputs,
             max_header_bytes=index_options.max_header_bytes if index_options else None,
             check_inputs=check_inputs,
+            on_verified_group=report_group if on_verified_group is not None else None,
         )
         if sum(bool(member.pages) for member in ranges) != len(indexed):
             raise ValueError("Wikimedia index or XML context is incomplete")
         check_inputs()
     except (OSError, EOFError, expat.ExpatError) as error:
+        if consuming_group:
+            raise
         raise ValueError(f"cannot verify Wikimedia dump or index: {error}") from error
     assert xml.header_bytes is not None
     return WikimediaRangePlan(
