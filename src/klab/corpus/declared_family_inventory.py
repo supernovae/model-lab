@@ -12,7 +12,6 @@ coarse as a source does not change which documents a stratum quota takes.
 from __future__ import annotations
 
 import shutil
-import tempfile
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
@@ -20,19 +19,18 @@ from typing import Any
 
 import yaml
 
-from klab.canonical import canonical_json
+from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.build_stages import implementation_digests
+from klab.corpus.inventory_writer import inventory_writer
 from klab.corpus.mixture import MixtureDeclaration
 from klab.corpus.release import verify_release
-from klab.corpus.release_verify import range_records
+from klab.corpus.release_verify import current_settings, range_records
 from klab.corpus.shards import (
     declare_stage,
     plan_ranges,
     range_file_identity,
     run_sharded_files,
 )
-from klab.corpus.split_freeze import _publish_new
-from klab.training.manifest import sha256_file
 
 DECLARED_UNITS = ("source_document_family", "source_repository")
 
@@ -94,43 +92,67 @@ def derive_family_inventory(declaration: Path) -> dict[str, Any]:
     if output.exists() or output.is_symlink():
         raise ValueError("family inventory already exists")
     strata = spec.source_strata
-    output.parent.mkdir(parents=True, exist_ok=True)
-    kept = 0
-    with tempfile.TemporaryDirectory(dir=output.parent, prefix=".family-") as scratch:
-        payload = Path(scratch) / "family-inventory.jsonl"
-        plan = plan_ranges(
-            INVENTORY_STAGE,
-            documents,
-            strata,
-            inputs={
-                "release": manifest["release_id"],
-                "producer": implementation_digests(
-                    "declared_family_inventory.py", "release_verify.py"
-                ),
-            },
+    plan = plan_ranges(
+        INVENTORY_STAGE,
+        documents,
+        strata,
+        inputs={
+            "release": manifest["release_id"],
+            "producer": implementation_digests(
+                "declared_family_inventory.py", "release_verify.py"
+            ),
+        },
+    )
+    if plan.inputs["file"] != verified_input:
+        raise ValueError("release documents changed during family inventory")
+    identity = canonical_digest(
+        {
+            "inputs": plan.inputs,
+            "assembler": implementation_digests(
+                "inventory_writer.py", "view_checkpoints.py"
+            ),
+            "strata": strata,
+            "ranges": [(start, end) for _, start, end, _ in plan.tasks],
+        }
+    )
+    with inventory_writer(output, identity) as (checkpoints, view, state):
+        completed = state.get("ranges", 0)
+        kept = state.get("kept", 0)
+        echo = current_settings().echo
+        if completed and echo is not None:
+            print(
+                f"family inventory: reused {completed}/{len(plan.tasks)} assembled ranges",
+                file=echo,
+            )
+        tasks = plan.tasks[completed:]
+        disposable = plan.store is None
+        tail = replace(
+            plan,
+            tasks=tasks,
+            total_bytes=sum(end - start for _, start, end, _ in tasks),
+            store=checkpoints.root / "shards" if disposable else plan.store,
         )
-        if plan.inputs["file"] != verified_input:
-            raise ValueError("release documents changed during family inventory")
-        if plan.store is None:
-            plan = replace(plan, store=Path(scratch) / "shards")
-        with (
-            payload.open("xb") as stream,
-            closing(
-                run_sharded_files(plan, _inventory_range, ordered=True)
-            ) as segments,
-        ):
-            for directory, result in segments:
+        with closing(
+            run_sharded_files(tail, _inventory_range, ordered=True)
+        ) as segments:
+            for number, (directory, result) in enumerate(segments, start=completed + 1):
                 with (directory / "inventory.jsonl").open("rb") as segment:
-                    shutil.copyfileobj(segment, stream)
+                    while block := segment.read(1024**2):
+                        view.write(block)
                 kept += result["kept_documents"]
+                checkpoints.commit({"ranges": number, "kept": kept})
+                if disposable:
+                    shutil.rmtree(directory)
+        if not plan.tasks:
+            checkpoints.commit({"ranges": 0, "kept": 0})
         if range_file_identity(documents) != verified_input:
             raise ValueError("release documents changed during family inventory")
-        _publish_new(output, payload)
+        digest = view.file_digest().sha256
     return {
         "schema_version": 1,
         "release_id": manifest["release_id"],
         "output": str(output),
-        "sha256": sha256_file(output),
+        "sha256": digest,
         "kept_documents": kept,
         "family_unit": split["unit"],
     }

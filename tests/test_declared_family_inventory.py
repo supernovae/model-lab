@@ -199,11 +199,25 @@ def test_inventory_resumes_with_verified_segments(
     ):
         declared_family_inventory.derive_family_inventory(declaration)
     assert not output.exists()
-    good, damaged = sorted(scratch.glob("shards/files/shard/*/inventory.jsonl"))
+    good, damaged = sorted(
+        scratch.glob("shards/files/shard/*/inventory.jsonl"),
+        key=lambda path: json.loads(path.with_name("receipt.json").read_bytes())[
+            "inputs"
+        ]["task"][1],
+    )
     inode = good.stat().st_ino
     damaged.write_bytes(b"bad data")
     monkeypatch.delenv("KLAB_FAULT")
 
+    run = declared_family_inventory.run_sharded_files
+
+    def unassembled_only(plan, *args, **options):
+        assert plan.tasks and plan.tasks[0][1] > 0
+        return run(plan, *args, **options)
+
+    monkeypatch.setattr(
+        declared_family_inventory, "run_sharded_files", unassembled_only
+    )
     with verification_settings(workers=1, scratch_dir=scratch):
         resumed = declared_family_inventory.derive_family_inventory(declaration)
     assert good.stat().st_ino == inode
