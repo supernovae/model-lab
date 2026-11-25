@@ -8,7 +8,7 @@ import stat
 from pathlib import Path
 
 from klab.corpus import bounded_metadata
-from klab.corpus.acquisition_parts import check_checkpoint
+from klab.corpus.acquisition_parts import check_checkpoint, reclaim_disposable_staging
 from klab.corpus.project import Project
 from klab.corpus.transport_budget import (
     PINNED_FILE_KINDS,
@@ -53,6 +53,7 @@ def prepare(
     min_free_bytes: int,
     proof_store,
     verification_mode,
+    plan_only: bool,
 ):
     from klab.corpus import acquisition as native
 
@@ -266,6 +267,8 @@ def prepare(
         + LEDGER_BYTES
         + JOURNAL_BYTES
     )
+    if not plan_only:
+        reclaim_disposable_staging(parent)
     current_bytes = _files(base)
     free = os.statvfs(base).f_bavail * os.statvfs(base).f_frsize
     if not observes_storage and path_bytes > max_new_bytes:

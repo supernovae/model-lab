@@ -7,8 +7,11 @@ import hashlib
 import io
 import json
 import os
+import select
+import signal
 import stat
 import subprocess
+import sys
 import threading
 import urllib.request
 from contextlib import contextmanager
@@ -67,6 +70,68 @@ def test_local_offline_change_and_tamper(tmp_path: Path) -> None:
         verify_acquisition(project, tmp_path / "work")
     with pytest.raises(ValueError, match="mismatch"):
         acquire(project, tmp_path / "work", offline=True)
+
+
+def test_acquisition_reclaims_only_abandoned_disposable_work(tmp_path: Path) -> None:
+    recipe = _fixture(tmp_path)
+    document = recipe.parent / "sources/data.md"
+    document.write_text("# Before\n", encoding="utf-8")
+    project = load_project(recipe)
+    work = tmp_path / "work"
+    first = acquire(project, work)
+    parent = Path(first["sources"]["one"]["snapshot_path"]).parent
+    legacy = parent / ".acquire-leftover"
+    legacy.mkdir()
+    keep = legacy / "original.txt"
+    keep.write_bytes(b"unmarked payload")
+    document.write_text("# After\n", encoding="utf-8")
+    script = """
+import sys
+from pathlib import Path
+from klab.corpus import acquisition
+from klab.corpus.project import load_project
+
+def pause_before_verification(path, *, _staged=False, **kwargs):
+    assert _staged
+    print(path, flush=True)
+    sys.stdin.buffer.read(1)
+    raise SystemExit(1)
+
+acquisition.verify_snapshot = pause_before_verification
+acquisition.acquire(load_project(Path(sys.argv[1])), Path(sys.argv[2]))
+"""
+    with subprocess.Popen(
+        [sys.executable, "-c", script, str(recipe), str(work)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    ) as running:
+        assert running.stdout is not None
+        try:
+            assert select.select([running.stdout], [], [], 20)[0]
+            line = running.stdout.readline().strip()
+            assert line
+            staging = Path(line)
+            assert (staging / "files/data.md").read_bytes() == b"# After\n"
+            with pytest.raises(ValueError, match="another acquisition"):
+                acquire(project, work)
+            assert acquire(project, work, offline=True) == first
+            assert (staging / "files/data.md").exists()
+        finally:
+            running.kill()
+            running.wait(timeout=20)
+    assert running.returncode == -signal.SIGKILL
+    assert staging.is_dir()
+
+    resumed = acquire(project, work)
+    clean = acquire(project, tmp_path / "clean")
+    assert (
+        resumed["sources"]["one"]["snapshot_sha256"]
+        == clean["sources"]["one"]["snapshot_sha256"]
+    )
+    assert verify_acquisition(project, work) == resumed
+    assert not staging.exists()
+    assert keep.read_bytes() == b"unmarked payload"
 
 
 def test_git_pinned_revision_and_symlink(tmp_path: Path) -> None:
@@ -291,7 +356,10 @@ def test_build_only_declaration_edits_keep_the_acquisition_identity(
     second = acquire(project, work)
     assert second == first
     verify_acquisition(project, work)
-    assert len(list((work / "corpora/example/snapshots/one").iterdir())) == 1
+    snapshots = (work / "corpora/example/snapshots/one").iterdir()
+    assert {path.name for path in snapshots if not path.name.startswith(".")} == {
+        first["sources"]["one"]["snapshot_sha256"]
+    }
     assert (
         "rights"
         not in verify_snapshot(first["sources"]["one"]["snapshot_path"])["declaration"]
