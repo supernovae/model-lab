@@ -3664,6 +3664,7 @@ def acquire(
             origin, manifest = retained[source.id]
             destination = snapshot_root / source.id / manifest["snapshot_sha256"]
             _safe_snapshot_path(destination.absolute())
+            copied = None
             if not destination.exists():
                 if require_existing:
                     raise ValueError(
@@ -3672,10 +3673,11 @@ def acquire(
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with acquisition_staging(destination.parent, None) as staging:
                     shutil.copytree(origin, staging, dirs_exist_ok=True, symlinks=True)
-                    if (
-                        verify_snapshot(staging, _staged=True)["snapshot_sha256"]
-                        != manifest["snapshot_sha256"]
-                    ):
+                    checked = check_checkpoint(
+                        staging, lambda path: verify_snapshot(path, _staged=True)
+                    )
+                    assert checked is not None
+                    if checked.value != manifest:
                         raise ValueError("retained snapshot copy differs from origin")
                     for member in sorted(staging.rglob("*"), reverse=True):
                         if member.is_file():
@@ -3686,11 +3688,14 @@ def acquire(
                     sync_directory(staging)
                     rename_noreplace(staging, destination)
                     sync_directory(destination.parent)
-            copied = verify_snapshot(
-                destination,
-                proof_store=proof_store,
-                verification_mode=verification_mode,
-            )
+                    if checked.matches(destination, renamed=True):
+                        copied = checked.value
+            if copied is None:
+                copied = verify_snapshot(
+                    destination,
+                    proof_store=proof_store,
+                    verification_mode=verification_mode,
+                )
             if copied != manifest:
                 raise ValueError("retained snapshot copy identity mismatch")
             entries[source.id] = {

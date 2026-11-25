@@ -86,10 +86,15 @@ per source and then an acquisition lock binding them.
   `--plan` verifies everything without network access or writes. A step returns
   `source_verified` and `complete: false`; once every source is present, plain
   `corpus acquire PROJECT` publishes the lock, reusing the snapshots.
-- **Restart interrupted acquisition.** Lab uses one disposable staging slot
-  per source for work that has no verified checkpoints, including retained
-  snapshot copies. The next online attempt reclaims the slot if its ownership
-  marker matches and it can acquire the source's staging lock. An executing
+- **Restart interrupted acquisition.** Lab keeps disposable staging per
+  source for work that has no verified checkpoints, including retained
+  snapshot copies. Each attempt writes to a unique directory. Before it
+  starts, Lab reclaims the previous attempt under the source's staging lock
+  after checking the staging area's ownership marker. The lock must coordinate
+  all writers. On filesystems that provide only host-local locks, use a
+  separate work root per host. If Lab refuses an unsafe or unmarked staging
+  area, stop acquisitions for that source, then inspect and move the indicated
+  staging directory aside before retrying. An executing
   source step reclaims before measuring disk headroom. Planning, offline
   verification and existing-snapshot finalization leave disposable staging
   alone. Legacy `.acquire-*` and `.reuse-*` directories and checkpoints for

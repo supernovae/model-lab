@@ -8,6 +8,7 @@ import os
 import shutil
 import stat
 import sys
+import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ from klab.verification_proofs import (
 )
 
 _DISPOSABLE_STAGING = ".disposable-staging"
+_DISPOSABLE_ATTEMPT_PREFIX = "snapshot-"
 
 
 def _checkpoint_fingerprint(path: Path) -> ArtifactFingerprint | None:
@@ -502,20 +504,23 @@ def _disposable_lock(parent: Path) -> Iterator[bool]:
         os.close(descriptor)
 
 
-def _disposable_snapshot(root: Path, *, create: bool) -> Path:
+def _check_disposable_root(root: Path, *, create: bool) -> bool:
     if create:
         root.mkdir(mode=0o700, exist_ok=True)
     info = root.lstat()
+    recovery = "Stop acquisitions for this source, then inspect and move the staging directory aside before retrying."
     if (
         not stat.S_ISDIR(info.st_mode)
         or info.st_uid != os.getuid()
         or stat.S_IMODE(info.st_mode) & 0o077
     ):
-        raise ValueError(f"unsafe acquisition staging directory: {root}")
+        raise ValueError(f"unsafe acquisition staging directory: {root}. {recovery}")
     # An empty marker is created atomically in the private staging directory.
     # Keep it outside the payload so it survives publication or interrupted cleanup.
     owner = root / ".klab-disposable"
-    if create and not os.path.lexists(owner) and not any(root.iterdir()):
+    if not os.path.lexists(owner) and not any(root.iterdir()):
+        if not create:
+            return False
         with owner.open("xb"):
             pass
         sync_directory(root)
@@ -523,15 +528,19 @@ def _disposable_snapshot(root: Path, *, create: bool) -> Path:
     try:
         info = owner.lstat()
     except FileNotFoundError as error:
-        raise ValueError(f"unmarked acquisition staging directory: {root}") from error
+        raise ValueError(
+            f"unmarked acquisition staging directory: {root}. {recovery}"
+        ) from error
     if (
         not stat.S_ISREG(info.st_mode)
         or info.st_uid != os.getuid()
         or info.st_nlink != 1
         or info.st_size != 0
     ):
-        raise ValueError(f"invalid acquisition staging owner marker: {owner}")
-    return root / "snapshot"
+        raise ValueError(
+            f"invalid acquisition staging owner marker: {owner}. {recovery}"
+        )
+    return True
 
 
 def _discard_disposable_snapshot(snapshot: Path) -> bool:
@@ -545,21 +554,28 @@ def _discard_disposable_snapshot(snapshot: Path) -> bool:
     return True
 
 
+def _reclaim_disposable_attempts(root: Path) -> None:
+    removed = False
+    for snapshot in root.glob(f"{_DISPOSABLE_ATTEMPT_PREFIX}*"):
+        if _discard_disposable_snapshot(snapshot):
+            removed = True
+            print(
+                f"reclaimed abandoned acquisition staging at {snapshot}",
+                file=sys.stderr,
+            )
+    if removed:
+        sync_directory(root)
+
+
 def reclaim_disposable_staging(parent: Path) -> None:
     """Reclaim a stopped attempt without disturbing a live writer or checkpoints."""
     root = parent / _DISPOSABLE_STAGING
-    if not os.path.lexists(root / "snapshot"):
+    if not os.path.lexists(root):
         return
     try:
         with _disposable_lock(parent) as locked:
-            if locked and _discard_disposable_snapshot(
-                _disposable_snapshot(root, create=False)
-            ):
-                sync_directory(root)
-                print(
-                    f"reclaimed abandoned acquisition staging at {root}",
-                    file=sys.stderr,
-                )
+            if locked and _check_disposable_root(root, create=False):
+                _reclaim_disposable_attempts(root)
     except (OSError, ValueError) as error:
         print(f"cannot reclaim acquisition staging at {root}: {error}", file=sys.stderr)
 
@@ -577,13 +593,13 @@ def acquisition_staging(parent: Path, parts: AcquisitionParts | None) -> Iterato
         with _disposable_lock(parent) as locked:
             if not locked:
                 raise ValueError("another acquisition is writing this source")
-            snapshot = _disposable_snapshot(root, create=True)
-            if _discard_disposable_snapshot(snapshot):
-                print(
-                    f"reclaimed abandoned acquisition staging at {root}",
-                    file=sys.stderr,
-                )
-            snapshot.mkdir(mode=0o700)
+            _check_disposable_root(root, create=True)
+            _reclaim_disposable_attempts(root)
+            # Give each attempt its own publication path even if a filesystem
+            # fails to coordinate locks across its clients.
+            snapshot = Path(
+                tempfile.mkdtemp(prefix=_DISPOSABLE_ATTEMPT_PREFIX, dir=root)
+            )
             sync_directory(root)
             try:
                 yield snapshot
