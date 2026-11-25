@@ -139,6 +139,18 @@ def _run(args: argparse.Namespace) -> None:
             result = TransportCache(cache_root).prune()
         print(json.dumps(result, sort_keys=True, default=str))
         return
+    if command == "staging-prune":
+        from klab.corpus.acquisition import prune_acquisition_staging
+
+        result = prune_acquisition_staging(
+            load_project(args.project),
+            root,
+            args.source_id,
+            args.generation,
+            apply=args.apply,
+        )
+        print(json.dumps(result, sort_keys=True))
+        return
     verification = (
         verification_options(root, cold=getattr(args, "cold", False))
         if command in {"acquire", "build", "freeze", "export"}
@@ -728,6 +740,16 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         help="Remove corrupt entries, unreferenced bodies and stale scratch; never a valid entry",
     )
     command.add_argument("--transport-cache", type=Path, help=_CACHE_HELP)
+    command.set_defaults(handler=_handle)
+    command = sub.add_parser(
+        "staging-prune", help="Preview or remove one superseded acquisition checkpoint"
+    )
+    command.add_argument("project")
+    command.add_argument("--source-id", required=True)
+    command.add_argument("--generation", required=True)
+    command.add_argument(
+        "--apply", action="store_true", help="Remove the selected generation"
+    )
     command.set_defaults(handler=_handle)
     command = sub.add_parser(
         "budget-observe-time",
