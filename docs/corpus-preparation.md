@@ -2108,15 +2108,43 @@ I/O remain unmeasured.
 
 | Step | Committed unit | Work repeated after a stop | Measured evidence |
 | --- | --- | --- | --- |
-| Source split inventory | Complete output with native completion evidence. | Rescan the admitted source files and write the inventory again if output was unpublished. | Production restart cost unmeasured. |
+| Source split inventory | Receipted append windows at verified source-file boundaries, then the native completion evidence. | Verify committed inventory bytes. Resume at the next file in the ordered snapshot inventory. An unfinished window can include up to 64 MiB or 128 files, plus the file that crosses the byte bound. | The connected preparation fixture interrupts after one committed file and matches the clean inventory while skipping that file on retry. |
 | `freeze-splits` | Verified final split bundle. Completed preparation also commits external-sort and join phases plus export chunks. | The ordinary path repeats unfinished assignment work. The completed-preparation route resumes at the last authenticated phase and reuses intact export chunks. | Production restart cost unmeasured. |
 | `derive-family-inventory` | Receipted file-backed range segments with persistent `--scratch-dir`. | Verify existing segments, regenerate missing ones, and copy the segments again during final assembly. | Byte-identical fixture restart. Production assembly and verification cost unmeasured. [#576](https://github.com/supernovae/model-lab/pull/576) |
-| `finalize-family-inventory` | Final inventory. Completed preparation can reuse the release's authenticated family inventory. | Rebuild the native candidate-to-document join and output, or republish the authenticated retained inventory. | Production restart cost unmeasured. |
+| `finalize-family-inventory` | Receipted native merge windows at 64 MiB of combined input, with document and candidate offsets. Completed preparation can reuse the release's authenticated family inventory. | Verify the frozen candidate bundle and committed output prefix. Resume the ordered merge from the saved offsets, or republish the authenticated retained inventory. | See [native family finalization measurements](#native-family-finalization-measurements). |
 | Near-duplicate screen | Training-pass offset and accumulators per range, every 200,000 training documents by default. | Rebuild the held-out index and template evidence when enabled. Replay training records after each range's commit. | Historical 6.7M-document Workshop screen, 1–2 h on one core. Held-out rebuild cost unmeasured. [#491](https://github.com/supernovae/model-lab/pull/491) |
 | Seeded tokenizer sample and verification | TRAIN lineage, rank histogram, and candidate range receipts with `--scratch-dir` on `tokenizer train` and `tokenizer verify`. | Reuse completed ranges and scan missing or damaged ranges. Reassemble the sample and read its selected payloads. A run without scratch does its own selection scans. | 13 s at 12 workers on a warm-page-cache synthetic 11.9 GB, 2M-document release with a 32 MiB fit quota. This measures selection. [#499](https://github.com/supernovae/model-lab/pull/499) |
 | Tokenizer fit and bakeoff | Complete staged tokenizer and provenance, published together, or completed bakeoff artifacts. | Verify and publish a matching staged pair without fitting again. A stop before both staged files are complete repeats the native fit. Concurrent fits coordinate on the destination and publication preserves an existing destination. | A 16 MiB synthetic fit took 1.04 s, and its retry after a stop inside BPE spent 1.03 s in the trainer call. See [the fitting measurements](#tokenizer-fit-timings). |
 | `materialize-mixture` | Candidate and output segments and a reusable content token cache. Default commit thresholds are 4,096 candidates, 64 MiB or 30 s. | Verify committed segments, rebuild or verify indexes as needed, replay the uncommitted segment, and finish assembly. Reuse unchanged token encodings. | 24.2 s cold and 12.9 s with warm token cache on a synthetic 210M-token mixture. These are build timings. [Mixture speed](token-store.md#mixture-speed) |
 | `verify-mixture`, `--reseal`, and `--audit` | Complete verification or completion receipt. | Routine verification and reseal may repeat output checks and hashes. `--audit` reruns an independent schedule in fresh scratch with token reuse disabled. | A real full audit took 94 min. The synthetic 6,000-document audit took 1.1 s with a mocked tokenizer. [#521](https://github.com/supernovae/model-lab/pull/521) |
+
+Retry `split-inventory` or native `finalize-family-inventory` with the same
+output path to resume a private checkpoint beside it. The ordered source
+scan commits at file boundaries to keep snapshot validation and document
+IDs intact. The finalizer joins the release rows and frozen candidates in
+document-ID order and checks each pair's split, content digest and stratum,
+including dropped documents. The join runs in one ordered pass and keeps
+one input pair in memory. Both operations bind receipts to the input
+generations and producer code. The completed inventory is linked into place
+atomically. Its stage directory is removed after publication.
+
+#### Native family finalization measurements
+
+One cold NVMe trial per case used 200,000 synthetic rows with 514 MB of
+document JSONL and 46 MB of frozen candidates. Each trial included real
+frozen bundle validation and excluded release verification. The streamed
+retry followed SIGKILL after 71,925 pairs, with 185 MB of document bytes
+and 16 MB of output already committed. All three inventories had the
+same digest and 44 MB of output.
+
+| Run | Wall time | CPU time | Peak RSS | Logical reads | Device reads | Device writes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Row-store join, fresh | 7.208 s | 6.721 s | 67 MiB | 3.21 GB | 560 MB | 1.68 GB |
+| Ordered merge, fresh | 1.888 s | 1.461 s | 59 MiB | 626 MB | 560 MB | 44 MB |
+| Ordered merge, retry | 1.076 s | 0.942 s | 60 MiB | 441 MB | 391 MB | 28 MB |
+
+The retry still hashed the frozen candidates and verified the output
+prefix. Production and slower-storage recovery measurements remain open.
 
 ### Prepare data, train, and score
 

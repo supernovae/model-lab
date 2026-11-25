@@ -8,20 +8,24 @@ import os
 import re
 import shutil
 import tempfile
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
 import yaml
 
-from klab.canonical import canonical_json
+from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.acquisition import verify_acquisition
+from klab.corpus.admission_inspection_cache import capture, unchanged
 from klab.corpus.bounded_metadata import (
     current_metadata_store,
     metadata_operation,
     read_metadata,
 )
-from klab.corpus.jsonl_records import records_from_path
+from klab.corpus.build_stages import implementation_digests
+from klab.corpus.inventory_writer import INVENTORY_WINDOW_BYTES, inventory_writer
+from klab.corpus.jsonl_records import iter_jsonl_records, records_from_path
 from klab.corpus.project import (
     SPLITS,
     Project,
@@ -29,6 +33,7 @@ from klab.corpus.project import (
     source_declaration_payload,
 )
 from klab.corpus.release import verify_release
+from klab.corpus.release_verify import current_settings
 from klab.corpus.rights import verify_record_admission
 from klab.corpus.row_index import RowIndex, ValueMap
 from klab.corpus.split_inventory import write_split_inventory
@@ -705,70 +710,130 @@ def _freeze_splits(
 
 
 def _finalize_family_inventory(
-    release: Path, frozen_splits: Path, output: Path
+    manifest: dict[str, Any],
+    documents: Path,
+    verified_documents: dict,
+    frozen_splits: Path,
+    output: Path,
 ) -> dict[str, Any]:
     """Filter the authenticated family candidates to exactly kept release docs."""
-    manifest = verify_release(release)
     candidate_path = frozen_splits.with_name(
         frozen_splits.stem + ".family-candidates.jsonl"
     )
+    receipt_path = frozen_splits.with_name(frozen_splits.stem + ".receipt.json")
+    dependencies = {
+        **verified_documents,
+        **capture([candidate_path, frozen_splits, receipt_path]),
+    }
     receipt = cast(dict[str, Any], verify_split_bundle(frozen_splits))
-    if (
-        receipt.get("schema_version") != 1
-        or receipt.get("split_sha256") != sha256_file(frozen_splits)
-        or receipt.get("family_candidate_sha256") != sha256_file(candidate_path)
-        or manifest["build_identity"]["split"]
-        != yaml.safe_load(frozen_splits.read_text(encoding="utf-8"))
+    if manifest["build_identity"]["split"] != yaml.safe_load(
+        frozen_splits.read_text(encoding="utf-8")
     ):
         raise ValueError("family candidates differ from frozen release split")
-    connection = current_metadata_store().connection
-    candidates = RowIndex(
-        connection,
-        (
-            record.value
-            for record in records_from_path(
-                candidate_path, max_record_bytes=8 * 1024**2
+    identity = canonical_digest(
+        {
+            "release": manifest["release_id"],
+            "inputs": dependencies,
+            "producer": implementation_digests(
+                "split_freeze.py",
+                "inventory_writer.py",
+                "view_checkpoints.py",
+                "jsonl_records.py",
+            ),
+        }
+    )
+    with inventory_writer(output, identity) as (checkpoints, view, state):
+        cursor = {
+            "documents": 0,
+            "kept": 0,
+            "previous": "",
+            "doc_offset": 0,
+            "candidate_offset": 0,
+            **state,
+        }
+        echo = current_settings().echo
+        if state and echo is not None:
+            print(
+                f"family inventory: reused {cursor['documents']} document pairs",
+                file=echo,
             )
-        ),
-        lambda row: row["document_id"],
-        duplicate="duplicate family candidate document",
-    )
-    docs = RowIndex(
-        connection,
-        (record.value for record in records_from_path(release / "documents.jsonl")),
-        lambda row: row["document_id"],
-    )
-    if not candidates.same_keys(docs):
-        raise ValueError("family candidates differ from release documents")
-    kept = 0
-    payload = Path(current_metadata_store().temporary.name) / (
-        "final-family-" + uuid4().hex
-    )
-    with payload.open("xb") as stream:
-        for doc in docs.ordered_values():
-            document_id = doc["document_id"]
-            row = candidates[document_id]
-            if (
-                set(row)
-                != {"document_id", "family_id", "split", "stratum", "content_sha256"}
-                or row["split"] != doc["split"]
-                or row["content_sha256"] != doc["content_sha256"]
-                or row["stratum"] not in doc["domains"]
+        if not state.get("complete"):
+            with (
+                documents.open("rb") as docs,
+                candidate_path.open("rb") as candidates,
             ):
-                raise ValueError("family candidate disagrees with verified release")
-            if doc["drop_reason"] is None:
-                stream.write(canonical_json(row) + b"\n")
-                kept += 1
-    if output.exists() or output.is_symlink():
-        raise ValueError("final family inventory already exists")
-    _publish_new(output, payload)
+                doc_start = cursor["doc_offset"]
+                candidate_start = cursor["candidate_offset"]
+                docs.seek(doc_start)
+                candidates.seek(candidate_start)
+                pairs = zip_longest(
+                    iter_jsonl_records(docs, source=str(documents)),
+                    iter_jsonl_records(
+                        candidates,
+                        source=str(candidate_path),
+                        max_record_bytes=8 * 1024**2,
+                    ),
+                )
+                before = doc_start + candidate_start
+                for doc_record, candidate_record in pairs:
+                    if doc_record is None or candidate_record is None:
+                        raise ValueError(
+                            "family candidates differ from release documents"
+                        )
+                    doc, row = doc_record.value, candidate_record.value
+                    document_id = doc["document_id"]
+                    if (
+                        row["document_id"] != document_id
+                        or document_id <= cursor["previous"]
+                    ):
+                        raise ValueError(
+                            "family candidates differ from ordered release documents"
+                        )
+                    if (
+                        set(row)
+                        != {
+                            "document_id",
+                            "family_id",
+                            "split",
+                            "stratum",
+                            "content_sha256",
+                        }
+                        or row["split"] != doc["split"]
+                        or row["content_sha256"] != doc["content_sha256"]
+                        or row["stratum"] not in doc["domains"]
+                    ):
+                        raise ValueError(
+                            "family candidate disagrees with verified release"
+                        )
+                    if doc["drop_reason"] is None:
+                        view.write(canonical_json(row) + b"\n")
+                        cursor["kept"] += 1
+                    cursor["documents"] += 1
+                    cursor["previous"] = document_id
+                    cursor["doc_offset"] = (
+                        doc_start + doc_record.byte_offset + len(doc_record.raw)
+                    )
+                    cursor["candidate_offset"] = (
+                        candidate_start
+                        + candidate_record.byte_offset
+                        + len(candidate_record.raw)
+                    )
+                    read = cursor["doc_offset"] + cursor["candidate_offset"]
+                    if read - before >= INVENTORY_WINDOW_BYTES:
+                        checkpoints.commit(cursor)
+                        before = read
+            unchanged(dependencies)
+            checkpoints.commit({**cursor, "complete": True})
+        else:
+            unchanged(dependencies)
+        digest = view.file_digest().sha256
     return {
         "schema_version": 1,
         "release_id": manifest["release_id"],
         "output": str(output),
-        "sha256": sha256_file(output),
-        "kept_documents": kept,
-        "duplicate_documents_removed": len(docs) - kept,
+        "sha256": digest,
+        "kept_documents": cursor["kept"],
+        "duplicate_documents_removed": cursor["documents"] - cursor["kept"],
         "split_sha256": receipt["split_sha256"],
         "family_candidate_sha256": receipt["family_candidate_sha256"],
     }
@@ -806,6 +871,9 @@ def finalize_family_inventory(
 ) -> dict[str, Any]:
     from klab.corpus.completed_preparation import local_scope
 
+    release = release.resolve()
+    documents = release / "documents.jsonl"
+    verified_documents = capture([documents])
     manifest = verify_release(release)
     if manifest["build_identity"]["split"]["unit"] in (
         "source_document_family",
@@ -850,5 +918,10 @@ def finalize_family_inventory(
             "split_sha256": receipt["split_sha256"],
             "family_candidate_sha256": receipt["family_candidate_sha256"],
         }
-    with metadata_operation(output.parent, max_database_bytes=None):
-        return _finalize_family_inventory(release, frozen_splits, output)
+    return _finalize_family_inventory(
+        manifest,
+        documents,
+        verified_documents,
+        frozen_splits.parent.resolve() / frozen_splits.name,
+        output,
+    )

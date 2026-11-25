@@ -15,6 +15,7 @@ from klab.canonical import canonical_json
 from klab.corpus import split_freeze
 from klab.corpus.mixture_index import MixtureIndex
 from klab.corpus.project import SplitDeclaration
+from klab.corpus.view_checkpoints import ViewCheckpoints
 from klab.training.manifest import sha256_file
 
 
@@ -447,16 +448,47 @@ def test_finalized_family_inventory_matches_kept_release_documents(
     (release / "documents.jsonl").write_bytes(
         b"".join(canonical_json(row) + b"\n" for row in documents.values())
     )
-    monkeypatch.setattr(
-        split_freeze,
-        "verify_release",
-        lambda _: {
+    verified = []
+
+    def verify(path):
+        verified.append(path)
+        return {
             "release_id": "fixture-release",
             "build_identity": {"split": yaml.safe_load(split_path.read_text())},
-        },
-    )
+        }
+
+    monkeypatch.setattr(split_freeze, "verify_release", verify)
     final = tmp_path / "final-family-inventory.jsonl"
-    result = split_freeze.finalize_family_inventory(release, split_path, final)
+    commit = ViewCheckpoints.commit
+    committed = []
+
+    def interrupt(journal, state):
+        commit(journal, state)
+        committed.append(state["doc_offset"])
+        raise InterruptedError("stop after committed family window")
+
+    monkeypatch.setattr(split_freeze, "INVENTORY_WINDOW_BYTES", 1024)
+    with monkeypatch.context() as fault:
+        fault.setattr(ViewCheckpoints, "commit", interrupt)
+        with pytest.raises(InterruptedError):
+            split_freeze.finalize_family_inventory(release, split_path, final)
+    assert not final.exists()
+    assert 0 < committed[0] < (release / "documents.jsonl").stat().st_size
+
+    parse = split_freeze.iter_jsonl_records
+
+    def check_seek(stream, **options):
+        assert stream.tell() > 0
+        return parse(stream, **options)
+
+    with monkeypatch.context() as resumed:
+        resumed.setattr(split_freeze, "iter_jsonl_records", check_seek)
+        result = split_freeze.finalize_family_inventory(release, split_path, final)
+    assert verified == [release, release]
+    assert final.read_bytes() == b"".join(
+        canonical_json(row) + b"\n" for row in candidates[1:]
+    )
+    assert result["sha256"] == sha256_file(final)
     assert result["kept_documents"] == 29
     kept = {key: doc for key, doc in documents.items() if doc["drop_reason"] is None}
     scratch = tmp_path / "mixture-index"
