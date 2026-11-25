@@ -315,7 +315,8 @@ from file metadata. The former loop read it once per consulted source.
 Across 33 consultations, that is about 136 GB of calculated logical input.
 Acquisition now reads the advisory lock at most once and falls back to
 verified immutable snapshots if that read fails, including on memory
-exhaustion. Verification of the published lock is a separate step. The
+exhaustion. Acquisition then reads and verifies the candidate lock before
+atomically publishing it. Independent audits verify the published lock. The
 peak RSS, physical I/O and time of reading the production lock remain
 unmeasured. Keep wide metadata and production measurements tracked in
 [#450](https://github.com/supernovae/model-lab/issues/450).
