@@ -1649,8 +1649,16 @@ while they overlapped the new index, and fresh index writes fell from
 input. Cold ordered reads fetched 809 MB before and 767 MB after.
 The buffered sequential cache assist was eligible for this fixture.
 An initial batch-only reference reader took 5.588 s for the same cold
-ordered reads. Large cold working sets outside the cache budget,
-production-scale restart and slower storage remain open.
+ordered reads.
+
+A separate 1.70 GB fixture with 96,000 rows exceeded the cache budget.
+In one paired run, index construction including the final receipt took
+4.979 s before and 2.557 s with references. The index shrank from 1.83 GB
+to 74 MB. Cold ordered reads took 2.390 s before and 3.275 s with
+references. Warm ordered reads took 1.216 s before and 1.149 s after.
+The sum of index and cold-read times fell from 7.369 s to 5.832 s.
+These were separate timed phases with byte-identical ordered payloads.
+Production-scale restart and slower storage remain open.
 [#450](https://github.com/supernovae/model-lab/issues/450), [#485](https://github.com/supernovae/model-lab/issues/485)
 
 ### Select families, screen duplicates, and build a schedule
