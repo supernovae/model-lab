@@ -22,7 +22,6 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from bisect import bisect_right
 from collections.abc import Callable, Iterator, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -69,7 +68,7 @@ from klab.corpus.project import (
     project_path,
     safe_name,
 )
-from klab.corpus.release_verify import worker_count
+from klab.corpus.release_verify import hash_inventory, worker_count
 from klab.corpus.shards import ShardPlan, declare_stage, run_sharded
 from klab.corpus.transport_budget import (
     PINNED_FILE_KINDS,
@@ -3251,7 +3250,12 @@ def verify_snapshot(
             verification_mode=verification_mode,
         )
         return manifest
-    return _verify_snapshot_cold(path, _staged=_staged)
+    return _verify_snapshot_cold(
+        path,
+        _staged=_staged,
+        proof_store=None if _staged else proof_store,
+        verification_mode=verification_mode,
+    )
 
 
 def alias_verified_snapshot(
@@ -3293,7 +3297,13 @@ def alias_verified_snapshot(
     }
 
 
-def _verify_snapshot_cold(path: Path, *, _staged: bool = False) -> dict[str, Any]:
+def _verify_snapshot_cold(
+    path: Path,
+    *,
+    _staged: bool = False,
+    proof_store: ProofStore | None = None,
+    verification_mode: VerificationMode = "cold",
+) -> dict[str, Any]:
     path = Path(path)
     try:
         manifest = read_metadata(path / "manifest.json")
@@ -3320,42 +3330,43 @@ def _verify_snapshot_cold(path: Path, *, _staged: bool = False) -> dict[str, Any
             not _staged and path.name != expected
         ):
             raise ValueError("snapshot identity mismatch")
-        names = set()
-        checks = []
+        directory = path / "files"
+        resolved_directory = directory.resolve()
+        inventory = {}
         for entry in manifest["files"]:
             name = safe_name(entry["path"])
-            if name in names:
+            if name in inventory:
                 raise ValueError("duplicate snapshot path")
-            names.add(name)
-            file = path / "files" / name
+            inventory[name] = entry
+
+        def resolve_file(root: Path, name: str) -> Path:
+            file = root / name
             _regular(file)
-            checks.append((name, file, entry))
-
-        wiki = source.kind in {"wikimedia_dump", "mediawiki_dump"}
-
-        def check(item) -> None:
-            name, file, entry = item
-            if (
-                not file.resolve().is_relative_to((path / "files").resolve())
-                or file.stat().st_size != entry["size"]
-                or (not wiki and sha256_file(file) != entry["sha256"])
-            ):
+            if not file.resolve().is_relative_to(resolved_directory):
                 raise ValueError(f"snapshot byte mismatch: {name}")
+            return file
 
-        if wiki:
-            for item in checks:
-                check(item)
+        if source.kind in {"wikimedia_dump", "mediawiki_dump"}:
+            for name, entry in inventory.items():
+                if resolve_file(directory, name).stat().st_size != entry["size"]:
+                    raise ValueError(f"snapshot byte mismatch: {name}")
             _verify_wikimedia_receipt(path, source, manifest)
         else:
-            # Hashing releases the GIL, so threads read and hash files concurrently.
-            with ThreadPoolExecutor(max_workers=worker_count()) as pool:
-                list(pool.map(check, checks))
+            hash_inventory(
+                resolved_directory,
+                inventory,
+                resolve_file,
+                proof_store=proof_store,
+                verification_mode=verification_mode,
+                chunk_size=1024**2,
+                mismatch="snapshot byte mismatch",
+            )
         actual = {
-            p.relative_to(path / "files").as_posix()
-            for p in (path / "files").rglob("*")
+            p.relative_to(directory).as_posix()
+            for p in directory.rglob("*")
             if p.is_file() or p.is_symlink()
         }
-        if actual != names:
+        if actual != inventory.keys():
             raise ValueError("snapshot file inventory mismatch")
         if source.kind == "archive":
             _verify_archive_files(source, manifest)

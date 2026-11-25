@@ -1109,8 +1109,10 @@ def test_bounded_git_rejects_ambiguous_declaration(tmp_path: Path) -> None:
 def test_admission_reuses_verified_snapshot_and_rejects_changed_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from klab.corpus import acquisition
+    from klab.corpus import acquisition, release_verify
     from klab.corpus.admission_draft import draft_admission_manifest
+    from klab.training import manifest
+    from klab.verification_proofs import ProofStore
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "settings"))
 
@@ -1120,12 +1122,13 @@ def test_admission_reuses_verified_snapshot_and_rejects_changed_bytes(
     _git(repo, "config", "user.email", "test@example.test")
     _git(repo, "config", "user.name", "Test")
     (repo / "guide.md").write_text("A small source document.\n", encoding="utf-8")
+    (repo / "notes.md").write_text("More notes.\n", encoding="utf-8")
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "source")
     recipe = _fixture(
         tmp_path,
         kind="git",
-        acquisition={"include": ["guide.md"], "max_bytes": 1024},
+        acquisition={"include": ["guide.md", "notes.md"], "max_bytes": 1024},
         revision=_git(repo, "rev-parse", "HEAD"),
         uri=str(repo),
     )
@@ -1146,6 +1149,44 @@ def test_admission_reuses_verified_snapshot_and_rejects_changed_bytes(
     work = tmp_path / "work"
     work.mkdir(mode=0o700)
     lock = acquire(project, work)
+    snapshot = Path(lock["sources"]["one"]["snapshot_path"])
+    file_root = snapshot / "files"
+    proof_store = ProofStore(work)
+    monkeypatch.setattr(release_verify, "INVENTORY_RECEIPT_MIN_BYTES", 0)
+    sha256_file = manifest.sha256_file
+    hashed = []
+
+    def observe(path, *args, **kwargs):
+        if path.is_relative_to(file_root):
+            hashed.append(path.name)
+        return sha256_file(path, *args, **kwargs)
+
+    def stop_after_one(path, *args, **kwargs):
+        if hashed and path.is_relative_to(file_root):
+            raise RuntimeError("stopped during snapshot hashes")
+        return observe(path, *args, **kwargs)
+
+    with release_verify.verification_settings(workers=1):
+        with monkeypatch.context() as fault:
+            fault.setattr(manifest, "sha256_file", stop_after_one)
+            with pytest.raises(RuntimeError, match="stopped during snapshot hashes"):
+                verify_snapshot(
+                    snapshot,
+                    proof_store=proof_store,
+                    verification_mode="verified_reuse",
+                )
+        assert hashed == ["guide.md"]
+        with monkeypatch.context() as tracker:
+            tracker.setattr(manifest, "sha256_file", observe)
+            hashed.clear()
+            verify_snapshot(
+                snapshot, proof_store=proof_store, verification_mode="verified_reuse"
+            )
+            assert hashed == ["notes.md"]
+            hashed.clear()
+            verify_snapshot(snapshot, proof_store=proof_store, verification_mode="cold")
+            assert hashed == ["guide.md", "notes.md"]
+
     document = tmp_path / "policy.md"
     document.write_text("Use source terms.\n", encoding="utf-8")
     template = tmp_path / "policy.json"
@@ -1184,8 +1225,8 @@ def test_admission_reuses_verified_snapshot_and_rejects_changed_bytes(
             project, work, template, document, work / "second.json"
         )
     assert first["sha256"] == second["sha256"]
-    snapshot = Path(lock["sources"]["one"]["snapshot_path"])
-    (snapshot / "files/guide.md").write_text("Changed source.\n", encoding="utf-8")
+    guide = file_root / "guide.md"
+    guide.write_bytes(b"B" + guide.read_bytes()[1:])
     with pytest.raises(ValueError, match="mismatch"):
         draft_admission_manifest(project, work, template, document, work / "third.json")
 
@@ -1379,6 +1420,7 @@ def test_archive_recovery_checks_staged_body_and_derivation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
 ) -> None:
     from klab.corpus import acquisition, acquisition_parts
+    from klab.training import manifest
 
     text = b"pinned source text\n"
     body = _tar_gz([("rfc1.txt", text, None)])
@@ -1451,13 +1493,14 @@ def test_archive_recovery_checks_staged_body_and_derivation(
     body_hashes = []
     real_hash = acquisition.sha256_file
 
-    def record_hash(path: Path) -> str:
+    def record_hash(path: Path, *args, **kwargs) -> str:
         if path.name == "rfc1.txt":
             output_hashes.append(path)
         elif path.name == "RFC-all.tar.gz":
             body_hashes.append(path)
-        return real_hash(path)
+        return real_hash(path, *args, **kwargs)
 
+    monkeypatch.setattr(manifest, "sha256_file", record_hash)
     monkeypatch.setattr(acquisition, "sha256_file", record_hash)
     monkeypatch.setattr(acquisition_parts, "sha256_file", record_hash)
     assert acquire(project, work, **step)["status"] == "source_verified"
