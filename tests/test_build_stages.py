@@ -162,6 +162,48 @@ def test_a_build_killed_at_any_stage_resumes_without_redoing_earlier_stages(
         assert not list(lab.work.glob("corpora/*/builds/stages/.dedup-*.groups"))
     calls.reset()
 
+    shutil.rmtree(reference)
+    final_windows = []
+
+    def stop_in_final_decisions(checkpoints, state):
+        commit(checkpoints, state)
+        if checkpoints.root.name == "chain-decisions":
+            final_windows.append(state["last"])
+            raise OSError("interrupted final decision window")
+
+    def stop_after_final_decisions(checkpoints, state):
+        commit(checkpoints, state)
+        if checkpoints.root.name == "chain-decisions":
+            final_windows.append(state["last"])
+            if state["complete"]:
+                raise OSError("interrupted after final decisions")
+
+    with monkeypatch.context() as recovery:
+        recovery.setattr(large_build, "_DEDUP_DECISION_ROWS", 2)
+        with monkeypatch.context() as fault:
+            fault.setattr(ViewCheckpoints, "commit", stop_in_final_decisions)
+            with pytest.raises(OSError, match="interrupted final decision window"):
+                lab.run("corpus", "build", project, "--offline")
+        assert not reference.exists()
+        with monkeypatch.context() as fault:
+            fault.setattr(ViewCheckpoints, "commit", stop_after_final_decisions)
+            with pytest.raises(OSError, match="interrupted after final decisions"):
+                lab.run("corpus", "build", project, "--offline")
+        assert not reference.exists()
+        assert final_windows[0] == 2
+        assert final_windows == sorted(set(final_windows))
+
+        def unexpected_group_replay(*args, **kwargs):
+            pytest.fail("replayed groups with final decisions already committed")
+
+        recovery.setattr(
+            large_build, "_resolve_duplicate_groups", unexpected_group_replay
+        )
+        reference = Path(lab.run("corpus", "build", project, "--offline"))
+        assert tree(reference) == expected
+        assert not list(lab.work.glob("corpora/*/builds/stages/.dedup-*.groups"))
+    calls.reset()
+
     for failing, redone, kept in (
         ("index", {"index": 1, "dedup": 1, "emit": 1}, set()),
         ("dedup", {"index": 0, "dedup": 1, "emit": 1}, {"index"}),
