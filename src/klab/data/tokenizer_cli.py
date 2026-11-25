@@ -1,4 +1,4 @@
-"""Read-only configured tokenizer verification; never acquire or fit inputs."""
+"""Configured tokenizer verification with optional sampling scratch."""
 
 from __future__ import annotations
 
@@ -85,9 +85,20 @@ def verify_configured_tokenizer(config_path: Path) -> dict[str, object]:
 def _verify(args: argparse.Namespace) -> None:
     from klab.corpus.release_verify import verification_settings
 
-    with verification_settings(workers=args.workers, echo=sys.stderr):
+    with verification_settings(
+        workers=args.workers, scratch_dir=args.scratch_dir, echo=sys.stderr
+    ):
         result = verify_configured_tokenizer(Path(args.config))
     print(json.dumps(result, indent=None if args.json else 2, sort_keys=True))
+
+
+def add_sampling_flags(command: argparse.ArgumentParser) -> None:
+    add_workers_flag(command)
+    command.add_argument(
+        "--scratch-dir",
+        type=Path,
+        help="Keep completed sampling and verification ranges here",
+    )
 
 
 def register_verify_parser(commands: argparse._SubParsersAction) -> None:
@@ -98,7 +109,7 @@ def register_verify_parser(commands: argparse._SubParsersAction) -> None:
         "config", help="RunConfig binding tokenizer, dataset and vocabulary"
     )
     command.add_argument("--json", action="store_true")
-    add_workers_flag(command)
+    add_sampling_flags(command)
     command.set_defaults(handler=_verify)
 
 

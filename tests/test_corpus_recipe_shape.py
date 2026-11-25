@@ -304,7 +304,24 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     )
     tokenizer_config = tmp_path / "tokenizer.yaml"
     tokenizer_config.write_text(yaml.safe_dump(tokenizer))
-    lab.run("tokenizer", "train", str(tokenizer_config))
+    scratch = ("--scratch-dir", str(tmp_path / "tokenizer-scratch"))
+    with monkeypatch.context() as fault:
+        fault.setenv("KLAB_FAULT", "tokenizer sampling: candidates:1")
+        with pytest.raises(RuntimeError, match="KLAB_FAULT"):
+            lab.run("tokenizer", "train", str(tokenizer_config), *scratch)
+    capsys.readouterr()
+    lab.run("tokenizer", "train", str(tokenizer_config), *scratch)
+    assert any(
+        "tokenizer sampling: candidates:" in line and "reused 1/" in line
+        for line in lab.stderr.splitlines()
+    )
+    verify = ("tokenizer", "verify", str(export / "run.yaml"), "--json")
+    cold = lab.json(*verify)
+    assert lab.json(*verify, *scratch) == cold
+    assert any(
+        "tokenizer sampling: rank histogram:" in line and "reused 1/" in line
+        for line in lab.stderr.splitlines()
+    )
     tokenizer_json = Path(tokenizer["output_dir"]) / "tokenizer.json"
     audit = json.loads(tokenizer_json.with_name("tokenizer_manifest.json").read_text())[
         "sampling_audit"
