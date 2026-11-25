@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,6 +24,11 @@ from klab.corpus.shards import Single, declare_stage
 from klab.data.datasets import iter_documents
 from klab.data.sources import verify_snapshot
 from klab.progress import progress_phase
+from klab.result_publication import sync_directory
+from klab.safe_io import rename_noreplace
+from klab.training.manifest import sha256_file
+from klab.verification_proofs import writable_by_others
+from klab.workspace_cleanup import workspace_lock
 
 FIT_STAGE = declare_stage(
     "tokenizer fit",
@@ -34,6 +42,7 @@ if TYPE_CHECKING:
     from klab.verification_proofs import ProofStore, VerificationMode
 
 SPECIAL_TOKENS = ["<pad>", "<unk>", "<bos>", "<eos>"]
+_FIT_FILES = {"tokenizer.json", "tokenizer_manifest.json"}
 
 
 def _verify_bakeoff_selection(
@@ -81,10 +90,136 @@ def _verify_bakeoff_selection(
 
 def _atomic_json(path: Path, value: object) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    with temporary.open("x", encoding="utf-8") as stream:
+        json.dump(value, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
     temporary.replace(path)
+
+
+@contextmanager
+def _fit_staging(output: Path) -> Iterator[Path]:
+    """Serialize fitting and publication using the lock in a private sibling."""
+    work = output.parent.resolve() / f".{output.name}.tokenizer-work"
+    missing = []
+    parent = work.parent
+    while not parent.exists():
+        missing.append(parent)
+        parent = parent.parent
+    work.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for parent in reversed(missing):
+        sync_directory(parent.parent)
+    info = work.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or writable_by_others(info)
+    ):
+        raise ValueError(f"unsafe tokenizer staging workspace: {work}")
+    stage = work / "artifact"
+    owner = work / ".klab-tokenizer-fit"
+    with workspace_lock(work):
+        if owner.is_symlink() or (owner.exists() and not owner.is_file()):
+            raise ValueError(f"unsafe tokenizer staging marker: {owner}")
+        if not owner.exists():
+            if stage.exists() or stage.is_symlink():
+                raise ValueError(f"unowned tokenizer staging directory: {stage}")
+            owner.touch(exist_ok=False)
+        sync_directory(work)
+        sync_directory(work.parent)
+        yield stage
+
+
+def _staged_members(stage: Path) -> set[Path]:
+    if stage.is_symlink() or not stage.is_dir():
+        raise ValueError(f"unsafe tokenizer staging directory: {stage}")
+    members = set(stage.iterdir())
+    for member in members:
+        info = member.lstat()
+        if (
+            member.name not in _FIT_FILES | {"tokenizer_manifest.json.tmp"}
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+        ):
+            raise ValueError(f"unexpected tokenizer staging member: {member}")
+    return members
+
+
+def _matching_fit(
+    directory: Path,
+    config: TokenizerTrainConfig,
+    contract: dict,
+    selection: Selection | None,
+) -> bool:
+    tokenizer = directory / "tokenizer.json"
+    manifest_path = directory / "tokenizer_manifest.json"
+    if directory.is_symlink() or any(
+        file.is_symlink() or not file.is_file() for file in (tokenizer, manifest_path)
+    ):
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except UnicodeError, json.JSONDecodeError:
+        return False
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("training_contract") != contract
+        or any(
+            manifest.get(key) != contract.get(key)
+            for key in (
+                "source",
+                "revision",
+                "vocab_size",
+                "corpus_export",
+                "source_manifest_sha256",
+            )
+        )
+        or sha256_file(tokenizer) != manifest.get("sha256")
+    ):
+        return False
+    if selection is not None:
+        from klab.data.tokenizer_sampling import audit
+
+        return audit(
+            config, load_tokenizer(tokenizer), selection=selection
+        ) == manifest.get("sampling_audit")
+    return True
+
+
+def _publish_fit(stage: Path, output: Path, *, reused: bool) -> Path:
+    with progress_phase(
+        "tokenizer_artifact_publication",
+        completed_work=0,
+        total_work=1,
+        unit="artifacts",
+        raw_counters={"reused_staged_fit": reused},
+    ) as progress:
+        sync_directory(stage)
+        sync_directory(stage.parent)
+        rename_noreplace(stage, output)
+        sync_directory(output.parent)
+        sync_directory(stage.parent)
+        progress.update(completed_work=1)
+    return output / "tokenizer.json"
+
+
+def _published_fit(
+    output: Path,
+    config: TokenizerTrainConfig,
+    contract: dict,
+    selection: Selection | None,
+) -> Path | None:
+    if not (output.exists() or output.is_symlink()):
+        return None
+    if not _matching_fit(output, config, contract, selection):
+        raise FileExistsError(
+            f"tokenizer output at {output} has different or unverifiable training provenance; "
+            "use a new output directory, or reference the existing tokenizer explicitly"
+        )
+    sync_directory(output.parent)
+    return output / "tokenizer.json"
 
 
 def load_tokenizer(path: Path) -> Tokenizer:
@@ -413,8 +548,6 @@ def train_tokenizer(
     require_storage(tokenizer_storage_checks(config))
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     output = config.output_dir
-    json_path = output / "tokenizer.json"
-    manifest_path = output / "tokenizer_manifest.json"
 
     input_byte_budget = (
         config.sampling.max_fit_bytes
@@ -500,28 +633,37 @@ def train_tokenizer(
             else {}
         ),
     }
-    if json_path.exists() or manifest_path.exists():
-        if json_path.is_file() and manifest_path.is_file():
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if manifest.get(
-                "training_contract"
-            ) == training_contract and hashlib.sha256(
-                json_path.read_bytes()
-            ).hexdigest() == manifest.get("sha256"):
-                if config.sampling is not None:
-                    _verify_tokenizer_manifest(
-                        json_path,
-                        source=config.dataset.source,
-                        revision=config.dataset.revision,
-                        vocab_size=config.vocab_size,
-                        dataset=config.dataset,
-                    )
-                return json_path
-        raise FileExistsError(
-            f"tokenizer output at {output} has different or unverifiable training provenance; "
-            "use a new output directory, or reference the existing tokenizer explicitly"
-        )
+    if published := _published_fit(output, config, training_contract, selection):
+        return published
+    with _fit_staging(output) as stage:
+        if published := _published_fit(output, config, training_contract, selection):
+            return published
+        if stage.exists() or stage.is_symlink():
+            members = _staged_members(stage)
+            if {file.name for file in members} == _FIT_FILES and _matching_fit(
+                stage, config, training_contract, selection
+            ):
+                return _publish_fit(stage, output, reused=True)
+            # The lock protects these known files from other fit attempts.
+            for file in members:
+                file.unlink()
+            stage.rmdir()
+        stage.mkdir()
+        _fit_tokenizer(config, stage, training_contract, stats, selection)
+        return _publish_fit(stage, output, reused=False)
 
+
+def _fit_tokenizer(
+    config: TokenizerTrainConfig,
+    stage: Path,
+    training_contract: dict,
+    stats: dict[str, object],
+    selection: Selection | None,
+) -> None:
+    json_path = stage / "tokenizer.json"
+    manifest_path = stage / "tokenizer_manifest.json"
+    selected = int(stats["selected"])
+    selected_input_bytes = int(stats["bytes"])
     tokenizer = Tokenizer(BPE(unk_token="<unk>"))
     tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
     tokenizer.decoder = ByteLevelDecoder()
@@ -548,7 +690,7 @@ def train_tokenizer(
             _bounded_documents(
                 config,
                 replay_stats,
-                whole_documents=whole_documents,
+                whole_documents=config.dataset.source in {"local_text", "snapshot"},
                 selection=selection,
             ),
             trainer=trainer,
@@ -597,10 +739,9 @@ def train_tokenizer(
         unit="bytes",
         raw_counters={"artifact": "tokenizer.json"},
     ) as progress:
-        output.mkdir(parents=True, exist_ok=False)
-        temporary = output / "tokenizer.json.tmp"
-        tokenizer.save(str(temporary))
-        temporary.replace(json_path)
+        tokenizer.save(str(json_path))
+        with json_path.open("rb") as artifact:
+            os.fsync(artifact.fileno())
         artifact_bytes = json_path.stat().st_size
         progress.update(
             completed_work=artifact_bytes,
@@ -617,15 +758,14 @@ def train_tokenizer(
         unit="bytes",
         raw_counters={"artifact": "tokenizer.json"},
     ) as progress:
-        content = json_path.read_bytes()
-        content_sha256 = hashlib.sha256(content).hexdigest()
+        content_sha256 = sha256_file(json_path)
         progress.update(
-            completed_work=len(content),
-            total_work=len(content),
+            completed_work=artifact_bytes,
+            total_work=artifact_bytes,
             unit="bytes",
             raw_counters={
                 "artifact": "tokenizer.json",
-                "artifact_bytes": len(content),
+                "artifact_bytes": artifact_bytes,
             },
         )
     with progress_phase(
@@ -660,13 +800,13 @@ def train_tokenizer(
                 "revision": config.dataset.revision,
                 "split": "train",
                 "selected_documents": selected,
-                "input_byte_budget_utf8": input_byte_budget,
+                "input_byte_budget_utf8": training_contract["input_byte_budget_utf8"],
                 "selected_input_bytes_utf8": selected_input_bytes,
                 "content_digest_sha256": stats["digest"],
-                "source_manifest_sha256": source_manifest_sha256,
+                "source_manifest_sha256": training_contract["source_manifest_sha256"],
                 **(
-                    {"corpus_export": corpus_export}
-                    if corpus_export is not None
+                    {"corpus_export": training_contract["corpus_export"]}
+                    if "corpus_export" in training_contract
                     else {}
                 ),
                 "tokenizers_version": __import__("tokenizers").__version__,
@@ -682,4 +822,3 @@ def train_tokenizer(
                 "artifact_bytes": manifest_bytes,
             },
         )
-    return json_path
