@@ -1145,6 +1145,7 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   | `export document licenses` | shardable: byte ranges of `documents.jsonl`, merged as a set |
   | `export split statistics` | shardable: byte ranges of LM and chat splits, with chat bytes counted by the training reader's renderer |
   | `describe: lineage index` | shardable: byte ranges of `lineage.jsonl`, merged into one sorted index of row positions |
+  | `describe: view links` | one sequential scan per split link file, with reusable row counts and offsets |
   | `describe: view lines` | shardable: byte ranges of each view file, counting rows |
   | `describe: view rows` | shardable: runs of consecutive view rows, merged by sums and set unions |
   | `describe: source rights` | shardable: byte ranges of `documents.jsonl`, merged in file order |
@@ -1363,7 +1364,7 @@ needs measurement where the table gives historical or fixture evidence.
 | Completed-preparation build | Authenticated per-source render and completed sorting, deduplication, inventory and emission phases. | An unfinished phase repeats. View emission on this route reruns its complete pass. The small in-memory builder likewise has a whole-build boundary. | Production restart cost unmeasured. |
 | Freeze | Native staging rename and build tombstone, signed verification after a staged replay, then the public release. Completed preparation seals a retained release against its existing build. | Reuse the complete staged receipt at the same path, or resume an unfinished check from eligible file and replay proofs. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. See [staged freeze recovery measurements](#staged-freeze-recovery-measurements). [#501](https://github.com/supernovae/model-lab/pull/501) |
 | Release verification, `audit`, and `sources` | Signed checks of eligible inventory files, stage outputs and streaming raw source replay, then the complete release proof. `audit` and `sources` read the corresponding published report after verification. | A receipt-backed retry skips eligible completed checks and continues the remaining work. Cold mode starts the checks from bytes. | See [inventory hash recovery measurements](#inventory-hash-recovery-measurements), [stage output verification measurements](#stage-output-verification-measurements) and [raw source replay recovery](#raw-source-replay-recovery). An earlier cold audit took 67.3 s on 13.2 GB synthetic data, and the first receipt-backed audit took 0.94 s. [#500](https://github.com/supernovae/model-lab/pull/500), [#450](https://github.com/supernovae/model-lab/issues/450) |
-| `describe` | Cached measurement runs and lineage position index when a proof store is available. Release verification has its own receipt. | Resume missing measurement ranges and merge results. Chat view measurement uses a whole run. A stopped cold release verification can still repeat. | 55.1 s for 5M synthetic rows (23 GB), 12 workers, without a tokenizer. [#502](https://github.com/supernovae/model-lab/pull/502) |
+| `describe` | Cached measurement runs, per-split link offsets and lineage position index when a proof store or persistent scratch is available. Release verification has its own receipt. | Resume missing link files and measurement ranges, then merge results. Each chat view is one run. An unfinished lineage index or cold release check can repeat. | See [describe link planning recovery measurements](#describe-link-planning-recovery-measurements). An earlier full measurement took 55.1 s for 5M synthetic rows (23 GB), 12 workers, without a tokenizer. [#502](https://github.com/supernovae/model-lab/pull/502) |
 | Corpus `export` | Document license labels and LM or chat split statistics by range with persistent scratch. Final export directory and verification receipt. | Reuse valid license and split statistics. Repeat unfinished ranges and final publication. Later consumers can use the complete receipt. | See [export verification measurements](#export-verification-measurements), [export license scan measurements](#export-license-scan-measurements) and [chat export split measurements](#chat-export-split-measurements). |
 
 #### Staged freeze recovery measurements
@@ -1530,6 +1531,31 @@ The first receipt occupied 994 bytes. The isolated receipt-backed runs
 included about 0.25 s to compute the verifier identity, which is shared
 with other checks in the same operation. Index construction, snapshot
 verification and end-to-end release recovery were outside this benchmark.
+[#450](https://github.com/supernovae/model-lab/issues/450), [#485](https://github.com/supernovae/model-lab/issues/485)
+
+#### Describe link planning recovery measurements
+
+When measurement caching is enabled, `describe` stores the row count
+and one offset per 4,096 physical lines for each nonempty view's link file.
+The checkpoint binds the file generation, stride and implementation.
+An interrupted scan can reuse completed link files. The in-flight file
+repeats, as can construction of an unfinished lineage position index.
+
+A synthetic NVMe fixture had 3 million LM rows across two splits, with
+294 MB of links and 222 MB of payloads. The table shows medians of three
+trials with requested cache eviction. Times cover view planning and
+exclude release verification, lineage index construction and view
+measurement. Every run produced the same plan.
+
+| Planning attempt | Previous time | With link checkpoints | Storage reads before and after |
+| --- | ---: | ---: | ---: |
+| Fresh | 0.455 s | 0.446 s | 516 MB in both |
+| Repeat with prior checkpoints | 0.283 s | 0.002 s | 294 MB to 512 KiB |
+| Retry after SIGKILL following the first link checkpoint | | 0.213 s | 273 MB on retry |
+
+Each killed run committed the 243 MB train link file. The retry replayed
+the validation link file and the payload counts. Production-scale and
+slower-storage results remain open.
 [#450](https://github.com/supernovae/model-lab/issues/450), [#485](https://github.com/supernovae/model-lab/issues/485)
 
 ### Select families, screen duplicates, and build a schedule

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import io
 import json
+import os
 import random
 from pathlib import Path
 
@@ -191,29 +191,59 @@ def test_a_killed_describe_reuses_its_finished_runs(
     monkeypatch.setattr(shards, "CHUNK_BYTES", 700)
     cache = tmp_path / "cache"
     expected = serial_measure_views(release, None, release_spec=RELEASE_SPEC)
-    monkeypatch.setenv("KLAB_FAULT", f"{measurement.VIEW_STAGE}:3")
-    with (
-        verification_settings(workers=1),
-        pytest.raises(RuntimeError, match="KLAB_FAULT"),
-    ):
-        measure_views(release, release_spec=RELEASE_SPEC, cache=cache)
-    monkeypatch.delenv("KLAB_FAULT")
-    echo = io.StringIO()
-    with verification_settings(workers=1, echo=echo):
+    scan, measure = measurement._scan_view_links, measurement._measure_shard
+    links_read, views_read = [], []
+
+    def read_links(path, *args):
+        links_read.append(Path(path))
+        return scan(path, *args)
+
+    def read_view(*args):
+        views_read.append(args[:5])
+        return measure(*args)
+
+    monkeypatch.setattr(measurement, "_scan_view_links", read_links)
+    monkeypatch.setattr(measurement, "_measure_shard", read_view)
+
+    with verification_settings(workers=1):
+        with monkeypatch.context() as stop:
+            stop.setenv("KLAB_FAULT", f"{measurement.LINK_STAGE}:1")
+            with pytest.raises(RuntimeError, match="KLAB_FAULT"):
+                measure_views(release, release_spec=RELEASE_SPEC, cache=cache)
+        [committed_links] = links_read
+        assert not views_read
+        links_read.clear()
+
+        with monkeypatch.context() as stop:
+            stop.setenv("KLAB_FAULT", f"{measurement.VIEW_STAGE}:3")
+            with pytest.raises(RuntimeError, match="KLAB_FAULT"):
+                measure_views(release, release_spec=RELEASE_SPEC, cache=cache)
+        assert links_read and committed_links not in links_read
+        assert len(views_read) == 3
+        committed_views = set(views_read)
+        links_read.clear()
+        views_read.clear()
+
         assert (
             measure_views(release, release_spec=RELEASE_SPEC, cache=cache) == expected
         )
+        assert views_read and committed_views.isdisjoint(views_read)
+        views_read.clear()
         assert (
             measure_views(release, release_spec=RELEASE_SPEC, cache=cache) == expected
         )
-    reused = [
-        line
-        for line in echo.getvalue().splitlines()
-        if "view rows" in line and "reused" in line
-    ]
-    assert "reused 3/" in reused[0], reused
-    total = reused[1].rsplit("/", 1)[1]
-    assert f"reused {total}/{total}" in reused[1], "a second run measures nothing"
+        assert not links_read and not views_read
+
+        # A replacement can have the same length and modification time.
+        info = committed_links.stat()
+        replacement = tmp_path / "replacement.jsonl"
+        replacement.write_bytes(committed_links.read_bytes())
+        os.utime(replacement, ns=(info.st_atime_ns, info.st_mtime_ns))
+        replacement.replace(committed_links)
+        assert (
+            measure_views(release, release_spec=RELEASE_SPEC, cache=cache) == expected
+        )
+        assert links_read == [committed_links]
 
 
 def test_a_lineage_link_to_no_record_is_refused(release: Path) -> None:
