@@ -40,6 +40,34 @@ def _release(
     return manifest
 
 
+LICENSE_SCAN_STAGE = declare_stage("export document licenses")
+SPLIT_STATS_STAGE = declare_stage("export split statistics")
+
+
+def _license_range(path: str, start: int, end: int) -> list[str]:
+    """Collect the distinct normalized document labels in one buffered range."""
+    labels: set[str] = set()
+    with Path(path).open("rb") as stream:
+        stream.seek(start)
+        offset = start
+        while offset < end:
+            raw = stream.readline()
+            if not raw:
+                raise ValueError(f"document file truncated at {path}:{offset}")
+            label = json.loads(raw.decode("utf-8"))["license"]
+            if not isinstance(label, str):
+                raise TypeError(f"document license must be a string at {path}:{offset}")
+            labels.add(label)
+            offset += len(raw)
+    return sorted(labels)
+
+
+def _export_range_inputs() -> dict[str, str] | None:
+    if current_settings().scratch_dir is not None:
+        return {"producer": sha256_file(Path(__file__))}
+    return None
+
+
 def _licenses(release_dir: Path) -> str:
     sources = json.loads((release_dir / "sources.json").read_text(encoding="utf-8"))
     items = sources.values() if isinstance(sources, dict) else sources
@@ -50,14 +78,16 @@ def _licenses(release_dir: Path) -> str:
             if isinstance(declaration, dict) and declaration.get("license"):
                 names.add(str(declaration["license"]))
     if any(isinstance(item, dict) and "rights_policy" in item for item in items):
-        with (release_dir / "documents.jsonl").open(encoding="utf-8") as handle:
-            names.update(json.loads(line)["license"] for line in handle)
+        plan = plan_ranges(
+            LICENSE_SCAN_STAGE,
+            release_dir / "documents.jsonl",
+            inputs=_export_range_inputs(),
+        )
+        for labels in run_sharded(plan, _license_range):
+            names.update(labels)
     if not names:
         raise ValueError("frozen release lacks explicit source licenses")
     return "; ".join(sorted(names))
-
-
-SPLIT_STATS_STAGE = declare_stage("export split statistics")
 
 
 def _lm_range_stats(
@@ -93,10 +123,7 @@ def _split_stats(path: Path, view: str) -> tuple[int, int]:
     count = size = 0
     if view == "lm":
         before = 0
-        inputs = None
-        if current_settings().scratch_dir is not None:
-            inputs = {"producer": sha256_file(Path(__file__))}
-        plan = plan_ranges(SPLIT_STATS_STAGE, path, inputs=inputs)
+        plan = plan_ranges(SPLIT_STATS_STAGE, path, inputs=_export_range_inputs())
         for lines, kept, rendered, bad in run_sharded(
             plan, _lm_range_stats, ordered=True
         ):
