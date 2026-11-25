@@ -475,14 +475,14 @@ def _raw_group(
     options: NormalizerOptions,
 ):
     """Replay one raw snapshot file against every document that cites it."""
-    from klab.corpus.jsonl_records import iter_jsonl_records
+    from klab.corpus.jsonl_records import iter_jsonl_records, verified_line_replay
     from klab.corpus.pipeline import _normalized
 
     if file is None or file["role"] != "document":
         raise ValueError("document lacks pinned file rights")
     decision = file["rights"]
     raw_path = _safe(Path(files_root), raw_name)
-    raw_sha = sha256_file(raw_path)
+    raw_sha = file["sha256"]
     normalizer = (
         "cnxml-text-v1" if raw_path.suffix.lower() == ".cnxml" else options.identity
     )
@@ -490,12 +490,13 @@ def _raw_group(
     count = 0
     try:
         with (
-            raw_path.open("rb") as raw_stream,
+            verified_line_replay(raw_path, expected_sha256=raw_sha) as raw_stream,
             Path(documents).open("rb") as document_stream,
             Path(spans).open("rb") as span_stream,
         ):
             current_line = current_offset = 0
             current_item = None
+            raw_rows = iter_jsonl_records(raw_stream, source=str(raw_path))
             for doc_offset, doc_length, span_offset, span_length in db.execute(
                 "SELECT doc_offset, doc_length, span_offset, span_length FROM docs "
                 "WHERE source=? AND raw_path=? ORDER BY line_start, id",
@@ -552,7 +553,8 @@ def _raw_group(
                     if start < 1 or end < start:
                         raise ValueError("document raw line range mismatch")
                     if start <= current_line:
-                        raw_stream.seek(0)
+                        raw_stream.rewind()
+                        raw_rows = iter_jsonl_records(raw_stream, source=str(raw_path))
                         current_line, current_offset = 0, 0
                     while current_line < start - 1:
                         line = raw_stream.readline()
@@ -596,12 +598,11 @@ def _raw_group(
                     ):
                         raise ValueError("document raw row range mismatch")
                     if index <= current_line:
-                        raw_stream.seek(0)
+                        raw_stream.rewind()
+                        raw_rows = iter_jsonl_records(raw_stream, source=str(raw_path))
                         current_line = 0
                     while current_line < index:
-                        parsed = next(
-                            iter_jsonl_records(raw_stream, source=str(raw_path)), None
-                        )
+                        parsed = next(raw_rows, None)
                         if parsed is None:
                             raise ValueError("document raw row range mismatch")
                         current_line += 1
@@ -1246,7 +1247,6 @@ def _validate_rows_stored(
         raise ValueError("document evidence span inventory mismatch")
     previous_file: Path | None = None
     raw = b""
-    raw_sha = ""
     offsets: list[int] = []
     sample_rows = None
     for doc in document_map.source_order(spans):
@@ -1299,10 +1299,10 @@ def _validate_rows_stored(
             / source["snapshot_sha256"]
         )
         raw_path = _safe(snapshot / "files", span["raw_path"])
+        raw_sha = file["sha256"]
         if raw_path != previous_file:
             # Finishing the previous cursor validates trailing unselected rows.
             replay_stack.close()
-            raw_sha = sha256_file(raw_path)
             offsets = [0]
             sample_rows = None
             needs_rows = ("_admission_decisions" in file) or (
@@ -1323,6 +1323,8 @@ def _validate_rows_stored(
                 )
             else:
                 raw = raw_path.read_bytes()
+                if hashlib.sha256(raw).hexdigest() != raw_sha:
+                    raise ValueError(f"source replay SHA-256 mismatch: {raw_path}")
                 if "#lines=" in doc["source_location"]:
                     for line in raw.split(b"\n")[:-1]:
                         offsets.append(offsets[-1] + len(line) + 1)

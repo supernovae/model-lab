@@ -222,6 +222,30 @@ def test_valid_release_verifies_in_either_execution(
         assert verify_release(release)["release_id"] == release.name
 
 
+def test_raw_replay_authenticates_bytes_outside_document_spans(
+    release: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus = tmp_path / "corpus"
+    shutil.copytree(release.parent.parent, corpus)
+    victim = next((corpus / "snapshots/prose_train").glob("*/files/*.txt"))
+    verify_rights = release_module._verify_rights_files
+
+    def append_after_snapshot_check(*args, **kwargs):
+        files = verify_rights(*args, **kwargs)
+        with victim.open("ab") as stream:
+            stream.write(b"appended outside every document span\n")
+        return files
+
+    monkeypatch.setattr(
+        release_module, "_verify_rights_files", append_after_snapshot_check
+    )
+    with (
+        verification_settings(workers=1),
+        pytest.raises(ValueError, match="source replay SHA-256 mismatch"),
+    ):
+        verify_release(corpus / "releases" / release.name)
+
+
 @pytest.mark.parametrize("name", FORGERIES)
 def test_resealed_forgery_is_refused_with_its_cause(
     release: Path, execution: str, name: str

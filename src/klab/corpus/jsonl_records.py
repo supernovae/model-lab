@@ -117,6 +117,60 @@ def records_from_path(
             raise ValueError("JSONL source SHA-256 mismatch")
 
 
+class _ReplayLines:
+    """Hash the first visit to each byte of a line-oriented replay."""
+
+    def __init__(self, stream: BinaryIO):
+        self.stream = stream
+        self.digest = hashlib.sha256()
+        self.position = 0
+        self.hashed_through = 0
+
+    def rewind(self) -> None:
+        self.stream.seek(0)
+        self.position = 0
+
+    def readline(self) -> bytes:
+        raw = self.stream.readline()
+        start = self.position
+        self.position += len(raw)
+        if start == self.hashed_through:
+            self.digest.update(raw)
+            self.hashed_through = self.position
+        elif self.position > self.hashed_through:
+            self.digest.update(raw[self.hashed_through - start :])
+            self.hashed_through = self.position
+        return raw
+
+    def __iter__(self) -> Iterator[bytes]:
+        return iter(self.readline, b"")
+
+    def finish(self) -> str:
+        if self.position != self.hashed_through:
+            self.stream.seek(self.hashed_through)
+        while block := self.stream.read(1024**2):
+            self.digest.update(block)
+        return self.digest.hexdigest()
+
+
+@contextmanager
+def verified_line_replay(path: Path, *, expected_sha256: str) -> Iterator[_ReplayLines]:
+    """Replay lines with optional rewinds, authenticating even an unread tail."""
+    from klab.verification_proofs import artifact_fingerprint
+
+    with path.open("rb") as stream:
+        before = artifact_fingerprint(stream.fileno())
+        reader = _ReplayLines(stream)
+        yield reader
+        if reader.finish() != expected_sha256:
+            raise ValueError(f"source replay SHA-256 mismatch: {path}")
+        if (
+            artifact_fingerprint(stream.fileno()) != before
+            or artifact_fingerprint(path) != before
+        ):
+            raise ValueError(f"source changed during replay: {path}")
+
+
 class ForwardRows:
     """One-row replay cursor for callers ordered by nonblank source ordinal."""
 
