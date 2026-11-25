@@ -12,6 +12,7 @@ import subprocess
 import threading
 import urllib.request
 from contextlib import contextmanager
+from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ import yaml
 from corpus_fixtures import serve_pinned_acquisition as _serve_pinned
 from corpus_fixtures import write_acquisition_recipe as _fixture
 
+from klab.canonical import canonical_digest
 from klab.corpus.acquisition import (
     acquire,
     declaration_sha256,
@@ -1992,7 +1994,7 @@ def _multistream_wikimedia_fixture(
         f"{first_offset}:1:Topic:A\n"
         f"{first_offset}:{9 if fault == 'page_id' else 2}:Topic B\n"
         f"{third_offset}:3:Topic C\n"
-        f"{third_offset}:4:Topic D\n"
+        f"{third_offset}:{9 if fault == 'late_page_id' else 4}:Topic D\n"
     ).encode()
     index_uri = next(reversed(responses)).replace(
         "multistream1.xml", "multistream-index1.txt"
@@ -2095,6 +2097,83 @@ def test_wikimedia_range_plan_verifies_index_and_physical_members(
     ]
     assert ranges[0]["opens_document"] and ranges[-1]["closes_document"]
     assert ranges[1]["page_ids_sha256"] == hashlib.sha256(b"1\n2\n").hexdigest()
+
+
+@pytest.mark.parametrize("case", ["resume", "damaged", "invalid_suffix"])
+def test_indexed_wikimedia_resumes_range_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    from klab.corpus import wikimedia_ranges
+
+    monkeypatch.delenv("KLAB_TRANSPORT_CACHE", raising=False)
+    recipe, responses, pieces, compressed, index_text = _multistream_wikimedia_fixture(
+        tmp_path, fault="late_page_id" if case == "invalid_suffix" else None
+    )
+    index = _fixture_index_options(responses, pieces, index_text)
+    source_path = recipe.parent / "sources/one.yaml"
+    declaration = yaml.safe_load(source_path.read_text())
+    declaration["acquisition"]["multistream_index"] = index
+    _yaml(source_path, declaration)
+    project = load_project(recipe)
+    calls = _serve_pinned(monkeypatch, responses)
+    monkeypatch.setattr(wikimedia_ranges, "_PLAN_GROUP_MEMBERS", 2)
+    run_stage = wikimedia_ranges.run_stage
+    scan = wikimedia_ranges._scan_members
+    scanned = []
+
+    def record_scan(*args, **kwargs):
+        for member in scan(*args, **kwargs):
+            scanned.append(member.start)
+            yield member
+
+    def interrupt(*args, **kwargs):
+        run_stage(*args, **kwargs)
+        raise RuntimeError("stop after verified range group")
+
+    monkeypatch.setattr(wikimedia_ranges, "_scan_members", record_scan)
+    work = tmp_path / "work"
+    base = work / "corpora/example"
+    with monkeypatch.context() as fault:
+        fault.setattr(wikimedia_ranges, "run_stage", interrupt)
+        with pytest.raises(RuntimeError, match="stop after verified range group"):
+            acquire(project, work)
+    assert scanned == [0, len(compressed[0])]
+    assert not (base / "acquisition.json").exists()
+    assert calls == list(responses)
+    calls.clear()
+    scanned.clear()
+    (parts,) = (base / "snapshots/one").glob(".wikimedia_dump-parts-*")
+    if case == "invalid_suffix":
+        with pytest.raises(ValueError, match="page IDs or offset differ"):
+            acquire(project, work)
+        assert not calls and not scanned
+        assert not (base / "acquisition.json").exists()
+        return
+    if case == "damaged":
+        (group,) = (parts / "ranges/wikimedia-plan-group").glob("*/ranges.json")
+        group.write_bytes(b"damaged")
+
+    manifest, _ = _snapshot_payload(acquire(project, work))
+    starts = [sum(map(len, compressed[:i])) for i in range(len(compressed))]
+    assert scanned == (starts if case == "damaged" else starts[2:])
+    assert not calls and not parts.exists()
+
+    dump_path = tmp_path / "dump.bz2"
+    index_path = tmp_path / "index.bz2"
+    dump_path.write_bytes(b"".join(compressed))
+    index_path.write_bytes(responses[index["uri"]])
+    control = wikimedia_ranges.plan_wikimedia_ranges(
+        project.sources[0],
+        dump_path,
+        index_path,
+        index_sha256=index["expected_sha256"],
+        max_index_bytes=index["max_bytes"],
+        max_index_expanded_bytes=index["max_expanded_bytes"],
+        max_members=index["max_members"],
+    )
+    assert manifest["retrieval"]["multistream_index"][
+        "plan_sha256"
+    ] == canonical_digest(asdict(control))
 
 
 @pytest.mark.parametrize(

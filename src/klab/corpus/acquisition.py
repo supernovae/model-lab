@@ -2111,6 +2111,9 @@ def _extract_indexed_wikimedia(
     store.prune(plan_stage, keep=1)
     store.prune(member_stage, keep=index.max_members)
 
+    def record_plan_bytes(count: int) -> None:
+        resources.expanded += count
+
     def prepare(staging: Path, _result: dict[str, Any]) -> None:
         plan = wikimedia_ranges.plan_wikimedia_ranges(
             source,
@@ -2120,8 +2123,9 @@ def _extract_indexed_wikimedia(
             max_index_bytes=index.max_bytes,
             max_index_expanded_bytes=index.max_expanded_bytes,
             max_members=index.max_members,
+            checkpoint_store=store,
+            on_expanded=record_plan_bytes,
         )
-        resources.expanded = plan.expanded_bytes
         write_canonical_json(staging / "plan.json", asdict(plan))
 
     plan_directory, _ = run_stage(store, plan_stage, inputs, prepare)
