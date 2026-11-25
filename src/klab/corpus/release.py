@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 from collections import Counter
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
@@ -17,10 +19,11 @@ from typing import TYPE_CHECKING, Any
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.bounded_metadata import metadata_operation, read_metadata
+from klab.corpus.build_stages import StageStore, run_stage
 from klab.corpus.jsonl_records import read_rows
 from klab.corpus.project import NormalizerOptions
 from klab.corpus.quota import require_estimated_supply
-from klab.corpus.release_receipt import receipt_first
+from klab.corpus.release_receipt import receipt_first, verifier_digest
 from klab.corpus.release_verify import (
     INVENTORY_RECEIPT_MIN_BYTES,
     current_settings,
@@ -389,7 +392,7 @@ VIEW_LINES = 50_000
 
 
 def _readonly(database: str) -> sqlite3.Connection:
-    return sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    return sqlite3.connect(Path(database).resolve().as_uri() + "?mode=ro", uri=True)
 
 
 def _span_rows(spans: str, start: int, end: int):
@@ -879,6 +882,222 @@ def _unique_index(
         raise ValueError(error) from exception
 
 
+@contextmanager
+def _release_index_store(root, verification_mode):
+    """Own temporary index checkpoints until the row verdict completes."""
+    from klab.verification_proofs import verification_options
+
+    settings = current_settings()
+    if settings.scratch_dir is None or verification_mode != "verified_reuse":
+        yield None
+        return
+    scratch = scratch_root()
+    trust = verification_options(scratch, read_only=True)["proof_store"]
+    if trust is None:
+        if settings.echo is not None:
+            print(
+                "release row index checkpoints require owned scratch",
+                file=settings.echo,
+            )
+        yield None
+        return
+    parent = scratch / "release-indexes"
+    parent.mkdir(exist_ok=True, mode=0o700)
+    if not trust.trusted(parent):
+        raise ValueError(f"unsafe release index root: {parent}")
+    workspace = parent / canonical_digest(str(root.resolve()))
+    workspace.mkdir(exist_ok=True, mode=0o700)
+    if not trust.trusted(workspace):
+        raise ValueError(f"unsafe release index workspace: {workspace}")
+    descriptor = os.open(
+        workspace / "lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600
+    )
+    with os.fdopen(descriptor, "wb") as lock:
+        # Process record locks are released on crash even if a worker inherits the fd.
+        fcntl.lockf(lock, fcntl.LOCK_EX)
+        for abandoned in workspace.glob(".verify-corpus-*"):
+            if abandoned.is_dir() and not abandoned.is_symlink():
+                shutil.rmtree(abandoned)
+        store = StageStore(workspace)
+        yield store
+        for stage in ("spans", "documents"):
+            store.prune(stage, keep=0)
+
+
+@contextmanager
+def _row_index_writer(path):
+    with closing(sqlite3.connect(path)) as db:
+        db.execute("PRAGMA journal_mode=OFF")
+        db.execute("PRAGMA synchronous=OFF")
+        db.execute("PRAGMA temp_store=FILE")
+        db.execute("PRAGMA cache_size=-65536")
+        yield db
+        db.commit()
+
+
+def _release_row_indexes(
+    root, receipt, identity, options, temporary, store, phase, advance, progress
+):
+    """Build or restore the checked indexes used by downstream replay queries."""
+    spans_path, documents_path = root / "spans.jsonl", root / "documents.jsonl"
+    producer = verifier_digest("release") if store is not None else None
+
+    def check_inputs(files):
+        if any(
+            range_file_identity(root / name) != item["generation"]
+            for name, item in files.items()
+        ):
+            raise ValueError("release row index inputs changed")
+
+    def run(name, inputs, produce):
+        if store is None:
+            result = {}
+            produce(temporary, result)
+            return str(temporary / f"{name}.sqlite"), result
+        store.discard_incomplete(name)
+
+        def reused():
+            if progress is not None:
+                progress.update(
+                    input_bytes_reused=sum(
+                        receipt["files"][member]["size"] for member in inputs["files"]
+                    )
+                )
+                progress.record(f"reused_release_{name}_index")
+
+        def checked(directory, result):
+            produce(directory, result)
+            check_inputs(inputs["files"])
+
+        directory, result = run_stage(store, name, inputs, checked, on_reuse=reused)
+        store.prune(name, keep=1, protect=store.key(inputs))
+        return str(directory / f"{name}.sqlite"), result
+
+    def build_spans(directory, result):
+        with _row_index_writer(directory / "spans.sqlite") as db:
+            db.execute(
+                "CREATE TABLE spans (id TEXT, raw_path TEXT, line_start INTEGER, "
+                "byte_offset INTEGER, byte_length INTEGER)"
+            )
+
+            def load(result):
+                rows, size = result
+                db.executemany("INSERT INTO spans VALUES (?,?,?,?,?)", rows)
+                advance(len(rows), size)
+
+            run_tasks(
+                _span_rows,
+                (
+                    (str(spans_path), start, end)
+                    for start, end in chunk_ranges(spans_path)
+                ),
+                load,
+                total_bytes=file_bindings[spans_path.name]["entry"]["size"],
+            )
+            _unique_index(db, "spans_id", "spans", "id", "duplicate evidence span")
+            result["rows"] = db.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+
+    file_bindings = {
+        path.name: {
+            "entry": receipt["files"][path.name],
+            "generation": range_file_identity(path),
+        }
+        for path in (spans_path, documents_path)
+    }
+    span_inputs = {
+        "files": {spans_path.name: file_bindings[spans_path.name]},
+        "producer": producer,
+    }
+    document_inputs = {
+        "files": file_bindings,
+        "producer": producer,
+        "normalizer": options.model_dump(mode="json"),
+        "keys": identity["release"]["policy"]["duplicates"]["keys"],
+    }
+
+    def build_documents(directory, result):
+        phase("spans", spans_path)
+        span_database, spans = run("spans", span_inputs, build_spans)
+        with _row_index_writer(directory / "documents.sqlite") as db:
+            db.execute(
+                "CREATE TABLE docs (id TEXT, source TEXT, split TEXT, "
+                "representative TEXT, dropped TEXT, raw_path TEXT, "
+                "line_start INTEGER, content_sha256 TEXT, source_family TEXT, "
+                "modality TEXT, domains TEXT, doc_offset INTEGER, doc_length INTEGER, "
+                "span_offset INTEGER, span_length INTEGER)"
+            )
+            db.execute("CREATE TABLE duplicate_keys (key TEXT, id TEXT)")
+
+            def load(rows):
+                docs, keys, size = rows
+                db.executemany(
+                    "INSERT INTO docs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", docs
+                )
+                db.executemany("INSERT INTO duplicate_keys VALUES (?,?)", keys)
+                advance(len(docs), size)
+
+            total = phase("documents", documents_path)
+            run_tasks(
+                _document_rows,
+                (
+                    (
+                        span_database,
+                        str(documents_path),
+                        start,
+                        end,
+                        options,
+                        tuple(document_inputs["keys"]),
+                    )
+                    for start, end in chunk_ranges(documents_path)
+                ),
+                load,
+                total_bytes=total,
+            )
+            db.commit()
+            _unique_index(db, "docs_id", "docs", "id", "duplicate document identity")
+            if db.execute("SELECT COUNT(*) FROM docs").fetchone()[0] != spans["rows"]:
+                raise ValueError("document evidence span inventory mismatch")
+            db.execute(
+                "CREATE INDEX docs_raw_order_idx ON docs(source, raw_path, line_start, id)"
+            )
+            if db.execute(
+                "SELECT COUNT(*) FROM docs AS doc LEFT JOIN docs AS representative "
+                "ON doc.representative=representative.id WHERE representative.id IS NULL "
+                "OR representative.representative!=representative.id OR "
+                "(doc.id=doc.representative AND doc.dropped IS NOT NULL "
+                "AND doc.dropped!='metadata_only_front_matter') OR "
+                "(doc.id!=doc.representative AND doc.dropped IS NULL) OR "
+                "(doc.dropped NOT IN ('duplicate','contaminated_heldout',"
+                "'metadata_only_front_matter')) OR "
+                "(doc.split!='train' AND representative.split!=doc.split) OR "
+                "(doc.dropped='contaminated_heldout' AND "
+                "(doc.split!='train' OR representative.split='train')) OR "
+                "(doc.dropped='duplicate' AND doc.split='train' "
+                "AND representative.split!='train')"
+            ).fetchone()[0]:
+                raise ValueError("invalid duplicate representative identity")
+            db.execute("CREATE INDEX duplicate_key_idx ON duplicate_keys (key)")
+            if db.execute(
+                "SELECT COUNT(*) FROM (SELECT duplicate_keys.key FROM duplicate_keys "
+                "JOIN docs ON docs.id=duplicate_keys.id GROUP BY duplicate_keys.key "
+                "HAVING COUNT(DISTINCT docs.representative)!=1)"
+            ).fetchone()[0]:
+                raise ValueError("duplicate group representative mismatch")
+
+    phase("documents", documents_path, spans_path)
+    database, _ = run("documents", document_inputs, build_documents)
+    check_inputs(file_bindings)
+    if identity["split"].get("assignment_file") is not None:
+        if progress is not None:
+            progress.start_phase("document_assignments")
+        with metadata_operation(temporary, max_database_bytes=None):
+            assignments = document_assignments(root, identity)
+            with closing(_readonly(database)) as db:
+                for document_id, split in db.execute("SELECT id, split FROM docs"):
+                    assignments.verify_document(document_id, split)
+    return database
+
+
 def _validate_rows_streaming(
     root: Path,
     *,
@@ -933,36 +1152,32 @@ def _validate_rows_streaming(
         if progress is not None:
             progress.update(documents=documents, input_bytes=size)
 
-    spans_path, documents_path = root / "spans.jsonl", root / "documents.jsonl"
-    with tempfile.TemporaryDirectory(
-        prefix=".verify-corpus-", dir=scratch_root()
-    ) as temporary:
-        # Workers read one file while this process fills another, so writers and
-        # readers never share a database file.
-        span_database = str(Path(temporary) / "spans.sqlite")
-        database = str(Path(temporary) / "evidence.sqlite")
+    with (
+        _release_index_store(root, verification_mode) as store,
+        tempfile.TemporaryDirectory(
+            prefix=".verify-corpus-",
+            dir=store.root if store is not None else scratch_root(),
+        ) as temporary,
+    ):
+        database = _release_row_indexes(
+            root,
+            receipt,
+            identity,
+            options,
+            Path(temporary),
+            store,
+            phase,
+            advance,
+            progress,
+        )
         tally = str(Path(temporary) / "tally.sqlite")
-        db = sqlite3.connect(database)
-        db.execute("ATTACH ? AS span_store", (span_database,))
-        db.execute("ATTACH ? AS tally", (tally,))
-        for schema in ("main", "span_store", "tally"):
-            db.execute(f"PRAGMA {schema}.journal_mode=OFF")
-            db.execute(f"PRAGMA {schema}.synchronous=OFF")
-        db.execute("PRAGMA temp_store=FILE")
-        db.execute("PRAGMA cache_size=-65536")
+        db = _readonly(database)
         try:
-            db.execute(
-                "CREATE TABLE span_store.spans (id TEXT, raw_path TEXT, line_start INTEGER, "
-                "byte_offset INTEGER, byte_length INTEGER)"
-            )
-            db.execute(
-                "CREATE TABLE docs (id TEXT, source TEXT, split TEXT, "
-                "representative TEXT, dropped TEXT, raw_path TEXT, "
-                "line_start INTEGER, content_sha256 TEXT, source_family TEXT, "
-                "modality TEXT, domains TEXT, doc_offset INTEGER, "
-                "doc_length INTEGER, span_offset INTEGER, span_length INTEGER)"
-            )
-            db.execute("CREATE TABLE duplicate_keys (key TEXT, id TEXT)")
+            db.execute("ATTACH ? AS tally", (tally,))
+            db.execute("PRAGMA tally.journal_mode=OFF")
+            db.execute("PRAGMA tally.synchronous=OFF")
+            db.execute("PRAGMA temp_store=FILE")
+            db.execute("PRAGMA cache_size=-65536")
             db.execute("CREATE TABLE tally.lineage (id TEXT)")
             db.execute("CREATE TABLE tally.stage_docs (stage TEXT, id TEXT)")
             db.execute("CREATE TABLE tally.view_docs (id TEXT)")
@@ -971,100 +1186,6 @@ def _validate_rows_streaming(
                 db.executemany(
                     f"INSERT INTO {table} VALUES ({','.join('?' * width)})", rows
                 )
-
-            total = phase("spans", spans_path)
-            run_tasks(
-                _span_rows,
-                (
-                    (str(spans_path), start, end)
-                    for start, end in chunk_ranges(spans_path)
-                ),
-                lambda result: (
-                    load("spans", result[0], 5),
-                    advance(len(result[0]), result[1]),
-                ),
-                total_bytes=total,
-            )
-            _unique_index(
-                db,
-                "span_store.spans_id",
-                "spans",
-                "id",
-                "duplicate document evidence span",
-            )
-            db.commit()
-
-            with ExitStack() as assignment_scope:
-                if identity["split"].get("assignment_file") is not None:
-                    if progress is not None:
-                        progress.start_phase("document_assignments")
-                    assignment_scope.enter_context(
-                        metadata_operation(Path(temporary), max_database_bytes=None)
-                    )
-                assignments = document_assignments(root, identity)
-
-                def load_documents(result):
-                    rows, duplicate_keys, size = result
-                    if assignments is not None:
-                        # The worker already projected the document ID and split.
-                        for row in rows:
-                            assignments.verify_document(row[0], row[2])
-                    load("docs", rows, 15)
-                    load("duplicate_keys", duplicate_keys, 2)
-                    advance(len(rows), size)
-
-                total = phase("documents", documents_path)
-                run_tasks(
-                    _document_rows,
-                    (
-                        (
-                            span_database,
-                            str(documents_path),
-                            start,
-                            end,
-                            options,
-                            tuple(identity["release"]["policy"]["duplicates"]["keys"]),
-                        )
-                        for start, end in chunk_ranges(documents_path)
-                    ),
-                    load_documents,
-                    total_bytes=total,
-                )
-            db.commit()
-            _unique_index(db, "docs_id", "docs", "id", "duplicate document identity")
-            if (
-                db.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
-                != db.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
-            ):
-                raise ValueError("document evidence span inventory mismatch")
-            db.execute(
-                "CREATE INDEX docs_raw_order_idx "
-                "ON docs(source, raw_path, line_start, id)"
-            )
-            if db.execute(
-                "SELECT COUNT(*) FROM docs AS doc LEFT JOIN docs AS representative "
-                "ON doc.representative=representative.id WHERE representative.id IS NULL "
-                "OR representative.representative!=representative.id OR "
-                "(doc.id=doc.representative AND doc.dropped IS NOT NULL "
-                "AND doc.dropped!='metadata_only_front_matter') OR "
-                "(doc.id!=doc.representative AND doc.dropped IS NULL) OR "
-                "(doc.dropped NOT IN ('duplicate','contaminated_heldout',"
-                "'metadata_only_front_matter')) OR "
-                "(doc.split!='train' AND representative.split!=doc.split) OR "
-                "(doc.dropped='contaminated_heldout' AND "
-                "(doc.split!='train' OR representative.split='train')) OR "
-                "(doc.dropped='duplicate' AND doc.split='train' "
-                "AND representative.split!='train')"
-            ).fetchone()[0]:
-                raise ValueError("invalid duplicate representative identity")
-            db.execute("CREATE INDEX duplicate_key_idx ON duplicate_keys (key)")
-            if db.execute(
-                "SELECT COUNT(*) FROM (SELECT duplicate_keys.key FROM duplicate_keys "
-                "JOIN docs ON docs.id=duplicate_keys.id GROUP BY duplicate_keys.key "
-                "HAVING COUNT(DISTINCT docs.representative)!=1)"
-            ).fetchone()[0]:
-                raise ValueError("duplicate group representative mismatch")
-            db.commit()
 
             groups = db.execute(
                 "SELECT source, raw_path, COUNT(*) FROM docs GROUP BY source, raw_path "
