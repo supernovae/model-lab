@@ -7,8 +7,9 @@ An ordinary text recipe can still go from acquisition to training without
 any structured extraction. Small datasets can still use the
 [local data path](../datasets.md#prepare).
 
-The inventory below is based on Lab `b53022b2` and Workshop `4164998`.
-The interfaces in the design sections describe future work. Current commands
+The original increments were reviewed at Lab `b53022b2` and Workshop `4164998`.
+The recovery entries below were refreshed at Lab `fa567164`. The interfaces
+in the design sections describe future work. Current commands
 are in [Corpus preparation](../corpus-preparation.md) and
 [Token store](../token-store.md). The issues are
 [#459](https://github.com/supernovae/model-lab/issues/459) for the design,
@@ -16,16 +17,17 @@ are in [Corpus preparation](../corpus-preparation.md) and
 verification, and [#485](https://github.com/supernovae/model-lab/issues/485)
 for recovery. The [rolling backlog](https://github.com/supernovae/model-lab/issues/497)
 records the decisions from [the original design](https://github.com/supernovae/model-lab/pull/493).
+The [D1–D12 decision table](https://github.com/supernovae/model-lab/blob/b53022b2/docs/design/corpus-workarea.md#9-open-decisions-for-the-owner) preserves the labels used in that backlog.
 
 ## Current implementation
 
 | Original increment | Evidence on main | Remaining work |
 | --- | --- | --- |
-| 1. ShardRunner and verification | #494 and #495 landed the shared range runner and early consumers. It bounds submitted work, can checkpoint JSON results, and supports ordered output. | Admit work by memory and scratch, bound buffered results, and checkpoint large payloads and reductions. |
+| 1. Shared shard runner and verification | #494 and #495 landed the range runner. #576 bounds its worker window by CPU and available RAM, limits native threads, and verifies cached JSON and file-backed results within the same window. | Extend bounded scratch admission and receipted reductions to the remaining long passes. |
 | 2. Near-duplicate screen | #491 and #496 landed checkpointing, sharded scans, and template-aware classes. | Reuse the held-out index and template evidence as artifacts. Add passage-level grouping and measure classification precision. |
 | 3. Tokenizer sampling | #494 and #499 landed range scans and seeded-hash sampling. Workshop #112 pins the sample seed. | Keep this path. Track fit and cold sample-verification costs separately from sample selection. |
-| 4. Acquisition parts | #456 landed the verified transport cache. Supported bodies can be reused after a source declaration changes. | Publish independently receipted parts for eligible acquisition paths so a stop can resume within a source. |
-| 5. Narrow build | #486 checkpoints complete disk-build index and dedup stages. #488 landed the canary. The disk builder still stores payloads and spans in SQLite and can replay the entire view-emission pass after a stop. | Replace the wide tables with narrow metadata and references. Checkpoint view segments. |
+| 4. Acquisition parts | #456 landed the verified transport cache. Bounded Git, Hugging Face and PDF reuse verified parts. Archives and wiki dumps reuse pinned inputs and completed derivations. Indexed Wikimedia commits planning and extraction in groups. #601 adds exact-generation staging inspection and removal under the adapter lock. | Measure representative archive and partial-body replay, wider Wikimedia runs, and recovery on slower storage. |
+| 5. Narrow build | #486 checkpoints complete disk-build index and dedup stages. #488 landed the canary. #579 resumes native disk LM view emission from verified append boundaries. The disk index still stores payloads and spans in SQLite. | Replace wide tables with narrow metadata and references. Bound unfinished index and dedup replay, report measurement and manifest hashing. Extend emission recovery to completed preparation. |
 | 6. Freeze and verification | #500–#502 landed signed receipt reuse, freeze by verified rename, and resumable describe measurement. Cold verification still performs full checks. Some LM and chat releases still use the row-store verifier. | Bound the remaining row-store paths, including reviewed admission and fractional releases. Separate integrity from transformation replay and sampled audits. |
 | 7. Shared work area | `StageStore`, normalized shards, and token caches exist. Most source and build artifacts are still project-scoped. | Share immutable outputs across projects, narrow identities, and protect reference closure during explicit pruning. |
 | 8–9. Operators and sidecars | #448/#451 moved choice into recorded release policy. Exact deduplication and the approximate screen exist. The runner declares stages but there is no general typed operator registry or sidecar store. | Extract reusable evidence and make selection consume sidecars without rewriting source text. |
@@ -39,6 +41,10 @@ Its [additive release](https://github.com/supernovae/kybern-workshop/issues/109)
 can proceed through the existing workflow, with independent rights, split,
 contamination, and quota checks. Retain the screening and reporting decisions
 for the existing base release. Keep active training on its pinned checkout.
+
+The [long-stage recovery inventory](../corpus-preparation.md#long-steps-and-what-a-failure-costs)
+records the committed units, restart work and measured costs for the current
+Corpus and training paths.
 
 ## Architectural decisions
 
@@ -134,7 +140,8 @@ the Lab revision for traceability and exercise deterministic outputs in CI
 to catch an unrecorded semantic change. Keep format versions separate from
 named policy options.
 
-Extend `ShardRunner` and `StageStore` together. Start with one partitioned
+Extend the shared runner (`klab.corpus.shards.run_sharded` and `run_tasks`)
+and `StageStore` together. Start with one partitioned
 recipe path from normalization to a sealed release. Add file-backed maps,
 partitioned shuffle and external sort, indexed joins, and bounded iterative
 passes as operators require them. Workers pass small manifests and counts.

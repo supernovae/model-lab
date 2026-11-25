@@ -1318,22 +1318,61 @@ checks all three, and that the screen covered every document of this release.
 
 ## Long steps and what a failure costs
 
-| Step | Resumable after a kill? | A failure at the end costs |
-| --- | --- | --- |
-| `acquire` | varies by [source adapter](#recovery-by-source-adapter) | an unfinished unit and required verification. Indexed Wikimedia planning replays at most one uncommitted verification group after a hard stop. |
-| `build` normalize | yes: per-file receipted shards | files being written |
-| `build` index, dedup | yes: receipted stage outputs ([resume](#resume-a-failed-build)) | the stage that was running |
-| `build` views and publish (native disk builder) | yes: verified append boundaries and atomic publication | uncommitted rows, prefix verification and any unfinished report or manifest pass |
-| `freeze` | yes: rerun it; a stopped freeze is finished after verifying the staged files | the rename, or a verification from the bytes after a stop |
-| `audit`, `describe`, `sources`, release readers | no, but a successful verification is a receipt that later commands reuse | one verification from the bytes |
-| `export` | no: staged, then renamed | the export |
-| `derive-family-inventory` | yes with `--scratch-dir`: verify and reuse committed segments | unfinished ranges and a sequential assembly pass |
-| `near-duplicates` | yes, per shard by training-document offset | the documents since each shard's last checkpoint |
-| `materialize-mixture` | yes: committed segments | the segment in progress |
-| `verify-mixture` | no | one verification pass |
-| `tokenizer` fit and `corpus tokenizer-bakeoff` | no | the fit |
-| `klab data prepare` | yes: receipted chunks | the chunk in progress |
-| `klab stage ... --through warmup` | no, but short | the pilot |
+Recovery boundaries were checked against Lab `fa567164`. A committed unit is
+work a retry can authenticate and reuse. A completed verification receipt can
+avoid repeating a check on unchanged inputs in normal receipt-backed mode.
+An independent cold audit reads the evidence again. Timings describe the named
+workloads and revisions. The cost of interrupting today's large runs still
+needs measurement where the table gives historical or fixture evidence.
+
+### Acquire, build, and publish a release
+
+| Step | Committed unit | Work repeated after a stop | Measured evidence |
+| --- | --- | --- | --- |
+| Acquisition and transport cache | Published source snapshot, verified transport body or adapter-specific checkpoint. See [recovery by source adapter](#recovery-by-source-adapter). | Adapter-specific work and verification. Indexed Wikimedia retains committed planning groups and selected member groups. A partial pinned transfer restarts its body. | On a 287 MiB Wikimedia shard, a stop after 128 planned members avoided 539.88 MiB of retry decompression. [#592](https://github.com/supernovae/model-lab/pull/592) |
+| Snapshot verification | Complete snapshot proof when a trusted proof store is enabled. | Hash the whole interrupted snapshot again. An explicit cold check re-reads all requested snapshots. | Historical Workshop cold pass, about 15 min for 33 snapshots and 108 GB. [#485](https://github.com/supernovae/model-lab/issues/485) |
+| Native disk build, normalize | Receipted shard per source file. | Verify completed shards and re-normalize unfinished files. | Historical Workshop normalize, about 25 min for the 6.7M-document workload. [#491](https://github.com/supernovae/model-lab/pull/491) |
+| Native disk build, index and dedup | Whole index and whole dedup stage, separately. | Verify earlier outputs and rebuild the interrupted stage. Keep the index when only duplicate policy changes. | Historical Workshop index, about 30 min for roughly 13M rows. The HDD incident measured 3.4k docs/s against 19.8k docs/s on NVMe. Current dedup interruption cost is unmeasured. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
+| Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB. Final publication by rename. | Verify the committed prefix, reconstruct its digest and render the uncommitted tail. Report measurement or manifest hashing can restart as a whole pass. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. These figures cover the append helper. [#579](https://github.com/supernovae/model-lab/pull/579) |
+| Completed-preparation build | Authenticated per-source render and completed sorting, deduplication, inventory and emission phases. | An unfinished phase repeats. View emission on this route reruns its complete pass. The small in-memory builder likewise has a whole-build boundary. | Production restart cost unmeasured. |
+| Freeze | Native staging rename and build tombstone, then the verified release. Completed preparation seals a retained release against its existing build. | A stopped native freeze can reuse the staged files and verify them from bytes before publishing. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. [#501](https://github.com/supernovae/model-lab/pull/501) |
+| Release verification, `audit`, and `sources` | Complete release proof. `audit` and `sources` read the corresponding published report after verification. | In cold mode, restart inventory hashing and unfinished row and lineage checks. A receipt-backed retry can reuse eligible dependency proofs. | 67.3 s for cold audit on 13.2 GB synthetic data, 0.94 s for the first receipt-backed audit. A historical 57 GB HDD audit was stopped after 1 h 45 min. [#500](https://github.com/supernovae/model-lab/pull/500), [#450](https://github.com/supernovae/model-lab/issues/450) |
+| `describe` | Cached measurement runs and lineage position index when a proof store is available. Release verification has its own receipt. | Resume missing measurement ranges and merge results. Chat view measurement uses a whole run. A stopped cold release verification can still repeat. | 55.1 s for 5M synthetic rows (23 GB), 12 workers, without a tokenizer. [#502](https://github.com/supernovae/model-lab/pull/502) |
+| Corpus `export` | LM train and validation statistics by range with persistent scratch. Final export directory and verification receipt. | Reuse valid LM range statistics. Repeat unfinished ranges, any required serial rights scan, chat split scans and final publication. | Stage-specific restart cost unmeasured. |
+
+### Select families, screen duplicates, and build a schedule
+
+| Step | Committed unit | Work repeated after a stop | Measured evidence |
+| --- | --- | --- | --- |
+| Source split inventory | Complete output with native completion evidence. | Rescan the admitted source files and write the inventory again if output was unpublished. | Production restart cost unmeasured. |
+| `freeze-splits` | Verified final split bundle. Completed preparation also commits external-sort and join phases plus export chunks. | The ordinary path repeats unfinished assignment work. The completed-preparation route resumes at the last authenticated phase and reuses intact export chunks. | Production restart cost unmeasured. |
+| `derive-family-inventory` | Receipted file-backed range segments with persistent `--scratch-dir`. | Verify existing segments, regenerate missing ones, and copy the segments again during final assembly. | Byte-identical fixture restart. Production assembly and verification cost unmeasured. [#576](https://github.com/supernovae/model-lab/pull/576) |
+| `finalize-family-inventory` | Final inventory. Completed preparation can reuse the release's authenticated family inventory. | Rebuild the native candidate-to-document join and output, or republish the authenticated retained inventory. | Production restart cost unmeasured. |
+| Near-duplicate screen | Training-pass offset and accumulators per range, every 200,000 training documents by default. | Rebuild the held-out index and template evidence when enabled. Replay training records after each range's commit. | Historical 6.7M-document Workshop screen, 1–2 h on one core. Held-out rebuild cost unmeasured. [#491](https://github.com/supernovae/model-lab/pull/491) |
+| Seeded tokenizer sample and verification | The shared runner can commit TRAIN lineage, rank histogram, and candidate ranges when a caller supplies persistent scratch. Normal tokenizer CLI sampling uses the in-process merge without that store. | `tokenizer train` and `tokenizer verify` rerun selection and read the selected payloads. Corpus operations may reuse a completed tokenizer verification receipt. | 13 s at 12 workers on a warm-page-cache synthetic 11.9 GB, 2M-document release with a 32 MiB fit quota. This measures selection. [#499](https://github.com/supernovae/model-lab/pull/499) |
+| Tokenizer fit and bakeoff | Complete tokenizer and provenance, or completed bakeoff artifacts. | Fit BPE again after an interruption during training. A completed matching fit can be reused after verifying its inputs. | Current fit and restart costs unmeasured. |
+| `materialize-mixture` | Candidate and output segments and a reusable content token cache. Default commit thresholds are 4,096 candidates, 64 MiB or 30 s. | Verify committed segments, rebuild or verify indexes as needed, replay the uncommitted segment, and finish assembly. Reuse unchanged token encodings. | 24.2 s cold and 12.9 s with warm token cache on a synthetic 210M-token mixture. These are build timings. [Mixture speed](token-store.md#mixture-speed) |
+| `verify-mixture`, `--reseal`, and `--audit` | Complete verification or completion receipt. | Routine verification and reseal may repeat output checks and hashes. `--audit` reruns an independent schedule in fresh scratch with token reuse disabled. | A real full audit took 94 min. The synthetic 6,000-document audit took 1.1 s with a mocked tokenizer. [#521](https://github.com/supernovae/model-lab/pull/521) |
+
+### Prepare data, train, and score
+
+| Step | Committed unit | Work repeated after a stop | Measured evidence |
+| --- | --- | --- | --- |
+| Streaming `data prepare` | Sealed chunks, configured by [preparation limits](runtime.md#interrupted-preparation). A finished split remains reusable. | Recheck sealed chunks, replay in-flight records, and repeat unfinished final array assembly or hashing. | Current interrupted-preparation cost unmeasured. |
+| Token-store and mixture packing paths | Reusable completed token-store or mixture input and completed prepared bundle. | Reuse verified input encodings and rebuild unpublished arrays and masks where applicable. | Mixture packing achieved 126M tokens/s on the synthetic 210M-token workload. [Mixture speed](token-store.md#mixture-speed) |
+| Stage validation and warmup | Complete verified stage bundle. Prepared inputs can be reused separately. | Restart the interrupted disposable pilot using the same declared inputs. | Runtime-specific interruption cost unmeasured. |
+| Training and post-training objectives | Full-state checkpoint at a committed optimizer update, including data cursor and random state. | Resume from the newest valid checkpoint and repeat updates since that checkpoint. Supported device-layout changes require explicit runtime options and record numerical drift. | Validate cadence and preemption costs with [#516](https://github.com/supernovae/model-lab/issues/516). See [Checkpoints](checkpointing.md#resume) and [Post-training](post-training.md). |
+| Evaluation and fixed panels | Complete result for one checkpoint and panel. A panel can retain incomplete accounting. | Repeat the interrupted pass over the same panel and checkpoint. | Per-panel recovery cost unmeasured. |
+| Probe battery | Sealed result per invocation, including evidence from a graceful interruption when available. | Replay the interrupted battery on the same authorized split, subject to the final-split rules. | Current tier-specific recovery cost unmeasured. See [Probes](probes.md). |
+| Post-training weight export and quantization | Completed exported artifact or quantization result. | Restart the interrupted export, or repeat conversion and its evaluation from the source checkpoint. | Large-checkpoint replay cost unmeasured. |
+
+The recovery checklist tracks phase and scale gaps. Release verification layout
+and replay are also tracked in #450, reference assets in #567 and #569, and
+training recovery in #516. [#485](https://github.com/supernovae/model-lab/issues/485),
+[#450](https://github.com/supernovae/model-lab/issues/450),
+[#567](https://github.com/supernovae/model-lab/issues/567),
+[#569](https://github.com/supernovae/model-lab/issues/569),
+[#516](https://github.com/supernovae/model-lab/issues/516)
 
 ## Guard held-out data across releases
 
