@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from klab.corpus.bounded_metadata import current_metadata_store
-from klab.corpus.project import SPLITS
+from klab.corpus.project import SPLITS, SplitAssignmentsReference
 from klab.corpus.split_lookup import AssignmentLookup, stamp
 from klab.training.manifest import sha256_file
 
@@ -20,15 +20,18 @@ UNIT_FIELDS = {
 }
 
 
-def assignment_path(directory, reference):
-    from klab.corpus.project import SplitAssignmentsReference
-
+def _assignment_member(directory, reference):
     reference = SplitAssignmentsReference.model_validate(reference).model_dump(
         mode="json"
     )
     path = Path(directory) / ("assignments-" + reference["sha256"] + ".jsonl")
     if any(part.is_symlink() for part in (path, *path.parents)) or not path.is_file():
         raise ValueError("missing or symlinked split assignments")
+    return path, reference
+
+
+def assignment_path(directory, reference):
+    path, reference = _assignment_member(directory, reference)
     if sha256_file(path) != reference["sha256"]:
         raise ValueError("split assignment digest mismatch")
     return path
@@ -54,6 +57,10 @@ class Assignments(Mapping):
 
     def __len__(self):
         return len(self.index)
+
+    def verify_document(self, document_id, split):
+        if self.get(document_id) != split:
+            raise ValueError("document differs from frozen split assignment")
 
 
 def split_policy(project):
@@ -91,14 +98,14 @@ def copy_assignments(project, destination, *, resume: bool = False):
     assignment_path(destination, reference)
 
 
-def verify_document_assignments(root, identity, documents):
+def document_assignments(root, identity):
+    """Open authenticated frozen assignments in the active metadata operation."""
     reference = identity["split"].get("assignment_file")
     if reference is None:
-        return
-    assignments = Assignments(assignment_path(root, reference), reference)
-    for doc in documents:
-        if assignments.get(doc["document_id"]) != doc["split"]:
-            raise ValueError("document differs from frozen split assignment")
+        return None
+    path, reference = _assignment_member(root, reference)
+    # The lookup verifies the digest while decoding and indexing the assignments.
+    return Assignments(path, reference)
 
 
 def assign_split(record, policy):

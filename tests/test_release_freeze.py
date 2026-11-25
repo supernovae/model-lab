@@ -6,8 +6,9 @@ import json
 from pathlib import Path
 
 import pytest
-from corpus_fixtures import write_prose_project
+from corpus_fixtures import forge_release, write_prose_project
 
+from klab.canonical import canonical_digest, canonical_json
 from klab.corpus import release as release_module
 from klab.corpus.acquisition import acquire
 from klab.corpus.pipeline import build
@@ -56,6 +57,66 @@ def test_frozen_release_is_the_build_directory_renamed(
     with pytest.raises(ValueError, match="frozen in place"):
         verify_build(build_dir)
     assert not list(release.parent.glob(".freezing-*"))
+
+
+def test_verification_checks_frozen_document_assignments(
+    prepared: tuple[Path, Path],
+) -> None:
+    build_dir, work = prepared
+    rows = sorted(
+        (
+            json.loads(line)
+            for line in (build_dir / "documents.jsonl").read_bytes().splitlines()
+        ),
+        key=lambda row: row["document_id"],
+    )
+    assignments = [
+        {"document_id": row["document_id"], "split": row["split"]} for row in rows
+    ]
+    # Split preparation may assign more documents than a release includes.
+    assignments.append({"document_id": "~unused", "split": "train"})
+
+    def write_assignments(root):
+        temporary = root / "assignments.jsonl"
+        temporary.write_bytes(
+            b"".join(canonical_json(row) + b"\n" for row in assignments)
+        )
+        digest = sha256_file(temporary)
+        name = f"assignments-{digest}.jsonl"
+        temporary.rename(root / name)
+        return name, {"sha256": digest, "rows": len(assignments)}
+
+    project = work.parent / "project"
+    name, reference = write_assignments(project)
+    (project / "splits.yaml").write_bytes(
+        canonical_json(
+            {"schema_version": 1, "unit": "document", "assignment_file": reference}
+        )
+    )
+    loaded = load_project(project / "corpus.yaml")
+    release = freeze(build(loaded, work, offline=True), work)
+    assert (
+        verify_release(release)["build_identity"]["split"]["assignment_file"]
+        == reference
+    )
+
+    def replace_assignment(root):
+        assignments[0]["split"] = (
+            "test" if assignments[0]["split"] == "train" else "train"
+        )
+        changed_name, changed_reference = write_assignments(root)
+        (root / name).unlink()
+        path = root / "manifest.json"
+        manifest = json.loads(path.read_bytes())
+        manifest["build_identity"]["split"]["assignment_file"] = changed_reference
+        manifest["build_id"] = canonical_digest(manifest["build_identity"])
+        manifest["files"][changed_name] = manifest["files"].pop(name)
+        path.write_bytes(canonical_json(manifest) + b"\n")
+
+    with pytest.raises(
+        ValueError, match="document differs from frozen split assignment"
+    ):
+        verify_release(forge_release(release, replace_assignment))
 
 
 def test_build_changed_after_verification_is_never_published(
