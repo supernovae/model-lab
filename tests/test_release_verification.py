@@ -362,6 +362,58 @@ def test_one_verification_serves_every_later_command(
     assert len(cold_runs) == 3, "--cold ignores receipts"
 
 
+def test_interrupted_source_replay_reuses_only_unchanged_checks(
+    release: Path,
+    receipts: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from klab.corpus import release_receipt
+    from klab.verification_proofs import verification_options
+
+    monkeypatch.setattr(release_module, "INVENTORY_RECEIPT_MIN_BYTES", 0)
+    replay = release_module._raw_group
+    record = release_receipt.record
+    replayed = []
+
+    def observe_replay(*args):
+        result = replay(*args)
+        replayed.append(result[:2])
+        return result
+
+    def stop_after_first_replay(store, kind, *args, **kwargs):
+        committed = record(store, kind, *args, **kwargs)
+        if kind == "raw_replay":
+            assert committed
+            raise RuntimeError("stop after durable source replay check")
+        return committed
+
+    monkeypatch.setattr(release_module, "_raw_group", observe_replay)
+    with verification_settings(workers=1, **verification_options(receipts)):
+        with monkeypatch.context() as fault:
+            fault.setattr(release_receipt, "record", stop_after_first_replay)
+            with pytest.raises(RuntimeError, match="durable source replay check"):
+                audit(release)
+        [completed] = replayed
+        replayed.clear()
+        assert not _release_receipts(receipts)
+
+        result = audit(release)
+        assert replayed and completed not in replayed
+        all_files = {completed, *replayed}
+
+        # A dependency can change generation while retaining its content digest.
+        spans = release / "spans.jsonl"
+        spans.write_bytes(spans.read_bytes())
+        replayed.clear()
+        assert audit(release) == result
+        assert set(replayed) == all_files
+
+    replayed.clear()
+    with verification_settings(workers=1, **verification_options(receipts, cold=True)):
+        assert audit(release) == result
+    assert set(replayed) == all_files
+
+
 @pytest.mark.parametrize("cause", ["rewritten", "forged", "verifier changed"])
 def test_receipt_is_refused_when_its_cause_no_longer_holds(
     release: Path,
