@@ -790,11 +790,16 @@ The native disk builder commits ordered span and view boundaries on reaching
 Each receipt binds the committed output offsets, range
 digests, cursor and report counts. On retry the writer verifies the committed
 prefix, truncates uncommitted or damaged suffixes and seeks to the last
-verified row. It re-reads bytes to verify the prefix and restore the stage
-digest. Report measurement uses the existing lineage and view range
+verified row. The writer computes whole-file SHA-256 checksums as it writes
+views and validates committed ranges. The manifest reuses those checksums
+after confirming that the file generations still match. The stage and file
+inventory use the same checksum for a stage's JSONL file. Resume still reads
+the committed prefix and reconstructs the framed stage output identity.
+Report measurement uses the existing lineage and view range
 checkpoints. The finished census has its own receipt bound to the verified
 view frontier and release options. A retry with the same frontier reuses the
-finished census and can still repeat final manifest hashing. The staged
+finished census. The `writing_manifest` phase hashes ancillary outputs,
+such as reports and assignment files. The staged
 view files become the published build. The census scratch and receipts are
 removed after successful publication. Abandoned checkpoints from other build
 identities can be removed between builds once they are no longer needed.
@@ -1377,7 +1382,7 @@ needs measurement where the table gives historical or fixture evidence.
 | Snapshot verification | Signed byte checks of eligible files in published snapshots, then a complete snapshot proof. | Reuse completed eligible file hashes at the same path; restart an incomplete file. An explicit cold check reads the bytes again. | Historical Workshop cold pass, about 15 min for 33 snapshots and 108 GB. See [snapshot hash recovery measurements](#snapshot-hash-recovery-measurements). |
 | Native disk build, normalize | Receipted shard per source file. | Verify completed shards and re-normalize unfinished files. | Historical Workshop normalize, about 25 min for the 6.7M-document workload. [#491](https://github.com/supernovae/model-lab/pull/491) |
 | Native disk build, index and dedup | Verified groups of prepared file references, then the assembled index and complete dedup stage. Reviewed row admission uses indexed file and row numbers. | Reuse verified input groups. Repeat the unfinished group, compact index assembly or dedup stage as applicable. | See [native index and payload read measurements](#native-index-and-payload-read-measurements) and [native admission coverage measurements](#native-admission-coverage-measurements). Historical Workshop indexing took about 30 min for roughly 13M rows. [#485](https://github.com/supernovae/model-lab/issues/485), [#450](https://github.com/supernovae/model-lab/issues/450) |
-| Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB, lineage and view measurement checkpoints, and a receipted census. Final publication by rename. | Verify the committed view prefix, reconstruct its digest and render the uncommitted tail. Reuse finished census work for matching inputs, then repeat final manifest hashing. A stop in the final lineage sort or measurement merge may repeat that step. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. [Native build census measurements](#native-build-census-measurements) cover the report phase. [#579](https://github.com/supernovae/model-lab/pull/579) |
+| Native disk build, views and publication | Verified span and view append boundaries at 25,000 input rows or 64 MiB, lineage and view measurement checkpoints, and a receipted census. Final publication by rename. | Verify the committed view prefix, reconstruct its digests and render the uncommitted tail. Reuse finished census work for matching inputs. The manifest hashes ancillary outputs and reuses the view checksums. A stop in the final lineage sort or measurement merge may repeat that step. | A 128 MiB tmpfs append fixture took 0.082 s with two commits and 0.071 s for prefix verification. [Native build census measurements](#native-build-census-measurements) cover the report phase. [#579](https://github.com/supernovae/model-lab/pull/579) |
 | Completed-preparation build | Authenticated per-source render and completed sorting, deduplication, inventory and emission phases. | An unfinished phase repeats. View emission on this route reruns its complete pass. The small in-memory builder likewise has a whole-build boundary. | Production restart cost unmeasured. |
 | Freeze | Native staging rename and build tombstone, signed verification after a staged replay, then the public release. Completed preparation seals a retained release against its existing build. | Reuse the complete staged receipt at the same path, or resume an unfinished check from eligible file and replay proofs. Retained freeze can repeat its final verification and seal. | Native freeze took 72.3 s on a 13.2 GB synthetic release, including build verification. The historical 374 GB copy took 92 min before in-place freeze. See [staged freeze recovery measurements](#staged-freeze-recovery-measurements). [#501](https://github.com/supernovae/model-lab/pull/501) |
 | Release verification, `audit`, and `sources` | Signed checks of eligible inventory files, stage outputs and streaming raw source replay, then the complete release proof. `audit` and `sources` read the corresponding published report after verification. | A receipt-backed retry skips eligible completed checks and continues the remaining work. Cold mode starts the checks from bytes. | See [inventory hash recovery measurements](#inventory-hash-recovery-measurements), [stage output verification measurements](#stage-output-verification-measurements) and [raw source replay recovery](#raw-source-replay-recovery). An earlier cold audit took 67.3 s on 13.2 GB synthetic data, and the first receipt-backed audit took 0.94 s. [#500](https://github.com/supernovae/model-lab/pull/500), [#450](https://github.com/supernovae/model-lab/issues/450) |
@@ -1693,6 +1698,26 @@ measurement cache held about 70 MB before publication cleanup.
 A connected build fixture covers reuse of the finished census after a
 publication stop. Larger mixed releases, production NVMe and slower storage
 remain unmeasured.
+
+#### Native build manifest measurements
+
+An NVMe fixture rendered 70,000 documents and spans into 1.49 GB of
+inventory files. The renderer ran without the census so the measurements
+cover view emission, recovery and manifest creation. Three runs per
+implementation used the same prepared input. Each ran through manifest
+creation, stopped with SIGKILL before publication, and retried with cold
+staged file pages. Every build manifest matched byte for byte. The append
+journal held about 17 kB in both implementations.
+
+| Run | Prior median manifest time | Inline checksum median | Prior total logical reads | Inline checksum total logical reads |
+| --- | ---: | ---: | ---: | ---: |
+| Fresh emission and manifest | 653 ms | 3.3 ms | 2.41 GB | 468 MB |
+| Retry through publication | 646 ms | 3.8 ms | 3.89 GB | 1.95 GB |
+
+Device reads were about 465 MB for fresh emission and 1.49 GB for a retry
+with either implementation. The older extra reads came from the page cache
+on this fixture. Whole-phase wall times varied with host load. Larger
+working sets and slower storage remain unmeasured.
 
 ### Select families, screen duplicates, and build a schedule
 

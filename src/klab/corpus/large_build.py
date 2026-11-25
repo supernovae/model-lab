@@ -1508,8 +1508,9 @@ def _emit_build(
             boundary(len(raw_doc))
         boundary(0, finished=True)
 
+        view_digests = checkpoints.file_digests() if checkpoints is not None else None
+
     stage_digest.update(b"]]")
-    stage_path = staging / "stages" / f"{stage_id}.jsonl"
     stages = [
         {
             "id": stage_id,
@@ -1518,7 +1519,6 @@ def _emit_build(
             "parameters_sha256": canonical_digest(stage_spec["parameters"]),
             "inputs": stage_spec["inputs"],
             "implementation_sha256": identity["implementation_sha256"],
-            "output_sha256": sha256_file(stage_path),
             "output_count": stage_count,
             "output_id": stage_digest.hexdigest(),
         }
@@ -1606,6 +1606,7 @@ def _emit_build(
         report["measurement"] = json.loads(
             (census_dir / "measurement.json").read_text(encoding="utf-8")
         )
+    progress.update(phase="writing_manifest")
     write_release_files(
         staging,
         project,
@@ -1614,6 +1615,7 @@ def _emit_build(
         identity=identity,
         stages=stages,
         lock=lock,
+        view_digests=view_digests,
     )
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import pytest
 from corpus_fixtures import neutral_corpus
 from recipe_fixtures import Lab, write_recipe
 
-from klab.corpus import build_stages, large_build, measurement
+from klab.corpus import build_outputs, build_stages, large_build, measurement
 from klab.corpus.view_checkpoints import ViewCheckpoints
 from klab.training.manifest import sha256_file
 
@@ -174,8 +175,25 @@ def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(
     lab.run("corpus", "budget-init", project)
     lab.run("corpus", "acquire", project)
     monkeypatch.setattr(large_build, "_VIEW_CHECKPOINT_ROWS", 2)
+
+    hash_file = build_outputs.sha256_file
+
+    def hash_untracked(path):
+        if path.name in {"documents.jsonl", "spans.jsonl", "lineage.jsonl"} or (
+            path.suffix == ".jsonl" and path.parent.name in {"lm", "stages"}
+        ):
+            pytest.fail(f"manifest reread a checkpointed view: {path}")
+        return hash_file(path)
+
+    monkeypatch.setattr(build_outputs, "sha256_file", hash_untracked)
     reference = Path(lab.run("corpus", "build", project, "--offline"))
     expected = tree(reference)
+    manifest = json.loads((reference / "build.json").read_bytes())
+    assert {name: entry["sha256"] for name, entry in manifest["files"].items()} == {
+        name: digest for name, digest in expected.items() if name != "build.json"
+    }
+    for stage in manifest["stages"]:
+        assert stage["output_sha256"] == expected[f"stages/{stage['id']}.jsonl"]
     shutil.rmtree(reference)
 
     commit = ViewCheckpoints.commit
@@ -234,12 +252,22 @@ def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(
     assert not rendered
     assert first_run not in measured
 
-    # Damage only the last committed group after the manifest was produced.
-    # A new attempt must retain the valid prefix and rebuild that group.
-    with (staging / "documents.jsonl").open("r+b") as stream:
-        stream.seek(-2, 2)
-        stream.write(b"x")
-    rendered.clear()
+    # A same-size edit after view verification must not publish a stale hash.
+    # The following attempt must retain the valid prefix and rebuild that group.
+    write_manifest = large_build.write_release_files
+
+    def mutate_before_manifest(staging, *args, **kwargs):
+        with (staging / "lineage.jsonl").open("r+b") as stream:
+            stream.seek(-2, 2)
+            stream.write(b"x")
+        return write_manifest(staging, *args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(large_build, "write_release_files", mutate_before_manifest)
+        with pytest.raises(ValueError, match="corpus view changed"):
+            lab.run("corpus", "build", project, "--offline")
+    assert not reference.exists()
+    assert not rendered
 
     # A repaired frontier with identical output can reuse a verified census.
     def unexpected_census(*args, **kwargs):

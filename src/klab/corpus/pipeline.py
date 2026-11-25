@@ -2620,9 +2620,6 @@ def _build_stored(
                     "parameters_sha256": digest(params),
                     "inputs": inputs,
                     "implementation_sha256": sha256_file(Path(__file__)),
-                    "output_sha256": sha256_file(
-                        staging / "stages" / f"{stage_id}.jsonl"
-                    ),
                     "output_count": len(output),
                     "output_id": digest([stage_id, output]),
                 }
