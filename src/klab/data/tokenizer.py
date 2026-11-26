@@ -19,7 +19,7 @@ from tokenizers.pre_tokenizers import ByteLevel
 from tokenizers.trainers import BpeTrainer
 
 from klab.config.models import DatasetConfig, RunConfig, TokenizerTrainConfig
-from klab.corpus.export import verify_release_export
+from klab.corpus.export import authenticate_release_export
 from klab.corpus.shards import Single, declare_stage
 from klab.data.datasets import iter_documents
 from klab.data.sources import verify_snapshot
@@ -278,12 +278,14 @@ def _verify_tokenizer_manifest(
         ).hexdigest()
         if manifest.get("source_manifest_sha256") != snapshot_digest:
             raise ValueError("tokenizer snapshot identity mismatch")
+    verified_export = None
     if dataset is not None and dataset.corpus_release_path is not None:
-        binding = verify_release_export(
+        verified_export = authenticate_release_export(
             dataset,
             proof_store=proof_store,
             verification_mode=verification_mode,
         )
+        binding = verified_export.binding
         if bakeoff is not None:
             if (
                 manifest.get("corpus_export") is not None
@@ -304,7 +306,7 @@ def _verify_tokenizer_manifest(
         )
     contract = manifest.get("training_contract", {})
     if "sampling" in contract:
-        if dataset is None:
+        if dataset is None or verified_export is None:
             raise ValueError(
                 "sampled tokenizer verification requires its frozen dataset"
             )
@@ -320,7 +322,8 @@ def _verify_tokenizer_manifest(
         from klab.data.tokenizer_sampling import audit, documents, select_documents
 
         # The fit's byte selection and the audit's reserve come from one scan.
-        selection = select_documents(config)
+        with verified_export.release_members() as release:
+            selection = select_documents(config, release)
         stats = {}
         for _ in documents(config, stats, selection=selection):
             pass
@@ -480,6 +483,7 @@ def _bounded_documents(
     if config.sampling is not None:
         from klab.data.tokenizer_sampling import documents
 
+        assert selection is not None
         yield from documents(config, stats, selection=selection)
         return
     selected = acquired = byte_count = 0
@@ -554,8 +558,8 @@ def train_tokenizer(
         if config.sampling is not None
         else config.dataset.train_max_tokens
     )
-    corpus_export = (
-        verify_release_export(
+    verified_export = (
+        authenticate_release_export(
             config.dataset,
             proof_store=proof_store,
             verification_mode=verification_mode,
@@ -563,6 +567,7 @@ def train_tokenizer(
         if config.dataset.corpus_release_path is not None
         else None
     )
+    corpus_export = verified_export.binding if verified_export is not None else None
     if corpus_export is not None and corpus_export["vocab_size"] != config.vocab_size:
         raise ValueError(
             "corpus export vocabulary size does not match tokenizer request"
@@ -585,7 +590,9 @@ def train_tokenizer(
         if config.sampling is not None:
             from klab.data.tokenizer_sampling import select_documents
 
-            selection = select_documents(config)
+            assert verified_export is not None
+            with verified_export.release_members() as release:
+                selection = select_documents(config, release)
         for _ in _bounded_documents(
             config, stats, whole_documents=whole_documents, selection=selection
         ):
@@ -722,6 +729,7 @@ def _fit_tokenizer(
     if config.sampling is not None:
         from klab.data.tokenizer_sampling import audit
 
+        assert selection is not None
         sampling_audit = audit(config, tokenizer, selection=selection)
         if any(
             group["unknown_tokens"] or group["roundtrip_failures"]

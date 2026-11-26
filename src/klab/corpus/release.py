@@ -2739,12 +2739,11 @@ def describe(
 
 
 @dataclass(frozen=True)
-class ReleaseReader:
-    """Resolve logical members of a verified Corpus release."""
+class ReleaseMembers:
+    """Map logical Corpus member names through a release manifest."""
 
     root: Path
     manifest: dict[str, Any]
-    generation: str
 
     def member(self, name: str) -> Path:
         if name not in self.manifest["files"]:
@@ -2753,6 +2752,13 @@ class ReleaseReader:
 
     def rows(self, name: str) -> Iterator[dict[str, Any]]:
         return iter_rows(self.member(name))
+
+
+@dataclass(frozen=True)
+class ReleaseReader(ReleaseMembers):
+    """Logical release members bound to the generation verified in this operation."""
+
+    generation: str
 
     def require_unchanged(self) -> None:
         """Check the verified generation before publishing a dependent artifact."""

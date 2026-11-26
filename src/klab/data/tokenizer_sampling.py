@@ -31,14 +31,14 @@ import os
 from collections.abc import Iterator
 from itertools import batched
 from pathlib import Path
-from typing import BinaryIO, NamedTuple
+from typing import TYPE_CHECKING, BinaryIO, NamedTuple
 
 from tokenizers import Tokenizer
 
 from klab.canonical import canonical_json
 from klab.config.models import TokenizerTrainConfig
 from klab.corpus import release_verify
-from klab.corpus.mixture import _source_rights
+from klab.corpus.mixture import validate_source_strata
 from klab.corpus.mixture_index import MAX_ROW_BYTES
 from klab.corpus.release_verify import range_records
 from klab.corpus.shards import (
@@ -49,6 +49,9 @@ from klab.corpus.shards import (
 )
 from klab.safe_io import read_file_range
 from klab.training.manifest import sha256_file
+
+if TYPE_CHECKING:
+    from klab.corpus.release import ReleaseMembers
 
 BUCKET_BITS = 12
 BUCKETS = 1 << BUCKET_BITS
@@ -100,6 +103,7 @@ class Selection(NamedTuple):
     fit: dict[str, list[_Candidate]]
     reserve: dict[str, list[_Candidate]]
     train_documents: int
+    documents_path: Path
     inputs: dict[Path, list[int]]
 
     def check_inputs(self) -> None:
@@ -241,21 +245,23 @@ def _unique(found: list[_Candidate]) -> list[_Candidate]:
 
 
 def select_documents(
-    config: TokenizerTrainConfig, caps: dict[str, int] | None = None
+    config: TokenizerTrainConfig,
+    release: ReleaseMembers,
+    *,
+    caps: dict[str, int] | None = None,
 ) -> Selection:
     """Choose each stratum's fit prefix and audit reserve from the frozen release."""
     spec = config.sampling
     assert spec is not None
-    release = config.dataset.corpus_release_path
-    assert release is not None
     caps = quotas(config) if caps is None else caps
-    lineage = release / "lm/train.lineage.jsonl"
-    documents_path = release / "documents.jsonl"
+    lineage = release.member("lm/train.lineage.jsonl")
+    documents_path = release.member("documents.jsonl")
+    sources = release.member("sources.json")
     source_generation = {
         path: range_file_identity(path)
-        for path in (lineage, documents_path, release / "sources.json")
+        for path in (lineage, documents_path, sources, release.root / "manifest.json")
     }
-    _source_rights(release, spec.source_strata)
+    validate_source_strata(sources, spec.source_strata)
     inputs = {}
     if release_verify.current_settings().scratch_dir is not None:
         inputs = {
@@ -348,6 +354,7 @@ def select_documents(
         {stratum: chosen[stratum][0] for stratum in caps},
         {stratum: chosen[stratum][1] for stratum in caps},
         len(selected),
+        documents_path,
         source_generation,
     )
     selection.check_inputs()
@@ -385,13 +392,12 @@ def documents(
     stats: dict,
     selected_hashes: set[str] | None = None,
     *,
-    selection: Selection | None = None,
+    selection: Selection,
 ):
-    """The fit documents; pass the `select_documents` result to reuse a scan already made."""
+    """Replay the selected fit in hash order from the authenticated document file."""
     spec = config.sampling
     assert spec is not None
     caps = quotas(config)
-    selection = selection or select_documents(config, caps)
     selection.check_inputs()
     used = {key: sum(c.size for c in selection.fit[key]) for key in caps}
     counts = {key: len(selection.fit[key]) for key in caps}
@@ -403,9 +409,7 @@ def documents(
         )
     digest = hashlib.sha256()
     identities = hashlib.sha256()
-    release = config.dataset.corpus_release_path
-    assert release is not None
-    with (release / "documents.jsonl").open("rb") as stream:
+    with selection.documents_path.open("rb") as stream:
         for stratum in caps:
             for row in _prefetched_rows(stream, selection.fit[stratum]):
                 text = _text(stream, row)
@@ -438,16 +442,13 @@ def documents(
     )
 
 
-def audit(
-    config: TokenizerTrainConfig, tokenizer, *, selection: Selection | None = None
-) -> dict:
+def audit(config: TokenizerTrainConfig, tokenizer, *, selection: Selection) -> dict:
     # Audit ordinary text, including literal special-token spellings, without
     # mutating the fitted artifact or its production encoding behavior.
     tokenizer = Tokenizer.from_str(tokenizer.to_str())
     tokenizer.encode_special_tokens = True
     spec = config.sampling
     assert spec is not None
-    selection = selection or select_documents(config)
     selection.check_inputs()
     fit_hashes = {row.content_sha256 for rows in selection.fit.values() for row in rows}
     groups = {
@@ -463,12 +464,10 @@ def audit(
     total_bytes = 0
     digest = hashlib.sha256()
     unknown = tokenizer.token_to_id("<unk>")
-    release = config.dataset.corpus_release_path
-    assert release is not None
     # The documents after each stratum's fit, one stratum at a time in turn, so
     # the byte cap is shared evenly and the choice never depends on the scan.
     depth = spec.audit_documents_per_stratum
-    with (release / "documents.jsonl").open("rb") as stream:
+    with selection.documents_path.open("rb") as stream:
         for position in range(depth):
             for stratum, reserve in selection.reserve.items():
                 if position >= len(reserve):
