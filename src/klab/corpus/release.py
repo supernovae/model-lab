@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import tempfile
 from collections import Counter
+from collections.abc import Iterator
 from contextlib import ExitStack, closing, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -20,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.bounded_metadata import metadata_operation, read_metadata
 from klab.corpus.build_stages import StageStore, run_stage
-from klab.corpus.jsonl_records import read_rows
+from klab.corpus.jsonl_records import iter_rows
 from klab.corpus.project import NormalizerOptions
 from klab.corpus.quota import require_estimated_supply
 from klab.corpus.release_receipt import receipt_first, verifier_digest
@@ -2736,14 +2737,59 @@ def describe(
     return result
 
 
+@dataclass(frozen=True)
+class ReleaseReader:
+    """Resolve logical members of a verified Corpus release."""
+
+    root: Path
+    manifest: dict[str, Any]
+
+    def member(self, name: str) -> Path:
+        if name not in self.manifest["files"]:
+            raise ValueError(f"release does not declare member: {name}")
+        return _safe(self.root, name)
+
+    def rows(self, name: str) -> Iterator[dict[str, Any]]:
+        return iter_rows(self.member(name))
+
+
+@contextmanager
+def open_release(path: Path) -> Iterator[ReleaseReader]:
+    """Verify once and check that the inspected release generation stays stable."""
+    root = Path(path).resolve()
+    with _verification_operation():
+        yield ReleaseReader(root, verify_release(root))
+
+
 def sources(path: Path) -> dict[str, Any]:
-    verify_release(path)
-    return {"sources": _load(Path(path) / "sources.json")}
+    with open_release(path) as release:
+        return {"sources": _load(release.member("sources.json"))}
 
 
 def audit(path: Path) -> dict[str, Any]:
-    verify_release(path)
-    return _load(Path(path) / "audit.json")
+    with open_release(path) as release:
+        return _load(release.member("audit.json"))
+
+
+def _parent_domain_index(release: ReleaseReader, stack: ExitStack):
+    """Spill only document IDs and domains when lineage needs supplementary domains."""
+    from klab.corpus.row_index import RowIndex
+
+    temporary = Path(
+        stack.enter_context(
+            tempfile.TemporaryDirectory(prefix="sample-domains-", dir=scratch_root())
+        )
+    )
+    db = stack.enter_context(closing(sqlite3.connect(temporary / "domains.sqlite")))
+    db.execute("PRAGMA cache_size=-4096")
+    return RowIndex(
+        db,
+        (
+            {"id": row["document_id"], "domains": row["domains"]}
+            for row in release.rows("documents.jsonl")
+        ),
+        lambda row: row["id"],
+    )
 
 
 def sample(
@@ -2754,74 +2800,85 @@ def sample(
     status: str | None = None,
     limit: int = 10,
 ) -> dict[str, Any]:
-    verify_release(path)
     if limit < 0 or limit > 1000:
         raise ValueError("sample limit must be between 0 and 1000")
-    if limit == 0:
-        return {"records": []}
-    root = Path(path)
-    documents = {row["document_id"]: row for row in read_rows(root / "documents.jsonl")}
-    result = []
-    for row in read_rows(root / "lineage.jsonl"):
-        if kind and row["record_kind"] not in (
-            {"chat_sft", "tool_episode"} if kind == "chat" else {kind}
-        ):
-            continue
-        if status and row.get("validation_status") != status:
-            continue
-        domains = sorted(
-            set(row.get("domains", []))
-            | {
-                value
-                for parent in row["parent_document_ids"]
-                for value in documents[parent]["domains"]
-            }
-        )
-        if domain and domain not in domains:
-            continue
-        result.append({**row, "domains": domains})
-        if len(result) >= limit:
-            break
-    return {"records": result}
+    kinds = {"chat_sft", "tool_episode"} if kind == "chat" else {kind}
+    result: list[dict[str, Any]] = []
+    with open_release(path) as release, ExitStack() as stack:
+        if limit == 0:
+            return {"records": result}
+        parent_domains = None
+        for row in release.rows("lineage.jsonl"):
+            if kind and row["record_kind"] not in kinds:
+                continue
+            if status and row.get("validation_status") != status:
+                continue
+            domains = set(row.get("domains", []))
+            parents = row["parent_document_ids"]
+            # Classified lineage pins its parent domain union. Generated worlds
+            # pin their own domain and can also need source domains for inspection.
+            if parents and ("origin" not in row or row.get("generator_world_id")):
+                if parent_domains is None:
+                    parent_domains = _parent_domain_index(release, stack)
+                for parent in parents:
+                    domains.update(parent_domains[parent]["domains"])
+            if domain and domain not in domains:
+                continue
+            result.append({**row, "domains": sorted(domains)})
+            if len(result) >= limit:
+                break
+        return {"records": result}
 
 
 def review(path: Path, **filters: Any) -> dict[str, Any]:
     return sample(path, **filters)
 
 
+def _find_rows(
+    release: ReleaseReader, name: str, field: str, wanted: set[str]
+) -> dict[str, dict[str, Any]]:
+    found = {}
+    for row in release.rows(name):
+        key = row[field]
+        if key in wanted:
+            found[key] = row
+            if len(found) == len(wanted):
+                return found
+    return found
+
+
 def lineage(path: Path, record_id: str) -> dict[str, Any]:
-    verify_release(path)
-    root = Path(path)
-    document_map = {
-        row["document_id"]: row for row in read_rows(root / "documents.jsonl")
-    }
-    spans = {row["record_id"]: row for row in read_rows(root / "spans.jsonl")}
-    sources_map = {row["id"]: row for row in _load(root / "sources.json")}
-    for row in read_rows(root / "lineage.jsonl"):
-        if row["record_id"] == record_id:
+    with open_release(path) as release:
+        row = _find_rows(release, "lineage.jsonl", "record_id", {record_id}).get(
+            record_id
+        )
+        if row is None:
+            raise ValueError(f"unknown record ID: {record_id}")
+        parents = []
+        if wanted := set(row["parent_document_ids"]):
+            documents = _find_rows(release, "documents.jsonl", "document_id", wanted)
+            spans = _find_rows(release, "spans.jsonl", "record_id", wanted)
+            sources_map = {
+                item["id"]: item for item in _load(release.member("sources.json"))
+            }
             parents = [
                 {
-                    "document": document_map[key],
+                    "document": documents[key],
                     "span": spans[key],
-                    "source": sources_map[document_map[key]["source_id"]],
+                    "source": sources_map[documents[key]["source_id"]],
                 }
                 for key in row["parent_document_ids"]
             ]
-            result = {"lineage": row, "parents": parents}
-            if scenario_id := row.get("scenario_id"):
-                result["scenario"] = next(
-                    item
-                    for item in read_rows(root / "scenarios.jsonl")
-                    if item["scenario_id"] == scenario_id
-                )
-            if generation_id := row.get("generation_id"):
-                result["generation"] = next(
-                    item
-                    for item in read_rows(root / "generations.jsonl")
-                    if item["record_id"] == generation_id
-                )
-            return result
-    raise ValueError(f"unknown record ID: {record_id}")
+        result = {"lineage": row, "parents": parents}
+        if scenario_id := row.get("scenario_id"):
+            result["scenario"] = _find_rows(
+                release, "scenarios.jsonl", "scenario_id", {scenario_id}
+            )[scenario_id]
+        if generation_id := row.get("generation_id"):
+            result["generation"] = _find_rows(
+                release, "generations.jsonl", "record_id", {generation_id}
+            )[generation_id]
+        return result
 
 
 def consumers(path: Path, runs_dir: Path) -> dict[str, Any]:

@@ -119,6 +119,23 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     lab, recipe, release = prepared.lab, prepared.recipe, prepared.release
     docs = documents(release)
 
+    scanned: Counter[str] = Counter()
+    scan = release_module.iter_rows
+
+    def count_rows(path):
+        for row in scan(path):
+            scanned[path.name] += 1
+            yield row
+
+    with monkeypatch.context() as lookup:
+        lookup.setattr(release_module, "iter_rows", count_rows)
+        sample = lab.json("corpus", "sample", str(release), "--limit", "1")
+        assert len(sample["records"]) == 1
+        assert scanned == {"lineage.jsonl": 1}
+        trace = lab.json("corpus", "lineage", str(release), docs[0]["document_id"])
+        assert trace["parents"][0]["document"] == docs[0]
+        assert scanned["documents.jsonl"] == 1
+
     # An edit to rights text, notes or domains is a new build, not a new acquisition.
     assert prepared.build != prepared.build_before_edit
 
