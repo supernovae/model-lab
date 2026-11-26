@@ -110,8 +110,13 @@ changes the normalized artifact producer and the native build key. New
 builds at this cutover re-normalize from their existing source snapshots
 and derive fresh index and deduplication keys. Existing releases remain
 addressable by their recorded IDs.
-View recovery, fresh-stage scratch estimates, reference publication and
-closure-aware pruning remain in #567.
+With retained index and deduplication receipts, the native planner can
+identify a view checkpoint and report the candidate verified prefix and
+uncommitted tail from metadata. Build authenticates the checkpoint chain
+before reuse. The shared view identity implementation changes the native
+build key. New builds can reuse verified normalization, index and deduplication
+artifacts across that change. Fresh-stage scratch estimates, reference
+publication and closure-aware pruning remain in #567.
 `klab corpus plan --build BUILD` previews ordinary freeze from existing
 build metadata. It reports the release identity, verification and placement
 dependencies, shared store growth and duplicate staging bytes. It leaves

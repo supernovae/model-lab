@@ -220,6 +220,13 @@ def _run(args: argparse.Namespace) -> None:
                     + details
                     + (f" ({reason})" if reason else "")
                 )
+                if stage["id"] == "views" and stage["action"] == "resume_candidate":
+                    print(
+                        f"    {stage['checkpoint_records']:,} checkpoints, "
+                        f"{stage['committed_document_rows']:,} committed documents, "
+                        f"{stage['stage_replay_candidate_bytes']:,} stage replay bytes, "
+                        f"{stage['uncommitted_tail_bytes']:,} uncommitted bytes"
+                    )
             for source in plan["sources"]:
                 print(source["source_id"])
                 for partition in source["partitions"]:

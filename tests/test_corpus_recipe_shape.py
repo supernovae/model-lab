@@ -341,6 +341,7 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         view_plan = lab.json(*plan_args)
     assert view_plan["build_id"] != other_build.name
     candidate_stages = {row["id"]: row for row in view_plan["stages"]}
+    assert candidate_stages["views"]["action"] == "run"
     stage_store = other_build.parent / "stages"
     for label, directory in (("index", "index"), ("deduplicate", "dedup")):
         step = candidate_stages[label]

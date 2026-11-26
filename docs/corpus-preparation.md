@@ -809,8 +809,19 @@ identities are still unknown, the plan leaves the dependent key unresolved.
 `corpus build PROJECT --keep-stages 2` retains recent index and deduplication
 results for subsequent builds. A view-only policy change can preserve both
 keys. A duplicate-resolution policy change can preserve the index and
-change the deduplication key. The planner leaves view recovery, fresh stage
-write costs and peak scratch unestimated.
+change the deduplication key. With both upstream receipts, the plan can
+also resolve the exact view checkpoint key, which binds the build ID and
+the current normalized input generations.
+
+A view `resume_candidate` reports committed document rows and checkpoint
+records, the candidate prefix bytes to verify, the stage prefix bytes to
+replay for its ordered digest, and the observed uncommitted output tail.
+The plan checks the receipt filenames for gaps and reads only the latest
+receipt and file metadata. Build authenticates the entire chain and can
+resume from an earlier verified record if a checkpoint is damaged. A gap
+or a short output leaves the byte forecast unresolved. Output byte counts
+cover the checkpointed files. Fresh-stage writes and peak scratch remain
+unestimated.
 
 Planning writes no artifacts or verification receipts. It streams the
 acquisition lock and snapshot manifests, discards row-level inventories and
@@ -851,6 +862,17 @@ the Python process and fixture setup. These are planning measurements.
 | 4 | 2.0 ms | 0.69 MB |
 | 128 | 15.2 ms | 0.88 MB |
 | 1,024 | 115.0 ms | 2.28 MB |
+
+The view recovery forecast was measured separately on Linux tmpfs with 128
+prepared partitions and synthetic 64 MiB checkpoints. The plan checked the
+checkpoint directory, the last receipt, and file sizes. Three in-process
+measurements per row left the sparse view payloads unread.
+
+| Checkpoints | Candidate prefix | Median wall time | Process reads |
+| ---: | ---: | ---: | ---: |
+| 16 | 1 GiB | 1.75 ms | 29.6 KB |
+| 256 | 16 GiB | 1.74 ms | 29.7 KB |
+| 4,096 | 256 GiB | 3.58 ms | 29.7 KB |
 
 Inspect shared normalized storage with:
 
