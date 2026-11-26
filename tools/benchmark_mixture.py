@@ -151,6 +151,7 @@ def main():
     )
     parser.add_argument("--loader-blocks", type=int, default=0)
     parser.add_argument("--loader-row-tokens", type=int, default=1024)
+    parser.add_argument("--portable-segments", action="store_true")
     args = parser.parse_args()
     if (
         not 1 <= args.workers <= 8
@@ -167,6 +168,8 @@ def main():
         parser.error("bounds: loader-blocks 0..16384, loader-row-tokens 16..8192")
     if args.loader_blocks and args.token_output != "references":
         parser.error("loader comparison requires reference token output")
+    if args.portable_segments and args.token_output != "references":
+        parser.error("portable segment packaging requires reference token output")
     # Affinity also bounds the baseline's default Rayon planner. Do this before
     # importing Lab or tokenizers; no nested BLAS/Rayon pool inherits more cores.
     if hasattr(os, "sched_getaffinity"):
@@ -390,6 +393,41 @@ def main():
             blocks=args.loader_blocks,
             seq_len=args.loader_row_tokens,
         )
+    if args.portable_segments:
+        destination = root / "portable-segments"
+        process = psutil.Process()
+        io_counters = getattr(process, "io_counters", None)
+        before = io_counters() if io_counters is not None else None
+        started = time.monotonic()
+        copies = schedule.copy_dependencies(destination)
+        copied = time.monotonic()
+        after = io_counters() if io_counters is not None else None
+        verify_schedule(
+            staging,
+            destination,
+            receipt,
+            3,
+            portable=True,
+            memo={
+                (proof.path, proof.fingerprint): proof
+                for proof in (schedule.schedule, *copies.values())
+            },
+        )
+        verified = time.monotonic()
+        checked = io_counters() if io_counters is not None else None
+        result["portable_segments"] = {
+            "segments": len(schedule.tokens),
+            "segment_files": len(copies),
+            "logical_bytes": sum(proof.size_bytes for proof in copies.values()),
+            "copy_seconds": copied - started,
+            "copy_read_chars": after.read_chars - before.read_chars
+            if after is not None
+            else None,
+            "verify_seconds": verified - copied,
+            "verify_read_chars": checked.read_chars - after.read_chars
+            if checked is not None
+            else None,
+        }
     (root / "benchmark.json").write_bytes(canonical_json(result) + b"\n")
     print(json.dumps(result, sort_keys=True))
 

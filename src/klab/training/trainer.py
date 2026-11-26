@@ -30,6 +30,7 @@ import torch
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.models import RunConfig
 from klab.corpus.export import verify_release_export
+from klab.corpus.mixture_schedule import PORTABLE_SEGMENTS
 from klab.data.encoding import (
     TOKENIZER_BATCH_DOCUMENTS,
     TOKENIZER_BATCH_SOURCE_BYTES,
@@ -164,6 +165,7 @@ def _check_training_storage(
             ),
         }
     )
+    schedule = data.portable_schedule
     require_storage(
         training_storage_checks(
             storage_config,
@@ -172,6 +174,9 @@ def _check_training_storage(
             completed_tokens=completed_tokens,
             stop_after_step=stop_after_step,
             operational_checkpoints=operational_checkpoints,
+            portable_token_footprint=schedule.dependency_footprint()
+            if schedule is not None
+            else (0, 0),
         )
     )
 
@@ -248,6 +253,15 @@ def _copy_artifacts(
     copied_data = _copy_tree(
         data.root, run / "data", verified=dict(data.receipt.proofs)
     )
+    copied = {f"data/{name}": proof for name, proof in copied_data.items()}
+    schedule = data.portable_schedule
+    if schedule is not None:
+        copied.update(
+            (f"{PORTABLE_SEGMENTS}/{name}", proof)
+            for name, proof in schedule.copy_dependencies(
+                run / PORTABLE_SEGMENTS
+            ).items()
+        )
     copy_fixed_panels(
         config, run, inputs_root=source_run, training_manifest=data.manifest
     )
@@ -266,11 +280,7 @@ def _copy_artifacts(
         and not item.is_relative_to(run / "checkpoints")
     ):
         relative = path.relative_to(run)
-        proof = (
-            copied_data.get(relative.relative_to("data").as_posix())
-            if copied_data and relative.parts[0] == "data"
-            else None
-        )
+        proof = copied.get(relative.as_posix())
         if proof is not None:
             from klab.data.verification import _fingerprint, _owned_file
 
@@ -967,9 +977,12 @@ def _train_impl(
         with pilot_phase("data_open"):
             if continuation == "RESUMED" and not append_data:
                 assert source_run is not None
-                data = _load_run_data(
+                from klab.staging import _load_inventory_prepared
+
+                data = _load_inventory_prepared(
                     source_run,
-                    config,
+                    continuation_state.artifact_proofs,
+                    byte_enabled=config.model.memory == "byte",
                     proof_store=proof_store,
                     verification_mode=verification_mode,
                 )

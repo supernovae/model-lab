@@ -256,11 +256,22 @@ Preparation checks the selected IDs and records the digest the packed
 `train.npy` would have had. Evidence readers can open the same logical
 training stream through the bundle.
 
-Reference-only runs keep the sealed segment store on the execution host.
-Local continuation uses the run-owned schedule and records, so it can
-resume after the original mixture output moves. Offline worker dispatch
-uses contiguous prepared storage. Set both training options to
-`contiguous` for an independent portable bundle.
+Local continuation uses the run-owned schedule and records and the shared
+sealed store. It can resume after the original mixture output moves.
+[Offline worker dispatch](workers.md#preparation-and-durable-identity) can also bundle
+the referenced sealed segments. The worker verifies their identities and
+owns a copy in the run, so continuation can use the run even when the
+original store is unavailable.
+
+Worker dispatch ships entire referenced segments, including tokens outside
+the selected ranges. A sparse selection can ship more bytes than contiguous
+storage. The retained-mixture benchmark's `--portable-segments` option
+measures the owned copy and the subsequent verification using its file
+proofs. On ext4 over NVMe, the one-segment 65,536-document fixture packaged
+270.91 MB in 0.360 s. The copy issued 541.86 MB of process reads, including
+destination authentication. Verification of the resulting closure took
+0.95 ms and read 624 bytes. This trial excludes input preparation and
+network transfer.
 
 On the same verified reference schedules, the packing benchmark compared
 contiguous and reference-only output on ext4 over NVMe. Times are medians of

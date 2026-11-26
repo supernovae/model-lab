@@ -99,6 +99,18 @@ class PreparedData:
     def train_tokens(self) -> int:
         return self.manifest["train"]["tokens"]
 
+    @property
+    def portable_schedule(self) -> VerifiedSchedule | None:
+        from klab.corpus.mixture_schedule import PORTABLE_SEGMENTS
+
+        if (
+            self.mixture_schedule is not None
+            and self.mixture_schedule.cache_root
+            == self.root.resolve().parent / PORTABLE_SEGMENTS
+        ):
+            return self.mixture_schedule
+        return None
+
     @contextmanager
     def open_train(self) -> Iterator[np.ndarray | ReferencedTokenArray]:
         """Open packed positions from the array or the authenticated segment view."""
@@ -324,6 +336,8 @@ def load_prepared_data(
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
     mixture_schedule: VerifiedSchedule | None = None,
+    dependency_proofs: Sequence[VerifiedFile] = (),
+    require_portable_segments: bool = False,
 ) -> PreparedData:
     """Open a verified immutable cache or run-owned copy without reacquiring data."""
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
@@ -358,12 +372,26 @@ def load_prepared_data(
     )
     has_supervision = supervision_requires_mask(manifest)
     reference = manifest.get("train_reference")
+    if require_portable_segments and reference is None:
+        raise ValueError(
+            "offline reference training requires reference-only prepared data"
+        )
     if reference is not None:
-        from klab.corpus.mixture_schedule import verify_schedule
+        from klab.corpus.mixture_schedule import PORTABLE_SEGMENTS, verify_schedule
         from klab.corpus.release_verify import verification_settings
 
         mixture = manifest["token_mixture"]
-        files = list(verified.proofs.values())
+        store = root.parent / PORTABLE_SEGMENTS
+        if store.is_symlink():
+            raise ValueError("unsafe portable token segment store")
+        portable = store.exists()
+        if (portable or require_portable_segments) and not store.is_dir():
+            raise ValueError(
+                "offline reference training requires bundled token segments"
+            )
+        if not portable:
+            store = Path(reference["cache_root"])
+        files = [*verified.proofs.values(), *dependency_proofs]
         if mixture_schedule is not None:
             files.extend((*mixture_schedule.tokens, *mixture_schedule.indexes))
         memo = {(file.path, file.fingerprint): file for file in files}
@@ -372,10 +400,11 @@ def load_prepared_data(
         ):
             mixture_schedule = verify_schedule(
                 root,
-                Path(reference["cache_root"]),
+                store,
                 mixture,
                 mixture["token_schedule"]["eos"],
                 memo=memo,
+                portable=portable,
             )
     return PreparedData(
         root,

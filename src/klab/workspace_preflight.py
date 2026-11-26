@@ -184,6 +184,7 @@ def training_storage_checks(
     stop_after_step: int | None = None,
     operational_checkpoints: bool = False,
     verified_prepared: VerifiedPreparedData | None = None,
+    portable_token_footprint: tuple[int, int] = (0, 0),
 ) -> list[StorageCheck]:
     """Reserve incremental growth on each device, not already allocated cache bytes.
 
@@ -253,8 +254,8 @@ def training_storage_checks(
     destinations = (
         (
             run_dir if run_dir is not None else config.logging.root_dir,
-            checkpoint_growth + run_copy,
-            checkpoint_generations_upper * 16 + 128,
+            checkpoint_growth + run_copy + portable_token_footprint[0],
+            checkpoint_generations_upper * 16 + 128 + 2 * portable_token_footprint[1],
         ),
         (config.dataset.cache_dir, cache_growth, 128 if cache_growth else 0),
         (

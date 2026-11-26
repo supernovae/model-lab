@@ -223,6 +223,15 @@ filesystem.
 
 Submission verifies and seals an engine-neutral dispatch bundle before atomically reserving experiment, attempt, and run IDs. It contains exact tokenizer/data/package bytes, configuration and source identities, supported version requirements, and selected continuation artifacts. Original input paths are not needed after successful preparation. Promotion must match the requested tokenizer/package identity before any path is rebased; full resume can prepare from verified parent-owned inputs after the originals are gone.
 
+For a [reference-only Corpus configuration](token-store.md#training-batch-loaders),
+use `--include-referenced-token-segments` on `experiment submit` and
+`experiment resume` to include the complete sealed segments named by the
+schedule. A segment can hold tokens outside the selected ranges. Use this
+option only when the worker may receive the entire segments. The worker's
+asset cache reuses segments by digest across bundles, and the run owns the
+segment files it needs for offline resume. Contiguous configurations use the
+ordinary submission command.
+
 The worker checks its content-addressed cache, installs only missing verified assets, revalidates its actual runtime, and runs disposable smoke/warmup pilots. Pilots are separate runs and never advance the experiment's optimizer, schedule, cursor, RNG, or target budget. Memory failure produces a proposal rather than silently reducing scientific settings.
 
 A durable `PREPARED` receipt precedes spawning. A nonblocking attempt claim prevents duplicate wrappers from training. A claimed execution records PID, process-start identity, boot identity, start token, and phase before training. Replaying the same launch returns the same receipt; conflicting identities fail. `RUNNING` and terminal attempts are never restarted under their old IDs.

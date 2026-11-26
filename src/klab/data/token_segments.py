@@ -30,7 +30,7 @@ from klab.verification_proofs import artifact_fingerprint, writable_by_others
 
 SEGMENT_DOCUMENTS = 65_536
 _OPEN_SEGMENTS = 16
-_MANIFEST = "segment.json"
+TOKEN_SEGMENT_MANIFEST = "segment.json"
 _FILES = {"tokens.ids", "index.bin"}
 _SHA256 = re.compile("[0-9a-f]{64}")
 
@@ -52,9 +52,12 @@ def _owned_file(path: Path) -> os.stat_result:
 
 
 def read_token_segment(directory: Path, encoding_id: str, tokenizer_sha: str) -> dict:
-    if directory.is_symlink() or _owned_file(directory / _MANIFEST).st_size > 8192:
+    if (
+        directory.is_symlink()
+        or _owned_file(directory / TOKEN_SEGMENT_MANIFEST).st_size > 8192
+    ):
         raise ValueError(f"unsafe token segment manifest: {directory}")
-    manifest = read_canonical(directory / _MANIFEST)
+    manifest = read_canonical(directory / TOKEN_SEGMENT_MANIFEST)
     encoding = manifest.get("encoding")
     if (
         manifest.keys()
@@ -176,7 +179,7 @@ class SealedContentTokens:
                     row INTEGER NOT NULL
                 ) WITHOUT ROWID;
             """)
-            pending = self.active_path / _MANIFEST
+            pending = self.active_path / TOKEN_SEGMENT_MANIFEST
             if pending.exists() or pending.is_symlink():
                 manifest = self._read_manifest(self.active_path)
                 verified = {}
@@ -296,7 +299,7 @@ class SealedContentTokens:
         temporary = self.active_path / ".segment.tmp"
         temporary.unlink(missing_ok=True)
         write_canonical_json(temporary, manifest, exclusive=True)
-        rename_noreplace(temporary, self.active_path / _MANIFEST)
+        rename_noreplace(temporary, self.active_path / TOKEN_SEGMENT_MANIFEST)
         self.active = None
         active.__exit__(None, None, None)
         stamp = artifact_fingerprint(self.active_path / "index.bin")

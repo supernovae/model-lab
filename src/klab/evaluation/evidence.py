@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from klab.canonical import canonical_digest
+from klab.corpus.mixture_schedule import PORTABLE_SEGMENTS
 from klab.data.packing import (
     TokenBlockDataset,
     load_prepared_data,
@@ -44,11 +45,16 @@ def _validated_artifacts(
 
     ``hash_data=False`` is for a reader that never touches the prepared arrays (the
     Generate preview): each ``data/*.npy`` is checked for presence and for the size the
-    manifest records, but not hashed, and gets no proof. Everything else is hashed.
+    manifest records, but not hashed, and gets no proof. The same rule applies
+    to the bundled binary token payloads and indexes.
     """
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, list):
         raise TypeError("run manifest lacks artifact inventory")
+    closure = {
+        "run_id": manifest["run_id"],
+        "inventory_sha256": canonical_digest(artifacts),
+    }
     verified: dict[str, str] = {}
     proofs: dict[str, VerifiedFile] = {}
     for item in artifacts:
@@ -63,7 +69,13 @@ def _validated_artifacts(
         path = run / name
         if not _inside(run, path) or path.is_symlink() or not path.is_file():
             raise ValueError(f"artifact integrity failure: {name}")
-        if not hash_data and relative.parts[0] == "data" and path.suffix == ".npy":
+        segment = relative.parts[0] == PORTABLE_SEGMENTS
+        if not hash_data and (
+            relative.parts[0] == "data"
+            and path.suffix == ".npy"
+            or segment
+            and path.suffix in {".ids", ".bin"}
+        ):
             size = item.get("size_bytes")
             if type(size) is not int or path.stat().st_size != size:
                 raise ValueError(f"artifact integrity failure: {name}")
@@ -79,7 +91,7 @@ def _validated_artifacts(
                 digest,
                 kind="run_artifact",
                 identifier=name,
-                closure={"run_id": manifest["run_id"], "inventory": artifacts},
+                closure=closure,
             ),
         )
         if relative.parts[0] == "data" and (
@@ -87,6 +99,8 @@ def _validated_artifacts(
             or path.name in {"train.records.jsonl", "train.schedule.bin"}
         ):
             proofs[path.name] = proof
+        elif segment:
+            proofs[name] = proof
         verified[name] = digest
     return verified, proofs
 
@@ -216,7 +230,7 @@ def experiment_evidence(
     """Return observations only when every referenced immutable artifact verifies."""
     validate_mode(verification_mode)
     manifest = read_manifest(run / "manifest.json")
-    artifacts, array_proofs = _validated_artifacts(
+    artifacts, input_proofs = _validated_artifacts(
         run, manifest, proof_store=proof_store, verification_mode=verification_mode
     )
     config = manifest["effective_config"]
@@ -234,7 +248,16 @@ def experiment_evidence(
         data_root,
         byte_enabled=config["model"]["memory"] == "byte",
         verification="structural",
-        receipt=_receipt_from_proofs(data_root, data_manifest, array_proofs),
+        receipt=_receipt_from_proofs(
+            data_root,
+            data_manifest,
+            {name: proof for name, proof in input_proofs.items() if "/" not in name},
+        ),
+        proof_store=proof_store,
+        verification_mode=verification_mode,
+        dependency_proofs=[
+            proof for name, proof in input_proofs.items() if "/" in name
+        ],
     )
     corpus_release_sha256 = None
     corpus_report_path = None

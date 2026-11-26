@@ -1155,7 +1155,75 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     assert Path(lab.run("data", "prepare", str(shorter_run))) != prepared_dir
 
     # A training update must actually obtain its IDs from the segment view.
+    from klab.config.loading import load_config
     from klab.data.mixture_batches import ReferencedTokenArray
+    from klab.workers.bundles import (
+        install_dispatch_bundle,
+        materialize_dispatch_bundle,
+        prepare_dispatch_bundle,
+        verify_dispatch_bundle,
+    )
+    from klab.workers.execution import _continuation_run
+
+    config = load_config(run_config)
+    worker = tmp_path / "worker"
+
+    def transport(dispatch, manifest, destination):
+        plan = install_dispatch_bundle(worker, manifest, {}, check_only=True)
+        missing = set(plan["missing_asset_digests"])
+        attachments = {
+            f"assets/{item.sha256}": dispatch / item.relative_path
+            for item in manifest.files
+            if item.sha256 in missing
+        }
+        install_dispatch_bundle(worker, manifest, attachments, check_only=False)
+        materialize_dispatch_bundle(worker, manifest.digest(), destination)
+        return missing
+
+    with pytest.raises(ValueError, match="whole sealed segments"):
+        prepare_dispatch_bundle(config, tmp_path / "refused-dispatch")
+    store = tmp_path / "controller"
+    lab.run(
+        "experiment",
+        "submit",
+        str(run_config),
+        "--store",
+        str(store),
+        "--include-referenced-token-segments",
+    )
+    dispatch = next((store / ".dispatch").iterdir())
+    portable = verify_dispatch_bundle(dispatch)
+    segment_digests = {
+        item.sha256
+        for item in portable.files
+        if item.relative_path.startswith("assets/token-segments/")
+    }
+    assert segment_digests
+    assert not (dispatch / "assets/data/train.npy").exists()
+    mixture.rename(tmp_path / "original-mixture")
+    Path(prepared_manifest["train_reference"]["cache_root"]).rename(
+        tmp_path / "original-token-store"
+    )
+    tokenizer_json.rename(tmp_path / "original-tokenizer.json")
+    payload = next((dispatch / "assets/token-segments").rglob("tokens.ids"))
+    original = payload.read_bytes()
+    payload.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+    with pytest.raises(ValueError, match="digest mismatch"):
+        verify_dispatch_bundle(dispatch)
+    payload.write_bytes(original)
+    offline = tmp_path / "offline"
+    assert segment_digests <= transport(dispatch, portable, offline)
+    stage = tmp_path / "offline-stage"
+    lab.run(
+        "stage",
+        str(run_config),
+        "--through",
+        "validate",
+        "--output",
+        str(stage),
+        "--prepared-inputs",
+        str(offline),
+    )
 
     fetched = []
     read = ReferencedTokenArray.__getitem__
@@ -1172,6 +1240,8 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         "mini",
         "--stop-after-step",
         "1",
+        "--stage-bundle",
+        str(stage),
         "--require-prepared",
         "--preflight",
         "waive:two-step CPU run in the recipe-shape test, not a pretraining run",
@@ -1179,15 +1249,31 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     run = tmp_path / "runs/mini"
     assert fetched
     assert not (run / "data/train.npy").exists()
+    assert (run / "token-segments/sealed").is_dir()
     assert json.loads((run / "progress.json").read_text())["step"] == 1
     assert (run / "checkpoints/latest.json").is_file()
-    # Run-owned metadata plus the sealed store are enough for continuation.
-    mixture.rename(tmp_path / "original-mixture")
+    # A second outbound bundle uses the run's authenticated closure. The
+    # receiving worker's digest cache needs no segment upload on resume.
+    resume_dispatch = tmp_path / "resume-dispatch"
+    resume = prepare_dispatch_bundle(
+        config,
+        resume_dispatch,
+        resume=run / "checkpoints/latest.json",
+        include_referenced_token_segments=True,
+    )
+    assert not (resume_dispatch / "continuation/run_assets/token-segments").exists()
+    offline_resume = tmp_path / "offline-resume"
+    assert segment_digests.isdisjoint(
+        transport(resume_dispatch, resume, offline_resume)
+    )
+    parent = _continuation_run(offline_resume, "RESUMED")
+    assert parent is not None
+    generation = next((parent / "checkpoints").glob("step_*_gen_*"))
     lab.run(
         "train",
         str(run_config),
         "--resume",
-        str(run / "checkpoints/latest.json"),
+        str(generation),
         "--run-id",
         "mini-resumed",
     )
