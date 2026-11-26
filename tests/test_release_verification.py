@@ -80,10 +80,14 @@ def _spans(edit):
     return apply
 
 
-def _drop_first_train_view_row(root: Path) -> None:
-    for name in ("lm/train.jsonl", "lm/train.lineage.jsonl"):
-        lines = (root / name).read_bytes().splitlines(keepends=True)
-        (root / name).write_bytes(b"".join(lines[1:]))
+def _train_view(edit):
+    def apply(root: Path) -> None:
+        for name in ("lm/train.jsonl", "lm/train.lineage.jsonl"):
+            path = root / name
+            lines = path.read_bytes().splitlines(keepends=True)
+            path.write_bytes(b"".join(edit(lines)))
+
+    return apply
 
 
 def _drop_last_link(root: Path) -> None:
@@ -198,8 +202,12 @@ FORGERIES = {
     ),
     "lineage identity repeated": (_lineage(_repeat_row), "duplicate lineage ID"),
     "view omits a selected document": (
-        _drop_first_train_view_row,
+        _train_view(lambda lines: lines[1:]),
         "LM view omitted selected documents",
+    ),
+    "view repeats a document while preserving its row count": (
+        _train_view(lambda lines: [lines[1], *lines[1:]]),
+        "duplicate LM view identity",
     ),
     "view and lineage lengths differ": (_drop_last_link, "LM lineage count mismatch"),
 }

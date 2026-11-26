@@ -313,6 +313,11 @@ even when original project pointers have moved.
 Native build and release receipts already include the parent snapshot
 required to replay each declared retained subset. The dependency comes from
 the pinned source declaration in the build identity.
+Streaming replay checks lineage, stage and view coverage over the verified
+document row IDs with a single reusable file-backed bitmap. The source and
+document indexes still provide the semantic checks and eligibility counts.
+Measured coverage scratch and sampled full-audit peaks are recorded in the
+[Corpus guide](../corpus-preparation.md#streaming-replay-coverage-measurements).
 
 | Workload | Evidence |
 | --- | --- |

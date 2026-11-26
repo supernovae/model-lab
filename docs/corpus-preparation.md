@@ -1761,6 +1761,12 @@ verified index for raw replay, lineage and view checks. An interruption
 inside an unfinished index still repeats that index. The independent
 `--cold` pass rebuilds both indexes.
 
+The streaming replay uses one file-backed bitmap for lineage, each transform
+and the LM views in turn. Workers validate a record before returning its
+document row ID. The coordinator checks duplicates in the bitmap and matches
+the number of unique rows against the eligible document count. Bitmap size
+is one bit per indexed document, rounded up to a byte.
+
 ```sh
 klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
 ```
@@ -2064,7 +2070,7 @@ The two indexes totaled 342 MB. Sealing added a read of the new
 index files. With a same-generation retry, the completed document
 index is checked by digest and opened read-only. The verifier keeps
 one generation per index for the selected release path, reclaims its
-abandoned tally scratch when restarting and clears the indexes after
+abandoned replay scratch when restarting and clears the indexes after
 successful row verification.
 
 With source files on NVMe and scratch on a rotational ZFS pool, one
@@ -2072,6 +2078,31 @@ pair took 14.473 s before and 18.623 s with checkpoints when fresh.
 Retry took 7.881 s before and 0.558 s with checkpoints. The retry
 used the pool's warm cache, so it measures saved work with that cache
 state. Both backends produced the same index rows.
+
+#### Streaming replay coverage measurements
+
+Three synthetic Linux tmpfs runs per size compared the lineage, stage and
+view coverage reducers over the same immutable document index. The largest
+case read 1.63 GB through the previous SQLite reducer and 45.58 MB through
+the bitmap reducer. Peak process RSS was 78.9 MiB and 63.3 MiB respectively.
+These figures cover membership reduction, excluding payload replay and
+index construction.
+
+| Indexed documents | SQLite time | Bitmap time | SQLite logical scratch | Bitmap logical scratch |
+| ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 3.0 ms | 1.3 ms | 430 KB | 125 bytes |
+| 25,000 | 77.1 ms | 29.0 ms | 9.95 MB | 3.13 KB |
+| 180,000 | 715 ms | 234 ms | 71.97 MB | 22.50 KB |
+
+Separate cold audits used local prose sources, one worker and the same
+release bytes on both revisions. These are medians of three synthetic Linux
+tmpfs runs. Scratch is the sampled peak allocated space for named files,
+including the span and document indexes.
+
+| Documents | Prior audit | Bitmap audit | Prior named scratch | Bitmap named scratch |
+| ---: | ---: | ---: | ---: | ---: |
+| 136 | 103 ms | 103 ms | 303 KB | 205 KB |
+| 2,056 | 725 ms | 725 ms | 3.30 MB | 2.35 MB |
 
 #### Staged freeze recovery measurements
 
