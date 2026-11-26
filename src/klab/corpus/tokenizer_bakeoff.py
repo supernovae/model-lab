@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import math
 from collections import Counter, defaultdict
+from contextlib import closing
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any, Literal
 
@@ -13,13 +15,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.models import DatasetConfig, TokenizerTrainConfig
-from klab.corpus.release import verify_release
+from klab.corpus.jsonl_records import iter_rows
+from klab.corpus.release import ReleaseReader, open_release, resolve_release_reference
 from klab.data.tokenizer import (
     _verify_tokenizer_manifest,
     load_tokenizer,
     train_tokenizer,
     verify_tokenizer_artifact,
 )
+from klab.safe_io import write_canonical_json
 from klab.training.manifest import sha256_file
 from klab.verification_proofs import ProofStore, VerificationMode
 
@@ -99,13 +103,6 @@ def load_declaration(path: Path) -> Declaration:
     return spec
 
 
-def _rows(path: Path):
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            if line.strip():
-                yield json.loads(line)
-
-
 def _group(doc: dict[str, Any]) -> str | None:
     kind = doc["document_kind"].lower()
     if kind in GROUPS:
@@ -121,29 +118,27 @@ def _group(doc: dict[str, Any]) -> str | None:
     return None
 
 
-def _source_documents(release: Path, split: str):
+def _source_documents(release: ReleaseReader, *splits: str):
     selected_ids = {
-        link["record_id"] for link in _rows(release / "lm" / f"{split}.lineage.jsonl")
+        split: {link["record_id"] for link in release.rows(f"lm/{split}.lineage.jsonl")}
+        for split in splits
     }
-    for doc in _rows(release / "documents.jsonl"):
-        if doc["document_id"] in selected_ids and doc["split"] == split:
+    for doc in release.rows("documents.jsonl"):
+        if doc["document_id"] in selected_ids.get(doc["split"], ()):
             yield doc
 
 
-def _documents(release: Path, split: str) -> dict[str, list[dict[str, Any]]]:
-    result: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for doc in _source_documents(release, split):
+def _selection(release: ReleaseReader, spec: Declaration):
+    train: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    validation: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_split = {"train": train, "validation": validation}
+    for doc in _source_documents(release, *by_split):
         group = _group(doc)
         if group in GROUPS:
-            result[group].append(doc)
-    for group, documents in result.items():
-        documents.sort(key=lambda doc: (doc["content_sha256"], doc["document_id"]))
-    return result
-
-
-def _selection(release: Path, spec: Declaration):
-    train = _documents(release, "train")
-    validation = _documents(release, "validation")
+            by_split[doc["split"]][group].append(doc)
+    for groups in by_split.values():
+        for documents in groups.values():
+            documents.sort(key=lambda doc: (doc["content_sha256"], doc["document_id"]))
     if missing := [g for g in spec.groups if not train[g] or not validation[g]]:
         raise ValueError(
             f"missing required train/validation document groups: {missing}"
@@ -192,7 +187,7 @@ def _selection(release: Path, spec: Declaration):
 
 
 def _train_token_counts(
-    release: Path,
+    release: ReleaseReader,
     train: dict[str, list[dict[str, Any]]],
     train_token_scope: str,
     model: Any,
@@ -218,12 +213,12 @@ def _train_token_counts(
             general_tokens += tokens
     general_by_document = {
         doc["document_id"]: "general_education" in doc.get("domains", [])
-        for doc in _rows(release / "documents.jsonl")
+        for doc in release.rows("documents.jsonl")
     }
     train_view_tokens = general_view_tokens = 0
     for row, link in zip(
-        _rows(release / "lm" / "train.jsonl"),
-        _rows(release / "lm" / "train.lineage.jsonl"),
+        release.rows("lm/train.jsonl"),
+        release.rows("lm/train.lineage.jsonl"),
         strict=True,
     ):
         tokens = len(model.encode(row["text"]).ids)
@@ -337,16 +332,18 @@ def _write_sample(path: Path, docs: list[dict[str, Any]]) -> None:
 def _binding(
     identity: dict[str, Any],
     receipt: dict[str, Any],
-    release: Path,
+    release: ReleaseReader,
     sample: Path,
     validation: Path,
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "release_id": identity["release_id"],
-        "release_manifest_sha256": sha256_file(release / "manifest.json"),
-        "lm_train_sha256": sha256_file(release / "lm" / "train.jsonl"),
-        "lm_validation_sha256": sha256_file(release / "lm" / "validation.jsonl"),
+        "release_manifest_sha256": sha256_file(release.root / "manifest.json"),
+        "lm_train_sha256": release.manifest["files"]["lm/train.jsonl"]["sha256"],
+        "lm_validation_sha256": release.manifest["files"]["lm/validation.jsonl"][
+            "sha256"
+        ],
         "declaration_sha256": identity["declaration_sha256"],
         "sample_receipt_sha256": canonical_digest(receipt),
         "fit_sample_sha256": sha256_file(sample),
@@ -370,49 +367,35 @@ def _verify_existing(
     receipt: dict[str, Any],
     selected: dict[str, list[dict[str, Any]]],
     heldout: dict[str, list[dict[str, Any]]],
-    release: Path,
+    release: ReleaseReader,
 ) -> Path:
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    sample = output / "fit.jsonl"
+    validation = output / "validation.jsonl"
+    binding = _binding(identity, receipt, release, sample, validation)
     if (
         report.get("identity") != identity
         or report.get("sample_receipt") != receipt
-        or report.get("release_binding")
-        != _binding(
-            identity,
-            receipt,
-            release,
-            output / "fit.jsonl",
-            output / "validation.jsonl",
-        )
+        or report.get("release_binding") != binding
         or [item["vocab_size"] for item in report.get("candidates", [])] != list(VOCABS)
     ):
         raise ValueError(
             "existing tokenizer bakeoff has mismatched release, declaration or samples"
         )
-    sample = output / "fit.jsonl"
     groups = tuple(identity["declaration"]["groups"])
-    expected = [{"text": doc["text"]} for group in groups for doc in selected[group]]
     if (
-        list(_rows(sample)) != expected
-        or sha256_file(sample) != report["fit_sample_sha256"]
+        not _same_sample(sample, groups, selected)
+        or binding["fit_sample_sha256"] != report["fit_sample_sha256"]
     ):
         raise ValueError("existing tokenizer fitting sample has changed")
-    validation = output / "validation.jsonl"
-    if list(_rows(validation)) != [
-        {"text": doc["text"]} for group in groups for doc in heldout[group]
-    ]:
+    if not _same_sample(validation, groups, heldout):
         raise ValueError("existing held-out sample has changed")
-    binding = _binding(identity, receipt, release, sample, validation)
     dataset = _dataset(
         sample,
-        output / "validation.jsonl",
-        sha256_file(sample),
-        sum(
-            len(doc["text"].encode("utf-8"))
-            for group in groups
-            for doc in selected[group]
-        ),
-        len(expected),
+        validation,
+        binding["fit_sample_sha256"],
+        sum(receipt["fit"][group]["bytes"] for group in groups),
+        sum(len(selected[group]) for group in groups),
     )
     weights = {g: receipt["train"][g]["bytes"] for g in groups}
     for candidate in report["candidates"]:
@@ -464,26 +447,48 @@ def _verify_existing(
     return output / "report.json"
 
 
+def _same_sample(
+    path: Path, groups: tuple[str, ...], sample: dict[str, list[dict[str, Any]]]
+) -> bool:
+    expected = ({"text": doc["text"]} for group in groups for doc in sample[group])
+    with closing(iter_rows(path)) as actual:
+        return all(
+            left == right
+            for left, right in zip_longest(actual, expected, fillvalue=object())
+        )
+
+
 def bakeoff(declaration: Path, output: Path, *, work_root: Path | None = None) -> Path:
     """Fit candidates to identical bounded train documents, score disjoint validation."""
     declaration = Path(declaration).resolve()
     output = Path(output).resolve()
     spec = load_declaration(declaration)
     if "@" in spec.release_path and not Path(spec.release_path).exists():
-        from klab.corpus.cli import _release_path
         from klab.workdir import resolve_work_dir
 
-        release = _release_path(spec.release_path, work_root or resolve_work_dir(None))
+        release = resolve_release_reference(
+            spec.release_path, work_root or resolve_work_dir(None)
+        )
     else:
         release = Path(spec.release_path)
         if not release.is_absolute():
             release = (declaration.parent / release).resolve()
-    manifest = verify_release(release)
+    with open_release(release) as reader:
+        return _run_bakeoff(declaration, output, spec, reader, str(release))
+
+
+def _run_bakeoff(
+    declaration: Path,
+    output: Path,
+    spec: Declaration,
+    release: ReleaseReader,
+    release_path: str,
+) -> Path:
     selected, heldout, train = _selection(release, spec)
     receipt = _receipt(selected, heldout, train, spec)
     identity = {
-        "release_path": str(release),
-        "release_id": manifest["release_id"],
+        "release_path": release_path,
+        "release_id": release.manifest["release_id"],
         "declaration_sha256": sha256_file(declaration),
         "declaration": spec.model_dump(mode="json"),
     }
@@ -497,14 +502,14 @@ def bakeoff(declaration: Path, output: Path, *, work_root: Path | None = None) -
         output / "validation.jsonl",
         [doc for group in spec.groups for doc in heldout[group]],
     )
+    binding = _binding(identity, receipt, release, sample, output / "validation.jsonl")
     dataset = _dataset(
         sample,
         output / "validation.jsonl",
-        sha256_file(sample),
-        sum(len(doc["text"].encode("utf-8")) for doc in fit_docs),
+        binding["fit_sample_sha256"],
+        sum(receipt["fit"][group]["bytes"] for group in spec.groups),
         len(fit_docs),
     )
-    binding = _binding(identity, receipt, release, sample, output / "validation.jsonl")
     candidates = []
     weights = {g: receipt["train"][g]["bytes"] for g in spec.groups}
     for vocab in spec.vocab_sizes:
@@ -577,7 +582,7 @@ def bakeoff(declaration: Path, output: Path, *, work_root: Path | None = None) -
         },
         "identity": identity,
         "sample_receipt": receipt,
-        "fit_sample_sha256": sha256_file(sample),
+        "fit_sample_sha256": binding["fit_sample_sha256"],
         "release_binding": binding,
         "candidates": candidates,
         "selected_tokenizer": str(selected_path),
@@ -592,7 +597,8 @@ def bakeoff(declaration: Path, output: Path, *, work_root: Path | None = None) -
         ]
         / token_counts["total_selected_train_view_tokens"],
     }
-    (output / "report.json").write_bytes(canonical_json(report) + b"\n")
+    release.require_unchanged()
+    write_canonical_json(output / "report.json", report, exclusive=True)
     return output / "report.json"
 
 
@@ -609,20 +615,19 @@ def verify_selection(
         )
     report = json.loads(path.read_text(encoding="utf-8"))
     identity = report["identity"]
-    release = Path(identity["release_path"])
-    if (
-        verify_release(
-            release, proof_store=proof_store, verification_mode=verification_mode
-        )["release_id"]
-        != identity["release_id"]
-    ):
-        raise ValueError("selection release binding changed")
     spec = Declaration.model_validate(identity["declaration"])
-    selected_docs, heldout_docs, train_docs = _selection(release, spec)
-    receipt = _receipt(selected_docs, heldout_docs, train_docs, spec)
-    _verify_existing(
-        path.parent, identity, receipt, selected_docs, heldout_docs, release
-    )
+    with open_release(
+        Path(identity["release_path"]),
+        proof_store=proof_store,
+        verification_mode=verification_mode,
+    ) as release:
+        if release.manifest["release_id"] != identity["release_id"]:
+            raise ValueError("selection release binding changed")
+        selected_docs, heldout_docs, train_docs = _selection(release, spec)
+        receipt = _receipt(selected_docs, heldout_docs, train_docs, spec)
+        _verify_existing(
+            path.parent, identity, receipt, selected_docs, heldout_docs, release
+        )
     if not isinstance(report["candidates"], list) or not report["candidates"]:
         raise ValueError("selection has no verified candidates")
     chosen = choose_candidate(report["candidates"], spec.near_best_ratio)

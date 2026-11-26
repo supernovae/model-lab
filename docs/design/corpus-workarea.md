@@ -108,10 +108,10 @@ stage planning, reference publication and closure-aware pruning remain in #567.
 counts from shared-store metadata. Its paginated inspection is advisory.
 Release sample, review, lineage, source and audit queries use the
 manifest-bound release reader and keep verification in scope until the query
-finishes. Export creation and cold verification also use this reader. Export
-publication checks the verified generation before committing its configs.
-Mixture, tokenizer and other payload consumers still need the common reader
-at the reference layout cutover.
+finishes. Export creation, cold export verification and tokenizer bakeoff
+also use this reader. Export and bakeoff check the verified generation before
+publishing their results. Mixture, sampled tokenizer fit and other payload
+consumers still need the common reader at the reference layout cutover.
 
 Start with typed document, passage, annotation, duplicate-group, selection,
 entity, assertion, evidence, edge, index, and compiled sequence payloads.
