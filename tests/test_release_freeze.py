@@ -448,6 +448,7 @@ def test_shared_releases_reuse_members_and_reject_drift(
     prepared: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     from klab.corpus import artifact_inventory
+    from klab.corpus.release_members import LM_VIEW_MEMBERS
     from klab.training import manifest as file_manifest
 
     build_dir, work = prepared
@@ -456,11 +457,13 @@ def test_shared_releases_reuse_members_and_reject_drift(
         **verification_options(work),
         "share_stage_artifacts": True,
         "share_document_artifacts": True,
+        "share_lm_views": True,
     }
     stage_name = "stages/lm.jsonl"
     document_names = ("documents.jsonl", "spans.jsonl")
     original = {
-        name: (build_dir / name).stat() for name in (stage_name, *document_names)
+        name: (build_dir / name).stat()
+        for name in (stage_name, *document_names, *LM_VIEW_MEMBERS)
     }
     shared_bytes = sum(info.st_size for info in original.values())
     publish = release_module.publish_shared_members
@@ -474,7 +477,11 @@ def test_shared_releases_reuse_members_and_reject_drift(
     def plan(path, *options):
         return query("plan", "--build", str(path), *options)
 
-    share = ("--share-stage-artifacts", "--share-document-artifacts")
+    share = (
+        "--share-stage-artifacts",
+        "--share-document-artifacts",
+        "--share-lm-views",
+    )
     opened_file = Path.open
 
     def forbid_payload(path, *args, **kwargs):
@@ -512,12 +519,16 @@ def test_shared_releases_reuse_members_and_reject_drift(
     pending_documents = query("artifacts", "--kind", "release-documents")
     assert pending_documents["shared_payloads"] == 1
     assert all(row["staging_releases"] == 1 for row in pending_documents["payloads"])
+    pending_views = query("artifacts", "--kind", "release-lm-views")
+    assert pending_views["shared_payloads"] == len(LM_VIEW_MEMBERS)
+    assert all(row["staging_releases"] == 1 for row in pending_views["payloads"])
     resumed = plan(build_dir, *share)
     assert resumed["state"] == "staging"
     assert {row["member"]: row["action"] for row in resumed["shared_members"]} == {
         "documents.jsonl": "verify_staged_reference",
         "spans.jsonl": "move_to_shared_store",
         stage_name: "verify_staged_reference",
+        **dict.fromkeys(LM_VIEW_MEMBERS, "verify_staged_reference"),
     }
     assert resumed["stages"][-1]["inputs"] == ["verify_staged_release"]
     assert plan(build_dir, share[0])["status"] == "blocked"
@@ -603,6 +614,15 @@ def test_shared_releases_reuse_members_and_reject_drift(
         query("artifacts", "--kind", "release-documents", "--unreferenced")["payloads"]
         == []
     )
+    lm_view = paths["lm/train.jsonl"]
+    view_inventory = query("artifacts", "--kind", "release-lm-views")
+    assert all(row["published_releases"] == 2 for row in view_inventory["payloads"])
+    protected = _corpus_json(
+        work, monkeypatch, capsys,
+        "release-prune", "--kind", "release-lm-views", "--digest", lm_view.name,
+        "--apply", exit_code=1,
+    )  # fmt: skip
+    assert protected["payloads"][0]["action"] == "protected" and lm_view.exists()
 
     payload = paths[stage_name]
     unused = b"an unreferenced stage payload\n"
@@ -644,6 +664,19 @@ def test_shared_releases_reuse_members_and_reject_drift(
 
         warm.setattr(release_module, "_verify_release_cold", no_replay)
         assert verify_release(first, **proof_options)["release_id"] == first.name
+
+    original_view = lm_view.read_bytes()
+    tampered_view = original_view.replace(b"training", b"traininx", 1)
+    assert tampered_view != original_view
+    stamp = lm_view.stat()
+    try:
+        lm_view.write_bytes(tampered_view)
+        os.utime(lm_view, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        for released in (first, second):
+            with pytest.raises(ValueError, match=r"tampered artifact: lm/train\.jsonl"):
+                verify_release(released, **proof_options)
+    finally:
+        lm_view.write_bytes(original_view)
 
     data = payload.read_bytes()
     changed = data.replace(b"training", b"traininx", 1)

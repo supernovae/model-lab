@@ -294,6 +294,7 @@ def _run(args: argparse.Namespace) -> None:
             stages=args.share_stage_artifacts,
             documents=args.share_document_artifacts,
             normalized_spans=args.reference_normalized_spans,
+            lm_views=args.share_lm_views,
         )
         inspect_verification = (
             args.inspect_verification or args.cold or args.scratch_dir is not None
@@ -316,7 +317,7 @@ def _run(args: argparse.Namespace) -> None:
             else:
                 _print_freeze_plan(plan)
             return
-        if placement.stages or placement.documents:
+        if placement.stages or placement.documents or placement.lm_views:
             raise ValueError(
                 "shared release placement requires --build for freeze planning"
             )
@@ -768,6 +769,7 @@ def _run(args: argparse.Namespace) -> None:
                 share_stage_artifacts=args.share_stage_artifacts,
                 share_document_artifacts=args.share_document_artifacts,
                 reference_normalized_spans=args.reference_normalized_spans,
+                share_lm_views=args.share_lm_views,
                 **verification,
             )
         )
@@ -937,6 +939,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "--share-document-artifacts",
         action="store_true",
         help="Plan shared document and span placement",
+    )
+    command.add_argument(
+        "--share-lm-views",
+        action="store_true",
+        help="Plan shared language-model view placement",
     )
     command.add_argument(
         "--reference-normalized-spans",
@@ -1268,6 +1275,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "--share-document-artifacts",
         action="store_true",
         help="Publish documents and evidence spans by digest in the Corpus work area",
+    )
+    command.add_argument(
+        "--share-lm-views",
+        action="store_true",
+        help="Publish language-model text splits by digest in the Corpus work area",
     )
     command.add_argument(
         "--reference-normalized-spans",

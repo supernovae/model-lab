@@ -22,10 +22,13 @@ if TYPE_CHECKING:
 
 SHARED_STAGE = "shared_stage"
 SHARED_DOCUMENT = "shared_document"
+SHARED_LM_VIEW = "shared_lm_view"
 DOCUMENT_MEMBERS = ("documents.jsonl", "spans.jsonl")
+LM_VIEW_MEMBERS = ("lm/train.jsonl", "lm/validation.jsonl", "lm/test.jsonl")
 SHARED_STORES = {
     SHARED_STAGE: "release-stages",
     SHARED_DOCUMENT: "release-documents",
+    SHARED_LM_VIEW: "release-lm-views",
 }
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _STAGE_FILE = re.compile(r"stages/[a-zA-Z0-9_-]+\.jsonl")
@@ -38,10 +41,11 @@ class ReleasePlacement:
     stages: bool = False
     documents: bool = False
     normalized_spans: bool = False
+    lm_views: bool = False
 
     @property
     def shared(self) -> bool:
-        return self.stages or self.documents or self.normalized_spans
+        return self.stages or self.documents or self.normalized_spans or self.lm_views
 
     @classmethod
     def from_inventory(cls, files: dict[str, dict[str, Any]]) -> ReleasePlacement:
@@ -50,6 +54,7 @@ class ReleasePlacement:
             stages=SHARED_STAGE in stores,
             documents=SHARED_DOCUMENT in stores,
             normalized_spans=NORMALIZED_SPANS in stores,
+            lm_views=SHARED_LM_VIEW in stores,
         )
 
 
@@ -70,6 +75,7 @@ def shared_member_path(root: Path, name: str, entry: dict[str, Any]) -> Path | N
         not (
             (storage == SHARED_STAGE and _STAGE_FILE.fullmatch(name))
             or (storage == SHARED_DOCUMENT and name in DOCUMENT_MEMBERS)
+            or (storage == SHARED_LM_VIEW and name in LM_VIEW_MEMBERS)
         )
         or not isinstance(digest, str)
         or not _DIGEST.fullmatch(digest)
@@ -180,8 +186,9 @@ def publish_shared_members(
             if stamp[2] != entry["size"]:
                 raise ValueError(f"shared release payload size differs: {name}")
             # A resumed release replays references whose source was already moved.
-            authenticate = (existing and (verified or source.exists())) or (
-                not existing and not verified
+            authenticate = checked.get(destination) != stamp and (
+                (existing and (verified or source.exists()))
+                or (not existing and not verified)
             )
             if authenticate:
                 from klab.data.verification import verify_file

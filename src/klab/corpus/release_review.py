@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import yaml
 
-from klab.corpus.release import verify_release
+from klab.corpus.release import ReleaseMembers, verify_release
 from klab.training.manifest import sha256_file
 
 
@@ -16,6 +17,15 @@ def verify_accepted_prepared_config(path: Path, review: dict[str, object]) -> No
     from klab.config.loading import load_config
 
     dataset = load_config(path).dataset
+    release = Path(str(review["release_path"]))
+    manifest_bytes = (release / "manifest.json").read_bytes()
+    manifest = json.loads(manifest_bytes)
+    if (
+        hashlib.sha256(manifest_bytes).hexdigest() != review["release_manifest_sha256"]
+        or manifest["release_id"] != review["release_id"]
+    ):
+        raise ValueError("prepared config differs from accepted release")
+    validation = ReleaseMembers(release, manifest).member("lm/validation.jsonl")
     if (
         dataset.source != "local_token_mixture"
         or dataset.revision != review["release_id"]
@@ -25,8 +35,7 @@ def verify_accepted_prepared_config(path: Path, review: dict[str, object]) -> No
         or dataset.validation_path is None
         or dataset.train_path.resolve()
         != (dataset.mixture_output_path / "train.tokens.ids").resolve()
-        or dataset.validation_path.resolve()
-        != (Path(str(review["release_path"])) / "lm" / "validation.jsonl").resolve()
+        or dataset.validation_path.resolve() != validation.resolve()
     ):
         raise ValueError("prepared config differs from accepted release")
     mixture = yaml.safe_load(dataset.mixture_declaration_path.read_text())

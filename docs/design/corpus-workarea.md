@@ -143,13 +143,15 @@ tokenizer observation, the training validation view, publication metadata,
 family inventory derivation and finalization, prior split preparation,
 protected-lineage audits and source-token measurement also resolve their
 release payloads through the shared contract. Ordinary freeze can opt in to
-digest references for transform output payloads and for released document
-and evidence-span files. The manifest binds their content and placement.
+digest references for transform outputs, released documents, evidence spans
+and LM text views. The manifest binds their content and placement. LM
+lineage stays with each release, and export config paths resolve the shared
+view for the tokenizer and trainer.
 Release and export verification receipts track their file generations.
 Corpus artifact inventory reports unique stored bytes and published or
 in-flight references for each store. Its unreferenced preview withholds
 candidates when the metadata scan is incomplete. Releases still render a
-project-scoped document inventory. The two release payload stores support
+project-scoped document inventory. The release payload stores support
 explicit digest pruning. The apply path walks all published and staged
 release roots under the work-area publication lease and uses the same
 per-digest locks as freeze. These roots protect the payloads reached by

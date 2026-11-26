@@ -288,7 +288,11 @@ def test_retained_build_recovers_from_closed_execution(tmp_path, monkeypatch):
     save("session-report.json", session)
     declaration.write_bytes(original)
     before = data.stat()
-    for option in ("share_stage_artifacts", "share_document_artifacts"):
+    for option in (
+        "share_stage_artifacts",
+        "share_document_artifacts",
+        "share_lm_views",
+    ):
         with pytest.raises(ValueError, match="require an ordinary Corpus build"):
             freeze(build, root, **{option: True})
     assert consumed_release(build) is None

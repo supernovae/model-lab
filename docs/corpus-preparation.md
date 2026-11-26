@@ -723,11 +723,13 @@ klab --work-dir WORK corpus freeze BUILD
 transform outputs by digest in `WORK/artifacts/corpus/release-stages`.
 `klab corpus freeze BUILD --share-document-artifacts` publishes the release's
 `documents.jsonl` and `spans.jsonl` by digest in
-`WORK/artifacts/corpus/release-documents`. The options can be combined. Both
-use same-filesystem moves and bind the physical placement into the release
-ID. When another release has the same output digest, freeze authenticates
-the stored file before consuming the duplicate staging copy. The receipts
-track the shared file generation.
+`WORK/artifacts/corpus/release-documents`.
+`klab corpus freeze BUILD --share-lm-views` publishes the LM train,
+validation and test text files in `WORK/artifacts/corpus/release-lm-views`.
+The options can be combined. They use same-filesystem moves and bind the
+physical placement into the release ID. When another release has the same
+output digest, freeze authenticates the stored file before consuming the
+duplicate staging copy. The receipts track the shared file generation.
 
 Retry interrupted publication with the same placement options. For a
 shared document or span authenticated during recovery, staged verification
@@ -737,7 +739,15 @@ artifacts. Keep them with the release and its source snapshots when moving
 a work area. Use Corpus commands or the verified release reader to resolve
 shared members. Completed local preparation uses its retained publication.
 
-Sharing a released document or span file requires exact bytes. Build still
+To preview LM view placement, run
+`klab corpus plan --build BUILD --share-lm-views --json`. LM lineage files
+stay with each release. `klab corpus export` resolves shared view paths
+for the tokenizer and training configs. When composing a token-mixture
+config, use the exported dataset's `validation_path`. Keep the shared view
+store with the release manifests and source snapshots when moving the work
+area. See the [shared LM view measurements](#shared-lm-view-measurements).
+
+Sharing a released view, document or span file requires exact bytes. Build still
 renders its project-scoped files. A change to selection, duplicate policy
 or row order can produce different release payloads. Source-level normalized
 partitions continue to be reused separately during preparation.
@@ -1060,13 +1070,14 @@ metadata.
 | 5,000 | 200 | 89.9 ms | 130 ms | 2.94 MB | 45 MiB |
 | 25,000 | 1,000 | 576 ms | 826 ms | 28.77 MB | 50 MiB |
 
-Inspect shared transform outputs and released document evidence, or preview
+Inspect shared transform outputs, released document evidence and LM views, or preview
 unreferenced payloads, with:
 
 ```sh
 klab --work-dir WORK corpus artifacts --kind release-stages --json
 klab --work-dir WORK corpus artifacts --kind release-stages --unreferenced --json
 klab --work-dir WORK corpus artifacts --kind release-documents --unreferenced --json
+klab --work-dir WORK corpus artifacts --kind release-lm-views --unreferenced --json
 ```
 
 This view counts retained bytes once per digest. Each row gives the number
@@ -1099,8 +1110,9 @@ klab --work-dir WORK corpus release-prune --kind release-documents --digest SHA2
 klab --work-dir WORK corpus release-prune --kind release-documents --digest SHA256 --apply --json
 ```
 
-The command also accepts `--kind release-stages`. Repeat `--digest` to select
-multiple files. The preview reports protected, missing and eligible files.
+The command also accepts `--kind release-stages` and `--kind release-lm-views`.
+Repeat `--digest` to select multiple files. The preview reports protected,
+missing and eligible files.
 Apply checks the published and staged release manifests in the work area
 again while holding the publication lease and the selected digest locks.
 Prune refuses the batch when a selected digest is referenced, a required lock
@@ -2350,6 +2362,34 @@ Both revisions returned the same release ID.
 The full audit still hashes release members and reads them to construct the
 row indexes. Production-sized and slower-storage audits remain open.
 [#450](https://github.com/supernovae/model-lab/issues/450)
+
+#### Shared LM view measurements
+
+Two synthetic native builds from different projects each rendered 24.23 MB
+of identical LM views across 24,002 documents. Three paired one-worker NVMe
+trials compared full cold freeze with inline and shared views. The view
+digests matched in every trial.
+
+| Operation or output | Inline views | Shared views |
+| --- | ---: | ---: |
+| First freeze | 1.574 s | 1.579 s |
+| Second freeze | 1.563 s | 1.596 s |
+| Second freeze storage reads | 176.12 MB | 200.36 MB |
+| LM view bytes retained across both releases | 48.46 MB | 24.23 MB |
+
+The extra second-freeze read authenticated the existing shared files.
+Storage writes during both full freezes were about 21.18 MB per release
+for either placement. These measurements include verification and exclude
+the earlier build and repeated rendering.
+
+An isolated placement benchmark on the same NVMe used three actual JSONL
+files totaling 256 MiB, with the staged files already verified and synced.
+Median inline placement took 1.32 ms. The first shared placement took
+5.76 ms. Authenticating the cold retained files took 294 ms and fetched
+256 MiB from storage. Warm placement with existing receipts took 13.0 ms
+with no storage reads. Shared placement wrote metadata and moved or
+discarded the staged view files. Production-sized freeze and slower
+storage remain to be measured. [#567](https://github.com/supernovae/model-lab/issues/567)
 
 #### Source-ordered replay index measurements
 
