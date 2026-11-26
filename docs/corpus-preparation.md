@@ -967,6 +967,7 @@ Inspect shared normalized storage with:
 klab --work-dir WORK corpus artifacts --json
 klab --work-dir WORK corpus artifacts --source-id SOURCE --limit 20
 klab --work-dir WORK corpus artifacts --release-references --source-id SOURCE --json
+klab --work-dir WORK corpus artifacts --build-references --source-id SOURCE --json
 ```
 
 The inventory reports published partition keys and the logical bytes of their
@@ -991,6 +992,15 @@ with unknown reference counts. This scan reads manifests and directory metadata.
 A zero release count only describes release manifests. Active builds,
 unfinished preparation and future builds can also use a partition.
 
+Use `--build-references` to include unconsumed builds and staged native
+builds that have written `build.json` in the same scan. The inventory reports
+build and release counts separately for each partition. A consumed build
+passes its reference to a matching staged or published release. If the
+release is missing or a native view has yet to seal its build manifest,
+the combined scan reports incomplete with unknown counts. These counts
+describe manifest references. Earlier preparation stages can also use
+normalized partitions.
+
 Three synthetic Linux tmpfs trials per size compared the same 20-row page
 with and without the reference scan. The largest fixture had 64 span
 references per release and 27.88 GB of logical normalized partition files.
@@ -1001,6 +1011,20 @@ The reference scan read only release manifests and process metadata.
 | 100 | 20 | 1.3 ms | 7.4 ms | 0.05 MB | 44 MiB |
 | 5,000 | 200 | 46 ms | 108 ms | 1.55 MB | 44 MiB |
 | 25,000 | 2,000 | 223 ms | 1.29 s | 30.29 MB | 49 MiB |
+
+Three Linux tmpfs trials per size also compared release-only and combined
+inspection for the same 20-row page. Each fixture used equal numbers of
+release manifests and build directories. Ten percent of the builds were
+sealed native staging roots and ten percent were consumed tombstones.
+The largest fixture declared 64 span references per manifest and 27.88 GB
+of normalized files. The combined scan read control files and process
+metadata.
+
+| Partitions | Release manifests and build roots, each | Release-only median | Combined median | Combined process reads | Combined peak RSS |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 20 | 6.4 ms | 7.7 ms | 0.10 MB | 44 MiB |
+| 5,000 | 200 | 89.9 ms | 130 ms | 2.94 MB | 45 MiB |
+| 25,000 | 1,000 | 576 ms | 826 ms | 28.77 MB | 50 MiB |
 
 Inspect shared transform outputs and released document evidence, or preview
 unreferenced payloads, with:

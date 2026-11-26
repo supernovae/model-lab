@@ -155,8 +155,11 @@ directly to the release after verifying that they reproduce the logical
 span digest. Published releases then retain the referenced normalized spans
 and receipts. Normalized inventory can inspect published and staged span
 references for one page of partitions using the same guarded manifest scan
-as the digest stores. A native build can opt in to a verified span projection
-before view emission and carry it through freeze. The seal binds the ordered
+as the digest stores. It can include unconsumed builds and sealed native view
+staging in the same scan. Consumed build markers hand off retention to release
+manifests, and unsealed native views make the combined counts unknown. A native
+build can opt in to a verified span projection before view emission and carry
+it through freeze. The seal binds the ordered
 input hashes and exact file generations, so a view retry can reuse it while
 the original partitions are available. Released documents carry selection,
 split and duplicate decisions, so references to normalized document payloads

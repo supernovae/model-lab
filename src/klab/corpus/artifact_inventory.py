@@ -16,7 +16,11 @@ from pathlib import Path
 from typing import Any
 
 from klab.canonical import canonical_digest
-from klab.corpus.normalized_spans import NORMALIZED_SPANS, span_partitions
+from klab.corpus.normalized_spans import (
+    NORMALIZED_SPANS,
+    has_span_projection,
+    span_partitions,
+)
 from klab.corpus.prepared_shards import normalized_store_root
 from klab.corpus.release_members import (
     SHARED_STAGE,
@@ -32,6 +36,7 @@ _SOURCE = re.compile(r"[a-z][a-z0-9_-]*")
 _KEY = re.compile(r"[0-9a-f]{64}")
 _INCOMPLETE = ".incomplete-"
 _FREEZING = ".freezing-"
+_VIEW = ".views-"
 _PREFIX = re.compile(r"[0-9a-f]{2}")
 
 
@@ -98,6 +103,7 @@ def normalized_inventory(
     limit: int,
     after: str | None,
     release_references: bool = False,
+    build_references: bool = False,
 ) -> dict[str, Any]:
     """Count visible published bytes and return one bounded page of partition keys."""
     if source_id is not None and not _SOURCE.fullmatch(source_id):
@@ -143,8 +149,12 @@ def normalized_inventory(
         "partitions": rows,
         "next_after": page[limit - 1]["artifact_id"] if len(page) > limit else None,
     }
-    if release_references:
-        result.update(_normalized_reference_report(work_root, rows))
+    if release_references or build_references:
+        result.update(
+            _normalized_reference_report(
+                work_root, rows, include_builds=build_references
+            )
+        )
     return result
 
 
@@ -162,6 +172,7 @@ class _RetentionScan:
         self.problems: list[dict[str, str]] = []
         self.problem_count = 0
         self.published_manifests = self.staging_manifests = 0
+        self.build_manifests = self.staging_build_manifests = self.consumed_builds = 0
 
     def issue(self, path: Path, reason: str) -> None:
         self.problem_count += 1
@@ -179,7 +190,9 @@ class _RetentionScan:
         return info
 
     def observe(self, path: Path, info: os.stat_result | None) -> None:
-        self.observed[path] = _stamp(info)
+        generation = _stamp(info)
+        if self.observed.setdefault(path, generation) != generation:
+            self.issue(path, "changed_during_scan")
         if (
             self.owned
             and info is not None
@@ -199,6 +212,31 @@ class _RetentionScan:
             self.issue(path, "unsafe_directory")
             return False
         return True
+
+    def control(self, root: Path, name: str, *, optional: bool = False) -> dict | None:
+        path = root / name
+        with _directory(root) as directory:
+            try:
+                descriptor = os.open(
+                    name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory
+                )
+            except FileNotFoundError:
+                if not optional:
+                    raise
+                self.observe(path, None)
+                return None
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError("unsafe control file")
+                previous = self.problem_count
+                self.observe(path, info)
+                if self.problem_count != previous:
+                    return None
+                result = json.load(stream)
+                if not isinstance(result, dict):
+                    raise TypeError("invalid control file")
+                return result
 
     def check_generations(self) -> None:
         for path, before in self.observed.items():
@@ -229,29 +267,71 @@ class _RetentionScan:
 
 
 @dataclass(slots=True)
-class _ReleaseReferences:
+class _ArtifactReferences:
     size: int
     published: int = 0
     staging: int = 0
     example: str = ""
 
 
-def _release_references(
-    scan: _RetentionScan, storage: str, *, artifact_ids: set[str] | None = None
-) -> dict[str, _ReleaseReferences]:
-    references: dict[str, _ReleaseReferences] = {}
+def _project_roots(scan: _RetentionScan) -> Iterator[Path]:
     corpora = scan.root / "corpora"
     if not scan.directory(corpora):
         if scan.owned:
             scan.issue(corpora, "missing_corpus_roots")
-        return references
+        return
     for project in corpora.iterdir():
         if not _SOURCE.fullmatch(project.name):
             if scan.owned and (project / "releases").exists():
                 scan.issue(project, "unrecognized_project_root")
             continue
-        if not scan.directory(project):
+        if scan.directory(project):
+            yield project
+
+
+def _span_references(root: Path, files: dict) -> Iterator[tuple[str, int]]:
+    return (
+        (f"{part.entry['source_id']}/{part.entry['partition_key']}", part.entry["size"])
+        for part in span_partitions(root, files)
+    )
+
+
+def _count_references(
+    scan: _RetentionScan,
+    path: Path,
+    retained: Iterator[tuple[str, int]],
+    reference_counts: dict[str, _ArtifactReferences],
+    *,
+    staging: bool,
+    artifact_ids: set[str] | None,
+) -> None:
+    seen: set[str] = set()
+    example = path.parent.relative_to(scan.root).as_posix()
+    for artifact_id, size in retained:
+        if artifact_ids is not None and artifact_id not in artifact_ids:
             continue
+        reference = reference_counts.setdefault(artifact_id, _ArtifactReferences(size))
+        if size != reference.size:
+            scan.issue(path, "inconsistent_reference_size")
+        if artifact_id in seen:
+            continue
+        seen.add(artifact_id)
+        reference.staging += staging
+        reference.published += not staging
+        reference.example = (
+            min(reference.example, example) if reference.example else example
+        )
+
+
+def _release_references(
+    scan: _RetentionScan,
+    storage: str,
+    *,
+    artifact_ids: set[str] | None = None,
+    release_builds: dict[tuple[str, str], str] | None = None,
+) -> dict[str, _ArtifactReferences]:
+    references: dict[str, _ArtifactReferences] = {}
+    for project in _project_roots(scan):
         releases = project / "releases"
         if not scan.directory(releases):
             continue
@@ -269,21 +349,9 @@ def _release_references(
                 continue
             path = release / "manifest.json"
             try:
-                with _directory(release) as directory:
-                    descriptor = os.open(
-                        path.name,
-                        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                        dir_fd=directory,
-                    )
-                    with os.fdopen(descriptor, "rb") as stream:
-                        info = os.fstat(stream.fileno())
-                        if not stat.S_ISREG(info.st_mode):
-                            raise ValueError("unsafe release manifest")
-                        previous = scan.problem_count
-                        scan.observe(path, info)
-                        if scan.problem_count != previous:
-                            continue
-                        manifest = json.load(stream)
+                manifest = scan.control(release, path.name)
+                if manifest is None:
+                    continue
                 release_id = manifest.pop("release_id")
                 if (
                     manifest["schema_version"] != 1
@@ -305,19 +373,15 @@ def _release_references(
                     if any(files[name]["sha256"] != outputs[name] for name in stages):
                         raise ValueError("stage digest mismatch")
                 if storage == NORMALIZED_SPANS:
-                    retained = (
-                        (
-                            f"{part.entry['source_id']}/{part.entry['partition_key']}",
-                            part.entry["size"],
-                        )
-                        for part in span_partitions(release, files)
-                    )
+                    retained = _span_references(release, files)
                 else:
                     retained = (
                         (member.name, files[name]["size"])
                         for name, member in members.items()
                         if files[name]["storage"] == storage
                     )
+                if release_builds is not None:
+                    release_builds[project.name, release_id] = manifest["build_id"]
             except OSError:
                 scan.issue(path, "missing_or_unreadable_manifest")
                 continue
@@ -328,48 +392,145 @@ def _release_references(
                 scan.staging_manifests += 1
             else:
                 scan.published_manifests += 1
-            seen: set[str] = set()
-            example = release.relative_to(scan.root).as_posix()
-            for artifact_id, size in retained:
-                if artifact_ids is not None and artifact_id not in artifact_ids:
+            _count_references(
+                scan,
+                path,
+                retained,
+                references,
+                staging=staging,
+                artifact_ids=artifact_ids,
+            )
+    return references
+
+
+def _build_roots(scan: _RetentionScan, project: Path) -> Iterator[tuple[Path, bool]]:
+    builds = project / "builds"
+    if scan.directory(builds):
+        for build in builds.iterdir():
+            if _KEY.fullmatch(build.name):
+                yield build, False
+    for view in project.iterdir():
+        if (
+            view.name.startswith(_VIEW)
+            and _KEY.fullmatch(view.name.removeprefix(_VIEW))
+            and scan.directory(view)
+        ):
+            yield view / "build", True
+
+
+def _build_references(
+    scan: _RetentionScan,
+    artifact_ids: set[str],
+    release_builds: dict[tuple[str, str], str],
+) -> dict[str, _ArtifactReferences]:
+    references: dict[str, _ArtifactReferences] = {}
+    for project in _project_roots(scan):
+        for root, staging in _build_roots(scan, project):
+            if not scan.directory(root):
+                scan.issue(root, "missing_build_directory")
+                continue
+            path = root / "consumed.json"
+            try:
+                if (
+                    not staging
+                    and (marker := scan.control(root, path.name, optional=True))
+                    is not None
+                ):
+                    if set(marker) != {"release_id"} or not _KEY.fullmatch(
+                        marker["release_id"]
+                    ):
+                        raise ValueError("invalid consumed build marker")
+                    if (
+                        release_builds.get((project.name, marker["release_id"]))
+                        == root.name
+                    ):
+                        scan.consumed_builds += 1
+                    else:
+                        scan.issue(path, "missing_consumed_release")
                     continue
-                reference = references.setdefault(artifact_id, _ReleaseReferences(size))
-                if size != reference.size:
-                    scan.issue(path, "inconsistent_reference_size")
-                if artifact_id in seen:
+                path = root / "build.json"
+                manifest = scan.control(root, path.name, optional=staging)
+                if manifest is None:
+                    scan.issue(path, "unsealed_build")
                     continue
-                seen.add(artifact_id)
-                reference.staging += staging
-                reference.published += not staging
-                reference.example = (
-                    min(reference.example, example) if reference.example else example
-                )
+                identity = manifest["identity"]
+                build_id = manifest["build_id"]
+                files = manifest["files"]
+                if (
+                    manifest["schema_version"] != 1
+                    or identity["project_id"] != project.name
+                    or build_id != canonical_digest(identity)
+                    or (not staging and build_id != root.name)
+                    or has_span_projection(files)
+                    != bool(identity.get("reference_normalized_spans"))
+                ):
+                    raise ValueError("build identity mismatch")
+                retained = _span_references(project / "builds" / build_id, files)
+            except OSError:
+                scan.issue(path, "missing_or_unreadable_build_control")
+                continue
+            except ValueError, KeyError, TypeError, AttributeError:
+                scan.issue(path, "invalid_build_control")
+                continue
+            scan.staging_build_manifests += staging
+            scan.build_manifests += not staging
+            _count_references(
+                scan,
+                path,
+                retained,
+                references,
+                staging=staging,
+                artifact_ids=artifact_ids,
+            )
     return references
 
 
 def _normalized_reference_report(
-    work_root: Path, rows: list[dict[str, Any]]
+    work_root: Path, rows: list[dict[str, Any]], *, include_builds: bool
 ) -> dict[str, Any]:
     scan = _RetentionScan(work_root)
+    artifact_ids = {row["artifact_id"] for row in rows}
+    releases: dict[str, _ArtifactReferences] = {}
+    builds: dict[str, _ArtifactReferences] = {}
+    release_builds: dict[tuple[str, str], str] | None = {} if include_builds else None
     try:
-        references = _release_references(
-            scan, NORMALIZED_SPANS, artifact_ids={row["artifact_id"] for row in rows}
+        releases = _release_references(
+            scan,
+            NORMALIZED_SPANS,
+            artifact_ids=artifact_ids,
+            release_builds=release_builds,
         )
+        if release_builds is not None:
+            builds = _build_references(scan, artifact_ids, release_builds)
     except OSError as error:
         scan.interrupted(error)
-        references = {}
     scan.check_generations()
     if scan.problem_count:
-        references.clear()
+        releases.clear()
+        builds.clear()
     absent_count = None if scan.problem_count else 0
     for row in rows:
-        reference = references.get(row["artifact_id"])
+        reference = releases.get(row["artifact_id"])
         row.update(
             published_releases=reference.published if reference else absent_count,
             staging_releases=reference.staging if reference else absent_count,
             example_reference=reference.example if reference else None,
         )
-    return scan.summary()
+        if include_builds:
+            reference = builds.get(row["artifact_id"])
+            row.update(
+                published_builds=reference.published if reference else absent_count,
+                staging_builds=reference.staging if reference else absent_count,
+                example_build_reference=reference.example if reference else None,
+            )
+    report = scan.summary()
+    if include_builds:
+        report.update(
+            build_manifests=scan.build_manifests,
+            staging_build_manifests=scan.staging_build_manifests,
+            consumed_builds=scan.consumed_builds,
+        )
+    return report
 
 
 def _shared_payloads(scan: _RetentionScan, root: Path) -> Iterator[tuple[str, int]]:
@@ -412,7 +573,7 @@ def shared_release_inventory(
         raise ValueError("shared release cursor must be a full SHA-256 digest")
     root = shared_store(work_root, storage)
     scan = _RetentionScan(work_root)
-    references: dict[str, _ReleaseReferences] = {}
+    references: dict[str, _ArtifactReferences] = {}
     totals = dict.fromkeys(
         (
             "shared_payloads",
