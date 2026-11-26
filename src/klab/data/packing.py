@@ -13,7 +13,7 @@ import tempfile
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from functools import lru_cache, partial, wraps
@@ -75,6 +75,7 @@ from klab.workspace_cleanup import mark_prepared_cache, workspace_lock
 
 if TYPE_CHECKING:
     from klab.bottleneck_observations import BottleneckObserver
+    from klab.corpus.mixture_schedule import VerifiedSchedule
     from klab.data.preparation_chunks import SplitChunks
 
 PACKING_VERSION = "contiguous-eos-v6"
@@ -144,6 +145,11 @@ def packing_identity(config: RunConfig) -> dict[str, object]:
         **(
             {"pair_row_tokens": config.training.seq_len}
             if config.dataset.source == "local_preference"
+            else {}
+        ),
+        **(
+            {"mixture_row_tokens": config.training.seq_len}
+            if config.dataset.source == "local_token_mixture"
             else {}
         ),
     }
@@ -729,6 +735,7 @@ def _collect_token_mixture(
     root: Path,
     *,
     proofs: dict[str, VerifiedFile] | None = None,
+    schedule: VerifiedSchedule | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
     """Pack exact scheduled targets with BOS and masked block-end padding.
 
@@ -790,7 +797,7 @@ def _collect_token_mixture(
         or (int(ends[-1]) if records else 0) != target_count
         or dict(by_stratum) != receipt["actual_target_tokens"]
         or record_digest.hexdigest() != receipt["train_records_sha256"]
-        or dataset.train_path.stat().st_size != 4 * target_count
+        or (schedule is None and dataset.train_path.stat().st_size != 4 * target_count)
     ):
         raise ValueError("token mixture target count differs from verified receipt")
     ids = _ArraySpool(root / "train.npy", np.dtype(np.int32))
@@ -799,9 +806,19 @@ def _collect_token_mixture(
     mask.append([False])
     token_digest = hashlib.sha256()
     position = record = 0
-    with dataset.train_path.open("rb") as stream:
-        while block := stream.read(_MIXTURE_COPY_BYTES):
-            token_digest.update(block)
+    with (
+        dataset.train_path.open("rb")
+        if schedule is None
+        else closing(schedule.blocks(_MIXTURE_COPY_BYTES, lengths=lengths))
+    ) as stream:
+        blocks = (
+            iter(lambda: stream.read(_MIXTURE_COPY_BYTES), b"")
+            if schedule is None
+            else stream
+        )
+        for block in blocks:
+            if schedule is None:
+                token_digest.update(block)
             values = np.frombuffer(block, dtype="<i4")
             # Every record ends inside exactly one block, at its EOS.
             last = int(np.searchsorted(ends, position + len(values), side="right"))
@@ -832,9 +849,8 @@ def _collect_token_mixture(
                 cursor = cut
             position += len(values)
             record = last
-    if (
-        position != target_count
-        or token_digest.hexdigest() != receipt["train_tokens_sha256"]
+    if position != target_count or (
+        schedule is None and token_digest.hexdigest() != receipt["train_tokens_sha256"]
     ):
         raise ValueError("token mixture target count differs from verified receipt")
     remaining_padding = padded_targets - target_count - filler
@@ -2090,12 +2106,13 @@ def _prepare_data(
         )
     generic_snapshot = None
     token_mixture = None
+    mixture_schedule = None
     if config.dataset.source == "local_token_mixture":
-        from klab.corpus.mixture import verify_mixture_dataset
+        from klab.corpus.mixture import verified_mixture_dataset
 
         if config.model.memory == "byte":
             raise ValueError("token-ID mixture has no verified byte-address sidecar")
-        token_mixture = verify_mixture_dataset(
+        token_mixture, mixture_schedule = verified_mixture_dataset(
             config.dataset, config.tokenizer.path, config.model.vocab_size
         )
         if (
@@ -2525,7 +2542,12 @@ def _prepare_data(
         )
     elif token_mixture is not None:
         train, train_supervision, train_stats = _collect_token_mixture(
-            config, tokenizer, token_mixture, temporary_root, proofs=proofs
+            config,
+            tokenizer,
+            token_mixture,
+            temporary_root,
+            proofs=proofs,
+            schedule=mixture_schedule,
         )
         train_byte = None
         validation, validation_supervision, validation_byte, validation_stats = (

@@ -15,6 +15,7 @@ from klab.training.manifest import sha256_file
 def verify_accepted_prepared_config(path: Path, review: dict[str, object]) -> None:
     """Tie a prepared-input or training config to the exact accepted mixture."""
     from klab.config.loading import load_config
+    from klab.corpus.mixture import TRAIN_SCHEDULE, TRAIN_TOKENS, MixtureDeclaration
 
     dataset = load_config(path).dataset
     release = Path(str(review["release_path"]))
@@ -33,8 +34,6 @@ def verify_accepted_prepared_config(path: Path, review: dict[str, object]) -> No
         or dataset.mixture_output_path is None
         or dataset.train_path is None
         or dataset.validation_path is None
-        or dataset.train_path.resolve()
-        != (dataset.mixture_output_path / "train.tokens.ids").resolve()
         or dataset.validation_path.resolve() != validation.resolve()
     ):
         raise ValueError("prepared config differs from accepted release")
@@ -47,6 +46,10 @@ def verify_accepted_prepared_config(path: Path, review: dict[str, object]) -> No
         != Path(str(review["family_inventory_path"])).resolve()
     ):
         raise ValueError("prepared config mixture differs from accepted release")
+    spec = MixtureDeclaration.model_validate(mixture)
+    member = TRAIN_SCHEDULE if spec.token_output == "references" else TRAIN_TOKENS
+    if dataset.train_path.resolve() != (dataset.mixture_output_path / member).resolve():
+        raise ValueError("prepared config differs from accepted release")
 
 
 def verify_admission_review(admission: Path, work_root: Path) -> dict[str, object]:

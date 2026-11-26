@@ -642,7 +642,11 @@ def _run(args: argparse.Namespace) -> None:
             raise ValueError("protected evaluation lineage collision")
         return
     if command in {"materialize-mixture", "verify-mixture"}:
-        from klab.corpus.mixture import materialize_mixture, verify_mixture
+        from klab.corpus.mixture import (
+            materialize_mixture,
+            mixture_train_file,
+            verify_mixture,
+        )
 
         result = (
             materialize_mixture(Path(args.declaration), Path(args.output))
@@ -670,9 +674,11 @@ def _run(args: argparse.Namespace) -> None:
                     ),
                     "release_id": result["release_id"],
                     "receipt_path": str(Path(args.output).resolve() / "receipt.json"),
-                    "train_tokens_path": str(
-                        Path(args.output).resolve() / "train.tokens.ids"
-                    ),
+                    (
+                        "train_schedule_path"
+                        if "token_schedule" in result
+                        else "train_tokens_path"
+                    ): str(Path(args.output).resolve() / mixture_train_file(result)),
                     "records": result["records"],
                     "actual_target_tokens": result["actual_target_tokens"],
                     **{

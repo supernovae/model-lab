@@ -33,6 +33,12 @@ from klab.corpus.mixture_index import (
     MixtureIndex,
     rows,
 )
+from klab.corpus.mixture_schedule import (
+    TRAIN_SCHEDULE,
+    token_cache_root,
+    verify_schedule,
+    write_schedule,
+)
 from klab.corpus.quota import shortfall_message
 from klab.corpus.release import ReleaseMembers, _verification_operation, verify_release
 from klab.corpus.release_verify import current_settings
@@ -157,6 +163,9 @@ class MixtureDeclaration(BaseModel):
     token_cache: Literal["append", "sealed"] = Field(
         default="append", exclude_if=lambda value: value == "append"
     )
+    token_output: Literal["contiguous", "references"] = Field(
+        default="contiguous", exclude_if=lambda value: value == "contiguous"
+    )
 
     @field_validator("max_exposures", mode="before")
     @classmethod
@@ -177,6 +186,8 @@ class MixtureDeclaration(BaseModel):
 
     @model_validator(mode="after")
     def valid(self) -> MixtureDeclaration:
+        if self.token_output == "references" and self.token_cache != "sealed":
+            raise ValueError("reference token output requires token_cache: sealed")
         if (
             not self.source_strata
             or not self.target_quotas
@@ -517,7 +528,8 @@ def _materialize_mixture(
             raise ValueError("unsafe mixture checkpoint payload")
         staging.mkdir(mode=0o700, parents=True, exist_ok=True)
         if any(
-            path.name not in {TRAIN_TOKENS, TRAIN_RECORDS, "receipt.json"}
+            path.name
+            not in {TRAIN_TOKENS, TRAIN_RECORDS, TRAIN_SCHEDULE, "receipt.json"}
             or path.is_symlink()
             or not path.is_file()
             or path.stat().st_nlink != 1
@@ -646,6 +658,11 @@ def _materialize_mixture(
         if frontier is not None:
             for name, digest in frontier.output_digests.items():
                 digest.inventory_entry(staging / name)
+        if "token_schedule" in receipt:
+            schedule = verify_schedule(
+                staging, token_cache_root(release, output.parent), receipt, eos
+            )
+            schedule.require_unchanged()
         receipt_path = staging / "receipt.json"
         if reuse_tokens:
             receipt_path.unlink(missing_ok=True)
@@ -709,18 +726,16 @@ def _schedule(
         excluded.append(row)
 
     from klab.corpus.mixture_pipeline import encode_ahead
-    from klab.corpus.preparation_inputs import corpus_work_root
     from klab.corpus.view_checkpoints import ViewOutput
     from klab.data import encoding
     from klab.data.encoding import PreparationEncoder
     from klab.data.token_store import ContentTokens
 
-    try:
-        token_root = corpus_work_root(release.root) / "cache" / "source-tokens"
-    except ValueError:
-        work_parent = frontier.root.parent if frontier is not None else staging.parent
-        token_root = work_parent / ".source-tokens"
+    work_parent = frontier.root.parent if frontier is not None else staging.parent
+    token_root = token_cache_root(release.root, work_parent)
     sealed_cache = reuse_tokens and spec.token_cache == "sealed"
+    reference_rows = spec.token_output == "references"
+    reference_output = reference_rows and reuse_tokens
     cache_type = ContentTokens
     if sealed_cache:
         from klab.data.token_segments import SealedContentTokens
@@ -732,13 +747,12 @@ def _schedule(
         (
             cache_type(token_root, tokenizer_sha) if reuse_tokens else nullcontext(None)
         ) as tokens,
-        (staging / TRAIN_TOKENS).open(mode) as stream,
         (staging / TRAIN_RECORDS).open(mode) as record_stream,
     ):
-        outputs = {
-            TRAIN_TOKENS: ViewOutput(stream),
-            TRAIN_RECORDS: ViewOutput(record_stream),
-        }
+        outputs = {TRAIN_RECORDS: ViewOutput(record_stream)}
+        if not reference_output:
+            stream = encoders.enter_context((staging / TRAIN_TOKENS).open(mode))
+            outputs[TRAIN_TOKENS] = ViewOutput(stream)
         from klab.corpus.release_verify import worker_count
         from klab.host_capacity import plan_host_workers
 
@@ -779,7 +793,7 @@ def _schedule(
                     counter.update(resumed[name])
                 records = resumed["records"]
                 excluded_bytes = resumed["excluded_bytes"]
-                done = resumed["done"]
+                done = list(resumed["done"])
             frontier.begin(index)
 
         commit_candidates = int(
@@ -905,15 +919,19 @@ def _schedule(
 
         def emit(doc, stratum, quota, exposure):
             nonlocal records
-            ids = doc["token_ids"]
             remaining = quota - totals[stratum]
             if remaining <= 0:
                 return
-            take = min(len(ids), remaining)
-            targets = np.asarray(ids[:take], dtype="<i4")
-            if take != len(ids):
-                targets = targets.copy()
-                targets[-1] = eos
+            if reference_output:
+                take = min(doc["token_count"], remaining)
+            else:
+                ids = doc["token_ids"]
+                take = min(len(ids), remaining)
+                targets = np.asarray(ids[:take], dtype="<i4")
+                if take != len(ids):
+                    targets = targets.copy()
+                    targets[-1] = eos
+                outputs[TRAIN_TOKENS].write(targets.tobytes())
             row = {
                 "document_id": doc["document_id"],
                 "family_id": doc["family_id"],
@@ -924,8 +942,8 @@ def _schedule(
                 "content_token_end": take - 1,
                 "tokens": take,
             }
-            payload = targets.tobytes()
-            outputs[TRAIN_TOKENS].write(payload)
+            if reference_rows:
+                row["content_sha256"] = doc["content_sha256"]
             encoded_row = canonical_json(row) + b"\n"
             outputs[TRAIN_RECORDS].write(encoded_row)
             totals[stratum] += take
@@ -967,19 +985,25 @@ def _schedule(
                     exclude(doc, "zero_encoded_targets")
                     return
                 selected[stratum] += 1
-                targets = np.empty(len(ids) + 1, dtype="<i4")
-                targets[:-1] = ids
-                targets[-1] = eos
+                count = len(ids) + 1
+                if 4 * count > MAX_ROW_BYTES and (direct or reference_output):
+                    raise ValueError("mixture encoded record-byte cap exceeded")
                 encoded_doc = {
                     "document_id": doc["document_id"],
                     "source_id": doc["source_id"],
                     "family_id": family,
-                    "token_ids": targets if direct else targets.tolist(),
                     "stratum": stratum,
                 }
+                if reference_rows:
+                    encoded_doc["content_sha256"] = doc["content_sha256"]
+                if reference_output:
+                    encoded_doc["token_count"] = count
+                else:
+                    targets = np.empty(count, dtype="<i4")
+                    targets[:-1] = ids
+                    targets[-1] = eos
+                    encoded_doc["token_ids"] = targets if direct else targets.tolist()
                 if direct:
-                    if 4 * (len(ids) + 1) > MAX_ROW_BYTES:
-                        raise ValueError("mixture encoded record-byte cap exceeded")
                     index.record_family(stratum, family)
                     emit(encoded_doc, stratum, quota, 1)
                 else:
@@ -1057,6 +1081,13 @@ def _schedule(
             frontier.output_digests = {
                 name: output_file.file_digest() for name, output_file in outputs.items()
             }
+        schedule = (
+            write_schedule(
+                staging / TRAIN_SCHEDULE, staging / TRAIN_RECORDS, tokens, eos
+            )
+            if reference_output
+            else None
+        )
     receipt = {
         "schema_version": 2,
         "release_id": manifest["release_id"],
@@ -1086,11 +1117,14 @@ def _schedule(
             for stratum in spec.target_quotas
         },
         "train_tokens_format": "int32-le",
-        "train_tokens_sha256": outputs[TRAIN_TOKENS].whole.hexdigest(),
-        "train_tokens_bytes": (staging / TRAIN_TOKENS).stat().st_size,
+        "train_tokens_bytes": 4 * sum(totals.values()),
         "train_records_sha256": outputs[TRAIN_RECORDS].whole.hexdigest(),
         "train_records_bytes": (staging / TRAIN_RECORDS).stat().st_size,
     }
+    if schedule is None:
+        receipt["train_tokens_sha256"] = outputs[TRAIN_TOKENS].whole.hexdigest()
+    else:
+        receipt["token_schedule"] = schedule
     if spec.unique_train_content_floors is not None:
         receipt["available_unique_content_tokens"] = dict(available_content)
         receipt["unique_train_content_floors"] = spec.unique_train_content_floors
@@ -1116,6 +1150,7 @@ def _completed_mixture_cache(spec):
                 "mixture.py",
                 "mixture_index.py",
                 "mixture_pipeline.py",
+                "mixture_schedule.py",
             )
         }
         | {"data/token_store.py": sha256_file(_TOKEN_STORE_SOURCE)},
@@ -1174,16 +1209,11 @@ def _seal_completed_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
     )
 
 
-def _verify_completed_mixture(declaration, output, receipt):
-    raw = declaration.read_bytes()
-    spec = MixtureDeclaration.model_validate(yaml.safe_load(raw))
-    release = _verified_members(spec.release_path.resolve())
-    manifest = release.manifest
+def _verify_completed_mixture(spec, raw, output, manifest, tokenizer_sha, receipt):
     from klab.corpus.completed_preparation import local_scope
 
     if local_scope(manifest) is None:
         raise ValueError("completed mixture has no matching local preparation scope")
-    _, tokenizer_sha = _tokenizer(spec, release)
     cached = _completed_mixture_cache(spec).load(
         "completed-mixture",
         _completed_mixture_request(spec, raw, output, manifest, tokenizer_sha),
@@ -1280,7 +1310,29 @@ def verify_mixture(
     with _verification_operation():
         if reseal:
             return _reseal_mixture(declaration, output.resolve())
-        return _verify_mixture(declaration, output, audit=audit)
+        return _verify_mixture(declaration, output, audit=audit)[0]
+
+
+def mixture_train_file(receipt: dict) -> str:
+    return TRAIN_SCHEDULE if "token_schedule" in receipt else TRAIN_TOKENS
+
+
+def _reference_schedule(spec, output, receipt, tokenizer, tokenizer_sha):
+    reference = spec.token_output == "references"
+    if (
+        reference != ("token_schedule" in receipt)
+        or reference == ("train_tokens_sha256" in receipt)
+        or receipt["tokenizer_sha256"] != tokenizer_sha
+    ):
+        raise ValueError("mixture token storage differs from declaration")
+    if not reference:
+        return None
+    return verify_schedule(
+        output,
+        token_cache_root(spec.release_path.resolve(), output.parent),
+        receipt,
+        tokenizer.token_to_id("<eos>"),
+    )
 
 
 _DIGEST_CHUNK = 16 * 1024 * 1024
@@ -1302,7 +1354,7 @@ def _reseal_mixture(declaration: Path, output: Path) -> dict:
     spec = MixtureDeclaration.model_validate(yaml.safe_load(raw))
     release = _verified_members(spec.release_path.resolve())
     manifest = release.manifest
-    _, tokenizer_sha = _tokenizer(spec, release)
+    tokenizer, tokenizer_sha = _tokenizer(spec, release)
     expected = {
         "schema_version": 2,
         "declaration_sha256": hashlib.sha256(raw).hexdigest(),
@@ -1336,19 +1388,21 @@ def _reseal_mixture(declaration: Path, output: Path) -> dict:
         raise ValueError("mixture receipt counts are not self-consistent")
     from concurrent.futures import ThreadPoolExecutor
 
-    if any(
-        (output / name).stat().st_size != receipt[key]
-        for name, key in (
-            (TRAIN_TOKENS, "train_tokens_bytes"),
-            (TRAIN_RECORDS, "train_records_bytes"),
-        )
-    ):
+    if (output / TRAIN_RECORDS).stat().st_size != receipt["train_records_bytes"]:
         raise ValueError("mixture token export digest mismatch")
-    with ThreadPoolExecutor(2) as pool:
-        tokens = pool.submit(sha256_file, output / TRAIN_TOKENS, _DIGEST_CHUNK)
+    schedule = _reference_schedule(spec, output, receipt, tokenizer, tokenizer_sha)
+    if schedule is not None:
         _verify_records(output, receipt)
-        if tokens.result() != receipt["train_tokens_sha256"]:
+        schedule.validate_counts(row["tokens"] for row in rows(output / TRAIN_RECORDS))
+        schedule.require_unchanged()
+    else:
+        if (output / TRAIN_TOKENS).stat().st_size != receipt["train_tokens_bytes"]:
             raise ValueError("mixture token export digest mismatch")
+        with ThreadPoolExecutor(2) as pool:
+            tokens = pool.submit(sha256_file, output / TRAIN_TOKENS, _DIGEST_CHUNK)
+            _verify_records(output, receipt)
+            if tokens.result() != receipt["train_tokens_sha256"]:
+                raise ValueError("mixture token export digest mismatch")
     if (
         receipt.get("completed_preparation", {}).get("policy")
         == "completed_local_preparation"
@@ -1359,7 +1413,7 @@ def _reseal_mixture(declaration: Path, output: Path) -> dict:
     return receipt
 
 
-def _verify_mixture(declaration: Path, output: Path, *, audit: bool) -> dict:
+def _verify_mixture(declaration: Path, output: Path, *, audit: bool):
     output = output.resolve()
     receipt_path = output / "receipt.json"
     with receipt_path.open("rb") as stream:
@@ -1367,35 +1421,45 @@ def _verify_mixture(declaration: Path, output: Path, *, audit: bool) -> dict:
     if len(raw) > MAX_RECEIPT_BYTES:
         raise ValueError("mixture receipt-byte cap exceeded")
     receipt = json.loads(raw)
-    if (
+    reference = "token_schedule" in receipt
+    completed = (
         receipt.get("completed_preparation", {}).get("policy")
         == "completed_local_preparation"
-        and not audit
-    ):
-        _verify_records(output, receipt, require_digest=False)
-        return _verify_completed_mixture(declaration, output, receipt)
-    if (
+    )
+    completed_inline = completed and not reference and not audit
+    if not completed_inline and (
         receipt.get("schema_version") != 2
-        or sha256_file(output / TRAIN_TOKENS) != receipt["train_tokens_sha256"]
+        or (
+            not reference
+            and sha256_file(output / TRAIN_TOKENS) != receipt["train_tokens_sha256"]
+        )
         or (output / TRAIN_RECORDS).stat().st_size != receipt["train_records_bytes"]
     ):
         raise ValueError("mixture token export digest mismatch")
-    _verify_records(output, receipt)
+    _verify_records(output, receipt, require_digest=not completed_inline)
+    raw = declaration.read_bytes()
+    spec = MixtureDeclaration.model_validate(yaml.safe_load(raw))
+    release = _verified_members(spec.release_path.resolve())
+    manifest = release.manifest
+    tokenizer, tokenizer_sha = _tokenizer(spec, release)
     if not audit:
-        raw = declaration.read_bytes()
-        spec = MixtureDeclaration.model_validate(yaml.safe_load(raw))
-        release = _verified_members(spec.release_path.resolve())
-        manifest = release.manifest
-        _, tokenizer_sha = _tokenizer(spec, release)
-        cache, request = _native_mixture_completion(
-            spec, raw, output, manifest, tokenizer_sha
-        )
-        cached = cache.load("native-mixture", request, limit=MAX_RECEIPT_BYTES)
-        if cached is None or cached[0] != receipt:
-            raise ValueError(
-                "native mixture completion unavailable or changed; run verify-mixture --reseal (cheap) or --audit (full replay)"
+        if completed:
+            _verify_completed_mixture(
+                spec, raw, output, manifest, tokenizer_sha, receipt
             )
-        return receipt
+        else:
+            cache, request = _native_mixture_completion(
+                spec, raw, output, manifest, tokenizer_sha
+            )
+            cached = cache.load("native-mixture", request, limit=MAX_RECEIPT_BYTES)
+            if cached is None or cached[0] != receipt:
+                raise ValueError(
+                    "native mixture completion unavailable or changed; run verify-mixture --reseal (cheap) or --audit (full replay)"
+                )
+        return receipt, _reference_schedule(
+            spec, output, receipt, tokenizer, tokenizer_sha
+        )
+    schedule = _reference_schedule(spec, output, receipt, tokenizer, tokenizer_sha)
     with tempfile.TemporaryDirectory(
         prefix=".verify-mixture-", dir=output.parent
     ) as temp:
@@ -1403,22 +1467,26 @@ def _verify_mixture(declaration: Path, output: Path, *, audit: bool) -> dict:
             replay = _materialize_mixture(
                 declaration, Path(temp) / "replay", reuse_tokens=False
             )
-        if replay != receipt:
+        comparison = receipt
+        if schedule is not None:
+            digest = hashlib.sha256()
+            for block in schedule.blocks(
+                _DIGEST_CHUNK,
+                lengths=(row["tokens"] for row in rows(output / TRAIN_RECORDS)),
+            ):
+                digest.update(block)
+            comparison = {
+                key: value for key, value in receipt.items() if key != "token_schedule"
+            }
+            comparison["train_tokens_sha256"] = digest.hexdigest()
+        if replay != comparison:
             raise ValueError("mixture receipt differs from authenticated replay")
     # Explicit audit can recover an unsigned/legacy output without replacing it.
-    raw = declaration.read_bytes()
-    spec = MixtureDeclaration.model_validate(yaml.safe_load(raw))
-    release = _verified_members(spec.release_path.resolve())
-    manifest = release.manifest
-    _, tokenizer_sha = _tokenizer(spec, release)
-    if (
-        receipt.get("completed_preparation", {}).get("policy")
-        == "completed_local_preparation"
-    ):
+    if completed:
         _seal_completed_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
     else:
         _seal_native_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
-    return receipt
+    return receipt, schedule
 
 
 def verify_mixture_tokenizer_origin(
@@ -1452,6 +1520,13 @@ def verify_mixture_dataset(
     dataset: DatasetConfig, tokenizer_path: Path, vocab_size: int
 ) -> dict:
     """Bind a token-ID consumer to the replayed mix and its fit tokenizer."""
+    return verified_mixture_dataset(dataset, tokenizer_path, vocab_size)[0]
+
+
+def verified_mixture_dataset(
+    dataset: DatasetConfig, tokenizer_path: Path, vocab_size: int
+):
+    """Return the receipt and, for reference outputs, the checked range reader."""
     if (
         dataset.source != "local_token_mixture"
         or dataset.mixture_declaration_path is None
@@ -1466,19 +1541,19 @@ def verify_mixture_dataset(
 
 def _verify_mixture_dataset_members(
     dataset: DatasetConfig, tokenizer_path: Path, vocab_size: int
-) -> dict:
+):
     spec = MixtureDeclaration.model_validate(
         yaml.safe_load(dataset.mixture_declaration_path.read_bytes())
     )
-    receipt = verify_mixture(
-        dataset.mixture_declaration_path, dataset.mixture_output_path
+    receipt, schedule = _verify_mixture(
+        dataset.mixture_declaration_path, dataset.mixture_output_path, audit=False
     )
     fit = load_tokenizer_config(spec.tokenizer_config)
     release = _verified_members(spec.release_path.resolve())
     validation = release.member("lm/validation.jsonl")
     if (
         dataset.train_path.resolve()
-        != (dataset.mixture_output_path / TRAIN_TOKENS).resolve()
+        != (dataset.mixture_output_path / mixture_train_file(receipt)).resolve()
         or dataset.validation_path.resolve() != validation.resolve()
         or dataset.revision != receipt["release_id"]
         or dataset.train_max_tokens != sum(receipt["actual_target_tokens"].values())
@@ -1508,4 +1583,4 @@ def _verify_mixture_dataset_members(
         or dataset.validation_max_tokens != token_budget
     ):
         raise ValueError("token mixture validation split count or budget mismatch")
-    return receipt
+    return receipt, schedule
