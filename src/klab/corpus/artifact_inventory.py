@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from klab.canonical import canonical_digest
+from klab.corpus.normalized_spans import NORMALIZED_SPANS, span_partitions
 from klab.corpus.prepared_shards import normalized_store_root
 from klab.corpus.release_members import (
     SHARED_STAGE,
@@ -91,7 +92,12 @@ def _published(root: int, source_id: str | None, totals: dict[str, int]):
 
 
 def normalized_inventory(
-    work_root: Path, *, source_id: str | None, limit: int, after: str | None
+    work_root: Path,
+    *,
+    source_id: str | None,
+    limit: int,
+    after: str | None,
+    release_references: bool = False,
 ) -> dict[str, Any]:
     """Count visible published bytes and return one bounded page of partition keys."""
     if source_id is not None and not _SOURCE.fullmatch(source_id):
@@ -128,14 +134,18 @@ def normalized_inventory(
                 ),
                 key=itemgetter("artifact_id"),
             )
-    return {
+    rows = page[:limit]
+    result = {
         "artifact_type": "normalized_source_partition",
         "verification": "advisory",
         "source_id": source_id,
         **totals,
-        "partitions": page[:limit],
+        "partitions": rows,
         "next_after": page[limit - 1]["artifact_id"] if len(page) > limit else None,
     }
+    if release_references:
+        result.update(_normalized_reference_report(work_root, rows))
+    return result
 
 
 def _stamp(info: os.stat_result | None) -> tuple[int, ...] | None:
@@ -202,6 +212,21 @@ class _RetentionScan:
             if after != before:
                 self.issue(path, "changed_during_scan")
 
+    def interrupted(self, error: OSError) -> None:
+        path = Path(error.filename) if error.filename else self.root
+        self.issue(
+            path if path.is_relative_to(self.root) else self.root, "scan_interrupted"
+        )
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "scan_status": "incomplete" if self.problem_count else "complete",
+            "problem_count": self.problem_count,
+            "problems": self.problems,
+            "published_manifests": self.published_manifests,
+            "staging_manifests": self.staging_manifests,
+        }
+
 
 @dataclass(slots=True)
 class _ReleaseReferences:
@@ -212,7 +237,7 @@ class _ReleaseReferences:
 
 
 def _release_references(
-    scan: _RetentionScan, storage: str, *, digests: set[str] | None = None
+    scan: _RetentionScan, storage: str, *, artifact_ids: set[str] | None = None
 ) -> dict[str, _ReleaseReferences]:
     references: dict[str, _ReleaseReferences] = {}
     corpora = scan.root / "corpora"
@@ -279,6 +304,20 @@ def _release_references(
                     }
                     if any(files[name]["sha256"] != outputs[name] for name in stages):
                         raise ValueError("stage digest mismatch")
+                if storage == NORMALIZED_SPANS:
+                    retained = (
+                        (
+                            f"{part.entry['source_id']}/{part.entry['partition_key']}",
+                            part.entry["size"],
+                        )
+                        for part in span_partitions(release, files)
+                    )
+                else:
+                    retained = (
+                        (member.name, files[name]["size"])
+                        for name, member in members.items()
+                        if files[name]["storage"] == storage
+                    )
             except OSError:
                 scan.issue(path, "missing_or_unreadable_manifest")
                 continue
@@ -291,24 +330,46 @@ def _release_references(
                 scan.published_manifests += 1
             seen: set[str] = set()
             example = release.relative_to(scan.root).as_posix()
-            for name, member in members.items():
-                if files[name]["storage"] != storage:
+            for artifact_id, size in retained:
+                if artifact_ids is not None and artifact_id not in artifact_ids:
                     continue
-                digest, size = member.name, files[name]["size"]
-                if digests is not None and digest not in digests:
-                    continue
-                reference = references.setdefault(digest, _ReleaseReferences(size))
+                reference = references.setdefault(artifact_id, _ReleaseReferences(size))
                 if size != reference.size:
                     scan.issue(path, "inconsistent_reference_size")
-                if digest in seen:
+                if artifact_id in seen:
                     continue
-                seen.add(digest)
+                seen.add(artifact_id)
                 reference.staging += staging
                 reference.published += not staging
                 reference.example = (
                     min(reference.example, example) if reference.example else example
                 )
     return references
+
+
+def _normalized_reference_report(
+    work_root: Path, rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    scan = _RetentionScan(work_root)
+    try:
+        references = _release_references(
+            scan, NORMALIZED_SPANS, artifact_ids={row["artifact_id"] for row in rows}
+        )
+    except OSError as error:
+        scan.interrupted(error)
+        references = {}
+    scan.check_generations()
+    if scan.problem_count:
+        references.clear()
+    absent_count = None if scan.problem_count else 0
+    for row in rows:
+        reference = references.get(row["artifact_id"])
+        row.update(
+            published_releases=reference.published if reference else absent_count,
+            staging_releases=reference.staging if reference else absent_count,
+            example_reference=reference.example if reference else None,
+        )
+    return scan.summary()
 
 
 def _shared_payloads(scan: _RetentionScan, root: Path) -> Iterator[tuple[str, int]]:
@@ -392,21 +453,14 @@ def shared_release_inventory(
             if reference.published:
                 scan.issue(root / digest[:2] / digest, "missing_published_payload")
     except OSError as error:
-        path = Path(error.filename) if error.filename else work_root
-        scan.issue(
-            path if path.is_relative_to(work_root) else work_root, "scan_interrupted"
-        )
+        scan.interrupted(error)
     scan.check_generations()
     if scan.problem_count and unreferenced:
         page = []
     return {
         "artifact_type": f"shared_release_{storage.removeprefix('shared_')}",
         "verification": "advisory",
-        "scan_status": "incomplete" if scan.problem_count else "complete",
-        "problem_count": scan.problem_count,
-        "problems": scan.problems,
-        "published_manifests": scan.published_manifests,
-        "staging_manifests": scan.staging_manifests,
+        **scan.summary(),
         **totals,
         "unreferenced_bytes": None
         if scan.problem_count
@@ -451,7 +505,7 @@ def prune_shared_release_payloads(
                         locks.enter_context(shared_payload_lease(path, wait=False))
                         leased.add(digest)
             scan = _RetentionScan(work_root, owned=True)
-            references = _release_references(scan, storage, digests=set(paths))
+            references = _release_references(scan, storage, artifact_ids=set(paths))
             for digest, path in paths.items():
                 if symlinked(path):
                     raise ValueError(f"unsafe shared payload: {path}")

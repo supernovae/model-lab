@@ -209,7 +209,11 @@ def _run(args: argparse.Namespace) -> None:
             if args.unreferenced:
                 raise ValueError("--unreferenced requires a shared release inventory")
             inventory = normalized_inventory(
-                root, source_id=args.source_id, limit=args.limit, after=args.after
+                root,
+                source_id=args.source_id,
+                limit=args.limit,
+                after=args.after,
+                release_references=args.release_references,
             )
         if args.json:
             print(json.dumps(inventory, sort_keys=True))
@@ -225,8 +229,20 @@ def _run(args: argparse.Namespace) -> None:
                     f"{inventory['staging_directories']:,} staging directories, "
                     f"{inventory['disappeared_partitions']:,} partitions disappeared during scan"
                 )
+                if args.release_references:
+                    print(f"Release reference scan {inventory['scan_status']}")
+                    for problem in inventory["problems"]:
+                        print(f"  {problem['path']}  {problem['reason']}")
                 for row in inventory["partitions"]:
-                    print(f"{row['artifact_id']}  {row['retained_bytes']:,} bytes")
+                    counts = (
+                        f"  {row['published_releases']:,} published, "
+                        f"{row['staging_releases']:,} staged releases"
+                        if row.get("published_releases") is not None
+                        else ""
+                    )
+                    print(
+                        f"{row['artifact_id']}  {row['retained_bytes']:,} bytes{counts}"
+                    )
             if inventory["next_after"] is not None:
                 print(f"Next page --after {inventory['next_after']}")
         return
@@ -819,6 +835,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     command.add_argument("--source-id")
     command.add_argument("--limit", type=int, default=100)
     command.add_argument("--after", help="Continue after a key from this inventory")
+    command.add_argument(
+        "--release-references",
+        action="store_true",
+        help="Look up published and staged release references for normalized partitions",
+    )
     command.add_argument(
         "--unreferenced",
         action="store_true",

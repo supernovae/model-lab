@@ -129,6 +129,14 @@ def prepare(
             row for row in retry["shared_members"] if row["member"] == "spans.jsonl"
         )
         assert span_step["action"] == "verify_staged_reference"
+        staged = lab.json("corpus", "artifacts", "--release-references", "--json")
+        assert staged["scan_status"] == "complete"
+        assert staged["staging_manifests"] == 1
+        assert (
+            sum(row["staging_releases"] for row in staged["partitions"])
+            == span_step["partitions"]
+        )
+        assert all(row["published_releases"] == 0 for row in staged["partitions"])
         release = Path(lab.run("corpus", "freeze", str(build), *placement))
         assert plan["release_id"] == retry["release_id"] == release.name
         manifest = json.loads((release / "manifest.json").read_bytes())
@@ -640,6 +648,34 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         path.is_relative_to(lab.work / "cache/corpus/normalized") for path in parts
     )
     path = next(path for path in parts if path.stat().st_size)
+    source_id, key = path.parent.parent.name, path.parent.name
+    lookup = (
+        "corpus",
+        "artifacts",
+        "--release-references",
+        "--source-id",
+        source_id,
+        "--json",
+    )
+    retained = lab.json(*lookup)
+    assert retained["scan_status"] == "complete"
+    partition = next(
+        row for row in retained["partitions"] if row["computation_key"] == key
+    )
+    assert (partition["published_releases"], partition["staging_releases"]) == (1, 0)
+    assert partition["example_reference"] == str(release.relative_to(lab.work))
+    unfinished = release.parent / (".freezing-" + "e" * 64)
+    unfinished.mkdir()
+    try:
+        uncertain = lab.json(*lookup)
+        assert uncertain["scan_status"] == "incomplete"
+        assert uncertain["published_manifests"] == 1
+        assert all(
+            row["published_releases"] is None and row["staging_releases"] is None
+            for row in uncertain["partitions"]
+        )
+    finally:
+        unfinished.rmdir()
     data, stamp = path.read_bytes(), path.stat()
     try:
         path.write_bytes(b" " + data[1:])
