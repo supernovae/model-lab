@@ -1746,15 +1746,17 @@ verification that had none. A verification checks each file's size and SHA-256
 against the manifest. For stage outputs, the ordered replay computes the
 inventory checksum alongside the stage identity. It checks stage outputs,
 documents, spans, lineage and view rows against the pinned source snapshots.
-It runs on several processes and keeps
-only identities and byte offsets in a disposable index, so memory stays bounded
-and the index is a small fraction of the release, not a copy of it. A
+The verifier can run on several processes. Its disposable index keeps
+identities, digests and source offsets in place of document and span payloads. A
 language-model-only release with a reviewed admission or a `fraction`, and any
 release with chat views, still uses the row-store verifier, whose index can be as
 large as the release's documents.
 
 On the streaming LM path, receipt-backed verification with an owned
 `--scratch-dir` commits the narrow span and document indexes separately.
+The span checkpoint binds the pinned source declarations and file rights.
+The document checkpoint carries the checked facts for raw replay, including
+source file numbers, byte ranges and content and structure digests.
 An interrupted document scan can reuse the completed span index. Once the
 document index commits, restart can skip both input scans and use the
 verified index for raw replay, lineage and view checks. An interruption
@@ -2288,8 +2290,8 @@ In receipt-backed mode, the streaming LM verifier records a signed check
 after replaying every document citing an eligible raw file of at least
 64 MiB. The check binds the build identity, snapshot, source file,
 documents, spans and rights evidence to their verified location and
-filesystem generation. A retry at that location reuses matching checks
-and still reconstructs the document index. The progress journal counts
+filesystem generation. A retry at that location resolves the checked
+row index and reuses matching source checks. The progress journal counts
 the size of each skipped raw file as reused bytes. Reviewed and chat
 releases still use the row-store verifier. An explicit cold audit replays
 all source files, and a stop within an uncommitted file repeats that file.
@@ -2311,6 +2313,37 @@ included about 0.25 s to compute the verifier identity, which is shared
 with other checks in the same operation. Index construction, snapshot
 verification and end-to-end release recovery were outside this benchmark.
 [#450](https://github.com/supernovae/model-lab/issues/450), [#485](https://github.com/supernovae/model-lab/issues/485)
+
+#### Raw replay from checked index facts
+
+The streaming verifier checks source attribution, file rights, span
+identity and source locators while building the row indexes. Raw replay
+uses those facts and streams the pinned source bytes, including bytes
+outside selected ranges. It compares the cited byte ranges or row text
+and replays the declared structure cleaning where applicable. The
+raw-replay phase no longer seeks back into the release's document and
+span files. A matching retry receipt still binds their generations.
+
+Three paired one-worker audits used the same 100,002-document synthetic
+Markdown release on NVMe. Input-cache eviction was requested before each
+full audit. Earlier phases read the files before raw replay, so the
+replay-phase read counters mainly measure userspace I/O from cache.
+Both revisions returned the same release ID.
+
+| Measure | #673 | Raw replay from checked index facts |
+| --- | ---: | ---: |
+| Raw replay elapsed | 1.116 s | 0.272 s |
+| Raw replay logical reads | 739.5 MB | 476.6 MB |
+| Full cold audit elapsed | 5.962 s | 5.836 s |
+| Full cold audit logical reads | 2.60 GB | 2.35 GB |
+| Full cold audit storage reads | 633.5 MB | 633.5 MB |
+| Full cold audit storage writes | 94.33 MB | 95.79 MB |
+| Peak allocated space for sampled named scratch | 80.29 MB | 81.75 MB |
+| Peak process RSS | 180 MiB | 177 MiB |
+
+The full audit still hashes release members and reads them to construct the
+row indexes. Production-sized and slower-storage audits remain open.
+[#450](https://github.com/supernovae/model-lab/issues/450)
 
 #### Describe link planning recovery measurements
 

@@ -323,6 +323,11 @@ from the document scan into one grouped check. The checked index keeps the
 document references for subsequent replay. The grouping input is temporary.
 [Streaming duplicate verification measurements](../corpus-preparation.md#streaming-duplicate-verification-measurements)
 cover the isolated grouping and the full cold audit.
+The span and document checkpoints bind pinned file rights, source identities
+and exact row generations. Raw replay reads those checked facts and the
+original source bytes. It uses the document and span payloads during index
+construction. [Raw replay measurements](../corpus-preparation.md#raw-replay-from-checked-index-facts)
+report full audit costs and the small increase in sampled named scratch.
 
 | Workload | Evidence |
 | --- | --- |

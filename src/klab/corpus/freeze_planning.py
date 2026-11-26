@@ -21,6 +21,7 @@ from klab.corpus.normalized_spans import (
 from klab.corpus.preparation_inputs import local_scope
 from klab.corpus.project import NormalizerOptions
 from klab.corpus.release import (
+    RELEASE_ROW_INDEX_MEMBERS,
     ReleaseMembers,
     consumed_release,
     release_index_workspace,
@@ -29,7 +30,6 @@ from klab.corpus.release import (
     streaming_verification,
 )
 from klab.corpus.release_members import (
-    DOCUMENT_MEMBERS,
     SHARED_STAGE,
     ReleasePlacement,
     shared_members,
@@ -196,7 +196,7 @@ def _retained_row_indexes(
         raise ValueError(f"unsafe release index workspace: {workspace}")
     members = ReleaseMembers(root, manifest)
     keys = release_row_index_inputs(
-        {name: members.member_paths(name) for name in DOCUMENT_MEMBERS},
+        {name: members.member_paths(name) for name in RELEASE_ROW_INDEX_MEMBERS},
         manifest["files"],
         identity,
         NormalizerOptions.model_validate(identity["release"]["normalizer"]),
