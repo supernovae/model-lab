@@ -10,6 +10,7 @@ import re
 import shutil
 import sqlite3
 import tempfile
+from array import array
 from collections import Counter
 from collections.abc import Iterator
 from contextlib import ExitStack, closing, contextmanager, nullcontext
@@ -22,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.bounded_metadata import metadata_operation, read_metadata
 from klab.corpus.build_stages import StageStore, run_stage
+from klab.corpus.document_coverage import document_coverage
 from klab.corpus.jsonl_records import iter_rows
 from klab.corpus.measurement_inputs import MeasurementTokenizer
 from klab.corpus.normalized_spans import (
@@ -837,12 +839,12 @@ def _lineage_rows(database: str, lineage: str, start: int, end: int, origins):
 
     db = _readonly(database)
     try:
-        ids = []
+        ids = array("q")
         for row, _, _ in range_records(Path(lineage), start, end):
             record_id = row["record_id"]
             found = db.execute(
                 "SELECT representative, dropped, source, split, content_sha256, "
-                "source_family, modality, domains FROM docs WHERE id=?",
+                "source_family, modality, domains, rowid FROM docs WHERE id=?",
                 (record_id,),
             ).fetchone()
             if found is None or row["record_kind"] != "document":
@@ -856,6 +858,7 @@ def _lineage_rows(database: str, lineage: str, start: int, end: int, origins):
                 family,
                 modality,
                 domains,
+                ordinal,
             ) = found
             domains = json.loads(domains)
             validate_lineage(row)
@@ -883,21 +886,21 @@ def _lineage_rows(database: str, lineage: str, start: int, end: int, origins):
                 or row["rendered_sha256"] != digest
             ):
                 raise ValueError("document lineage mismatch")
-            ids.append((record_id,))
+            ids.append(ordinal)
         return ids, end - start
     finally:
         db.close()
 
 
 def _stage_rows(
-    database: str, stage: str, path: str, start: int, end: int, selected: list[str]
+    database: str, path: str, start: int, end: int, selected: frozenset[str]
 ):
     db = _readonly(database)
     try:
-        ids = []
+        ids = array("q")
         for row, _, _ in range_records(Path(path), start, end):
             doc = db.execute(
-                "SELECT content_sha256, split, source, dropped FROM docs WHERE id=?",
+                "SELECT content_sha256, split, source, dropped, rowid FROM docs WHERE id=?",
                 (row["record_id"],),
             ).fetchone()
             if (
@@ -906,10 +909,10 @@ def _stage_rows(
                 or hashlib.sha256(row["text"].encode("utf-8")).hexdigest() != doc[0]
                 or row["split"] != doc[1]
                 or (selected and doc[2] not in selected)
-                or doc[3]
+                or doc[3] is not None
             ):
                 raise ValueError("LM stage record differs from selected document")
-            ids.append((stage, row["record_id"]))
+            ids.append(doc[4])
         return ids, end - start
     finally:
         db.close()
@@ -923,14 +926,11 @@ def _view_rows(
     view_start: int,
     link_start: int,
     count: int,
-    eligible: bool,
-    allowed: list[str],
-    origins: dict[str, str],
-    wanted_origins: list[str] | None,
+    eligible_sources: frozenset[str],
 ):
     db = _readonly(database)
     try:
-        ids, size = [], 0
+        ids, size = array("q"), 0
         with Path(view).open("rb") as payloads, Path(links).open("rb") as refs:
             payloads.seek(view_start)
             refs.seek(link_start)
@@ -946,7 +946,7 @@ def _view_rows(
                 ):
                     raise ValueError("invalid LM record or lineage")
                 found = db.execute(
-                    "SELECT content_sha256, split, dropped, source FROM docs WHERE id=?",
+                    "SELECT content_sha256, split, dropped, source, rowid FROM docs WHERE id=?",
                     (ref["record_id"],),
                 ).fetchone()
                 if (
@@ -959,14 +959,9 @@ def _view_rows(
                     != found[:3]
                 ):
                     raise ValueError("invalid LM record or lineage")
-                if (
-                    not eligible
-                    or found[3] not in allowed
-                    or wanted_origins is not None
-                    and origins[found[3]] not in wanted_origins
-                ):
+                if found[3] not in eligible_sources:
                     raise ValueError("LM view includes an unselected document")
-                ids.append((ref["record_id"],))
+                ids.append(found[4])
         return ids, size
     finally:
         db.close()
@@ -1305,22 +1300,10 @@ def _validate_rows_streaming(
             advance,
             progress,
         )
-        tally = str(Path(temporary) / "tally.sqlite")
-        db = _readonly(database)
-        try:
-            db.execute("ATTACH ? AS tally", (tally,))
-            db.execute("PRAGMA tally.journal_mode=OFF")
-            db.execute("PRAGMA tally.synchronous=OFF")
+        coverage_path = Path(temporary) / "coverage.bits"
+        with closing(_readonly(database)) as db:
             db.execute("PRAGMA temp_store=FILE")
             db.execute("PRAGMA cache_size=-65536")
-            db.execute("CREATE TABLE tally.lineage (id TEXT)")
-            db.execute("CREATE TABLE tally.stage_docs (stage TEXT, id TEXT)")
-            db.execute("CREATE TABLE tally.view_docs (id TEXT)")
-
-            def load(table: str, rows: list, width: int) -> None:
-                db.executemany(
-                    f"INSERT INTO {table} VALUES ({','.join('?' * width)})", rows
-                )
 
             groups = db.execute(
                 "SELECT source, raw_path, COUNT(*) FROM docs GROUP BY source, raw_path "
@@ -1340,151 +1323,120 @@ def _validate_rows_streaming(
                 verification_mode=verification_mode,
             )
 
+            # The index inserts dense positive row IDs and never deletes rows.
+            documents = sum(count for _, _, count in groups)
+            kept_by_source = dict(
+                db.execute(
+                    "SELECT source, COUNT(*) FROM docs WHERE dropped IS NULL GROUP BY source"
+                )
+            )
+
+            def consume(coverage, result):
+                rows, size = result
+                coverage.add(rows)
+                advance(len(rows), size)
+
             lineage_path = root / "lineage.jsonl"
             total = phase("lineage", lineage_path)
-            run_tasks(
-                _lineage_rows,
-                (
-                    (database, str(lineage_path), start, end, origins)
-                    for start, end in chunk_ranges(lineage_path)
-                ),
-                lambda result: (
-                    load("lineage", result[0], 1),
-                    advance(len(result[0]), result[1]),
-                ),
-                total_bytes=total,
-            )
-            _unique_index(
-                db, "tally.lineage_id", "lineage", "id", "duplicate lineage ID"
-            )
-            if db.execute(
-                "SELECT COUNT(*) FROM docs LEFT JOIN lineage ON docs.id=lineage.id "
-                "WHERE lineage.id IS NULL"
-            ).fetchone()[0]:
-                raise ValueError("document lineage mismatch")
-            db.commit()
+            with document_coverage(
+                coverage_path, documents, duplicate="duplicate lineage ID"
+            ) as coverage:
+                run_tasks(
+                    _lineage_rows,
+                    (
+                        (database, str(lineage_path), start, end, origins)
+                        for start, end in chunk_ranges(lineage_path)
+                    ),
+                    partial(consume, coverage),
+                    total_bytes=total,
+                )
+                if coverage.count != documents:
+                    raise ValueError("document lineage mismatch")
 
             transforms = identity["transforms"]
             for stage in receipt["stages"]:
                 transform = next(
                     spec for spec in transforms if spec["id"] == stage["id"]
                 )
-                selected = sorted(set(transform["inputs"]) & set(sources))
+                selected = frozenset(transform["inputs"]).intersection(sources)
                 stage_path = ReleaseMembers(root, receipt).member(
                     f"stages/{stage['id']}.jsonl"
                 )
                 total = phase(f"stage:{stage['id']}", stage_path)
-                run_tasks(
-                    _stage_rows,
-                    (
-                        (database, stage["id"], str(stage_path), start, end, selected)
-                        for start, end in chunk_ranges(stage_path)
-                    ),
-                    lambda result: (
-                        load("stage_docs", result[0], 2),
-                        advance(len(result[0]), result[1]),
-                    ),
-                    total_bytes=total,
+                expected = sum(
+                    kept_by_source.get(source, 0) for source in (selected or sources)
                 )
-            db.commit()
-            _unique_index(
-                db,
-                "tally.stage_docs_id",
-                "stage_docs",
-                "stage, id",
-                "duplicate LM stage identity",
-            )
-            for stage in receipt["stages"]:
-                transform = next(
-                    spec for spec in transforms if spec["id"] == stage["id"]
-                )
-                selected = set(transform["inputs"]) & set(sources)
-                if db.execute(
-                    "SELECT COUNT(*) FROM docs WHERE dropped IS NULL AND "
-                    "(? = 1 OR source IN (SELECT value FROM json_each(?))) "
-                    "AND id NOT IN (SELECT id FROM stage_docs WHERE stage=?)",
-                    (not bool(selected), json.dumps(sorted(selected)), stage["id"]),
-                ).fetchone()[0]:
-                    raise ValueError("LM stage omitted selected documents")
+                with document_coverage(
+                    coverage_path, documents, duplicate="duplicate LM stage identity"
+                ) as coverage:
+                    run_tasks(
+                        _stage_rows,
+                        (
+                            (database, str(stage_path), start, end, selected)
+                            for start, end in chunk_ranges(stage_path)
+                        ),
+                        partial(consume, coverage),
+                        total_bytes=total,
+                    )
+                    if coverage.count != expected:
+                        raise ValueError("LM stage omitted selected documents")
 
             release = identity["release"]
             allowed_sources = set().union(
                 *(
-                    set(spec["inputs"]) & set(sources)
-                    if set(spec["inputs"]) & set(sources)
-                    else set(sources)
+                    set(spec["inputs"]).intersection(sources) or sources.keys()
                     for spec in transforms
                 )
             )
             shapes = release.get("include_shapes")
             wanted_origins = release.get("include_origins")
-            eligible = (shapes is None or "raw_document" in shapes) and (
-                wanted_origins is None
-                or any(
-                    source.get("origin", "primary_source") in wanted_origins
-                    for source in sources.values()
-                )
+            eligible_sources = frozenset(
+                source
+                for source in allowed_sources
+                if (shapes is None or "raw_document" in shapes)
+                and (wanted_origins is None or origins[source] in wanted_origins)
             )
-            for split in ("train", "validation", "test"):
-                view, links = (
-                    root / "lm" / f"{split}.jsonl",
-                    root / "lm" / f"{split}.lineage.jsonl",
-                )
-                total = phase(f"view:{split}", view, links)
-                view_starts, view_lines = line_boundaries(view, VIEW_LINES)
-                link_starts, link_lines = line_boundaries(links, VIEW_LINES)
-                if view_lines != link_lines:
-                    raise ValueError("LM lineage count mismatch")
-                run_tasks(
-                    _view_rows,
-                    (
+            expected = sum(kept_by_source.get(source, 0) for source in eligible_sources)
+            with document_coverage(
+                coverage_path, documents, duplicate="duplicate LM view identity"
+            ) as coverage:
+                for split in ("train", "validation", "test"):
+                    view, links = (
+                        root / "lm" / f"{split}.jsonl",
+                        root / "lm" / f"{split}.lineage.jsonl",
+                    )
+                    total = phase(f"view:{split}", view, links)
+                    view_starts, view_lines = line_boundaries(view, VIEW_LINES)
+                    link_starts, link_lines = line_boundaries(links, VIEW_LINES)
+                    if view_lines != link_lines:
+                        raise ValueError("LM lineage count mismatch")
+                    run_tasks(
+                        _view_rows,
                         (
-                            database,
-                            split,
-                            str(view),
-                            str(links),
-                            view_start,
-                            link_start,
-                            min(VIEW_LINES, view_lines - index * VIEW_LINES),
-                            eligible,
-                            sorted(allowed_sources),
-                            origins,
-                            wanted_origins,
-                        )
-                        for index, (view_start, link_start) in enumerate(
-                            zip(view_starts, link_starts, strict=True)
-                        )
-                    ),
-                    lambda result: (
-                        load("view_docs", result[0], 1),
-                        advance(len(result[0]), result[1]),
-                    ),
-                    total_bytes=total,
-                )
-                for name in (f"chat/{split}.jsonl", f"chat/{split}.lineage.jsonl"):
-                    if (root / name).stat().st_size:
-                        raise ValueError("unexpected chat records in LM-only release")
-            db.commit()
-            _unique_index(
-                db,
-                "tally.view_docs_id",
-                "view_docs",
-                "id",
-                "duplicate LM view identity",
-            )
-            if eligible:
-                for source_id in allowed_sources:
-                    if (
-                        wanted_origins is not None
-                        and origins[source_id] not in wanted_origins
-                    ):
-                        continue
-                    if db.execute(
-                        "SELECT COUNT(*) FROM docs WHERE source=? AND dropped IS NULL "
-                        "AND id NOT IN (SELECT id FROM view_docs)",
-                        (source_id,),
-                    ).fetchone()[0]:
-                        raise ValueError("LM view omitted selected documents")
+                            (
+                                database,
+                                split,
+                                str(view),
+                                str(links),
+                                view_start,
+                                link_start,
+                                min(VIEW_LINES, view_lines - index * VIEW_LINES),
+                                eligible_sources,
+                            )
+                            for index, (view_start, link_start) in enumerate(
+                                zip(view_starts, link_starts, strict=True)
+                            )
+                        ),
+                        partial(consume, coverage),
+                        total_bytes=total,
+                    )
+                    for name in (f"chat/{split}.jsonl", f"chat/{split}.lineage.jsonl"):
+                        if (root / name).stat().st_size:
+                            raise ValueError(
+                                "unexpected chat records in LM-only release"
+                            )
+                if coverage.count != expected:
+                    raise ValueError("LM view omitted selected documents")
             for name in (
                 "chat/records.jsonl",
                 "scenarios.jsonl",
@@ -1495,8 +1447,6 @@ def _validate_rows_streaming(
             ):
                 if (root / name).stat().st_size:
                     raise ValueError("unexpected generated records in LM-only release")
-        finally:
-            db.close()
 
 
 def _validate_rows(
