@@ -479,6 +479,51 @@ def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(
     staging = next(lab.work.glob("corpora/*/.views-*/build"))
     assert (staging / "documents.jsonl").read_bytes().endswith(b"uncommitted tail")
 
+    plan_args = ("corpus", "plan", project, "--json")
+    open_file = Path.open
+    receipts = sorted(staging.parent.glob("commit-*.json"))
+    opened_receipts = []
+
+    def no_payload_reads(path, *args, **kwargs):
+        if path.is_relative_to(staging) or path.suffix == ".sqlite":
+            pytest.fail(f"view planning opened a payload: {path}")
+        if path in receipts:
+            opened_receipts.append(path)
+        return open_file(path, *args, **kwargs)
+
+    with monkeypatch.context() as forecast:
+        forecast.setattr(Path, "open", no_payload_reads)
+        plan = lab.json(*plan_args)
+    assert plan["build_id"] == reference.name
+    view = next(stage for stage in plan["stages"] if stage["id"] == "views")
+    assert view["action"] == "resume_candidate", view
+    assert view["computation_key"] == staging.parent.name.removeprefix(".views-")
+    assert view["committed_document_rows"] == 2
+    assert opened_receipts == [receipts[-1]]
+    assert view["checkpoint_records"] == len(receipts)
+    assert view["uncommitted_tail_bytes"] == len(b"uncommitted tail")
+    outputs = json.loads(receipts[-1].read_bytes())["body"]["outputs"]
+    assert view["verification_candidate_bytes"] == sum(
+        (staging / name).stat().st_size for name in outputs
+    ) - len(b"uncommitted tail")
+    (stage,) = manifest["stages"]
+    assert (
+        view["stage_replay_candidate_bytes"]
+        == (staging / "stages" / f"{stage['id']}.jsonl").stat().st_size
+    )
+
+    first = receipts[0]
+    parked = first.with_suffix(".parked")
+    first.rename(parked)
+    try:
+        incomplete = next(
+            stage for stage in lab.json(*plan_args)["stages"] if stage["id"] == "views"
+        )
+        assert incomplete["action"] == "resolve"
+        assert incomplete["verification_candidate_bytes"] is None
+    finally:
+        parked.rename(first)
+
     rendered = []
     lineage = large_build._document_lineage
 

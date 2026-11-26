@@ -470,6 +470,18 @@ _VIEW_CHECKPOINT_ROWS = 25_000
 _VIEW_CHECKPOINT_BYTES = 64 * 1024**2
 
 
+def native_view_members(stage_id: str) -> tuple[str, ...]:
+    """Logical outputs whose prefixes the native view journal tracks."""
+    return (
+        "documents.jsonl",
+        "spans.jsonl",
+        "lineage.jsonl",
+        f"stages/{stage_id}.jsonl",
+        *(f"lm/{split}.jsonl" for split in SPLITS),
+        *(f"lm/{split}.lineage.jsonl" for split in SPLITS),
+    )
+
+
 def _emit_build(
     *,
     connection: sqlite3.Connection,
@@ -520,12 +532,13 @@ def _emit_build(
                 return checkpoints.add(name, stream)
             return stack.enter_context(path.open("wb"))
 
-        documents = writer("documents.jsonl")
-        spans = writer("spans.jsonl")
-        lineage = writer("lineage.jsonl")
-        stage = writer(f"stages/{stage_id}.jsonl")
-        views = {split: writer(f"lm/{split}.jsonl") for split in SPLITS}
-        links = {split: writer(f"lm/{split}.lineage.jsonl") for split in SPLITS}
+        resumable = {name: writer(name) for name in native_view_members(stage_id)}
+        documents = resumable["documents.jsonl"]
+        spans = resumable["spans.jsonl"]
+        lineage = resumable["lineage.jsonl"]
+        stage = resumable[f"stages/{stage_id}.jsonl"]
+        views = {split: resumable[f"lm/{split}.jsonl"] for split in SPLITS}
+        links = {split: resumable[f"lm/{split}.lineage.jsonl"] for split in SPLITS}
         for path in (
             "lexical/candidates.jsonl",
             "semantic/candidates.jsonl",
@@ -852,6 +865,36 @@ def native_dedup_inputs(project: Any, index_receipt_sha256: str) -> dict[str, An
     }
 
 
+def native_prepared_members(prepared: list[Path]) -> list[Path]:
+    """Return the ordered payloads that bind native index and view generations."""
+    return [
+        shard / name for shard in prepared for name in ("docs.jsonl", "spans.jsonl")
+    ]
+
+
+def native_view_checkpoints(
+    workspace: Path,
+    build_id: str,
+    *,
+    index_receipt_sha256: str,
+    dedup_receipt_sha256: str,
+    generations: list[list[int]],
+) -> ViewCheckpoints:
+    """Resolve the journal for this build and the exact retained stage inputs."""
+    key = canonical_digest(
+        {
+            "build": build_id,
+            "index_receipt": index_receipt_sha256,
+            "dedup_receipt": dedup_receipt_sha256,
+            "prepared_generations": generations,
+            "implementation": implementation_digests(
+                "view_checkpoints.py", "build_outputs.py"
+            ),
+        }
+    )
+    return ViewCheckpoints(workspace / f".views-{key}", key)
+
+
 def _sample_file(
     canary: CanarySample,
     taken: dict[str, tuple[int, int]],
@@ -1119,9 +1162,7 @@ def build_large(
     index_inputs = native_index_inputs(
         project, prepared, admission_files=admission_files
     )
-    prepared_files = [
-        shard / name for shard in prepared for name in ("docs.jsonl", "spans.jsonl")
-    ]
+    prepared_files = native_prepared_members(prepared)
     generations = [range_file_identity(path) for path in prepared_files]
     index_key = stages.key(index_inputs)
     groups_root = stages.root / f".index-{index_key}.groups"
@@ -1183,7 +1224,8 @@ def build_large(
                     connection, record_admission, admission_files
                 )
     progress.update(phase="deduplicating")
-    dedup_inputs = native_dedup_inputs(project, sha256_file(index_dir / "receipt.json"))
+    index_receipt_sha256 = sha256_file(index_dir / "receipt.json")
+    dedup_inputs = native_dedup_inputs(project, index_receipt_sha256)
     dedup_groups_root = stages.root / f".dedup-{stages.key(dedup_inputs)}.groups"
     if dedup_groups_root.is_symlink():
         raise ValueError(f"symlinked dedup checkpoint: {dedup_groups_root}")
@@ -1220,18 +1262,14 @@ def build_large(
             shutil.rmtree(dedup_groups_root)
         stages.prune("dedup", keep=_PRUNE_ON_PUBLISH, protect=dedup_dir.name)
     progress.update(phase="writing_views")
-    view_key = canonical_digest(
-        {
-            "build": build_id,
-            "index_receipt": sha256_file(index_dir / "receipt.json"),
-            "dedup_receipt": sha256_file(dedup_dir / "receipt.json"),
-            "prepared_generations": generations,
-            "implementation": implementation_digests(
-                "view_checkpoints.py", "build_outputs.py"
-            ),
-        }
+    checkpoints = native_view_checkpoints(
+        workspace,
+        build_id,
+        index_receipt_sha256=index_receipt_sha256,
+        dedup_receipt_sha256=sha256_file(dedup_dir / "receipt.json"),
+        generations=generations,
     )
-    view_root = workspace / f".views-{view_key}"
+    view_root = checkpoints.root
     with (
         _open_decided(index_dir, dedup_dir) as connection,
         (workspace / ".view-emission.lock").open("a") as lock_file,
@@ -1263,7 +1301,7 @@ def build_large(
             group_count=dedup_result["groups"],
             dropped=dedup_result["dropped"],
             progress=progress,
-            checkpoints=ViewCheckpoints(view_root, view_key),
+            checkpoints=checkpoints,
             diagnostics=root / "diagnostics" / f"{build_id}.json",
         )
         require_prepared_generation()
