@@ -529,36 +529,32 @@ def _run(args: argparse.Namespace) -> None:
         return
     release = publication.resolve_release_reference(args.release, root)
     if command == "measure-tokens":
-        from klab.corpus.release import _verification_operation
         from klab.corpus.token_denominator import measure_source_tokens
 
-        # Explicit evidence reuse accepts only the reviewed, Git-bound v5 cold
-        # record. It is not authentication supplied by an arbitrary caller SHA.
         raw_release = Path(args.release)
         is_reference = "@" in args.release and not (
             raw_release.exists() or raw_release.is_symlink()
         )
-        with _verification_operation():
-            result = measure_source_tokens(
-                release if is_reference else raw_release,
-                Path(args.tokenizer),
-                Path(args.policy),
-                Path(args.output),
-                tokenizer_origin_release=(
-                    publication.resolve_release_reference(
-                        args.tokenizer_origin_release, root
-                    )
-                    if args.tokenizer_origin_release is not None
-                    else None
-                ),
-                family_inventory=(
-                    Path(args.family_inventory)
-                    if args.family_inventory is not None
-                    else None
-                ),
-                batch_documents=args.batch_documents,
-                batch_source_bytes=args.batch_source_bytes,
-            )
+        result = measure_source_tokens(
+            release if is_reference else raw_release,
+            Path(args.tokenizer),
+            Path(args.policy),
+            Path(args.output),
+            tokenizer_origin_release=(
+                publication.resolve_release_reference(
+                    args.tokenizer_origin_release, root
+                )
+                if args.tokenizer_origin_release is not None
+                else None
+            ),
+            family_inventory=(
+                Path(args.family_inventory)
+                if args.family_inventory is not None
+                else None
+            ),
+            batch_documents=args.batch_documents,
+            batch_source_bytes=args.batch_source_bytes,
+        )
         print(json.dumps(result, sort_keys=True))
         return
     if command == "export":

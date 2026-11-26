@@ -47,7 +47,7 @@ def _check_row(doc: dict, row: dict[str, str] | None) -> dict[str, str]:
 
 def _indexed_coverage(
     docs: Iterator[dict], rows: Iterator[dict[str, str]]
-) -> Iterator[dict[str, str]]:
+) -> Iterator[tuple[dict, dict[str, str]]]:
     with (
         tempfile.TemporaryDirectory(
             prefix="family-inventory-", dir=scratch_root()
@@ -62,7 +62,7 @@ def _indexed_coverage(
         )
         matched = 0
         for doc in docs:
-            yield _check_row(doc, index.get(doc["document_id"]))
+            yield doc, _check_row(doc, index.get(doc["document_id"]))
             matched += 1
         # Any extra row, including a repeat of a matched prefix ID, remains unmatched.
         if matched != len(index):
@@ -76,15 +76,34 @@ def covered_family_rows(
     max_record_bytes: int | None = None,
     expected_sha256: str | None = None,
 ) -> Iterator[dict[str, str]]:
-    """Stream the inventories Lab writes in document order; index a reordered tail."""
     with (
         closing(release.rows("documents.jsonl")) as documents,
         closing(
-            _inventory_rows(
-                path, max_record_bytes=max_record_bytes, expected_sha256=expected_sha256
+            join_family_documents(
+                documents,
+                path,
+                max_record_bytes=max_record_bytes,
+                expected_sha256=expected_sha256,
             )
-        ) as rows,
+        ) as pairs,
     ):
+        for _, row in pairs:
+            yield row
+
+
+def join_family_documents(
+    documents: Iterator[dict],
+    path: Path,
+    *,
+    max_record_bytes: int | None = None,
+    expected_sha256: str | None = None,
+) -> Iterator[tuple[dict, dict[str, str]]]:
+    """Stream kept documents with their inventory rows, indexing a reordered tail."""
+    with closing(
+        _inventory_rows(
+            path, max_record_bytes=max_record_bytes, expected_sha256=expected_sha256
+        )
+    ) as rows:
         docs = (doc for doc in documents if doc["drop_reason"] is None)
         for doc in docs:
             row = next(rows, None)
@@ -95,6 +114,6 @@ def covered_family_rows(
             if row["document_id"] != doc["document_id"]:
                 yield from _indexed_coverage(chain((doc,), docs), chain((row,), rows))
                 return
-            yield _check_row(doc, row)
+            yield doc, _check_row(doc, row)
         if next(rows, None) is not None:
             raise ValueError("family inventory does not cover kept release documents")
