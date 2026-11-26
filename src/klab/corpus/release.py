@@ -1691,11 +1691,13 @@ def _validate_rows(
     if progress is not None:
         progress.start_phase("reviewed_rows")
     from klab.corpus.admission_coverage import AdmissionCoverage
+    from klab.corpus.row_index import EvidenceFiles
 
     with (
         metadata_operation(scratch_root(), max_database_bytes=None) as metadata,
         AdmissionCoverage(metadata.connection) as coverage,
         ExitStack() as replay_stack,
+        EvidenceFiles() as evidence_files,
         progress.track_scratch(Path(metadata.temporary.name))
         if progress is not None
         else nullcontext(),
@@ -1705,8 +1707,10 @@ def _validate_rows(
             replay_stack=replay_stack,
             coverage=coverage,
             row_connection=metadata.connection,
+            evidence_files=evidence_files,
             proof_store=proof_store,
             verification_mode=verification_mode,
+            progress=progress,
         )
 
 
@@ -1716,8 +1720,10 @@ def _validate_rows_stored(
     replay_stack: ExitStack,
     coverage,
     row_connection,
+    evidence_files,
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
+    progress: BuildProgress | None = None,
 ) -> None:
     receipt = _load(
         root / ("build.json" if (root / "build.json").exists() else "manifest.json")
@@ -1725,33 +1731,52 @@ def _validate_rows_stored(
     identity = receipt.get("identity", receipt.get("build_identity"))
     options = _release_normalizer(identity)
     selected_normalizer = options.identity
-    from klab.corpus.jsonl_records import records_from_path
-    from klab.corpus.row_index import RowIndex
+    from klab.corpus.row_index import FileRowIndex
 
     def rows(path):
-        if path.is_symlink():
-            raise ValueError("symlinked evidence input")
-        return (record.value for record in records_from_path(path))
+        return (record.value for record in evidence_files.records(path))
 
-    def row_index(path, key="record_id", *, duplicate="duplicate evidence identity"):
-        return RowIndex(
-            row_connection, rows(path), lambda row: row[key], duplicate=duplicate
+    def row_index(path, key="record_id", **options):
+        return FileRowIndex(
+            row_connection,
+            evidence_files,
+            {"": path},
+            lambda _, row: row[key],
+            **options,
         )
+
+    assignments = document_assignments(root, identity)
+
+    def checked_document(doc):
+        if doc["content_sha256"] != hashlib.sha256(doc["text"].encode()).hexdigest():
+            raise ValueError("document content digest mismatch")
+        _verify_cleaning_decision(doc, options)
+        if assignments is not None:
+            assignments.verify_document(doc["document_id"], doc["split"])
+        return {
+            name: doc[name]
+            for name in (
+                "document_id",
+                "source_id",
+                "split",
+                "representative_id",
+                "drop_reason",
+                "content_sha256",
+            )
+        }
 
     members = ReleaseMembers(root, receipt)
     document_map = row_index(
         members.member("documents.jsonl"),
         "document_id",
         duplicate="duplicate document identity",
+        order=lambda doc: (doc["source_id"], None),
+        projection=checked_document,
     )
-    assignments = document_assignments(root, identity)
-    for doc in document_map.values():
-        if doc["content_sha256"] != hashlib.sha256(doc["text"].encode()).hexdigest():
-            raise ValueError("document content digest mismatch")
-        _verify_cleaning_decision(doc, options)
-        if assignments is not None:
-            assignments.verify_document(doc["document_id"], doc["split"])
-    spans = row_index(members.member("spans.jsonl"))
+    spans = row_index(
+        members.member("spans.jsonl"),
+        order=lambda span: (span["raw_path"], span["line_start"]),
+    )
     sources = {item["id"]: item for item in _load(root / "sources.json")}
 
     source_origins = {
@@ -1768,12 +1793,13 @@ def _validate_rows_stored(
     rights_files = _verify_rights_files(root, sources, snapshots)
     if not spans.same_keys(document_map):
         raise ValueError("document evidence span inventory mismatch")
+    if progress is not None:
+        progress.start_phase("reviewed_replay")
     previous_file: Path | None = None
     raw = b""
     offsets: list[int] = []
     sample_rows = None
-    for doc in document_map.source_order(spans):
-        span = spans[doc["document_id"]]
+    for doc, span in document_map.source_order(spans):
         source = sources[doc["source_id"]]
         if (
             doc["source_revision"] != source["revision"]
@@ -1941,8 +1967,11 @@ def _validate_rows_stored(
             if choice["decision"] == "qualify":
                 coverage.expect(source_id, path, index)
     coverage.verify()
-    lineage_map = row_index(root / "lineage.jsonl", duplicate="duplicate lineage ID")
-    classified = any("origin" in row for row in lineage_map.values())
+    if progress is not None:
+        progress.start_phase("reviewed_lineage")
+    lineage_path = root / "lineage.jsonl"
+    lineage_map = row_index(lineage_path, duplicate="duplicate lineage ID")
+    classified = any("origin" in row for row in rows(lineage_path))
     if classified:
         from klab.corpus.pipeline import _path_scenario, _scenario, _scenario_shape
         from klab.corpus.provenance import (
@@ -1952,27 +1981,25 @@ def _validate_rows_stored(
         )
         from klab.data.conversations import _v2_document
 
-        receipt = _load(
-            root / ("build.json" if (root / "build.json").exists() else "manifest.json")
-        )
-        stage_rows = RowIndex(
+        def stage_key(stage, record):
+            if record.get("record_id") or record.get("scenario_id"):
+                return stage, record.get("record_id", record.get("scenario_id"))
+            return None
+
+        stage_rows = FileRowIndex(
             row_connection,
-            (
-                {"stage": stage["id"], "record": record}
+            evidence_files,
+            {
+                stage["id"]: members.member(f"stages/{stage['id']}.jsonl")
                 for stage in receipt["stages"]
-                for record in rows(members.member(f"stages/{stage['id']}.jsonl"))
-                if record.get("record_id") or record.get("scenario_id")
-            ),
-            lambda item: (
-                item["stage"],
-                item["record"].get("record_id", item["record"].get("scenario_id")),
-            ),
+            },
+            stage_key,
         )
         chats = row_index(root / "chat/records.jsonl")
         scenarios = row_index(root / "scenarios.jsonl", "scenario_id")
         generations = row_index(root / "generations.jsonl")
         semantic = row_index(root / "semantic/candidates.jsonl")
-        for row in lineage_map.values():
+        for row in rows(lineage_path):
             validate_lineage(row, documents=document_map)
             expected_origin = (
                 source_origins[document_map[row["record_id"]]["source_id"]]
@@ -2097,8 +2124,7 @@ def _validate_rows_stored(
                     else None
                 )
             else:
-                stored = stage_rows.get((row["transform_id"], row["record_id"]))
-                payload = stored["record"] if stored is not None else None
+                payload = stage_rows.get((row["transform_id"], row["record_id"]))
             source_payload = record if kind in {"chat_sft", "tool_episode"} else payload
             expected_shape = {
                 "lexical_candidate": "lexical_inventory",
@@ -2255,14 +2281,14 @@ def _validate_rows_stored(
                         raise ValueError("semantic chat generator/evidence mismatch")
                 else:
                     raise ValueError("chat missing generator reference")
-    for row in lineage_map.values():
+    for row in rows(lineage_path):
         parents = row["parent_document_ids"]
-        if any(parent not in document_map for parent in parents) or (
-            row["split"] not in {"train", "validation", "test"}
-            and not (
-                row["record_kind"] == "lexical_candidate"
-                and row["split"] == "inventory"
-            )
+        try:
+            parent_rows = [document_map.metadata(parent) for parent in parents]
+        except KeyError:
+            raise ValueError("dangling lineage or invalid split") from None
+        if row["split"] not in {"train", "validation", "test"} and not (
+            row["record_kind"] == "lexical_candidate" and row["split"] == "inventory"
         ):
             raise ValueError("dangling lineage or invalid split")
         if any(
@@ -2271,15 +2297,15 @@ def _validate_rows_stored(
         ):
             raise ValueError("invalid representative lineage")
         if row["split"] == "inventory":
-            if len({document_map[parent]["split"] for parent in parents}) < 2:
+            if len({parent["split"] for parent in parent_rows}) < 2:
                 raise ValueError("unnecessary cross-split lexical inventory")
-        elif any(document_map[parent]["split"] != row["split"] for parent in parents):
+        elif any(parent["split"] != row["split"] for parent in parent_rows):
             raise ValueError("cross-split lineage")
         if row["representative_parent_document_ids"] != sorted(
-            {document_map[parent]["representative_id"] for parent in parents}
+            {parent["representative_id"] for parent in parent_rows}
         ):
             raise ValueError("incorrect duplicate representative lineage")
-    for doc in document_map.values():
+    for doc in document_map.metadata_rows():
         row = lineage_map.get(doc["document_id"])
         if (
             row is None
@@ -2289,6 +2315,8 @@ def _validate_rows_stored(
             raise ValueError("document lineage mismatch")
     if not classified:
         chats = row_index(root / "chat/records.jsonl")
+    if progress is not None:
+        progress.start_phase("reviewed_views")
     for split in ("train", "validation", "test"):
         from itertools import zip_longest
 
@@ -2297,19 +2325,22 @@ def _validate_rows_stored(
         for row, link in zip_longest(lm, lm_lineage):
             if row is None or link is None:
                 raise ValueError("LM lineage count mismatch")
-            doc = document_map[link["record_id"]]
-            if classified and (
-                link["split"] != split
-                or lineage_map[link["record_id"]]["record_kind"] != "document"
-                or lineage_map[link["record_id"]]["rendered_sha256"]
-                != hashlib.sha256(row["text"].encode("utf-8")).hexdigest()
-            ):
-                raise ValueError("LM selected-view lineage mismatch")
+            doc = document_map.metadata(link["record_id"])
             if (
                 set(row) != {"text"}
                 or not isinstance(row["text"], str)
                 or not row["text"].strip()
-                or doc["text"] != row["text"]
+            ):
+                raise ValueError("invalid LM record or lineage")
+            digest = hashlib.sha256(row["text"].encode("utf-8")).hexdigest()
+            if classified and (
+                link["split"] != split
+                or lineage_map[link["record_id"]]["record_kind"] != "document"
+                or lineage_map[link["record_id"]]["rendered_sha256"] != digest
+            ):
+                raise ValueError("LM selected-view lineage mismatch")
+            if (
+                doc["content_sha256"] != digest
                 or doc["split"] != split
                 or doc["drop_reason"]
             ):

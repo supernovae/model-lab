@@ -1392,6 +1392,7 @@ def test_archive_plan_step_snapshot_and_reviewed_release(
     from klab.corpus.admission_draft import draft_admission_manifest
     from klab.corpus.pipeline import build
     from klab.corpus.release import freeze, verify_release
+    from klab.corpus.release_verify import verification_settings
     from klab.corpus.split_freeze import freeze_splits
     from klab.corpus.split_inventory import write_split_inventory
 
@@ -1403,6 +1404,7 @@ def test_archive_plan_step_snapshot_and_reviewed_release(
         ).encode()
         for number in (1, 2, 4, 5)
     }
+    included["rfc1.txt"] += b"Reviewed example material for this protocol.\n" * 105_000
     body = _tar_gz(
         [(name, data, None) for name, data in included.items()]
         + [
@@ -1412,6 +1414,12 @@ def test_archive_plan_step_snapshot_and_reviewed_release(
         ]
     )
     recipe = _archive_recipe(tmp_path, body, budget=True)
+    [declared_source] = (recipe.parent / "sources").glob("*.yaml")
+    source = yaml.safe_load(declared_source.read_text())
+    source["acquisition"].update(
+        max_member_bytes=1 << 23, max_expanded_bytes=1 << 23, max_bytes=1 << 23
+    )
+    _yaml(declared_source, source)
     project = load_project(recipe)
     root = tmp_path  # the recipe, and so its frozen splits, lie in the work root
     ledger = root / "corpora/example/transport-budget.sqlite"
@@ -1501,7 +1509,16 @@ def test_archive_plan_step_snapshot_and_reviewed_release(
         },
     )
     published = freeze(build(load_project(recipe), root, offline=True), root)
-    assert verify_release(published)["release_id"] == published.name
+    scratch = root / "audit-scratch"
+    with verification_settings(scratch_dir=scratch, workers=1):
+        manifest = verify_release(published, verification_mode="cold")
+    assert manifest["release_id"] == published.name
+    [journal] = scratch.glob("verify-*.progress.jsonl")
+    final = json.loads(journal.read_text().splitlines()[-1])
+    assert (
+        final["scratch"]["observed_peak_logical_bytes"]
+        < manifest["files"]["documents.jsonl"]["size"]
+    )
 
 
 @pytest.mark.parametrize(
