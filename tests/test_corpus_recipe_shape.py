@@ -1066,6 +1066,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
                 "training": {
                     "mixture_loader": "references",
                     "mixture_prepared_storage": "references",
+                    "max_tokens": sum(quotas.values()),
                 },
                 "dataset": {
                     "source": "local_token_mixture",
