@@ -79,7 +79,9 @@ def edit_excluded_fields(recipe: Recipe) -> None:
     )
 
 
-def prepare(root: Path, monkeypatch, capsys, **recipe_options) -> Prepared:
+def prepare(
+    root: Path, monkeypatch, capsys, *, share_stage_artifacts=False, **recipe_options
+) -> Prepared:
     lab = Lab(root, monkeypatch, capsys)
     recipe = write_recipe(root / "recipe", **recipe_options)
     write_training_files(recipe, vocab_size=VOCAB_SIZE)
@@ -102,7 +104,8 @@ def prepare(root: Path, monkeypatch, capsys, **recipe_options) -> Prepared:
         for key in ("declaration_sha256", "snapshot_sha256"):
             assert again["sources"][name][key] == lock["sources"][name][key], name
     build = Path(lab.run("corpus", "build", project, "--offline"))
-    release = Path(lab.run("corpus", "freeze", str(build)))
+    placement = ("--share-stage-artifacts",) if share_stage_artifacts else ()
+    release = Path(lab.run("corpus", "freeze", str(build), *placement))
     return Prepared(lab, recipe, lock, build_before_edit, build, release)
 
 
@@ -492,7 +495,7 @@ def write_family_inventory(release: Path, output: Path) -> None:
 def test_recipe_shaped_pipeline_trains_on_the_mixture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    prepared = prepare(tmp_path, monkeypatch, capsys)
+    prepared = prepare(tmp_path, monkeypatch, capsys, share_stage_artifacts=True)
     lab, recipe, release = prepared.lab, prepared.recipe, prepared.release
     inventory = tmp_path / "family-inventory.jsonl"
     write_family_inventory(release, inventory)

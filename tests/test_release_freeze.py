@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+import yaml
 from corpus_fixtures import forge_release, write_prose_project
 
 from klab.canonical import canonical_digest, canonical_json
@@ -17,6 +18,7 @@ from klab.corpus.pipeline import build
 from klab.corpus.project import load_project
 from klab.corpus.release import consumed_release, freeze, verify_build, verify_release
 from klab.training.manifest import sha256_file
+from klab.verification_proofs import verification_options
 
 TEXTS = {
     "prose_train": [f"training document {n} with some words\n" for n in range(4)],
@@ -318,3 +320,62 @@ def test_release_manifest_names_its_files_and_not_the_build_file(
         for path in release.rglob("*")
         if path.is_file() and path.name != "manifest.json"
     }
+
+
+def test_shared_stage_releases_reuse_one_payload_and_reject_drift(
+    prepared: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    build_dir, work = prepared
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(work.parent / "settings"))
+    options = {**verification_options(work), "share_stage_artifacts": True}
+    name = "stages/lm.jsonl"
+    original = (build_dir / name).stat()
+    publish = release_module.publish_shared_stages
+
+    def stop_after_stage_move(*args, **kwargs):
+        publish(*args, **kwargs)
+        raise InterruptedError("after stage move")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(release_module, "publish_shared_stages", stop_after_stage_move)
+        with pytest.raises(InterruptedError, match="after stage move"):
+            freeze(build_dir, work, **options)
+    with pytest.raises(ValueError, match="same freeze options"):
+        freeze(build_dir, work)
+    first = freeze(build_dir, work, **options)
+    assert not (first / name).exists()
+    proof_options = verification_options(work)
+    with release_module.open_release(first, **proof_options) as opened:
+        payload = opened.member(name)
+        assert payload.stat().st_ino == original.st_ino
+        assert payload.name == sha256_file(payload)
+
+    declaration = work.parent / "project" / "corpus.yaml"
+    project = yaml.safe_load(declaration.read_bytes())
+    project["id"] = "second-prose"
+    declaration.write_text(yaml.safe_dump(project))
+    loaded = load_project(declaration)
+    acquire(loaded, work)
+    second = freeze(build(loaded, work, offline=True), work, **options)
+    assert second != first
+    with release_module.open_release(second, **proof_options) as opened:
+        assert opened.member(name) == payload
+    assert not (second / name).exists()
+
+    with monkeypatch.context() as warm:
+
+        def no_replay(*args, **kwargs):
+            pytest.fail("verified release replayed unchanged shared stage")
+
+        warm.setattr(release_module, "_verify_release_cold", no_replay)
+        assert verify_release(first, **proof_options)["release_id"] == first.name
+
+    data = payload.read_bytes()
+    changed = data.replace(b"training", b"traininx", 1)
+    assert changed != data and len(changed) == len(data)
+    stamp = payload.stat()
+    payload.write_bytes(changed)
+    os.utime(payload, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    for released in (first, second):
+        with pytest.raises(ValueError, match="stage output|stage receipt"):
+            verify_release(released, **proof_options)

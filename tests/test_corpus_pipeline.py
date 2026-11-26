@@ -356,9 +356,14 @@ def test_build_freeze_replay_spans_semantics_and_tamper(tmp_path: Path) -> None:
     acquire(project, tmp_path)
     first = build(project, tmp_path, offline=True)
     assert build(project, tmp_path, offline=True) == first
-    published = freeze(first, tmp_path)
-    assert freeze(first, tmp_path) == published
+    published = freeze(first, tmp_path, share_stage_artifacts=True)
+    assert freeze(first, tmp_path, share_stage_artifacts=True) == published
     manifest = verify_release(published)
+    assert all(
+        entry.get("storage") == "shared_stage"
+        for name, entry in manifest["files"].items()
+        if name.startswith("stages/")
+    )
     declared = project.release.normalizer.model_dump(mode="json")
     report = json.loads((published / "report.json").read_text())
     assert report["normalizer"] == declared

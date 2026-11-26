@@ -396,12 +396,14 @@ def _retained_snapshot_parent(declaration: dict[str, Any]) -> Path | None:
 
 
 def snapshot_dependencies(path: Path, manifest_name: str) -> tuple[Path, ...]:
+    """Return snapshots and external payloads needed to authenticate the release."""
     manifest = _json_file(path / manifest_name)
     from klab.corpus.preparation_inputs import (
         corpus_work_root,
         local_dependencies,
         local_scope,
     )
+    from klab.corpus.release_members import shared_stage_members
 
     if local_scope(manifest) is not None:
         dependencies = local_dependencies(manifest, work_root=corpus_work_root(path))
@@ -413,6 +415,13 @@ def snapshot_dependencies(path: Path, manifest_name: str) -> tuple[Path, ...]:
         path.parent.parent / "snapshots" / item["source_id"] / item["sha256"]
         for item in manifest["snapshots"]
     ]
+    shared = shared_stage_members(path, manifest.get("files", {}))
+    for name, member in shared.items():
+        if not member.is_file():
+            raise ValueError(f"missing shared stage payload: {name}")
+        if member.stat().st_nlink != 1:
+            raise ValueError(f"hard-linked shared stage payload: {name}")
+        snapshots.append(member)
     identity = manifest.get("build_identity", manifest.get("identity", {}))
     sources = identity.get("sources", {})
     # Cold replay needs the retained parent as well as the derived bytes.
