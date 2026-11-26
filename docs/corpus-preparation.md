@@ -736,6 +736,26 @@ batching. These scans read each metadata file once and use no payload or
 scratch I/O. Measure end-to-end planning separately on a production
 inventory, where storage and the fraction of rows in compact form matter.
 
+Inspect shared normalized storage with:
+
+```sh
+klab --work-dir WORK corpus artifacts --json
+klab --work-dir WORK corpus artifacts --source-id SOURCE --limit 20
+```
+
+The inventory reports published partition keys and the logical bytes of their
+files, including receipts. It counts visible staging directories separately.
+The default page has up to 100 rows. Use `--after` with the returned
+`next_after` cursor to continue in source and key order. Totals describe the
+whole selected namespace on each request. Each request scans directory
+metadata and retains only one page. Concurrent changes can affect the results.
+The command performs no payload reads or deletion. Its byte counts describe
+retention, with no determination of which artifacts can be reclaimed.
+On a local synthetic store with four sparse files per partition, a 20-row
+page took 0.74–0.85 ms with 100 partitions and 42–44 ms with 5,000 partitions.
+The larger scan counted 5.35 GB of logical file sizes. Both sizes had 37.9 MiB
+peak process RSS.
+
 `build` normalizes admitted documents, applies the frozen splits, removes exact
 duplicates (refusing cross-split or incompatible-rights duplicates) and writes
 documents, spans, lineage and language-model and chat views. `freeze` publishes

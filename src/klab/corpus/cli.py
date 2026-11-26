@@ -85,7 +85,7 @@ def _handle(args: argparse.Namespace) -> None:
         **verification_options(
             root,
             cold=getattr(args, "cold", False),
-            read_only=args.corpus_command == "plan",
+            read_only=args.corpus_command in {"plan", "artifacts"},
         ),
     ):
         _run(args)
@@ -100,6 +100,28 @@ def _run(args: argparse.Namespace) -> None:
 
     root = resolve_work_dir(args.work_dir)
     command = args.corpus_command
+    if command == "artifacts":
+        from klab.corpus.artifact_inventory import normalized_inventory
+
+        inventory = normalized_inventory(
+            root, source_id=args.source_id, limit=args.limit, after=args.after
+        )
+        if args.json:
+            print(json.dumps(inventory, sort_keys=True))
+        else:
+            print(
+                f"{inventory['published_partitions']:,} normalized partitions, "
+                f"{inventory['retained_bytes']:,} retained bytes"
+            )
+            print(
+                f"{inventory['staging_directories']:,} staging directories, "
+                f"{inventory['disappeared_partitions']:,} partitions disappeared during scan"
+            )
+            for row in inventory["partitions"]:
+                print(f"{row['artifact_id']}  {row['retained_bytes']:,} bytes")
+            if inventory["next_after"] is not None:
+                print(f"Next page --after {inventory['next_after']}")
+        return
     if command == "plan":
         from klab.corpus.planning import plan_build
 
@@ -619,6 +641,16 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "corpus", help="Acquire, derive, freeze and inspect corpus releases"
     )
     sub = corpus.add_subparsers(dest="corpus_command", required=True)
+    command = sub.add_parser(
+        "artifacts", help="Inspect shared normalized Corpus storage"
+    )
+    command.add_argument("--source-id")
+    command.add_argument("--limit", type=int, default=100)
+    command.add_argument(
+        "--after", help="Continue after a source/key from this inventory"
+    )
+    command.add_argument("--json", action="store_true")
+    command.set_defaults(handler=_handle)
     command = sub.add_parser(
         "plan", help="Estimate native normalization work from local metadata"
     )
