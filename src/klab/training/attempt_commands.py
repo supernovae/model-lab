@@ -93,7 +93,7 @@ _SHAPES: dict[str, tuple[int, set[str], set[str], str]] = {
         "preparation",
     ),
     "corpus build": (1, set(), {"--offline"}, "preparation"),
-    "corpus freeze": (1, set(), set(), "preparation"),
+    "corpus freeze": (1, set(), {"--share-stage-artifacts"}, "preparation"),
     "corpus audit": (1, set(), set(), "inspection"),
     "corpus near-duplicates": (
         1,

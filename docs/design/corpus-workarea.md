@@ -116,8 +116,11 @@ generations through fit and audit. Native and additive mixture preparation,
 tokenizer observation, the training validation view, publication metadata,
 family inventory derivation and finalization, prior split preparation,
 protected-lineage audits and source-token measurement also resolve their
-release payloads through the shared contract. Reference publication and the
-remaining payload readers are tracked in #567.
+release payloads through the shared contract. Ordinary freeze can opt in to
+digest references for transform output payloads. The manifest binds their
+content and placement, and release and export verification receipts track
+their file generations. Reference publication for the remaining payloads
+and closure-aware pruning are tracked in #567.
 
 Start with typed document, passage, annotation, duplicate-group, selection,
 entity, assertion, evidence, edge, index, and compiled sequence payloads.

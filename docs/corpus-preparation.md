@@ -719,6 +719,26 @@ klab --work-dir WORK corpus build PROJECT
 klab --work-dir WORK corpus freeze BUILD
 ```
 
+`klab corpus freeze BUILD --share-stage-artifacts` publishes verified
+transform outputs as digest references in the release manifest. Lab moves the
+first copy into `WORK/artifacts/corpus/release-stages` on the same filesystem.
+When another release has the same output digest, freeze authenticates the
+stored file before consuming the duplicate staging copy. The release ID
+includes the placement, and receipt verification tracks the shared file.
+Other release members retain their existing placement.
+
+Retry interrupted publication with the same flag. Referenced files are
+retained release artifacts. Keep them with the release and its source
+snapshots when moving a work area. This option applies to ordinary freeze,
+and completed local preparation keeps its existing retained publication.
+
+In a post-verification Linux tmpfs test with a 268.57 MB stage output,
+the first move took 0.35 ms and preserved the inode. First reuse took
+269 ms with a cold hash, and the median of three receipt-backed reuses took
+72 ms. Two releases sharing those bytes retained one 268.57 MB stage file.
+These measurements cover the stage publication step. Build, full release
+verification and production storage were outside the benchmark.
+
 Run `plan` to see the local acquisition pins, eligible source partitions,
 candidate normalized cache hits and the source bytes that would need
 normalization if a new native disk build runs. A missing lock reports

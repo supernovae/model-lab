@@ -516,6 +516,7 @@ def _run(args: argparse.Namespace) -> None:
                 Path(args.build),
                 root,
                 reuse_completed_preparation=args.reuse_completed_preparation,
+                share_stage_artifacts=args.share_stage_artifacts,
                 **verification,
             )
         )
@@ -932,6 +933,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     command = sub.add_parser("freeze")
     command.add_argument("build")
     _verification_flags(command)
+    command.add_argument(
+        "--share-stage-artifacts",
+        action="store_true",
+        help="Publish transform outputs by digest in the Corpus work area",
+    )
     command.add_argument(
         "--reuse-completed-preparation",
         action="store_true",
