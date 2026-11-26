@@ -17,7 +17,12 @@ import numpy as np
 import tokenizers
 
 from klab.canonical import canonical_digest
-from klab.data.token_store import CONTENT_INDEX_DTYPE, SHARD_TOKENS, ContentTokens
+from klab.data.token_store import (
+    CONTENT_INDEX_DTYPE,
+    CONTENT_TOKEN_DTYPES,
+    SHARD_TOKENS,
+    ContentTokens,
+)
 from klab.result_publication import read_canonical, sync_directory
 from klab.safe_io import (
     read_file_range,
@@ -33,6 +38,9 @@ _OPEN_SEGMENTS = 16
 TOKEN_SEGMENT_MANIFEST = "segment.json"
 _FILES = {"tokens.ids", "index.bin"}
 _SHA256 = re.compile("[0-9a-f]{64}")
+SEGMENT_DTYPES = {
+    f"{storage}-le": dtype for storage, dtype in CONTENT_TOKEN_DTYPES.items()
+}
 
 
 def _digest(value) -> bool:
@@ -78,7 +86,8 @@ def read_token_segment(directory: Path, encoding_id: str, tokenizer_sha: str) ->
         or encoding["input"] != "exact-utf8"
         or encoding["add_special_tokens"] is not False
         or encoding["eos"] is not None
-        or encoding["dtype"] != "int32-le"
+        or not isinstance(encoding["dtype"], str)
+        or encoding["dtype"] not in SEGMENT_DTYPES
         or canonical_digest(encoding) != encoding_id
         or type(manifest["documents"]) is not int
         or not 1 <= manifest["documents"] <= SEGMENT_DOCUMENTS
@@ -91,7 +100,7 @@ def read_token_segment(directory: Path, encoding_id: str, tokenizer_sha: str) ->
         raise ValueError(f"invalid token segment manifest: {directory}")
     sizes = {
         "index.bin": manifest["documents"] * CONTENT_INDEX_DTYPE.itemsize,
-        "tokens.ids": manifest["tokens"] * 4,
+        "tokens.ids": manifest["tokens"] * SEGMENT_DTYPES[encoding["dtype"]].itemsize,
     }
     for name, size in sizes.items():
         entry = manifest["files"][name]
@@ -113,24 +122,26 @@ class SealedContentTokens:
     the narrow, sealed indexes and has no authority over token contents.
     """
 
-    decode_ids = staticmethod(ContentTokens.decode_ids)
-
-    def __init__(self, root: Path, tokenizer_sha: str):
+    def __init__(self, root: Path, tokenizer_sha: str, *, storage: str = "int32"):
         if not _digest(tokenizer_sha):
             raise ValueError("invalid token segment tokenizer digest")
         self.tokenizer_sha = tokenizer_sha
+        self.storage = storage
+        self.width = CONTENT_TOKEN_DTYPES[storage].itemsize
         self.encoding = {
             "tokenizer_sha256": tokenizer_sha,
             "tokenizers_version": tokenizers.__version__,
             "input": "exact-utf8",
             "add_special_tokens": False,
             "eos": None,
-            "dtype": "int32-le",
+            "dtype": f"{storage}-le",
         }
         self.path = root / "sealed" / canonical_digest(self.encoding)
         self.segments = self.path / "segments"
         self.active_root = self.path / "active"
-        self.active_path = ContentTokens.cache_path(self.active_root, tokenizer_sha)
+        self.active_path = ContentTokens.cache_path(
+            self.active_root, tokenizer_sha, storage=storage
+        )
         self.active: ContentTokens | None = None
         self.hits = self.misses = self.sealed_hits = self.published_segments = 0
         self.lookup_seconds = self.write_seconds = 0.0
@@ -272,7 +283,10 @@ class SealedContentTokens:
                         f"active token index exceeds segment bound: {path}"
                     )
         self.active = ContentTokens(
-            self.active_root, self.tokenizer_sha, track_digest=True
+            self.active_root,
+            self.tokenizer_sha,
+            track_digest=True,
+            storage=self.storage,
         )
 
     def _publish(self, manifest: dict) -> str:
@@ -364,7 +378,7 @@ class SealedContentTokens:
     def _read(self, key: bytes, location) -> bytes:
         _, record, ids = self._record(key, location)
         payload = read_file_range(
-            ids, 4 * int(record["offset"]), 4 * int(record["count"])
+            ids, self.width * int(record["offset"]), self.width * int(record["count"])
         )
         if hashlib.sha256(payload).digest() != bytes(record["digest"]):
             raise ValueError("sealed token segment payload digest mismatch")
@@ -395,6 +409,10 @@ class SealedContentTokens:
             return None
         self.hits += 1
         return self.decode_ids(payload) if decode else payload
+
+    def decode_ids(self, payload: bytes) -> np.ndarray:
+        assert self.active is not None
+        return self.active.decode_ids(payload)
 
     def store(self, content: bytes, ids: np.ndarray) -> None:
         active = self.active

@@ -129,15 +129,15 @@ message instead of waiting.
 ### Sealed content segments
 
 A mixture declaration can set `token_cache: sealed`. This uses the same
-encoder and int32 append format for the active segment. The writer seals by
-rename before exceeding 256 MiB of tokens or 65,536 documents and at
-successful completion.
-A document that exceeds the byte target occupies its own segment. Sealing
+encoder and defaults to little-endian int32 for the active and sealed segments.
+The writer seals by rename before exceeding 67,108,864 tokens or 65,536
+documents and at successful completion.
+A document that exceeds the token limit occupies its own segment. Sealing
 syncs the active files and publishes them with `segment.json`, without
 copying their token bytes.
 
 The store namespace binds the exact tokenizer artifact SHA-256, installed
-tokenizers version, exact UTF-8 input, little-endian int32 encoding and the
+tokenizers version, exact UTF-8 input, physical token encoding and the
 choice to omit special tokens and EOS. Each index row binds the source
 content SHA-256 to the location, count and SHA-256 of its token IDs. The
 segment path is the digest of its canonical manifest, which binds both binary
@@ -150,13 +150,21 @@ sealed segments at a time. The locator can be rebuilt from the sealed
 indexes. A retry registers a segment that was published before the locator
 transaction finished. A lookup checks the sealed index and the digest of
 the requested token range. The mixture assembly's `progress.json` reports
-`sealed_token_cache_hits` and `published_token_segments`.
+`sealed_token_cache_hits`, `published_token_segments` and `sealed_token_dtype`.
 
 The `append` cache is the default. To try the `sealed` mode, use a new
 mixture output directory. The first run fills a separate cache for that
 encoding. Later sealed runs reuse content across mixture seeds, quotas and
 projects within the same work root. Either cache mode can produce contiguous
 output. The sealed cache can also back a reference schedule.
+
+Set `segment_dtype: uint16` alongside `token_cache: sealed` to use two-byte
+IDs in the segment token files. The tokenizer's complete vocabulary must
+use IDs in 0–65,535, and the writer refuses any emitted ID outside that range.
+The physical encoding is part of the segment identity, so the first uint16
+run fills its own cache. Contiguous mixture output, prepared arrays and
+decoded reference streams still use int32. Reference-only training and
+offline worker dispatch read the physical encoding from the sealed manifest.
 
 On an NVMe synthetic retained release with two workers and about 2 KiB of
 text per document, the median schedule times across three trials were:
@@ -171,6 +179,26 @@ fixture used 1.45 MB more logical space across the cold and warm builds,
 including the SQLite locator. A separate 65,536-document trial published
 two segments and reused both on the warm run. Production-scale and
 media-cold random access remain unmeasured.
+
+The retained-mixture benchmark compares widths with `--segment-dtype`,
+`--loader-blocks 8192` and `--portable-segments`. The figures below are
+medians of three paired trials on ext4 over NVMe. Each pair uses the same
+fixture, quotas and shuffled blocks of 1,024 targets. Decoded target,
+record, prepared token and batch digests all matched. The first loader
+pass followed Linux file-page eviction advice for the token files.
+
+| Documents | Sealed token bytes, int32 → uint16 | First pass, int32 → uint16 | Warm pass, int32 → uint16 |
+| --- | ---: | ---: | ---: |
+| 8,192 | 65.03 → 32.52 MB | 0.251 → 0.175 s | 0.056 → 0.056 s |
+| 32,768 | 260.15 → 130.07 MB | 0.633 → 0.455 s | 0.057 → 0.057 s |
+| 65,536 | 268.43 → 134.21 MB | 0.719 → 0.566 s | 0.058 → 0.058 s |
+
+On the largest fixture, first-pass storage reads went from 91.33 to
+60.99 MB. The unchanged index was 2.49 MB. Cold mixture scheduling took
+13.431 s with int32 and 13.161 s with uint16. Warm scheduling took 3.204 s
+and 3.021 s. Reference-only packing took 0.404 s and 0.412 s. Offline
+segment copy time went from 0.659 s to 0.338 s. These timings exclude
+network transfer, model execution and accelerator transfers.
 
 ## Mixture output
 

@@ -11,10 +11,16 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.mixture_index import MAX_ROW_BYTES, rows
 from klab.corpus.release_verify import current_settings
-from klab.data.token_segments import TOKEN_SEGMENT_MANIFEST, read_token_segment
+from klab.data.token_segments import (
+    SEGMENT_DTYPES,
+    TOKEN_SEGMENT_MANIFEST,
+    read_token_segment,
+)
 from klab.data.verification import VerifiedFile, verify_file
 from klab.owned_copy import owned_copy
 from klab.safe_io import read_file_range, symlinked
@@ -25,7 +31,6 @@ PORTABLE_SEGMENTS = "token-segments"
 SCHEDULE_RANGE = struct.Struct(
     "<IQI"
 )  # segment ordinal, token offset, targets including EOS
-_TOKEN = struct.Struct("<i")
 _SHA256 = re.compile("[0-9a-f]{64}")
 _FORMAT = "int32-segment-ranges"
 
@@ -93,6 +98,7 @@ class VerifiedSchedule:
     tokens: tuple[VerifiedFile, ...]
     indexes: tuple[VerifiedFile, ...]
     manifest_sha256: tuple[str, ...]
+    token_dtype: np.dtype
     eos: int
     target_count: int
 
@@ -141,13 +147,14 @@ class VerifiedSchedule:
     def ranges(self):
         total = 0
         seen = set()
+        width = self.token_dtype.itemsize
         with open_verified_schedule_member(self.schedule) as stream:
             while raw := stream.read(SCHEDULE_RANGE.size * 4096):
                 for segment, offset, count in SCHEDULE_RANGE.iter_unpack(raw):
                     if (
                         segment >= len(self.tokens)
                         or not 1 <= count <= MAX_ROW_BYTES // 4
-                        or offset + count - 1 > self.tokens[segment].size_bytes // 4
+                        or offset + count - 1 > self.tokens[segment].size_bytes // width
                     ):
                         raise ValueError("invalid mixture token range")
                     total += count
@@ -163,9 +170,17 @@ class VerifiedSchedule:
 
     def blocks(self, block_bytes: int, *, lengths=None):
         """Read scheduled ranges with bounded open files and append one EOS each."""
-        eos = _TOKEN.pack(self.eos)
+        width = self.token_dtype.itemsize
+        limit = block_bytes // 4 * width
+        eos = self.eos.to_bytes(width, "little")
         buffer = bytearray()
         streams = OrderedDict()
+
+        def logical_tokens(values):
+            if width == 4:
+                return values
+            widened = np.frombuffer(values, dtype=self.token_dtype).astype("<i4")
+            return memoryview(widened).cast("B")
 
         def close_streams():
             with ExitStack() as opened:
@@ -184,8 +199,8 @@ class VerifiedSchedule:
             for (segment, offset, count), expected in entries:
                 if count != expected:
                     raise ValueError("mixture schedule range differs from its record")
-                if len(buffer) + 4 * count > block_bytes and buffer:
-                    yield buffer
+                if len(buffer) + width * count > limit and buffer:
+                    yield logical_tokens(buffer)
                     buffer = bytearray()
                 if count > 1:
                     if segment not in streams:
@@ -199,12 +214,12 @@ class VerifiedSchedule:
                     streams.move_to_end(segment)
                     buffer.extend(
                         read_file_range(
-                            streams[segment][0], offset * 4, (count - 1) * 4
+                            streams[segment][0], offset * width, (count - 1) * width
                         )
                     )
                 buffer.extend(eos)
             if buffer:
-                yield buffer
+                yield logical_tokens(buffer)
             self.require_unchanged()
 
 
@@ -289,18 +304,26 @@ def verify_schedule(
             if proof.size_bytes != entry["size"]:
                 raise ValueError("mixture token segment size differs from its manifest")
             files.append(proof)
-        return *files, hashlib.sha256(canonical_json(manifest) + b"\n").hexdigest()
+        return (
+            *files,
+            hashlib.sha256(canonical_json(manifest) + b"\n").hexdigest(),
+            manifest["encoding"]["dtype"],
+        )
 
     workers = min(8, settings.workers, len(schedule["segments"]))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         files = list(pool.map(check, schedule["segments"], buffersize=workers))
-    tokens, indexes, manifests = zip(*files, strict=True)
+    tokens, indexes, manifests, encodings = zip(*files, strict=True)
+    dtype = SEGMENT_DTYPES[encodings[0]]
+    if len(set(encodings)) != 1 or eos >= 2 ** (8 * dtype.itemsize):
+        raise ValueError("invalid physical token encoding for the mixture schedule")
     return VerifiedSchedule(
         cache_root.resolve(),
         schedule_file,
         tokens,
         indexes,
         manifests,
+        dtype,
         eos,
         targets,
     )

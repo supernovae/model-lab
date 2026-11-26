@@ -60,6 +60,8 @@ class ReferencedTokenArray:
         pad: int,
     ) -> None:
         self.schedule = schedule
+        self.token_dtype = schedule.token_dtype
+        self.token_width = self.token_dtype.itemsize
         self.bos, self.pad = bos, pad
         self.records = receipt["records"]
         self.landmarks = array("Q")
@@ -139,9 +141,11 @@ class ReferencedTokenArray:
 
     def _content(self, segment: int, offset: int, count: int) -> np.ndarray:
         stream = self._segment(segment)
-        raw = read_file_range(stream, 4 * offset, 4 * count)
+        raw = read_file_range(
+            stream, self.token_width * offset, self.token_width * count
+        )
         require_schedule_generation(self.schedule.tokens[segment], stream.fileno())
-        return np.frombuffer(raw, dtype="<i4")
+        return np.frombuffer(raw, dtype=self.token_dtype)
 
     def __getitem__(self, key: slice) -> np.ndarray:
         start, stop, step = key.indices(self.length)
@@ -159,7 +163,10 @@ class ReferencedTokenArray:
             document, segment, offset = entries[row]
             end = ends[row]
             if document <= position == start < stop < end:
-                return self._content(segment, offset + start - document, stop - start)
+                content = self._content(
+                    segment, offset + start - document, stop - start
+                )
+                return content if self.token_width == 4 else content.astype(self.dtype)
             if values is None:
                 values = np.full(stop - start, self.pad, dtype=self.dtype)
             if position < document:
