@@ -2410,6 +2410,12 @@ license labels. Tokenizer output under `tokenizer/` and prepared data under
 the export receipt. Use `klab corpus verify-export RUN.yaml --cold` to replay
 the release and export checks from bytes.
 
+Export creation and cold verification resolve split and evidence files through
+the verified release reader. Repeating the same export with a valid receipt
+reuses the exact counts and license labels. It derives both configs from the
+requested base again, compares their bytes and checks the export generation
+before returning. A missing or stale receipt repeats the scans.
+
 Export combines declared source licenses with the exact license labels on
 normalized documents. When document-level labels are present, the scan uses
 line-aligned ranges under the Corpus worker limit. Pass the same
@@ -2436,6 +2442,16 @@ Process reads for verification fell from 229 MB to 1.4 MB. These runs
 measure export creation and verification. Production-scale and slower
 storage measurements remain open.
 [#450](https://github.com/supernovae/model-lab/issues/450)
+
+For repeated export creation, the following local measurements used built
+and frozen synthetic LM corpora, one worker and warm signed receipts.
+Wall times and process reads are medians of three repeats per size. The
+payload sizes include documents and the train and validation views.
+
+| Documents | Payload | Wall time before / after | Logical reads before / after |
+| --- | ---: | ---: | ---: |
+| 128 | 12.97 MB | 19.9 / 10.9 ms | 13.30 / 0.19 MB |
+| 512 | 51.89 MB | 57.4 / 20.6 ms | 52.95 / 0.58 MB |
 
 ### Export license scan measurements
 

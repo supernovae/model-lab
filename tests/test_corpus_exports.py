@@ -138,6 +138,7 @@ def test_export_seals_immutable_inputs_before_first_verification(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "settings"))
     root = tmp_path / "work"
     root.mkdir(mode=0o700)
+    base = Path("configs/runtime_smoke_cpu.yaml")
     options = verification_options(root)
     checks = []
     verify = export._verify_release_export_cold
@@ -148,9 +149,7 @@ def test_export_seals_immutable_inputs_before_first_verification(
 
     monkeypatch.setattr(export, "_verify_release_export_cold", observe)
     with _private_corpus_files():
-        exported = export_release(
-            release, "lm", Path("configs/runtime_smoke_cpu.yaml"), 300, root, **options
-        )
+        exported = export_release(release, "lm", base, 300, root, **options)
         dataset = _dataset(exported)
         binding = verify_release_export(dataset, **options)
         for member in ("tokenizer/tokenizer.json", "prepared/shard.bin"):
@@ -159,6 +158,15 @@ def test_export_seals_immutable_inputs_before_first_verification(
             path.write_bytes(b"derived output")
         assert verify_release_export(dataset, **options) == binding
         assert len(checks) == 0
+
+        def unexpected_payload_scan(*args, **kwargs):
+            pytest.fail("authenticated export repeated a payload scan")
+
+        with monkeypatch.context() as reuse:
+            reuse.setattr(export, "split_stats", unexpected_payload_scan)
+            reuse.setattr(export, "release_licenses", unexpected_payload_scan)
+            assert export_release(release, "lm", base, 300, root, **options) == exported
+
         assert (
             verify_release_export(dataset, **verification_options(root, cold=True))
             == binding
@@ -172,6 +180,23 @@ def test_export_seals_immutable_inputs_before_first_verification(
         with pytest.raises(ValueError, match="corpus export config changed"):
             verify_release_export(dataset, **options)
         assert len(checks) == 2
+        config.write_bytes(original)
+
+        # Verification authenticates the dataset and counts. Export creation
+        # additionally requires the exact derivation from the requested base.
+        run_path = exported / "run.yaml"
+        run = yaml.safe_load(run_path.read_text())
+        run["seed"] += 1
+        run_path.write_text(yaml.safe_dump(run, sort_keys=True))
+        sidecar = _sidecar(exported)
+        sidecar["run_config_sha256"] = sha256_file(run_path)
+        _write_sidecar(exported, sidecar)
+        assert verify_release_export(dataset, **options)["release_id"] == release.name
+        with monkeypatch.context() as reuse:
+            reuse.setattr(export, "split_stats", unexpected_payload_scan)
+            reuse.setattr(export, "release_licenses", unexpected_payload_scan)
+            with pytest.raises(ValueError, match="existing corpus export has changed"):
+                export_release(release, "lm", base, 300, root, **options)
 
 
 @pytest.mark.parametrize(
@@ -562,14 +587,14 @@ def test_sharded_split_statistics_match_a_single_pass_and_name_the_bad_line(
     monkeypatch.setattr(shards, "PARALLEL_MIN_BYTES", 0)
     monkeypatch.setattr(shards, "CHUNK_BYTES", 500)
     with verification_settings(workers=3):
-        assert export._split_stats(path, "lm") == (
+        assert export.split_stats(path, "lm") == (
             200,
             sum(len(f"line {n} é".encode()) for n in range(200)),
         )
         rows[137] = b'{"text": " "}'
         path.write_bytes(b"\n".join(rows) + b"\n")
         with pytest.raises(ValueError, match=r"invalid LM record at .*:138"):
-            export._split_stats(path, "lm")
+            export.split_stats(path, "lm")
 
         chat = tmp_path / "chat.jsonl"
         good = canonical_json(
@@ -582,4 +607,4 @@ def test_sharded_split_statistics_match_a_single_pass_and_name_the_bad_line(
         )
         chat.write_bytes((good + b"\n") * 35 + b'{"messages":[],"messages":[]}\n')
         with pytest.raises(ValueError, match=r"chat\.jsonl:36: .*duplicate JSON key"):
-            export._split_stats(chat, "chat")
+            export.split_stats(chat, "chat")

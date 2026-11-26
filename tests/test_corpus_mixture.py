@@ -457,7 +457,9 @@ def test_yaml_mixture_consumer_and_storage_identity_are_independent_of_cwd(
     )
     from klab.corpus import export
 
-    monkeypatch.setattr(export, "_licenses", lambda path: "local research")
+    monkeypatch.setattr(
+        export, "release_licenses", lambda sources, documents: "local research"
+    )
     raw = load_config(
         Path(__file__).resolve().parents[1] / "configs/runtime_smoke_cpu.yaml"
     ).model_dump(mode="json")
@@ -843,7 +845,9 @@ def test_mixture_dataset_binds_train_validation_and_tokenizer(
     )
     from klab.corpus import export
 
-    monkeypatch.setattr(export, "_licenses", lambda path: "local research")
+    monkeypatch.setattr(
+        export, "release_licenses", lambda sources, documents: "local research"
+    )
     dataset = DatasetConfig(
         source="local_token_mixture",
         revision=release.name,

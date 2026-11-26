@@ -2743,6 +2743,7 @@ class ReleaseReader:
 
     root: Path
     manifest: dict[str, Any]
+    generation: str
 
     def member(self, name: str) -> Path:
         if name not in self.manifest["files"]:
@@ -2752,13 +2753,30 @@ class ReleaseReader:
     def rows(self, name: str) -> Iterator[dict[str, Any]]:
         return iter_rows(self.member(name))
 
+    def require_unchanged(self) -> None:
+        """Check the verified generation before publishing a dependent artifact."""
+        from klab.corpus.release_receipt import fingerprint
+
+        if fingerprint(self.root) != self.generation:
+            raise ValueError("release changed after verification")
+
 
 @contextmanager
-def open_release(path: Path) -> Iterator[ReleaseReader]:
+def open_release(
+    path: Path,
+    *,
+    proof_store: ProofStore | None = None,
+    verification_mode: VerificationMode | None = None,
+) -> Iterator[ReleaseReader]:
     """Verify once and check that the inspected release generation stays stable."""
     root = Path(path).resolve()
     with _verification_operation():
-        yield ReleaseReader(root, verify_release(root))
+        manifest = verify_release(
+            root, proof_store=proof_store, verification_mode=verification_mode
+        )
+        proofs = _verified_releases.get()
+        assert proofs is not None
+        yield ReleaseReader(root, manifest, proofs[root].fingerprint)
 
 
 def sources(path: Path) -> dict[str, Any]:
