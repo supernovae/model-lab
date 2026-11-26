@@ -115,9 +115,26 @@ def prepare(
         native_plan = ("corpus", "plan", project, flag, "--json")
         build_args = ("corpus", "build", project, "--offline", flag)
         expected = lab.json(*native_plan)["build_id"]
+        part = json.loads((inline_build / "build.json").read_bytes())[
+            "span_partitions"
+        ][0]
+        prune = (
+            "corpus",
+            "release-prune",
+            "--kind",
+            "normalized",
+            "--partition",
+            f"{part['source_id']}/{part['partition_key']}",
+            "--json",
+        )
 
         def stop_build(source, destination):
             if destination.name == expected:
+                with pytest.raises(SystemExit) as blocked:
+                    lab.run(*prune, "--apply")
+                assert blocked.value.code == 1
+                busy = json.loads(capsys.readouterr().out.splitlines()[-1])
+                assert busy["status"] == "blocked" and not busy["payloads"]
                 raise InterruptedError("before publishing the projected build")
             rename(source, destination)
 
@@ -152,6 +169,9 @@ def prepare(
                 row["reason"] == "unsealed_build" for row in unsealed["problems"]
             )
             assert all(row["staging_builds"] is None for row in unsealed["partitions"])
+            selected = lab.json(*prune)["payloads"][0]
+            assert selected["action"] == "protected"
+            assert selected["resumable_builds"] == 1 and selected["staging_builds"] == 0
         finally:
             saved.rename(control)
 
@@ -209,6 +229,14 @@ def prepare(
             == span_step["partitions"]
         )
         assert all(row["published_releases"] == 0 for row in staged["partitions"])
+        with pytest.raises(SystemExit) as blocked:
+            lab.run(*prune, "--apply")
+        assert blocked.value.code == 1
+        retained = json.loads(capsys.readouterr().out.splitlines()[-1])
+        assert retained["status"] == "blocked" and not retained["pruned"]
+        selected = retained["payloads"][0]
+        assert selected["action"] == "protected" and selected["staging_releases"] == 1
+        assert selected["resumable_builds"] == 0
         releasing = build.parents[1] / "releases" / f".freezing-{build.name}"
         moved = releasing.with_name(".displaced-freeze")
         releasing.rename(moved)

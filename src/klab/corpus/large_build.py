@@ -41,6 +41,11 @@ from klab.corpus.build_outputs import (
 )
 from klab.corpus.build_stages import StageStore, implementation_digests, run_stage
 from klab.corpus.duplicate_evidence import source_rank
+from klab.corpus.normalized_retention import (
+    bind_normalized_view,
+    clear_normalized_use,
+    record_normalized_use,
+)
 from klab.corpus.normalized_spans import (
     NORMALIZED_SPANS,
     SPAN_MEMBER,
@@ -963,6 +968,9 @@ def build_large(
         prepared_root = root / "prepared"
     prepared_root.mkdir(parents=True, exist_ok=True)
     sources = sorted(project.sources, key=lambda source: source.id)
+    source_ids = [source.id for source in sources]
+    if canary is None:
+        record_normalized_use(workspace.resolve(), build_id, source_ids)
     transform = project.transforms[0]
     rights_files: list[dict[str, Any]] = []
     source_events: list[Path | dict[str, Any]] = []
@@ -1193,6 +1201,14 @@ def build_large(
     groups_root = stages.root / f".index-{index_key}.groups"
     if groups_root.is_symlink():
         raise ValueError(f"symlinked index checkpoint: {groups_root}")
+    if canary is None:
+        record_normalized_use(
+            workspace.resolve(),
+            build_id,
+            source_ids,
+            partitions=prepared,
+            checkpoints=(groups_root.name,),
+        )
     group_store = StageStore(groups_root)
     progress.update(phase="indexing")
 
@@ -1254,6 +1270,14 @@ def build_large(
     dedup_groups_root = stages.root / f".dedup-{stages.key(dedup_inputs)}.groups"
     if dedup_groups_root.is_symlink():
         raise ValueError(f"symlinked dedup checkpoint: {dedup_groups_root}")
+    if canary is None:
+        record_normalized_use(
+            workspace.resolve(),
+            build_id,
+            source_ids,
+            partitions=prepared,
+            checkpoints=(groups_root.name, dedup_groups_root.name),
+        )
 
     def dedup_stage(staging: Path, result: dict[str, Any]) -> None:
         # The decisions are a narrow table beside the index, not a copy of it.
@@ -1306,6 +1330,8 @@ def build_large(
         staging = view_root / "build"
         if view_root.is_symlink() or staging.is_symlink():
             raise ValueError(f"symlinked build checkpoint: {view_root}")
+        if canary is None:
+            bind_normalized_view(view_root.resolve(), build_id)
         staging.mkdir(parents=True, exist_ok=True)
         # An interruption during publication may have left a manifest from the
         # previous attempt. The inventory must never include the manifest itself.
@@ -1386,5 +1412,7 @@ def build_large(
     with (workspace / ".index.lock").open("a") as index_lock:
         fcntl.flock(index_lock, fcntl.LOCK_EX)
         stages.prune("index", keep=keep_stages)
+    if canary is None:
+        clear_normalized_use(workspace.resolve(), build_id)
     progress.record("complete")
     return target

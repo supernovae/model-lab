@@ -765,7 +765,8 @@ digest-based publication.
 Keep the referenced span files and their receipts under
 `WORK/cache/corpus/normalized` when moving or retaining referenced builds
 and releases.
-`klab corpus release-prune` only manages the two digest-based stores.
+The [explicit prune commands](#prune-shared-artifacts) account for these
+references.
 
 Three synthetic Linux tmpfs trials per size compared the span-emission
 phase on fixed-width 1 KiB JSONL records. Reference sealing read the span
@@ -1056,6 +1057,8 @@ largest scan counted 1.64 GB of logical payload sizes from metadata.
 | 5,000 | 400 | 128 ms | 1.04 MB | 45 MiB |
 | 25,000 | 2,000 | 658 ms | 5.18 MB | 54 MiB |
 
+### Prune shared artifacts
+
 Preview pruning an exact digest and apply the same selection with:
 
 ```sh
@@ -1072,11 +1075,10 @@ is held, or the release-root scan is incomplete. An already absent digest
 can be retried safely. JSON reports each removed digest and logical bytes
 removed. A refusal or partial apply exits nonzero.
 
-This operation covers the two release payload stores. Exports, prepared
-bundles and runs that use those stores reach the files through their release
-manifests. Retain those manifests in the work area for the lifetime of their
-consumers. Archives of a release need the seal, shared payloads and source
-snapshots together.
+Exports, prepared bundles and runs that use the digest stores reach the
+files through their release manifests. Retain those manifests in the work
+area for the lifetime of their consumers. Archives of a release need the
+seal, shared payloads and source snapshots together.
 
 Three Linux tmpfs trials per size measured explicit prune batches against
 synthetic manifests with ten shared stage references each. The largest
@@ -1088,6 +1090,48 @@ the root scan and publisher locks. Reads cover manifests and metadata.
 | 40 | 8 | 14.96 ms | 15.30 ms | 0.10 MB |
 | 400 | 32 | 111.43 ms | 111.38 ms | 1.04 MB |
 | 2,000 | 64 | 483.26 ms | 482.36 ms | 5.18 MB |
+
+Select a normalized partition using its `artifact_id` from `klab corpus artifacts`:
+
+```sh
+klab --work-dir WORK corpus release-prune --kind normalized --partition SOURCE/KEY --json
+klab --work-dir WORK corpus release-prune --kind normalized --partition SOURCE/KEY --apply --json
+```
+
+Repeat `--partition` to select multiple partitions. Preview reports build,
+release and resumable-build references for each selection. A native build
+pins its declared source namespaces before normalization, narrows the pin
+to exact partition keys once resolved, and clears it after publication.
+Published builds and releases protect normalized dependencies recorded in
+their manifests. An inline build's optional span catalog is a reuse
+candidate. If its partitions have been pruned, start a fresh build with
+`--reference-normalized-spans` to create a referenced release.
+
+Apply takes the normalized build lease, the release publication lease and
+the selected partition writer locks before checking the roots again. Run
+Corpus build and freeze commands from this revision or later while using
+normalized prune on the same work area. Finish interrupted older native
+checkpoints on their original revision when the scan reports them as
+unregistered. Apply requires an owned store and refuses a batch with a
+protected selection, an incomplete scan or a held lease. The payload bytes
+stay unread. Apply removes the exact published partition directory and its
+receipt. If removal is interrupted after the atomic rename, preview shows
+`interrupted_prune` and the same selection can finish the removal.
+
+Three synthetic Linux tmpfs trials per size measured normalized prune
+with matching counts of release manifests and build roots, plus up to ten
+resumable declarations. The 64-partition batch removed 71.34 MB of logical
+files. The measurements include root and receipt checks, locking and
+retirement. An exact 25,000-partition declaration took a median 21.6 ms to
+write and occupied 1.88 MB. These figures cover the metadata operations.
+
+| Release manifests and build roots, each | Selected partitions | Median preview | Median apply | Apply process reads |
+| ---: | ---: | ---: | ---: | ---: |
+| 20 | 4 | 4.7 ms | 5.4 ms | 0.11 MB |
+| 200 | 16 | 74.5 ms | 77.0 ms | 2.98 MB |
+| 1,000 | 64 | 608 ms | 620 ms | 28.85 MB |
+
+### Build publication and recovery
 
 `build` normalizes admitted documents, applies the frozen splits, removes exact
 duplicates (refusing cross-split or incompatible-rights duplicates) and writes

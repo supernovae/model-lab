@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from klab.canonical import canonical_digest
+from klab.corpus.normalized_retention import VIEW_INPUTS, normalized_uses
 from klab.corpus.normalized_spans import (
     NORMALIZED_SPANS,
     has_span_projection,
@@ -24,12 +25,14 @@ from klab.corpus.normalized_spans import (
 from klab.corpus.prepared_shards import normalized_store_root
 from klab.corpus.release_members import (
     SHARED_STAGE,
+    normalized_partition_lease,
+    normalized_retention_lease,
     release_retention_lease,
     shared_members,
     shared_payload_lease,
     shared_store,
 )
-from klab.safe_io import symlinked
+from klab.safe_io import rename_noreplace, symlinked
 from klab.verification_proofs import ProofStore, writable_by_others
 
 _SOURCE = re.compile(r"[a-z][a-z0-9_-]*")
@@ -38,6 +41,17 @@ _INCOMPLETE = ".incomplete-"
 _FREEZING = ".freezing-"
 _VIEW = ".views-"
 _PREFIX = re.compile(r"[0-9a-f]{2}")
+_NATIVE_CHECKPOINT = re.compile(r"\.(index|dedup)-[0-9a-f]{64}\.groups")
+_NORMALIZED_PAYLOADS = frozenset({"docs.jsonl", "spans.jsonl", "rejected.jsonl"})
+
+
+def _partition_id(value: str) -> tuple[str, str]:
+    source, _, key = value.partition("/")
+    if not _SOURCE.fullmatch(source) or not _KEY.fullmatch(key):
+        raise ValueError(
+            "normalized partition must be a source ID and full computation key"
+        )
+    return source, key
 
 
 @contextmanager
@@ -422,15 +436,33 @@ def _build_references(
     scan: _RetentionScan,
     artifact_ids: set[str],
     release_builds: dict[tuple[str, str], str],
+    declared_builds: set[tuple[str, str]] | None = None,
 ) -> dict[str, _ArtifactReferences]:
     references: dict[str, _ArtifactReferences] = {}
+
+    def known_view(root: Path, project: Path, published: set[str]) -> bool:
+        if declared_builds is None:
+            return False
+        binding = scan.control(root.parent, VIEW_INPUTS, optional=True)
+        if binding is None or set(binding) != {"build_id"}:
+            return False
+        build_id = binding["build_id"]
+        return build_id in published or (project.name, build_id) in declared_builds
+
     for project in _project_roots(scan):
+        published: set[str] = set()
         for root, staging in _build_roots(scan, project):
-            if not scan.directory(root):
-                scan.issue(root, "missing_build_directory")
-                continue
-            path = root / "consumed.json"
+            path = root
             try:
+                if not scan.directory(root):
+                    if not (
+                        staging
+                        and scan.observed[root] is None
+                        and known_view(root, project, published)
+                    ):
+                        scan.issue(root, "missing_build_directory")
+                    continue
+                path = root / "consumed.json"
                 if (
                     not staging
                     and (marker := scan.control(root, path.name, optional=True))
@@ -445,13 +477,15 @@ def _build_references(
                         == root.name
                     ):
                         scan.consumed_builds += 1
+                        published.add(root.name)
                     else:
                         scan.issue(path, "missing_consumed_release")
                     continue
                 path = root / "build.json"
                 manifest = scan.control(root, path.name, optional=staging)
                 if manifest is None:
-                    scan.issue(path, "unsealed_build")
+                    if not (staging and known_view(root, project, published)):
+                        scan.issue(path, "unsealed_build")
                     continue
                 identity = manifest["identity"]
                 build_id = manifest["build_id"]
@@ -474,6 +508,8 @@ def _build_references(
                 continue
             scan.staging_build_manifests += staging
             scan.build_manifests += not staging
+            if not staging:
+                published.add(root.name)
             _count_references(
                 scan,
                 path,
@@ -483,6 +519,77 @@ def _build_references(
                 artifact_ids=artifact_ids,
             )
     return references
+
+
+def _resumable_normalized_use(
+    scan: _RetentionScan, artifact_ids: set[str]
+) -> tuple[dict[str, int], set[tuple[str, str]]]:
+    """Resolve durable native pins and refuse unknown interrupted stage roots."""
+    selected: dict[str, set[str]] = {}
+    for artifact_id in artifact_ids:
+        source, _ = _partition_id(artifact_id)
+        selected.setdefault(source, set()).add(artifact_id)
+    counts = dict.fromkeys(artifact_ids, 0)
+    declared_builds: set[tuple[str, str]] = set()
+    for project in _project_roots(scan):
+        known_checkpoints: set[str] = set()
+        root = normalized_uses(project)
+        if scan.directory(root):
+            for path in root.iterdir():
+                if not path.name.endswith(".json") or not _KEY.fullmatch(path.stem):
+                    continue
+                try:
+                    record = scan.control(root, path.name)
+                    if record is None:
+                        continue
+                    body = record["body"]
+                    sources = body["sources"]
+                    checkpoints = body["checkpoints"]
+                    partitions = body["partitions"]
+                    if (
+                        canonical_digest(body) != record["sha256"]
+                        or body["schema_version"] != 1
+                        or body["build_id"] != path.stem
+                        or not isinstance(sources, list)
+                        or any(not _SOURCE.fullmatch(source) for source in sources)
+                        or not isinstance(checkpoints, list)
+                        or any(
+                            not _NATIVE_CHECKPOINT.fullmatch(name)
+                            for name in checkpoints
+                        )
+                        or (partitions is not None and not isinstance(partitions, list))
+                    ):
+                        raise ValueError("invalid normalized build inputs")
+                    source_keys = set(sources)
+                    if partitions is None:
+                        retained = {
+                            item
+                            for source in source_keys
+                            for item in selected.get(source, ())
+                        }
+                    else:
+                        if any(
+                            _partition_id(item)[0] not in source_keys
+                            for item in partitions
+                        ):
+                            raise ValueError("normalized input outside build sources")
+                        retained = artifact_ids.intersection(partitions)
+                except OSError, ValueError, KeyError, TypeError, AttributeError:
+                    scan.issue(path, "invalid_normalized_build_inputs")
+                    continue
+                declared_builds.add((project.name, path.stem))
+                known_checkpoints.update(checkpoints)
+                for artifact_id in retained:
+                    counts[artifact_id] += 1
+        stages = project / "builds" / "stages"
+        if scan.directory(stages):
+            for checkpoint in stages.iterdir():
+                if _NATIVE_CHECKPOINT.fullmatch(checkpoint.name) and (
+                    not scan.directory(checkpoint)
+                    or checkpoint.name not in known_checkpoints
+                ):
+                    scan.issue(checkpoint, "unregistered_native_checkpoint")
+    return counts, declared_builds
 
 
 def _normalized_reference_report(
@@ -738,6 +845,218 @@ def prune_shared_release_payloads(
     return {
         **result,
         "status": "partial" if removed else "blocked",
+        "reason": reason,
+        "pruned_bytes": pruned_bytes,
+    }
+
+
+def _selected_partition_bytes(
+    scan: _RetentionScan, path: Path, artifact_id: str, *, retired: bool = False
+) -> int | None:
+    if not scan.directory(path):
+        return None
+    members: dict[str, int] = {}
+    with _directory(path) as directory, os.scandir(directory) as entries:
+        for entry in entries:
+            info = entry.stat(follow_symlinks=False)
+            scan.observe(path / entry.name, info)
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError(
+                    f"non-file in selected normalized partition: {path / entry.name}"
+                )
+            members[entry.name] = info.st_size
+    expected = {*_NORMALIZED_PAYLOADS, "receipt.json"}
+    if retired:
+        if members.keys() - expected:
+            raise ValueError(f"unexpected retired partition members: {path}")
+        return sum(members.values())
+    if members.keys() != expected:
+        raise ValueError(f"unexpected normalized partition members: {path}")
+    try:
+        receipt = scan.control(path, "receipt.json")
+        if receipt is None:
+            return None
+        source, key = _partition_id(artifact_id)
+        identity = receipt["identity"]
+        files = receipt["files"]
+        if (
+            receipt["schema_version"] != 1
+            or receipt["key"] != key
+            or identity["source_id"] != source
+            or identity["artifact_type"] != "normalized_source_partition"
+            or canonical_digest(identity) != key
+            or files.keys() != _NORMALIZED_PAYLOADS
+            or any(files[name]["size"] != members[name] for name in files)
+        ):
+            raise ValueError("partition receipt differs from selected members")
+    except (AttributeError, KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"invalid normalized partition receipt: {path}") from error
+    return sum(members.values())
+
+
+def _remove_retired_partition(namespace: int, name: str) -> None:
+    with _directory(name, parent=namespace) as retired:
+        for member in (*sorted(_NORMALIZED_PAYLOADS), "receipt.json"):
+            try:
+                os.unlink(member, dir_fd=retired)
+            except FileNotFoundError:
+                continue
+        os.fsync(retired)
+    os.rmdir(name, dir_fd=namespace)
+    os.fsync(namespace)
+
+
+def prune_normalized_partitions(
+    work_root: Path, *, partitions: list[str], apply: bool = False
+) -> dict[str, Any]:
+    """Preview or remove selected normalized partitions outside retained roots."""
+    if not partitions:
+        raise ValueError("prune requires explicit normalized partition IDs")
+    work_root = work_root.absolute()
+    store = normalized_store_root(work_root)
+    paths = {
+        item: store.joinpath(*_partition_id(item)) for item in sorted(set(partitions))
+    }
+    rows: list[dict[str, Any]] = []
+    removed: list[str] = []
+    changed = False
+    pruned_bytes = 0
+    result = {"store": str(store), "payloads": rows, "pruned": removed}
+    try:
+        trust = ProofStore(work_root, read_only=True)
+        if not trust.trusted(work_root):
+            raise ValueError("normalized prune requires an owned work root")
+        if symlinked(store) or (store.exists() and not trust.trusted(store)):
+            raise ValueError("unsafe normalized partition store")
+        with ExitStack() as locks:
+            leased = set()
+            if apply:
+                locks_root = work_root / "artifacts" / "corpus"
+                for lock in (
+                    locks_root.parent,
+                    locks_root,
+                    locks_root / ".normalized-retention.lock",
+                    locks_root / ".release-retention.lock",
+                ):
+                    if (lock.exists() or lock.is_symlink()) and not trust.trusted(lock):
+                        raise ValueError(f"unsafe Corpus retention lock scope: {lock}")
+                locks.enter_context(normalized_retention_lease(work_root, prune=True))
+                locks.enter_context(release_retention_lease(work_root, prune=True))
+            retired_paths = {
+                item: path.with_name(f".pruned-{path.name}")
+                for item, path in paths.items()
+            }
+            for item, path in paths.items():
+                retired = retired_paths[item]
+                if (
+                    symlinked(path)
+                    or symlinked(retired)
+                    or (path.parent.exists() and not trust.trusted(path.parent))
+                ):
+                    raise ValueError(f"unsafe normalized partition: {path}")
+                if apply and (path.exists() or retired.exists()):
+                    lock_dir = path.parent / ".locks"
+                    lock_path = lock_dir / path.name
+                    if symlinked(lock_path) or any(
+                        entry.exists() and not trust.trusted(entry)
+                        for entry in (lock_dir, lock_path)
+                    ):
+                        raise ValueError(f"unsafe normalized writer lock: {lock_path}")
+                    locks.enter_context(normalized_partition_lease(path))
+                    leased.add(item)
+
+            scan = _RetentionScan(work_root, owned=True)
+            selected = set(paths)
+            release_builds: dict[tuple[str, str], str] = {}
+            releases = _release_references(
+                scan,
+                NORMALIZED_SPANS,
+                artifact_ids=selected,
+                release_builds=release_builds,
+            )
+            resumable, declared = _resumable_normalized_use(scan, selected)
+            builds = _build_references(scan, selected, release_builds, declared)
+
+            candidates: list[tuple[str, int | None, int | None]] = []
+            for item, path in paths.items():
+                release = releases.get(item)
+                build = builds.get(item)
+                size = _selected_partition_bytes(scan, path, item)
+                retired_size = _selected_partition_bytes(
+                    scan, retired_paths[item], item, retired=True
+                )
+                exists = size is not None or retired_size is not None
+                if apply and exists and item not in leased:
+                    raise ValueError(
+                        f"normalized partition appeared during prune: {item}"
+                    )
+                protected = bool(release or build or resumable[item])
+                rows.append(
+                    {
+                        "artifact_id": item,
+                        "action": "protected"
+                        if protected
+                        else ("prune" if exists else "missing"),
+                        "bytes": (size or 0) + (retired_size or 0),
+                        "published_releases": release.published if release else 0,
+                        "staging_releases": release.staging if release else 0,
+                        "published_builds": build.published if build else 0,
+                        "staging_builds": build.staging if build else 0,
+                        "resumable_builds": resumable[item],
+                        "interrupted_prune": retired_size is not None,
+                    }
+                )
+                if exists and not protected:
+                    candidates.append((item, size, retired_size))
+            scan.check_generations()
+            if scan.problem_count:
+                return {
+                    **result,
+                    "status": "blocked",
+                    "payloads": [],
+                    "reason": "normalized root scan was incomplete",
+                    "problems": scan.problems,
+                    "pruned_bytes": 0,
+                }
+            if not apply:
+                return {**result, "status": "planned", "pruned_bytes": 0}
+            if any(row["action"] == "protected" for row in rows):
+                raise ValueError(
+                    "requested partition is retained by a build or release"
+                )
+            for item, size, retired_size in candidates:
+                path, retired = paths[item], retired_paths[item]
+                with _directory(path.parent) as namespace:
+                    for entry, entry_size in ((path, size), (retired, retired_size)):
+                        if entry_size is not None:
+                            info = os.stat(
+                                entry.name, dir_fd=namespace, follow_symlinks=False
+                            )
+                            if _stamp(info) != scan.observed[entry]:
+                                raise ValueError(
+                                    f"normalized partition changed during prune: {item}"
+                                )
+                    if retired_size is not None:
+                        changed = True
+                        _remove_retired_partition(namespace, retired.name)
+                        pruned_bytes += retired_size
+                    if size is not None:
+                        rename_noreplace(path, retired)
+                        changed = True
+                        os.fsync(namespace)
+                        _remove_retired_partition(namespace, retired.name)
+                        pruned_bytes += size
+                    removed.append(item)
+            return {**result, "status": "pruned", "pruned_bytes": pruned_bytes}
+    except BlockingIOError:
+        reason = (
+            "native build, shared release publication, or prune holds a required lock"
+        )
+    except (OSError, ValueError) as error:
+        reason = str(error)
+    return {
+        **result,
+        "status": "partial" if changed else "blocked",
         "reason": reason,
         "pruned_bytes": pruned_bytes,
     }

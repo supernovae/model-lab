@@ -161,6 +161,7 @@ def _run(args: argparse.Namespace) -> None:
     if command in {"artifacts", "release-prune"}:
         from klab.corpus.artifact_inventory import (
             normalized_inventory,
+            prune_normalized_partitions,
             prune_shared_release_payloads,
             shared_release_inventory,
         )
@@ -171,17 +172,23 @@ def _run(args: argparse.Namespace) -> None:
             None,
         )
         if command == "release-prune":
-            assert storage is not None
-            result = prune_shared_release_payloads(
-                root,
-                storage=storage,
-                digests=args.digest,
-                apply=args.apply,
-            )
+            if args.kind == "normalized":
+                if args.partition is None:
+                    raise ValueError("normalized prune requires --partition SOURCE/KEY")
+                result = prune_normalized_partitions(
+                    root, partitions=args.partition, apply=args.apply
+                )
+            else:
+                if args.digest is None:
+                    raise ValueError("shared release prune requires --digest SHA256")
+                assert storage is not None
+                result = prune_shared_release_payloads(
+                    root, storage=storage, digests=args.digest, apply=args.apply
+                )
             if args.json:
                 print(json.dumps(result, sort_keys=True))
             else:
-                print(f"Shared release prune {result['status']} ({result['store']})")
+                print(f"Corpus prune {result['status']} ({result['store']})")
                 for row in result["payloads"]:
                     print(
                         f"  {row['action']} {row['artifact_id']} ({row['bytes']:,} bytes)"
@@ -869,10 +876,14 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     command.set_defaults(handler=_handle)
     command = sub.add_parser(
         "release-prune",
-        help="Preview or remove explicitly selected unreferenced shared release digests",
+        help="Preview or remove explicitly selected unreferenced Corpus artifacts",
     )
-    command.add_argument("--kind", choices=tuple(SHARED_STORES.values()), required=True)
-    command.add_argument("--digest", action="append", required=True)
+    command.add_argument(
+        "--kind", choices=("normalized", *SHARED_STORES.values()), required=True
+    )
+    selected = command.add_mutually_exclusive_group(required=True)
+    selected.add_argument("--digest", action="append", metavar="SHA256")
+    selected.add_argument("--partition", action="append", metavar="SOURCE/KEY")
     command.add_argument("--apply", action="store_true")
     command.add_argument("--json", action="store_true")
     command.set_defaults(handler=_handle)

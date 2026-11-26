@@ -9,7 +9,7 @@ import shutil
 import tempfile
 from collections import Counter, defaultdict
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -1102,34 +1102,49 @@ def _build_stored(
     if target.exists() and canary is None:
         from klab.corpus.release import consumed_release, verify_build
 
-        if consumed_release(target) is not None:
-            return target
-        verify_build(
-            target, proof_store=proof_store, verification_mode=verification_mode
-        )
+        if consumed_release(target) is None:
+            verify_build(
+                target, proof_store=proof_store, verification_mode=verification_mode
+            )
+        if large_lm_build:
+            from klab.corpus.normalized_retention import (
+                clear_normalized_use,
+                normalized_uses,
+            )
+            from klab.corpus.release_members import normalized_retention_lease
+
+            if (normalized_uses(workspace) / f"{build_id}.json").exists():
+                with normalized_retention_lease(Path(work_root).resolve()):
+                    clear_normalized_use(workspace.resolve(), build_id)
         return target
     if large_lm_build:
         from klab.corpus.large_build import build_large
         from klab.corpus.prepared_shards import normalized_store_root
         from klab.corpus.progress import BuildProgress
+        from klab.corpus.release_members import normalized_retention_lease
 
         progress = BuildProgress(workspace / "progress" / f"{build_id}.jsonl", build_id)
-        return build_large(
-            project,
-            workspace,
-            lock,
-            identity,
-            build_id,
-            target,
-            progress,
-            prepared_root=normalized_store_root(Path(work_root)),
-            proof_store=proof_store,
-            verification_mode=verification_mode,
-            record_admission=record_admission,
-            admission_path=admission_path,
-            keep_stages=keep_stages,
-            canary=canary,
-        )
+        with (
+            normalized_retention_lease(Path(work_root).resolve())
+            if canary is None
+            else nullcontext()
+        ):
+            return build_large(
+                project,
+                workspace,
+                lock,
+                identity,
+                build_id,
+                target,
+                progress,
+                prepared_root=normalized_store_root(Path(work_root)),
+                proof_store=proof_store,
+                verification_mode=verification_mode,
+                record_admission=record_admission,
+                admission_path=admission_path,
+                keep_stages=keep_stages,
+                canary=canary,
+            )
     with _staged_build(root, build_id) as staging:
         stage_declared_inputs(project, staging, admission_path)
         documents: list[dict[str, Any]] = []
