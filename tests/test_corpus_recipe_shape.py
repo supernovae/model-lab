@@ -1026,7 +1026,9 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     }.items():
         template = template.replace("${" + key + "}", str(value))
     declaration, mixture = tmp_path / "mixture.yaml", tmp_path / "mixture"
-    declaration.write_text(template + "\ntoken_cache: sealed\ntoken_output: references\n")
+    declaration.write_text(
+        template + "\ntoken_cache: sealed\ntoken_output: references\n"
+    )
     quotas = yaml.safe_load(template)["target_quotas"]
     receipt = lab.json(
         "corpus", "materialize-mixture", str(declaration), "--output", str(mixture)
@@ -1109,8 +1111,11 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     inline_declaration.write_text(template + "\ntoken_cache: sealed\n")
     inline_output = tmp_path / "inline-mixture"
     inline = lab.json(
-        "corpus", "materialize-mixture", str(inline_declaration),
-        "--output", str(inline_output),
+        "corpus",
+        "materialize-mixture",
+        str(inline_declaration),
+        "--output",
+        str(inline_output),
     )
     inline_config = yaml.safe_load(run_config.read_text())
     inline_config["dataset"].update(
@@ -1122,7 +1127,9 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     inline_run.write_text(yaml.safe_dump(inline_config))
     inline_prepared = Path(lab.run("data", "prepare", str(inline_run)))
     for name in ("train.npy", "train_supervision.npy"):
-        assert (prepared_dir / name).read_bytes() == (inline_prepared / name).read_bytes()
+        assert (prepared_dir / name).read_bytes() == (
+            inline_prepared / name
+        ).read_bytes()
 
     shorter = yaml.safe_load(run_config.read_text())
     shorter["training"]["seq_len"] //= 2
