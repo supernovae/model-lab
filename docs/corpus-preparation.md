@@ -939,6 +939,7 @@ Inspect shared normalized storage with:
 ```sh
 klab --work-dir WORK corpus artifacts --json
 klab --work-dir WORK corpus artifacts --source-id SOURCE --limit 20
+klab --work-dir WORK corpus artifacts --release-references --source-id SOURCE --json
 ```
 
 The inventory reports published partition keys and the logical bytes of their
@@ -953,6 +954,26 @@ On a local synthetic store with four sparse files per partition, a 20-row
 page took 0.74–0.85 ms with 100 partitions and 42–44 ms with 5,000 partitions.
 The larger scan counted 5.35 GB of logical file sizes. Both sizes had 37.9 MiB
 peak process RSS.
+
+Add `--release-references` to scan sealed published and staged release
+manifests for normalized span references to the partitions on the current
+page. Each row reports the number of published and staged releases. JSON
+includes an example work-relative path. If a manifest is missing, invalid
+or changes during the scan, the inventory reports `scan_status: incomplete`
+with unknown reference counts. This scan reads manifests and directory metadata.
+A zero release count only describes release manifests. Active builds,
+unfinished preparation and future builds can also use a partition.
+
+Three synthetic Linux tmpfs trials per size compared the same 20-row page
+with and without the reference scan. The largest fixture had 64 span
+references per release and 27.88 GB of logical normalized partition files.
+The reference scan read only release manifests and process metadata.
+
+| Partitions | Release manifests | Inventory median | With references | Scan process reads | Scan peak RSS |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 20 | 1.3 ms | 7.4 ms | 0.05 MB | 44 MiB |
+| 5,000 | 200 | 46 ms | 108 ms | 1.55 MB | 44 MiB |
+| 25,000 | 2,000 | 223 ms | 1.29 s | 30.29 MB | 49 MiB |
 
 Inspect shared transform outputs and released document evidence, or preview
 unreferenced payloads, with:

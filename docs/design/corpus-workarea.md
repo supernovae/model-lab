@@ -153,7 +153,9 @@ Ordinary native builds catalog normalized evidence span partitions in
 acquisition order. Freeze can bind the ordered partition keys and receipts
 directly to the release after verifying that they reproduce the logical
 span digest. Published releases then retain the referenced normalized spans
-and receipts. Builds still render a flat span file for verification and
+and receipts. Normalized inventory can inspect published and staged span
+references for one page of partitions using the same guarded manifest scan
+as the digest stores. Builds still render a flat span file for verification and
 publication. Released documents carry selection, split and duplicate
 decisions, so references to normalized document payloads require a separate
 overlay and ordering contract. That contract and retention for other
