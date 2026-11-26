@@ -369,7 +369,7 @@ def _encoded_batches(
         pool.close()
 
 
-_CONTENT_RECORD = np.dtype(
+CONTENT_INDEX_DTYPE = np.dtype(
     [("content", "V32"), ("offset", "<u8"), ("count", "<u4"), ("digest", "V32")]
 )
 _CONTENT_FLUSH_DOCUMENTS = 4096
@@ -392,17 +392,23 @@ class ContentTokens:
     offset, token count and the digest of its IDs). The index is read once into
     memory, so a lookup is one positioned read and never a database query.
 
-    This is a cache and favors throughput over durability: nothing is synced.
+    Ordinary cache appends favor throughput. Only explicit sealing syncs them.
     IDs are written before their index record, so after a crash the index is
     cut back to the records whose IDs are present and the rest are encoded
     again. Every read checks the stored digest of the IDs.
     """
 
-    def __init__(self, root: Path, tokenizer_sha: str):
-        name = hashlib.sha256(
-            canonical_json(["content-tokens-v1", tokenizer_sha])
-        ).hexdigest()
-        self.path = root / name
+    @staticmethod
+    def cache_path(root: Path, tokenizer_sha: str) -> Path:
+        return (
+            root
+            / hashlib.sha256(
+                canonical_json(["content-tokens-v1", tokenizer_sha])
+            ).hexdigest()
+        )
+
+    def __init__(self, root: Path, tokenizer_sha: str, *, track_digest: bool = False):
+        self.path = self.cache_path(root, tokenizer_sha)
         self.path.mkdir(parents=True, exist_ok=True)
         if self.path.is_symlink():
             raise ValueError("content token store must not be a symlink")
@@ -416,9 +422,9 @@ class ContentTokens:
             ) from error
         ids_path, index_path = self.path / "tokens.ids", self.path / "index.bin"
         records = (
-            np.fromfile(index_path, dtype=_CONTENT_RECORD)
+            np.fromfile(index_path, dtype=CONTENT_INDEX_DTYPE)
             if index_path.exists()
-            else np.empty(0, dtype=_CONTENT_RECORD)
+            else np.empty(0, dtype=CONTENT_INDEX_DTYPE)
         )
         stored = ids_path.stat().st_size // 4 if ids_path.exists() else 0
         ends = records["offset"] + records["count"]
@@ -428,7 +434,7 @@ class ContentTokens:
         self._ids = ids_path.open("ab+")
         self._ids.truncate(4 * self._tokens)
         self._index = index_path.open("ab")
-        self._index.truncate(complete * _CONTENT_RECORD.itemsize)
+        self._index.truncate(complete * CONTENT_INDEX_DTYPE.itemsize)
         self._flushed = self._tokens
         contents = records["content"].tobytes()
         self._rows = {
@@ -443,9 +449,24 @@ class ContentTokens:
         self.pending = 0
         self.hits = self.misses = 0
         self.lookup_seconds = self.write_seconds = self.encode_seconds = 0.0
+        self._file_digests = None
+        if track_digest:
+            self._file_digests = {}
+            for path in (ids_path, index_path):
+                with path.open("rb") as stream:
+                    self._file_digests[path.name] = hashlib.file_digest(
+                        stream, "sha256"
+                    )
 
     def __len__(self) -> int:
         return len(self._rows)
+
+    def __contains__(self, content: bytes) -> bool:
+        return content in self._rows
+
+    @property
+    def token_count(self) -> int:
+        return self._tokens
 
     def _digest(self, row: int) -> bytes:
         if row < self._loaded:
@@ -488,11 +509,15 @@ class ContentTokens:
     def _append(self, content: bytes, ids: np.ndarray) -> None:
         payload = ids.tobytes()
         digest = hashlib.sha256(payload).digest()
-        record = np.empty(1, dtype=_CONTENT_RECORD)
+        record = np.empty(1, dtype=CONTENT_INDEX_DTYPE)
         record["content"], record["digest"] = np.void(content), np.void(digest)
         record["offset"], record["count"] = self._tokens, len(ids)
         self._ids.write(payload)
-        self._index.write(record.tobytes())
+        index_bytes = record.tobytes()
+        self._index.write(index_bytes)
+        if self._file_digests is not None:
+            self._file_digests["tokens.ids"].update(payload)
+            self._file_digests["index.bin"].update(index_bytes)
         self._rows[content] = len(self._offsets)
         self._offsets.append(self._tokens)
         self._counts.append(len(ids))
@@ -507,6 +532,22 @@ class ContentTokens:
         self._index.flush()
         self._flushed = self._tokens
         self.pending = 0
+
+    def seal_files(self) -> dict:
+        """Sync the bytes covered by the active writer's digests."""
+        if self._file_digests is None:
+            raise ValueError("content token writer did not track its file digests")
+        self.flush()
+        files = {}
+        for stream in (self._ids, self._index):
+            descriptor = stream.fileno()
+            os.fsync(descriptor)
+            name = Path(stream.name).name
+            files[name] = {
+                "sha256": self._file_digests[name].hexdigest(),
+                "size": os.fstat(descriptor).st_size,
+            }
+        return files
 
     def store(self, content: bytes, ids: np.ndarray) -> None:
         """Keep IDs encoded elsewhere, once, under the 32-byte digest of the text."""

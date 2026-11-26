@@ -1026,7 +1026,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     }.items():
         template = template.replace("${" + key + "}", str(value))
     declaration, mixture = tmp_path / "mixture.yaml", tmp_path / "mixture"
-    declaration.write_text(template)
+    declaration.write_text(template + "\ntoken_cache: sealed\n")
     quotas = yaml.safe_load(template)["target_quotas"]
     receipt = lab.json(
         "corpus", "materialize-mixture", str(declaration), "--output", str(mixture)

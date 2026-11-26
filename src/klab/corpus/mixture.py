@@ -154,6 +154,9 @@ class MixtureDeclaration(BaseModel):
     row_tokens: int | None = Field(
         default=None, strict=True, gt=0, exclude_if=lambda value: value is None
     )
+    token_cache: Literal["append", "sealed"] = Field(
+        default="append", exclude_if=lambda value: value == "append"
+    )
 
     @field_validator("max_exposures", mode="before")
     @classmethod
@@ -717,13 +720,17 @@ def _schedule(
     except ValueError:
         work_parent = frontier.root.parent if frontier is not None else staging.parent
         token_root = work_parent / ".source-tokens"
+    sealed_cache = reuse_tokens and spec.token_cache == "sealed"
+    cache_type = ContentTokens
+    if sealed_cache:
+        from klab.data.token_segments import SealedContentTokens
+
+        cache_type = SealedContentTokens
     mode = "ab+" if frontier is not None else "wb+"
     with (
         ExitStack() as encoders,
         (
-            ContentTokens(token_root, tokenizer_sha)
-            if reuse_tokens
-            else nullcontext(None)
+            cache_type(token_root, tokenizer_sha) if reuse_tokens else nullcontext(None)
         ) as tokens,
         (staging / TRAIN_TOKENS).open(mode) as stream,
         (staging / TRAIN_RECORDS).open(mode) as record_stream,
@@ -884,6 +891,11 @@ def _schedule(
             metrics["read_utilization"] = metrics.get("read_worker_seconds", 0) / max(
                 1e-9, metrics["elapsed_seconds"] * max(1, read_workers)
             )
+            if sealed_cache:
+                metrics.update(
+                    sealed_token_cache_hits=tokens.sealed_hits,
+                    published_token_segments=tokens.published_segments,
+                )
             progress = (
                 frontier.root if frontier is not None else staging
             ) / "progress.json"
@@ -1035,6 +1047,8 @@ def _schedule(
             if totals[stratum] != quota:
                 raise ValueError(f"unfilled quota for {stratum}")
             done.append(stratum)
+            if sealed_cache and len(done) == len(spec.target_quotas):
+                tokens.finish()
             checkpoint(stratum, available, force=True)
         if frontier is None:
             for output_file in outputs.values():
