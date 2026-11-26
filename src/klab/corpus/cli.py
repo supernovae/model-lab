@@ -23,7 +23,7 @@ def _verification_flags(
     command: argparse.ArgumentParser,
     *,
     scratch_help: str = (
-        "Directory for disposable verification state; default is WORK/scratch. "
+        "Directory for verification state; default is the host temporary directory. "
         "Allow 2-3x the release size on fast storage"
     ),
 ) -> None:
@@ -97,9 +97,32 @@ def _print_freeze_plan(plan: dict) -> None:
         f"{plan['shared_candidate_bytes']:,} existing candidate bytes, "
         f"{plan['duplicate_staging_bytes']:,} duplicate staging bytes"
     )
-    print(
-        "Publication moves payloads without copying. Verification scratch is unestimated."
-    )
+    print("Publication moves payloads without copying.")
+    inspection = plan.get("verification_inspection")
+    if inspection is not None:
+        print(
+            f"Scratch {inspection['scratch_path']} "
+            f"({inspection['scratch_available_bytes']:,} bytes available)"
+        )
+        for step in inspection["steps"]:
+            print(
+                f"  {step['id']}: {step['method']} ({step['row_verifier']} row verifier)"
+            )
+            for index in step["row_indexes"]:
+                size = index["verification_candidate_bytes"]
+                condition = (
+                    " if the document index is rebuilt"
+                    if index["when"] == "if_document_index_rebuilt"
+                    else ""
+                )
+                print(
+                    f"    {index['id']}: {index['action']}{condition}"
+                    + (f" ({size:,} candidate bytes)" if size is not None else "")
+                )
+    if plan["verification_scratch_bytes"] == 0:
+        print("Current receipts avoid verification scratch.")
+    else:
+        print("Peak verification scratch is unestimated.")
 
 
 def _handle(args: argparse.Namespace) -> None:
@@ -182,10 +205,18 @@ def _run(args: argparse.Namespace) -> None:
         placement = ReleasePlacement(
             stages=args.share_stage_artifacts, documents=args.share_document_artifacts
         )
+        inspect_verification = (
+            args.inspect_verification or args.cold or args.scratch_dir is not None
+        )
         if args.build is not None:
             from klab.corpus.freeze_planning import plan_freeze
 
-            plan = plan_freeze(args.build, root, placement=placement)
+            plan = plan_freeze(
+                args.build,
+                root,
+                placement=placement,
+                inspect_verification=inspect_verification,
+            )
             if args.json:
                 print(json.dumps(plan, sort_keys=True))
             else:
@@ -195,6 +226,8 @@ def _run(args: argparse.Namespace) -> None:
             raise ValueError(
                 "shared release placement requires --build for freeze planning"
             )
+        if inspect_verification:
+            raise ValueError("verification inspection requires --build")
         from klab.corpus.planning import plan_build
 
         plan = plan_build(load_project(args.project, verify_inputs=False), root)
@@ -776,6 +809,21 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "--share-document-artifacts",
         action="store_true",
         help="Plan shared document and span placement",
+    )
+    command.add_argument(
+        "--inspect-verification",
+        action="store_true",
+        help="Inspect signed verification receipts and available scratch for freeze",
+    )
+    command.add_argument(
+        "--scratch-dir",
+        type=Path,
+        help="Inspect this scratch location and its retained row indexes",
+    )
+    command.add_argument(
+        "--cold",
+        action="store_true",
+        help="Plan verification from the bytes",
     )
     command.add_argument("--json", action="store_true")
     command.set_defaults(handler=_handle)

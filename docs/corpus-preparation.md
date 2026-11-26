@@ -777,10 +777,43 @@ both placement flags to plan inline publication. A retry must match the
 interrupted placement.
 
 Publication uses same-filesystem moves with zero payload-copy bytes. The
-plan opens metadata only. Freeze authenticates the payloads and resolves
-verification work and scratch, which the plan leaves unestimated. This plan
-covers ordinary builds. Completed local preparation uses its dedicated
-retained-release command option.
+plan opens metadata only. This plan covers ordinary builds. Completed local
+preparation uses its dedicated retained-release command option.
+
+Inspect verification work and current scratch capacity with:
+
+```sh
+klab --work-dir WORK corpus plan --build BUILD --inspect-verification --json
+klab --work-dir WORK corpus plan --build BUILD --scratch-dir /fast/disk --json
+klab --work-dir WORK corpus plan --build BUILD --cold --json
+```
+
+Inspection reports each build, staged release or published release check as
+`receipt`, `verify_bytes` or `after_placement`. A matching complete receipt
+forecasts zero verification scratch. A check without that receipt can reuse
+lower-level proofs during verification. At an explicitly selected scratch
+location, the plan reports matching narrow row index candidates and their
+logical bytes. The span index is only used if the document index is rebuilt.
+With `--cold`, the plan describes an independent check from bytes.
+
+The capacity is the filesystem's currently available bytes. It uses the
+nearest existing parent of a scratch directory that has yet to be created.
+The plan leaves peak scratch unestimated when byte verification is required.
+These observations use metadata and perform no payload authentication or
+scratch creation. Inspecting an existing signed receipt checks the source
+snapshot and member file generations, so the default placement plan skips
+that walk.
+
+Three Linux tmpfs plans per size used synthetic receipts and sparse 4 MiB
+source files. The matching-receipt case read about 1.95 KB of metadata at
+16,384 files. The placement and missing-receipt plans read about 0.68 KB
+at that size. These measurements cover planning with small build manifests.
+
+| Source files | Placement only | Missing receipt | Matching receipt |
+| ---: | ---: | ---: | ---: |
+| 16 | 0.21 ms | 0.41 ms | 0.62 ms |
+| 2,048 | 0.20 ms | 0.26 ms | 13.97 ms |
+| 16,384 | 0.20 ms | 0.27 ms | 129.39 ms |
 
 Three synthetic Linux tmpfs plans per size inspected 4 MiB sparse stage
 files, with half of the digests already present in the shared store. The
@@ -1524,10 +1557,11 @@ inside an unfinished index still repeats that index. The independent
 klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
 ```
 
-- **`--scratch-dir`** holds the disposable index and the progress journal.
-  Default: `WORK/scratch`. Allow 2-3 times the release size for a release that
-  uses the row-store verifier, and put it on fast storage (NVMe); it is deleted
-  when the command ends.
+- **`--scratch-dir`** selects the verification index and progress journal
+  location. The default is the host temporary directory. Allow 2-3 times
+  the release size for a release that uses the row-store verifier and put
+  it on fast storage (NVMe). Disposable indexes are removed after
+  verification. A progress journal and checkpoints can survive a stop.
 - **`--workers`** sets the worker processes for every parallel pass over corpus
   files (default: half the CPU count; never more than the CPU count). Use `1` for
   a single-process run. A file smaller than a few hundred MB is read in-process.

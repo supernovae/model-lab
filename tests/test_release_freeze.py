@@ -215,11 +215,15 @@ def test_resumed_freeze_reuses_verified_staging_after_another_stop(
     prepared: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from klab import safe_io
-    from klab.verification_proofs import verification_options
+    from klab.corpus import freeze_planning
+    from klab.corpus.release_members import ReleasePlacement
+    from klab.corpus.release_verify import verification_settings
 
     build_dir, work = prepared
     monkeypatch.setenv("XDG_CONFIG_HOME", str(work.parent / "settings"))
     options = verification_options(work)
+    scratch = work / "alternate-scratch"
+    inspect_options = verification_options(work, read_only=True)
     original_rename = safe_io.rename_noreplace
     verify = release_module._verify_release_cold
     checks = []
@@ -233,16 +237,45 @@ def test_resumed_freeze_reuses_verified_staging_after_another_stop(
             raise OSError("stopped before publication")
         return original_rename(source, target)
 
+    def forecast():
+        with verification_settings(scratch_dir=scratch, **inspect_options):
+            return freeze_planning.plan_freeze(
+                build_dir,
+                work,
+                placement=ReleasePlacement(),
+                inspect_verification=True,
+            )
+
     monkeypatch.setattr(release_module, "_verify_release_cold", observe)
     with monkeypatch.context() as fault:
         fault.setattr(safe_io, "rename_noreplace", stop_before_publish)
         with pytest.raises(OSError, match="stopped before publication"):
             freeze(build_dir, work, **options)
         assert not checks
+
+        def no_dependency_walk(*args):
+            pytest.fail("missing receipt scanned snapshot dependencies")
+
+        with monkeypatch.context() as missing:
+            missing.setattr(
+                freeze_planning, "snapshot_dependencies", no_dependency_walk
+            )
+            pending = forecast()
+        assert (
+            pending["verification_inspection"]["steps"][0]["method"] == "verify_bytes"
+        )
+        assert pending["verification_scratch_bytes"] is None
         with pytest.raises(OSError, match="stopped before publication"):
             freeze(build_dir, work, **options)
         [staged] = checks
         assert list(staged.parent.iterdir()) == [staged]
+        warm = forecast()
+        inspection = warm["verification_inspection"]
+        assert inspection["steps"][0]["method"] == "receipt"
+        assert warm["verification_scratch_bytes"] == 0
+        assert inspection["scratch_path"] == str(scratch)
+        assert inspection["scratch_available_bytes"] > 0
+        assert not scratch.exists()
         with pytest.raises(OSError, match="stopped before publication"):
             freeze(build_dir, work, **verification_options(work, cold=True))
         assert checks == [staged, staged], "cold freeze must recheck the staged files"
@@ -432,6 +465,10 @@ def test_shared_releases_reuse_members_and_reject_drift(
     assert span_hashes == ["spans.jsonl"]
     assert first_plan["release_id"] == resumed["release_id"] == first.name
     assert plan(build_dir)["state"] == "published"
+    assert plan(build_dir, "--inspect-verification")["verification_scratch_bytes"] == 0
+    cold_plan = plan(build_dir, "--cold")
+    assert cold_plan["verification_inspection"]["steps"][0]["method"] == "verify_bytes"
+    assert cold_plan["verification_scratch_bytes"] is None
     proof_options = verification_options(work)
     with release_module.open_release(first, **proof_options) as opened:
         paths = {name: opened.member(name) for name in original}
