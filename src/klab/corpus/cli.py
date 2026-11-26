@@ -643,21 +643,25 @@ def _run(args: argparse.Namespace) -> None:
         return
     if command in {"materialize-mixture", "verify-mixture"}:
         from klab.corpus.mixture import (
+            inspect_mixture_transfer,
             materialize_mixture,
             mixture_train_file,
             verify_mixture,
         )
 
-        result = (
-            materialize_mixture(Path(args.declaration), Path(args.output))
-            if command == "materialize-mixture"
-            else verify_mixture(
-                Path(args.declaration),
-                Path(args.output),
-                audit=args.audit,
-                reseal=args.reseal,
+        declaration, output = Path(args.declaration), Path(args.output)
+        transfer = {}
+        if command == "materialize-mixture":
+            result = materialize_mixture(declaration, output)
+        elif args.inspect_transfer:
+            result, plan = inspect_mixture_transfer(
+                declaration, output, audit=args.audit, reseal=args.reseal
             )
-        )
+            transfer = {"transfer": plan}
+        else:
+            result = verify_mixture(
+                declaration, output, audit=args.audit, reseal=args.reseal
+            )
         print(
             json.dumps(
                 {
@@ -681,6 +685,7 @@ def _run(args: argparse.Namespace) -> None:
                     ): str(Path(args.output).resolve() / mixture_train_file(result)),
                     "records": result["records"],
                     "actual_target_tokens": result["actual_target_tokens"],
+                    **transfer,
                     **{
                         key: result[key]
                         for key in ("stratum_exposures", "row_layout")
@@ -1330,6 +1335,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
                 action="store_true",
                 help="Re-record completion from the receipt and file digests "
                 "without replaying the schedule (weaker than --audit)",
+            )
+            command.add_argument(
+                "--inspect-transfer",
+                action="store_true",
+                help="Count selected, repeated and unused physical token bytes for offline dispatch",
             )
         command.set_defaults(handler=_handle)
     command = sub.add_parser(

@@ -266,6 +266,37 @@ target scan including SHA-256 took 0.062 s for the contiguous file and
 bytes fell from 643.09 MB to 377.92 MB. These timings exclude packing and
 training.
 
+### Offline transfer inspection
+
+```sh
+klab corpus verify-mixture MIXTURE.yaml --output MIXTURE_DIR --inspect-transfer
+```
+
+The `transfer` section of the JSON result adds physical byte accounting to
+normal verification. `whole_segments.bytes` counts the referenced token,
+index and manifest files for a worker with an empty asset cache. The cache
+determines which files a worker actually receives.
+
+`selected_ranges.unique_token_bytes` counts each selected physical token
+position once. `repeated_token_bytes` counts additional exposures to those
+positions. The count uses the actual segment width and excludes the EOS
+added by the schedule. `unselected_token_bytes` gives the rest of the
+sealed token payload. `logical_target_bytes` gives the scheduled int32
+stream size including EOS, before padding or supervision masks.
+
+After verification, inspection reads the schedule and merges overlapping
+and adjacent physical ranges. It uses bounded sort runs under
+`--scratch-dir` or the host temporary directory. A new inspection starts a
+new sort. It reports the scratch byte bound and the logical bytes written.
+The sort reads the schedule and temporary ranges. Verification covers the
+token payload separately.
+
+The retained-mixture benchmark accepts `--transfer-plan`. On the uint16
+NVMe fixture with 32,768 documents, the plan counted 63.00 MB of unselected
+tokens in a 132.48 MB segment inventory. The 65,536-document fixture had
+61.47 KB of unselected tokens in 136.70 MB. After verification, the median
+inspection times across three trials were 103 ms and 155 ms, respectively.
+
 ### Training batch loaders
 
 For an experimental direct loader, set `training.mixture_loader: references`

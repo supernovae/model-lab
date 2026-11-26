@@ -709,6 +709,17 @@ def test_document_start_rows_and_stratum_exposures(
     )
     references = tmp_path / "references"
     reference_receipt = mixture.materialize_mixture(reference_declaration, references)
+    inspected, transfer = mixture.inspect_mixture_transfer(
+        reference_declaration, references
+    )
+    assert inspected == reference_receipt
+    assert transfer["selected_ranges"] == {
+        "unique_token_bytes": 4 * 27,
+        "repeated_token_bytes": 4 * 6,
+        "coalesced_ranges": 2,
+        "segments_without_selected_content": 0,
+    }
+    assert transfer["whole_segments"]["unselected_token_bytes"] == 4 * 2
     schedule = verify_schedule(
         references, tmp_path / ".source-tokens", reference_receipt, 3
     )
@@ -1601,7 +1612,7 @@ def test_sealed_mixture_recovers_published_segments_and_refuses_corrupt_tokens(
         corrupt.seek(0)
         corrupt.write(bytes([first[0] ^ 1]))
     with pytest.raises(ValueError, match="file digest mismatch"):
-        mixture.verify_mixture(declaration, output)
+        mixture.inspect_mixture_transfer(declaration, output)
 
 
 def test_uint16_segments_preserve_the_upper_boundary_and_refuse_wrapping(tmp_path):

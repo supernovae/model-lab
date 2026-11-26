@@ -98,6 +98,7 @@ class VerifiedSchedule:
     tokens: tuple[VerifiedFile, ...]
     indexes: tuple[VerifiedFile, ...]
     manifest_sha256: tuple[str, ...]
+    manifest_sizes: tuple[int, ...]
     token_dtype: np.dtype
     eos: int
     target_count: int
@@ -133,10 +134,10 @@ class VerifiedSchedule:
         return copied
 
     def dependency_footprint(self) -> tuple[int, int]:
-        """Reserve payload, index and bounded manifest bytes and file count."""
+        """Count the authenticated payload, index and manifest bytes and files."""
         return (
             sum(proof.size_bytes for proof in (*self.tokens, *self.indexes))
-            + 8192 * len(self.tokens),
+            + sum(self.manifest_sizes),
             3 * len(self.tokens),
         )
 
@@ -304,16 +305,18 @@ def verify_schedule(
             if proof.size_bytes != entry["size"]:
                 raise ValueError("mixture token segment size differs from its manifest")
             files.append(proof)
+        encoded = canonical_json(manifest) + b"\n"
         return (
             *files,
-            hashlib.sha256(canonical_json(manifest) + b"\n").hexdigest(),
+            hashlib.sha256(encoded).hexdigest(),
+            len(encoded),
             manifest["encoding"]["dtype"],
         )
 
     workers = min(8, settings.workers, len(schedule["segments"]))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         files = list(pool.map(check, schedule["segments"], buffersize=workers))
-    tokens, indexes, manifests, encodings = zip(*files, strict=True)
+    tokens, indexes, manifests, manifest_sizes, encodings = zip(*files, strict=True)
     dtype = SEGMENT_DTYPES[encodings[0]]
     if len(set(encodings)) != 1 or eos >= 2 ** (8 * dtype.itemsize):
         raise ValueError("invalid physical token encoding for the mixture schedule")
@@ -323,6 +326,7 @@ def verify_schedule(
         tokens,
         indexes,
         manifests,
+        manifest_sizes,
         dtype,
         eos,
         targets,
