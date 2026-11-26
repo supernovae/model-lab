@@ -765,7 +765,9 @@ def test_tokenizer_accepts_retained_release_path_but_not_a_different_origin(
         dataset=dataset, output_dir=tmp_path / "fit", vocab_size=260
     )
     spec = SimpleNamespace(
-        tokenizer_config=tmp_path / "config", tokenizer_origin_release_id=release_id
+        tokenizer_config=tmp_path / "config",
+        tokenizer_origin_release_id=release_id,
+        segment_dtype="int32",
     )
     monkeypatch.setattr(mixture, "load_tokenizer_config", lambda path: config)
     monkeypatch.setattr(
@@ -783,6 +785,15 @@ def test_tokenizer_accepts_retained_release_path_but_not_a_different_origin(
     dataset.corpus_release_path = tmp_path / ("d" * 64)
     with pytest.raises(ValueError, match="not bound to this release"):
         mixture._tokenizer(spec, members)
+    dataset.corpus_release_path = release
+    spec.segment_dtype = "uint16"
+    vocab = {"<eos>": 3, "last": 65535}
+    tokenizer = SimpleNamespace(get_vocab=lambda: vocab)
+    monkeypatch.setattr(mixture, "load_tokenizer", lambda path: tokenizer)
+    assert mixture._tokenizer(spec, members) == (tokenizer, "t" * 64)
+    vocab["outside"] = 65536
+    with pytest.raises(ValueError, match="vocabulary IDs must fit uint16"):
+        mixture._tokenizer(spec, members)
 
 
 def test_tokenizer_verification_uses_the_operators_receipts(
@@ -797,7 +808,9 @@ def test_tokenizer_verification_uses_the_operators_receipts(
     )
     config = SimpleNamespace(dataset=dataset, output_dir=tmp_path, vocab_size=260)
     spec = SimpleNamespace(
-        tokenizer_config=tmp_path / "config", tokenizer_origin_release_id=release_id
+        tokenizer_config=tmp_path / "config",
+        tokenizer_origin_release_id=release_id,
+        segment_dtype="int32",
     )
     seen = []
     monkeypatch.setattr(mixture, "load_tokenizer_config", lambda path: config)
@@ -1536,7 +1549,8 @@ def test_sealed_mixture_recovers_published_segments_and_refuses_corrupt_tokens(
 
     declaration, _, _ = _fixture(tmp_path, monkeypatch, actual_content=True)
     declaration.write_text(
-        declaration.read_text() + "\ntoken_cache: sealed\ntoken_output: references\n"
+        declaration.read_text()
+        + "\ntoken_cache: sealed\nsegment_dtype: uint16\ntoken_output: references\n"
     )
     monkeypatch.setattr(token_segments, "SHARD_TOKENS", 8)
     publish = token_segments.rename_noreplace
@@ -1588,6 +1602,22 @@ def test_sealed_mixture_recovers_published_segments_and_refuses_corrupt_tokens(
         corrupt.write(bytes([first[0] ^ 1]))
     with pytest.raises(ValueError, match="file digest mismatch"):
         mixture.verify_mixture(declaration, output)
+
+
+def test_uint16_segments_preserve_the_upper_boundary_and_refuse_wrapping(tmp_path):
+    from klab.data.token_segments import SealedContentTokens
+
+    content = hashlib.sha256(b"boundary")
+    with SealedContentTokens(tmp_path, "a" * 64, storage="uint16") as store:
+        with pytest.raises(ValueError, match="token IDs must fit uint16"):
+            store.store(content.digest(), np.array([65536], dtype=np.int32))
+        store.store(content.digest(), np.array([0, 65535], dtype=np.int32))
+        store.finish()
+    with SealedContentTokens(tmp_path, "a" * 64, storage="uint16") as store:
+        ids = store.lookup(content.hexdigest())
+        assert ids.dtype == np.dtype("<i4")
+        assert ids.tolist() == [0, 65535]
+        assert store.lookup(content.hexdigest(), decode=False) == b"\x00\x00\xff\xff"
 
 
 def test_worker_telemetry_survives_a_vanished_worker():

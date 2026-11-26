@@ -146,6 +146,7 @@ def main():
     parser.add_argument("--documents", type=int, default=512)
     parser.add_argument("--text-bytes", type=int, default=512)
     parser.add_argument("--token-cache", choices=("append", "sealed"), default="append")
+    parser.add_argument("--segment-dtype", choices=("int32", "uint16"), default="int32")
     parser.add_argument(
         "--token-output", choices=("contiguous", "references"), default="contiguous"
     )
@@ -161,6 +162,8 @@ def main():
         parser.error("bounds: workers 1..8, documents 8..65536, text-bytes 32..2048")
     if args.token_output == "references" and args.token_cache != "sealed":
         parser.error("reference token output requires the sealed cache")
+    if args.segment_dtype == "uint16" and args.token_cache != "sealed":
+        parser.error("uint16 segments require the sealed cache")
     if (
         not 0 <= args.loader_blocks <= 16_384
         or not 16 <= args.loader_row_tokens <= 8192
@@ -274,6 +277,7 @@ def main():
         strata={},
         packing="contiguous",
         token_cache=args.token_cache,
+        segment_dtype=args.segment_dtype,
         token_output=args.token_output,
         seed=42,
         order_policy=None,
@@ -379,11 +383,18 @@ def main():
         "documents": args.documents,
         "text_bytes": args.text_bytes,
         "token_cache": args.token_cache,
+        "segment_dtype": args.segment_dtype,
         "token_output": args.token_output,
         "fixture_sha256": sha256_file(source),
         "scratch_bytes": sum(p.stat().st_size for p in root.rglob("*") if p.is_file()),
         "results": results,
     }
+    if args.token_output == "references":
+        result["segment_storage"] = {
+            "segments": len(schedule.tokens),
+            "token_bytes": sum(proof.size_bytes for proof in schedule.tokens),
+            "index_bytes": sum(proof.size_bytes for proof in schedule.indexes),
+        }
     if args.loader_blocks:
         result["loaders"] = benchmark_loaders(
             root / "loader",

@@ -372,6 +372,7 @@ def _encoded_batches(
 CONTENT_INDEX_DTYPE = np.dtype(
     [("content", "V32"), ("offset", "<u8"), ("count", "<u4"), ("digest", "V32")]
 )
+CONTENT_TOKEN_DTYPES = {"int32": np.dtype("<i4"), "uint16": np.dtype("<u2")}
 _CONTENT_FLUSH_DOCUMENTS = 4096
 
 
@@ -387,7 +388,7 @@ def _content_key(content: str) -> bytes:
 class ContentTokens:
     """Token IDs of documents, found by the SHA-256 of their text.
 
-    Two append-only files per tokenizer: ``tokens.ids`` (raw int32, no EOS) and
+    Two append-only files per encoding: ``tokens.ids`` (raw IDs, no EOS) and
     ``index.bin`` (one fixed-width record per document: content digest, token
     offset, token count and the digest of its IDs). The index is read once into
     memory, so a lookup is one positioned read and never a database query.
@@ -399,16 +400,23 @@ class ContentTokens:
     """
 
     @staticmethod
-    def cache_path(root: Path, tokenizer_sha: str) -> Path:
-        return (
-            root
-            / hashlib.sha256(
-                canonical_json(["content-tokens-v1", tokenizer_sha])
-            ).hexdigest()
-        )
+    def cache_path(root: Path, tokenizer_sha: str, *, storage: str = "int32") -> Path:
+        identity = ["content-tokens-v1", tokenizer_sha]
+        if storage != "int32":
+            identity.append(storage)
+        return root / hashlib.sha256(canonical_json(identity)).hexdigest()
 
-    def __init__(self, root: Path, tokenizer_sha: str, *, track_digest: bool = False):
-        self.path = self.cache_path(root, tokenizer_sha)
+    def __init__(
+        self,
+        root: Path,
+        tokenizer_sha: str,
+        *,
+        track_digest: bool = False,
+        storage: str = "int32",
+    ):
+        self.dtype = CONTENT_TOKEN_DTYPES[storage]
+        self.width = self.dtype.itemsize
+        self.path = self.cache_path(root, tokenizer_sha, storage=storage)
         self.path.mkdir(parents=True, exist_ok=True)
         if self.path.is_symlink():
             raise ValueError("content token store must not be a symlink")
@@ -426,13 +434,13 @@ class ContentTokens:
             if index_path.exists()
             else np.empty(0, dtype=CONTENT_INDEX_DTYPE)
         )
-        stored = ids_path.stat().st_size // 4 if ids_path.exists() else 0
+        stored = ids_path.stat().st_size // self.width if ids_path.exists() else 0
         ends = records["offset"] + records["count"]
         complete = int(np.searchsorted(ends, stored, side="right"))
         records = records[:complete]
         self._tokens = int(ends[complete - 1]) if complete else 0
         self._ids = ids_path.open("ab+")
-        self._ids.truncate(4 * self._tokens)
+        self._ids.truncate(self.width * self._tokens)
         self._index = index_path.open("ab")
         self._index.truncate(complete * CONTENT_INDEX_DTYPE.itemsize)
         self._flushed = self._tokens
@@ -474,7 +482,7 @@ class ContentTokens:
         return self._new_digests[row - self._loaded]
 
     def lookup(self, content: str, *, count_miss: bool = True, decode: bool = True):
-        """The document's IDs (or their raw int32 bytes), or None if absent."""
+        """The document's int32 IDs (or encoded bytes), or None if absent."""
         started = time.monotonic()
         row = self._rows.get(_content_key(content))
         if row is None:
@@ -486,28 +494,41 @@ class ContentTokens:
         if offset + count > self._flushed:
             self._ids.flush()
             self._flushed = self._tokens
-        payload = os.pread(self._ids.fileno(), 4 * count, 4 * offset)
+        payload = os.pread(self._ids.fileno(), self.width * count, self.width * offset)
         if hashlib.sha256(payload).digest() != self._digest(row):
             raise ValueError("cached token payload digest mismatch")
         self.lookup_seconds += time.monotonic() - started
         self.hits += 1
         return self.decode_ids(payload) if decode else payload
 
-    @staticmethod
-    def decode_ids(payload: bytes) -> np.ndarray:
-        if len(payload) % 4:
+    def decode_ids(self, payload: bytes) -> np.ndarray:
+        if len(payload) % self.width:
             raise ValueError("invalid cached token IDs")
-        ids = np.frombuffer(payload, dtype="<i4")
+        ids = np.frombuffer(payload, dtype=self.dtype)
+        if self.width == 2:
+            return ids.astype("<i4")
         if len(ids) and int(ids.min()) < 0:
             raise ValueError("invalid cached token IDs")
         return ids
 
     def payload_bytes(self, content: str) -> int:
         row = self._rows.get(_content_key(content))
-        return 0 if row is None else 4 * self._counts[row]
+        return 0 if row is None else self.width * self._counts[row]
 
     def _append(self, content: bytes, ids: np.ndarray) -> None:
-        payload = ids.tobytes()
+        if self.width == 2 and (
+            ids.ndim != 1
+            or (
+                ids.size
+                and (
+                    ids.dtype.kind not in "iu"
+                    or int(ids.min()) < 0
+                    or int(ids.max()) > 65535
+                )
+            )
+        ):
+            raise ValueError("token IDs must fit uint16 storage")
+        payload = ids.astype(self.dtype, copy=False).tobytes()
         digest = hashlib.sha256(payload).digest()
         record = np.empty(1, dtype=CONTENT_INDEX_DTYPE)
         record["content"], record["digest"] = np.void(content), np.void(digest)
@@ -552,8 +573,8 @@ class ContentTokens:
     def store(self, content: bytes, ids: np.ndarray) -> None:
         """Keep IDs encoded elsewhere, once, under the 32-byte digest of the text."""
         if content not in self._rows:
+            self._append(content, np.asarray(ids))
             self.misses += 1
-            self._append(content, np.asarray(ids, dtype="<i4"))
 
     def encode_many(self, texts, encode_missing):
         """Return int32 arrays in input order; only absent content is encoded."""
@@ -576,9 +597,9 @@ class ContentTokens:
                 raise ValueError("tokenizer returned incorrect batch length")
             started = time.monotonic()
             for content, ids in zip(missing, results, strict=True):
-                ids = np.asarray(ids, dtype="<i4")
+                ids = np.asarray(ids, dtype="<i4" if self.width == 4 else None)
                 self._append(_content_key(content), ids)
-                known[content] = ids
+                known[content] = ids.astype("<i4", copy=False)
             self.write_seconds += time.monotonic() - started
         return [known[content] for content in keys]
 

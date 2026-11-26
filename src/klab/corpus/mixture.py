@@ -163,6 +163,9 @@ class MixtureDeclaration(BaseModel):
     token_cache: Literal["append", "sealed"] = Field(
         default="append", exclude_if=lambda value: value == "append"
     )
+    segment_dtype: Literal["int32", "uint16"] = Field(
+        default="int32", exclude_if=lambda value: value == "int32"
+    )
     token_output: Literal["contiguous", "references"] = Field(
         default="contiguous", exclude_if=lambda value: value == "contiguous"
     )
@@ -188,6 +191,8 @@ class MixtureDeclaration(BaseModel):
     def valid(self) -> MixtureDeclaration:
         if self.token_output == "references" and self.token_cache != "sealed":
             raise ValueError("reference token output requires token_cache: sealed")
+        if self.segment_dtype == "uint16" and self.token_cache != "sealed":
+            raise ValueError("segment_dtype: uint16 requires token_cache: sealed")
         if (
             not self.source_strata
             or not self.target_quotas
@@ -391,7 +396,12 @@ def _tokenizer(spec: MixtureDeclaration, release: ReleaseMembers):
             proof_store=settings.proof_store,
             verification_mode=settings.verification_mode,
         )["sha256"]
-    return load_tokenizer(path), digest
+    tokenizer = load_tokenizer(path)
+    if spec.segment_dtype == "uint16" and any(
+        not 0 <= token < 2**16 for token in tokenizer.get_vocab().values()
+    ):
+        raise ValueError("tokenizer vocabulary IDs must fit uint16 storage")
+    return tokenizer, digest
 
 
 def materialize_mixture(declaration: Path, output: Path) -> dict:
@@ -737,15 +747,19 @@ def _schedule(
     reference_rows = spec.token_output == "references"
     reference_output = reference_rows and reuse_tokens
     cache_type = ContentTokens
+    cache_options = {}
     if sealed_cache:
         from klab.data.token_segments import SealedContentTokens
 
         cache_type = SealedContentTokens
+        cache_options["storage"] = spec.segment_dtype
     mode = "ab+" if frontier is not None else "wb+"
     with (
         ExitStack() as encoders,
         (
-            cache_type(token_root, tokenizer_sha) if reuse_tokens else nullcontext(None)
+            cache_type(token_root, tokenizer_sha, **cache_options)
+            if reuse_tokens
+            else nullcontext(None)
         ) as tokens,
         (staging / TRAIN_RECORDS).open(mode) as record_stream,
     ):
@@ -909,6 +923,7 @@ def _schedule(
                 metrics.update(
                     sealed_token_cache_hits=tokens.sealed_hits,
                     published_token_segments=tokens.published_segments,
+                    sealed_token_dtype=tokens.storage,
                 )
             progress = (
                 frontier.root if frontier is not None else staging
@@ -1327,12 +1342,15 @@ def _reference_schedule(spec, output, receipt, tokenizer, tokenizer_sha):
         raise ValueError("mixture token storage differs from declaration")
     if not reference:
         return None
-    return verify_schedule(
+    schedule = verify_schedule(
         output,
         token_cache_root(spec.release_path.resolve(), output.parent),
         receipt,
         tokenizer.token_to_id("<eos>"),
     )
+    if schedule.token_dtype.name != spec.segment_dtype:
+        raise ValueError("mixture segment encoding differs from the declaration")
+    return schedule
 
 
 _DIGEST_CHUNK = 16 * 1024 * 1024

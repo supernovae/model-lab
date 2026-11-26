@@ -1027,7 +1027,8 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         template = template.replace("${" + key + "}", str(value))
     declaration, mixture = tmp_path / "mixture.yaml", tmp_path / "mixture"
     declaration.write_text(
-        template + "\ntoken_cache: sealed\ntoken_output: references\n"
+        template
+        + "\ntoken_cache: sealed\nsegment_dtype: uint16\ntoken_output: references\n"
     )
     quotas = yaml.safe_load(template)["target_quotas"]
     receipt = lab.json(
@@ -1117,7 +1118,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     assert (bundle / "assets/data/train.schedule.bin").is_file()
     assert not (bundle / "assets/data/train.npy").exists()
 
-    # A storage-only change reuses sealed encodings and reaches identical
+    # Narrow storage and default-width materialization yield identical
     # packed targets and supervision through the same preparation command.
     inline_declaration = tmp_path / "inline-mixture.yaml"
     inline_declaration.write_text(template + "\ntoken_cache: sealed\n")
@@ -1206,6 +1207,9 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     )
     tokenizer_json.rename(tmp_path / "original-tokenizer.json")
     payload = next((dispatch / "assets/token-segments").rglob("tokens.ids"))
+    segment = json.loads(payload.with_name("segment.json").read_bytes())
+    assert segment["encoding"]["dtype"] == "uint16-le"
+    assert payload.stat().st_size == 2 * segment["tokens"]
     original = payload.read_bytes()
     payload.write_bytes(bytes([original[0] ^ 1]) + original[1:])
     with pytest.raises(ValueError, match="digest mismatch"):
