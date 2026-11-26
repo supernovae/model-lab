@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -323,14 +325,36 @@ def test_release_manifest_names_its_files_and_not_the_build_file(
 
 
 def test_shared_stage_releases_reuse_one_payload_and_reject_drift(
-    prepared: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+    prepared: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
+    from klab.cli.main import main
+    from klab.corpus import artifact_inventory
+
     build_dir, work = prepared
     monkeypatch.setenv("XDG_CONFIG_HOME", str(work.parent / "settings"))
     options = {**verification_options(work), "share_stage_artifacts": True}
     name = "stages/lm.jsonl"
     original = (build_dir / name).stat()
     publish = release_module.publish_shared_stages
+
+    def inventory(*arguments):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "klab",
+                "--work-dir",
+                str(work),
+                "corpus",
+                "artifacts",
+                "--kind",
+                "release-stages",
+                "--json",
+                *arguments,
+            ],
+        )
+        main()
+        return json.loads(capsys.readouterr().out)
 
     def stop_after_stage_move(*args, **kwargs):
         publish(*args, **kwargs)
@@ -340,6 +364,11 @@ def test_shared_stage_releases_reuse_one_payload_and_reject_drift(
         fault.setattr(release_module, "publish_shared_stages", stop_after_stage_move)
         with pytest.raises(InterruptedError, match="after stage move"):
             freeze(build_dir, work, **options)
+    pending = inventory()
+    assert pending["scan_status"] == "complete"
+    assert pending["unreferenced_payloads"] == 0
+    assert pending["payloads"][0]["staging_releases"] == 1
+
     with pytest.raises(ValueError, match="same freeze options"):
         freeze(build_dir, work)
     first = freeze(build_dir, work, **options)
@@ -361,6 +390,38 @@ def test_shared_stage_releases_reuse_one_payload_and_reject_drift(
     with release_module.open_release(second, **proof_options) as opened:
         assert opened.member(name) == payload
     assert not (second / name).exists()
+
+    unused = b"an unreferenced stage payload\n"
+    digest = hashlib.sha256(unused).hexdigest()
+    orphan = payload.parents[1] / digest[:2] / digest
+    orphan.parent.mkdir(exist_ok=True)
+    orphan.write_bytes(unused)
+    head = inventory("--limit", "1")
+    tail = inventory("--after", head["next_after"], "--limit", "1")
+    observed = {row["artifact_id"]: row for row in head["payloads"] + tail["payloads"]}
+    assert set(observed) == {payload.name, digest}
+    assert head["retained_bytes"] == original.st_size + len(unused)
+    assert observed[payload.name]["published_releases"] == 2
+    candidates = inventory("--unreferenced")
+    assert candidates["payloads"] == [observed[digest]]
+    assert candidates["unreferenced_bytes"] == len(unused)
+
+    racing = first.parent / (".freezing-" + "0" * 64)
+    payloads = artifact_inventory._stage_payloads
+
+    def start_freeze_during_scan(*args):
+        racing.mkdir()
+        return payloads(*args)
+
+    with monkeypatch.context() as race:
+        race.setattr(artifact_inventory, "_stage_payloads", start_freeze_during_scan)
+        incomplete = inventory("--unreferenced")
+    assert incomplete["scan_status"] == "incomplete"
+    assert incomplete["unreferenced_bytes"] is None and not incomplete["payloads"]
+    assert any(row["reason"] == "changed_during_scan" for row in incomplete["problems"])
+    assert inventory("--unreferenced")["scan_status"] == "incomplete"
+    assert orphan.read_bytes() == unused
+    racing.rmdir()
 
     with monkeypatch.context() as warm:
 

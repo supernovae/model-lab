@@ -792,6 +792,35 @@ page took 0.74–0.85 ms with 100 partitions and 42–44 ms with 5,000 partition
 The larger scan counted 5.35 GB of logical file sizes. Both sizes had 37.9 MiB
 peak process RSS.
 
+Inspect shared transform outputs or preview unreferenced payloads with:
+
+```sh
+klab --work-dir WORK corpus artifacts --kind release-stages --json
+klab --work-dir WORK corpus artifacts --kind release-stages --unreferenced --json
+```
+
+This view counts retained bytes once per digest. Each row gives the number
+of published and in-progress release manifests in the work area that name
+that digest and shows an example. Pagination uses the returned digest as
+the `--after` cursor. Totals cover the whole store on each page.
+
+The preview reads manifest and filesystem metadata. It checks the observed
+release namespace and manifest generations for changes. When a scan is
+incomplete, the JSON reports `scan_status: incomplete`, bounded examples of
+problems and null unreferenced totals. The preview page is empty in that
+case. Use the inventory as advisory retention evidence. Any future deletion
+must recheck the dependency closure under the publisher's locks.
+
+Three Linux tmpfs scans per size returned up to 20 unreferenced rows from
+synthetic stores with ten distinct referenced payloads per release. The
+largest scan counted 1.64 GB of logical payload sizes from metadata.
+
+| Shared payloads | Release manifests | Median wall time | Process reads | Median peak RSS |
+| ---: | ---: | ---: | ---: | ---: |
+| 500 | 40 | 15 ms | 0.10 MB | 44 MiB |
+| 5,000 | 400 | 128 ms | 1.04 MB | 45 MiB |
+| 25,000 | 2,000 | 658 ms | 5.18 MB | 54 MiB |
+
 `build` normalizes admitted documents, applies the frozen splits, removes exact
 duplicates (refusing cross-split or incompatible-rights duplicates) and writes
 documents, spans, lineage and language-model and chat views. `freeze` publishes

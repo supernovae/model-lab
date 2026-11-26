@@ -119,8 +119,11 @@ protected-lineage audits and source-token measurement also resolve their
 release payloads through the shared contract. Ordinary freeze can opt in to
 digest references for transform output payloads. The manifest binds their
 content and placement, and release and export verification receipts track
-their file generations. Reference publication for the remaining payloads
-and closure-aware pruning are tracked in #567.
+their file generations. `klab corpus artifacts --kind release-stages`
+counts unique stored bytes and published or in-flight references. Its
+unreferenced preview withholds candidates when the metadata scan is
+incomplete. Reference publication for the remaining payloads and
+closure-aware deletion are tracked in #567.
 
 Start with typed document, passage, annotation, duplicate-group, selection,
 entity, assertion, evidence, edge, index, and compiled sequence payloads.
