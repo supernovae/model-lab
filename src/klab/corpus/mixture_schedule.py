@@ -20,7 +20,9 @@ from klab.safe_io import read_file_range, symlinked
 from klab.verification_proofs import ProofStore, artifact_fingerprint
 
 TRAIN_SCHEDULE = "train.schedule.bin"
-_RANGE = struct.Struct("<IQI")  # segment ordinal, token offset, targets including EOS
+SCHEDULE_RANGE = struct.Struct(
+    "<IQI"
+)  # segment ordinal, token offset, targets including EOS
 _TOKEN = struct.Struct("<i")
 _SHA256 = re.compile("[0-9a-f]{64}")
 _FORMAT = "int32-segment-ranges"
@@ -49,7 +51,7 @@ def write_schedule(path: Path, records: Path, cache, eos: int) -> dict:
             if not 1 <= count <= available + 1:
                 raise ValueError("mixture token range exceeds the encoded document")
             ordinal = segments.setdefault(segment, len(segments))
-            raw = _RANGE.pack(ordinal, offset, count)
+            raw = SCHEDULE_RANGE.pack(ordinal, offset, count)
             stream.write(raw)
             digest.update(raw)
             size += len(raw)
@@ -67,7 +69,7 @@ def write_schedule(path: Path, records: Path, cache, eos: int) -> dict:
     }
 
 
-def _require_generation(proof: VerifiedFile, descriptor: int | None = None):
+def require_schedule_generation(proof: VerifiedFile, descriptor: int | None = None):
     if artifact_fingerprint(proof.path if descriptor is None else descriptor) != (
         (".", *proof.fingerprint),
     ):
@@ -75,11 +77,11 @@ def _require_generation(proof: VerifiedFile, descriptor: int | None = None):
 
 
 @contextmanager
-def _opened(proof: VerifiedFile):
+def open_verified_schedule_member(proof: VerifiedFile):
     with proof.path.open("rb") as stream:
-        _require_generation(proof, stream.fileno())
+        require_schedule_generation(proof, stream.fileno())
         yield stream
-        _require_generation(proof, stream.fileno())
+        require_schedule_generation(proof, stream.fileno())
 
 
 @dataclass(frozen=True)
@@ -92,14 +94,14 @@ class VerifiedSchedule:
 
     def require_unchanged(self):
         for proof in (self.schedule, *self.tokens, *self.indexes):
-            _require_generation(proof)
+            require_schedule_generation(proof)
 
     def ranges(self):
         total = 0
         seen = set()
-        with _opened(self.schedule) as stream:
-            while raw := stream.read(_RANGE.size * 4096):
-                for segment, offset, count in _RANGE.iter_unpack(raw):
+        with open_verified_schedule_member(self.schedule) as stream:
+            while raw := stream.read(SCHEDULE_RANGE.size * 4096):
+                for segment, offset, count in SCHEDULE_RANGE.iter_unpack(raw):
                     if (
                         segment >= len(self.tokens)
                         or not 1 <= count <= MAX_ROW_BYTES // 4
@@ -148,7 +150,9 @@ class VerifiedSchedule:
                         if len(streams) == 16:
                             streams.popitem(last=False)[1][1].close()
                         with ExitStack() as opened:
-                            stream = opened.enter_context(_opened(self.tokens[segment]))
+                            stream = opened.enter_context(
+                                open_verified_schedule_member(self.tokens[segment])
+                            )
                             streams[segment] = stream, opened.pop_all()
                     streams.move_to_end(segment)
                     buffer.extend(
@@ -186,7 +190,7 @@ def verify_schedule(
         or not 0 < len(schedule["segments"]) <= receipt["records"]
         or any(not _is_digest(segment) for segment in schedule["segments"])
         or len(set(schedule["segments"])) != len(schedule["segments"])
-        or schedule["bytes"] != _RANGE.size * receipt["records"]
+        or schedule["bytes"] != SCHEDULE_RANGE.size * receipt["records"]
         or receipt["train_tokens_bytes"] != 4 * targets
     ):
         raise ValueError("invalid mixture token schedule receipt")

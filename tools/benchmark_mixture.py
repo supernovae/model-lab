@@ -18,6 +18,97 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
+def benchmark_loaders(root, schedule, receipt, records, *, blocks, seq_len):
+    """Compare the same shuffled training blocks with and without segment reads."""
+    import mmap
+
+    import numpy as np
+    import psutil
+
+    from klab.data.mixture_batches import ReferencedTokenArray
+    from klab.data.packing import TokenBlockDataset
+
+    root.mkdir()
+    padded = -(-schedule.target_count // seq_len) * seq_len
+    path = root / "train.npy"
+    ids = np.lib.format.open_memmap(
+        path, mode="w+", dtype=np.int32, shape=(padded + 1,)
+    )
+    mask = np.lib.format.open_memmap(
+        root / "train_supervision.npy", mode="w+", dtype=bool, shape=(padded + 1,)
+    )
+    ids[0] = 2
+    position = 1
+    for raw in schedule.blocks(64 * 1024**2):
+        values = np.frombuffer(raw, dtype="<i4")
+        ids[position : position + len(values)] = values
+        position += len(values)
+    ids[position:] = 1
+    mask[:] = False
+    mask[1:position] = True
+    ids.flush()
+    mask.flush()
+    inline = TokenBlockDataset(ids, seq_len, supervision=mask)
+    order = np.random.default_rng(42).permutation(len(inline))[:blocks].tolist()
+    process = psutil.Process()
+    results = []
+
+    def run(dataset, mode, paths):
+        if hasattr(os, "posix_fadvise"):
+            for path in paths:
+                with path.open("rb") as stream:
+                    os.posix_fadvise(stream.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+        for cache in ("first", "warm"):
+            latencies = []
+            digest = hashlib.sha256()
+            before = process.io_counters() if hasattr(process, "io_counters") else None
+            for offset in range(0, len(order), 4):
+                started = time.perf_counter()
+                batch = [
+                    dataset.numpy_microblock(index)
+                    for index in order[offset : offset + 4]
+                ]
+                latencies.append(time.perf_counter() - started)
+                for inputs, targets, _ in batch:
+                    digest.update(inputs.tobytes())
+                    digest.update(targets.tobytes())
+            after = process.io_counters() if before is not None else None
+            results.append(
+                {
+                    "loader": mode,
+                    "cache": cache,
+                    "blocks": len(order),
+                    "seconds": sum(latencies),
+                    "p95_ms_per_batch": 1000 * float(np.percentile(latencies, 95)),
+                    "bytes_read_from_storage": (
+                        after.read_bytes - before.read_bytes
+                        if after is not None
+                        else None
+                    ),
+                    "rss_bytes": process.memory_info().rss,
+                    "sha256": digest.hexdigest(),
+                }
+            )
+
+    if hasattr(ids._mmap, "madvise"):
+        ids._mmap.madvise(mmap.MADV_DONTNEED)
+    run(inline, "contiguous", [path])
+    opened_at = time.perf_counter()
+    with ReferencedTokenArray(
+        schedule, records, receipt, seq_len=seq_len, bos=2, pad=1
+    ) as source:
+        open_seconds = time.perf_counter() - opened_at
+        references = TokenBlockDataset(source, seq_len, supervision=mask)
+        run(references, "references", [proof.path for proof in schedule.tokens])
+    if len({row["sha256"] for row in results}) != 1:
+        raise ValueError("train batches differ across loaders")
+    return {
+        "row_tokens": seq_len,
+        "reference_open_seconds": open_seconds,
+        "results": results,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
@@ -28,6 +119,8 @@ def main():
     parser.add_argument(
         "--token-output", choices=("contiguous", "references"), default="contiguous"
     )
+    parser.add_argument("--loader-blocks", type=int, default=0)
+    parser.add_argument("--loader-row-tokens", type=int, default=1024)
     args = parser.parse_args()
     if (
         not 1 <= args.workers <= 8
@@ -37,6 +130,13 @@ def main():
         parser.error("bounds: workers 1..8, documents 8..65536, text-bytes 32..2048")
     if args.token_output == "references" and args.token_cache != "sealed":
         parser.error("reference token output requires the sealed cache")
+    if (
+        not 0 <= args.loader_blocks <= 16_384
+        or not 16 <= args.loader_row_tokens <= 8192
+    ):
+        parser.error("bounds: loader-blocks 0..16384, loader-row-tokens 16..8192")
+    if args.loader_blocks and args.token_output != "references":
+        parser.error("loader comparison requires reference token output")
     # Affinity also bounds the baseline's default Rayon planner. Do this before
     # importing Lab or tokenizers; no nested BLAS/Rayon pool inherits more cores.
     if hasattr(os, "sched_getaffinity"):
@@ -251,6 +351,15 @@ def main():
         "scratch_bytes": sum(p.stat().st_size for p in root.rglob("*") if p.is_file()),
         "results": results,
     }
+    if args.loader_blocks:
+        result["loaders"] = benchmark_loaders(
+            root / "loader",
+            schedule,
+            receipt,
+            staging / "train.records.jsonl",
+            blocks=args.loader_blocks,
+            seq_len=args.loader_row_tokens,
+        )
     (root / "benchmark.json").write_bytes(canonical_json(result) + b"\n")
     print(json.dumps(result, sort_keys=True))
 

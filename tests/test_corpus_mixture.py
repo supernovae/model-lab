@@ -602,11 +602,19 @@ LONG_TEXT = "abcdefghijklmnopqrst"
 
 def _document_start_fixture(tmp_path, monkeypatch, seq_len=8):
     """One 21-target document under 8-target rows, and a stratum repeated 3x."""
-    declaration, _, release = _fixture(tmp_path, monkeypatch)
+    declaration, inventory, release = _fixture(
+        tmp_path, monkeypatch, actual_content=True
+    )
     documents = release / "documents.jsonl"
     docs = [json.loads(line) for line in documents.read_text().splitlines()]
     docs[0]["text"] = LONG_TEXT
+    docs[0]["content_sha256"] = hashlib.sha256(LONG_TEXT.encode()).hexdigest()
     documents.write_bytes(b"".join(canonical_json(row) + b"\n" for row in docs))
+    families = [json.loads(line) for line in inventory.read_text().splitlines()]
+    for row in families:
+        if row["document_id"] == docs[0]["document_id"]:
+            row["content_sha256"] = docs[0]["content_sha256"]
+    inventory.write_bytes(b"".join(canonical_json(row) + b"\n" for row in families))
     quotas = {"explanatory": 5, "general": len(LONG_TEXT) + 1, "incident": 12}
     total = sum(quotas.values())
     (release / "report.json").write_text(
@@ -689,6 +697,35 @@ def test_document_start_rows_and_stratum_exposures(
     assert blocks.numpy_block(1)[0][0] == 3
     assert rows[1] == long_ids[:8] and rows[2] == long_ids[8:16]
     assert rows[3][:5] == long_ids[16:]
+
+    from klab.corpus.mixture_schedule import verify_schedule
+    from klab.data import mixture_batches
+
+    reference_declaration = tmp_path / "reference.yaml"
+    reference_declaration.write_text(
+        declaration.read_text() + "\ntoken_cache: sealed\ntoken_output: references\n"
+    )
+    references = tmp_path / "references"
+    reference_receipt = mixture.materialize_mixture(reference_declaration, references)
+    schedule = verify_schedule(
+        references, tmp_path / ".source-tokens", reference_receipt, 3
+    )
+    monkeypatch.setattr(mixture_batches, "_PAGE_RECORDS", 2)
+    with mixture_batches.ReferencedTokenArray(
+        schedule,
+        references / "train.records.jsonl",
+        reference_receipt,
+        seq_len=8,
+        bos=2,
+        pad=0,
+    ) as source:
+        reference_blocks = TokenBlockDataset(source, 8, supervision=mask)
+        assert reference_blocks.exposure_supply() == blocks.exposure_supply()
+        for index in reversed(range(len(blocks))):
+            expected, target, _ = blocks.numpy_microblock(index)
+            actual, reference_target, _ = reference_blocks.numpy_microblock(index)
+            np.testing.assert_array_equal(actual, expected)
+            np.testing.assert_array_equal(reference_target, target)
 
 
 @pytest.mark.parametrize("damage", ["receipt_count", "seq_len"])

@@ -639,6 +639,11 @@ def calibration_key(
         "seq_len": config.training.seq_len,
         "micro_batch_size": config.training.micro_batch_size,
         "gradient_accumulation": config.training.gradient_accumulation,
+        **(
+            {"mixture_loader": config.training.mixture_loader}
+            if config.training.mixture_loader == "references"
+            else {}
+        ),
         "optimizer": config.optimizer.name,
         "optimizer_state_offload": config.optimizer.state_offload,
         "checkpointing": config.runtime.memory.activation_checkpointing.enabled,

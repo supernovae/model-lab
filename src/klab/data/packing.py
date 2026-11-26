@@ -11,11 +11,10 @@ import shutil
 import sys
 import tempfile
 import time
-from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing, nullcontext
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from functools import lru_cache, partial, wraps
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -47,7 +46,6 @@ from klab.data.preparation_workers import (
     collect_parallel_stream,
 )
 from klab.data.repeat_token import symbols as repeat_symbols
-from klab.data.row_layout import document_rows
 from klab.data.token_store import TokenStore
 from klab.data.verification import (
     HashingWriter,
@@ -76,10 +74,10 @@ from klab.workspace_cleanup import mark_prepared_cache, workspace_lock
 if TYPE_CHECKING:
     from klab.bottleneck_observations import BottleneckObserver
     from klab.corpus.mixture_schedule import VerifiedSchedule
+    from klab.data.mixture_batches import ReferencedTokenArray
     from klab.data.preparation_chunks import SplitChunks
 
 PACKING_VERSION = "contiguous-eos-v6"
-_MAX_MIXTURE_ROW_BYTES = 1024**2  # one metadata row; token IDs are binary
 _MIXTURE_COPY_BYTES = 64 * 1024**2
 
 
@@ -94,6 +92,7 @@ class PreparedData:
     validation_byte_addresses: np.ndarray | None
     manifest: dict[str, object]
     receipt: VerifiedPreparedData
+    mixture_schedule: VerifiedSchedule | None = None
 
 
 @dataclass(frozen=True)
@@ -748,15 +747,6 @@ def _collect_token_mixture(
     assert dataset.train_path is not None
     target_count = sum(receipt["actual_target_tokens"].values())
     seq_len = config.training.seq_len
-    layout = receipt.get("row_layout")
-    rows = None
-    if layout is not None:
-        if layout["row_tokens"] != seq_len:
-            raise ValueError(
-                f"token mixture rows hold {layout['row_tokens']} targets; "
-                f"training.seq_len is {seq_len}"
-            )
-        rows = document_rows(layout)
     # Raw target offsets where filler goes, and its length.
     gap_offsets: list[int] = []
     gap_lengths: list[int] = []
@@ -766,39 +756,22 @@ def _collect_token_mixture(
     pad = tokenizer.token_to_id("<pad>")
     if any(value is None for value in (bos, eos, pad)):
         raise ValueError("token mixture tokenizer requires BOS, EOS and PAD")
-    record_digest = hashlib.sha256()
-    by_stratum: Counter[str] = Counter()
+    from klab.data.row_layout import packed_mixture_records
+
     lengths: list[int] = []
-    with dataset.train_path.with_name("train.records.jsonl").open("rb") as stream:
-        while line := stream.readline(_MAX_MIXTURE_ROW_BYTES + 1):
-            if len(line) > _MAX_MIXTURE_ROW_BYTES:
-                raise ValueError("mixture record-byte cap exceeded")
-            if not line.strip():
-                raise ValueError("empty token mixture record row")
-            record_digest.update(line)
-            row = json.loads(line)
-            count = row.get("tokens") if isinstance(row, dict) else None
-            if type(count) is not int or count < 1:
-                raise ValueError("invalid token mixture target row")
-            if rows is not None and (gap := rows.place(row["stratum"], count)):
-                gap_offsets.append(scheduled)
-                gap_lengths.append(gap)
-            scheduled += count
-            lengths.append(count)
-            by_stratum[row["stratum"]] += count
+    for count, gap in packed_mixture_records(
+        dataset.train_path.with_name("train.records.jsonl"), receipt, seq_len
+    ):
+        if gap:
+            gap_offsets.append(scheduled)
+            gap_lengths.append(gap)
+        scheduled += count
+        lengths.append(count)
     records = len(lengths)
-    if rows is not None and rows.summary() != layout:
-        raise ValueError("token mixture row layout differs from verified receipt")
     filler = sum(gap_lengths)
     padded_targets = -(-(target_count + filler) // seq_len) * seq_len
     ends = np.cumsum(np.asarray(lengths, dtype=np.int64))
-    if (
-        records != receipt["records"]
-        or (int(ends[-1]) if records else 0) != target_count
-        or dict(by_stratum) != receipt["actual_target_tokens"]
-        or record_digest.hexdigest() != receipt["train_records_sha256"]
-        or (schedule is None and dataset.train_path.stat().st_size != 4 * target_count)
-    ):
+    if schedule is None and dataset.train_path.stat().st_size != 4 * target_count:
         raise ValueError("token mixture target count differs from verified receipt")
     ids = _ArraySpool(root / "train.npy", np.dtype(np.int32))
     mask = _ArraySpool(root / "train_supervision.npy", np.dtype(bool))
@@ -2115,6 +2088,10 @@ def _prepare_data(
         token_mixture, mixture_schedule = verified_mixture_dataset(
             config.dataset, config.tokenizer.path, config.model.vocab_size
         )
+        if config.training.mixture_loader == "references" and mixture_schedule is None:
+            raise ValueError(
+                "training.mixture_loader=references requires a reference mixture schedule"
+            )
         if (
             tokenizer.to_str()
             != Tokenizer.from_file(str(config.tokenizer.path)).to_str()
@@ -2317,7 +2294,11 @@ def _prepare_data(
                     **telemetry.snapshot(),
                 },
             )
-            return cached
+            return (
+                replace(cached, mixture_schedule=mixture_schedule)
+                if config.training.mixture_loader == "references"
+                else cached
+            )
     if require_prepared:
         raise PreparedDataMissing(
             f"prepared data is not published at {root}; run `klab data prepare` "
@@ -2806,7 +2787,11 @@ def _prepare_data(
             unit="cache_verifications",
             raw_counters=telemetry.snapshot(),
         )
-    return prepared
+    return (
+        replace(prepared, mixture_schedule=mixture_schedule)
+        if config.training.mixture_loader == "references"
+        else prepared
+    )
 
 
 @_discard_store_staging_on_failure
@@ -2946,7 +2931,7 @@ def _supervised_blocks(
 class TokenBlockDataset:
     def __init__(
         self,
-        ids: np.ndarray,
+        ids: np.ndarray | ReferencedTokenArray,
         seq_len: int,
         byte_addresses: np.ndarray | None = None,
         supervision: np.ndarray | None = None,

@@ -6,6 +6,11 @@ and by packing, which places the masked filler; neither imports the other.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections import Counter
+from pathlib import Path
+
 
 class DocumentStartRows:
     """Place records of a target stream so long documents start on a row.
@@ -71,3 +76,42 @@ def document_rows(layout: dict) -> DocumentStartRows:
             for stratum, value in layout["strata"].items()
         },
     )
+
+
+_MAX_RECORD_BYTES = 1024**2
+
+
+def packed_mixture_records(path: Path, receipt: dict, seq_len: int):
+    """Yield each record's target length and preceding masked filler."""
+    layout = receipt.get("row_layout")
+    if layout is not None and layout["row_tokens"] != seq_len:
+        raise ValueError(
+            f"token mixture rows hold {layout['row_tokens']} targets; training.seq_len is {seq_len}"
+        )
+    placement = document_rows(layout) if layout is not None else None
+    digest = hashlib.sha256()
+    by_stratum: Counter[str] = Counter()
+    records = 0
+    with path.open("rb") as stream:
+        while line := stream.readline(_MAX_RECORD_BYTES + 1):
+            if len(line) > _MAX_RECORD_BYTES:
+                raise ValueError("mixture record-byte cap exceeded")
+            if not line.strip():
+                raise ValueError("empty token mixture record row")
+            digest.update(line)
+            row = json.loads(line)
+            count = row.get("tokens") if isinstance(row, dict) else None
+            if type(count) is not int or count < 1:
+                raise ValueError("invalid token mixture target row")
+            stratum = row["stratum"]
+            records += 1
+            by_stratum[stratum] += count
+            yield count, placement.place(stratum, count) if placement is not None else 0
+    if placement is not None and placement.summary() != layout:
+        raise ValueError("token mixture row layout differs from verified receipt")
+    if (
+        records != receipt["records"]
+        or dict(by_stratum) != receipt["actual_target_tokens"]
+        or digest.hexdigest() != receipt["train_records_sha256"]
+    ):
+        raise ValueError("token mixture target count differs from verified receipt")
