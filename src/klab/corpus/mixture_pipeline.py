@@ -26,6 +26,7 @@ from klab.corpus.split_runs import write_rows
 from klab.result_publication import sync_directory
 from klab.safe_io import symlinked
 from klab.training.manifest import sha256_file
+from klab.verification_proofs import artifact_fingerprint
 
 PREFETCH_BYTES = 128 * 1024**2
 PREFETCH_DOCUMENTS = 256  # One tokenizer batch can read ahead while encoding runs.
@@ -317,7 +318,7 @@ def _encode_here(tokenizer, request):
 
 
 class MixtureFrontier:
-    """Immutable segments and native proof-backed committed schedule frontier.
+    """Authenticated append prefixes and immutable index-event segments.
 
     Restoring SQL acceleration structures replays index deltas only: it does
     not fetch sources, tokenize, make dedup decisions or re-emit schedule rows.
@@ -344,52 +345,58 @@ class MixtureFrontier:
             write_rows(binding, [request])
         self.sequence = 0
         self.state = None
-        while (marker := self.root / f"commit-{self.sequence:012d}.json").exists():
-            entry = json.loads(marker.read_bytes())
+        self.excluded_offset = 0
+        self.event_file = None
+        self.output_digests = {}
+
+    def restore(self, index, outputs, excluded):
+        """Validate the committed files in place and replay narrow index events."""
+        generations = {
+            name: artifact_fingerprint(output.stream.fileno())
+            for name, output in outputs.items()
+        }
+        for marker in sorted(self.root.glob("commit-*.json")):
+            if marker.name != f"commit-{self.sequence:012d}.json":
+                raise ValueError("mixture checkpoint sequence gap")
+            segment = json.loads(marker.read_bytes())
             expected = {"identity": self.identity, "sequence": self.sequence}
-            found = cache.load("mixture-frontier", expected, limit=4 * 1024**2)
-            if found is None or found[0] != entry:
+            found = self.cache.load("mixture-frontier", expected, limit=4 * 1024**2)
+            if found is None or found[0] != segment:
                 raise ValueError(
                     "mixture checkpoint authentication or corruption failure"
                 )
-            if entry["previous"] != (
+            if segment["previous"] != (
                 canonical_digest(self.state) if self.state else None
             ):
                 raise ValueError("mixture checkpoint frontier chain mismatch")
-            self.state = entry
-            self.sequence += 1
-        if sum(1 for _ in self.root.glob("commit-*.json")) != self.sequence:
-            raise ValueError("mixture checkpoint sequence gap")
-        self.output_offsets: dict[str, int] = {}
-        self.excluded_offset = 0
-        self.event_file = None
-
-    def restore(self, index, outputs, excluded):
-        """Replay committed segments; ``outputs`` maps a segment file name to
-        the ``(stream, digest)`` it continues."""
-        for sequence in range(self.sequence):
-            segment = json.loads(
-                (self.root / f"commit-{sequence:012d}.json").read_bytes()
-            )
+            parts = segment["outputs"]
+            if parts.keys() != outputs.keys():
+                raise ValueError("mixture checkpoint output inventory mismatch")
+            for name, output in outputs.items():
+                digest = output.validated_prefix(parts[name])
+                if digest is None:
+                    raise ValueError(
+                        f"mixture checkpoint output prefix changed: {name}"
+                    )
+                output.whole = digest
+                output.offset = parts[name]["end"]
             directory = Path(segment["directory"])
             for event in rows(directory / "index.jsonl"):
                 index.restore_event(event)
-            for name, (stream, digest) in outputs.items():
-                with (directory / name).open("rb") as source:
-                    while chunk := source.read(1024**2):
-                        stream.write(chunk)
-                        digest.update(chunk)
             excluded.extend(rows(directory / "excluded.jsonl"))
-        self.output_offsets = {
-            name: stream.tell() for name, (stream, _) in outputs.items()
-        }
+            self.state = segment
+            self.sequence += 1
+        for name, output in outputs.items():
+            if artifact_fingerprint(output.stream.fileno()) != generations[name]:
+                raise ValueError(f"mixture checkpoint changed during recovery: {name}")
+            output.stream.seek(output.offset)
+            if os.fstat(output.stream.fileno()).st_size != output.offset:
+                output.stream.truncate()
+                os.fsync(output.stream.fileno())
         self.excluded_offset = len(excluded)
 
     def pending_bytes(self, outputs):
-        return sum(
-            stream.tell() - self.output_offsets.get(name, 0)
-            for name, (stream, _) in outputs.items()
-        )
+        return sum(output.stream.tell() - output.offset for output in outputs.values())
 
     def begin(self, index):
         from uuid import uuid4
@@ -402,23 +409,13 @@ class MixtureFrontier:
         )
 
     def commit(self, state, outputs, excluded, index):
-        ends = {}
-        for name, (stream, _) in outputs.items():
-            stream.flush()
-            ends[name] = end = stream.tell()
-            start = self.output_offsets.get(name, 0)
-            with (self.directory / name).open("xb") as target:
-                stream.seek(start)
-                remaining = end - start
-                while remaining:
-                    raw = stream.read(min(1024**2, remaining))
-                    if not raw:
-                        raise ValueError("mixture checkpoint output truncated")
-                    target.write(raw)
-                    remaining -= len(raw)
-                target.flush()
-                os.fsync(target.fileno())
-            stream.seek(end)
+        parts = {name: output.seal() for name, output in outputs.items()}
+        if self.sequence == 0:
+            for directory in {
+                Path(output.stream.name).parent for output in outputs.values()
+            }:
+                sync_directory(directory)
+            sync_directory(self.root.parent)
         write_rows(self.directory / "excluded.jsonl", excluded[self.excluded_offset :])
         self.event_file.flush()
         os.fsync(self.event_file.fileno())
@@ -428,6 +425,7 @@ class MixtureFrontier:
             "previous": canonical_digest(self.state) if self.state else None,
             "directory": str(self.directory),
             "state": state,
+            "outputs": parts,
         }
         request = {"identity": self.identity, "sequence": self.sequence}
         self.cache.publish(
@@ -444,7 +442,8 @@ class MixtureFrontier:
         write_rows(self.root / f"commit-{self.sequence:012d}.json", [entry])
         self.state = entry
         self.sequence += 1
-        self.output_offsets = ends
+        for name, output in outputs.items():
+            output.offset = parts[name]["end"]
         self.excluded_offset = len(excluded)
         self.begin(index)
 
@@ -463,6 +462,7 @@ def producer_digests():
             "mixture_index.py",
             "mixture_pipeline.py",
             "retained_mixture.py",
+            "view_checkpoints.py",
         )
     }
     producer.update(

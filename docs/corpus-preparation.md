@@ -2962,7 +2962,7 @@ I/O remain unmeasured.
 | Near-duplicate screen | Verified held-out and sample shingle evidence per range, plus training offsets and accumulators every 200,000 training records by default. | Reuse evidence and rebuild the in-memory tables. Read source ranges with missing or damaged evidence and screen the uncommitted training suffixes. | See [near-duplicate evidence measurements](#near-duplicate-evidence-measurements). The historical 6.7M-document Workshop screen took 1–2 h on one core. [#491](https://github.com/supernovae/model-lab/pull/491) |
 | Seeded tokenizer sample and verification | TRAIN lineage, rank histogram, and candidate range receipts with `--scratch-dir` on `tokenizer train` and `tokenizer verify`. | Reuse completed ranges and scan missing or damaged ranges. Reassemble the sample and read its selected payloads. A run without scratch does its own selection scans. | 13 s at 12 workers on a warm-page-cache synthetic 11.9 GB, 2M-document release with a 32 MiB fit quota. This measures selection. [#499](https://github.com/supernovae/model-lab/pull/499) |
 | Tokenizer fit and bakeoff | Complete staged tokenizer and provenance, published together, or completed bakeoff artifacts. | Verify and publish a matching staged pair without fitting again. A stop before both staged files are complete repeats the native fit. Concurrent fits coordinate on the destination and publication preserves an existing destination. | A 16 MiB synthetic fit took 1.04 s, and its retry after a stop inside BPE spent 1.03 s in the trainer call. See [the fitting measurements](#tokenizer-fit-timings). |
-| `materialize-mixture` | Candidate and output segments and a reusable content token cache. Default commit thresholds are 4,096 candidates, 64 MiB or 30 s. | Verify committed segments, rebuild or verify indexes as needed, replay the uncommitted segment, and finish assembly. Reuse unchanged token encodings. | 24.2 s cold and 12.9 s with warm token cache on a synthetic 210M-token mixture. These are build timings. [Mixture speed](token-store.md#mixture-speed) |
+| `materialize-mixture` | Authenticated output prefixes, index event segments and a reusable content token cache. Default commit thresholds are 4,096 candidates, 64 MiB or 30 s. | Verify committed bytes in place, trim the uncommitted tail, restore index state, and continue writing the same files. Reuse unchanged token encodings. | 24.2 s cold and 12.9 s with warm token cache on a synthetic 210M-token mixture. [Build and checkpoint measurements](token-store.md#mixture-speed) |
 | `verify-mixture`, `--reseal`, and `--audit` | Complete verification or completion receipt. | Routine verification and reseal may repeat output checks and hashes. `--audit` reruns an independent schedule in fresh scratch with token reuse disabled. | A real full audit took 94 min. The synthetic 6,000-document audit took 1.1 s with a mocked tokenizer. [#521](https://github.com/supernovae/model-lab/pull/521) |
 
 Retry `split-inventory`, `derive-family-inventory` or native
@@ -3568,7 +3568,7 @@ recomputes them from `train.records.jsonl` and refuses a receipt that differs.
 carries a loss mask; `document_start` is the mixture's way to give long
 documents their own rows.
 
-- **Resume.** An interrupted run resumes from its last committed segment in
+- **Resume.** An interrupted run resumes from its last committed frontier in
   `.OUTPUT.assembly-ID`, where `ID` names the declaration, release manifest,
   family inventory, tokenizer and Lab source the checkpoint was written for;
   keep that directory and the output parent's `cache`. Another declaration,
@@ -3576,8 +3576,14 @@ documents their own rows.
   its own checkpoint, and the command lists the others at once (delete the ones
   you will not resume). A checkpoint whose `request.json` disagrees with its
   name is refused before any verification, sampling or indexing, naming the
-  directory to delete. Once the output is published, the segments and commit
-  markers are removed; `progress.json` stays.
+  directory to delete. The commit markers bind the lengths and checksums of
+  the staged token and record files. On retry, the writer checks the committed
+  bytes in place, refuses damage to the committed prefix, discards the
+  uncommitted tail and rebuilds disposable SQL state from the index events.
+  Publication renames the staged files into the output. It removes the index
+  segments and commit markers and keeps `progress.json`. Checkpoints from
+  earlier Lab revisions start a separate assembly. Published mixtures can
+  refresh their completion proof with `verify-mixture --reseal` if required.
   `KLAB_MIXTURE_COMMIT_CANDIDATES=N` sets how often it commits (default 4096
   candidates, 64 MiB or 30 seconds).
 - **Workers.** `--workers N` (default: half the CPU count) sets the number of
@@ -3645,8 +3651,8 @@ Admission, splitting, building and mixtures stream metadata through temporary
 on-disk databases under the work root and spool encoded data to disk, so memory
 is bounded by individual records rather than corpus size. Individual rows are
 limited to 8 MiB in admission and splitting and 64 MiB in mixtures. Scratch
-space is real: indexes, spools, committed segments and the output coexist until it is
-published, so
-watch free space on the corpus filesystem throughout. Reuse of completed work
+space includes indexes, spools, index events and the staged output. Mixture
+checkpoints share the staged token and record files through authenticated
+prefixes. Watch free space on the corpus filesystem throughout. Reuse of completed work
 depends on a private verification key under `XDG_CONFIG_HOME`; keep it, the work
 root and the service user the same across restarts.

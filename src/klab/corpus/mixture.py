@@ -39,7 +39,7 @@ from klab.corpus.release_verify import current_settings
 from klab.data.row_layout import document_rows
 from klab.data.tokenizer import load_tokenizer, verify_tokenizer_artifact
 from klab.result_publication import sync_directory
-from klab.safe_io import rename_noreplace, write_canonical_json
+from klab.safe_io import rename_noreplace, symlinked, write_canonical_json
 from klab.training.manifest import sha256_file
 
 MIXTURE_BATCH_SOURCE_BYTES = 2 * 1024**2
@@ -502,12 +502,36 @@ def _materialize_mixture(
                 "completed mixture requires existing trusted work-root completion storage"
             )
     output.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=".mixture-", dir=output.parent))
+    checkpoint_cache, checkpoint_request = _native_mixture_completion(
+        spec, raw, output, manifest, tokenizer_sha
+    )
+    if reuse_tokens:
+        from klab.corpus.mixture_pipeline import claim_assembly
+
+        assembly = assembly or claim_assembly(output, checkpoint_request)
+        staging = assembly / "payload"
+        if symlinked(staging):
+            raise ValueError("unsafe mixture checkpoint payload")
+        staging.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if any(
+            path.name not in {TRAIN_TOKENS, TRAIN_RECORDS, "receipt.json"}
+            or path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_nlink != 1
+            for path in staging.iterdir()
+        ):
+            raise ValueError("unsafe mixture checkpoint payload inventory")
+        # These directories only contain rebuildable SQL state. A killed writer
+        # cannot run TemporaryDirectory cleanup, so reclaim it under the lease.
+        for scratch in assembly.glob(".mixture-index-*"):
+            if scratch.is_dir() and not scratch.is_symlink():
+                shutil.rmtree(scratch)
+    else:
+        staging = Path(tempfile.mkdtemp(prefix=".mixture-", dir=output.parent))
     try:
-        checkpoint_cache, checkpoint_request = _native_mixture_completion(
-            spec, raw, output, manifest, tokenizer_sha
-        )
-        with tempfile.TemporaryDirectory(prefix=".index-", dir=staging) as scratch:
+        with tempfile.TemporaryDirectory(
+            prefix=".mixture-index-", dir=assembly if reuse_tokens else staging
+        ) as scratch:
             preflight = None
             if cohorts is None:
                 from klab.corpus.mixture_pipeline import MixturePreflight
@@ -562,12 +586,12 @@ def _materialize_mixture(
                 if reuse_tokens:
                     from klab.corpus.mixture_pipeline import (
                         MixtureFrontier,
-                        claim_assembly,
                         pipeline_request,
                     )
 
+                    assert assembly is not None
                     frontier = MixtureFrontier(
-                        assembly or claim_assembly(output, checkpoint_request),
+                        assembly,
                         checkpoint_cache,
                         pipeline_request(checkpoint_request, index),
                     )
@@ -616,10 +640,18 @@ def _materialize_mixture(
                 "policy": completed["policy"],
                 "verification_scope": "native executed mixture schedule and unique-content counts; no later schedule replay",
             }
-        write_canonical_json(staging / "receipt.json", receipt, exclusive=True)
+        if frontier is not None:
+            for name, digest in frontier.output_digests.items():
+                digest.inventory_entry(staging / name)
+        receipt_path = staging / "receipt.json"
+        if reuse_tokens:
+            receipt_path.unlink(missing_ok=True)
+        write_canonical_json(receipt_path, receipt, exclusive=True)
         sync_directory(staging)
         rename_noreplace(staging, output)
         sync_directory(output.parent)
+        if staging.parent != output.parent:
+            sync_directory(staging.parent)
         if completed is not None:
             _seal_completed_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
         else:
@@ -636,7 +668,7 @@ def _materialize_mixture(
                     shutil.rmtree(segment)
         return receipt
     except BaseException:
-        if staging.exists():
+        if not reuse_tokens and staging.exists():
             shutil.rmtree(staging)
         raise
 
@@ -664,8 +696,6 @@ def _schedule(
     records = 0
     excluded: list[dict] = []
     excluded_bytes = 0
-    token_digest = hashlib.sha256()
-    record_digest = hashlib.sha256()
 
     def exclude(doc, reason):
         nonlocal excluded_bytes
@@ -677,6 +707,7 @@ def _schedule(
 
     from klab.corpus.mixture_pipeline import encode_ahead
     from klab.corpus.preparation_inputs import corpus_work_root
+    from klab.corpus.view_checkpoints import ViewOutput
     from klab.data import encoding
     from klab.data.encoding import PreparationEncoder
     from klab.data.token_store import ContentTokens
@@ -684,7 +715,9 @@ def _schedule(
     try:
         token_root = corpus_work_root(release.root) / "cache" / "source-tokens"
     except ValueError:
-        token_root = staging.parent / ".source-tokens"
+        work_parent = frontier.root.parent if frontier is not None else staging.parent
+        token_root = work_parent / ".source-tokens"
+    mode = "ab+" if frontier is not None else "wb+"
     with (
         ExitStack() as encoders,
         (
@@ -692,12 +725,12 @@ def _schedule(
             if reuse_tokens
             else nullcontext(None)
         ) as tokens,
-        (staging / TRAIN_TOKENS).open("wb+") as stream,
-        (staging / TRAIN_RECORDS).open("wb+") as record_stream,
+        (staging / TRAIN_TOKENS).open(mode) as stream,
+        (staging / TRAIN_RECORDS).open(mode) as record_stream,
     ):
         outputs = {
-            "output.ids": (stream, token_digest),
-            "output.records.jsonl": (record_stream, record_digest),
+            TRAIN_TOKENS: ViewOutput(stream),
+            TRAIN_RECORDS: ViewOutput(record_stream),
         }
         from klab.corpus.release_verify import worker_count
         from klab.host_capacity import plan_host_workers
@@ -880,11 +913,9 @@ def _schedule(
                 "tokens": take,
             }
             payload = targets.tobytes()
-            stream.write(payload)
-            token_digest.update(payload)
+            outputs[TRAIN_TOKENS].write(payload)
             encoded_row = canonical_json(row) + b"\n"
-            record_stream.write(encoded_row)
-            record_digest.update(encoded_row)
+            outputs[TRAIN_RECORDS].write(encoded_row)
             totals[stratum] += take
             source_totals[doc["source_id"]] += take
             if exposure == 1:
@@ -1005,9 +1036,13 @@ def _schedule(
                 raise ValueError(f"unfilled quota for {stratum}")
             done.append(stratum)
             checkpoint(stratum, available, force=True)
-        for output_stream, _ in outputs.values():
-            output_stream.flush()
-            os.fsync(output_stream.fileno())
+        if frontier is None:
+            for output_file in outputs.values():
+                output_file.seal()
+        else:
+            frontier.output_digests = {
+                name: output_file.file_digest() for name, output_file in outputs.items()
+            }
     receipt = {
         "schema_version": 2,
         "release_id": manifest["release_id"],
@@ -1037,9 +1072,9 @@ def _schedule(
             for stratum in spec.target_quotas
         },
         "train_tokens_format": "int32-le",
-        "train_tokens_sha256": token_digest.hexdigest(),
+        "train_tokens_sha256": outputs[TRAIN_TOKENS].whole.hexdigest(),
         "train_tokens_bytes": (staging / TRAIN_TOKENS).stat().st_size,
-        "train_records_sha256": record_digest.hexdigest(),
+        "train_records_sha256": outputs[TRAIN_RECORDS].whole.hexdigest(),
         "train_records_bytes": (staging / TRAIN_RECORDS).stat().st_size,
     }
     if spec.unique_train_content_floors is not None:
