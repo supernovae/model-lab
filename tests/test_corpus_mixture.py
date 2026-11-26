@@ -1316,6 +1316,16 @@ def test_mixture_frontier_resumes_without_committed_candidate_replay(
     checkpoints = _assembly(tmp_path, "interrupted")
     last = json.loads(max(checkpoints.glob("commit-*.json")).read_bytes())
     committed = sum(last["state"]["candidates"].values())
+    assert {path.name for path in Path(last["directory"]).iterdir()} == {
+        "index.jsonl",
+        "excluded.jsonl",
+    }
+    abandoned_scratch = checkpoints / ".mixture-index-abandoned"
+    abandoned_scratch.mkdir()
+    staged_inodes = {
+        name: (checkpoints / "payload" / name).stat().st_ino
+        for name in ("train.tokens.ids", "train.records.jsonl")
+    }
     visited = []
     original_cached = mixture.MixtureIndex.cached_document
 
@@ -1334,15 +1344,17 @@ def test_mixture_frontier_resumes_without_committed_candidate_replay(
     assert actual == expected
     for name in ("train.tokens.ids", "train.records.jsonl"):
         assert (output / name).read_bytes() == (baseline / name).read_bytes()
+        assert (output / name).stat().st_ino == staged_inodes[name]
     assert len(visited) == 3 - committed
     # Segments kept for the resume are removed once the output is published;
     # the progress report stays.
     assert not list(checkpoints.glob("segment-*"))
     assert not list(checkpoints.glob("commit-*.json"))
+    assert not abandoned_scratch.exists()
     assert (checkpoints / "progress.json").is_file()
 
 
-@pytest.mark.parametrize("damage", ["output.ids", "marker"])
+@pytest.mark.parametrize("damage", ["committed bytes", "marker"])
 def test_mixture_frontier_rejects_changed_checkpoint(tmp_path, monkeypatch, damage):
     from klab.corpus.mixture_pipeline import MixtureFrontier
 
@@ -1352,18 +1364,20 @@ def test_mixture_frontier_rejects_changed_checkpoint(tmp_path, monkeypatch, dama
 
     def interrupt(self, *args):
         original(self, *args)
-        raise InterruptedError("after durable commit")
+        if self.state["outputs"]["train.tokens.ids"]["end"]:
+            raise InterruptedError("after durable commit")
 
     monkeypatch.setattr(MixtureFrontier, "commit", interrupt)
     with pytest.raises(InterruptedError):
         mixture.materialize_mixture(declaration, output)
     monkeypatch.setattr(MixtureFrontier, "commit", original)
     checkpoints = _assembly(tmp_path, "interrupted")
-    marker = next(checkpoints.glob("commit-*.json"))
+    marker = max(checkpoints.glob("commit-*.json"))
     entry = json.loads(marker.read_bytes())
-    if damage == "output.ids":
-        path = Path(entry["directory"]) / damage
-        path.write_bytes(path.read_bytes() + b"{}\n")
+    if damage == "committed bytes":
+        path = checkpoints / "payload" / "train.tokens.ids"
+        data = path.read_bytes()
+        path.write_bytes(bytes([data[0] ^ 1]) + data[1:])
     else:
         entry["state"]["records"] += 1
         marker.write_bytes(canonical_json(entry))

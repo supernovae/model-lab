@@ -136,6 +136,10 @@ A materialized mixture is binary too. Its output directory holds:
 | `train.records.jsonl` | one small row per scheduled record: document, family, source, stratum, exposure and its token count |
 | `receipt.json` | schema version 2; binds both files by SHA-256 and size |
 
+Mixture checkpoints sign prefixes of the staged token and record files. A
+retry verifies each committed byte once, discards any uncommitted tail, and
+appends to the same files. The schedule still journals index events separately.
+
 `dataset.train_path` of a `local_token_mixture` run names `train.tokens.ids`.
 Preparing it for training is a checked copy: the packer reads the record rows
 for counts and strata, then copies the IDs in 64 MiB blocks while checking the
@@ -161,3 +165,23 @@ storage, 48 threads, same output tokens in every row:
 
 About 6 s of each build is fixed verification work that does not grow with the
 corpus.
+
+### Checkpoint I/O
+
+The table compares the former copied checkpoint segments with authenticated
+prefixes on ext4 over NVMe. Each synthetic window appends 64 MiB of tokens and
+2 MiB of record bytes, then commits. Retry restores the full committed prefix
+after an extra uncommitted 1 MiB append. File pages were released before retry.
+Times are medians of three trials per size.
+
+| Token payload | Fresh write and commit, before → after | Restore, before → after |
+| --- | ---: | ---: |
+| 64 MiB | 0.206 s → 0.155 s | 0.112 s → 0.059 s |
+| 256 MiB | 0.649 s → 0.440 s | 1.615 s → 0.246 s |
+| 1 GiB | 3.703 s → 2.724 s | 3.045 s → 0.958 s |
+
+At 1 GiB, fresh storage writes fell from 2.22 GB to 1.11 GB, and the
+staged files and journal used 1.11 GB of logical space instead of 2.21 GB.
+Retry read about 1.11 GB from storage in both revisions, and storage writes
+fell from 1.11 GB to zero. Output digests matched. The experiment isolates
+checkpoint I/O. It excludes tokenization, real index events and training.
