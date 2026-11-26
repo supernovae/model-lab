@@ -23,7 +23,7 @@ from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.build_stages import implementation_digests
 from klab.corpus.inventory_writer import inventory_writer
 from klab.corpus.mixture import MixtureDeclaration
-from klab.corpus.release import verify_release
+from klab.corpus.release import ReleaseReader, open_release
 from klab.corpus.release_verify import current_settings, range_records
 from klab.corpus.shards import (
     declare_stage,
@@ -78,11 +78,17 @@ def derive_family_inventory(declaration: Path) -> dict[str, Any]:
     spec = MixtureDeclaration.model_validate(
         yaml.safe_load(declaration.read_text(encoding="utf-8"))
     )
-    release = spec.release_path.resolve()
-    documents = release / "documents.jsonl"
+    with open_release(spec.release_path) as release:
+        return _write_inventory(spec, release)
+
+
+def _write_inventory(
+    spec: MixtureDeclaration, release: ReleaseReader
+) -> dict[str, Any]:
+    documents = release.member("documents.jsonl")
     verified_input = range_file_identity(documents)
     output = spec.family_inventory.resolve()
-    manifest = verify_release(release)
+    manifest = release.manifest
     split = manifest["build_identity"]["split"]
     if split["unit"] not in DECLARED_UNITS or split.get("assignment_file"):
         raise ValueError(
@@ -148,6 +154,7 @@ def derive_family_inventory(declaration: Path) -> dict[str, Any]:
         if range_file_identity(documents) != verified_input:
             raise ValueError("release documents changed during family inventory")
         digest = view.file_digest().sha256
+        release.require_unchanged()
     return {
         "schema_version": 1,
         "release_id": manifest["release_id"],

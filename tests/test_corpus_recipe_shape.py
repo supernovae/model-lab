@@ -35,6 +35,7 @@ from klab.canonical import canonical_json
 from klab.corpus import prepared_shards
 from klab.corpus import release as release_module
 from klab.corpus.release_verify import verification_settings
+from klab.training.manifest import sha256_file
 
 VOCAB_SIZE = 300
 DECLARED = sorted(SOURCE_STRATA)
@@ -135,6 +136,32 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         trace = lab.json("corpus", "lineage", str(release), docs[0]["document_id"])
         assert trace["parents"][0]["document"] == docs[0]
         assert scanned["documents.jsonl"] == 1
+
+    snapshots = release.parent.parent / "snapshots"
+    acquisitions = {
+        name: json.loads(
+            (
+                snapshots / name / source["snapshot_sha256"] / "manifest.json"
+            ).read_bytes()
+        )["declaration"]["acquisition"]
+        for name, source in prepared.lock["sources"].items()
+    }
+    original_open = Path.open
+
+    def no_snapshot_body(path, *args, **options):
+        if path.name == "manifest.json" and path.is_relative_to(snapshots):
+            pytest.fail("warm publication reread a raw snapshot manifest")
+        return original_open(path, *args, **options)
+
+    with monkeypatch.context() as warm:
+        warm.setattr(Path, "open", no_snapshot_body)
+        publication = lab.json("corpus", "publication", str(release))
+    assert {
+        row["id"]: row["acquisition"] for row in publication["sources"]
+    } == acquisitions
+    assert publication["rights_report_sha256"] == sha256_file(
+        release / "license-report.json"
+    )
 
     # An edit to rights text, notes or domains is a new build, not a new acquisition.
     assert prepared.build != prepared.build_before_edit

@@ -1733,6 +1733,30 @@ def test_real_lineage_audit_blocks_protected_family_moved_to_train(
     assert result["status"] == "BLOCKED"
     assert result["new_train_family_collisions"]
     assert output.exists()
+    assert protected["content_sha256"] in result["new_train_content_collisions"]
+    assert protected["document_id"] in result["changed_retained_protected_assignments"]
+
+    rows = family.read_bytes().splitlines(keepends=True)
+    reordered = recipe / "reordered-family.jsonl"
+    reordered.write_bytes(b"".join(reversed(rows)))
+    replay = audit_protected_lineage(
+        prior_release,
+        release,
+        prior_family,
+        reordered,
+        profile,
+        suite,
+        recipe / "reordered-lineage.json",
+    )
+    assert replay == {**result, "candidate_inventory_sha256": sha256_file(reordered)}
+
+    incomplete = recipe / "incomplete-lineage.json"
+    reordered.write_bytes(b"".join(rows[:-1]))
+    with pytest.raises(ValueError, match="does not cover kept release documents"):
+        audit_protected_lineage(
+            prior_release, release, prior_family, reordered, profile, suite, incomplete
+        )
+    assert not incomplete.exists()
 
 
 def test_split_preparation_reuses_verified_snapshots(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,8 @@ import yaml
 from klab.canonical import canonical_json
 from klab.corpus import declared_family_inventory, split_freeze
 from klab.corpus.mixture_index import MixtureIndex
+from klab.corpus.release import ReleaseReader
+from klab.corpus.release_receipt import fingerprint
 
 TRAIN_SOURCES = {"ref_a": 400, "ref_b": 40, "ref_c": 10}
 STRATA = {"ref_a": "reference", "ref_b": "reference", "ref_c": "reference"}
@@ -45,8 +48,18 @@ def _release(tmp_path: Path, monkeypatch, split) -> tuple[Path, Path]:
             if row["split"] == "train" and row["drop_reason"] is None
         )
     )
-    manifest = {"release_id": "fixture", "build_identity": {"split": split}}
-    monkeypatch.setattr(declared_family_inventory, "verify_release", lambda _: manifest)
+    manifest = {
+        "release_id": "fixture",
+        "build_identity": {"split": split},
+        "files": {"documents.jsonl": {}},
+        "snapshots": [],
+    }
+    (release / "manifest.json").write_bytes(canonical_json(manifest))
+    monkeypatch.setattr(
+        declared_family_inventory,
+        "open_release",
+        lambda root: nullcontext(ReleaseReader(root, manifest, fingerprint(root))),
+    )
     monkeypatch.setattr(split_freeze, "verify_release", lambda _: manifest)
     declaration = tmp_path / "mixture.yaml"
     declaration.write_text(

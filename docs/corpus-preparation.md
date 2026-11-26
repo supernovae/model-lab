@@ -1255,7 +1255,9 @@ rights:
 - **Reports.** `license-report.json` counts eligibility, redistribution modes
   and SPDX expressions. `klab corpus publication RELEASE` emits a metadata
   manifest (source URIs, revisions, file paths and hashes) for sharing what was
-  used without the text. `corpus export` is never a publication.
+  used without the text. It takes the acquisition declarations and rights
+  report digest from the verified release. A warm publication need not read
+  the snapshots' selected-row manifests. `corpus export` is never a publication.
 - **Per-source ledger.** `report.json` (`source_ledger`) and `report.md` list
   every declared source with the files seen, the files and records set aside
   with their most common reasons (rights decisions, path boundaries,
@@ -1399,9 +1401,10 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   tens of thousands of files take seconds, however large the release. `audit`,
   `describe`, `sources`, `sample`, `review`, `lineage`, `publication`,
   `near-duplicates`, `export`, `derive-family-inventory`, `materialize-mixture`,
-  `verify-mixture`, `preflight` and the training gate all use it, and each prints
-  `release ID: verified by receipt` or `verified from the bytes in N s`. `build`
-  and `export` have receipts of their own.
+  `verify-mixture`, `audit-protected-lineage`, `preflight` and the training
+  gate all use it, and each prints `release ID: verified by receipt` or
+  `verified from the bytes in N s`. `build` and `export` have receipts of
+  their own.
   The complete receipt is refused when any file was written, replaced, added or removed (an
   edit that restores the modification time still changes ctime), when the
   verifier changed, when the receipt does not carry this host's key, or when a
@@ -2385,11 +2388,35 @@ klab corpus audit-protected-lineage --prior-release PRIOR --candidate-release RE
   candidate's training split, and protected documents whose family, split or
   stratum changed. Any of these makes it `BLOCKED` and the command fails;
   otherwise `PASS`.
+  Inventories in release order stream alongside the documents, with only
+  protected IDs, families and content assignments held for comparison.
+  Reordered rows use a disposable disk index for the unmatched suffix. Use
+  `--scratch-dir` for cold verification and the index, and `--cold` to
+  refresh release verification receipts from the bytes.
 - **Acceptance.** A `klab-release-review-v1` record (decision `ACCEPTED`, the
   reviewer, the release, its family inventory and its lineage receipt, each
   with its SHA-256) is what an [attempt](#run-it-as-phases) binds as its
   `release_acceptance` artifact. It is refused unless the lineage receipt is
   `PASS` for this exact release and inventory.
+
+### Publication and protected-lineage measurements
+
+Single-process synthetic measurements on Linux tmpfs compare processing
+after release verification with #651. The publication fixture used one
+snapshot with 750,000 selected rows in a 117.64 MB manifest. The lineage
+fixture used 100,000 documents per release with roughly 1 KiB of text per
+document and one protected document moved to training. The reordered case
+reversed the candidate inventory. Median of three processes per case.
+
+| Operation | Elapsed before → after | Logical reads before → after | Peak RSS before → after |
+| --- | ---: | ---: | ---: |
+| Publication metadata | 402 ms → <1 ms | 117.66 MB → 0.02 MB | 497 MiB → 44 MiB |
+| Lineage audit, ordered | 1.169 s → 0.738 s | 331.12 MB → 313.22 MB | 426 MiB → 46 MiB |
+| Lineage audit, reordered | 1.268 s → 1.488 s | 331.12 MB → 352.95 MB | 426 MiB → 49 MiB |
+
+The output digests matched in all cases. The slower reordered path trades
+local index I/O for bounded memory. Cold release verification and the cost
+of reordered inventories on slower devices were outside this benchmark.
 
 ## Export and tokenize
 
