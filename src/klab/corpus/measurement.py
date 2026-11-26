@@ -13,15 +13,17 @@ import sqlite3
 import tempfile
 import unicodedata
 from collections import Counter, defaultdict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from klab.canonical import canonical_digest
 from klab.corpus.build_stages import implementation_digests
+from klab.corpus.measurement_inputs import MeasurementTokenizer, TokenizerGeneration
 from klab.corpus.provenance import HUMAN_ORIGIN, SOURCE_ORIGIN
 from klab.corpus.release_verify import (
     current_settings,
@@ -41,6 +43,9 @@ from klab.result_publication import sync_directory
 from klab.safe_io import read_file_range, rename_noreplace
 from klab.training.manifest import sha256_file
 
+if TYPE_CHECKING:
+    from klab.corpus.release import ReleaseMembers
+
 SPLITS = ("train", "validation", "test")
 DIMENSIONS = ("origin", "verification_status", "shape")
 _WORD = re.compile(r"\w+", re.UNICODE)
@@ -59,10 +64,10 @@ _ELIGIBLE = ("eligible", "eligible_with_obligations")
 
 
 def _rights_range(
-    path: str, start: int, end: int, tokenizer: str
+    path: str, start: int, end: int, tokenizer: TokenizerGeneration
 ) -> dict[str, list[Any]]:
     """Retained train documents in one byte range: content digest, rights state, tokens."""
-    model = _tokenizer(tokenizer)
+    model = _tokenizer(*tokenizer)
     digests, states, tokens, seen = [], [], [], set()
     for row, _, _ in range_records(Path(path), start, end):
         if row["split"] != "train" or row.get("drop_reason"):
@@ -90,7 +95,10 @@ def _rights_range(
 
 
 def measure_source_rights(
-    root: Path, tokenizer: Path, *, cache: Path | None = None
+    release: ReleaseMembers,
+    tokenizer: MeasurementTokenizer,
+    *,
+    cache: Path | None = None,
 ) -> dict[str, dict[str, int | None]]:
     """Measure each retained train source passage once, not its derived views.
 
@@ -98,17 +106,16 @@ def measure_source_rights(
     order, wherever its duplicates are, so the byte ranges of `documents.jsonl`
     can be measured independently and merged.
     """
-    root = Path(root)
-    documents = root / "documents.jsonl"
-    info = documents.stat()
+    documents = release.member("documents.jsonl")
+    generation = range_file_identity(documents)
     cache = cache or _scratch_cache()
     plan = ShardPlan(
         RIGHTS_STAGE,
-        [(str(documents), *r, str(tokenizer)) for r in chunk_ranges(documents)],
-        info.st_size,
+        [(str(documents), *r, tokenizer.source) for r in chunk_ranges(documents)],
+        generation[2],
         {
-            "documents": [info.st_size, info.st_mtime_ns],
-            "tokenizer": sha256_file(tokenizer),
+            "documents": generation,
+            "tokenizer": tokenizer.identity(),
             "measurement": sha256_file(Path(__file__)),
         },
         None if cache is None else cache / "shards",
@@ -546,17 +553,19 @@ def _link_lines(path: Path, offset: int, skip: int, count: int) -> Iterator[byte
             yield stream.readline()
 
 
-_tokenizers: dict[str, Any] = {}
+@lru_cache(maxsize=1)
+def _tokenizer(path: str, generation: tuple[int, ...]) -> Any:
+    # One thread per worker process: the pool already uses every core.
+    os.environ.setdefault("RAYON_NUM_THREADS", "1")
+    from tokenizers import Tokenizer
 
-
-def _tokenizer(path: str) -> Any:
-    if path not in _tokenizers:
-        # One thread per worker process: the pool already uses every core.
-        os.environ.setdefault("RAYON_NUM_THREADS", "1")
-        from tokenizers import Tokenizer
-
-        _tokenizers[path] = Tokenizer.from_file(path)
-    return _tokenizers[path]
+    file = Path(path)
+    if tuple(range_file_identity(file)) != generation:
+        raise ValueError("tokenizer changed before Corpus measurement")
+    model = Tokenizer.from_file(path)
+    if tuple(range_file_identity(file)) != generation:
+        raise ValueError("tokenizer changed while loading for Corpus measurement")
+    return model
 
 
 def _measure_shard(
@@ -573,10 +582,10 @@ def _measure_shard(
     index: str,
     generations: str,
     scenarios: str,
-    tokenizer: str | None,
+    tokenizer: TokenizerGeneration | None,
 ) -> dict[str, Any]:
     """Measure one run of consecutive view rows and return a mergeable state."""
-    model = _tokenizer(tokenizer) if tokenizer is not None else None
+    model = _tokenizer(*tokenizer) if tokenizer is not None else None
     lookup = _LineageIndex(Path(lineage), Path(index))
     generated = {row["record_id"]: row for row in _rows(Path(generations))}
     scenario_rows = {row["scenario_id"]: row for row in _rows(Path(scenarios))}
@@ -727,18 +736,22 @@ def _scan_view_links(
 
 
 def _plan_views(
-    root: Path, lineage_index: Path, tokenizer: Path | None, cache: Path | None
+    member: Callable[[str], Path],
+    lineage: Path,
+    lineage_index: Path,
+    tokenizer: MeasurementTokenizer | None,
+    cache: Path | None,
 ) -> tuple[list[tuple], ShardPlan, list[tuple[str, str]]]:
     """One task per run of view rows, in view/split order, and the key that names them."""
     tasks, owners, total = [], [], 0
-    generations = str(root / "generations.jsonl")
-    scenarios = str(root / "scenarios.jsonl")
+    generations = str(member("generations.jsonl"))
+    scenarios = str(member("scenarios.jsonl"))
     views = [
         (
             view,
             split,
-            root / view / f"{split}.jsonl",
-            root / view / f"{split}.lineage.jsonl",
+            member(f"{view}/{split}.jsonl"),
+            member(f"{view}/{split}.lineage.jsonl"),
         )
         for view in ("lm", "chat")
         for split in SPLITS
@@ -813,11 +826,11 @@ def _plan_views(
                     offsets[first // _LINK_STRIDE],
                     first % _LINK_STRIDE,
                     lines,
-                    str(root / "lineage.jsonl"),
+                    str(lineage),
                     str(lineage_index),
                     generations,
                     scenarios,
-                    str(tokenizer) if tokenizer is not None else None,
+                    tokenizer.source if tokenizer is not None else None,
                 )
             )
             owners.append((view, split))
@@ -829,10 +842,10 @@ def _plan_views(
         "files": {
             name: generation for name, generation in files.items() if generation[2]
         },
-        "lineage": range_file_identity(root / "lineage.jsonl"),
+        "lineage": range_file_identity(lineage),
         "generations": _nonempty_generation(Path(generations)),
         "scenarios": _nonempty_generation(Path(scenarios)),
-        "tokenizer": sha256_file(tokenizer) if tokenizer is not None else None,
+        "tokenizer": tokenizer.identity() if tokenizer is not None else None,
         "measurement": implementation["measurement.py"],
     }
     plan = ShardPlan(
@@ -847,8 +860,8 @@ def _nonempty_generation(path: Path) -> list[int] | None:
 
 
 def measure_views(
-    root: Path,
-    tokenizer: Path | None = None,
+    release: ReleaseMembers,
+    tokenizer: MeasurementTokenizer | None = None,
     *,
     release_spec: dict[str, Any] | None = None,
     cache: Path | None = None,
@@ -860,39 +873,41 @@ def measure_views(
     `cache` so a rerun, or a run stopped part way, measures only the runs that
     are not there. Merging reproduces the serial pass exactly.
     """
-    with _measured_views(Path(root), tokenizer, release_spec, cache) as (summary, _, _):
+    with _measured_views(release.member, tokenizer, release_spec, cache) as (
+        summary,
+        _,
+        _,
+    ):
         return summary
 
 
 @contextmanager
 def _measured_views(
-    root: Path,
-    tokenizer: Path | None,
+    member: Callable[[str], Path],
+    tokenizer: MeasurementTokenizer | None,
     release_spec: dict[str, Any] | None,
     cache: Path | None,
 ) -> Iterator[tuple[dict[str, Any], Path, Path]]:
     cache = cache or _scratch_cache()
     with tempfile.TemporaryDirectory(prefix=".describe-", dir=scratch_root()) as work:
-        directory = _build_lineage_index(
-            root / "lineage.jsonl", Path(work), cache=cache
-        )
-        tasks, plan, owners = _plan_views(root, directory, tokenizer, cache)
+        lineage = member("lineage.jsonl")
+        directory = _build_lineage_index(lineage, Path(work), cache=cache)
+        tasks, plan, owners = _plan_views(member, lineage, directory, tokenizer, cache)
         states: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         results = run_sharded(plan, _measure_shard, ordered=True)
         for task, state in zip(tasks, results, strict=True):
             states[task[0], task[1]].append(state)
         yield (
-            _combine(root, states, owners, tokenizer, release_spec),
+            _combine(states, owners, tokenizer, release_spec),
             directory,
             Path(work),
         )
 
 
 def _combine(
-    root: Path,
     states: dict[tuple[str, str], list[dict[str, Any]]],
     owners: list[tuple[str, str]],
-    tokenizer: Path | None,
+    tokenizer: MeasurementTokenizer | None,
     release_spec: dict[str, Any] | None,
 ) -> dict[str, Any]:
     counted = tokenizer is not None
@@ -964,7 +979,7 @@ def _combine(
     if release_spec is not None:
         result["training_mixture"] = training.result()
     if tokenizer is not None:
-        result["tokenizer_sha256"] = sha256_file(tokenizer)
+        result["tokenizer_sha256"] = tokenizer.digest
     return result
 
 
@@ -977,7 +992,8 @@ def summarize_release(
 ) -> dict[str, Any]:
     """Frozen descriptive census, with measured tokens only for a pinned tokenizer."""
     root = Path(root)
-    with _measured_views(root, tokenizer, release_spec, cache) as (
+    bound = MeasurementTokenizer.from_path(tokenizer) if tokenizer is not None else None
+    with _measured_views(root.joinpath, bound, release_spec, cache) as (
         summary,
         index,
         work,
@@ -995,6 +1011,8 @@ def summarize_release(
             generated = _generated_lineage(root, index, work, training_views)
         else:
             generated = (0, 0, [], {})
+    if bound is not None:
+        bound.require_unchanged()
     return _summarize_release(root, summary, *generated)
 
 

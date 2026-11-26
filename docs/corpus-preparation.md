@@ -1305,12 +1305,33 @@ None of them is a quality score.
 | `klab corpus near-duplicates RELEASE` | MinHash near-duplicate pairs across splits |
 | `klab corpus consumers RELEASE --runs-dir RUNS` | Runs that trained on it |
 
-`sample`, `review`, `lineage`, `sources` and `audit` resolve declared
+`sample`, `review`, `lineage`, `sources`, `audit` and `describe` resolve declared
 members of one verified release generation. Sampling streams lineage until it
 has the requested matches. For rows that need supplementary parent domains,
 it builds a temporary index of document IDs and domains under `--scratch-dir`.
 A lineage lookup streams only the tables needed for the requested record and
 keeps its matching parents. Late lookups may still scan a whole table.
+
+`describe` stores the completed measurement under `WORK/cache/describe` or
+the designated scratch directory. The result binds the verified release,
+measurement implementation and tokenizer digest when supplied. A repeat
+loads the verified result directly. Mixture quota checks use that result and
+read the requested template on each call. Interrupted descriptions retain
+their finished shards and rebuild the final result on retry. Existing
+description caches from before the reader change are repopulated on use.
+
+On synthetic Linux tmpfs, a tokenized description of 100,000 roughly
+1 KiB documents was measured after release verification. The table shows
+medians of three processes per case with one worker. Fresh measurements
+started with empty measurement caches. Complete report digests matched.
+
+| Measurement cache | Wall time before → after | Logical reads before → after | Peak RSS before → after |
+| --- | ---: | ---: | ---: |
+| Empty | 8.870 s → 8.952 s | 371.44 MB → 373.11 MB | 136 MiB → 138 MiB |
+| Warm | 199.8 ms → 16.8 ms | 26.28 MB → 1.65 MB | 116 MiB → 69 MiB |
+
+The warm run verifies and parses the completed measurement in one read.
+Cold release verification and production storage were outside this comparison.
 
 The following local measurements isolate inspection after verification.
 The synthetic 100,000-row corpus had 1 KiB of text per document. Each query
@@ -1420,10 +1441,10 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   The complete receipt is refused when any file was written, replaced, added or removed (an
   edit that restores the modification time still changes ctime), when the
   verifier changed, when the receipt does not carry this host's key, or when a
-  file has another hard link or is writable by others. The verifier is the code
-  in `corpus.release` and what it imports within the corpus package (not the
-  command line, the near-duplicate screen, the exporter, the measurement
-  or the trainer), so editing those does not unverify a release.
+  file has another hard link or is writable by others. The verifier digest
+  includes `corpus.release`, its scoped Corpus imports and shared verification
+  and rendering helpers. A change to any of those inputs refreshes the
+  affected receipts on next use.
   Receipts trust the filesystem's own metadata and the key under your
   configuration directory: they are not protection against an account that can
   write both. `--cold` (also on `acquire` and `build`) ignores receipts, verifies
