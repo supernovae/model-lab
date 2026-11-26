@@ -80,7 +80,7 @@ def edit_excluded_fields(recipe: Recipe) -> None:
 
 
 def prepare(
-    root: Path, monkeypatch, capsys, *, share_stage_artifacts=False, **recipe_options
+    root: Path, monkeypatch, capsys, *, placement=(), **recipe_options
 ) -> Prepared:
     lab = Lab(root, monkeypatch, capsys)
     recipe = write_recipe(root / "recipe", **recipe_options)
@@ -104,16 +104,16 @@ def prepare(
         for key in ("declaration_sha256", "snapshot_sha256"):
             assert again["sources"][name][key] == lock["sources"][name][key], name
     build = Path(lab.run("corpus", "build", project, "--offline"))
-    placement = ("--share-stage-artifacts",) if share_stage_artifacts else ()
     release = Path(lab.run("corpus", "freeze", str(build), *placement))
     return Prepared(lab, recipe, lock, build_before_edit, build, release)
 
 
 def documents(release: Path) -> list[dict]:
-    return [
-        json.loads(line)
-        for line in (release / "documents.jsonl").read_text().splitlines()
-    ]
+    control = "manifest.json" if (release / "manifest.json").exists() else "build.json"
+    members = release_module.ReleaseMembers(
+        release, json.loads((release / control).read_text())
+    )
+    return list(members.rows("documents.jsonl"))
 
 
 def test_recipe_shaped_corpus_reaches_a_verified_release(
@@ -568,7 +568,12 @@ def write_family_inventory(release: Path, output: Path) -> None:
 def test_recipe_shaped_pipeline_trains_on_the_mixture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    prepared = prepare(tmp_path, monkeypatch, capsys, share_stage_artifacts=True)
+    prepared = prepare(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        placement=("--share-stage-artifacts", "--share-document-artifacts"),
+    )
     lab, recipe, release = prepared.lab, prepared.recipe, prepared.release
     inventory = tmp_path / "family-inventory.jsonl"
     write_family_inventory(release, inventory)

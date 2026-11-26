@@ -129,13 +129,15 @@ tokenizer observation, the training validation view, publication metadata,
 family inventory derivation and finalization, prior split preparation,
 protected-lineage audits and source-token measurement also resolve their
 release payloads through the shared contract. Ordinary freeze can opt in to
-digest references for transform output payloads. The manifest binds their
-content and placement, and release and export verification receipts track
-their file generations. `klab corpus artifacts --kind release-stages`
-counts unique stored bytes and published or in-flight references. Its
-unreferenced preview withholds candidates when the metadata scan is
-incomplete. Reference publication for the remaining payloads and
-closure-aware deletion are tracked in #567.
+digest references for transform output payloads and for released document
+and evidence-span files. The manifest binds their content and placement.
+Release and export verification receipts track their file generations.
+Corpus artifact inventory reports unique stored bytes and published or
+in-flight references for each store. Its unreferenced preview withholds
+candidates when the metadata scan is incomplete. Releases still render a
+project-scoped document inventory. Direct release references to reusable
+normalized source partitions, further payload references and closure-aware
+deletion are tracked in #567.
 
 Start with typed document, passage, annotation, duplicate-group, selection,
 entity, assertion, evidence, edge, index, and compiled sequence payloads.

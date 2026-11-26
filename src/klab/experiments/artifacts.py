@@ -403,7 +403,7 @@ def snapshot_dependencies(path: Path, manifest_name: str) -> tuple[Path, ...]:
         local_dependencies,
         local_scope,
     )
-    from klab.corpus.release_members import shared_stage_members
+    from klab.corpus.release_members import shared_members
 
     if local_scope(manifest) is not None:
         dependencies = local_dependencies(manifest, work_root=corpus_work_root(path))
@@ -415,12 +415,12 @@ def snapshot_dependencies(path: Path, manifest_name: str) -> tuple[Path, ...]:
         path.parent.parent / "snapshots" / item["source_id"] / item["sha256"]
         for item in manifest["snapshots"]
     ]
-    shared = shared_stage_members(path, manifest.get("files", {}))
+    shared = shared_members(path, manifest.get("files", {}))
     for name, member in shared.items():
         if not member.is_file():
-            raise ValueError(f"missing shared stage payload: {name}")
+            raise ValueError(f"missing shared release payload: {name}")
         if member.stat().st_nlink != 1:
-            raise ValueError(f"hard-linked shared stage payload: {name}")
+            raise ValueError(f"hard-linked shared release payload: {name}")
         snapshots.append(member)
     identity = manifest.get("build_identity", manifest.get("identity", {}))
     sources = identity.get("sources", {})

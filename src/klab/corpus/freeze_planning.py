@@ -1,4 +1,4 @@
-"""Metadata-only plan for ordinary Corpus freeze and shared stage placement."""
+"""Metadata-only plan for ordinary Corpus freeze and shared payload placement."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from klab.corpus.release import (
     consumed_release,
     release_manifest_payload,
 )
-from klab.corpus.release_members import SHARED_STAGE, shared_stage_members
+from klab.corpus.release_members import SHARED_STAGE, ReleasePlacement, shared_members
 from klab.safe_io import symlinked
 
 _DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -55,7 +55,7 @@ def _shared_placement(
     root: Path, destination: Path, payload: dict[str, Any], *, state: str
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     files = payload["files"]
-    members = shared_stage_members(destination, files)
+    members = shared_members(destination, files)
     totals = dict.fromkeys(
         ("new_shared_bytes", "shared_candidate_bytes", "duplicate_staging_bytes"), 0
     )
@@ -75,7 +75,7 @@ def _shared_placement(
         if state == "published":
             if stored is None or original is not None:
                 raise ValueError(
-                    f"published shared stage has different placement: {name}"
+                    f"published shared member has different placement: {name}"
                 )
             action = "verify_published"
         elif stored is not None:
@@ -89,7 +89,7 @@ def _shared_placement(
         elif original is not None:
             if original.st_dev != _device(target.parent):
                 raise ValueError(
-                    f"shared stage move requires the same filesystem: {name}"
+                    f"shared member move requires the same filesystem: {name}"
                 )
             if target in scheduled:
                 action = "reuse_after_move"
@@ -102,13 +102,19 @@ def _shared_placement(
             totals["duplicate_staging_bytes"] += size
         scheduled.add(target)
         actions.append(
-            {"member": name, "sha256": target.name, "bytes": size, "action": action}
+            {
+                "member": name,
+                "sha256": target.name,
+                "storage": files[name]["storage"],
+                "bytes": size,
+                "action": action,
+            }
         )
     return actions, totals
 
 
 def plan_freeze(
-    build: Path, work_root: Path, *, share_stage_artifacts: bool = False
+    build: Path, work_root: Path, *, placement: ReleasePlacement
 ) -> dict[str, Any]:
     """Show release identity, placement and resume work before reading payload bytes."""
     base: dict[str, Any] = {"operation": "freeze", "verification": "advisory"}
@@ -144,9 +150,7 @@ def plan_freeze(
                 "reason": "completed local preparation",
             }
 
-        payload = release_manifest_payload(
-            manifest, share_stage_artifacts=share_stage_artifacts
-        )
+        payload = release_manifest_payload(manifest, placement=placement)
         release_id = canonical_digest(payload)
         marker = build / "consumed.json"
         if symlinked(marker):
@@ -170,20 +174,16 @@ def plan_freeze(
             if consumed is not None:
                 if not isinstance(consumed, str) or not _DIGEST.fullmatch(consumed):
                     raise ValueError("invalid consumed release identity")
-                if share_stage_artifacts and consumed != release_id:
+                if placement.shared and consumed != release_id:
                     raise ValueError(
-                        "build was already frozen with different stage placement"
+                        "build was already frozen with different shared placement"
                     )
                 release_id = consumed
             existing = releases / release_id
             if consumed is not None or existing.exists():
                 sealed = _metadata(existing / "manifest.json")
-                shared = any(
-                    entry.get("storage") == SHARED_STAGE
-                    for entry in sealed["files"].values()
-                )
                 payload = release_manifest_payload(
-                    manifest, share_stage_artifacts=shared
+                    manifest, placement=ReleasePlacement.from_inventory(sealed["files"])
                 )
                 if (
                     sealed != {**payload, "release_id": release_id}
@@ -213,7 +213,11 @@ def plan_freeze(
         previous = verify
         if state != "published":
             if actions:
-                share = "place_shared_stages"
+                share = (
+                    "place_shared_stages"
+                    if all(row["storage"] == SHARED_STAGE for row in actions)
+                    else "place_shared_members"
+                )
                 if state == "staging":
                     steps = [
                         {"id": share, "inputs": []},

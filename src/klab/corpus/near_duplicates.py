@@ -978,20 +978,14 @@ def screen_documents(
 
 def audit_release(path: Path, **options: Any) -> dict[str, Any]:
     """Verify the immutable release, then screen its original normalized text."""
-    from klab.corpus.release import verify_release
+    from klab.corpus.release import open_release
 
-    documents = Path(path) / "documents.jsonl"
-    observed = range_file_identity(documents)
-    manifest = verify_release(path)
-    if range_file_identity(documents) != observed:
-        raise ValueError("documents changed during release verification")
-    report = screen_documents(documents, identity=manifest["release_id"], **options)
-    if range_file_identity(documents) != observed:
-        raise ValueError("documents changed during near-duplicate screen")
-    return {
-        "release_id": manifest["release_id"],
-        **report,
-    }
+    with open_release(path) as release:
+        release_id = release.manifest["release_id"]
+        report = screen_documents(
+            release.member("documents.jsonl"), identity=release_id, **options
+        )
+        return {"release_id": release_id, **report}
 
 
 DECISION_CHOICES = ("merged", "dropped", "kept")
