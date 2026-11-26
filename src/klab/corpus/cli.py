@@ -82,6 +82,26 @@ def _print_stage_inventory(inventory: dict) -> None:
         )
 
 
+def _print_freeze_plan(plan: dict) -> None:
+    if plan["status"] != "planned":
+        print(f"Freeze {plan['status']} ({plan['reason']})")
+        return
+    print(f"Freeze {plan['state']} → {plan['release_id']}")
+    for step in plan["stages"]:
+        inputs = ", ".join(step["inputs"])
+        print(f"  {step['id']}" + (f" after {inputs}" if inputs else ""))
+    for row in plan["shared_members"]:
+        print(f"  {row['action']} {row['member']} ({row['bytes']:,} bytes)")
+    print(
+        f"{plan['new_shared_bytes']:,} new shared bytes, "
+        f"{plan['shared_candidate_bytes']:,} existing candidate bytes, "
+        f"{plan['duplicate_staging_bytes']:,} duplicate staging bytes"
+    )
+    print(
+        "Publication moves payloads without copying. Verification scratch is unestimated."
+    )
+
+
 def _handle(args: argparse.Namespace) -> None:
     """Run one command with the operator's verification placement and receipts."""
     from klab.corpus.release_verify import verification_settings
@@ -147,6 +167,21 @@ def _run(args: argparse.Namespace) -> None:
                 print(f"Next page --after {inventory['next_after']}")
         return
     if command == "plan":
+        if args.build is not None:
+            from klab.corpus.freeze_planning import plan_freeze
+
+            plan = plan_freeze(
+                args.build, root, share_stage_artifacts=args.share_stage_artifacts
+            )
+            if args.json:
+                print(json.dumps(plan, sort_keys=True))
+            else:
+                _print_freeze_plan(plan)
+            return
+        if args.share_stage_artifacts:
+            raise ValueError(
+                "--share-stage-artifacts requires --build for freeze planning"
+            )
         from klab.corpus.planning import plan_build
 
         plan = plan_build(load_project(args.project, verify_inputs=False), root)
@@ -681,9 +716,18 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     command.add_argument("--json", action="store_true")
     command.set_defaults(handler=_handle)
     command = sub.add_parser(
-        "plan", help="Estimate native normalization work from local metadata"
+        "plan", help="Estimate native normalization or freeze work from local metadata"
     )
-    command.add_argument("project", type=Path)
+    planned = command.add_mutually_exclusive_group(required=True)
+    planned.add_argument("project", type=Path, nargs="?")
+    planned.add_argument(
+        "--build", type=Path, help="Plan the freeze of an existing build"
+    )
+    command.add_argument(
+        "--share-stage-artifacts",
+        action="store_true",
+        help="Plan shared transform output placement",
+    )
     command.add_argument("--json", action="store_true")
     command.set_defaults(handler=_handle)
     command = sub.add_parser(

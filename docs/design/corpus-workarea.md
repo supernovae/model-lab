@@ -104,6 +104,10 @@ project-specific stage retention. `klab corpus plan PROJECT` reads the pinned
 inventory and reports expected normalization work and cache candidates for
 full native builds. Build resolves and verifies artifact reuse. Downstream
 stage planning, reference publication and closure-aware pruning remain in #567.
+`klab corpus plan --build BUILD` previews ordinary freeze from existing
+build metadata. It reports the release identity, verification and placement
+dependencies, shared store growth and duplicate staging bytes. It leaves
+verification scratch unestimated.
 `klab corpus artifacts` reports retained bytes, computation keys and staging
 counts from shared-store metadata. Its paginated inspection is advisory.
 Release sample, review, lineage, source, audit and description queries use the

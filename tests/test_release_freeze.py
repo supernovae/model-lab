@@ -337,7 +337,7 @@ def test_shared_stage_releases_reuse_one_payload_and_reject_drift(
     original = (build_dir / name).stat()
     publish = release_module.publish_shared_stages
 
-    def inventory(*arguments):
+    def query(*arguments):
         monkeypatch.setattr(
             sys,
             "argv",
@@ -346,15 +346,36 @@ def test_shared_stage_releases_reuse_one_payload_and_reject_drift(
                 "--work-dir",
                 str(work),
                 "corpus",
-                "artifacts",
-                "--kind",
-                "release-stages",
-                "--json",
                 *arguments,
+                "--json",
             ],
         )
         main()
         return json.loads(capsys.readouterr().out)
+
+    def inventory(*arguments):
+        return query("artifacts", "--kind", "release-stages", *arguments)
+
+    def plan(path, *options):
+        return query("plan", "--build", str(path), *options)
+
+    share = "--share-stage-artifacts"
+    opened_file = Path.open
+
+    def forbid_payload(path, *args, **kwargs):
+        if path.is_relative_to(work) and (
+            path.suffix == ".jsonl" or path.is_relative_to(work / "artifacts")
+        ):
+            pytest.fail(f"freeze planning opened payload bytes: {path}")
+        return opened_file(path, *args, **kwargs)
+
+    with monkeypatch.context() as metadata_only:
+        metadata_only.setattr(Path, "open", forbid_payload)
+        first_plan = plan(build_dir, share)
+    assert first_plan["state"] == "build"
+    assert first_plan["new_shared_bytes"] == original.st_size
+    assert first_plan["publication_payload_copy_bytes"] == 0
+    assert first_plan["verification_scratch_bytes"] is None
 
     def stop_after_stage_move(*args, **kwargs):
         publish(*args, **kwargs)
@@ -368,10 +389,17 @@ def test_shared_stage_releases_reuse_one_payload_and_reject_drift(
     assert pending["scan_status"] == "complete"
     assert pending["unreferenced_payloads"] == 0
     assert pending["payloads"][0]["staging_releases"] == 1
+    resumed = plan(build_dir, share)
+    assert resumed["state"] == "staging"
+    assert resumed["shared_members"][0]["action"] == "verify_staged_reference"
+    assert resumed["stages"][-1]["inputs"] == ["verify_staged_release"]
+    assert plan(build_dir)["status"] == "blocked"
 
     with pytest.raises(ValueError, match="same freeze options"):
         freeze(build_dir, work)
     first = freeze(build_dir, work, **options)
+    assert first_plan["release_id"] == resumed["release_id"] == first.name
+    assert plan(build_dir)["state"] == "published"
     assert not (first / name).exists()
     proof_options = verification_options(work)
     with release_module.open_release(first, **proof_options) as opened:
@@ -385,7 +413,16 @@ def test_shared_stage_releases_reuse_one_payload_and_reject_drift(
     declaration.write_text(yaml.safe_dump(project))
     loaded = load_project(declaration)
     acquire(loaded, work)
-    second = freeze(build(loaded, work, offline=True), work, **options)
+    next_build = build(loaded, work, offline=True)
+    reuse = plan(next_build, share)
+    assert (
+        reuse["shared_candidate_bytes"]
+        == reuse["duplicate_staging_bytes"]
+        == original.st_size
+    )
+    assert reuse["new_shared_bytes"] == 0
+    second = freeze(next_build, work, **options)
+    assert reuse["release_id"] == second.name
     assert second != first
     with release_module.open_release(second, **proof_options) as opened:
         assert opened.member(name) == payload

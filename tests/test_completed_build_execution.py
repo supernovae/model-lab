@@ -11,6 +11,7 @@ from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.admission_inspection_cache import capture
 from klab.corpus.completed_release import freeze_retained, verify_retained_release
 from klab.corpus.project import ProjectConfig, SplitDeclaration
+from klab.corpus.release import consumed_release, freeze
 from klab.corpus.split_freeze import finalize_family_inventory
 from klab.corpus.split_runs import SplitStages
 from klab.training.manifest import sha256_file
@@ -287,6 +288,12 @@ def test_retained_build_recovers_from_closed_execution(tmp_path, monkeypatch):
     save("session-report.json", session)
     declaration.write_bytes(original)
     before = data.stat()
+    with pytest.raises(
+        ValueError, match="shared stages require an ordinary Corpus build"
+    ):
+        freeze(build, root, share_stage_artifacts=True)
+    assert consumed_release(build) is None
+    assert data.stat() == before
     assert freeze_retained(build, root) == build
     assert verify_retained_release(build)["release_id"]
     assert data.stat() == before
