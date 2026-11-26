@@ -119,8 +119,10 @@ artifacts across that change. Fresh-stage scratch estimates, reference
 publication and closure-aware pruning remain in #567.
 `klab corpus plan --build BUILD` previews ordinary freeze from existing
 build metadata. It reports the release identity, verification and placement
-dependencies, shared store growth and duplicate staging bytes. It leaves
-verification scratch unestimated.
+dependencies, shared store growth and duplicate staging bytes. Optional
+verification inspection checks signed receipts, available scratch space and
+matching row-index checkpoints. A valid complete receipt forecasts zero
+verification scratch. Peak demand for byte verification remains unestimated.
 `klab corpus artifacts` reports retained bytes, computation keys and staging
 counts from shared-store metadata. Its paginated inspection is advisory.
 Release sample, review, lineage, source, audit and description queries use the

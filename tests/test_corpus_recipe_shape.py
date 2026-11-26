@@ -223,6 +223,9 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
 
     scratch = tmp_path / "verification-scratch"
     expected_manifest = json.loads((release / "manifest.json").read_bytes())
+    # Force the full checker to consult its scratch stages by invalidating the
+    # complete receipt without changing the row index inputs.
+    (release / "report.json").touch()
 
     def verify_indexes():
         return release_module.verify_release(
@@ -240,8 +243,23 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
             stop.setattr(release_module, "_document_rows", interrupted)
             with pytest.raises(InterruptedError):
                 verify_indexes()
-        assert list(scratch.glob("release-indexes/*/spans/*/spans.sqlite"))
+        (spans,) = scratch.glob("release-indexes/*/spans/*/spans.sqlite")
         assert not list(scratch.glob("release-indexes/*/documents/*/documents.sqlite"))
+        plan = lab.json(
+            "corpus",
+            "plan",
+            "--build",
+            str(prepared.build),
+            "--scratch-dir",
+            str(scratch),
+            "--json",
+        )
+        (verify,) = plan["verification_inspection"]["steps"]
+        assert verify["method"] == "verify_bytes"
+        indexes = {row["id"]: row for row in verify["row_indexes"]}
+        assert indexes["documents"]["action"] == "run"
+        assert indexes["spans"]["action"] == "verify_candidate"
+        assert indexes["spans"]["verification_candidate_bytes"] == spans.stat().st_size
         with monkeypatch.context() as stop:
             stop.setattr(release_module, "_span_rows", reran)
             stop.setattr(release_module, "_replay_sources", interrupted)

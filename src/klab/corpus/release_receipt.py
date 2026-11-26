@@ -149,17 +149,24 @@ def lookup(
     kind: str,
     root: Path,
     identity: str,
-    dependencies: list[Path],
+    dependencies: list[Path] | Callable[[], list[Path]],
+    *,
+    skip_index_on_missing: bool = False,
 ) -> Lookup:
     """Whether a signed receipt vouches for `root` as it is on disk now."""
     started = time.monotonic()
     receipt = _receipt_path(store, kind, root, identity)
+    proof = store.load(receipt) if skip_index_on_missing else None
+    if skip_index_on_missing and proof is None:
+        return Lookup(False, None)
+    dependencies = dependencies() if callable(dependencies) else dependencies
     try:
         index = stat_index([root, *dependencies])
     except (OSError, Untrustable) as error:
         _say(f"{kind} {identity[:12]}: files not receipt-eligible ({error})")
         return Lookup(False, None)
-    proof = store.load(receipt)
+    if not skip_index_on_missing:
+        proof = store.load(receipt)
     if proof is None:
         _say(f"{kind} {identity[:12]}: no usable receipt, verifying from the bytes")
         return Lookup(False, index)

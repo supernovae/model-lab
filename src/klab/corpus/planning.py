@@ -185,9 +185,10 @@ def _source_plan(
     return {"source_id": source.id, "snapshot_sha256": pin, "partitions": partitions}
 
 
-def _stage_candidate(
+def plan_stage_candidate(
     store: StageStore, name: str, inputs: dict[str, Any]
 ) -> tuple[dict[str, Any], str | None]:
+    """Inspect a matching stage's metadata and return its candidate receipt digest."""
     key = store.key(inputs)
     target = store.directory(name, key)
     checkpoint = store.root / f".{name}-{key}.groups"
@@ -479,12 +480,12 @@ def plan_build(project: Project, work_root: Path) -> dict[str, Any]:
         stage_by_id["freeze"]["action"] = "plan_after_build"
         if not pending:
             store = StageStore(target.parent / "stages")
-            index, index_sha = _stage_candidate(
+            index, index_sha = plan_stage_candidate(
                 store, "index", native_index_inputs(project, prepared)
             )
             stage_by_id["index"].update(index)
             if index_sha is not None:
-                dedup, dedup_sha = _stage_candidate(
+                dedup, dedup_sha = plan_stage_candidate(
                     store, "dedup", native_dedup_inputs(project, index_sha)
                 )
                 stage_by_id["deduplicate"].update(dedup)

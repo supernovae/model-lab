@@ -412,7 +412,7 @@ def _verify_source_snapshots(
     return snapshots
 
 
-def _streaming_rows(identity: dict[str, Any]) -> bool:
+def streaming_verification(identity: dict[str, Any]) -> bool:
     """Whether the bounded-memory row validator applies (no reviewed admission)."""
     return (
         identity["release"].get("record_admission") is None
@@ -913,6 +913,11 @@ def _unique_index(
         raise ValueError(error) from exception
 
 
+def release_index_workspace(root: Path, scratch: Path) -> Path:
+    """Locate row index checkpoints for this verification path."""
+    return scratch / "release-indexes" / canonical_digest(str(root.resolve()))
+
+
 @contextmanager
 def _release_index_store(root, verification_mode):
     """Own temporary index checkpoints until the row verdict completes."""
@@ -932,11 +937,11 @@ def _release_index_store(root, verification_mode):
             )
         yield None
         return
-    parent = scratch / "release-indexes"
+    workspace = release_index_workspace(root, scratch)
+    parent = workspace.parent
     parent.mkdir(exist_ok=True, mode=0o700)
     if not trust.trusted(parent):
         raise ValueError(f"unsafe release index root: {parent}")
-    workspace = parent / canonical_digest(str(root.resolve()))
     workspace.mkdir(exist_ok=True, mode=0o700)
     if not trust.trusted(workspace):
         raise ValueError(f"unsafe release index workspace: {workspace}")
@@ -966,6 +971,31 @@ def _row_index_writer(path):
         db.commit()
 
 
+def release_row_index_inputs(
+    paths: dict[str, Path],
+    files: dict[str, Any],
+    identity: dict[str, Any],
+    options: NormalizerOptions,
+    *,
+    checkpointed: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Bind the row index keys to the exact files and verification rules."""
+    producer = verifier_digest("release") if checkpointed else None
+    file_bindings = {
+        name: {"entry": files[name], "generation": range_file_identity(path)}
+        for name, path in paths.items()
+    }
+    return (
+        {"files": {"spans.jsonl": file_bindings["spans.jsonl"]}, "producer": producer},
+        {
+            "files": file_bindings,
+            "producer": producer,
+            "normalizer": options.model_dump(mode="json"),
+            "keys": identity["release"]["policy"]["duplicates"]["keys"],
+        },
+    )
+
+
 def _release_row_indexes(
     root, receipt, identity, options, temporary, store, phase, advance, progress
 ):
@@ -974,7 +1004,14 @@ def _release_row_indexes(
     inputs_by_name = {name: members.member(name) for name in DOCUMENT_MEMBERS}
     spans_path = inputs_by_name["spans.jsonl"]
     documents_path = inputs_by_name["documents.jsonl"]
-    producer = verifier_digest("release") if store is not None else None
+    span_inputs, document_inputs = release_row_index_inputs(
+        inputs_by_name,
+        receipt["files"],
+        identity,
+        options,
+        checkpointed=store is not None,
+    )
+    file_bindings = document_inputs["files"]
 
     def check_inputs(files):
         if any(
@@ -1030,24 +1067,6 @@ def _release_row_indexes(
             )
             _unique_index(db, "spans_id", "spans", "id", "duplicate evidence span")
             result["rows"] = db.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
-
-    file_bindings = {
-        name: {
-            "entry": receipt["files"][name],
-            "generation": range_file_identity(path),
-        }
-        for name, path in inputs_by_name.items()
-    }
-    span_inputs = {
-        "files": {"spans.jsonl": file_bindings["spans.jsonl"]},
-        "producer": producer,
-    }
-    document_inputs = {
-        "files": file_bindings,
-        "producer": producer,
-        "normalizer": options.model_dump(mode="json"),
-        "keys": identity["release"]["policy"]["duplicates"]["keys"],
-    }
 
     def build_documents(directory, result):
         phase("spans", spans_path)
@@ -2315,7 +2334,7 @@ def _verify_build_cold(
             raise ValueError("build snapshot identity mismatch")
     (
         _validate_rows_streaming
-        if _streaming_rows(manifest["identity"])
+        if streaming_verification(manifest["identity"])
         else _validate_rows
     )(
         path,
@@ -2763,7 +2782,7 @@ def _verify_release_cold(
             raise ValueError("release snapshot identity mismatch")
     (
         _validate_rows_streaming
-        if _streaming_rows(manifest["build_identity"])
+        if streaming_verification(manifest["build_identity"])
         else _validate_rows
     )(
         path,

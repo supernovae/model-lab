@@ -5,19 +5,33 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import stat
 from pathlib import Path
 from typing import Any
 
 from klab.canonical import canonical_digest
 from klab.corpus.preparation_inputs import local_scope
+from klab.corpus.project import NormalizerOptions
 from klab.corpus.release import (
     ReleaseMembers,
     consumed_release,
+    release_index_workspace,
     release_manifest_payload,
+    release_row_index_inputs,
+    streaming_verification,
 )
-from klab.corpus.release_members import SHARED_STAGE, ReleasePlacement, shared_members
+from klab.corpus.release_members import (
+    DOCUMENT_MEMBERS,
+    SHARED_STAGE,
+    ReleasePlacement,
+    shared_members,
+)
+from klab.corpus.release_receipt import lookup
+from klab.corpus.release_verify import current_settings, scratch_location
+from klab.experiments.artifacts import snapshot_dependencies
 from klab.safe_io import symlinked
+from klab.verification_proofs import verification_options
 
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 
@@ -113,8 +127,136 @@ def _shared_placement(
     return actions, totals
 
 
+def _retained_row_indexes(
+    root: Path, scratch: Path, manifest: dict[str, Any], identity: dict[str, Any]
+) -> list[dict[str, Any]]:
+    from klab.corpus.build_stages import StageStore
+    from klab.corpus.planning import plan_stage_candidate
+
+    workspace = release_index_workspace(root, scratch)
+    if not workspace.exists() and not symlinked(workspace):
+        return []
+    trust = verification_options(scratch, read_only=True)["proof_store"]
+    if trust is None:
+        # The verifier uses disposable scratch when the selected root cannot
+        # retain owned checkpoints.
+        return []
+    if not trust.trusted(workspace.parent) or not trust.trusted(workspace):
+        raise ValueError(f"unsafe release index workspace: {workspace}")
+    members = ReleaseMembers(root, manifest)
+    keys = release_row_index_inputs(
+        {name: members.member(name) for name in DOCUMENT_MEMBERS},
+        manifest["files"],
+        identity,
+        NormalizerOptions.model_validate(identity["release"]["normalizer"]),
+        checkpointed=True,
+    )
+    store = StageStore(workspace)
+    return [
+        {
+            "id": stage,
+            "when": "if_document_index_rebuilt" if stage == "spans" else "first",
+            **plan_stage_candidate(store, stage, inputs)[0],
+        }
+        for stage, inputs in zip(("spans", "documents"), keys, strict=True)
+    ]
+
+
+def _verification_step(
+    step: str,
+    root: Path,
+    manifest: dict[str, Any],
+    scratch: Path,
+    *,
+    placement_pending: bool,
+) -> dict[str, Any]:
+    settings = current_settings()
+    kind = step.removeprefix("verify_")
+    build = kind == "build"
+    identity = manifest["identity" if build else "build_identity"]
+    streaming = streaming_verification(identity)
+    result = {
+        "id": step,
+        "row_verifier": "streaming" if streaming else "row_store",
+        "scratch_bytes": None,
+        "row_indexes": [],
+    }
+    if placement_pending:
+        return {**result, "method": "after_placement"}
+
+    if (
+        settings.proof_store is not None
+        and settings.verification_mode == "verified_reuse"
+    ):
+        filename = "build.json" if build else "manifest.json"
+        artifact_id = manifest["build_id" if build else "release_id"]
+
+        def dependency_paths():
+            return list(snapshot_dependencies(root, filename))
+
+        if lookup(
+            settings.proof_store,
+            kind,
+            root,
+            artifact_id,
+            dependency_paths,
+            skip_index_on_missing=True,
+        ).hit:
+            return {**result, "method": "receipt", "scratch_bytes": 0}
+    if (
+        streaming
+        and settings.scratch_dir is not None
+        and settings.verification_mode == "verified_reuse"
+    ):
+        result["row_indexes"] = _retained_row_indexes(root, scratch, manifest, identity)
+    return {**result, "method": "verify_bytes"}
+
+
+def _inspect_verification(
+    steps: list[dict[str, Any]],
+    build: Path,
+    root: Path,
+    manifest: dict[str, Any],
+    release: dict[str, Any],
+    actions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    scratch = scratch_location().absolute()
+    anchor = scratch
+    while not anchor.exists() and not anchor.is_symlink():
+        anchor = anchor.parent
+    if not anchor.is_dir():
+        raise ValueError(f"scratch location is not a directory: {anchor}")
+    forecasts = []
+    for step in (item["id"] for item in steps if item["id"].startswith("verify_")):
+        placement_pending = step == "verify_staged_release" and (
+            not (root / "manifest.json").is_file()
+            or (root / "build.json").exists()
+            or any(row["action"] != "verify_staged_reference" for row in actions)
+        )
+        verify_build = step == "verify_build"
+        forecasts.append(
+            _verification_step(
+                step,
+                build if verify_build else root,
+                manifest if verify_build else release,
+                scratch,
+                placement_pending=placement_pending,
+            )
+        )
+    return {
+        "mode": current_settings().verification_mode,
+        "scratch_path": str(scratch),
+        "scratch_available_bytes": shutil.disk_usage(anchor).free,
+        "steps": forecasts,
+    }
+
+
 def plan_freeze(
-    build: Path, work_root: Path, *, placement: ReleasePlacement
+    build: Path,
+    work_root: Path,
+    *,
+    placement: ReleasePlacement,
+    inspect_verification: bool = False,
 ) -> dict[str, Any]:
     """Show release identity, placement and resume work before reading payload bytes."""
     base: dict[str, Any] = {"operation": "freeze", "verification": "advisory"}
@@ -227,6 +369,20 @@ def plan_freeze(
                     steps.append({"id": share, "inputs": [verify]})
                     previous = share
             steps.append({"id": "publish_release", "inputs": [previous]})
+        verification = {}
+        scratch_bytes = None
+        if inspect_verification:
+            inspection = _inspect_verification(
+                steps,
+                build,
+                root,
+                manifest,
+                {**payload, "release_id": release_id},
+                actions,
+            )
+            verification["verification_inspection"] = inspection
+            if all(step["method"] == "receipt" for step in inspection["steps"]):
+                scratch_bytes = 0
         return {
             **base,
             "status": "planned",
@@ -237,7 +393,8 @@ def plan_freeze(
             "shared_members": actions,
             **totals,
             "publication_payload_copy_bytes": 0,
-            "verification_scratch_bytes": None,
+            "verification_scratch_bytes": scratch_bytes,
+            **verification,
         }
     except (KeyError, OSError, TypeError, ValueError) as error:
         return {**base, "status": "blocked", "reason": str(error)}

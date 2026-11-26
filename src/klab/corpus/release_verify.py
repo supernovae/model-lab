@@ -89,10 +89,15 @@ def verification_settings(
         _settings.reset(token)
 
 
+def scratch_location() -> Path:
+    """Resolve the configured verification scratch path without creating it."""
+    chosen = current_settings().scratch_dir
+    return chosen if chosen is not None else Path(tempfile.gettempdir())
+
+
 def scratch_root() -> Path:
     """Directory for disposable verification state, created when it is first used."""
-    chosen = current_settings().scratch_dir
-    root = chosen if chosen is not None else Path(tempfile.gettempdir())
+    root = scratch_location()
     root.mkdir(parents=True, exist_ok=True)
     return root
 
