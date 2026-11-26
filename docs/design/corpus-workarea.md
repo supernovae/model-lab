@@ -148,6 +148,10 @@ and LM text views. The manifest binds their content and placement. LM
 lineage stays with each release, and export config paths resolve the shared
 view for the tokenizer and trainer.
 Release and export verification receipts track their file generations.
+Shared placement records the verified generation of a large payload once
+it moves to its retained digest path. Later freezes can reuse that signed
+check. The move checks the original verified staging generation before
+signing the stored file.
 Corpus artifact inventory reports unique stored bytes and published or
 in-flight references for each store. Its unreferenced preview withholds
 candidates when the metadata scan is incomplete. Releases still render a

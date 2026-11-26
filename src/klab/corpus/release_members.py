@@ -6,13 +6,14 @@ import fcntl
 import os
 import re
 import stat
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from klab.corpus.normalized_spans import NORMALIZED_SPANS, SPAN_MEMBER
+from klab.corpus.release_verify import INVENTORY_RECEIPT_MIN_BYTES
 from klab.corpus.shards import range_file_identity
 from klab.result_publication import sync_directory
 from klab.safe_io import rename_noreplace, symlinked
@@ -159,6 +160,31 @@ class SharedPublication:
     checked: dict[Path, list[int]]
 
 
+def shared_payload_receipt_hit(
+    path: Path,
+    entry: dict[str, Any],
+    proof_store: ProofStore | None,
+    verification_mode: VerificationMode,
+) -> bool:
+    """Inspect the signed generation of an already retained large payload."""
+    if (
+        proof_store is None
+        or verification_mode != "verified_reuse"
+        or entry["size"] < INVENTORY_RECEIPT_MIN_BYTES
+    ):
+        return False
+    from klab.corpus import release_receipt
+
+    return release_receipt.lookup(
+        proof_store,
+        "shared_payload",
+        path,
+        entry["sha256"],
+        [],
+        skip_index_on_missing=True,
+    ).hit
+
+
 def publish_shared_members(
     staging: Path,
     files: dict[str, dict[str, Any]],
@@ -166,8 +192,11 @@ def publish_shared_members(
     verified: bool,
     proof_store: ProofStore | None,
     verification_mode: VerificationMode,
+    verified_sources: Mapping[str, list[int]] | None = None,
 ) -> SharedPublication:
     """Move verified files once, or consume staging copies after authenticating reuse."""
+    from klab.corpus import release_receipt
+
     generations = {}
     checked = {}
     for name, destination in shared_members(staging, files).items():
@@ -176,6 +205,13 @@ def publish_shared_members(
         with shared_payload_lease(destination):
             if symlinked(destination) or symlinked(source):
                 raise ValueError(f"symlinked shared release input: {name}")
+            if verified_sources is not None and (
+                not source.is_file()
+                or range_file_identity(source) != verified_sources[name]
+            ):
+                raise ValueError(
+                    f"shared staging payload changed after verification: {name}"
+                )
             existing = destination.exists()
             input_path = destination if existing else source
             if not input_path.is_file():
@@ -185,8 +221,17 @@ def publish_shared_members(
             stamp = range_file_identity(input_path)
             if stamp[2] != entry["size"]:
                 raise ValueError(f"shared release payload size differs: {name}")
+            receiptable = (
+                proof_store is not None and entry["size"] >= INVENTORY_RECEIPT_MIN_BYTES
+            )
+            reused = checked.get(destination) == stamp or (
+                existing
+                and shared_payload_receipt_hit(
+                    destination, entry, proof_store, verification_mode
+                )
+            )
             # A resumed release replays references whose source was already moved.
-            authenticate = checked.get(destination) != stamp and (
+            authenticate = not reused and (
                 (existing and (verified or source.exists()))
                 or (not existing and not verified)
             )
@@ -221,6 +266,19 @@ def publish_shared_members(
             ):
                 raise ValueError(f"shared release payload changed while moving: {name}")
             generations[destination] = generation
-            if authenticate or verified:
+            if authenticate or verified or reused:
                 checked[destination] = generation
+            if (
+                receiptable
+                and not existing
+                and (authenticate or verified_sources is not None)
+            ):
+                release_receipt.record(
+                    proof_store,
+                    "shared_payload",
+                    destination,
+                    entry["sha256"],
+                    [],
+                    shared_generations={destination: generation},
+                )
     return SharedPublication(generations, checked)
