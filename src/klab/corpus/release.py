@@ -38,7 +38,9 @@ from klab.corpus.project import NormalizerOptions
 from klab.corpus.quota import require_estimated_supply
 from klab.corpus.release_members import (
     DOCUMENT_MEMBERS,
+    LM_VIEW_MEMBERS,
     SHARED_DOCUMENT,
+    SHARED_LM_VIEW,
     SHARED_STAGE,
     ReleasePlacement,
     SharedPublication,
@@ -1474,6 +1476,7 @@ def _validate_rows_streaming(
     receipt = _load(
         root / ("build.json" if (root / "build.json").exists() else "manifest.json")
     )
+    members = ReleaseMembers(root, receipt)
     identity = receipt.get("identity", receipt.get("build_identity"))
     options = _release_normalizer(identity)
     pinned_snapshots = {row["source_id"]: row["sha256"] for row in receipt["snapshots"]}
@@ -1591,9 +1594,7 @@ def _validate_rows_streaming(
                     spec for spec in transforms if spec["id"] == stage["id"]
                 )
                 selected = frozenset(transform["inputs"]).intersection(sources)
-                stage_path = ReleaseMembers(root, receipt).member(
-                    f"stages/{stage['id']}.jsonl"
-                )
+                stage_path = members.member(f"stages/{stage['id']}.jsonl")
                 total = phase(f"stage:{stage['id']}", stage_path)
                 expected = sum(
                     kept_by_source.get(source, 0) for source in (selected or sources)
@@ -1634,8 +1635,8 @@ def _validate_rows_streaming(
             ) as coverage:
                 for split in ("train", "validation", "test"):
                     view, links = (
-                        root / "lm" / f"{split}.jsonl",
-                        root / "lm" / f"{split}.lineage.jsonl",
+                        members.member(f"lm/{split}.jsonl"),
+                        members.member(f"lm/{split}.lineage.jsonl"),
                     )
                     total = phase(f"view:{split}", view, links)
                     view_starts, view_lines = line_boundaries(view, VIEW_LINES)
@@ -2320,8 +2321,8 @@ def _validate_rows_stored(
     for split in ("train", "validation", "test"):
         from itertools import zip_longest
 
-        lm = rows(root / "lm" / f"{split}.jsonl")
-        lm_lineage = rows(root / "lm" / f"{split}.lineage.jsonl")
+        lm = rows(members.member(f"lm/{split}.jsonl"))
+        lm_lineage = rows(members.member(f"lm/{split}.lineage.jsonl"))
         for row, link in zip_longest(lm, lm_lineage):
             if row is None or link is None:
                 raise ValueError("LM lineage count mismatch")
@@ -2672,6 +2673,9 @@ def release_manifest_payload(
         for name in DOCUMENT_MEMBERS:
             if name != SPAN_MEMBER or not projected_spans:
                 files[name] = {**files[name], "storage": SHARED_DOCUMENT}
+    if placement.lm_views:
+        for name in LM_VIEW_MEMBERS:
+            files[name] = {**files[name], "storage": SHARED_LM_VIEW}
     if placement.normalized_spans and not projected_spans:
         if not build.get("span_partitions") or not streaming_verification(
             build["identity"]
@@ -2705,6 +2709,7 @@ def freeze(
     share_stage_artifacts: bool = False,
     share_document_artifacts: bool = False,
     reference_normalized_spans: bool = False,
+    share_lm_views: bool = False,
 ) -> Path:
     """Publish a release identity, optionally retaining its completed local payload."""
     build_dir = Path(build_dir).resolve()
@@ -2713,6 +2718,7 @@ def freeze(
         stages=share_stage_artifacts,
         documents=share_document_artifacts,
         normalized_spans=reference_normalized_spans,
+        lm_views=share_lm_views,
     )
     if placement.shared and build_dir.parent.parent.parent != work_root / "corpora":
         raise ValueError(

@@ -1508,7 +1508,9 @@ def test_archive_plan_step_snapshot_and_reviewed_release(
             "inputs": ["one"],
         },
     )
-    published = freeze(build(load_project(recipe), root, offline=True), root)
+    published = freeze(
+        build(load_project(recipe), root, offline=True), root, share_lm_views=True
+    )
     scratch = root / "audit-scratch"
     with verification_settings(scratch_dir=scratch, workers=1):
         manifest = verify_release(published, verification_mode="cold")

@@ -782,6 +782,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
             "--share-stage-artifacts",
             "--share-document-artifacts",
             "--reference-normalized-spans",
+            "--share-lm-views",
         ),
     )
     lab, recipe, release = prepared.lab, prepared.recipe, prepared.release
@@ -1051,6 +1052,9 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     # Compose the pretraining config; the export's dataset section carries the
     # release revision, licence and validation counts the mixture binds to.
     bound = yaml.safe_load((export / "run.yaml").read_text())["dataset"]
+    validation = members.member("lm/validation.jsonl")
+    assert validation.is_relative_to(lab.work / "artifacts/corpus/release-lm-views")
+    assert Path(bound["validation_path"]) == validation
     paths = tmp_path / "paths.yaml"
     paths.write_text(
         yaml.safe_dump(
@@ -1063,7 +1067,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
                     "mixture_declaration_path": str(declaration),
                     "mixture_output_path": str(mixture),
                     "train_path": str(mixture / "train.tokens.ids"),
-                    "validation_path": str(release / "lm/validation.jsonl"),
+                    "validation_path": str(validation),
                     "cache_dir": str(tmp_path / "prepared"),
                     "train_max_documents": receipt["records"],
                     "train_max_tokens": sum(receipt["actual_target_tokens"].values()),
@@ -1083,6 +1087,17 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         f"optimizer={root / 'optimizer.yaml'}",
         str(paths), "--output", str(run_config),
     )  # fmt: skip
+    from klab.corpus.release_review import verify_accepted_prepared_config
+
+    verify_accepted_prepared_config(
+        run_config,
+        {
+            "release_path": str(release),
+            "release_id": release.name,
+            "release_manifest_sha256": sha256_file(release / "manifest.json"),
+            "family_inventory_path": str(inventory),
+        },
+    )
     lab.run("inspect", str(run_config))
     prepared_dir = Path(lab.run("data", "prepare", str(run_config)))
     assert prepared_dir.is_dir()
