@@ -112,7 +112,7 @@ def prepare(
         before = sha256_file(build / "spans.jsonl")
         rename = safe_io.rename_noreplace
         flag = "--reference-normalized-spans"
-        native_plan = ("corpus", "plan", project, flag, "--json")
+        native_plan = ("corpus", "plan", project, flag, "--inspect-storage", "--json")
         build_args = ("corpus", "build", project, "--offline", flag)
         expected = lab.json(*native_plan)["build_id"]
         part = json.loads((inline_build / "build.json").read_bytes())[
@@ -150,6 +150,11 @@ def prepare(
             next(row for row in retry_build["stages"] if row["id"] == "views")["action"]
             == "resume_candidate"
         )
+        assert retry_build["storage_inspection"]["spans"] == {
+            "logical_bytes": (inline_build / "spans.jsonl").stat().st_size,
+            "flat_output_bytes": 0,
+            "append_candidate_bytes": 0,
+        }
         reference_scan = ("corpus", "artifacts", "--build-references", "--json")
         staged_build = lab.json(*reference_scan)
         assert staged_build["scan_status"] == "complete"
@@ -512,10 +517,18 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
 
     with monkeypatch.context() as forecast:
         forecast.setattr(Path, "open", no_stage_body)
-        view_plan = lab.json(*plan_args)
+        view_plan = lab.json(*plan_args, "--inspect-storage")
     assert view_plan["build_id"] != other_build.name
     candidate_stages = {row["id"]: row for row in view_plan["stages"]}
     assert candidate_stages["views"]["action"] == "run"
+    forecast = view_plan["storage_inspection"]
+    assert forecast["all_normalized_candidates_present"]
+    expected_spans = (other_build / "spans.jsonl").stat().st_size
+    assert forecast["spans"] == {
+        "logical_bytes": expected_spans,
+        "flat_output_bytes": expected_spans,
+        "append_candidate_bytes": expected_spans,
+    }
     stage_store = other_build.parent / "stages"
     for label, directory in (("index", "index"), ("deduplicate", "dedup")):
         step = candidate_stages[label]
@@ -531,6 +544,17 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         view_build.parent.parent / "progress" / f"{view_build.name}.jsonl"
     ).read_text()
     assert "reused_index_stage" in progress and "reused_dedup_stage" in progress
+    observed = lab.json(*plan_args, "--inspect-storage")["storage_inspection"]
+    assert observed["spans"]["append_candidate_bytes"] == 0
+    prior = observed["prior_stage_observation"]
+    assert prior["completed"]
+    for stage in ("index", "deduplicate"):
+        assert prior["stage_outputs"][stage] == {
+            "computation_key": candidate_stages[stage]["computation_key"],
+            "payload_bytes": candidate_stages[stage]["verification_candidate_bytes"],
+        }
+    assert (view_build / "spans.jsonl").stat().st_size == expected_spans
+    assert prior["stage_outputs"]["views"]["payload_bytes"] >= expected_spans
 
     # A dedup-only option changes its key, keeping the index verification candidate.
     view["policy"]["duplicates"]["heldout_overlap"] = "error"
@@ -590,6 +614,11 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     source_bytes = len(b"# Extra\n\nAn independent reference.\n")
     assert scheduled == [("ref_append", name, source_bytes)]
     assert plan["normalization_source_bytes"] == source_bytes
+    storage = lab.json(*plan_args, "--inspect-storage")["storage_inspection"]
+    assert not storage["all_normalized_candidates_present"]
+    assert storage["normalized_candidate_payload_bytes"]["spans.jsonl"] > 0
+    assert storage["spans"]["flat_output_bytes"] is None
+    assert storage["spans"]["append_candidate_bytes"] is None
     assert (
         next(row for row in plan["stages"] if row["id"] == "index")["action"]
         == "await_normalization"

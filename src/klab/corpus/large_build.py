@@ -687,6 +687,11 @@ def _emit_build(
         boundary(0, finished=True)
 
         view_digests = checkpoints.file_digests()
+        progress.observe_stage_output(
+            "views",
+            checkpoints.identity,
+            sum(digest.size for digest in view_digests.values()),
+        )
 
     stage_digest.update(b"]]")
     stages = [
@@ -1243,6 +1248,9 @@ def build_large(
             on_reuse=lambda: progress.record("reused_index_stage"),
             retained=groups_root / "assembly",
         )
+        progress.observe_stage_output(
+            "index", index_key, (index_dir / "index.sqlite").stat().st_size
+        )
         if groups_root.exists():
             shutil.rmtree(groups_root)
         stages.prune("index", keep=_PRUNE_ON_PUBLISH, protect=index_dir.name)
@@ -1306,6 +1314,14 @@ def build_large(
             dedup_inputs,
             dedup_stage,
             on_reuse=lambda: progress.record("reused_dedup_stage"),
+        )
+        progress.observe_stage_output(
+            "deduplicate",
+            dedup_dir.name,
+            sum(
+                (dedup_dir / name).stat().st_size
+                for name in ("dedup.sqlite", "groups.jsonl")
+            ),
         )
         if dedup_groups_root.exists():
             shutil.rmtree(dedup_groups_root)
