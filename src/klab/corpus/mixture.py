@@ -1428,11 +1428,13 @@ def verify_mixture_dataset(
         records = fit.dataset.validation_max_documents
         token_budget = fit.dataset.validation_max_tokens
     else:
-        from klab.corpus.export import _licenses, _split_stats
+        from klab.corpus.export import release_licenses, split_stats
 
-        records, rendered_bytes = _split_stats(dataset.validation_path, "lm")
+        records, rendered_bytes = split_stats(dataset.validation_path, "lm")
         token_budget = rendered_bytes + records + 1
-        expected_license = _licenses(release)
+        expected_license = release_licenses(
+            release / "sources.json", release / "documents.jsonl"
+        )
     if (
         dataset.license != expected_license
         or records != dataset.validation_max_documents

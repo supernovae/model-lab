@@ -17,27 +17,12 @@ from klab.config.loading import load_config, load_tokenizer_config
 from klab.config.models import DatasetConfig, RunConfig, TokenizerTrainConfig
 from klab.corpus.release_verify import current_settings
 from klab.corpus.shards import declare_stage, plan_ranges, run_sharded
-from klab.safe_io import write_canonical_json
+from klab.safe_io import rename_noreplace, write_canonical_json
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
+    from klab.corpus.release import ReleaseReader
     from klab.verification_proofs import ProofStore, VerificationMode
-
-
-def _release(
-    path: Path,
-    *,
-    proof_store: ProofStore | None = None,
-    verification_mode: VerificationMode = "cold",
-) -> dict[str, object]:
-    from klab.corpus.release import verify_release
-
-    manifest = verify_release(
-        path,
-        proof_store=proof_store,
-        verification_mode=verification_mode,
-    )
-    return manifest
 
 
 LICENSE_SCAN_STAGE = declare_stage("export document licenses")
@@ -68,8 +53,9 @@ def _export_range_inputs() -> dict[str, str] | None:
     return None
 
 
-def _licenses(release_dir: Path) -> str:
-    sources = json.loads((release_dir / "sources.json").read_text(encoding="utf-8"))
+def release_licenses(sources_path: Path, documents_path: Path) -> str:
+    """Collect license labels from authenticated source and document members."""
+    sources = json.loads(sources_path.read_text(encoding="utf-8"))
     items = sources.values() if isinstance(sources, dict) else sources
     names: set[str] = set()
     for item in items:
@@ -80,7 +66,7 @@ def _licenses(release_dir: Path) -> str:
     if any(isinstance(item, dict) and "rights_policy" in item for item in items):
         plan = plan_ranges(
             LICENSE_SCAN_STAGE,
-            release_dir / "documents.jsonl",
+            documents_path,
             inputs=_export_range_inputs(),
         )
         for labels in run_sharded(plan, _license_range):
@@ -143,7 +129,7 @@ def _chat_range_stats(path: str, start: int, end: int) -> tuple[int, int, str | 
     return count, size, None
 
 
-def _split_stats(path: Path, view: str) -> tuple[int, int]:
+def split_stats(path: Path, view: str) -> tuple[int, int]:
     inputs = _export_range_inputs()
     if inputs is not None:
         inputs["view"] = view
@@ -189,8 +175,7 @@ def _export_request(
 
 
 def _export_metadata(
-    release_dir: Path,
-    manifest: dict[str, object],
+    release: ReleaseReader,
     request: dict[str, object],
     counts: list[tuple[int, int]],
     *,
@@ -199,18 +184,19 @@ def _export_metadata(
 ) -> dict[str, object]:
     """Build the authenticated content closure, independent of storage root."""
     view = request["view"]
+    files = release.manifest["files"]
     sidecar = {
         "schema_version": 1,
         **request,
-        "release_manifest_sha256": sha256_file(release_dir / "manifest.json"),
-        "report_sha256": sha256_file(release_dir / "report.json"),
-        "license_report_sha256": sha256_file(release_dir / "license-report.json"),
+        "release_manifest_sha256": sha256_file(release.root / "manifest.json"),
+        "report_sha256": files["report.json"]["sha256"],
+        "license_report_sha256": files["license-report.json"]["sha256"],
         "tokenizer_config_sha256": tokenizer_sha256,
         "run_config_sha256": run_sha256,
         "splits": {
             split: {
                 "path": f"{view}/{split}.jsonl",
-                "sha256": manifest["files"][f"{view}/{split}.jsonl"]["sha256"],
+                "sha256": files[f"{view}/{split}.jsonl"]["sha256"],
                 "records": count,
                 "rendered_bytes": size,
             }
@@ -220,7 +206,7 @@ def _export_metadata(
         },
     }
     rights = json.loads(
-        (release_dir / "license-report.json").read_text(encoding="utf-8")
+        release.member("license-report.json").read_text(encoding="utf-8")
     )
     sidecar["publication_mode"] = rights["publication_mode"]
     sidecar["weight_license_status"] = rights["weight_license_status"]
@@ -256,14 +242,37 @@ def export_release(
     """Create two complete configs bound to one verified immutable release."""
     if view not in {"lm", "chat"} or type(vocab_size) is not int or vocab_size < 260:
         raise ValueError("view must be lm or chat and vocab_size must be >= 260")
+    from klab.corpus.release import open_release
+
+    with open_release(
+        release_dir, proof_store=proof_store, verification_mode=verification_mode
+    ) as release:
+        return _publish_export(
+            release,
+            view,
+            base_run_config,
+            vocab_size,
+            work_root,
+            min_frequency=min_frequency,
+            proof_store=proof_store,
+            verification_mode=verification_mode,
+        )
+
+
+def _publish_export(
+    release: ReleaseReader,
+    view: str,
+    base_run_config: Path,
+    vocab_size: int,
+    work_root: Path,
+    *,
+    min_frequency: int,
+    proof_store: ProofStore | None,
+    verification_mode: VerificationMode,
+) -> Path:
     from klab.corpus import release_receipt
 
-    release_dir = Path(release_dir).resolve()
-    release_key = release_receipt.fingerprint(release_dir)
-    manifest = _release(
-        release_dir, proof_store=proof_store, verification_mode=verification_mode
-    )
-
+    manifest = release.manifest
     base = load_config(Path(base_run_config))
     base_digest = sha256_file(Path(base_run_config))
     release_id = str(manifest["release_id"])
@@ -285,9 +294,31 @@ def export_release(
         / view
         / identity
     )
-    train = release_dir / view / "train.jsonl"
-    validation = release_dir / view / "validation.jsonl"
-    counts = [_split_stats(path, view) for path in (train, validation)]
+    train = release.member(f"{view}/train.jsonl")
+    validation = release.member(f"{view}/validation.jsonl")
+    existing = destination.exists()
+    sidecar_path = destination / "export.json"
+    dependencies = None
+    reused_index = None
+    if existing and proof_store is not None and verification_mode == "verified_reuse":
+        dependencies = _export_receipt_dependencies(destination, release.root)
+        found = release_receipt.lookup(
+            proof_store, "export", sidecar_path, identity, dependencies
+        )
+        if found.hit:
+            reused_index = found.index
+    if reused_index is None:
+        counts = [split_stats(path, view) for path in (train, validation)]
+        licenses = release_licenses(
+            release.member("sources.json"), release.member("documents.jsonl")
+        )
+    else:
+        verified = json.loads(sidecar_path.read_bytes())
+        counts = [
+            (row["records"], row["rendered_bytes"])
+            for row in (verified["splits"]["train"], verified["splits"]["validation"])
+        ]
+        licenses = load_config(destination / "run.yaml").dataset.license
     if any(count == 0 for count, _ in counts):
         raise ValueError(f"{view} requires nonempty train and validation")
     if any(
@@ -301,10 +332,10 @@ def export_release(
         update={
             "source": source,
             "revision": release_id,
-            "license": _licenses(release_dir),
+            "license": licenses,
             "train_path": train,
             "validation_path": validation,
-            "corpus_release_path": release_dir,
+            "corpus_release_path": release.root,
             "corpus_export_path": destination,
             "source_manifest_path": None,
             "dataset_config": None,
@@ -338,14 +369,12 @@ def export_release(
     tokenizer_bytes = yaml.safe_dump(tokenizer, sort_keys=True).encode("utf-8")
     run_bytes = yaml.safe_dump(run_payload, sort_keys=True).encode("utf-8")
     sidecar = _export_metadata(
-        release_dir,
-        manifest,
+        release,
         request,
         counts,
         run_sha256=hashlib.sha256(run_bytes).hexdigest(),
         tokenizer_sha256=hashlib.sha256(tokenizer_bytes).hexdigest(),
     )
-    existing = destination.exists()
     if not existing:
         destination.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
@@ -355,15 +384,9 @@ def export_release(
             _write_yaml(staging / "tokenizer.yaml", tokenizer)
             _write_yaml(staging / "run.yaml", run_payload)
             write_canonical_json(staging / "export.json", sidecar, exclusive=True)
-            if destination.exists():
-                raise FileExistsError(
-                    f"corpus export appeared during publication: {destination}"
-                )
-            if release_receipt.fingerprint(release_dir) != release_key:
-                raise ValueError("release changed during export creation")
-            staging.rename(destination)
+            release.require_unchanged()
+            rename_noreplace(staging, destination)
 
-    sidecar_path = destination / "export.json"
     expected = {
         sidecar_path: canonical_json(sidecar) + b"\n",
         destination / "run.yaml": run_bytes,
@@ -372,19 +395,25 @@ def export_release(
     if existing or proof_store is not None:
         if any(not path.is_file() for path in expected):
             raise ValueError("incomplete immutable corpus export")
-        if proof_store is not None:
-            dependencies = _export_receipt_dependencies(destination, release_dir)
-            index = release_receipt.stat_index(
-                [sidecar_path, *dependencies], strict=False
-            )
+        if proof_store is not None and dependencies is None:
+            dependencies = _export_receipt_dependencies(destination, release.root)
+        paths = [sidecar_path, *dependencies] if dependencies is not None else None
+        index = (
+            release_receipt.stat_index(paths, strict=False)
+            if paths is not None and reused_index is None
+            else None
+        )
         if any(path.read_bytes() != content for path, content in expected.items()):
             raise ValueError("existing corpus export has changed")
-    if release_receipt.fingerprint(release_dir) != release_key:
-        raise ValueError("release changed during export creation")
-    if proof_store is not None:
-        release_receipt.record(
-            proof_store, "export", sidecar_path, identity, dependencies, index=index
-        )
+        if reused_index is not None:
+            assert paths is not None
+            if release_receipt.stat_index(paths, strict=False) != reused_index:
+                raise ValueError("corpus export changed during reuse")
+        elif proof_store is not None and dependencies is not None:
+            release.require_unchanged()
+            release_receipt.record(
+                proof_store, "export", sidecar_path, identity, dependencies, index=index
+            )
     return destination
 
 
@@ -460,13 +489,20 @@ def _verify_release_export_cold(
     """Verify the release, export request, and exact bytes selected by dataset."""
     if dataset.corpus_release_path is None or dataset.corpus_export_path is None:
         raise ValueError("dataset does not reference a frozen corpus export")
-    release_dir = dataset.corpus_release_path
-    export_dir = dataset.corpus_export_path
-    manifest = _release(
-        release_dir,
+    from klab.corpus.release import open_release
+
+    with open_release(
+        dataset.corpus_release_path,
         proof_store=proof_store,
         verification_mode=verification_mode,
-    )
+    ) as release:
+        return _verify_export_members(dataset, release, dataset.corpus_export_path)
+
+
+def _verify_export_members(
+    dataset: DatasetConfig, release: ReleaseReader, export_dir: Path
+) -> dict[str, object]:
+    manifest = release.manifest
     export_bytes = (export_dir / "export.json").read_bytes()
     export = json.loads(export_bytes)
     if (
@@ -502,14 +538,19 @@ def _verify_release_export_cold(
             str(manifest["release_id"]),
             view,
         )
-        or dataset.license != _licenses(release_dir)
+        or dataset.license
+        != release_licenses(
+            release.member("sources.json"), release.member("documents.jsonl")
+        )
     ):
         raise ValueError("corpus export request or license mismatch")
+    config_digests = {}
     for name, key in (
         ("run.yaml", "run_config_sha256"),
         ("tokenizer.yaml", "tokenizer_config_sha256"),
     ):
-        if sha256_file(export_dir / name) != export.get(key):
+        config_digests[key] = sha256_file(export_dir / name)
+        if config_digests[key] != export.get(key):
             raise ValueError(f"corpus export config changed: {name}")
     exported_run = load_config(export_dir / "run.yaml")
     exported_tokenizer = load_tokenizer_config(export_dir / "tokenizer.yaml")
@@ -526,10 +567,10 @@ def _verify_release_export_cold(
         ("train", dataset.train_path),
         ("validation", dataset.validation_path),
     ):
-        expected = release_dir / view / f"{split}.jsonl"
+        expected = release.member(f"{view}/{split}.jsonl")
         if path is None or path.resolve() != expected.resolve():
             raise ValueError(f"corpus export {split} split path mismatch")
-        records, rendered_bytes = _split_stats(expected, view)
+        records, rendered_bytes = split_stats(expected, view)
         counts.append((records, rendered_bytes))
         count = (
             dataset.train_max_documents
@@ -546,23 +587,12 @@ def _verify_release_export_cold(
                 f"corpus export {split} count or rendered-byte budget mismatch"
             )
     expected_export = _export_metadata(
-        release_dir,
-        manifest,
+        release,
         request,
         counts,
-        run_sha256=sha256_file(export_dir / "run.yaml"),
-        tokenizer_sha256=sha256_file(export_dir / "tokenizer.yaml"),
+        run_sha256=config_digests["run_config_sha256"],
+        tokenizer_sha256=config_digests["tokenizer_config_sha256"],
     )
     if export_bytes != canonical_json(expected_export) + b"\n":
         raise ValueError("corpus export content or policy mismatch")
-    splits = expected_export["splits"]
-    return {
-        "release_id": manifest["release_id"],
-        "view": view,
-        "vocab_size": export["vocab_size"],
-        "train_sha256": splits["train"]["sha256"],
-        "validation_sha256": splits["validation"]["sha256"],
-        "report_sha256": export["report_sha256"],
-        "license_report_sha256": export["license_report_sha256"],
-        "export_sha256": sha256_file(export_dir / "export.json"),
-    }
+    return _export_binding(expected_export)

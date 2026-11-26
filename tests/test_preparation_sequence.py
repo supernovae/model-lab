@@ -29,9 +29,9 @@ from klab.corpus.acquisition import (
 from klab.corpus.admission_draft import draft_admission_manifest
 from klab.corpus.declaration_render import render_declaration
 from klab.corpus.export import (
-    _licenses,
-    _split_stats,
     export_release,
+    release_licenses,
+    split_stats,
     verify_release_export,
 )
 from klab.corpus.pipeline import build
@@ -1194,7 +1194,9 @@ def test_offline_preparation_sequence_through_native_supervision(
     fixture_dataset = {
         **operator_run["dataset"],
         "train_max_tokens": 100,
-        "license": _licenses(prior_release),
+        "license": release_licenses(
+            prior_release / "sources.json", prior_release / "documents.jsonl"
+        ),
     }
     base_config["training"].update(seq_len=16, max_steps=7, max_tokens=100)
     base_config["checkpoint"]["every_steps"] = 1
@@ -1497,7 +1499,7 @@ def test_offline_preparation_sequence_through_native_supervision(
     _run(paths, "cold-verify-mixture")
     mixture_receipt = json.loads((mixture_output / "receipt.json").read_text())
     assert sum(mixture_receipt["actual_target_tokens"].values()) == 100
-    validation_documents, validation_bytes = _split_stats(
+    validation_documents, validation_bytes = split_stats(
         release / "lm/validation.jsonl", "lm"
     )
     run_config = _out(paths, "prepared-run-declaration")
