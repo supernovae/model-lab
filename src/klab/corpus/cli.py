@@ -61,6 +61,27 @@ def _canary_sample(args: argparse.Namespace):
     return CanarySample(**sizes)
 
 
+def _print_stage_inventory(inventory: dict) -> None:
+    print(
+        f"{inventory['shared_payloads']:,} shared stage payloads, "
+        f"{inventory['retained_bytes']:,} retained bytes"
+    )
+    if inventory["scan_status"] == "complete":
+        print(
+            f"{inventory['unreferenced_payloads']:,} without an observed release reference, "
+            f"{inventory['unreferenced_bytes']:,} bytes"
+        )
+    else:
+        print(f"Retention scan incomplete ({inventory['problem_count']:,} problems)")
+        for problem in inventory["problems"]:
+            print(f"{problem['path']}  {problem['reason']}")
+    for row in inventory["payloads"]:
+        print(
+            f"{row['artifact_id']}  {row['retained_bytes']:,} bytes  "
+            f"{row['published_releases']:,} published, {row['staging_releases']:,} staging"
+        )
+
+
 def _handle(args: argparse.Namespace) -> None:
     """Run one command with the operator's verification placement and receipts."""
     from klab.corpus.release_verify import verification_settings
@@ -89,24 +110,39 @@ def _run(args: argparse.Namespace) -> None:
     root = resolve_work_dir(args.work_dir)
     command = args.corpus_command
     if command == "artifacts":
-        from klab.corpus.artifact_inventory import normalized_inventory
-
-        inventory = normalized_inventory(
-            root, source_id=args.source_id, limit=args.limit, after=args.after
+        from klab.corpus.artifact_inventory import (
+            normalized_inventory,
+            shared_stage_inventory,
         )
+
+        if args.kind == "release-stages":
+            if args.source_id is not None:
+                raise ValueError("--source-id applies to normalized partitions")
+            inventory = shared_stage_inventory(
+                root, limit=args.limit, after=args.after, unreferenced=args.unreferenced
+            )
+        else:
+            if args.unreferenced:
+                raise ValueError("--unreferenced requires --kind release-stages")
+            inventory = normalized_inventory(
+                root, source_id=args.source_id, limit=args.limit, after=args.after
+            )
         if args.json:
             print(json.dumps(inventory, sort_keys=True))
         else:
-            print(
-                f"{inventory['published_partitions']:,} normalized partitions, "
-                f"{inventory['retained_bytes']:,} retained bytes"
-            )
-            print(
-                f"{inventory['staging_directories']:,} staging directories, "
-                f"{inventory['disappeared_partitions']:,} partitions disappeared during scan"
-            )
-            for row in inventory["partitions"]:
-                print(f"{row['artifact_id']}  {row['retained_bytes']:,} bytes")
+            if args.kind == "release-stages":
+                _print_stage_inventory(inventory)
+            else:
+                print(
+                    f"{inventory['published_partitions']:,} normalized partitions, "
+                    f"{inventory['retained_bytes']:,} retained bytes"
+                )
+                print(
+                    f"{inventory['staging_directories']:,} staging directories, "
+                    f"{inventory['disappeared_partitions']:,} partitions disappeared during scan"
+                )
+                for row in inventory["partitions"]:
+                    print(f"{row['artifact_id']}  {row['retained_bytes']:,} bytes")
             if inventory["next_after"] is not None:
                 print(f"Next page --after {inventory['next_after']}")
         return
@@ -629,12 +665,18 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     )
     sub = corpus.add_subparsers(dest="corpus_command", required=True)
     command = sub.add_parser(
-        "artifacts", help="Inspect shared normalized Corpus storage"
+        "artifacts", help="Inspect shared Corpus storage and release references"
+    )
+    command.add_argument(
+        "--kind", choices=("normalized", "release-stages"), default="normalized"
     )
     command.add_argument("--source-id")
     command.add_argument("--limit", type=int, default=100)
+    command.add_argument("--after", help="Continue after a key from this inventory")
     command.add_argument(
-        "--after", help="Continue after a source/key from this inventory"
+        "--unreferenced",
+        action="store_true",
+        help="Preview shared stages without an observed release reference",
     )
     command.add_argument("--json", action="store_true")
     command.set_defaults(handler=_handle)
