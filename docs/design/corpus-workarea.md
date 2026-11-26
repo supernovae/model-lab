@@ -106,6 +106,10 @@ full native builds. Build resolves and verifies artifact reuse. Downstream
 stage planning, reference publication and closure-aware pruning remain in #567.
 `klab corpus artifacts` reports retained bytes, computation keys and staging
 counts from shared-store metadata. Its paginated inspection is advisory.
+Release sample, review, lineage, source and audit queries use the
+manifest-bound release reader and keep verification in scope until the query
+finishes. Export, mixture, tokenizer and other payload consumers still need
+the common reader at the reference layout cutover.
 
 Start with typed document, passage, annotation, duplicate-group, selection,
 entity, assertion, evidence, edge, index, and compiled sequence payloads.

@@ -1291,6 +1291,24 @@ None of them is a quality score.
 | `klab corpus near-duplicates RELEASE` | MinHash near-duplicate pairs across splits |
 | `klab corpus consumers RELEASE --runs-dir RUNS` | Runs that trained on it |
 
+`sample`, `review`, `lineage`, `sources` and `audit` resolve declared
+members of one verified release generation. Sampling streams lineage until it
+has the requested matches. For rows that need supplementary parent domains,
+it builds a temporary index of document IDs and domains under `--scratch-dir`.
+A lineage lookup streams only the tables needed for the requested record and
+keeps its matching parents. Late lookups may still scan a whole table.
+
+The following local measurements isolate inspection after verification.
+The synthetic 100,000-row corpus had 1 KiB of text per document. Each query
+ran in a fresh Python process with warm files. Reads use Linux process
+`rchar` counters.
+
+| Query | Logical reads before / after | Wall time before / after | Peak RSS before / after |
+| --- | --- | --- | --- |
+| Sample one early match | 125.77 / 0.13 MB | 587 / <1 ms | 308 / 43 MiB |
+| Trace first document | 128.06 / 0.39 MB | 683 / <1 ms | 341 / 43 MiB |
+| Trace last document | 128.06 / 128.06 MB | 687 / 428 ms | 342 / 44 MiB |
+
 ### Verification cost, scratch and receipts
 
 A release is verified from its bytes once. Every command that reads a release
