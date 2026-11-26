@@ -85,6 +85,78 @@ def test_frozen_release_is_the_build_directory_renamed(
     assert not list(release.parent.glob(".freezing-*"))
 
 
+def test_normalized_prune_retries_a_retired_partition(tmp_path, monkeypatch, capsys):
+    from klab.corpus import artifact_inventory
+    from klab.corpus.normalized_retention import (
+        clear_normalized_use,
+        record_normalized_use,
+    )
+    from klab.corpus.prepared_shards import normalized_store_root
+    from klab.corpus.release_members import normalized_partition_lease
+
+    work = tmp_path / "work"
+    project = work / "corpora" / "example"
+    project.mkdir(parents=True, mode=0o700)
+    identity = {"artifact_type": "normalized_source_partition", "source_id": "example"}
+    key = canonical_digest(identity)
+    partition = normalized_store_root(work) / "example" / key
+    partition.mkdir(parents=True)
+    files = {}
+    for name in ("docs.jsonl", "spans.jsonl", "rejected.jsonl"):
+        file = partition / name
+        file.write_bytes(b"{}\n")
+        files[name] = {"sha256": sha256_file(file), "size": file.stat().st_size}
+    receipt = {"schema_version": 1, "identity": identity, "key": key, "files": files}
+    (partition / "receipt.json").write_bytes(canonical_json(receipt) + b"\n")
+    size = sum(path.stat().st_size for path in partition.iterdir())
+    artifact_id = f"example/{key}"
+    command = ("release-prune", "--kind", "normalized", "--partition", artifact_id)
+
+    def prune(*args, blocked=False):
+        return _corpus_json(
+            work, monkeypatch, capsys, *command, *args, exit_code=int(blocked)
+        )
+
+    assert prune()["payloads"][0]["action"] == "prune"
+    assert (partition / "receipt.json").is_file()
+    unexpected = partition / "unrelated.txt"
+    unexpected.write_text("outside the normalized partition contract")
+    assert prune("--apply", blocked=True)["status"] == "blocked"
+    assert unexpected.is_file()
+    unexpected.unlink()
+    build_id = "a" * 64
+    record_normalized_use(project, build_id, ["example"])
+    retained = prune()["payloads"][0]
+    assert retained["action"] == "protected" and retained["resumable_builds"] == 1
+    clear_normalized_use(project, build_id)
+
+    legacy = project / "builds" / "stages" / f".index-{'b' * 64}.groups"
+    legacy.mkdir(parents=True)
+    unknown = prune(blocked=True)
+    assert any(
+        row["reason"] == "unregistered_native_checkpoint" for row in unknown["problems"]
+    )
+    legacy.rmdir()
+
+    with normalized_partition_lease(partition):
+        assert prune("--apply", blocked=True)["status"] == "blocked"
+
+    retired = partition.with_name(f".pruned-{key}")
+
+    def interrupt(_namespace, _name):
+        raise InterruptedError("after retiring partition")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(artifact_inventory, "_remove_retired_partition", interrupt)
+        assert prune("--apply", blocked=True)["status"] == "partial"
+    assert not partition.exists() and retired.is_dir()
+    assert prune()["payloads"][0]["interrupted_prune"] is True
+    removed = prune("--apply")
+    assert removed["pruned"] == [artifact_id] and removed["pruned_bytes"] == size
+    assert not retired.exists()
+    assert prune("--apply")["payloads"][0]["action"] == "missing"
+
+
 def test_verification_checks_frozen_document_assignments(
     prepared: tuple[Path, Path],
 ) -> None:

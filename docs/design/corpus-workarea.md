@@ -161,7 +161,12 @@ manifests, and unsealed native views make the combined counts unknown. A native
 build can opt in to a verified span projection before view emission and carry
 it through freeze. The seal binds the ordered
 input hashes and exact file generations, so a view retry can reuse it while
-the original partitions are available. Released documents carry selection,
+the original partitions are available. Normalized pruning accepts explicit
+partition IDs and checks the combined release and build roots, plus durable
+pins for interrupted native preparation. Builders hold a shared normalized
+lease, and apply takes that lease exclusively along with the release lease
+and selected writer locks. Apply retires each directory by rename before
+deleting its members. Released documents carry selection,
 split and duplicate decisions, so references to normalized document payloads
 require a separate overlay and ordering contract. That contract and retention
 for other artifact families are tracked in #567.

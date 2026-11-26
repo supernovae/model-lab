@@ -120,6 +120,23 @@ def release_retention_lease(
     )
 
 
+def normalized_retention_lease(
+    work_root: Path, *, prune: bool = False
+) -> AbstractContextManager[None]:
+    """Keep normalized inputs available through native build and placement."""
+    path = work_root / "artifacts" / "corpus" / ".normalized-retention.lock"
+    return _release_lock(
+        path, fcntl.LOCK_EX | fcntl.LOCK_NB if prune else fcntl.LOCK_SH
+    )
+
+
+def normalized_partition_lease(partition: Path) -> AbstractContextManager[None]:
+    """Take the normalizer's existing per-key writer lock without waiting."""
+    return _release_lock(
+        partition.parent / ".locks" / partition.name, fcntl.LOCK_EX | fcntl.LOCK_NB
+    )
+
+
 def shared_payload_lease(
     payload: Path, *, wait: bool = True
 ) -> AbstractContextManager[None]:

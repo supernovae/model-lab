@@ -40,6 +40,7 @@ from klab.corpus.release_members import (
     SHARED_STAGE,
     ReleasePlacement,
     SharedPublication,
+    normalized_retention_lease,
     publish_shared_members,
     release_retention_lease,
     shared_member_path,
@@ -2511,7 +2512,12 @@ def freeze(
             raise ValueError("shared release artifacts require ordinary Corpus freeze")
         return freeze_retained(build_dir, work_root)
     # One operation, so a snapshot authenticated for the build is hashed once.
-    with _verification_operation():
+    with (
+        _verification_operation(),
+        normalized_retention_lease(work_root)
+        if reference_normalized_spans
+        else nullcontext(),
+    ):
         return _freeze(build_dir, work_root, proof_store, verification_mode, placement)
 
 
