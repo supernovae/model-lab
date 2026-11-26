@@ -324,18 +324,27 @@ def test_release_manifest_names_its_files_and_not_the_build_file(
     }
 
 
-def test_shared_stage_releases_reuse_one_payload_and_reject_drift(
+def test_shared_releases_reuse_members_and_reject_drift(
     prepared: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     from klab.cli.main import main
     from klab.corpus import artifact_inventory
+    from klab.training import manifest as file_manifest
 
     build_dir, work = prepared
     monkeypatch.setenv("XDG_CONFIG_HOME", str(work.parent / "settings"))
-    options = {**verification_options(work), "share_stage_artifacts": True}
-    name = "stages/lm.jsonl"
-    original = (build_dir / name).stat()
-    publish = release_module.publish_shared_stages
+    options = {
+        **verification_options(work),
+        "share_stage_artifacts": True,
+        "share_document_artifacts": True,
+    }
+    stage_name = "stages/lm.jsonl"
+    document_names = ("documents.jsonl", "spans.jsonl")
+    original = {
+        name: (build_dir / name).stat() for name in (stage_name, *document_names)
+    }
+    shared_bytes = sum(info.st_size for info in original.values())
+    publish = release_module.publish_shared_members
 
     def query(*arguments):
         monkeypatch.setattr(
@@ -359,7 +368,7 @@ def test_shared_stage_releases_reuse_one_payload_and_reject_drift(
     def plan(path, *options):
         return query("plan", "--build", str(path), *options)
 
-    share = "--share-stage-artifacts"
+    share = ("--share-stage-artifacts", "--share-document-artifacts")
     opened_file = Path.open
 
     def forbid_payload(path, *args, **kwargs):
@@ -371,41 +380,65 @@ def test_shared_stage_releases_reuse_one_payload_and_reject_drift(
 
     with monkeypatch.context() as metadata_only:
         metadata_only.setattr(Path, "open", forbid_payload)
-        first_plan = plan(build_dir, share)
+        first_plan = plan(build_dir, *share)
     assert first_plan["state"] == "build"
-    assert first_plan["new_shared_bytes"] == original.st_size
+    assert first_plan["new_shared_bytes"] == shared_bytes
     assert first_plan["publication_payload_copy_bytes"] == 0
     assert first_plan["verification_scratch_bytes"] is None
 
-    def stop_after_stage_move(*args, **kwargs):
-        publish(*args, **kwargs)
-        raise InterruptedError("after stage move")
+    def stop_after_shared_move(staging, files, **kwargs):
+        publish(
+            staging,
+            {name: row for name, row in files.items() if name != "spans.jsonl"},
+            **kwargs,
+        )
+        raise InterruptedError("after shared move")
 
+    spans_digest = sha256_file(build_dir / "spans.jsonl")
     with monkeypatch.context() as fault:
-        fault.setattr(release_module, "publish_shared_stages", stop_after_stage_move)
-        with pytest.raises(InterruptedError, match="after stage move"):
+        fault.setattr(release_module, "publish_shared_members", stop_after_shared_move)
+        with pytest.raises(InterruptedError, match="after shared move"):
             freeze(build_dir, work, **options)
     pending = inventory()
     assert pending["scan_status"] == "complete"
     assert pending["unreferenced_payloads"] == 0
     assert pending["payloads"][0]["staging_releases"] == 1
-    resumed = plan(build_dir, share)
+    pending_documents = query("artifacts", "--kind", "release-documents")
+    assert pending_documents["shared_payloads"] == 1
+    assert all(row["staging_releases"] == 1 for row in pending_documents["payloads"])
+    resumed = plan(build_dir, *share)
     assert resumed["state"] == "staging"
-    assert resumed["shared_members"][0]["action"] == "verify_staged_reference"
+    assert {row["member"]: row["action"] for row in resumed["shared_members"]} == {
+        "documents.jsonl": "verify_staged_reference",
+        "spans.jsonl": "move_to_shared_store",
+        stage_name: "verify_staged_reference",
+    }
     assert resumed["stages"][-1]["inputs"] == ["verify_staged_release"]
-    assert plan(build_dir)["status"] == "blocked"
+    assert plan(build_dir, share[0])["status"] == "blocked"
 
     with pytest.raises(ValueError, match="same freeze options"):
-        freeze(build_dir, work)
-    first = freeze(build_dir, work, **options)
+        freeze(build_dir, work, share_stage_artifacts=True)
+    original_hash = file_manifest.sha256_file
+    span_hashes = []
+
+    def observe_span_hash(path, **kwargs):
+        if path.name in {"spans.jsonl", spans_digest}:
+            span_hashes.append(path.name)
+        return original_hash(path, **kwargs)
+
+    with monkeypatch.context() as measure:
+        measure.setattr(file_manifest, "sha256_file", observe_span_hash)
+        first = freeze(build_dir, work, **(options | {"verification_mode": "cold"}))
+    assert span_hashes == ["spans.jsonl"]
     assert first_plan["release_id"] == resumed["release_id"] == first.name
     assert plan(build_dir)["state"] == "published"
-    assert not (first / name).exists()
     proof_options = verification_options(work)
     with release_module.open_release(first, **proof_options) as opened:
-        payload = opened.member(name)
-        assert payload.stat().st_ino == original.st_ino
-        assert payload.name == sha256_file(payload)
+        paths = {name: opened.member(name) for name in original}
+        for name, path in paths.items():
+            assert not (first / name).exists()
+            assert path.stat().st_ino == original[name].st_ino
+            assert path.name == sha256_file(path)
 
     declaration = work.parent / "project" / "corpus.yaml"
     project = yaml.safe_load(declaration.read_bytes())
@@ -414,20 +447,54 @@ def test_shared_stage_releases_reuse_one_payload_and_reject_drift(
     loaded = load_project(declaration)
     acquire(loaded, work)
     next_build = build(loaded, work, offline=True)
-    reuse = plan(next_build, share)
+    reuse = plan(next_build, *share)
     assert (
         reuse["shared_candidate_bytes"]
         == reuse["duplicate_staging_bytes"]
-        == original.st_size
+        == shared_bytes
     )
     assert reuse["new_shared_bytes"] == 0
-    second = freeze(next_build, work, **options)
+    documents = paths["documents.jsonl"]
+    original_documents = documents.read_bytes()
+    changed = original_documents.replace(b"training", b"traininx", 1)
+    assert changed != original_documents and len(changed) == len(original_documents)
+    record = release_module._record_frozen
+
+    def change_before_receipt(*args, **kwargs):
+        stamp = documents.stat()
+        documents.write_bytes(changed)
+        os.utime(documents, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        return record(*args, **kwargs)
+
+    with monkeypatch.context() as drift:
+        drift.setattr(release_module, "_record_frozen", change_before_receipt)
+        second = freeze(next_build, work, **options)
     assert reuse["release_id"] == second.name
     assert second != first
+    for released in (first, second):
+        with pytest.raises(ValueError, match=r"tampered artifact: documents\.jsonl"):
+            verify_release(released, **proof_options)
+    documents.write_bytes(original_documents)
     with release_module.open_release(second, **proof_options) as opened:
-        assert opened.member(name) == payload
-    assert not (second / name).exists()
+        assert {name: opened.member(name) for name in paths} == paths
+        for name in paths:
+            assert not (second / name).exists()
 
+    from klab.corpus.near_duplicates import audit_release
+
+    assert audit_release(first, workers=1)["release_id"] == first.name
+    assert verify_release(first, **proof_options)["release_id"] == first.name
+    document_inventory = query("artifacts", "--kind", "release-documents")
+    assert document_inventory["retained_bytes"] == sum(
+        original[name].st_size for name in document_names
+    )
+    assert all(row["published_releases"] == 2 for row in document_inventory["payloads"])
+    assert (
+        query("artifacts", "--kind", "release-documents", "--unreferenced")["payloads"]
+        == []
+    )
+
+    payload = paths[stage_name]
     unused = b"an unreferenced stage payload\n"
     digest = hashlib.sha256(unused).hexdigest()
     orphan = payload.parents[1] / digest[:2] / digest
@@ -437,21 +504,21 @@ def test_shared_stage_releases_reuse_one_payload_and_reject_drift(
     tail = inventory("--after", head["next_after"], "--limit", "1")
     observed = {row["artifact_id"]: row for row in head["payloads"] + tail["payloads"]}
     assert set(observed) == {payload.name, digest}
-    assert head["retained_bytes"] == original.st_size + len(unused)
+    assert head["retained_bytes"] == original[stage_name].st_size + len(unused)
     assert observed[payload.name]["published_releases"] == 2
     candidates = inventory("--unreferenced")
     assert candidates["payloads"] == [observed[digest]]
     assert candidates["unreferenced_bytes"] == len(unused)
 
     racing = first.parent / (".freezing-" + "0" * 64)
-    payloads = artifact_inventory._stage_payloads
+    payloads = artifact_inventory._shared_payloads
 
     def start_freeze_during_scan(*args):
         racing.mkdir()
         return payloads(*args)
 
     with monkeypatch.context() as race:
-        race.setattr(artifact_inventory, "_stage_payloads", start_freeze_during_scan)
+        race.setattr(artifact_inventory, "_shared_payloads", start_freeze_during_scan)
         incomplete = inventory("--unreferenced")
     assert incomplete["scan_status"] == "incomplete"
     assert incomplete["unreferenced_bytes"] is None and not incomplete["payloads"]
@@ -463,7 +530,7 @@ def test_shared_stage_releases_reuse_one_payload_and_reject_drift(
     with monkeypatch.context() as warm:
 
         def no_replay(*args, **kwargs):
-            pytest.fail("verified release replayed unchanged shared stage")
+            pytest.fail("verified release replayed unchanged shared members")
 
         warm.setattr(release_module, "_verify_release_cold", no_replay)
         assert verify_release(first, **proof_options)["release_id"] == first.name

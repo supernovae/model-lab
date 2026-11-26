@@ -27,10 +27,14 @@ from klab.corpus.measurement_inputs import MeasurementTokenizer
 from klab.corpus.project import NormalizerOptions
 from klab.corpus.quota import require_estimated_supply
 from klab.corpus.release_members import (
+    DOCUMENT_MEMBERS,
+    SHARED_DOCUMENT,
     SHARED_STAGE,
-    publish_shared_stages,
-    shared_stage_members,
-    shared_stage_path,
+    ReleasePlacement,
+    SharedPublication,
+    publish_shared_members,
+    shared_member_path,
+    shared_members,
 )
 from klab.corpus.release_receipt import receipt_first, verifier_digest
 from klab.corpus.release_verify import (
@@ -127,6 +131,7 @@ def _files(
     progress: BuildProgress | None = None,
     *,
     stage_outputs: frozenset[str] = frozenset(),
+    checked_shared: dict[Path, list[int]] | None = None,
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
 ) -> None:
@@ -137,25 +142,43 @@ def _files(
         for path in root.rglob("*")
         if path.is_file() or path.is_symlink()
     }
-    shared = shared_stage_members(root, inventory)
-    if not shared.keys() <= stage_outputs:
+    shared = shared_members(root, inventory)
+    if any(
+        inventory[name]["storage"] == SHARED_STAGE and name not in stage_outputs
+        for name in shared
+    ):
         raise ValueError("shared member is not a declared stage output")
     if actual != inventory.keys() - shared.keys():
         raise ValueError("release artifact inventory mismatch")
+    eligible = {
+        name: entry for name, entry in inventory.items() if name not in stage_outputs
+    }
+    reused = {
+        name
+        for name, path in shared.items()
+        if checked_shared
+        and path in checked_shared
+        and name in eligible
+        and range_file_identity(path) == checked_shared[path]
+    }
     to_hash = (
-        {name: entry for name, entry in inventory.items() if name not in stage_outputs}
-        if stage_outputs
-        else inventory
+        {name: entry for name, entry in eligible.items() if name not in reused}
+        if reused
+        else eligible
     )
     if progress is not None:
         progress.start_phase(
             "hash_files",
-            expected_input_bytes=sum(entry["size"] for entry in to_hash.values()),
+            expected_input_bytes=sum(entry["size"] for entry in eligible.values()),
         )
+        if reused:
+            progress.update(
+                input_bytes_reused=sum(eligible[name]["size"] for name in reused)
+            )
     hash_inventory(
         root,
         to_hash,
-        _safe,
+        lambda base, name: shared[name] if name in shared else _safe(base, name),
         progress,
         proof_store=proof_store,
         verification_mode=verification_mode,
@@ -668,14 +691,10 @@ def _replay_sources(
         / "files"
         for source_id in {group[0] for group in groups}
     }
-    documents = root / "documents.jsonl"
-    spans = root / "spans.jsonl"
-    dependencies = [
-        documents,
-        spans,
-        root / "license-report.json",
-        root / "sources.json",
-    ]
+    names = (*DOCUMENT_MEMBERS, "license-report.json", "sources.json")
+    members = ReleaseMembers(root, receipt)
+    dependencies = [members.member(name) for name in names]
+    documents, spans = dependencies[:2]
     use_receipts = proof_store is not None and verification_mode == "verified_reuse"
     if use_receipts:
         # The path separates build, staged, and release checks at distinct locations.
@@ -683,7 +702,7 @@ def _replay_sources(
             [
                 str(root),
                 receipt["build_id"],
-                [receipt["files"][p.name] for p in dependencies],
+                [receipt["files"][name] for name in names],
             ]
         )
     tasks = []
@@ -951,12 +970,15 @@ def _release_row_indexes(
     root, receipt, identity, options, temporary, store, phase, advance, progress
 ):
     """Build or restore the checked indexes used by downstream replay queries."""
-    spans_path, documents_path = root / "spans.jsonl", root / "documents.jsonl"
+    members = ReleaseMembers(root, receipt)
+    inputs_by_name = {name: members.member(name) for name in DOCUMENT_MEMBERS}
+    spans_path = inputs_by_name["spans.jsonl"]
+    documents_path = inputs_by_name["documents.jsonl"]
     producer = verifier_digest("release") if store is not None else None
 
     def check_inputs(files):
         if any(
-            range_file_identity(root / name) != item["generation"]
+            range_file_identity(inputs_by_name[name]) != item["generation"]
             for name, item in files.items()
         ):
             raise ValueError("release row index inputs changed")
@@ -1004,20 +1026,20 @@ def _release_row_indexes(
                     for start, end in chunk_ranges(spans_path)
                 ),
                 load,
-                total_bytes=file_bindings[spans_path.name]["entry"]["size"],
+                total_bytes=file_bindings["spans.jsonl"]["entry"]["size"],
             )
             _unique_index(db, "spans_id", "spans", "id", "duplicate evidence span")
             result["rows"] = db.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
 
     file_bindings = {
-        path.name: {
-            "entry": receipt["files"][path.name],
+        name: {
+            "entry": receipt["files"][name],
             "generation": range_file_identity(path),
         }
-        for path in (spans_path, documents_path)
+        for name, path in inputs_by_name.items()
     }
     span_inputs = {
-        "files": {spans_path.name: file_bindings[spans_path.name]},
+        "files": {"spans.jsonl": file_bindings["spans.jsonl"]},
         "producer": producer,
     }
     document_inputs = {
@@ -1430,8 +1452,11 @@ def _validate_rows_stored(
             row_connection, rows(path), lambda row: row[key], duplicate=duplicate
         )
 
+    members = ReleaseMembers(root, receipt)
     document_map = row_index(
-        root / "documents.jsonl", "document_id", duplicate="duplicate document identity"
+        members.member("documents.jsonl"),
+        "document_id",
+        duplicate="duplicate document identity",
     )
     assignments = document_assignments(root, identity)
     for doc in document_map.values():
@@ -1440,7 +1465,7 @@ def _validate_rows_stored(
         _verify_cleaning_decision(doc, options)
         if assignments is not None:
             assignments.verify_document(doc["document_id"], doc["split"])
-    spans = row_index(root / "spans.jsonl")
+    spans = row_index(members.member("spans.jsonl"))
     sources = {item["id"]: item for item in _load(root / "sources.json")}
 
     source_origins = {
@@ -1644,7 +1669,6 @@ def _validate_rows_stored(
         receipt = _load(
             root / ("build.json" if (root / "build.json").exists() else "manifest.json")
         )
-        members = ReleaseMembers(root, receipt)
         stage_rows = RowIndex(
             row_connection,
             (
@@ -2083,7 +2107,7 @@ def _verify_stages(
             raise ValueError("stage declaration identity mismatch")
         name = f"stages/{stage['id']}.jsonl"
         entry = inventory[name]
-        output = shared_stage_path(root, name, entry) or _safe(root, name)
+        output = shared_member_path(root, name, entry) or _safe(root, name)
         if not output.is_file():
             raise ValueError(f"tampered artifact: {name}")
         generation = range_file_identity(output)
@@ -2177,6 +2201,7 @@ def _verify_native_outputs(
     *,
     proof_store: ProofStore | None,
     verification_mode: VerificationMode,
+    checked_shared: dict[Path, list[int]] | None = None,
 ) -> None:
     """Check file membership, deferring stage checksums to ordered stage replay."""
     metadata = path / metadata_name
@@ -2196,6 +2221,7 @@ def _verify_native_outputs(
         inventory,
         progress,
         stage_outputs=stage_outputs,
+        checked_shared=checked_shared,
         proof_store=proof_store,
         verification_mode=verification_mode,
     )
@@ -2301,20 +2327,28 @@ def _verify_build_cold(
     return manifest
 
 
+_INLINE_PLACEMENT = ReleasePlacement()
+
+
 def release_manifest_payload(
-    build: dict[str, Any], *, share_stage_artifacts: bool = False
+    build: dict[str, Any], *, placement: ReleasePlacement = _INLINE_PLACEMENT
 ) -> dict[str, Any]:
     """Resolve the ordinary freeze payload before computing the release identity."""
-    if share_stage_artifacts:
+    if placement.shared:
         from klab.corpus.preparation_inputs import local_scope
 
         if local_scope(build) is not None:
-            raise ValueError("shared stages require an ordinary Corpus build")
+            raise ValueError(
+                "shared release artifacts require an ordinary Corpus build"
+            )
     files = {key: value for key, value in build["files"].items() if key != "build.json"}
-    if share_stage_artifacts:
+    if placement.stages:
         for stage in build["stages"]:
             name = f"stages/{stage['id']}.jsonl"
             files[name] = {**files[name], "storage": SHARED_STAGE}
+    if placement.documents:
+        for name in DOCUMENT_MEMBERS:
+            files[name] = {**files[name], "storage": SHARED_DOCUMENT}
     return {
         "schema_version": 1,
         "corpus_id": build["identity"]["project_id"],
@@ -2334,26 +2368,27 @@ def freeze(
     verification_mode: VerificationMode = "cold",
     reuse_completed_preparation: bool = False,
     share_stage_artifacts: bool = False,
+    share_document_artifacts: bool = False,
 ) -> Path:
     """Publish a release identity, optionally retaining its completed local payload."""
     build_dir = Path(build_dir).resolve()
     work_root = Path(work_root).resolve()
-    if (
-        share_stage_artifacts
-        and build_dir.parent.parent.parent != work_root / "corpora"
-    ):
-        raise ValueError("shared stages require a build in the selected work root")
+    placement = ReleasePlacement(
+        stages=share_stage_artifacts, documents=share_document_artifacts
+    )
+    if placement.shared and build_dir.parent.parent.parent != work_root / "corpora":
+        raise ValueError(
+            "shared release artifacts require a build in the selected work root"
+        )
     if reuse_completed_preparation:
         from klab.corpus.completed_release import freeze_retained
 
-        if share_stage_artifacts:
-            raise ValueError("shared stages require ordinary Corpus freeze")
+        if placement.shared:
+            raise ValueError("shared release artifacts require ordinary Corpus freeze")
         return freeze_retained(build_dir, work_root)
     # One operation, so a snapshot authenticated for the build is hashed once.
     with _verification_operation():
-        return _freeze(
-            build_dir, work_root, proof_store, verification_mode, share_stage_artifacts
-        )
+        return _freeze(build_dir, work_root, proof_store, verification_mode, placement)
 
 
 CONSUMED = "consumed.json"
@@ -2370,7 +2405,7 @@ def _freeze(
     work_root: Path,
     proof_store: ProofStore | None,
     verification_mode: VerificationMode,
-    share_stage_artifacts: bool,
+    placement: ReleasePlacement,
 ) -> Path:
     """Publish the verified build directory as the release by renaming it.
 
@@ -2393,8 +2428,8 @@ def _freeze(
         else _resume_source(staging, build_dir)
     )
     prospective = (
-        release_manifest_payload(manifest, share_stage_artifacts=True)
-        if share_stage_artifacts
+        release_manifest_payload(manifest, placement=placement)
+        if placement.shared
         else None
     )
     if staging.exists():
@@ -2406,11 +2441,11 @@ def _freeze(
             proof_store,
             verification_mode=verification_mode,
             verified=False,
-            share_stage_artifacts=share_stage_artifacts,
+            placement=placement,
         )
     if (released := consumed_release(build_dir)) is not None:
-        if share_stage_artifacts and canonical_digest(prospective) != released:
-            raise ValueError("build was already frozen with different stage placement")
+        if placement.shared and canonical_digest(prospective) != released:
+            raise ValueError("build was already frozen with different shared placement")
         destination = releases / released
         verify_release(
             destination, proof_store=proof_store, verification_mode=verification_mode
@@ -2434,12 +2469,10 @@ def _freeze(
                 ):
                     raise ValueError(f"selected {view}/{split} training view is empty")
     require_estimated_supply(_load(build_dir / "report.json"))
-    payload = release_manifest_payload(
-        build, share_stage_artifacts=share_stage_artifacts
-    )
+    payload = release_manifest_payload(build, placement=placement)
     release_id = canonical_digest(payload)
     destination = releases / release_id
-    shared_stage_members(destination, payload["files"])
+    shared_members(destination, payload["files"])
     if destination.exists():
         verify_release(
             destination, proof_store=proof_store, verification_mode=verification_mode
@@ -2466,7 +2499,7 @@ def _freeze(
         proof_store,
         verification_mode=verification_mode,
         verified=True,
-        share_stage_artifacts=share_stage_artifacts,
+        placement=placement,
     )
 
 
@@ -2479,7 +2512,7 @@ def _publish(
     *,
     verification_mode: VerificationMode,
     verified: bool,
-    share_stage_artifacts: bool,
+    placement: ReleasePlacement,
 ) -> Path:
     """Finish a freeze from the renamed build: tombstone, manifest, one rename.
 
@@ -2490,9 +2523,7 @@ def _publish(
     from klab.result_publication import sync_directory
     from klab.safe_io import rename_noreplace
 
-    payload = release_manifest_payload(
-        build, share_stage_artifacts=share_stage_artifacts
-    )
+    payload = release_manifest_payload(build, placement=placement)
     release_id = canonical_digest(payload)
     destination = releases / release_id
     if destination.exists():
@@ -2519,16 +2550,16 @@ def _publish(
             raise ValueError("staged release manifest differs from its build")
     else:
         _write_durably(manifest_path, sealed)
-    shared_generations = (
-        publish_shared_stages(
+    shared = (
+        publish_shared_members(
             staging,
             payload["files"],
             verified=verified,
             proof_store=proof_store,
             verification_mode=verification_mode,
         )
-        if share_stage_artifacts
-        else {}
+        if placement.shared
+        else SharedPublication({}, {})
     )
     tombstone_json.unlink(missing_ok=True)
     if not verified:
@@ -2549,6 +2580,7 @@ def _publish(
                 expected_id=release_id,
                 proof_store=proof_store,
                 verification_mode=verification_mode,
+                checked_shared=shared.checked,
             ),
             lambda: None,
         )
@@ -2558,9 +2590,9 @@ def _publish(
     sync_directory(staging)
     if any(
         range_file_identity(path) != before
-        for path, before in shared_generations.items()
+        for path, before in shared.generations.items()
     ):
-        raise ValueError("shared stage payload changed before release publication")
+        raise ValueError("shared payload changed before release publication")
     if (
         not verified
         and stat_index([staged_path, *dependencies], strict=False)[0] != generation
@@ -2569,7 +2601,7 @@ def _publish(
     rename_noreplace(staging, destination)
     sync_directory(releases)
     # The files are the verified build's, unchanged; record that for the release.
-    _record_frozen(destination, release_id, proof_store)
+    _record_frozen(destination, release_id, proof_store, shared.generations)
     return destination
 
 
@@ -2593,7 +2625,10 @@ def _write_durably(path: Path, content: bytes) -> None:
 
 
 def _record_frozen(
-    release: Path, release_id: str, proof_store: ProofStore | None
+    release: Path,
+    release_id: str,
+    proof_store: ProofStore | None,
+    shared_generations: dict[Path, list[int]],
 ) -> None:
     """Receipt a release whose files were verified as the build it was renamed from."""
     if proof_store is None:
@@ -2606,6 +2641,7 @@ def _record_frozen(
         release,
         release_id,
         list(snapshot_dependencies(release, "manifest.json")),
+        shared_generations=shared_generations,
     )
 
 
@@ -2671,6 +2707,7 @@ def _verify_release_cold(
     expected_id: str | None = None,
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
+    checked_shared: dict[Path, list[int]] | None = None,
 ) -> dict[str, Any]:
     """Verify the complete release including snapshotted source and lineage evidence."""
     path = Path(path).resolve()
@@ -2710,6 +2747,7 @@ def _verify_release_cold(
         progress,
         proof_store=proof_store,
         verification_mode=verification_mode,
+        checked_shared=checked_shared,
     )
     progress.start_phase("snapshots")
     for snapshot in manifest["snapshots"]:
@@ -2876,7 +2914,7 @@ class ReleaseMembers:
         if name not in self.manifest["files"]:
             raise ValueError(f"release does not declare member: {name}")
         entry = self.manifest["files"][name]
-        return shared_stage_path(self.root, name, entry) or _safe(self.root, name)
+        return shared_member_path(self.root, name, entry) or _safe(self.root, name)
 
     def rows(self, name: str) -> Iterator[dict[str, Any]]:
         return iter_rows(self.member(name))

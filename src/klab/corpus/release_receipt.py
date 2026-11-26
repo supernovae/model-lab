@@ -188,6 +188,7 @@ def record(
     dependencies: list[Path],
     *,
     index: tuple[str, int] | None = None,
+    shared_generations: dict[Path, list[int]] | None = None,
 ) -> bool:
     """Sign a receipt for files that were just verified; say why when that is impossible.
 
@@ -199,6 +200,14 @@ def record(
         current = stat_index([root, *dependencies])
         if index is not None and index != current:
             raise Untrustable("files changed during verification")
+        if shared_generations:
+            from klab.corpus.shards import range_file_identity
+
+            if any(
+                range_file_identity(path) != stamp
+                for path, stamp in shared_generations.items()
+            ):
+                raise Untrustable("shared files changed before receipt publication")
         published = store.publish(
             _receipt_path(store, kind, root, identity),
             _payload(kind, root, identity, dependencies, current[0]),

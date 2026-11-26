@@ -61,9 +61,9 @@ def _canary_sample(args: argparse.Namespace):
     return CanarySample(**sizes)
 
 
-def _print_stage_inventory(inventory: dict) -> None:
+def _print_shared_inventory(inventory: dict) -> None:
     print(
-        f"{inventory['shared_payloads']:,} shared stage payloads, "
+        f"{inventory['shared_payloads']:,} shared payloads, "
         f"{inventory['retained_bytes']:,} retained bytes"
     )
     if inventory["scan_status"] == "complete":
@@ -132,26 +132,36 @@ def _run(args: argparse.Namespace) -> None:
     if command == "artifacts":
         from klab.corpus.artifact_inventory import (
             normalized_inventory,
-            shared_stage_inventory,
+            shared_release_inventory,
         )
+        from klab.corpus.release_members import SHARED_STORES
 
-        if args.kind == "release-stages":
+        if args.kind != "normalized":
             if args.source_id is not None:
                 raise ValueError("--source-id applies to normalized partitions")
-            inventory = shared_stage_inventory(
-                root, limit=args.limit, after=args.after, unreferenced=args.unreferenced
+            storage = next(
+                key
+                for key, namespace in SHARED_STORES.items()
+                if namespace == args.kind
+            )
+            inventory = shared_release_inventory(
+                root,
+                storage=storage,
+                limit=args.limit,
+                after=args.after,
+                unreferenced=args.unreferenced,
             )
         else:
             if args.unreferenced:
-                raise ValueError("--unreferenced requires --kind release-stages")
+                raise ValueError("--unreferenced requires a shared release inventory")
             inventory = normalized_inventory(
                 root, source_id=args.source_id, limit=args.limit, after=args.after
             )
         if args.json:
             print(json.dumps(inventory, sort_keys=True))
         else:
-            if args.kind == "release-stages":
-                _print_stage_inventory(inventory)
+            if args.kind != "normalized":
+                _print_shared_inventory(inventory)
             else:
                 print(
                     f"{inventory['published_partitions']:,} normalized partitions, "
@@ -167,20 +177,23 @@ def _run(args: argparse.Namespace) -> None:
                 print(f"Next page --after {inventory['next_after']}")
         return
     if command == "plan":
+        from klab.corpus.release_members import ReleasePlacement
+
+        placement = ReleasePlacement(
+            stages=args.share_stage_artifacts, documents=args.share_document_artifacts
+        )
         if args.build is not None:
             from klab.corpus.freeze_planning import plan_freeze
 
-            plan = plan_freeze(
-                args.build, root, share_stage_artifacts=args.share_stage_artifacts
-            )
+            plan = plan_freeze(args.build, root, placement=placement)
             if args.json:
                 print(json.dumps(plan, sort_keys=True))
             else:
                 _print_freeze_plan(plan)
             return
-        if args.share_stage_artifacts:
+        if placement.shared:
             raise ValueError(
-                "--share-stage-artifacts requires --build for freeze planning"
+                "shared release placement requires --build for freeze planning"
             )
         from klab.corpus.planning import plan_build
 
@@ -609,6 +622,7 @@ def _run(args: argparse.Namespace) -> None:
                 root,
                 reuse_completed_preparation=args.reuse_completed_preparation,
                 share_stage_artifacts=args.share_stage_artifacts,
+                share_document_artifacts=args.share_document_artifacts,
                 **verification,
             )
         )
@@ -716,6 +730,8 @@ def _run(args: argparse.Namespace) -> None:
 
 
 def add_commands(commands: argparse._SubParsersAction) -> None:
+    from klab.corpus.release_members import SHARED_STORES
+
     corpus = commands.add_parser(
         "corpus", help="Acquire, derive, freeze and inspect corpus releases"
     )
@@ -724,7 +740,7 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "artifacts", help="Inspect shared Corpus storage and release references"
     )
     command.add_argument(
-        "--kind", choices=("normalized", "release-stages"), default="normalized"
+        "--kind", choices=("normalized", *SHARED_STORES.values()), default="normalized"
     )
     command.add_argument("--source-id")
     command.add_argument("--limit", type=int, default=100)
@@ -732,7 +748,7 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     command.add_argument(
         "--unreferenced",
         action="store_true",
-        help="Preview shared stages without an observed release reference",
+        help="Preview shared payloads without an observed release reference",
     )
     command.add_argument("--json", action="store_true")
     command.set_defaults(handler=_handle)
@@ -748,6 +764,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "--share-stage-artifacts",
         action="store_true",
         help="Plan shared transform output placement",
+    )
+    command.add_argument(
+        "--share-document-artifacts",
+        action="store_true",
+        help="Plan shared document and span placement",
     )
     command.add_argument("--json", action="store_true")
     command.set_defaults(handler=_handle)
@@ -1044,6 +1065,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "--share-stage-artifacts",
         action="store_true",
         help="Publish transform outputs by digest in the Corpus work area",
+    )
+    command.add_argument(
+        "--share-document-artifacts",
+        action="store_true",
+        help="Publish documents and evidence spans by digest in the Corpus work area",
     )
     command.add_argument(
         "--reuse-completed-preparation",

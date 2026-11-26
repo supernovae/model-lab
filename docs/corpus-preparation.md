@@ -720,17 +720,27 @@ klab --work-dir WORK corpus freeze BUILD
 ```
 
 `klab corpus freeze BUILD --share-stage-artifacts` publishes verified
-transform outputs as digest references in the release manifest. Lab moves the
-first copy into `WORK/artifacts/corpus/release-stages` on the same filesystem.
-When another release has the same output digest, freeze authenticates the
-stored file before consuming the duplicate staging copy. The release ID
-includes the placement, and receipt verification tracks the shared file.
-Other release members retain their existing placement.
+transform outputs by digest in `WORK/artifacts/corpus/release-stages`.
+`klab corpus freeze BUILD --share-document-artifacts` publishes the release's
+`documents.jsonl` and `spans.jsonl` by digest in
+`WORK/artifacts/corpus/release-documents`. The options can be combined. Both
+use same-filesystem moves and bind the physical placement into the release
+ID. When another release has the same output digest, freeze authenticates
+the stored file before consuming the duplicate staging copy. The receipts
+track the shared file generation.
 
-Retry interrupted publication with the same flag. Referenced files are
-retained release artifacts. Keep them with the release and its source
-snapshots when moving a work area. This option applies to ordinary freeze,
-and completed local preparation keeps its existing retained publication.
+Retry interrupted publication with the same placement options. For a
+shared document or span authenticated during recovery, staged verification
+reuses that hash check while the file generation matches. Semantic replay
+still reads the rows it validates. Referenced files are retained release
+artifacts. Keep them with the release and its source snapshots when moving
+a work area. Use Corpus commands or the verified release reader to resolve
+shared members. Completed local preparation uses its retained publication.
+
+Sharing a released document or span file requires exact bytes. Build still
+renders its project-scoped files. A change to selection, duplicate policy
+or row order can produce different release payloads. Source-level normalized
+partitions continue to be reused separately during preparation.
 
 In a post-verification Linux tmpfs test with a 268.57 MB stage output,
 the first move took 0.35 ms and preserved the inode. First reuse took
@@ -739,18 +749,32 @@ the first move took 0.35 ms and preserved the inode. First reuse took
 These measurements cover the stage publication step. Build, full release
 verification and production storage were outside the benchmark.
 
+Three Linux tmpfs runs per size measured the same handoff for two synthetic
+document and span files. For 256 MiB combined, the first move read roughly
+100 bytes of process metadata, first reuse read 268.86 MB including the
+payload hash, and receipt-backed reuse read 0.22 MB. Each handoff left one
+stored copy of each payload. The figures exclude build and semantic replay.
+
+| Combined payload | First move | First reuse | Receipt-backed reuse |
+| ---: | ---: | ---: | ---: |
+| 4 MiB | 0.40 ms | 6.31 ms | 2.17 ms |
+| 64 MiB | 0.37 ms | 34.51 ms | 2.11 ms |
+| 256 MiB | 0.36 ms | 125.20 ms | 2.02 ms |
+
 Inspect an existing ordinary build's freeze plan with:
 
 ```sh
 klab --work-dir WORK corpus plan --build BUILD --share-stage-artifacts --json
+klab --work-dir WORK corpus plan --build BUILD --share-document-artifacts --json
 ```
 
 The freeze plan reports the release ID, the dependency order and whether
 the build is ready to freeze, was interrupted during publication, or already
 has a published release. It checks member locations and sizes. For shared
-stages, it counts new store bytes, existing candidate bytes and duplicate
-staging bytes by their planned actions. Omit `--share-stage-artifacts` to plan
-inline publication. A retry must match the interrupted placement.
+members, it gives the destination store and counts new store bytes, existing
+candidate bytes and duplicate staging bytes by their planned actions. Omit
+both placement flags to plan inline publication. A retry must match the
+interrupted placement.
 
 Publication uses same-filesystem moves with zero payload-copy bytes. The
 plan opens metadata only. Freeze authenticates the payloads and resolves
@@ -848,11 +872,13 @@ page took 0.74–0.85 ms with 100 partitions and 42–44 ms with 5,000 partition
 The larger scan counted 5.35 GB of logical file sizes. Both sizes had 37.9 MiB
 peak process RSS.
 
-Inspect shared transform outputs or preview unreferenced payloads with:
+Inspect shared transform outputs and released document evidence, or preview
+unreferenced payloads, with:
 
 ```sh
 klab --work-dir WORK corpus artifacts --kind release-stages --json
 klab --work-dir WORK corpus artifacts --kind release-stages --unreferenced --json
+klab --work-dir WORK corpus artifacts --kind release-documents --unreferenced --json
 ```
 
 This view counts retained bytes once per digest. Each row gives the number

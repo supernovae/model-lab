@@ -16,7 +16,7 @@ from typing import Any
 
 from klab.canonical import canonical_digest
 from klab.corpus.prepared_shards import normalized_store_root
-from klab.corpus.release_members import shared_stage_members
+from klab.corpus.release_members import SHARED_STAGE, shared_members, shared_store
 from klab.safe_io import symlinked
 
 _SOURCE = re.compile(r"[a-z][a-z0-9_-]*")
@@ -189,7 +189,9 @@ class _ReleaseReferences:
     example: str = ""
 
 
-def _stage_references(scan: _RetentionScan) -> dict[str, _ReleaseReferences]:
+def _release_references(
+    scan: _RetentionScan, storage: str
+) -> dict[str, _ReleaseReferences]:
     references: dict[str, _ReleaseReferences] = {}
     corpora = scan.root / "corpora"
     if not scan.directory(corpora):
@@ -231,13 +233,16 @@ def _stage_references(scan: _RetentionScan) -> dict[str, _ReleaseReferences]:
                 ):
                     raise ValueError("release identity mismatch")
                 files = manifest["files"]
-                members = shared_stage_members(release, files)
-                if members:
+                members = shared_members(release, files)
+                stages = [
+                    name for name in members if files[name]["storage"] == SHARED_STAGE
+                ]
+                if stages:
                     outputs = {
                         f"stages/{stage['id']}.jsonl": stage["output_sha256"]
                         for stage in manifest["stages"]
                     }
-                    if any(files[name]["sha256"] != outputs[name] for name in members):
+                    if any(files[name]["sha256"] != outputs[name] for name in stages):
                         raise ValueError("stage digest mismatch")
             except OSError:
                 scan.issue(path, "missing_or_unreadable_manifest")
@@ -252,6 +257,8 @@ def _stage_references(scan: _RetentionScan) -> dict[str, _ReleaseReferences]:
             seen: set[str] = set()
             example = release.relative_to(scan.root).as_posix()
             for name, member in members.items():
+                if files[name]["storage"] != storage:
+                    continue
                 digest, size = member.name, files[name]["size"]
                 reference = references.setdefault(digest, _ReleaseReferences(size))
                 if size != reference.size:
@@ -267,7 +274,7 @@ def _stage_references(scan: _RetentionScan) -> dict[str, _ReleaseReferences]:
     return references
 
 
-def _stage_payloads(scan: _RetentionScan, root: Path) -> Iterator[tuple[str, int]]:
+def _shared_payloads(scan: _RetentionScan, root: Path) -> Iterator[tuple[str, int]]:
     if symlinked(root):
         scan.issue(root, "unsafe_store")
         return
@@ -297,15 +304,15 @@ def _stage_payloads(scan: _RetentionScan, root: Path) -> Iterator[tuple[str, int
                     yield entry.name, info.st_size
 
 
-def shared_stage_inventory(
-    work_root: Path, *, limit: int, after: str | None, unreferenced: bool
+def shared_release_inventory(
+    work_root: Path, *, storage: str, limit: int, after: str | None, unreferenced: bool
 ) -> dict[str, Any]:
-    """Preview shared-stage retention from published and in-flight release manifests."""
+    """Preview shared retention from published and in-flight release manifests."""
     if not 1 <= limit <= 1000:
         raise ValueError("artifact limit must be between 1 and 1000")
     if after is not None and not _KEY.fullmatch(after):
-        raise ValueError("shared stage cursor must be a full SHA-256 digest")
-    root = work_root / "artifacts" / "corpus" / "release-stages"
+        raise ValueError("shared release cursor must be a full SHA-256 digest")
+    root = shared_store(work_root, storage)
     scan = _RetentionScan(work_root)
     references: dict[str, _ReleaseReferences] = {}
     totals = dict.fromkeys(
@@ -319,7 +326,7 @@ def shared_stage_inventory(
     )
 
     def rows():
-        for digest, size in _stage_payloads(scan, root):
+        for digest, size in _shared_payloads(scan, root):
             reference = references.pop(digest, None)
             totals["shared_payloads"] += 1
             totals["retained_bytes"] += size
@@ -342,7 +349,7 @@ def shared_stage_inventory(
 
     page = []
     try:
-        references = _stage_references(scan)
+        references = _release_references(scan, storage)
         page = nsmallest(limit + 1, rows(), key=itemgetter("artifact_id"))
         for digest, reference in references.items():
             if reference.published:
@@ -356,7 +363,7 @@ def shared_stage_inventory(
     if scan.problem_count and unreferenced:
         page = []
     return {
-        "artifact_type": "shared_release_stage",
+        "artifact_type": f"shared_release_{storage.removeprefix('shared_')}",
         "verification": "advisory",
         "scan_status": "incomplete" if scan.problem_count else "complete",
         "problem_count": scan.problem_count,
