@@ -863,12 +863,15 @@ def test_mixture_dataset_binds_train_validation_and_tokenizer(
     (fit_dir / "tokenizer.json").write_text("{}")
     monkeypatch.setattr(
         mixture,
-        "verify_mixture",
-        lambda *args: {
-            "release_id": release.name,
-            "actual_target_tokens": {"x": 20},
-            "records": 3,
-        },
+        "_verify_mixture",
+        lambda *args, **kwargs: (
+            {
+                "release_id": release.name,
+                "actual_target_tokens": {"x": 20},
+                "records": 3,
+            },
+            None,
+        ),
     )
     monkeypatch.setattr(
         mixture,
@@ -1076,6 +1079,7 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
         strata={},
         packing="contiguous",
         token_cache="append",
+        token_output="contiguous",
         seed=42,
         order_policy=None,
         family_inventory=family_inventory,
@@ -1488,9 +1492,9 @@ def test_sealed_mixture_recovers_published_segments_and_refuses_corrupt_tokens(
     from klab.data import token_segments
 
     declaration, _, _ = _fixture(tmp_path, monkeypatch, actual_content=True)
-    declaration.write_text(declaration.read_text() + "\ntoken_cache: sealed\n")
-    baseline = tmp_path / "baseline"
-    expected = mixture._materialize_mixture(declaration, baseline, reuse_tokens=False)
+    declaration.write_text(
+        declaration.read_text() + "\ntoken_cache: sealed\ntoken_output: references\n"
+    )
     monkeypatch.setattr(token_segments, "SHARD_TOKENS", 8)
     publish = token_segments.rename_noreplace
 
@@ -1507,26 +1511,40 @@ def test_sealed_mixture_recovers_published_segments_and_refuses_corrupt_tokens(
     (committed,) = tmp_path.glob(".source-tokens/sealed/*/segments/*/tokens.ids")
     first_inode = committed.stat().st_ino
     assert not output.exists()
-    assert mixture.materialize_mixture(declaration, output) == expected
+
+    def stop_before_schedule_verification(*args):
+        raise InterruptedError("schedule derived before publication")
+
+    with monkeypatch.context() as interruption:
+        interruption.setattr(
+            mixture, "verify_schedule", stop_before_schedule_verification
+        )
+        with pytest.raises(InterruptedError):
+            mixture.materialize_mixture(declaration, output)
+    checkpoints = _assembly(tmp_path, "interrupted")
+    # A derived schedule can be rebuilt from the authenticated record prefix.
+    (checkpoints / "payload" / mixture.TRAIN_SCHEDULE).write_bytes(b"uncommitted")
+
+    receipt = mixture.materialize_mixture(declaration, output)
+    assert not (output / mixture.TRAIN_TOKENS).exists()
+    assert mixture.verify_mixture(declaration, output, audit=True) == receipt
     assert len(list(committed.parent.parent.iterdir())) == 3
     assert committed.stat().st_ino == first_inode
 
     warm = tmp_path / "warm"
-    assert mixture.materialize_mixture(declaration, warm) == expected
+    assert mixture.materialize_mixture(declaration, warm) == receipt
     progress = json.loads((_assembly(tmp_path, "warm") / "progress.json").read_bytes())
     assert progress["sealed_token_cache_hits"] == 3
     assert progress["published_token_segments"] == 0
-    for name in (mixture.TRAIN_TOKENS, mixture.TRAIN_RECORDS):
-        assert (warm / name).read_bytes() == (baseline / name).read_bytes()
+    for name in (mixture.TRAIN_SCHEDULE, mixture.TRAIN_RECORDS):
+        assert (warm / name).read_bytes() == (output / name).read_bytes()
 
     with committed.open("r+b") as corrupt:
         first = corrupt.read(1)
         corrupt.seek(0)
         corrupt.write(bytes([first[0] ^ 1]))
-    with pytest.raises(
-        ValueError, match="sealed token segment payload digest mismatch"
-    ):
-        mixture.materialize_mixture(declaration, tmp_path / "corrupt")
+    with pytest.raises(ValueError, match="file digest mismatch"):
+        mixture.verify_mixture(declaration, output)
 
 
 def test_worker_telemetry_survives_a_vanished_worker():

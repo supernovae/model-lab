@@ -3580,6 +3580,8 @@ documents their own rows.
   the staged token and record files. On retry, the writer checks the committed
   bytes in place, refuses damage to the committed prefix, discards the
   uncommitted tail and rebuilds disposable SQL state from the index events.
+  In reference mode, retry derives the range file from the committed record
+  prefix and the sealed segments before publishing.
   Publication renames the staged files into the output. It removes the index
   segments and commit markers and keeps `progress.json`. Checkpoints from
   earlier Lab revisions start a separate assembly. Published mixtures can
@@ -3601,6 +3603,11 @@ documents their own rows.
 - **Token cache.** Add `token_cache: sealed` to the mixture declaration to
   write bounded [sealed content segments](token-store.md#sealed-content-segments)
   as the existing encoder runs. `token_cache: append` is the default.
+- **Token output.** `token_output: references` uses the sealed cache and
+  publishes a [reference schedule](token-store.md#reference-schedules).
+  Configure `dataset.train_path` from the command's `train_schedule_path`
+  field. The default `token_output: contiguous` reports
+  `train_tokens_path`.
 - **Progress.** `.OUTPUT.assembly-ID/progress.json`, refreshed every few
   seconds, reports per-stratum counts, time spent waiting for the encoder,
   worker utilization and memory.
@@ -3617,8 +3624,9 @@ documents their own rows.
 - **Reseal.** When the recorded completion is gone or no longer matches the Lab
   code (`native mixture completion unavailable or changed`), `verify-mixture
   --reseal` records it again without replaying the schedule: it hashes
-  `train.tokens.ids` and `train.records.jsonl` (the two files in parallel, large
-  reads) against the receipt, authenticates the release and tokenizer through
+  the contiguous ID and record files in parallel, or checks the range file,
+  records and sealed segment dependencies for a reference schedule. It
+  authenticates the release and tokenizer through
   their receipts, checks that the receipt's declaration, release, tokenizer,
   inventory, seed, quotas and exposure limit are this declaration's, and checks
   the receipt's counts and sizes agree with each other. It takes about the time
@@ -3634,7 +3642,8 @@ documents their own rows.
 `tools/benchmark_mixture.py` runs a synthetic mixture cold and warm and writes
 timings and output hashes, for comparing two Lab revisions on one host.
 Set `--token-cache sealed` to compare immutable cache segments with the
-default append cache.
+default append cache. With that cache, `--token-output references`
+separates schedule time, dependency verification and logical target scans.
 
 The record-file check below used three warm runs per size with exposure and
 row-layout verification. It measures record verification alone. Logical

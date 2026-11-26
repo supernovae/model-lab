@@ -25,6 +25,9 @@ def main():
     parser.add_argument("--documents", type=int, default=512)
     parser.add_argument("--text-bytes", type=int, default=512)
     parser.add_argument("--token-cache", choices=("append", "sealed"), default="append")
+    parser.add_argument(
+        "--token-output", choices=("contiguous", "references"), default="contiguous"
+    )
     args = parser.parse_args()
     if (
         not 1 <= args.workers <= 8
@@ -32,6 +35,8 @@ def main():
         or not 32 <= args.text_bytes <= 2048
     ):
         parser.error("bounds: workers 1..8, documents 8..65536, text-bytes 32..2048")
+    if args.token_output == "references" and args.token_cache != "sealed":
+        parser.error("reference token output requires the sealed cache")
     # Affinity also bounds the baseline's default Rayon planner. Do this before
     # importing Lab or tokenizers; no nested BLAS/Rayon pool inherits more cores.
     if hasattr(os, "sched_getaffinity"):
@@ -48,6 +53,7 @@ def main():
     from klab.canonical import canonical_json
     from klab.corpus.mixture import _native_mixture_completion, _schedule
     from klab.corpus.mixture_pipeline import MixtureFrontier, pipeline_request
+    from klab.corpus.mixture_schedule import token_cache_root, verify_schedule
     from klab.corpus.release import ReleaseMembers
     from klab.corpus.release_verify import verification_settings
     from klab.corpus.retained_mixture import RetainedMixtureIndex
@@ -135,6 +141,7 @@ def main():
         strata={},
         packing="contiguous",
         token_cache=args.token_cache,
+        token_output=args.token_output,
         seed=42,
         order_policy=None,
         family_inventory=inventory,
@@ -187,14 +194,32 @@ def main():
                     staging,
                     frontier=frontier,
                 )
+        scheduled_at = time.monotonic()
+        if args.token_output == "references":
+            with verification_settings(
+                workers=args.workers, verification_mode="verified_reuse"
+            ):
+                schedule = verify_schedule(
+                    staging, token_cache_root(release, root), receipt, 3
+                )
+            verified_at = time.monotonic()
+            digest = hashlib.sha256()
+            for block in schedule.blocks(64 * 1024**2):
+                digest.update(block)
+            output_digest = digest.hexdigest()
+        else:
+            verified_at = scheduled_at
+            output_digest = sha256_file(staging / "train.tokens.ids")
         results.append(
             {
                 "cache": name,
                 "index_seconds": indexed - started,
-                "schedule_seconds": time.monotonic() - indexed,
+                "schedule_seconds": scheduled_at - indexed,
+                "reference_verification_seconds": verified_at - scheduled_at,
+                "target_scan_seconds": time.monotonic() - verified_at,
                 "receipt": receipt,
                 "output_sha256": [
-                    sha256_file(staging / "train.tokens.ids"),
+                    output_digest,
                     sha256_file(staging / "train.records.jsonl"),
                 ],
                 "rss_bytes": psutil.Process().memory_info().rss,
@@ -221,6 +246,7 @@ def main():
         "documents": args.documents,
         "text_bytes": args.text_bytes,
         "token_cache": args.token_cache,
+        "token_output": args.token_output,
         "fixture_sha256": sha256_file(source),
         "scratch_bytes": sum(p.stat().st_size for p in root.rglob("*") if p.is_file()),
         "results": results,

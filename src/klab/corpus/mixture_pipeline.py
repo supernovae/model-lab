@@ -461,6 +461,7 @@ def producer_digests():
             "mixture.py",
             "mixture_index.py",
             "mixture_pipeline.py",
+            "mixture_schedule.py",
             "retained_mixture.py",
             "view_checkpoints.py",
         )

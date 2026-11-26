@@ -51,6 +51,58 @@ def _owned_file(path: Path) -> os.stat_result:
     return info
 
 
+def read_token_segment(directory: Path, encoding_id: str, tokenizer_sha: str) -> dict:
+    if directory.is_symlink() or _owned_file(directory / _MANIFEST).st_size > 8192:
+        raise ValueError(f"unsafe token segment manifest: {directory}")
+    manifest = read_canonical(directory / _MANIFEST)
+    encoding = manifest.get("encoding")
+    if (
+        manifest.keys()
+        != {"schema_version", "encoding", "documents", "tokens", "files"}
+        or manifest["schema_version"] != 1
+        or not isinstance(encoding, dict)
+        or encoding.keys()
+        != {
+            "tokenizer_sha256",
+            "tokenizers_version",
+            "input",
+            "add_special_tokens",
+            "eos",
+            "dtype",
+        }
+        or encoding["tokenizer_sha256"] != tokenizer_sha
+        or not isinstance(encoding["tokenizers_version"], str)
+        or encoding["input"] != "exact-utf8"
+        or encoding["add_special_tokens"] is not False
+        or encoding["eos"] is not None
+        or encoding["dtype"] != "int32-le"
+        or canonical_digest(encoding) != encoding_id
+        or type(manifest["documents"]) is not int
+        or not 1 <= manifest["documents"] <= SEGMENT_DOCUMENTS
+        or type(manifest["tokens"]) is not int
+        or manifest["tokens"] < 0
+        or (manifest["tokens"] > SHARD_TOKENS and manifest["documents"] != 1)
+        or not isinstance(manifest["files"], dict)
+        or manifest["files"].keys() != _FILES
+    ):
+        raise ValueError(f"invalid token segment manifest: {directory}")
+    sizes = {
+        "index.bin": manifest["documents"] * CONTENT_INDEX_DTYPE.itemsize,
+        "tokens.ids": manifest["tokens"] * 4,
+    }
+    for name, size in sizes.items():
+        entry = manifest["files"][name]
+        if (
+            not isinstance(entry, dict)
+            or entry.keys() != {"sha256", "size"}
+            or not _digest(entry["sha256"])
+            or entry["size"] != size
+            or _owned_file(directory / name).st_size != size
+        ):
+            raise ValueError(f"invalid token segment inventory: {directory / name}")
+    return manifest
+
+
 class SealedContentTokens:
     """Use the existing append writer for the unfinished shard.
 
@@ -147,38 +199,7 @@ class SealedContentTokens:
             self.close_resources = opening.pop_all()
 
     def _read_manifest(self, directory: Path) -> dict:
-        if directory.is_symlink() or _owned_file(directory / _MANIFEST).st_size > 8192:
-            raise ValueError(f"unsafe token segment manifest: {directory}")
-        manifest = read_canonical(directory / _MANIFEST)
-        if (
-            manifest.keys()
-            != {"schema_version", "encoding", "documents", "tokens", "files"}
-            or manifest["schema_version"] != 1
-            or manifest["encoding"] != self.encoding
-            or type(manifest["documents"]) is not int
-            or not 1 <= manifest["documents"] <= SEGMENT_DOCUMENTS
-            or type(manifest["tokens"]) is not int
-            or manifest["tokens"] < 0
-            or (manifest["tokens"] > SHARD_TOKENS and manifest["documents"] != 1)
-            or not isinstance(manifest["files"], dict)
-            or manifest["files"].keys() != _FILES
-        ):
-            raise ValueError(f"invalid token segment manifest: {directory}")
-        sizes = {
-            "index.bin": manifest["documents"] * CONTENT_INDEX_DTYPE.itemsize,
-            "tokens.ids": manifest["tokens"] * 4,
-        }
-        for name, size in sizes.items():
-            entry = manifest["files"][name]
-            if (
-                not isinstance(entry, dict)
-                or entry.keys() != {"sha256", "size"}
-                or not _digest(entry["sha256"])
-                or entry["size"] != size
-                or _owned_file(directory / name).st_size != size
-            ):
-                raise ValueError(f"invalid token segment inventory: {directory / name}")
-        return manifest
+        return read_token_segment(directory, self.path.name, self.tokenizer_sha)
 
     def _verified_index(self, directory: Path, manifest: dict, *, rows: bool = False):
         path = directory / "index.bin"
@@ -292,7 +313,7 @@ class SealedContentTokens:
             (key,),
         ).fetchone()
 
-    def _read(self, key: bytes, location) -> bytes:
+    def _record(self, key: bytes, location):
         segment, row = location
         name = self.names.get(segment)
         if not _digest(name):
@@ -325,6 +346,20 @@ class SealedContentTokens:
         )[0]
         if bytes(record["content"]) != key:
             raise ValueError("token segment locator points to different content")
+        return name, record, ids
+
+    def segment_range(self, content: str) -> tuple[str, int, int]:
+        """Resolve a content digest to its sealed segment and whole-document range."""
+        if (
+            not _digest(content)
+            or (location := self._location(bytes.fromhex(content))) is None
+        ):
+            raise ValueError("mixture selected content without a sealed token range")
+        name, record, _ = self._record(bytes.fromhex(content), location)
+        return name, int(record["offset"]), int(record["count"])
+
+    def _read(self, key: bytes, location) -> bytes:
+        _, record, ids = self._record(key, location)
         payload = read_file_range(
             ids, 4 * int(record["offset"]), 4 * int(record["count"])
         )

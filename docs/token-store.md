@@ -155,9 +155,8 @@ the requested token range. The mixture assembly's `progress.json` reports
 The `append` cache is the default. To try the `sealed` mode, use a new
 mixture output directory. The first run fills a separate cache for that
 encoding. Later sealed runs reuse content across mixture seeds, quotas and
-projects within the same work root. Both modes write the same contiguous
-token and record streams for the trainer. Loading a schedule directly from
-immutable segments is tracked in [#569](https://github.com/supernovae/model-lab/issues/569).
+projects within the same work root. Either cache mode can produce contiguous
+output. The sealed cache can also back a reference schedule.
 
 On an NVMe synthetic retained release with two workers and about 2 KiB of
 text per document, the median schedule times across three trials were:
@@ -175,7 +174,7 @@ media-cold random access remain unmeasured.
 
 ## Mixture output
 
-A materialized mixture is binary too. Its output directory holds:
+A mixture defaults to `token_output: contiguous`. Its output directory holds:
 
 | File | Holds |
 | --- | --- |
@@ -198,6 +197,48 @@ A stratum with one exposure (`max_exposures: 1`, or its own
 Only a repeated stratum makes the scratch index retain its encoded documents,
 and that retained copy is still JSON. A `document_start` mixture adds no bytes
 to these files; packing inserts the masked filler.
+
+### Reference schedules
+
+Set `token_cache: sealed` and `token_output: references` in the mixture
+declaration to publish `train.schedule.bin`. Each 16-byte little-endian
+entry names a segment ordinal, a token offset and the number of targets,
+including EOS. Quota truncation reads the selected prefix and appends EOS.
+`train.records.jsonl` records the matching content digest, provenance and
+exposure. The receipt binds the schedule digest, exact encoding identity
+and the ordered list of sealed segment digests. Its `train_tokens_bytes`
+field gives the logical int32 size.
+
+The CLI reports `train_schedule_path`. Use that file as
+`dataset.train_path` for `local_token_mixture`. Preparation verifies the
+referenced segments and streams their ranges into the usual contiguous
+training arrays and supervision mask. The same schedule can be prepared at
+another sequence length when using contiguous packing. With
+`document_start`, the configured sequence length must match the declared
+row length.
+
+`verify-mixture --cold` reads every referenced segment and index. Routine
+verification can reuse signed file receipts for their current generations.
+`--audit` independently rebuilds the logical targets and verifies both the
+decoded token stream and the record bytes. `--reseal` checks the stored
+bytes, dependencies and range counts without independently selecting the
+training documents.
+
+Keep the mixture receipt, records and sealed store together. The receipt's
+segment inventory records the retained dependencies. The existing Corpus
+pruning commands exclude sealed token segments. Training from references
+without first producing contiguous prepared arrays is tracked in
+[#569](https://github.com/supernovae/model-lab/issues/569).
+
+Three paired two-worker NVMe trials on 32,768 synthetic documents
+scheduled 33.55 million targets with identical decoded hashes. Cold
+schedule construction took 6.572 s with contiguous output and 6.609 s
+with references. Warm construction took 1.700 s and 1.581 s. Reference
+dependency verification added 0.130 s cold and 0.003 s warm. A warm
+target scan including SHA-256 took 0.062 s for the contiguous file and
+0.100 s for references. Across the cold and warm builds, logical working
+bytes fell from 643.09 MB to 377.92 MB. These timings exclude packing and
+training.
 
 ## Mixture speed
 

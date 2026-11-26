@@ -1026,12 +1026,15 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     }.items():
         template = template.replace("${" + key + "}", str(value))
     declaration, mixture = tmp_path / "mixture.yaml", tmp_path / "mixture"
-    declaration.write_text(template + "\ntoken_cache: sealed\n")
+    declaration.write_text(
+        template + "\ntoken_cache: sealed\ntoken_output: references\n"
+    )
     quotas = yaml.safe_load(template)["target_quotas"]
     receipt = lab.json(
         "corpus", "materialize-mixture", str(declaration), "--output", str(mixture)
     )
     assert receipt["complete"]
+    assert not (mixture / "train.tokens.ids").exists()
     assert receipt["actual_target_tokens"] == quotas
     # The tokenizer fit has refreshed the export receipt. Mixture creation
     # authenticates the byte sample once, and the next command reuses it.
@@ -1066,7 +1069,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
                     "license": bound["license"],
                     "mixture_declaration_path": str(declaration),
                     "mixture_output_path": str(mixture),
-                    "train_path": str(mixture / "train.tokens.ids"),
+                    "train_path": receipt["train_schedule_path"],
                     "validation_path": str(validation),
                     "cache_dir": str(tmp_path / "prepared"),
                     "train_max_documents": receipt["records"],
@@ -1101,6 +1104,38 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     lab.run("inspect", str(run_config))
     prepared_dir = Path(lab.run("data", "prepare", str(run_config)))
     assert prepared_dir.is_dir()
+
+    # A storage-only change reuses sealed encodings and reaches identical
+    # packed targets and supervision through the same preparation command.
+    inline_declaration = tmp_path / "inline-mixture.yaml"
+    inline_declaration.write_text(template + "\ntoken_cache: sealed\n")
+    inline_output = tmp_path / "inline-mixture"
+    inline = lab.json(
+        "corpus",
+        "materialize-mixture",
+        str(inline_declaration),
+        "--output",
+        str(inline_output),
+    )
+    inline_config = yaml.safe_load(run_config.read_text())
+    inline_config["dataset"].update(
+        mixture_declaration_path=str(inline_declaration),
+        mixture_output_path=str(inline_output),
+        train_path=inline["train_tokens_path"],
+    )
+    inline_run = tmp_path / "inline-pretrain.yaml"
+    inline_run.write_text(yaml.safe_dump(inline_config))
+    inline_prepared = Path(lab.run("data", "prepare", str(inline_run)))
+    for name in ("train.npy", "train_supervision.npy"):
+        assert (prepared_dir / name).read_bytes() == (
+            inline_prepared / name
+        ).read_bytes()
+
+    shorter = yaml.safe_load(run_config.read_text())
+    shorter["training"]["seq_len"] //= 2
+    shorter_run = tmp_path / "shorter-pretrain.yaml"
+    shorter_run.write_text(yaml.safe_dump(shorter))
+    assert Path(lab.run("data", "prepare", str(shorter_run))) != prepared_dir
 
     # Two CPU updates on the prepared data; nothing is tokenized or packed here.
     lab.run(
