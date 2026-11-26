@@ -1046,8 +1046,26 @@ def _train_impl(
                 ),
             )
             _check_startup_cancel(cancel_path)
+        train_ids = data.train
+        if config.training.mixture_loader == "references":
+            from klab.data.mixture_batches import reference_training_tokens
+
+            with pilot_phase("reference_loader_open"):
+                train_ids = resources.enter_context(
+                    reference_training_tokens(
+                        config,
+                        data,
+                        tokenizer_path=(
+                            artifact_source / "tokenizer.json"
+                            if artifact_source
+                            else config.tokenizer.path
+                        ),
+                        proof_store=proof_store,
+                        verification_mode=verification_mode,
+                    )
+                )
         dataset = TokenBlockDataset(
-            data.train,
+            train_ids,
             config.training.seq_len,
             data.train_byte_addresses,
             data.train_supervision,

@@ -1150,6 +1150,9 @@ class TrainingConfig(StrictModel):
     max_tokens: int = Field(gt=0)
     grad_clip_norm: float = Field(default=1.0, gt=0)
     deterministic: bool = True
+    mixture_loader: Literal["contiguous", "references"] = Field(
+        default="contiguous", exclude_if=lambda value: value == "contiguous"
+    )
     matched_stories: MatchedStoryConfig | None = Field(
         default=None, exclude_if=lambda v: v is None
     )
@@ -1448,6 +1451,14 @@ class RunConfig(StrictModel):
     @model_validator(mode="after")
     def validate_cross_section(self) -> RunConfig:
         matched = self.training.matched_stories
+        if self.training.mixture_loader == "references" and (
+            self.dataset.source != "local_token_mixture"
+            or self.model.memory == "byte"
+            or matched is not None
+        ):
+            raise ValueError(
+                "training.mixture_loader=references requires a token mixture without byte memory or matched stories"
+            )
         if (
             matched is not None
             and matched.unpadded_documents

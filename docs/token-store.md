@@ -226,9 +226,7 @@ training documents.
 
 Keep the mixture receipt, records and sealed store together. The receipt's
 segment inventory records the retained dependencies. The existing Corpus
-pruning commands exclude sealed token segments. Training from references
-without first producing contiguous prepared arrays is tracked in
-[#569](https://github.com/supernovae/model-lab/issues/569).
+pruning commands exclude sealed token segments.
 
 Three paired two-worker NVMe trials on 32,768 synthetic documents
 scheduled 33.55 million targets with identical decoded hashes. Cold
@@ -239,6 +237,47 @@ target scan including SHA-256 took 0.062 s for the contiguous file and
 0.100 s for references. Across the cold and warm builds, logical working
 bytes fell from 643.09 MB to 377.92 MB. These timings exclude packing and
 training.
+
+### Training batch loaders
+
+For an experimental direct loader, set `training.mixture_loader: references`
+on a `local_token_mixture` run whose `dataset.train_path` names
+`train.schedule.bin`. Run preparation as usual. The existing training
+sampler reads its input and target IDs from verified segment ranges and uses
+the prepared supervision mask. A sparse position index supports shuffled
+batches, quota truncation, EOS and `document_start` filler. The loader keeps
+at most 16 segment files open and caches at most 256 pages of range metadata.
+
+The run still keeps its contiguous prepared arrays for checkpoint inventory,
+validation and evidence readers. The direct loader needs the original
+declaration, schedule, records and sealed store on the execution host,
+including when resuming from a checkpoint. The default
+`training.mixture_loader: contiguous` reads the prepared arrays. Direct
+loading with a reference-only prepared bundle is tracked in
+[#569](https://github.com/supernovae/model-lab/issues/569).
+
+The retained-mixture benchmark accepts `--loader-blocks 8192` and
+`--loader-row-tokens 1024` with the reference output. It runs the same
+shuffled block order through the two loaders, compares input and label
+hashes, and reports batch latency and storage reads. It times the CPU
+loader without worker prefetch, model execution or accelerator transfers.
+
+On NVMe, three paired trials read 8,192 shuffled blocks per loader.
+Each block held 1,024 targets. The first pass followed Linux file-page
+eviction advice for the token files. The next pass reused the same order
+with warm pages and the same prepared mask in both modes.
+
+| Documents | Loader | First pass | Warm pass | Warm p95 per four blocks |
+| --- | --- | ---: | ---: | ---: |
+| 8,192 | Contiguous | 0.218 s | 0.028 s | 14 µs |
+| 8,192 | References | 0.252 s | 0.055 s | 33 µs |
+| 65,536 | Contiguous | 0.899 s | 0.030 s | 15 µs |
+| 65,536 | References | 0.719 s | 0.059 s | 35 µs |
+
+Input and label hashes matched. On the larger fixture, storage reads on
+the first pass were 75.4 MB for contiguous and 91.3 MB for references.
+Creating the sparse reference index took 70 ms after verification.
+Accelerator utilization and production step throughput remain unmeasured.
 
 ## Mixture speed
 

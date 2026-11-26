@@ -1063,6 +1063,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         yaml.safe_dump(
             {
                 "tokenizer": {"path": str(tokenizer_json)},
+                "training": {"mixture_loader": "references"},
                 "dataset": {
                     "source": "local_token_mixture",
                     "revision": bound["revision"],
@@ -1118,6 +1119,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         str(inline_output),
     )
     inline_config = yaml.safe_load(run_config.read_text())
+    inline_config["training"].pop("mixture_loader")
     inline_config["dataset"].update(
         mixture_declaration_path=str(inline_declaration),
         mixture_output_path=str(inline_output),
@@ -1137,7 +1139,17 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     shorter_run.write_text(yaml.safe_dump(shorter))
     assert Path(lab.run("data", "prepare", str(shorter_run))) != prepared_dir
 
-    # Two CPU updates on the prepared data; nothing is tokenized or packed here.
+    # A training update must actually obtain its IDs from the segment view.
+    from klab.data.mixture_batches import ReferencedTokenArray
+
+    fetched = []
+    read = ReferencedTokenArray.__getitem__
+
+    def observe(source, key):
+        fetched.append(key)
+        return read(source, key)
+
+    monkeypatch.setattr(ReferencedTokenArray, "__getitem__", observe)
     lab.run(
         "train",
         str(run_config),
@@ -1148,5 +1160,6 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         "waive:two-step CPU run in the recipe-shape test, not a pretraining run",
     )
     run = tmp_path / "runs/mini"
+    assert fetched
     assert json.loads((run / "progress.json").read_text())["step"] == 2
     assert (run / "checkpoints/latest.json").is_file()
