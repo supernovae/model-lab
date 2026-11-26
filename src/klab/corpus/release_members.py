@@ -5,6 +5,9 @@ from __future__ import annotations
 import fcntl
 import os
 import re
+import stat
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -85,6 +88,38 @@ def shared_members(root: Path, files: dict[str, dict[str, Any]]) -> dict[str, Pa
     }
 
 
+@contextmanager
+def _release_lock(path: Path, operation: int) -> Iterator[None]:
+    if symlinked(path):
+        raise ValueError(f"symlinked shared release lock: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "a+b") as lock:
+        info = os.fstat(lock.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError(f"unsafe shared release lock: {path}")
+        fcntl.flock(lock, operation)
+        yield
+
+
+def release_retention_lease(
+    work_root: Path, *, prune: bool = False
+) -> AbstractContextManager[None]:
+    """Serialize an explicit prune with the shared manifest and payload commit."""
+    path = work_root / "artifacts" / "corpus" / ".release-retention.lock"
+    return _release_lock(
+        path, fcntl.LOCK_EX | fcntl.LOCK_NB if prune else fcntl.LOCK_SH
+    )
+
+
+def shared_payload_lease(
+    payload: Path, *, wait: bool = True
+) -> AbstractContextManager[None]:
+    """Lease one digest under the store's publisher lock."""
+    path = payload.parents[1] / "locks" / payload.name
+    return _release_lock(path, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
 @dataclass(frozen=True)
 class SharedPublication:
     """Shared generations and the subset authenticated during this publication."""
@@ -107,13 +142,7 @@ def publish_shared_members(
     for name, destination in shared_members(staging, files).items():
         source = staging / name
         entry = files[name]
-        locks = destination.parents[1] / "locks"
-        lock_path = locks / destination.name
-        if symlinked(lock_path):
-            raise ValueError("symlinked shared release lock")
-        locks.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with shared_payload_lease(destination):
             if symlinked(destination) or symlinked(source):
                 raise ValueError(f"symlinked shared release input: {name}")
             existing = destination.exists()

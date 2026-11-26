@@ -143,7 +143,7 @@ def _handle(args: argparse.Namespace) -> None:
         **verification_options(
             root,
             cold=getattr(args, "cold", False),
-            read_only=args.corpus_command in {"plan", "artifacts"},
+            read_only=args.corpus_command in {"plan", "artifacts", "release-prune"},
         ),
     ):
         _run(args)
@@ -158,21 +158,46 @@ def _run(args: argparse.Namespace) -> None:
 
     root = resolve_work_dir(args.work_dir)
     command = args.corpus_command
-    if command == "artifacts":
+    if command in {"artifacts", "release-prune"}:
         from klab.corpus.artifact_inventory import (
             normalized_inventory,
+            prune_shared_release_payloads,
             shared_release_inventory,
         )
         from klab.corpus.release_members import SHARED_STORES
 
-        if args.kind != "normalized":
+        storage = next(
+            (key for key, namespace in SHARED_STORES.items() if namespace == args.kind),
+            None,
+        )
+        if command == "release-prune":
+            assert storage is not None
+            result = prune_shared_release_payloads(
+                root,
+                storage=storage,
+                digests=args.digest,
+                apply=args.apply,
+            )
+            if args.json:
+                print(json.dumps(result, sort_keys=True))
+            else:
+                print(f"Shared release prune {result['status']} ({result['store']})")
+                for row in result["payloads"]:
+                    print(
+                        f"  {row['action']} {row['artifact_id']} ({row['bytes']:,} bytes)"
+                    )
+                if args.apply:
+                    print(f"{result['pruned_bytes']:,} logical bytes removed")
+                if result.get("reason"):
+                    print(result["reason"])
+                for problem in result.get("problems", ()):
+                    print(f"  {problem['path']}  {problem['reason']}")
+            if result["status"] in {"blocked", "partial"}:
+                raise SystemExit(1)
+            return
+        if storage is not None:
             if args.source_id is not None:
                 raise ValueError("--source-id applies to normalized partitions")
-            storage = next(
-                key
-                for key, namespace in SHARED_STORES.items()
-                if namespace == args.kind
-            )
             inventory = shared_release_inventory(
                 root,
                 storage=storage,
@@ -796,6 +821,15 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Preview shared payloads without an observed release reference",
     )
+    command.add_argument("--json", action="store_true")
+    command.set_defaults(handler=_handle)
+    command = sub.add_parser(
+        "release-prune",
+        help="Preview or remove explicitly selected unreferenced shared release digests",
+    )
+    command.add_argument("--kind", choices=tuple(SHARED_STORES.values()), required=True)
+    command.add_argument("--digest", action="append", required=True)
+    command.add_argument("--apply", action="store_true")
     command.add_argument("--json", action="store_true")
     command.set_defaults(handler=_handle)
     command = sub.add_parser(

@@ -950,8 +950,7 @@ The preview reads manifest and filesystem metadata. It checks the observed
 release namespace and manifest generations for changes. When a scan is
 incomplete, the JSON reports `scan_status: incomplete`, bounded examples of
 problems and null unreferenced totals. The preview page is empty in that
-case. Use the inventory as advisory retention evidence. Any future deletion
-must recheck the dependency closure under the publisher's locks.
+case. Use the inventory as advisory retention evidence.
 
 Three Linux tmpfs scans per size returned up to 20 unreferenced rows from
 synthetic stores with ten distinct referenced payloads per release. The
@@ -962,6 +961,39 @@ largest scan counted 1.64 GB of logical payload sizes from metadata.
 | 500 | 40 | 15 ms | 0.10 MB | 44 MiB |
 | 5,000 | 400 | 128 ms | 1.04 MB | 45 MiB |
 | 25,000 | 2,000 | 658 ms | 5.18 MB | 54 MiB |
+
+Preview pruning an exact digest and apply the same selection with:
+
+```sh
+klab --work-dir WORK corpus release-prune --kind release-documents --digest SHA256 --json
+klab --work-dir WORK corpus release-prune --kind release-documents --digest SHA256 --apply --json
+```
+
+The command also accepts `--kind release-stages`. Repeat `--digest` to select
+multiple files. The preview reports protected, missing and eligible files.
+Apply checks the published and staged release manifests in the work area
+again while holding the publication lease and the selected digest locks.
+Prune refuses the batch when a selected digest is referenced, a required lock
+is held, or the release-root scan is incomplete. An already absent digest
+can be retried safely. JSON reports each removed digest and logical bytes
+removed. A refusal or partial apply exits nonzero.
+
+This operation covers the two release payload stores. Exports, prepared
+bundles and runs that use those stores reach the files through their release
+manifests. Retain those manifests in the work area for the lifetime of their
+consumers. Archives of a release need the seal, shared payloads and source
+snapshots together.
+
+Three Linux tmpfs trials per size measured explicit prune batches against
+synthetic manifests with ten shared stage references each. The largest
+applied selection removed 4 MiB of logical payloads. These timings include
+the root scan and publisher locks. Reads cover manifests and metadata.
+
+| Release manifests | Selected digests | Median preview | Median apply | Process reads |
+| ---: | ---: | ---: | ---: | ---: |
+| 40 | 8 | 14.96 ms | 15.30 ms | 0.10 MB |
+| 400 | 32 | 111.43 ms | 111.38 ms | 1.04 MB |
+| 2,000 | 64 | 483.26 ms | 482.36 ms | 5.18 MB |
 
 `build` normalizes admitted documents, applies the frozen splits, removes exact
 duplicates (refusing cross-split or incompatible-rights duplicates) and writes

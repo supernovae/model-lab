@@ -33,6 +33,7 @@ from klab.corpus.release_members import (
     ReleasePlacement,
     SharedPublication,
     publish_shared_members,
+    release_retention_lease,
     shared_member_path,
     shared_members,
 )
@@ -2557,36 +2558,46 @@ def _publish(
             "the earlier freeze finished, remove the staging directory"
         )
     sealed = canonical_json({**payload, "release_id": release_id}) + b"\n"
-    tombstone_json = staging / "build.json"
-    if tombstone_json.is_file():
-        build_dir.mkdir(exist_ok=True)
-        if not (build_dir / "build.json").exists():
-            _write_durably(build_dir / "build.json", tombstone_json.read_bytes())
-    marker = canonical_json({"release_id": release_id}) + b"\n"
-    previous_release = consumed_release(build_dir)
-    if previous_release is None:
-        _write_durably(build_dir / CONSUMED, marker)
-    elif previous_release != release_id:
-        raise ValueError("retry the staged release with the same freeze options")
-    sync_directory(build_dir)
-    manifest_path = staging / "manifest.json"
-    if manifest_path.exists():
-        if manifest_path.read_bytes() != sealed:
-            raise ValueError("staged release manifest differs from its build")
-    else:
-        _write_durably(manifest_path, sealed)
-    shared = (
-        publish_shared_members(
-            staging,
-            payload["files"],
-            verified=verified,
-            proof_store=proof_store,
-            verification_mode=verification_mode,
-        )
+    # Keep a staged manifest visible before any shared payload can be moved.
+    # The durable manifest protects the files during subsequent cold replay.
+    with (
+        release_retention_lease(staging.parents[3])
         if placement.shared
-        else SharedPublication({}, {})
-    )
-    tombstone_json.unlink(missing_ok=True)
+        else nullcontext()
+    ):
+        tombstone_json = staging / "build.json"
+        if tombstone_json.is_file():
+            build_dir.mkdir(exist_ok=True)
+            if not (build_dir / "build.json").exists():
+                _write_durably(build_dir / "build.json", tombstone_json.read_bytes())
+        marker = canonical_json({"release_id": release_id}) + b"\n"
+        previous_release = consumed_release(build_dir)
+        if previous_release is None:
+            _write_durably(build_dir / CONSUMED, marker)
+        elif previous_release != release_id:
+            raise ValueError("retry the staged release with the same freeze options")
+        sync_directory(build_dir)
+        manifest_path = staging / "manifest.json"
+        if manifest_path.exists():
+            if manifest_path.read_bytes() != sealed:
+                raise ValueError("staged release manifest differs from its build")
+        else:
+            _write_durably(manifest_path, sealed)
+        if placement.shared:
+            sync_directory(staging)
+            sync_directory(releases)
+        shared = (
+            publish_shared_members(
+                staging,
+                payload["files"],
+                verified=verified,
+                proof_store=proof_store,
+                verification_mode=verification_mode,
+            )
+            if placement.shared
+            else SharedPublication({}, {})
+        )
+        tombstone_json.unlink(missing_ok=True)
     if not verified:
         # Staging will be renamed, so keep this check out of the operation's
         # memo of releases whose paths must still exist when the call returns.

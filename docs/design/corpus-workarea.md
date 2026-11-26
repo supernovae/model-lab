@@ -144,9 +144,13 @@ Release and export verification receipts track their file generations.
 Corpus artifact inventory reports unique stored bytes and published or
 in-flight references for each store. Its unreferenced preview withholds
 candidates when the metadata scan is incomplete. Releases still render a
-project-scoped document inventory. Direct release references to reusable
-normalized source partitions, further payload references and closure-aware
-deletion are tracked in #567.
+project-scoped document inventory. The two release payload stores support
+explicit digest pruning. The apply path walks all published and staged
+release roots under the work-area publication lease and uses the same
+per-digest locks as freeze. These roots protect the payloads reached by
+exports, prepared bundles and runs through their release manifests.
+Direct release references to reusable normalized source partitions and
+retention for other artifact families are tracked in #567.
 
 Start with typed document, passage, annotation, duplicate-group, selection,
 entity, assertion, evidence, edge, index, and compiled sequence payloads.
