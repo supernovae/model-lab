@@ -8,6 +8,8 @@ import os
 import re
 import shutil
 import tempfile
+from collections.abc import Callable
+from contextlib import closing
 from itertools import zip_longest
 from pathlib import Path
 from typing import Any, cast
@@ -24,6 +26,7 @@ from klab.corpus.bounded_metadata import (
     read_metadata,
 )
 from klab.corpus.build_stages import implementation_digests
+from klab.corpus.family_inventory_rows import covered_family_rows
 from klab.corpus.inventory_writer import INVENTORY_WINDOW_BYTES, inventory_writer
 from klab.corpus.jsonl_records import iter_jsonl_records, records_from_path
 from klab.corpus.project import (
@@ -32,8 +35,8 @@ from klab.corpus.project import (
     project_path,
     source_declaration_payload,
 )
-from klab.corpus.release import verify_release
-from klab.corpus.release_verify import current_settings
+from klab.corpus.release import ReleaseReader, open_release
+from klab.corpus.release_verify import current_settings, verification_settings
 from klab.corpus.rights import verify_record_admission
 from klab.corpus.row_index import RowIndex, ValueMap
 from klab.corpus.split_inventory import write_split_inventory
@@ -144,7 +147,11 @@ def _counts(
 
 
 def _publish_new(
-    path: Path, data: bytes | Path, *, work_root: Path | None = None
+    path: Path,
+    data: bytes | Path,
+    *,
+    work_root: Path | None = None,
+    before_publish: Callable[[], None] | None = None,
 ) -> None:
     sync_root = work_root
     if sync_root is None:
@@ -167,6 +174,8 @@ def _publish_new(
                 stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
+            if before_publish is not None:
+                before_publish()
             os.link(temporary, path)
             _sync_parents(path.parent, sync_root)
         finally:
@@ -185,62 +194,44 @@ def _prior_family_splits(
         raise ValueError("invalid prior family-inventory binding")
     prior_path = Path(binding["path"]).resolve()
     release = Path(binding["release_path"]).resolve()
-    if (
-        not prior_path.is_relative_to(root)
-        or not release.is_relative_to(root)
-        or prior_path.is_symlink()
-        or release.is_symlink()
-        or sha256_file(prior_path) != binding["sha256"]
+    if not prior_path.is_relative_to(root) or not release.is_relative_to(root):
+        raise ValueError("prior family inventory or release is outside the work root")
+    prior_sha256 = binding["sha256"]
+    if not isinstance(prior_sha256, str) or not re.fullmatch(
+        "[0-9a-f]{64}", prior_sha256
     ):
-        raise ValueError("prior family inventory path or digest mismatch")
-    verify_release(release, **verification_options(root))
+        raise ValueError("prior family inventory digest is invalid")
     connection = current_metadata_store().connection
-    kept = RowIndex(
-        connection,
-        (
-            record.value
-            for record in records_from_path(release / "documents.jsonl")
-            if record.value["drop_reason"] is None
-        ),
-        lambda row: row["document_id"],
-    )
     families = ValueMap(connection)
     strata = ValueMap(connection)
     content = ValueMap(connection)
-    seen = ValueMap(connection)
-    for record in records_from_path(prior_path, max_record_bytes=8 * 1024**2):
-        row = record.value
-        if (
-            not isinstance(row, dict)
-            or set(row)
-            != {"document_id", "family_id", "split", "stratum", "content_sha256"}
-            or row["document_id"] in seen
-            or row["split"] not in SPLITS
-            or not isinstance(row["family_id"], str)
-            or not row["family_id"]
-        ):
-            raise ValueError("invalid prior family inventory row")
-        seen[row["document_id"]] = True
-        doc = kept.get(row["document_id"])
-        if (
-            doc is None
-            or doc["split"] != row["split"]
-            or doc["content_sha256"] != row["content_sha256"]
-            or row["stratum"] not in doc["domains"]
-        ):
-            raise ValueError("prior family inventory differs from release")
-        family = row["family_id"]
-        if family in families and (
-            families[family] != row["split"] or strata[family] != row["stratum"]
-        ):
-            raise ValueError("prior family spans split or stratum")
-        families[family] = row["split"]
-        strata[family] = row["stratum"]
-        previous = content.setdefault(row["content_sha256"], (family, row["split"]))
-        if previous != (family, row["split"]):
-            raise ValueError("prior content spans families or splits")
-    if not seen.same_keys(kept):
-        raise ValueError("prior family inventory does not cover kept release")
+    with (
+        verification_settings(
+            scratch_dir=current_settings().scratch_dir or root / "scratch"
+        ),
+        open_release(release, **verification_options(root)) as verified,
+        closing(
+            covered_family_rows(
+                verified,
+                prior_path,
+                max_record_bytes=8 * 1024**2,
+                expected_sha256=prior_sha256,
+            )
+        ) as rows,
+    ):
+        for row in rows:
+            family, split, stratum = row["family_id"], row["split"], row["stratum"]
+            if not family:
+                raise ValueError("invalid prior family inventory row")
+            if family in families and (
+                families[family] != split or strata[family] != stratum
+            ):
+                raise ValueError("prior family spans split or stratum")
+            families[family] = split
+            strata[family] = stratum
+            previous = content.setdefault(row["content_sha256"], (family, split))
+            if previous != (family, split):
+                raise ValueError("prior content spans families or splits")
     return families, strata, content
 
 
@@ -710,21 +701,18 @@ def _freeze_splits(
 
 
 def _finalize_family_inventory(
-    manifest: dict[str, Any],
-    documents: Path,
-    verified_documents: dict,
+    release: ReleaseReader,
     frozen_splits: Path,
     output: Path,
 ) -> dict[str, Any]:
     """Filter the authenticated family candidates to exactly kept release docs."""
+    manifest = release.manifest
+    documents = release.member("documents.jsonl")
     candidate_path = frozen_splits.with_name(
         frozen_splits.stem + ".family-candidates.jsonl"
     )
     receipt_path = frozen_splits.with_name(frozen_splits.stem + ".receipt.json")
-    dependencies = {
-        **verified_documents,
-        **capture([candidate_path, frozen_splits, receipt_path]),
-    }
+    dependencies = capture([documents, candidate_path, frozen_splits, receipt_path])
     receipt = cast(dict[str, Any], verify_split_bundle(frozen_splits))
     if manifest["build_identity"]["split"] != yaml.safe_load(
         frozen_splits.read_text(encoding="utf-8")
@@ -827,6 +815,7 @@ def _finalize_family_inventory(
         else:
             unchanged(dependencies)
         digest = view.file_digest().sha256
+        release.require_unchanged()
     return {
         "schema_version": 1,
         "release_id": manifest["release_id"],
@@ -869,12 +858,16 @@ def freeze_splits(
 def finalize_family_inventory(
     release: Path, frozen_splits: Path, output: Path
 ) -> dict[str, Any]:
+    with open_release(release) as verified:
+        return _finalize_verified_inventory(verified, frozen_splits, output)
+
+
+def _finalize_verified_inventory(
+    release: ReleaseReader, frozen_splits: Path, output: Path
+) -> dict[str, Any]:
     from klab.corpus.completed_preparation import local_scope
 
-    release = release.resolve()
-    documents = release / "documents.jsonl"
-    verified_documents = capture([documents])
-    manifest = verify_release(release)
+    manifest = release.manifest
     if manifest["build_identity"]["split"]["unit"] in (
         "source_document_family",
         "source_repository",
@@ -892,9 +885,10 @@ def finalize_family_inventory(
         # Export that authenticated result instead of reconstructing a RowIndex.
         frozen_splits = frozen_splits.resolve()
         receipt_path = frozen_splits.with_name(frozen_splits.stem + ".receipt.json")
+        dependencies = capture([frozen_splits, receipt_path])
         if any(
-            str(p) not in scope["request"]["inputs"]
-            for p in (frozen_splits, receipt_path)
+            scope["request"]["inputs"].get(path) != stamp
+            for path, stamp in dependencies.items()
         ):
             raise ValueError("family export is not bound to the completed build split")
         receipt = json.loads(receipt_path.read_bytes())
@@ -905,8 +899,17 @@ def finalize_family_inventory(
             raise ValueError("family export split differs from completed build")
         if output.exists() or output.is_symlink():
             raise ValueError("final family inventory already exists")
-        _publish_new(output, release / "family-inventory.jsonl")
-        report = json.loads((release / "report.json").read_bytes())
+        report = json.loads(release.member("report.json").read_bytes())
+
+        def before_publish():
+            unchanged(dependencies)
+            release.require_unchanged()
+
+        _publish_new(
+            output,
+            release.member("family-inventory.jsonl"),
+            before_publish=before_publish,
+        )
         return {
             "schema_version": 1,
             "release_id": manifest["release_id"],
@@ -919,9 +922,7 @@ def finalize_family_inventory(
             "family_candidate_sha256": receipt["family_candidate_sha256"],
         }
     return _finalize_family_inventory(
-        manifest,
-        documents,
-        verified_documents,
+        release,
         frozen_splits.parent.resolve() / frozen_splits.name,
         output,
     )

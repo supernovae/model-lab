@@ -71,6 +71,7 @@ def prior_indexes(root, binding):
     """Authenticate retained execution, then reuse or build its metadata indexes."""
     from klab.corpus.admission_inspection_cache import capture
     from klab.corpus.completed_release import verify_retained_release
+    from klab.corpus.release import ReleaseMembers
 
     root = Path(root).resolve(strict=True)
     if not isinstance(binding, dict) or set(binding) != {
@@ -91,12 +92,11 @@ def prior_indexes(root, binding):
         raw_release.resolve(strict=True),
         raw_inventory.resolve(strict=True),
     )
-    if (
-        not release.is_relative_to(root)
-        or inventory != release / "family-inventory.jsonl"
-    ):
-        raise ValueError("prior inventory must be the retained release output")
+    if not release.is_relative_to(root):
+        raise ValueError("prior release is outside the work root")
     manifest = verify_retained_release(release)
+    if inventory != ReleaseMembers(release, manifest).member("family-inventory.jsonl"):
+        raise ValueError("prior inventory must be the retained release output")
     if manifest["files"]["family-inventory.jsonl"]["sha256"] != binding["sha256"]:
         raise ValueError("prior inventory digest differs from retained execution")
     alias_binding = binding["family_clusters"]

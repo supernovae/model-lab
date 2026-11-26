@@ -60,7 +60,6 @@ def _release(tmp_path: Path, monkeypatch, split) -> tuple[Path, Path]:
         "open_release",
         lambda root: nullcontext(ReleaseReader(root, manifest, fingerprint(root))),
     )
-    monkeypatch.setattr(split_freeze, "verify_release", lambda _: manifest)
     declaration = tmp_path / "mixture.yaml"
     declaration.write_text(
         yaml.safe_dump(
@@ -139,7 +138,11 @@ def test_derived_inventory_refuses_reviewed_or_unmapped_releases(
     assert not (tmp_path / "out" / "family-inventory.jsonl").exists()
 
     declared = {"release_id": "fixture", "build_identity": {"split": _split()}}
-    monkeypatch.setattr(split_freeze, "verify_release", lambda _: declared)
+    monkeypatch.setattr(
+        split_freeze,
+        "open_release",
+        lambda root: nullcontext(ReleaseReader(root, declared, fingerprint(root))),
+    )
     with pytest.raises(ValueError, match="declared source-family splits"):
         split_freeze.finalize_family_inventory(
             tmp_path / "release", tmp_path / "splits.yaml", tmp_path / "x.jsonl"
