@@ -2104,6 +2104,48 @@ including the span and document indexes.
 | 136 | 103 ms | 103 ms | 303 KB | 205 KB |
 | 2,056 | 725 ms | 725 ms | 3.30 MB | 2.35 MB |
 
+#### Streaming duplicate verification measurements
+
+The document scan records each declared duplicate key with its representative.
+The `document_duplicates` phase groups that compact evidence in one file-backed
+sort. It verifies that every key resolves to one representative. Raw and
+normalized hashes use binary encoding and canonical origins keep their exact
+text. Each key method has its own namespace. The intermediate evidence is
+discarded once checked, before the document index is sealed. A retry can
+reuse the checked index and only repeats grouping if that index did not seal.
+SQLite can spill its sort to a temporary file. Include that file in storage
+provisioning alongside the named scratch files.
+
+Three paired single-process trials per size used NVMe-backed scratch and
+warm database pages from the preceding insert. The synthetic inputs had
+two digest keys per document and a canonical origin for every second
+document. A quarter of the documents were in five-member groups. These times
+include inserting the synthetic rows and building the common ID index,
+plus duplicate-key validation. They exclude reading real release payloads,
+raw replay, and the remaining release checks.
+
+| Documents | Prior time | Grouped check time | Prior sampled peak scratch | Grouped sampled peak scratch |
+| ---: | ---: | ---: | ---: | ---: |
+| 25,000 | 0.167 s | 0.135 s | 23.83 MB | 14.64 MB |
+| 300,000 | 3.209 s | 1.707 s | 286.04 MB | 229.95 MB |
+| 1,000,000 | 12.026 s | 6.351 s | 1.08 GB | 775.17 MB |
+
+For one million documents, duplicate validation alone fell from 8.626 s to
+1.563 s and from 23.95 GB to 557 MB of logical process reads. The resulting
+document index occupied 390 MB, down from 953 MB. Sampled peaks include
+SQLite's open temporary sort files. Peak process RSS was 153 MiB before
+and 162 MiB after. The logical read counters include cache hits.
+
+A separate full cold audit used the same 40,002-document local Markdown
+release on both revisions, with one worker and input-cache eviction
+requested before each trial. Across three pairs, median time was 2.681 s
+before and 2.625 s after. Storage reads stayed at 253 MB, and storage writes
+fell from 45.0 MB to 32.2 MB. Sampled peak allocated space for named scratch
+fell from 44.85 MB to 32.06 MB, and peak RSS fell from 134 MiB to 130 MiB.
+Both revisions returned the same release ID. Whole-audit performance
+on the production release and slower storage remains to be measured.
+[#450](https://github.com/supernovae/model-lab/issues/450)
+
 #### Staged freeze recovery measurements
 
 A synthetic NVMe fixture contained 896 local documents, 401 MB of build

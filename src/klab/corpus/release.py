@@ -484,16 +484,31 @@ def _span_rows(
     return rows, end - start
 
 
-def _declared_keys(doc: dict[str, Any], methods: tuple[str, ...]) -> list[str]:
-    """The duplicate keys a release's policy declares for one document."""
+_REPLAY_DIGEST = re.compile("[0-9a-f]{64}")
+
+
+def _compact_digest(value: str) -> bytes | str:
+    # Encode canonical digests losslessly. Distinct text stays distinct until
+    # source replay authenticates it.
+    return bytes.fromhex(value) if _REPLAY_DIGEST.fullmatch(value) else value
+
+
+def _declared_keys(
+    doc: dict[str, Any], methods: tuple[str, ...]
+) -> Iterator[tuple[int, bytes | str]]:
+    """Yield the exact policy keys in disjoint namespaces."""
     from klab.corpus.duplicate_evidence import origin_keys
 
-    by_method = {
-        "raw": lambda: ["raw:" + doc["raw_content_sha256"]],
-        "normalized": lambda: ["normalized:" + doc["content_sha256"]],
-        "canonical_origin": lambda: ["origin:" + key for key in origin_keys(doc)],
-    }
-    return [key for method in methods for key in by_method[method]()]
+    for method in methods:
+        match method:
+            case "raw":
+                yield 0, _compact_digest(doc["raw_content_sha256"])
+            case "normalized":
+                yield 1, _compact_digest(doc["content_sha256"])
+            case "canonical_origin":
+                yield from ((2, key) for key in origin_keys(doc))
+            case _:
+                raise ValueError(f"unknown duplicate key: {method}")
 
 
 def _document_rows(
@@ -539,8 +554,10 @@ def _document_rows(
                     span[3],
                 )
             )
+            representative = doc["representative_id"]
+            compact = _compact_digest(representative)
             duplicate_keys.extend(
-                (key, doc["document_id"]) for key in _declared_keys(doc, keys)
+                (method, key, compact) for method, key in _declared_keys(doc, keys)
             )
         return rows, duplicate_keys, end - start
     finally:
@@ -1024,12 +1041,12 @@ def _release_index_store(root, verification_mode):
 
 
 @contextmanager
-def _row_index_writer(path):
+def _row_index_writer(path, *, cache_kib: int = 65536):
     with closing(sqlite3.connect(path)) as db:
         db.execute("PRAGMA journal_mode=OFF")
         db.execute("PRAGMA synchronous=OFF")
         db.execute("PRAGMA temp_store=FILE")
-        db.execute("PRAGMA cache_size=-65536")
+        db.execute(f"PRAGMA cache_size=-{cache_kib}")
         yield db
         db.commit()
 
@@ -1145,7 +1162,8 @@ def _release_row_indexes(
     def build_documents(directory, result):
         phase("spans", *spans_paths)
         span_database, spans = run("spans", span_inputs, build_spans)
-        with _row_index_writer(directory / "documents.sqlite") as db:
+
+        def index_documents(db, evidence):
             db.execute(
                 "CREATE TABLE docs (id TEXT, source TEXT, split TEXT, "
                 "representative TEXT, dropped TEXT, raw_path TEXT, "
@@ -1153,14 +1171,13 @@ def _release_row_indexes(
                 "modality TEXT, domains TEXT, doc_offset INTEGER, doc_length INTEGER, "
                 "span_offset INTEGER, span_length INTEGER)"
             )
-            db.execute("CREATE TABLE duplicate_keys (key TEXT, id TEXT)")
 
             def load(rows):
                 docs, keys, size = rows
                 db.executemany(
                     "INSERT INTO docs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", docs
                 )
-                db.executemany("INSERT INTO duplicate_keys VALUES (?,?)", keys)
+                evidence.executemany("INSERT INTO duplicate_keys VALUES (?,?,?)", keys)
                 advance(len(docs), size)
 
             total = phase("documents", documents_path)
@@ -1203,13 +1220,28 @@ def _release_row_indexes(
                 "AND representative.split!='train')"
             ).fetchone()[0]:
                 raise ValueError("invalid duplicate representative identity")
-            db.execute("CREATE INDEX duplicate_key_idx ON duplicate_keys (key)")
-            if db.execute(
-                "SELECT COUNT(*) FROM (SELECT duplicate_keys.key FROM duplicate_keys "
-                "JOIN docs ON docs.id=duplicate_keys.id GROUP BY duplicate_keys.key "
-                "HAVING COUNT(DISTINCT docs.representative)!=1)"
-            ).fetchone()[0]:
+
+        # The evidence is used once. Commit only the checked document index to
+        # the stage so retries neither store nor rehash these grouping inputs.
+        evidence_path = temporary / "duplicate-keys.sqlite"
+        with _row_index_writer(evidence_path, cache_kib=8192) as evidence:
+            evidence.execute(
+                "CREATE TABLE duplicate_keys "
+                "(method INTEGER NOT NULL, key BLOB NOT NULL, representative BLOB NOT NULL)"
+            )
+            with _row_index_writer(directory / "documents.sqlite") as db:
+                index_documents(db, evidence)
+            evidence.commit()
+            if progress is not None:
+                progress.start_phase("document_duplicates")
+            # Every row already has a valid, non-null representative. Extremes
+            # differ exactly when a key connects different representatives.
+            if evidence.execute(
+                "SELECT 1 FROM duplicate_keys GROUP BY method, key "
+                "HAVING MIN(representative)!=MAX(representative) LIMIT 1"
+            ).fetchone():
                 raise ValueError("duplicate group representative mismatch")
+        evidence_path.unlink()
 
     phase("documents", documents_path, *spans_paths)
     database, _ = run("documents", document_inputs, build_documents)

@@ -318,6 +318,11 @@ document row IDs with a single reusable file-backed bitmap. The source and
 document indexes still provide the semantic checks and eligibility counts.
 Measured coverage scratch and sampled full-audit peaks are recorded in the
 [Corpus guide](../corpus-preparation.md#streaming-replay-coverage-measurements).
+The streaming verifier carries compact duplicate keys and representatives
+from the document scan into one grouped check. The checked index keeps the
+document references for subsequent replay. The grouping input is temporary.
+[Streaming duplicate verification measurements](../corpus-preparation.md#streaming-duplicate-verification-measurements)
+cover the isolated grouping and the full cold audit.
 
 | Workload | Evidence |
 | --- | --- |
