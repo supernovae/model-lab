@@ -108,6 +108,12 @@ def _print_freeze_plan(plan: dict) -> None:
             print(
                 f"  {step['id']}: {step['method']} ({step['row_verifier']} row verifier)"
             )
+            if observed := step.get("prior_scratch_observation"):
+                status = "completed" if observed["completed"] else "partial"
+                print(
+                    f"    Previous {observed['verification_mode']} attempt ({status}) observed "
+                    f"{observed['observed_peak_allocated_bytes']:,} allocated scratch bytes"
+                )
             for index in step["row_indexes"]:
                 size = index["verification_candidate_bytes"]
                 condition = (

@@ -122,7 +122,9 @@ build metadata. It reports the release identity, verification and placement
 dependencies, shared store growth and duplicate staging bytes. Optional
 verification inspection checks signed receipts, available scratch space and
 matching row-index checkpoints. A valid complete receipt forecasts zero
-verification scratch. Peak demand for byte verification remains unestimated.
+verification scratch. The verifier journals observed logical and allocated
+row-scratch peaks, and inspection reports recent observations for the same
+artifact. A byte-verification plan still leaves total peak demand unestimated.
 `klab corpus artifacts` reports retained bytes, computation keys and staging
 counts from shared-store metadata. Its paginated inspection is advisory.
 Release sample, review, lineage, source, audit and description queries use the

@@ -12,7 +12,7 @@ import sqlite3
 import tempfile
 from collections import Counter
 from collections.abc import Iterator
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
@@ -1211,6 +1211,9 @@ def _validate_rows_streaming(
             prefix=".verify-corpus-",
             dir=store.root if store is not None else scratch_root(),
         ) as temporary,
+        progress.track_scratch(store.root if store is not None else Path(temporary))
+        if progress is not None
+        else nullcontext(),
     ):
         database = _release_row_indexes(
             root,
@@ -1432,6 +1435,9 @@ def _validate_rows(
         metadata_operation(scratch_root(), max_database_bytes=None) as metadata,
         AdmissionCoverage(metadata.connection) as coverage,
         ExitStack() as replay_stack,
+        progress.track_scratch(Path(metadata.temporary.name))
+        if progress is not None
+        else nullcontext(),
     ):
         _validate_rows_stored(
             root,
@@ -2310,7 +2316,7 @@ def _verify_build_cold(
         or canonical_digest(manifest["identity"]) != path.name
     ):
         raise ValueError("invalid build identity")
-    progress = open_progress(manifest["build_id"])
+    progress = open_progress(manifest["build_id"], verification_mode=verification_mode)
     _verify_native_outputs(
         path,
         manifest,
@@ -2757,7 +2763,7 @@ def _verify_release_cold(
         raise ValueError("release manifest identity mismatch")
     if canonical_digest(manifest["build_identity"]) != manifest["build_id"]:
         raise ValueError("release build identity differs from its build")
-    progress = open_progress(release_id)
+    progress = open_progress(release_id, verification_mode=verification_mode)
     _verify_native_outputs(
         path,
         manifest,
