@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from contextlib import ExitStack, closing, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
-from functools import partial
+from functools import lru_cache, partial
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -61,7 +61,6 @@ from klab.corpus.release_verify import (
 from klab.corpus.shards import chunk_ranges, range_file_identity, run_tasks
 from klab.corpus.split_assignments import document_assignments
 from klab.experiments.artifacts import snapshot_dependencies
-from klab.safe_io import read_file_range
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
@@ -375,13 +374,9 @@ def _verify_structure_replay(
     doc: dict[str, Any], raw_text: str, *, options: NormalizerOptions
 ) -> None:
     """Recreate the declared cleaning from the authenticated source text."""
-    from klab.corpus.document_normalization import normalize_text
-    from klab.corpus.structure_cleaning import clean_structure
-
-    original = normalize_text(raw_text)
     if (doc.get("structure") or {}).get("normalizer") != options.identity:
         raise ValueError("structured document normalizer mismatch")
-    replay = clean_structure(original, source_id=doc["source_id"], options=options)
+    original, replay = _replay_structure(raw_text, doc["source_id"], options)
     if (
         replay["text"] != doc["text"]
         or replay["structure"] != doc.get("structure")
@@ -392,6 +387,14 @@ def _verify_structure_replay(
         )
     ):
         raise ValueError("structured document replay mismatch")
+
+
+def _replay_structure(raw_text: str, source_id: str, options: NormalizerOptions):
+    from klab.corpus.document_normalization import normalize_text
+    from klab.corpus.structure_cleaning import clean_structure
+
+    original = normalize_text(raw_text)
+    return original, clean_structure(original, source_id=source_id, options=options)
 
 
 def _verify_cleaning_decision(doc: dict[str, Any], options: NormalizerOptions) -> None:
@@ -469,18 +472,60 @@ def _readonly(database: str) -> sqlite3.Connection:
 
 
 def _span_rows(
-    spans: str, start: int, end: int, source_file: tuple[str, str] | None = None
+    files_database: str,
+    spans: str,
+    start: int,
+    end: int,
+    source_file: tuple[str, str] | None,
 ):
-    rows = []
-    for span, offset, length in range_records(Path(spans), start, end):
-        if (
-            source_file is not None
-            and (span["source_id"], span["raw_path"]) != source_file
-        ):
-            raise ValueError("span is outside its normalized source partition")
-        rows.append(
-            (span["record_id"], span["raw_path"], span["line_start"], offset, length)
-        )
+    with closing(_readonly(files_database)) as db:
+
+        @lru_cache(maxsize=128)
+        def file(source_id, raw_path):
+            row = db.execute(
+                "SELECT id,snapshot,raw_sha,normalizer FROM files "
+                "WHERE source=? AND path=?",
+                (source_id, raw_path),
+            ).fetchone()
+            if row is None:
+                raise ValueError("document lacks pinned file rights")
+            return row
+
+        rows = []
+        for span, _, _ in range_records(Path(spans), start, end):
+            source = span["source_id"], span["raw_path"]
+            if source_file is not None and source != source_file:
+                raise ValueError("span is outside its normalized source partition")
+            file_id, snapshot, raw_sha, normalizer = file(*source)
+            if (span["snapshot_sha256"], span["raw_sha256"]) != (snapshot, raw_sha):
+                raise ValueError("document snapshot span mismatch")
+            if span.get("normalizer") != normalizer:
+                raise ValueError("document snapshot identity mismatch")
+            start_line, end_line, byte_start, byte_end = (
+                span["line_start"],
+                span["line_end"],
+                span["byte_start"],
+                span["byte_end"],
+            )
+            if any(type(value) is not int for value in (start_line, end_line)):
+                raise ValueError("document raw line range mismatch")
+            if any(
+                value is not None and type(value) is not int
+                for value in (byte_start, byte_end)
+            ):
+                raise ValueError("document raw byte range mismatch")
+            rows.append(
+                (
+                    span["record_id"],
+                    file_id,
+                    start_line,
+                    end_line,
+                    byte_start,
+                    byte_end,
+                    _compact_digest(span["raw_content_sha256"]),
+                    bytes.fromhex(canonical_digest(span.get("section_path"))),
+                )
+            )
     return rows, end - start
 
 
@@ -513,28 +558,77 @@ def _declared_keys(
 
 def _document_rows(
     span_database: str,
+    files_database: str,
     documents: str,
     start: int,
     end: int,
     options: NormalizerOptions,
     keys: tuple[str, ...],
 ):
-    db = _readonly(span_database)
-    try:
+    with (
+        closing(_readonly(span_database)) as db,
+        closing(_readonly(files_database)) as files,
+    ):
+
+        @lru_cache(maxsize=128)
+        def file(file_id):
+            source, path, snapshot, raw_sha, normalizer, rights = files.execute(
+                "SELECT source,path,snapshot,raw_sha,normalizer,rights FROM files WHERE id=?",
+                (file_id,),
+            ).fetchone()
+            if rights is None:
+                raise ValueError("document rights attribution mismatch")
+            return source, path, snapshot, raw_sha, normalizer, json.loads(rights)
+
         rows, duplicate_keys = [], []
-        for doc, offset, length in range_records(Path(documents), start, end):
-            if (
-                doc["content_sha256"]
-                != hashlib.sha256(doc["text"].encode("utf-8")).hexdigest()
-            ):
+        for doc, _, _ in range_records(Path(documents), start, end):
+            content_digest = hashlib.sha256(doc["text"].encode("utf-8")).digest()
+            if doc["content_sha256"] != content_digest.hex():
                 raise ValueError("document content digest mismatch")
             _verify_cleaning_decision(doc, options)
             span = db.execute(
-                "SELECT raw_path, line_start, byte_offset, byte_length FROM spans WHERE id=?",
+                "SELECT file, line_start, line_end, byte_start, byte_end, raw_content_sha, "
+                "section_sha FROM spans WHERE id=?",
                 (doc["document_id"],),
             ).fetchone()
             if span is None:
                 raise ValueError("document evidence span inventory mismatch")
+            (
+                file_id,
+                start_line,
+                end_line,
+                byte_start,
+                byte_end,
+                raw_content,
+                section,
+            ) = span
+            source, path, snapshot, raw_sha, normalizer, rights = file(file_id)
+            if [
+                doc["source_revision"],
+                doc["source_family"],
+                doc.get("rights"),
+                doc.get("file_sha256"),
+                doc["license"],
+                doc["redistribution"],
+            ] != rights:
+                raise ValueError("document rights attribution mismatch")
+            if source != doc["source_id"] or raw_content != _compact_digest(
+                doc["raw_content_sha256"]
+            ):
+                raise ValueError("document snapshot span mismatch")
+            location = doc["source_location"]
+            if doc["document_id"] != canonical_digest(
+                [snapshot, location, raw_sha, normalizer]
+            ) or section != bytes.fromhex(canonical_digest(doc["section_path"])):
+                raise ValueError("document snapshot identity mismatch")
+            _verify_replay_location(
+                location, path, start_line, end_line, byte_start, byte_end
+            )
+            structure = None
+            if options.structure_cleaning and normalizer == options.identity:
+                if (doc.get("structure") or {}).get("normalizer") != options.identity:
+                    raise ValueError("structured document normalizer mismatch")
+                structure = bytes.fromhex(canonical_digest(doc["structure"]))
             rows.append(
                 (
                     doc["document_id"],
@@ -542,16 +636,17 @@ def _document_rows(
                     doc["split"],
                     doc["representative_id"],
                     doc["drop_reason"],
-                    span[0],
-                    span[1],
-                    doc["content_sha256"],
+                    file_id,
+                    start_line,
+                    content_digest,
                     doc["source_family"],
                     doc["modality"],
                     json.dumps(doc["domains"]),
-                    offset,
-                    length,
-                    span[2],
-                    span[3],
+                    end_line,
+                    byte_start,
+                    byte_end,
+                    raw_content,
+                    structure,
                 )
             )
             representative = doc["representative_id"]
@@ -560,179 +655,131 @@ def _document_rows(
                 (method, key, compact) for method, key in _declared_keys(doc, keys)
             )
         return rows, duplicate_keys, end - start
-    finally:
-        db.close()
+
+
+def _verify_replay_location(location, path, start, end, byte_start, byte_end):
+    if "#lines=" in location:
+        if start < 1 or end < start:
+            raise ValueError("document raw line range mismatch")
+        if byte_start is None or byte_end is None:
+            raise ValueError("document raw byte range mismatch")
+        if location != f"{path}#lines={start}-{end}":
+            raise ValueError("document source location mismatch")
+    elif "#row=" in location and Path(path).suffix == ".jsonl":
+        if (
+            start < 1
+            or end != start
+            or location != f"{path}#row={start}"
+            or byte_start is not None
+            or byte_end is not None
+        ):
+            raise ValueError("document raw row range mismatch")
+    else:
+        raise ValueError("unsupported document snapshot span")
 
 
 def _raw_group(
     database: str,
-    documents: str,
-    spans: str,
-    source: dict[str, Any],
+    file_id: int,
+    source_id: str,
     raw_name: str,
-    file: dict[str, Any] | None,
-    files_root: str,
+    raw_path: Path,
+    raw_sha: str,
     text_field: str | None,
     options: NormalizerOptions,
 ):
-    """Replay one raw snapshot file against every document that cites it."""
+    """Replay one raw file using checked facts from the document index."""
     from klab.corpus.document_normalization import normalize_text
     from klab.corpus.jsonl_records import iter_jsonl_records, verified_line_replay
 
-    if file is None or file["role"] != "document":
-        raise ValueError("document lacks pinned file rights")
-    decision = file["rights"]
-    raw_path = _safe(Path(files_root), raw_name)
-    raw_sha = file["sha256"]
-    normalizer = (
-        "cnxml-text-v1" if raw_path.suffix.lower() == ".cnxml" else options.identity
-    )
-    db = _readonly(database)
     count = 0
-    try:
-        with (
-            verified_line_replay(raw_path, expected_sha256=raw_sha) as raw_stream,
-            Path(documents).open("rb") as document_stream,
-            Path(spans).open("rb") as span_stream,
+    with (
+        closing(_readonly(database)) as db,
+        verified_line_replay(raw_path, expected_sha256=raw_sha) as raw_stream,
+    ):
+        current_line = current_offset = 0
+        raw_rows = iter_jsonl_records(raw_stream, source=str(raw_path))
+        for (
+            start,
+            end,
+            byte_start,
+            byte_end,
+            raw_digest,
+            content_digest,
+            structure,
+        ) in db.execute(
+            "SELECT line_start,line_end,byte_start,byte_end,raw_content_sha256,"
+            "content_sha256,structure_sha256 FROM docs "
+            "WHERE file=? ORDER BY line_start,id",
+            (file_id,),
         ):
-            current_line = current_offset = 0
-            current_item = None
-            raw_rows = iter_jsonl_records(raw_stream, source=str(raw_path))
-            for doc_offset, doc_length, span_offset, span_length in db.execute(
-                "SELECT doc_offset, doc_length, span_offset, span_length FROM docs "
-                "WHERE source=? AND raw_path=? ORDER BY line_start, id",
-                (source["id"], raw_name),
-            ):
-                count += 1
-                doc = json.loads(
-                    read_file_range(document_stream, doc_offset, doc_length)
-                )
-                span = json.loads(
-                    read_file_range(span_stream, span_offset, span_length)
-                )
-                if (
-                    source.get("explicit_training_restriction", "none_found")
-                    != "none_found"
-                    or doc["source_revision"] != source["revision"]
-                    or doc["source_family"] != source["source_family"]
-                    or decision["training_eligibility"]
-                    not in ("eligible", "eligible_with_obligations")
-                    or doc.get("rights") != decision
-                    or doc.get("file_sha256") != file["sha256"]
-                    or doc["license"]
-                    != (
-                        decision["detected_spdx_expression"]
-                        or source["rights_policy"]["spdx_expression"]
-                        or source["license"]
-                    )
-                    or doc["redistribution"] != decision["redistribution_mode"]
-                ):
-                    raise ValueError("document rights attribution mismatch")
-                if (
-                    span["source_id"] != doc["source_id"]
-                    or span["snapshot_sha256"] != source["snapshot_sha256"]
-                    or span["raw_sha256"] != raw_sha
-                    or span["raw_content_sha256"] != doc["raw_content_sha256"]
-                ):
-                    raise ValueError("document snapshot span mismatch")
-                if (
-                    span.get("normalizer") != normalizer
-                    or doc["document_id"]
-                    != canonical_digest(
-                        [
-                            source["snapshot_sha256"],
-                            doc["source_location"],
-                            raw_sha,
-                            normalizer,
-                        ]
-                    )
-                    or span.get("section_path") != doc["section_path"]
-                ):
-                    raise ValueError("document snapshot identity mismatch")
-                if "#lines=" in doc["source_location"]:
-                    start, end = span["line_start"], span["line_end"]
-                    if start < 1 or end < start:
+            count += 1
+            if start <= current_line:
+                raw_stream.rewind()
+                raw_rows = iter_jsonl_records(raw_stream, source=str(raw_path))
+                current_line = current_offset = 0
+            if byte_start is not None:
+                while current_line < start - 1:
+                    line = raw_stream.readline()
+                    if not line:
                         raise ValueError("document raw line range mismatch")
-                    if start <= current_line:
-                        raw_stream.rewind()
-                        raw_rows = iter_jsonl_records(raw_stream, source=str(raw_path))
-                        current_line, current_offset = 0, 0
-                    while current_line < start - 1:
-                        line = raw_stream.readline()
-                        if not line:
-                            raise ValueError("document raw line range mismatch")
-                        current_line += 1
-                        current_offset += len(line)
-                    byte_start = current_offset
-                    digest = hashlib.sha256()
-                    lines = []
-                    while current_line < end:
-                        line = raw_stream.readline()
-                        if not line:
-                            raise ValueError("document raw line range mismatch")
-                        current_line += 1
-                        current_offset += len(line)
-                        digest.update(line)
+                    current_line += 1
+                    current_offset += len(line)
+                observed_start = current_offset
+                digest = hashlib.sha256()
+                lines = []
+                while current_line < end:
+                    line = raw_stream.readline()
+                    if not line:
+                        raise ValueError("document raw line range mismatch")
+                    current_line += 1
+                    current_offset += len(line)
+                    digest.update(line)
+                    if structure is not None:
                         lines.append(line)
-                    if (
-                        span["byte_start"] != byte_start
-                        or span["byte_end"] != current_offset
-                        or digest.hexdigest() != doc["raw_content_sha256"]
-                    ):
-                        raise ValueError("document raw byte range mismatch")
-                    if options.structure_cleaning and normalizer == options.identity:
-                        _verify_structure_replay(
-                            doc, b"".join(lines).decode("utf-8"), options=options
-                        )
-                    if doc["source_location"] != (
-                        f"{span['raw_path']}#lines={start}-{end}"
-                    ):
-                        raise ValueError("document source location mismatch")
-                elif "#row=" in doc["source_location"] and raw_path.suffix == ".jsonl":
-                    index = span["line_start"]
-                    if (
-                        index < 1
-                        or span["line_end"] != index
-                        or doc["source_location"] != f"{span['raw_path']}#row={index}"
-                        or span["byte_start"] is not None
-                        or span["byte_end"] is not None
-                    ):
+                if (byte_start, byte_end) != (
+                    observed_start,
+                    current_offset,
+                ) or digest.digest() != raw_digest:
+                    raise ValueError("document raw byte range mismatch")
+                if structure is None:
+                    continue
+                text = b"".join(lines).decode("utf-8")
+            else:
+                while current_line < start:
+                    parsed = next(raw_rows, None)
+                    if parsed is None:
                         raise ValueError("document raw row range mismatch")
-                    if index <= current_line:
-                        raw_stream.rewind()
-                        raw_rows = iter_jsonl_records(raw_stream, source=str(raw_path))
-                        current_line = 0
-                    while current_line < index:
-                        parsed = next(raw_rows, None)
-                        if parsed is None:
-                            raise ValueError("document raw row range mismatch")
-                        current_line += 1
-                        current_item = parsed.value
-                    if current_item is None:
-                        raise ValueError("document raw row range mismatch")
-                    if not isinstance(current_item, dict) or not isinstance(
-                        current_item.get(text_field), str
-                    ):
+                    current_line += 1
+                item = parsed.value
+                if not isinstance(item, dict) or not isinstance(
+                    item.get(text_field), str
+                ):
+                    raise ValueError("document raw row content mismatch")
+                text = item[text_field]
+                if structure is None:
+                    seen = hashlib.sha256(normalize_text(text).encode("utf-8")).digest()
+                    if seen != raw_digest or seen != content_digest:
                         raise ValueError("document raw row content mismatch")
-                    source_text = current_item[text_field]
-                    if options.structure_cleaning and normalizer == options.identity:
-                        _verify_structure_replay(doc, source_text, options=options)
-                    elif (
-                        normalize_text(source_text) != doc["text"]
-                        or doc["raw_content_sha256"] != doc["content_sha256"]
-                    ):
-                        raise ValueError("document raw row content mismatch")
-                else:
-                    raise ValueError("unsupported document snapshot span")
-    finally:
-        db.close()
-    return source["id"], raw_name, count, raw_path.stat().st_size
+                    continue
+            original, cleaned = _replay_structure(text, source_id, options)
+            if (
+                hashlib.sha256(cleaned["text"].encode("utf-8")).digest()
+                != content_digest
+                or bytes.fromhex(canonical_digest(cleaned["structure"])) != structure
+                or (
+                    byte_start is None
+                    and hashlib.sha256(original.encode("utf-8")).digest() != raw_digest
+                )
+            ):
+                raise ValueError("structured document replay mismatch")
+    return source_id, raw_name, count, raw_path.stat().st_size
 
 
 def _replay_sources(
     root: Path,
     database: str,
-    groups: list[tuple[str, str, int]],
+    groups: list[tuple[str, str, int, int]],
     receipt: dict[str, Any],
     sources: dict[str, dict],
     snapshots: dict[str, dict],
@@ -740,6 +787,7 @@ def _replay_sources(
     options: NormalizerOptions,
     progress: BuildProgress | None,
     *,
+    checked_inputs: dict[Path, list[int]],
     proof_store: ProofStore | None,
     verification_mode: VerificationMode,
 ) -> None:
@@ -752,7 +800,7 @@ def _replay_sources(
         / source_id
         / sources[source_id]["snapshot_sha256"]
         / "files"
-        for source_id in {group[0] for group in groups}
+        for source_id in {source for source, _, _, _ in groups}
     }
     members = ReleaseMembers(root, receipt)
     documents = members.member("documents.jsonl")
@@ -780,7 +828,7 @@ def _replay_sources(
     tasks = []
     unfinished = {}
     total = reused = 0
-    for source_id, raw_name, count in groups:
+    for source_id, raw_name, count, file_id in groups:
         raw_path = _safe(files_roots[source_id], raw_name)
         spans = (
             inline_spans
@@ -794,7 +842,9 @@ def _replay_sources(
         size = raw_path.stat().st_size
         total += size
         file = rights.get((source_id, raw_name))
-        if use_receipts and file is not None and size >= INVENTORY_RECEIPT_MIN_BYTES:
+        if file is None or file["role"] != "document":
+            raise ValueError("document lacks pinned file rights")
+        if use_receipts and size >= INVENTORY_RECEIPT_MIN_BYTES:
             dependencies = [documents, spans, *support]
             identity = canonical_digest(
                 [
@@ -809,6 +859,11 @@ def _replay_sources(
             check = release_receipt.lookup(
                 proof_store, "raw_replay", raw_path, identity, dependencies
             )
+            if any(
+                range_file_identity(path) != checked_inputs[path]
+                for path in dependencies
+            ):
+                raise ValueError("release row index inputs changed")
             if check.hit:
                 reused += size
                 continue
@@ -822,12 +877,11 @@ def _replay_sources(
         tasks.append(
             (
                 database,
-                str(documents),
-                str(spans),
-                sources[source_id],
+                file_id,
+                source_id,
                 raw_name,
-                file,
-                str(files_roots[source_id]),
+                raw_path,
+                file["sha256"],
                 snapshots[source_id]["declaration"]["acquisition"].get("text_field"),
                 options,
             )
@@ -849,6 +903,10 @@ def _replay_sources(
 
     if tasks:
         run_tasks(_raw_group, tasks, consume, total_bytes=total - reused)
+    if any(
+        range_file_identity(path) != stamp for path, stamp in checked_inputs.items()
+    ):
+        raise ValueError("release row index inputs changed")
 
 
 def _lineage_rows(database: str, lineage: str, start: int, end: int, origins):
@@ -900,7 +958,7 @@ def _lineage_rows(database: str, lineage: str, start: int, end: int, origins):
                 or row["verification"]["status"] != "schema_validated"
                 or row["verification"]["evidence"].get("schema_id")
                 != "normalized_document_v1"
-                or row["rendered_sha256"] != digest
+                or row["rendered_sha256"] != digest.hex()
             ):
                 raise ValueError("document lineage mismatch")
             ids.append(ordinal)
@@ -923,7 +981,7 @@ def _stage_rows(
             if (
                 doc is None
                 or set(row) != {"record_id", "text", "split"}
-                or hashlib.sha256(row["text"].encode("utf-8")).hexdigest() != doc[0]
+                or hashlib.sha256(row["text"].encode("utf-8")).digest() != doc[0]
                 or row["split"] != doc[1]
                 or (selected and doc[2] not in selected)
                 or doc[3] is not None
@@ -969,7 +1027,7 @@ def _view_rows(
                 if (
                     found is None
                     or (
-                        hashlib.sha256(row["text"].encode("utf-8")).hexdigest(),
+                        hashlib.sha256(row["text"].encode("utf-8")).digest(),
                         split,
                         None,
                     )
@@ -1051,6 +1109,10 @@ def _row_index_writer(path, *, cache_kib: int = 65536):
         db.commit()
 
 
+_REPLAY_SUPPORT = ("sources.json", "license-report.json")
+RELEASE_ROW_INDEX_MEMBERS = (*DOCUMENT_MEMBERS, *_REPLAY_SUPPORT)
+
+
 def release_row_index_inputs(
     paths: dict[str, tuple[Path, ...]],
     files: dict[str, Any],
@@ -1068,19 +1130,85 @@ def release_row_index_inputs(
         }
         for name, members in paths.items()
     }
+    common = {"producer": producer, "normalizer": options.model_dump(mode="json")}
     return (
-        {"files": {"spans.jsonl": file_bindings["spans.jsonl"]}, "producer": producer},
         {
+            **common,
+            "files": {
+                name: binding
+                for name, binding in file_bindings.items()
+                if name != "documents.jsonl"
+            },
+        },
+        {
+            **common,
             "files": file_bindings,
-            "producer": producer,
-            "normalizer": options.model_dump(mode="json"),
             "keys": identity["release"]["policy"]["duplicates"]["keys"],
         },
     )
 
 
+def _write_replay_files(path, sources, rights, options):
+    """Bind exact source and file rights once, independently of document order."""
+    with _row_index_writer(path, cache_kib=8192) as db:
+        db.execute(
+            "CREATE TABLE files (id INTEGER PRIMARY KEY,source TEXT,path TEXT,"
+            "snapshot TEXT,raw_sha TEXT,normalizer TEXT,rights BLOB,UNIQUE(source,path))"
+        )
+        for (source_id, name), file in rights.items():
+            if file["role"] != "document":
+                continue
+            source, decision = sources[source_id], file["rights"]
+            expected_rights = None
+            if source.get(
+                "explicit_training_restriction", "none_found"
+            ) == "none_found" and decision["training_eligibility"] in (
+                "eligible",
+                "eligible_with_obligations",
+            ):
+                expected_rights = canonical_json(
+                    [
+                        source["revision"],
+                        source["source_family"],
+                        decision,
+                        file["sha256"],
+                        decision["detected_spdx_expression"]
+                        or source["rights_policy"]["spdx_expression"]
+                        or source["license"],
+                        decision["redistribution_mode"],
+                    ]
+                )
+            normalizer = (
+                "cnxml-text-v1"
+                if Path(name).suffix.lower() == ".cnxml"
+                else options.identity
+            )
+            db.execute(
+                "INSERT INTO files(source,path,snapshot,raw_sha,normalizer,rights) VALUES (?,?,?,?,?,?)",
+                (
+                    source_id,
+                    name,
+                    source["snapshot_sha256"],
+                    file["sha256"],
+                    normalizer,
+                    expected_rights,
+                ),
+            )
+
+
 def _release_row_indexes(
-    root, receipt, identity, options, temporary, store, phase, advance, progress
+    root,
+    receipt,
+    identity,
+    options,
+    sources,
+    rights,
+    support_generations,
+    temporary,
+    store,
+    phase,
+    advance,
+    progress,
 ):
     """Build or restore the checked indexes used by downstream replay queries."""
     members = ReleaseMembers(root, receipt)
@@ -1092,7 +1220,10 @@ def _release_row_indexes(
     )
     spans_paths = tuple(path for path, _ in span_sources)
     documents_path = members.member("documents.jsonl")
-    inputs_by_name = {"documents.jsonl": (documents_path,), SPAN_MEMBER: spans_paths}
+    inputs_by_name = {
+        name: spans_paths if name == SPAN_MEMBER else (members.member(name),)
+        for name in RELEASE_ROW_INDEX_MEMBERS
+    }
     span_inputs, document_inputs = release_row_index_inputs(
         inputs_by_name,
         receipt["files"],
@@ -1101,6 +1232,15 @@ def _release_row_indexes(
         checkpointed=store is not None,
     )
     file_bindings = document_inputs["files"]
+    checked_inputs = {
+        path: stamp
+        for name, binding in file_bindings.items()
+        for path, stamp in zip(inputs_by_name[name], binding["generation"], strict=True)
+    }
+    if any(
+        checked_inputs[path] != stamp for path, stamp in support_generations.items()
+    ):
+        raise ValueError("release source metadata changed during verification")
 
     def check_inputs(files):
         if any(
@@ -1135,21 +1275,23 @@ def _release_row_indexes(
         return str(directory / f"{name}.sqlite"), result
 
     def build_spans(directory, result):
+        files_database = directory / "files.sqlite"
+        _write_replay_files(files_database, sources, rights, options)
         with _row_index_writer(directory / "spans.sqlite") as db:
             db.execute(
-                "CREATE TABLE spans (id TEXT, raw_path TEXT, line_start INTEGER, "
-                "byte_offset INTEGER, byte_length INTEGER)"
+                "CREATE TABLE spans (id TEXT, file INTEGER, line_start INTEGER, line_end INTEGER,"
+                "byte_start INTEGER, byte_end INTEGER, raw_content_sha BLOB, section_sha BLOB)"
             )
 
             def load(result):
                 rows, size = result
-                db.executemany("INSERT INTO spans VALUES (?,?,?,?,?)", rows)
+                db.executemany("INSERT INTO spans VALUES (?,?,?,?,?,?,?,?)", rows)
                 advance(len(rows), size)
 
             run_tasks(
                 _span_rows,
                 (
-                    (str(path), start, end, source_file)
+                    (str(files_database), str(path), start, end, source_file)
                     for path, source_file in span_sources
                     for start, end in chunk_ranges(path)
                 ),
@@ -1162,20 +1304,29 @@ def _release_row_indexes(
     def build_documents(directory, result):
         phase("spans", *spans_paths)
         span_database, spans = run("spans", span_inputs, build_spans)
+        files_database = str(Path(span_database).with_name("files.sqlite"))
 
         def index_documents(db, evidence):
             db.execute(
                 "CREATE TABLE docs (id TEXT, source TEXT, split TEXT, "
-                "representative TEXT, dropped TEXT, raw_path TEXT, "
-                "line_start INTEGER, content_sha256 TEXT, source_family TEXT, "
-                "modality TEXT, domains TEXT, doc_offset INTEGER, doc_length INTEGER, "
-                "span_offset INTEGER, span_length INTEGER)"
+                "representative TEXT, dropped TEXT, file INTEGER, "
+                "line_start INTEGER, content_sha256 BLOB, source_family TEXT, "
+                "modality TEXT, domains TEXT, line_end INTEGER, byte_start INTEGER, "
+                "byte_end INTEGER, raw_content_sha256 BLOB, structure_sha256 BLOB)"
             )
+            db.execute(
+                "ATTACH DATABASE ? AS span_files",
+                (Path(files_database).resolve().as_uri() + "?mode=ro",),
+            )
+            db.execute(
+                "CREATE TABLE files (id INTEGER PRIMARY KEY,source TEXT,path TEXT)"
+            )
+            db.execute("INSERT INTO files SELECT id,source,path FROM span_files.files")
 
             def load(rows):
                 docs, keys, size = rows
                 db.executemany(
-                    "INSERT INTO docs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", docs
+                    "INSERT INTO docs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", docs
                 )
                 evidence.executemany("INSERT INTO duplicate_keys VALUES (?,?,?)", keys)
                 advance(len(docs), size)
@@ -1186,6 +1337,7 @@ def _release_row_indexes(
                 (
                     (
                         span_database,
+                        files_database,
                         str(documents_path),
                         start,
                         end,
@@ -1201,9 +1353,7 @@ def _release_row_indexes(
             _unique_index(db, "docs_id", "docs", "id", "duplicate document identity")
             if db.execute("SELECT COUNT(*) FROM docs").fetchone()[0] != spans["rows"]:
                 raise ValueError("document evidence span inventory mismatch")
-            db.execute(
-                "CREATE INDEX docs_raw_order_idx ON docs(source, raw_path, line_start, id)"
-            )
+            db.execute("CREATE INDEX docs_raw_order_idx ON docs(file,line_start,id)")
             if db.execute(
                 "SELECT COUNT(*) FROM docs AS doc LEFT JOIN docs AS representative "
                 "ON doc.representative=representative.id WHERE representative.id IS NULL "
@@ -1254,7 +1404,7 @@ def _release_row_indexes(
             with closing(_readonly(database)) as db:
                 for document_id, split in db.execute("SELECT id, split FROM docs"):
                     assignments.verify_document(document_id, split)
-    return database
+    return database, checked_inputs
 
 
 def _validate_rows_streaming(
@@ -1264,13 +1414,16 @@ def _validate_rows_streaming(
     verification_mode: VerificationMode = "cold",
     progress: BuildProgress | None = None,
 ) -> None:
-    """Validate LM-only source evidence in parallel, indexing only identities.
+    """Validate LM-only source evidence in parallel using narrow indexes.
 
-    Document text, spans and lineage stay in the release files; the disposable
-    scratch index holds identity columns and byte offsets, so it is a small
-    fraction of the release rather than a copy of it.
+    The scratch index binds document and source identities, digests and
+    raw offsets during the initial scan. Replay reads the pinned source file
+    and the checked facts without revisiting the release payloads.
     """
 
+    support_generations = {
+        root / name: range_file_identity(root / name) for name in _REPLAY_SUPPORT
+    }
     source_rows = _load(root / "sources.json")
     sources = {row["id"]: row for row in source_rows}
     if len(sources) != len(source_rows):
@@ -1295,7 +1448,6 @@ def _validate_rows_streaming(
         verification_mode=verification_mode,
     )
     rights = _verify_rights_files(root, sources, snapshots)
-    options = _release_normalizer(identity)
     origins = {
         source_id: source.get("origin", "primary_source")
         for source_id, source in sources.items()
@@ -1321,11 +1473,14 @@ def _validate_rows_streaming(
         if progress is not None
         else nullcontext(),
     ):
-        database = _release_row_indexes(
+        database, checked_inputs = _release_row_indexes(
             root,
             receipt,
             identity,
             options,
+            sources,
+            rights,
+            support_generations,
             Path(temporary),
             store,
             phase,
@@ -1338,8 +1493,9 @@ def _validate_rows_streaming(
             db.execute("PRAGMA cache_size=-65536")
 
             groups = db.execute(
-                "SELECT source, raw_path, COUNT(*) FROM docs GROUP BY source, raw_path "
-                "ORDER BY COUNT(*) DESC"
+                "SELECT files.source,files.path,g.records,g.file FROM files JOIN "
+                "(SELECT file,COUNT(*) AS records FROM docs GROUP BY file) g "
+                "ON files.id=g.file ORDER BY g.records DESC,files.source,files.path"
             ).fetchall()
             _replay_sources(
                 root,
@@ -1351,12 +1507,13 @@ def _validate_rows_streaming(
                 rights,
                 options,
                 progress,
+                checked_inputs=checked_inputs,
                 proof_store=proof_store,
                 verification_mode=verification_mode,
             )
 
             # The index inserts dense positive row IDs and never deletes rows.
-            documents = sum(count for _, _, count in groups)
+            documents = sum(count for _, _, count, _ in groups)
             kept_by_source = dict(
                 db.execute(
                     "SELECT source, COUNT(*) FROM docs WHERE dropped IS NULL GROUP BY source"

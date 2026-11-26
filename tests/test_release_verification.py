@@ -145,6 +145,10 @@ def _raw_digest(rows):
     rows[0]["raw_sha256"] = "0" * 64
 
 
+def _raw_offset(rows):
+    rows[0]["byte_start"] += 1
+
+
 def _self_duplicate(rows):
     rows[0]["drop_reason"] = "duplicate"
 
@@ -207,6 +211,10 @@ FORGERIES = {
     "span cites different raw bytes": (
         _spans(_raw_digest),
         "document snapshot span mismatch",
+    ),
+    "span shifts the pinned byte range": (
+        _spans(_raw_offset),
+        "document raw byte range mismatch",
     ),
     "lineage disagrees with its document": (
         _lineage(_wrong_split),
@@ -409,10 +417,19 @@ def test_interrupted_source_replay_reuses_only_unchanged_checks(
     monkeypatch.setattr(release_module, "INVENTORY_RECEIPT_MIN_BYTES", 0)
     replay = release_module._raw_group
     record = release_receipt.record
+    open_file = Path.open
+    release_payloads = {release / name for name in ("documents.jsonl", "spans.jsonl")}
     replayed = []
 
+    def prohibit_payload_reread(path, *args, **kwargs):
+        if path in release_payloads:
+            pytest.fail("raw-source replay reread a checked release payload")
+        return open_file(path, *args, **kwargs)
+
     def observe_replay(*args):
-        result = replay(*args)
+        with monkeypatch.context() as source_only:
+            source_only.setattr(Path, "open", prohibit_payload_reread)
+            result = replay(*args)
         replayed.append(result[:2])
         return result
 

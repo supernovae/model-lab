@@ -420,7 +420,9 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         indexes = {row["id"]: row for row in verify["row_indexes"]}
         assert indexes["documents"]["action"] == "run"
         assert indexes["spans"]["action"] == "verify_candidate"
-        assert indexes["spans"]["verification_candidate_bytes"] == spans.stat().st_size
+        assert indexes["spans"]["verification_candidate_bytes"] == sum(
+            index.stat().st_size for index in spans.parent.glob("*.sqlite")
+        )
         with monkeypatch.context() as stop:
             stop.setattr(release_module, "_span_rows", reran)
             stop.setattr(release_module, "_replay_sources", interrupted)
