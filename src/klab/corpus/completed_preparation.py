@@ -528,7 +528,7 @@ def verify_completed_build(path, manifest=None):
 
 
 def verify_completed_release(path, manifest, *, expected_id=None):
-    from klab.corpus.release import _files, _manifest_payload
+    from klab.corpus.release import _files, release_manifest_payload
 
     path = Path(path).resolve()
     payload = {key: value for key, value in manifest.items() if key != "release_id"}
@@ -537,7 +537,7 @@ def verify_completed_release(path, manifest, *, expected_id=None):
         raise ValueError("invalid completed local release identity")
     build_path = path.parent.parent / "builds" / manifest["build_id"]
     build = verify_completed_build(build_path)
-    if payload != _manifest_payload(build):
+    if payload != release_manifest_payload(build):
         raise ValueError("local release differs from completed native build")
     root = corpus_work_root(path)
     cache = InspectionCache(root)

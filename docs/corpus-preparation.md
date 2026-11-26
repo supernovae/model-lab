@@ -739,6 +739,35 @@ the first move took 0.35 ms and preserved the inode. First reuse took
 These measurements cover the stage publication step. Build, full release
 verification and production storage were outside the benchmark.
 
+Inspect an existing ordinary build's freeze plan with:
+
+```sh
+klab --work-dir WORK corpus plan --build BUILD --share-stage-artifacts --json
+```
+
+The freeze plan reports the release ID, the dependency order and whether
+the build is ready to freeze, was interrupted during publication, or already
+has a published release. It checks member locations and sizes. For shared
+stages, it counts new store bytes, existing candidate bytes and duplicate
+staging bytes by their planned actions. Omit `--share-stage-artifacts` to plan
+inline publication. A retry must match the interrupted placement.
+
+Publication uses same-filesystem moves with zero payload-copy bytes. The
+plan opens metadata only. Freeze authenticates the payloads and resolves
+verification work and scratch, which the plan leaves unestimated. This plan
+covers ordinary builds. Completed local preparation uses its dedicated
+retained-release command option.
+
+Three synthetic Linux tmpfs plans per size inspected 4 MiB sparse stage
+files, with half of the digests already present in the shared store. The
+largest plan accounted for 4.29 GB of logical build payloads.
+
+| Stage members | Median wall time | Process reads |
+| ---: | ---: | ---: |
+| 4 | 0.53 ms | 1.16 KB |
+| 128 | 7.31 ms | 28.24 KB |
+| 1,024 | 54.96 ms | 225.41 KB |
+
 Run `plan` to see the local acquisition pins, eligible source partitions,
 candidate normalized cache hits and the source bytes that would need
 normalization if a new native disk build runs. A missing lock reports

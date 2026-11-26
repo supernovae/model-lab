@@ -2301,9 +2301,15 @@ def _verify_build_cold(
     return manifest
 
 
-def _manifest_payload(
+def release_manifest_payload(
     build: dict[str, Any], *, share_stage_artifacts: bool = False
 ) -> dict[str, Any]:
+    """Resolve the ordinary freeze payload before computing the release identity."""
+    if share_stage_artifacts:
+        from klab.corpus.preparation_inputs import local_scope
+
+        if local_scope(build) is not None:
+            raise ValueError("shared stages require an ordinary Corpus build")
     files = {key: value for key, value in build["files"].items() if key != "build.json"}
     if share_stage_artifacts:
         for stage in build["stages"]:
@@ -2386,6 +2392,11 @@ def _freeze(
         if not staging.exists()
         else _resume_source(staging, build_dir)
     )
+    prospective = (
+        release_manifest_payload(manifest, share_stage_artifacts=True)
+        if share_stage_artifacts
+        else None
+    )
     if staging.exists():
         return _publish(
             staging,
@@ -2398,13 +2409,7 @@ def _freeze(
             share_stage_artifacts=share_stage_artifacts,
         )
     if (released := consumed_release(build_dir)) is not None:
-        if (
-            share_stage_artifacts
-            and canonical_digest(
-                _manifest_payload(manifest, share_stage_artifacts=True)
-            )
-            != released
-        ):
+        if share_stage_artifacts and canonical_digest(prospective) != released:
             raise ValueError("build was already frozen with different stage placement")
         destination = releases / released
         verify_release(
@@ -2429,7 +2434,9 @@ def _freeze(
                 ):
                     raise ValueError(f"selected {view}/{split} training view is empty")
     require_estimated_supply(_load(build_dir / "report.json"))
-    payload = _manifest_payload(build, share_stage_artifacts=share_stage_artifacts)
+    payload = release_manifest_payload(
+        build, share_stage_artifacts=share_stage_artifacts
+    )
     release_id = canonical_digest(payload)
     destination = releases / release_id
     shared_stage_members(destination, payload["files"])
@@ -2483,7 +2490,9 @@ def _publish(
     from klab.result_publication import sync_directory
     from klab.safe_io import rename_noreplace
 
-    payload = _manifest_payload(build, share_stage_artifacts=share_stage_artifacts)
+    payload = release_manifest_payload(
+        build, share_stage_artifacts=share_stage_artifacts
+    )
     release_id = canonical_digest(payload)
     destination = releases / release_id
     if destination.exists():

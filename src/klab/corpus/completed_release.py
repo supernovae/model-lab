@@ -187,14 +187,14 @@ def _publish_metadata(path, value, root):
 
 
 def freeze_retained(path, work_root):
-    from klab.corpus.release import _manifest_payload
+    from klab.corpus.release import release_manifest_payload
 
     path = Path(path).resolve(strict=True)
     root = corpus_work_root(path)
     if root != Path(work_root).resolve(strict=True):
         raise ValueError("retained release must stay in its owned corpus work root")
     build, evidence = retained_payload(path)
-    payload = _manifest_payload(build)
+    payload = release_manifest_payload(build)
     release_id = canonical_digest(payload)
     evidence = {**evidence, "release_id": release_id}
     # No payload inode, filename, timestamp or historical proof is modified.
@@ -210,13 +210,13 @@ def freeze_retained(path, work_root):
 
 
 def verify_retained_release(path, manifest=None, *, expected_id=None):
-    from klab.corpus.release import _manifest_payload
+    from klab.corpus.release import release_manifest_payload
 
     path = Path(path).resolve(strict=True)
     root = corpus_work_root(path)
     manifest = manifest or json.loads(_small(path / "manifest.json", root))
     build, evidence = retained_payload(path)
-    payload = _manifest_payload(build)
+    payload = release_manifest_payload(build)
     release_id = canonical_digest(payload)
     if (
         not in_place(path, manifest)
