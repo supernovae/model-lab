@@ -688,7 +688,10 @@ splits.
   example `{cosmopedia_shard: [prompt]}`) without reacquiring it. Rows missing
   those values cannot enter training splits.
 - **`prior_family_inventory`** adds a new release while keeping an earlier
-  release's family assignments fixed.
+  release's family assignments fixed. In the ordinary route, the inventory
+  streams alongside the verified documents and checks its exact file digest
+  during parsing. A reordered suffix uses a compact disk index. The completed
+  preparation route uses the authenticated retained inventory member.
 - **Output.** The splits YAML points to a digest-named
   `assignments-DIGEST.jsonl` companion; keep the two together. Exact content
   that would cross splits, or a family spanning strata, is refused.
@@ -698,6 +701,15 @@ splits.
 - **`--reuse-completed-preparation`** freezes from an already completed local
   inventory and admission without repeating source verification. The receipt
   records which checks were deferred.
+
+On a synthetic Linux tmpfs workload with 100,000 ordered prior documents
+and about 1 KiB of text per document, the ordinary prior join took 1.659 s
+after release verification, down from 3.545 s. Logical process reads fell
+from 747.47 MB to 138.72 MB and the operation database from 512.11 MB to
+36.54 MB. Peak RSS stayed near 61–62 MiB. These are medians of three runs
+against #652. The family, stratum and content binding digests matched.
+This comparison excludes cold verification, reordered inventories and
+production storage.
 
 ## Build and freeze
 
@@ -2378,9 +2390,14 @@ klab corpus audit-protected-lineage --prior-release PRIOR --candidate-release RE
   verified release (`document_id`, `family_id`, `split`, `stratum`,
   `content_sha256`) from the reviewed, frozen splits it was built with. For a
   release built with declared splits use `derive-family-inventory` (see
-  [Materialize a mixture](#materialize-a-mixture)); `finalize-family-inventory`
-  refuses it. It refuses a split
-  file that differs from the release's and never overwrites an output.
+  [Materialize a mixture](#materialize-a-mixture)). Finalization resolves its
+  inputs through the verified release and checks their generation before
+  publishing. It reuses the family inventory from an authenticated completed
+  build and refuses mismatched split evidence or an existing output.
+  Upgrading across a split producer change restarts unfinished merge
+  checkpoints. Completed-preparation releases that require the current
+  producer must be rebuilt. The retained-release route can authenticate
+  unchanged historical execution through its existing evidence.
 - **`audit-protected-lineage`** verifies both releases and both inventories.
   The profile (`loss_slices`) and suite (`items`, `chunks`) name the protected
   validation and test documents and must be bound to the prior release and

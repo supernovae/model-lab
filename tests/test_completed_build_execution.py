@@ -1,6 +1,7 @@
 """Tiny real-file exercise of retained build recovery after a closed job."""
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,8 @@ import yaml
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.admission_inspection_cache import capture
 from klab.corpus.completed_release import freeze_retained, verify_retained_release
-from klab.corpus.project import ProjectConfig
+from klab.corpus.project import ProjectConfig, SplitDeclaration
+from klab.corpus.split_freeze import finalize_family_inventory
 from klab.corpus.split_runs import SplitStages
 from klab.training.manifest import sha256_file
 
@@ -37,6 +39,17 @@ def test_retained_build_recovers_from_closed_execution(tmp_path, monkeypatch):
     for file in scientific:
         file.write_text("{}\n")
         file.chmod(0o600)
+    splits = scientific[2]
+    split = SplitDeclaration(
+        schema_version=1, unit="document", assignments={"doc": "test"}
+    )
+    splits.write_text(yaml.safe_dump(split.model_dump(mode="json")))
+    split_receipt = splits.with_suffix(".receipt.json")
+    split_receipt.write_bytes(
+        canonical_json(
+            {"split_sha256": sha256_file(splits), "family_candidate_sha256": "a" * 64}
+        )
+    )
     project = root / "project.yaml"
     config_data = {
         "schema_version": 1,
@@ -67,19 +80,39 @@ def test_retained_build_recovers_from_closed_execution(tmp_path, monkeypatch):
     request = {
         "producer": producer,
         "project": {"root": str(root), "config": config},
-        "inputs": capture([project, *scientific]),
+        "inputs": capture([project, *scientific, split_receipt]),
     }
     scope = {
         "policy": "completed_local_preparation",
         "request": request,
         "source_bindings": capture([scientific[0]]),
     }
-    identity = {"project_id": "tiny", "completed_preparation": scope}
+    identity = {
+        "project_id": "tiny",
+        "completed_preparation": scope,
+        "split": split.model_dump(mode="json"),
+    }
     build_id = canonical_digest(identity)
     build = root / "corpora/tiny/builds" / build_id
     build.mkdir(parents=True)
     data = build / "documents.jsonl"
     data.write_text('{"text":"example"}\n')
+    family = build / "family-inventory.jsonl"
+    family.write_bytes(
+        canonical_json(
+            {
+                "document_id": "doc",
+                "family_id": "family",
+                "split": "test",
+                "stratum": "reference",
+                "content_sha256": "b" * 64,
+            }
+        )
+        + b"\n"
+    )
+    report = build / "report.json"
+    report.write_bytes(canonical_json({"kept_document_count": 1, "document_count": 1}))
+    outputs = (data, family, report)
     build_json = build / "build.json"
     manifest = {
         "build_id": build_id,
@@ -87,7 +120,8 @@ def test_retained_build_recovers_from_closed_execution(tmp_path, monkeypatch):
         "stages": [],
         "snapshots": [],
         "files": {
-            data.name: {"size": data.stat().st_size, "sha256": sha256_file(data)}
+            path.name: {"size": path.stat().st_size, "sha256": sha256_file(path)}
+            for path in outputs
         },
     }
     build_json.write_bytes(canonical_json(manifest) + b"\n")
@@ -97,7 +131,7 @@ def test_retained_build_recovers_from_closed_execution(tmp_path, monkeypatch):
         lambda _: {
             "files": [
                 {"path": str(p), "bytes": p.stat().st_size, "sha256": sha256_file(p)}
-                for p in (data, build_json)
+                for p in (*outputs, build_json)
             ],
             "build_path": str(build),
             "build_id": build_id,
@@ -263,6 +297,25 @@ def test_retained_build_recovers_from_closed_execution(tmp_path, monkeypatch):
     publication = json.loads((build / "release-publication.json").read_text())
     assert publication["declared_revision"] == rev
     assert "producer_revision" not in publication
+
+    finalized = root / "exported-family-inventory.jsonl"
+    result = finalize_family_inventory(build, splits, finalized)
+    assert result["kept_documents"] == 1
+    assert finalized.read_bytes() == family.read_bytes()
+    assert sha256_file(finalized) == result["sha256"]
+
+    copy = shutil.copyfileobj
+
+    def change_receipt_after_copy(source, destination):
+        copy(source, destination)
+        split_receipt.write_bytes(split_receipt.read_bytes())
+
+    interrupted = root / "changed-family-inventory.jsonl"
+    with monkeypatch.context() as fault:
+        fault.setattr(shutil, "copyfileobj", change_receipt_after_copy)
+        with pytest.raises(ValueError, match="inputs changed"):
+            finalize_family_inventory(build, splits, interrupted)
+    assert not interrupted.exists()
 
     scientific[0].write_text("changed\n")
     with pytest.raises(ValueError):

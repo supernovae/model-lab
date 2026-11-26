@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,8 +16,25 @@ from klab.canonical import canonical_json
 from klab.corpus import split_freeze
 from klab.corpus.mixture_index import MixtureIndex
 from klab.corpus.project import SplitDeclaration
+from klab.corpus.release import ReleaseReader
+from klab.corpus.release_receipt import fingerprint
 from klab.corpus.view_checkpoints import ViewCheckpoints
 from klab.training.manifest import sha256_file
+
+
+def _verified_documents(monkeypatch, release, *, split=None):
+    manifest = {
+        "release_id": release.name,
+        "build_identity": {"split": split},
+        "files": {"documents.jsonl": {}},
+        "snapshots": [],
+    }
+    (release / "manifest.json").write_bytes(canonical_json(manifest))
+    monkeypatch.setattr(
+        split_freeze,
+        "open_release",
+        lambda path, **_: nullcontext(ReleaseReader(path, manifest, fingerprint(path))),
+    )
 
 
 def _assignments(path):
@@ -242,11 +260,7 @@ def test_freeze_splits_preserves_authenticated_prior_families_with_new_document_
         "release_path": str(release),
     }
     clusters_path.write_bytes(canonical_json(clusters))
-    monkeypatch.setattr(
-        split_freeze,
-        "verify_release",
-        lambda *a, **kw: {"release_id": release.name},
-    )
+    _verified_documents(monkeypatch, release)
     output = tmp_path / "preserved.yaml"
     report = split_freeze.freeze_splits(
         project, tmp_path, inventory, clusters_path, output
@@ -262,16 +276,20 @@ def test_prior_family_inventory_changed_bytes_fail_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project, inventory, clusters_path, _, _ = _fixture(tmp_path, monkeypatch)
+    release = tmp_path / ("a" * 64)
+    release.mkdir()
+    _verified_documents(monkeypatch, release)
+    (release / "documents.jsonl").touch()
     prior = tmp_path / "prior.jsonl"
-    prior.write_text("{}\n")
+    prior.write_bytes(b"\n")
     clusters = json.loads(clusters_path.read_text())
     clusters["prior_family_inventory"] = {
         "path": str(prior),
-        "sha256": "0" * 64,
-        "release_path": str(tmp_path / ("a" * 64)),
+        "sha256": hashlib.sha256(b"").hexdigest(),
+        "release_path": str(release),
     }
     clusters_path.write_bytes(canonical_json(clusters))
-    with pytest.raises(ValueError, match="digest mismatch"):
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
         split_freeze.freeze_splits(
             project, tmp_path, inventory, clusters_path, tmp_path / "rejected.yaml"
         )
@@ -323,11 +341,7 @@ def test_prior_content_cannot_be_renamed_into_another_family(
         }
     ]
     clusters_path.write_bytes(canonical_json(clusters))
-    monkeypatch.setattr(
-        split_freeze,
-        "verify_release",
-        lambda *a, **kw: {"release_id": release.name},
-    )
+    _verified_documents(monkeypatch, release)
     with pytest.raises(ValueError, match="changed reviewed family"):
         split_freeze.freeze_splits(
             project, tmp_path, inventory, clusters_path, tmp_path / "rejected.yaml"
@@ -392,11 +406,7 @@ def test_exact_content_alias_uses_accepted_family_id_and_held_out_split(
         }
     ]
     clusters_path.write_bytes(canonical_json(clusters))
-    monkeypatch.setattr(
-        split_freeze,
-        "verify_release",
-        lambda *a, **kw: {"release_id": release.name},
-    )
+    _verified_documents(monkeypatch, release)
     output = tmp_path / "aliases-preserved.yaml"
     report = split_freeze.freeze_splits(
         project, tmp_path, inventory, clusters_path, output
@@ -448,16 +458,9 @@ def test_finalized_family_inventory_matches_kept_release_documents(
     (release / "documents.jsonl").write_bytes(
         b"".join(canonical_json(row) + b"\n" for row in documents.values())
     )
-    verified = []
-
-    def verify(path):
-        verified.append(path)
-        return {
-            "release_id": "fixture-release",
-            "build_identity": {"split": yaml.safe_load(split_path.read_text())},
-        }
-
-    monkeypatch.setattr(split_freeze, "verify_release", verify)
+    _verified_documents(
+        monkeypatch, release, split=yaml.safe_load(split_path.read_text())
+    )
     final = tmp_path / "final-family-inventory.jsonl"
     commit = ViewCheckpoints.commit
     committed = []
@@ -484,7 +487,6 @@ def test_finalized_family_inventory_matches_kept_release_documents(
     with monkeypatch.context() as resumed:
         resumed.setattr(split_freeze, "iter_jsonl_records", check_seek)
         result = split_freeze.finalize_family_inventory(release, split_path, final)
-    assert verified == [release, release]
     assert final.read_bytes() == b"".join(
         canonical_json(row) + b"\n" for row in candidates[1:]
     )

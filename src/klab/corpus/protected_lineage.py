@@ -4,92 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
-import tempfile
-from collections.abc import Iterator
-from contextlib import closing
 from itertools import chain
 from pathlib import Path
 from typing import Any
 
-from klab.corpus.jsonl_records import records_from_path
+from klab.corpus.family_inventory_rows import covered_family_rows
 from klab.corpus.release import ReleaseReader, open_release
-from klab.corpus.release_verify import scratch_root
-from klab.corpus.row_index import RowIndex
 from klab.corpus.shards import range_file_identity
 from klab.result_publication import publish_immutable
 from klab.training.manifest import sha256_file
-
-_FIELDS = {"document_id", "family_id", "split", "stratum", "content_sha256"}
-_MISMATCH = "family inventory disagrees with verified release"
-
-
-def _inventory_rows(path: Path) -> Iterator[dict[str, str]]:
-    for parsed in records_from_path(path):
-        row = parsed.value
-        if (
-            not isinstance(row, dict)
-            or set(row) != _FIELDS
-            or not all(isinstance(value, str) for value in row.values())
-        ):
-            raise ValueError(_MISMATCH)
-        yield row
-
-
-def _check_row(doc: dict, row: dict[str, str] | None) -> dict[str, str]:
-    if (
-        row is None
-        or row["split"] != doc["split"]
-        or row["content_sha256"] != doc["content_sha256"]
-        or row["stratum"] not in doc["domains"]
-    ):
-        raise ValueError(_MISMATCH)
-    return row
-
-
-def _indexed_coverage(
-    docs: Iterator[dict], rows: Iterator[dict[str, str]]
-) -> Iterator[dict[str, str]]:
-    with (
-        tempfile.TemporaryDirectory(
-            prefix="protected-lineage-", dir=scratch_root()
-        ) as scratch,
-        closing(sqlite3.connect(Path(scratch) / "families.sqlite")) as db,
-    ):
-        db.execute("PRAGMA cache_size=-4096")
-        # The index is private and disposable. No transaction needs recovery.
-        db.execute("PRAGMA journal_mode=OFF")
-        index = RowIndex(
-            db, rows, key=lambda row: row["document_id"], duplicate=_MISMATCH
-        )
-        matched = 0
-        for doc in docs:
-            yield _check_row(doc, index.get(doc["document_id"]))
-            matched += 1
-        # Any extra row, including a repeat of a matched prefix ID, remains unmatched.
-        if matched != len(index):
-            raise ValueError("family inventory does not cover kept release documents")
-
-
-def _covered_rows(release: ReleaseReader, path: Path) -> Iterator[dict[str, str]]:
-    """Stream the inventories Lab writes in document order; index a reordered tail."""
-    with (
-        closing(release.rows("documents.jsonl")) as documents,
-        closing(_inventory_rows(path)) as rows,
-    ):
-        docs = (doc for doc in documents if doc["drop_reason"] is None)
-        for doc in docs:
-            row = next(rows, None)
-            if row is None:
-                raise ValueError(
-                    "family inventory does not cover kept release documents"
-                )
-            if row["document_id"] != doc["document_id"]:
-                yield from _indexed_coverage(chain((doc,), docs), chain((row,), rows))
-                return
-            yield _check_row(doc, row)
-        if next(rows, None) is not None:
-            raise ValueError("family inventory does not cover kept release documents")
 
 
 def audit_protected_lineage(
@@ -154,7 +77,7 @@ def _audit(
         protected_ids.update(item["parent_document_ids"] or ())
     protected = {
         row["document_id"]: row
-        for row in _covered_rows(prior, prior_inventory)
+        for row in covered_family_rows(prior, prior_inventory)
         if row["document_id"] in protected_ids
     }
     _check_protected_documents(protected, profile, suite)
@@ -164,7 +87,7 @@ def _audit(
     content_collisions: set[str] = set()
     assignments: dict[str, tuple[str, str, str]] = {}
     multiple_assignments: set[str] = set()
-    for row in _covered_rows(candidate, candidate_inventory):
+    for row in covered_family_rows(candidate, candidate_inventory):
         family, content, split = row["family_id"], row["content_sha256"], row["split"]
         if split == "train" and family in protected_families:
             family_collisions.add(family)
