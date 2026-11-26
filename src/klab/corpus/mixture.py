@@ -35,6 +35,7 @@ from klab.corpus.mixture_index import (
 )
 from klab.corpus.mixture_schedule import (
     TRAIN_SCHEDULE,
+    VerifiedSchedule,
     token_cache_root,
     verify_schedule,
     write_schedule,
@@ -1318,6 +1319,26 @@ def verify_mixture(
     declaration: Path, output: Path, *, audit: bool = False, reseal: bool = False
 ) -> dict:
     """Authenticate completed execution; replay only for an explicit audit."""
+    return _verify_or_reseal(declaration, output, audit=audit, reseal=reseal)[0]
+
+
+def inspect_mixture_transfer(
+    declaration: Path, output: Path, *, audit: bool = False, reseal: bool = False
+) -> tuple[dict, dict]:
+    """Inspect which physical token ranges an authenticated mixture uses."""
+    from klab.corpus.mixture_transfer import plan_transfer
+
+    receipt, schedule = _verify_or_reseal(
+        declaration, output, audit=audit, reseal=reseal
+    )
+    if schedule is None:
+        raise ValueError("transfer inspection requires a reference mixture schedule")
+    return receipt, plan_transfer(schedule)
+
+
+def _verify_or_reseal(
+    declaration: Path, output: Path, *, audit: bool, reseal: bool
+) -> tuple[dict, VerifiedSchedule | None]:
     if audit and reseal:
         raise ValueError("--audit replays the mixture; --reseal never does")
     # One operation, so the release and export are authenticated once, however
@@ -1325,7 +1346,7 @@ def verify_mixture(
     with _verification_operation():
         if reseal:
             return _reseal_mixture(declaration, output.resolve())
-        return _verify_mixture(declaration, output, audit=audit)[0]
+        return _verify_mixture(declaration, output, audit=audit)
 
 
 def mixture_train_file(receipt: dict) -> str:
@@ -1356,7 +1377,9 @@ def _reference_schedule(spec, output, receipt, tokenizer, tokenizer_sha):
 _DIGEST_CHUNK = 16 * 1024 * 1024
 
 
-def _reseal_mixture(declaration: Path, output: Path) -> dict:
+def _reseal_mixture(
+    declaration: Path, output: Path
+) -> tuple[dict, VerifiedSchedule | None]:
     """Re-record completion for an output a builder already sealed, without replay.
 
     Proves the files are byte-identical to the receipt and that the receipt
@@ -1428,7 +1451,7 @@ def _reseal_mixture(declaration: Path, output: Path) -> dict:
         _seal_completed_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
     else:
         _seal_native_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
-    return receipt
+    return receipt, schedule
 
 
 def _verify_mixture(declaration: Path, output: Path, *, audit: bool):

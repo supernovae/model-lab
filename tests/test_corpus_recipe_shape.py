@@ -1042,9 +1042,17 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     assert lab.stderr.count("tokenizer sampling: rank histogram:") == 2
     assert "verified from the bytes" not in lab.stderr
     verified = lab.json(
-        "corpus", "verify-mixture", str(declaration), "--output", str(mixture)
+        "corpus",
+        "verify-mixture",
+        str(declaration),
+        "--output",
+        str(mixture),
+        "--inspect-transfer",
     )
     assert verified["status"] == "verified"
+    transfer = verified["transfer"]
+    assert transfer["segment_dtype"] == "uint16"
+    assert transfer["logical_target_bytes"] == 4 * sum(quotas.values())
     assert "tokenizer sampling" not in lab.stderr
     assert "verified from the bytes" not in lab.stderr
     scheduled = [
@@ -1200,6 +1208,12 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         if item.relative_path.startswith("assets/token-segments/")
     }
     assert segment_digests
+    assert transfer["whole_segments"]["bytes"] == sum(
+        item.size_bytes
+        for item in portable.files
+        if item.relative_path.startswith("assets/token-segments/")
+    )
+    assert transfer["selected_ranges"]["unique_token_bytes"] > 0
     assert not (dispatch / "assets/data/train.npy").exists()
     mixture.rename(tmp_path / "original-mixture")
     Path(prepared_manifest["train_reference"]["cache_root"]).rename(

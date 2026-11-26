@@ -153,6 +153,7 @@ def main():
     parser.add_argument("--loader-blocks", type=int, default=0)
     parser.add_argument("--loader-row-tokens", type=int, default=1024)
     parser.add_argument("--portable-segments", action="store_true")
+    parser.add_argument("--transfer-plan", action="store_true")
     args = parser.parse_args()
     if (
         not 1 <= args.workers <= 8
@@ -173,6 +174,8 @@ def main():
         parser.error("loader comparison requires reference token output")
     if args.portable_segments and args.token_output != "references":
         parser.error("portable segment packaging requires reference token output")
+    if args.transfer_plan and args.token_output != "references":
+        parser.error("transfer planning requires reference token output")
     # Affinity also bounds the baseline's default Rayon planner. Do this before
     # importing Lab or tokenizers; no nested BLAS/Rayon pool inherits more cores.
     if hasattr(os, "sched_getaffinity"):
@@ -404,6 +407,24 @@ def main():
             blocks=args.loader_blocks,
             seq_len=args.loader_row_tokens,
         )
+    if args.transfer_plan:
+        from klab.corpus.mixture_transfer import plan_transfer
+
+        process = psutil.Process()
+        io_counters = getattr(process, "io_counters", None)
+        before = io_counters() if io_counters is not None else None
+        started = time.monotonic()
+        with verification_settings(scratch_dir=root):
+            plan = plan_transfer(schedule)
+        elapsed = time.monotonic() - started
+        after = io_counters() if io_counters is not None else None
+        result["transfer_plan"] = {
+            **plan,
+            "seconds": elapsed,
+            "process_read_bytes": after.read_chars - before.read_chars
+            if after is not None
+            else None,
+        }
     if args.portable_segments:
         destination = root / "portable-segments"
         process = psutil.Process()
