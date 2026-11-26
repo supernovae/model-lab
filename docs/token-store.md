@@ -185,3 +185,8 @@ staged files and journal used 1.11 GB of logical space instead of 2.21 GB.
 Retry read about 1.11 GB from storage in both revisions, and storage writes
 fell from 1.11 GB to zero. Output digests matched. The experiment isolates
 checkpoint I/O. It excludes tokenization, real index events and training.
+
+On a rotational ZFS pool at 256 MiB of token payload, median fresh
+write-and-commit time fell from 4.017 s to 2.458 s and cached restore from
+1.817 s to 0.137 s across three trials. File-page advice did not evict the
+ZFS cache, so media-cold restore on rotational storage remains unmeasured.

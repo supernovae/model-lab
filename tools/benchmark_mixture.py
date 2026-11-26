@@ -45,7 +45,9 @@ def main():
     from tokenizers import Tokenizer, models, pre_tokenizers
 
     from klab.canonical import canonical_json
-    from klab.corpus.mixture import _schedule
+    from klab.corpus.mixture import _native_mixture_completion, _schedule
+    from klab.corpus.mixture_pipeline import MixtureFrontier, pipeline_request
+    from klab.corpus.release import ReleaseMembers
     from klab.corpus.release_verify import verification_settings
     from klab.corpus.retained_mixture import RetainedMixtureIndex
     from klab.corpus.split_runs import write_rows
@@ -152,6 +154,8 @@ def main():
     )
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     tokenizer_sha = hashlib.sha256(tokenizer.to_str().encode()).hexdigest()
+    members = ReleaseMembers(release, {"release_id": cohort["release_id"]})
+    declaration = b"synthetic benchmark"
     results = []
     for name in ("cold", "warm"):
         staging = root / name
@@ -163,46 +167,24 @@ def main():
             scratch, root, [cohort], 42, {"source": "general"}
         ) as index:
             indexed = time.monotonic()
-            # Same harness on baseline and candidate: include native durability
-            # when provided by that revision, without installing test packages.
-            import inspect
-
-            options = {}
-            if "frontier" in inspect.signature(_schedule).parameters:
-                from klab.corpus.mixture import _native_mixture_completion
-                from klab.corpus.mixture_pipeline import (
-                    MixtureFrontier,
-                    pipeline_request,
-                )
-
-                cache, request = _native_mixture_completion(
-                    spec,
-                    b"synthetic benchmark",
-                    staging,
-                    {"release_id": "a" * 64},
-                    tokenizer_sha,
-                )
-                options["frontier"] = MixtureFrontier(
-                    staging, cache, pipeline_request(request, index)
-                )
+            cache, request = _native_mixture_completion(
+                spec, declaration, staging, members.manifest, tokenizer_sha
+            )
+            frontier = MixtureFrontier(
+                root / f".{name}.assembly", cache, pipeline_request(request, index)
+            )
             with verification_settings(workers=args.workers):
                 receipt = _schedule(
                     spec,
-                    b"synthetic benchmark",
-                    release,
-                    {"release_id": "a" * 64},
+                    declaration,
+                    members,
                     tokenizer,
                     tokenizer_sha,
                     3,
                     index,
                     staging,
-                    **options,
+                    frontier=frontier,
                 )
-        progress_path = (
-            (root / ("." + name + ".assembly") / "progress.json")
-            if options
-            else staging / "progress.json"
-        )
         results.append(
             {
                 "cache": name,
@@ -214,9 +196,7 @@ def main():
                     sha256_file(staging / "train.records.jsonl"),
                 ],
                 "rss_bytes": psutil.Process().memory_info().rss,
-                "progress": json.loads(progress_path.read_bytes())
-                if progress_path.exists()
-                else None,
+                "progress": json.loads((frontier.root / "progress.json").read_bytes()),
             }
         )
     if (
