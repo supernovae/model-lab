@@ -2,14 +2,54 @@
 
 import json
 import sqlite3
+from collections import OrderedDict
 from collections.abc import Mapping, MutableMapping
 from uuid import uuid4
 
 from klab.canonical import canonical_json
-from klab.safe_io import database_byte_cap
+from klab.corpus.jsonl_records import iter_jsonl_records
+from klab.safe_io import database_byte_cap, read_file_range, symlinked
+from klab.verification_proofs import artifact_fingerprint
 
 
-class RowIndex(Mapping):
+class _KeyIndex(Mapping):
+    @staticmethod
+    def encode(key):
+        return canonical_json(key).decode("utf-8")
+
+    def __contains__(self, key):
+        return (
+            self.connection.execute(
+                f"SELECT 1 FROM {self.table} WHERE key=?", (self.encode(key),)
+            ).fetchone()
+            is not None
+        )
+
+    def __iter__(self):
+        for row in self.connection.execute(
+            f"SELECT key FROM {self.table} ORDER BY ordinal"
+        ):
+            key = json.loads(row[0])
+            yield tuple(key) if isinstance(key, list) else key
+
+    def __len__(self):
+        return self.connection.execute(f"SELECT COUNT(*) FROM {self.table}").fetchone()[
+            0
+        ]
+
+    def same_keys(self, other):
+        for left, right in ((self, other), (other, self)):
+            if (
+                self.connection.execute(
+                    f"SELECT key FROM {left.table} EXCEPT SELECT key FROM {right.table} LIMIT 1"
+                ).fetchone()
+                is not None
+            ):
+                return False
+        return True
+
+
+class RowIndex(_KeyIndex):
     """Point lookup and repeatable streaming iteration in the owned operation DB."""
 
     def __init__(
@@ -39,10 +79,6 @@ class RowIndex(Mapping):
         except sqlite3.IntegrityError as error:
             raise ValueError(duplicate) from error
 
-    @staticmethod
-    def encode(key):
-        return canonical_json(key).decode("utf-8")
-
     def __getitem__(self, key):
         row = self.connection.execute(
             f"SELECT payload FROM {self.table} WHERE key=?", (self.encode(key),)
@@ -50,18 +86,6 @@ class RowIndex(Mapping):
         if row is None:
             raise KeyError(key)
         return json.loads(row[0])
-
-    def __iter__(self):
-        for row in self.connection.execute(
-            f"SELECT key FROM {self.table} ORDER BY ordinal"
-        ):
-            key = json.loads(row[0])
-            yield tuple(key) if isinstance(key, list) else key
-
-    def __len__(self):
-        return self.connection.execute(f"SELECT COUNT(*) FROM {self.table}").fetchone()[
-            0
-        ]
 
     def values(self):
         for row in self.connection.execute(
@@ -75,22 +99,155 @@ class RowIndex(Mapping):
         ):
             yield json.loads(row[0])
 
-    def same_keys(self, other):
-        for left, right in ((self, other), (other, self)):
-            if (
-                self.connection.execute(
-                    f"SELECT key FROM {left.table} EXCEPT SELECT key FROM {right.table} LIMIT 1"
-                ).fetchone()
-                is not None
-            ):
-                return False
-        return True
+
+class EvidenceFiles:
+    """Operation-owned generations and a bounded pool for indexed JSONL reads."""
+
+    def __init__(self):
+        self.generations = {}
+        self.streams = OrderedDict()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, *_exc):
+        try:
+            if exc_type is None:
+                for path, generation in self.generations.items():
+                    if self._generation(path) != generation:
+                        raise ValueError(f"indexed evidence changed: {path}")
+        finally:
+            for stream in self.streams.values():
+                stream.close()
+            self.streams.clear()
+
+    @staticmethod
+    def _generation(path):
+        if symlinked(path) or not path.is_file():
+            raise ValueError(f"missing or unsafe evidence input: {path}")
+        return artifact_fingerprint(path)
+
+    def records(self, path):
+        if path not in self.generations:
+            self.generations[path] = self._generation(path)
+        with path.open("rb") as stream:
+            if artifact_fingerprint(stream.fileno()) != self.generations[path]:
+                raise ValueError(f"indexed evidence changed: {path}")
+            yield from iter_jsonl_records(stream, source=str(path))
+
+    def row(self, path, offset, size):
+        if path not in self.streams:
+            if len(self.streams) == 32:
+                self.streams.popitem(last=False)[1].close()
+            stream = path.open("rb")
+            if artifact_fingerprint(stream.fileno()) != self.generations[path]:
+                stream.close()
+                raise ValueError(f"indexed evidence changed: {path}")
+            self.streams[path] = stream
+        self.streams.move_to_end(path)
+        raw = read_file_range(self.streams[path], offset, size)
+        return json.loads(raw.decode("utf-8"))
+
+
+class FileRowIndex(_KeyIndex):
+    """Keys and byte ranges into generation-bound files, with optional metadata."""
+
+    def __init__(
+        self,
+        connection,
+        files,
+        paths,
+        key,
+        *,
+        duplicate="duplicate evidence identity",
+        order=None,
+        projection=None,
+    ):
+        self.connection = connection
+        self.files = files
+        self.paths = tuple(paths.values())
+        self.table = "evidence_" + uuid4().hex
+        self.last = None
+        connection.execute(
+            f"CREATE TABLE {self.table}(key TEXT PRIMARY KEY, ordinal INTEGER UNIQUE, "
+            "member INTEGER, byte_offset INTEGER, byte_length INTEGER, "
+            "order_name TEXT, order_position INTEGER, metadata BLOB) WITHOUT ROWID"
+        )
+
+        def references():
+            ordinal = 0
+            for member, (label, path) in enumerate(paths.items()):
+                for record in files.records(path):
+                    row = record.value
+                    row_key = key(label, row)
+                    if row_key is None:
+                        continue
+                    # Preserve the payload store's refusal of values that cannot
+                    # be represented by canonical, finite UTF-8 JSON.
+                    canonical_json(row)
+                    name, position = order(row) if order is not None else (None, None)
+                    yield (
+                        self.encode(row_key),
+                        ordinal,
+                        member,
+                        record.byte_offset,
+                        len(record.raw),
+                        name,
+                        position,
+                        canonical_json(projection(row))
+                        if projection is not None
+                        else None,
+                    )
+                    ordinal += 1
+
+        try:
+            with database_byte_cap("evidence database byte cap exceeded"):
+                connection.executemany(
+                    f"INSERT INTO {self.table} VALUES (?,?,?,?,?,?,?,?)", references()
+                )
+        except sqlite3.IntegrityError as error:
+            raise ValueError(duplicate) from error
+
+    def _row(self, member, offset, size):
+        return self.files.row(self.paths[member], offset, size)
+
+    def __getitem__(self, key):
+        encoded = self.encode(key)
+        if self.last is not None and self.last[0] == encoded:
+            return self.last[1]
+        reference = self.connection.execute(
+            f"SELECT member,byte_offset,byte_length FROM {self.table} WHERE key=?",
+            (encoded,),
+        ).fetchone()
+        if reference is None:
+            raise KeyError(key)
+        row = self._row(*reference)
+        # Consecutive lineage checks reuse one record without retaining wide rows.
+        self.last = (encoded, row) if reference[-1] <= 1024**2 else None
+        return row
+
+    def metadata(self, key):
+        row = self.connection.execute(
+            f"SELECT metadata FROM {self.table} WHERE key=?", (self.encode(key),)
+        ).fetchone()
+        if row is None:
+            raise KeyError(key)
+        return json.loads(row[0])
+
+    def metadata_rows(self):
+        for (metadata,) in self.connection.execute(
+            f"SELECT metadata FROM {self.table} ORDER BY ordinal"
+        ):
+            yield json.loads(metadata)
 
     def source_order(self, spans):
+        """Sort only locators and join the matching input ranges once."""
         for row in self.connection.execute(
-            f"SELECT d.payload FROM {self.table} d JOIN {spans.table} s ON d.key=s.key ORDER BY json_extract(d.payload,'$.source_id'),json_extract(s.payload,'$.raw_path'),json_extract(s.payload,'$.line_start'),d.ordinal"
+            f"SELECT d.member,d.byte_offset,d.byte_length,s.member,s.byte_offset,s.byte_length "
+            f"FROM {self.table} d JOIN {spans.table} s ON d.key=s.key "
+            "ORDER BY d.order_name,s.order_name,s.order_position,d.ordinal"
         ):
-            yield json.loads(row[0])
+            yield self._row(*row[:3]), spans._row(*row[3:])
 
 
 class ValueMap(MutableMapping):
@@ -152,4 +309,4 @@ class ValueMap(MutableMapping):
             yield json.loads(row[0])
 
     def same_keys(self, other):
-        return RowIndex.same_keys(self, other)
+        return _KeyIndex.same_keys(self, other)

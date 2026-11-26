@@ -28,7 +28,7 @@ The [D1–D12 decision table](https://github.com/supernovae/model-lab/blob/b5302
 | 3. Tokenizer sampling | #494 and #499 landed range scans and seeded-hash sampling. Workshop #112 pins the sample seed. | Keep this path. Track fit and cold sample-verification costs separately from sample selection. |
 | 4. Acquisition parts | #456 landed the verified transport cache. Bounded Git, Hugging Face and PDF reuse verified parts. Archives and wiki dumps reuse pinned inputs and completed derivations. Indexed Wikimedia commits planning and extraction in groups. #601 adds exact-generation staging inspection and removal under the adapter lock. | Measure representative archive and partial-body replay, wider Wikimedia runs, and recovery on slower storage. |
 | 5. Narrow build | #486 checkpoints complete disk-build index and dedup stages. #488 landed the canary. #579 resumes native disk LM view emission from verified append boundaries. The native disk index references prepared payloads and checkpoints groups of prepared files. | Measure out-of-cache emission and the largest input group. Bound compact index assembly, dedup replay, report measurement and manifest hashing. Extend emission recovery to completed preparation. |
-| 6. Freeze and verification | #500–#502 landed signed receipt reuse, freeze by verified rename, and resumable describe measurement. Cold verification still performs full checks. Some LM and chat releases still use the row-store verifier. | Bound the remaining row-store paths, including reviewed admission and fractional releases. Separate integrity from transformation replay and sampled audits. |
+| 6. Freeze and verification | #500–#502 landed signed receipt reuse, freeze by verified rename, and resumable describe measurement. Cold verification still performs full checks. Reviewed, fractional and chat releases index file ranges and compact metadata for replay. | Extend checkpointing and measure out-of-cache replay for reviewed releases. Separate integrity from transformation replay and sampled audits. |
 | 7. Shared work area | `StageStore`, normalized shards, and token caches exist. Most source and build artifacts are still project-scoped. | Share immutable outputs across projects, narrow identities, and protect reference closure during explicit pruning. |
 | 8–9. Operators and sidecars | #448/#451 moved choice into recorded release policy. Exact deduplication and the approximate screen exist. The runner declares stages but there is no general typed operator registry or sidecar store. | Extract reusable evidence and make selection consume sidecars without rewriting source text. |
 | 10. Reference releases and mixtures | #503–#507 improved quota checks, mixture indexing, and the ordered writer. #519–#523 and #557 improved reuse and verification keys. `ContentTokens` holds reusable int32 encodings but is a recoverable append-only cache. Mixture preparation still makes a checked contiguous copy. | Make releases reference immutable artifacts, seal reusable token segments, and train from schedules over those segments. |
@@ -332,6 +332,12 @@ The checked document index clusters raw replay facts by source position.
 The build sorts narrow temporary records once, and repeated replay scans
 the resulting table in storage order. [Source-ordered replay measurements](../corpus-preparation.md#source-ordered-replay-index-measurements)
 include the cold scan, index construction and full audit trade-offs.
+Reviewed admission, fractional releases and chat use disposable indexes of
+file ranges and compact document metadata. Their source-order join sorts
+locators, then reads the verified payloads from their original members.
+Point lookups retain the full evidence semantics for generated records and
+citations. [Reviewed release range index measurements](../corpus-preparation.md#reviewed-release-range-index-measurements)
+cover cold and warm audits of two file-admitted release sizes.
 
 | Workload | Evidence |
 | --- | --- |

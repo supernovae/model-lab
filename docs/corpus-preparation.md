@@ -1747,10 +1747,13 @@ against the manifest. For stage outputs, the ordered replay computes the
 inventory checksum alongside the stage identity. It checks stage outputs,
 documents, spans, lineage and view rows against the pinned source snapshots.
 The verifier can run on several processes. Its disposable index keeps
-identities, digests and source offsets in place of document and span payloads. A
-language-model-only release with a reviewed admission or a `fraction`, and any
-release with chat views, still uses the row-store verifier, whose index can be as
-large as the release's documents.
+identities, digests and source offsets in place of document and span payloads.
+The verifier for reviewed admission, fractional selection and chat indexes
+keys and byte ranges into the verified release members. It holds compact
+document metadata for split and selected-view checks. Source replay sorts
+range references and reads the cited document and span together. Lineage,
+transform and chat checks read the full record where required. The indexed
+file generations must still match when verification completes.
 
 On the streaming LM path, receipt-backed verification with an owned
 `--scratch-dir` commits the narrow span and document indexes separately.
@@ -1774,10 +1777,12 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
 ```
 
 - **`--scratch-dir`** selects the verification index and progress journal
-  location. The default is the host temporary directory. Allow 2-3 times
-  the release size for a release that uses the row-store verifier and put
-  it on fast storage (NVMe). Disposable indexes are removed after
-  verification. A progress journal and checkpoints can survive a stop.
+  location. The default is the host temporary directory. Use fast storage
+  for indexes and sorts. Inspect previous scratch observations with
+  `corpus plan --build BUILD --inspect-verification`. Disposable indexes
+  are removed after verification. A progress journal and streaming LM
+  checkpoints can survive a stop. Reviewed, fractional and chat checks
+  rebuild their disposable indexes after an interruption.
 - **Scratch observations** in the progress journal report logical bytes and
   allocated bytes for named files in the row verification workspace. Samples
   occur at existing progress boundaries and once before cleanup. The final
@@ -2293,8 +2298,9 @@ documents, spans and rights evidence to their verified location and
 filesystem generation. A retry at that location resolves the checked
 row index and reuses matching source checks. The progress journal counts
 the size of each skipped raw file as reused bytes. Reviewed and chat
-releases still use the row-store verifier. An explicit cold audit replays
-all source files, and a stop within an uncommitted file repeats that file.
+releases verify source evidence as part of their indexed audit. An explicit
+cold audit replays all source files, and a stop within an uncommitted file
+repeats that file.
 
 On a synthetic NVMe fixture, one worker replayed 180,000 documents from
 two 352 MB JSONL source files with 820 MB of document rows and 93 MB of
@@ -2384,6 +2390,37 @@ scratch fell from 81.75 MB to 78.00 MB. Peak RSS rose from about 176 MiB
 to 190 MiB. Both revisions verified the same release ID. Production-size
 and media-cold rotational audits remain open.
 [#450](https://github.com/supernovae/model-lab/issues/450)
+
+#### Reviewed release range index measurements
+
+Three paired one-worker trials audited the same two synthetic file-admitted,
+frozen-split Markdown releases on NVMe. Cold trials requested input-cache
+eviction. Warm trials immediately repeated full verification from bytes.
+Each revision verified the same release ID. Scratch columns are sampled
+peak allocated bytes for named files.
+
+| Reviewed release | Cold audit before / after | Warm byte audit before / after | Named scratch before / after |
+| --- | ---: | ---: | ---: |
+| 25,000 documents, 160 MB of release members | 6.713 / 4.592 s | 6.721 / 4.521 s | 378.47 / 25.74 MB |
+| 10,000 wider documents, 277 MB of release members | 6.688 / 5.201 s | 6.425 / 5.072 s | 272.19 / 8.18 MB |
+
+For 25,000 documents, logical process reads fell from 2.35 GB to 788 MB
+and storage writes fell from 436 MB to 25.8 MB. For wider documents,
+logical reads fell from 2.31 GB to 1.16 GB and storage writes fell from
+370 MB to 8.26 MB. Cold storage reads stayed near 184 MB and 357 MB
+respectively. Median peak RSS across cold trials was about 88 MiB before
+and 87 MiB after for the 25,000-document release, and 83 MiB before and
+79 MiB after for the wider release.
+
+With the 25,000-document release and snapshots on NVMe and scratch on
+rotational ZFS, three paired cold-input trials took a median 7.441 s
+before and 4.922 s after. This measures slower scratch with NVMe
+inputs. Media-cold rotational input scans remain unmeasured.
+
+The indexed verifier still reads full evidence where the check requires
+it, including cited text and generated payloads. Raw replay retains
+its existing per-adapter reads. Production-sized and out-of-cache audits
+remain to be measured. [#450](https://github.com/supernovae/model-lab/issues/450)
 
 #### Describe link planning recovery measurements
 
