@@ -376,6 +376,25 @@ class _VerifiedArtifact:
 _MINTED_ARTIFACTS: weakref.WeakSet[_VerifiedArtifact] = weakref.WeakSet()
 
 
+def _retained_snapshot_parent(declaration: dict[str, Any]) -> Path | None:
+    subset = declaration.get("acquisition", {}).get("retained_subset")
+    if subset is None:
+        return None
+    from klab.corpus.project import RetainedSubset
+    from klab.safe_io import symlinked
+
+    reference = RetainedSubset.model_validate(subset)
+    parent = reference.snapshot_path
+    if (
+        parent.name != reference.snapshot_sha256
+        or ".." in parent.parts
+        or symlinked(parent)
+        or not parent.is_dir()
+    ):
+        raise ValueError(f"missing or unsafe retained parent snapshot: {parent}")
+    return parent
+
+
 def snapshot_dependencies(path: Path, manifest_name: str) -> tuple[Path, ...]:
     manifest = _json_file(path / manifest_name)
     from klab.corpus.preparation_inputs import (
@@ -390,19 +409,29 @@ def snapshot_dependencies(path: Path, manifest_name: str) -> tuple[Path, ...]:
             return (*dependencies, path.parent.parent / "builds" / manifest["build_id"])
         return dependencies
     _check_snapshot_paths(path, manifest)
-    return tuple(
+    snapshots = [
         path.parent.parent / "snapshots" / item["source_id"] / item["sha256"]
         for item in manifest["snapshots"]
-    )
+    ]
+    identity = manifest.get("build_identity", manifest.get("identity", {}))
+    sources = identity.get("sources", {})
+    # Cold replay needs the retained parent as well as the derived bytes.
+    # The build identity pins this declaration, so checking the dependency
+    # requires no additional read of each source's row-level manifest.
+    for item in manifest["snapshots"]:
+        parent = _retained_snapshot_parent(sources.get(item["source_id"], {}))
+        if parent is not None:
+            snapshots.append(parent)
+    return tuple(dict.fromkeys(snapshots))
 
 
 def _dependent_paths(artifact: Artifact, path: Path) -> tuple[Path, ...]:
     """Track external files read by domain verifiers alongside the artifact tree."""
     if artifact.kind == "source_snapshot":
         manifest = _json_file(path / "manifest.json")
-        retained = manifest["declaration"]["acquisition"].get("retained_subset")
-        if retained is not None:
-            return (Path(retained["snapshot_path"]),)
+        parent = _retained_snapshot_parent(manifest["declaration"])
+        if parent is not None:
+            return (parent,)
     if artifact.kind == "dataset_snapshot":
         # The manifest identity covers sibling split/exclusion/event payloads.
         # Include all of them in memo and persistent proof invalidation.

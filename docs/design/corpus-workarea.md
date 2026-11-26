@@ -241,6 +241,9 @@ and in-flight publication. Prune walks the full dependency closure, previews
 reclaimable paths and bytes, and uses the publisher's locks before removal.
 Keep acquired source data outside automatic cleanup. Validate the closure
 even when original project pointers have moved.
+Native build and release receipts already include the parent snapshot
+required to replay each declared retained subset. The dependency comes from
+the pinned source declaration in the build identity.
 
 | Workload | Evidence |
 | --- | --- |
