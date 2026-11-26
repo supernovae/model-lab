@@ -29,6 +29,21 @@ TEXTS = {
 }
 
 
+def _corpus_json(work, monkeypatch, capsys, *arguments, exit_code=0):
+    from klab.cli.main import main
+
+    monkeypatch.setattr(
+        sys, "argv", ["klab", "--work-dir", str(work), "corpus", *arguments, "--json"]
+    )
+    if exit_code:
+        with pytest.raises(SystemExit) as stopped:
+            main()
+        assert stopped.value.code == exit_code
+    else:
+        main()
+    return json.loads(capsys.readouterr().out)
+
+
 @pytest.fixture
 def prepared(tmp_path: Path) -> Iterator[tuple[Path, Path]]:
     original_umask = os.umask(0o077)
@@ -360,7 +375,6 @@ def test_release_manifest_names_its_files_and_not_the_build_file(
 def test_shared_releases_reuse_members_and_reject_drift(
     prepared: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    from klab.cli.main import main
     from klab.corpus import artifact_inventory
     from klab.training import manifest as file_manifest
 
@@ -380,20 +394,7 @@ def test_shared_releases_reuse_members_and_reject_drift(
     publish = release_module.publish_shared_members
 
     def query(*arguments):
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            [
-                "klab",
-                "--work-dir",
-                str(work),
-                "corpus",
-                *arguments,
-                "--json",
-            ],
-        )
-        main()
-        return json.loads(capsys.readouterr().out)
+        return _corpus_json(work, monkeypatch, capsys, *arguments)
 
     def inventory(*arguments):
         return query("artifacts", "--kind", "release-stages", *arguments)
@@ -581,3 +582,92 @@ def test_shared_releases_reuse_members_and_reject_drift(
     for released in (first, second):
         with pytest.raises(ValueError, match="stage output|stage receipt"):
             verify_release(released, **proof_options)
+
+
+def test_prune_protects_active_and_published_release_members(
+    prepared: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    from klab.corpus.release_members import (
+        SHARED_DOCUMENT,
+        shared_payload_lease,
+        shared_store,
+    )
+
+    build_dir, work = prepared
+    body = b"Unreferenced fixture payload.\n"
+    digest = hashlib.sha256(body).hexdigest()
+    store = shared_store(work, SHARED_DOCUMENT)
+    orphan = store / digest[:2] / digest
+    orphan.parent.mkdir(parents=True)
+    orphan.write_bytes(body)
+    live = sha256_file(build_dir / "documents.jsonl")
+    command = ("release-prune", "--kind", "release-documents", "--digest", digest)
+
+    def prune(*args, blocked=False):
+        return _corpus_json(
+            work, monkeypatch, capsys, *command, *args, exit_code=int(blocked)
+        )
+
+    preview = prune()
+    assert preview["status"] == "planned"
+    assert preview["payloads"][0]["action"] == "prune"
+    assert not (store.parent / ".release-retention.lock").exists()
+    assert orphan.exists()
+
+    publish = release_module.publish_shared_members
+
+    def stop_after_move(*args, **kwargs):
+        publish(*args, **kwargs)
+        busy = prune("--apply", blocked=True)
+        assert busy["status"] == "blocked" and not busy["pruned"]
+        raise InterruptedError("stopped after shared moves")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(release_module, "publish_shared_members", stop_after_move)
+        with pytest.raises(InterruptedError, match="stopped after shared moves"):
+            freeze(build_dir, work, share_document_artifacts=True)
+    pending = prune("--digest", live, "--apply", blocked=True)
+    protected = next(row for row in pending["payloads"] if row["artifact_id"] == live)
+    assert protected["staging_releases"] == 1
+    assert protected["action"] == "protected"
+    assert orphan.exists()
+
+    release = freeze(build_dir, work, share_document_artifacts=True)
+    published = prune("--digest", live, "--apply", blocked=True)
+    protected = next(row for row in published["payloads"] if row["artifact_id"] == live)
+    assert protected["published_releases"] == 1
+    assert orphan.exists()
+
+    # An older publisher may hold only the per-digest lock.
+    with shared_payload_lease(orphan):
+        assert prune("--apply", blocked=True)["status"] == "blocked"
+
+    unknown = release.parent / (".freezing-" + "e" * 64)
+    from klab.corpus import artifact_inventory
+
+    references = artifact_inventory._release_references
+
+    def change_after_mark(*args, **kwargs):
+        result = references(*args, **kwargs)
+        unknown.mkdir()
+        return result
+
+    try:
+        with monkeypatch.context() as race:
+            race.setattr(artifact_inventory, "_release_references", change_after_mark)
+            changing = prune("--apply", blocked=True)
+        assert not changing["payloads"]
+        assert any(
+            problem["reason"] == "changed_during_scan"
+            for problem in changing["problems"]
+        )
+        assert orphan.exists()
+    finally:
+        if unknown.exists():
+            unknown.rmdir()
+
+    removed = prune("--apply")
+    assert removed["pruned"] == [digest]
+    assert removed["pruned_bytes"] == len(body) and not orphan.exists()
+    assert prune("--apply")["payloads"][0]["action"] == "missing"
+    assert verify_release(release)["release_id"] == release.name

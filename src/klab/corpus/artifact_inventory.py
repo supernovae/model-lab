@@ -7,17 +7,25 @@ import os
 import re
 import stat
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from heapq import nsmallest
+from itertools import groupby
 from operator import itemgetter
 from pathlib import Path
 from typing import Any
 
 from klab.canonical import canonical_digest
 from klab.corpus.prepared_shards import normalized_store_root
-from klab.corpus.release_members import SHARED_STAGE, shared_members, shared_store
+from klab.corpus.release_members import (
+    SHARED_STAGE,
+    release_retention_lease,
+    shared_members,
+    shared_payload_lease,
+    shared_store,
+)
 from klab.safe_io import symlinked
+from klab.verification_proofs import ProofStore, writable_by_others
 
 _SOURCE = re.compile(r"[a-z][a-z0-9_-]*")
 _KEY = re.compile(r"[0-9a-f]{64}")
@@ -137,8 +145,9 @@ def _stamp(info: os.stat_result | None) -> tuple[int, ...] | None:
 
 
 class _RetentionScan:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, owned: bool = False) -> None:
         self.root = root
+        self.owned = owned
         self.observed: dict[Path, tuple[int, ...] | None] = {}
         self.problems: list[dict[str, str]] = []
         self.problem_count = 0
@@ -156,8 +165,21 @@ class _RetentionScan:
             info = path.lstat()
         except FileNotFoundError:
             info = None
-        self.observed[path] = _stamp(info)
+        self.observe(path, info)
         return info
+
+    def observe(self, path: Path, info: os.stat_result | None) -> None:
+        self.observed[path] = _stamp(info)
+        if (
+            self.owned
+            and info is not None
+            and (
+                info.st_uid != os.getuid()
+                or writable_by_others(info)
+                or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1)
+            )
+        ):
+            self.issue(path, "unowned_or_writable_by_others")
 
     def directory(self, path: Path) -> bool:
         info = self.watch(path)
@@ -190,14 +212,20 @@ class _ReleaseReferences:
 
 
 def _release_references(
-    scan: _RetentionScan, storage: str
+    scan: _RetentionScan, storage: str, *, digests: set[str] | None = None
 ) -> dict[str, _ReleaseReferences]:
     references: dict[str, _ReleaseReferences] = {}
     corpora = scan.root / "corpora"
     if not scan.directory(corpora):
+        if scan.owned:
+            scan.issue(corpora, "missing_corpus_roots")
         return references
     for project in corpora.iterdir():
-        if not _SOURCE.fullmatch(project.name) or not scan.directory(project):
+        if not _SOURCE.fullmatch(project.name):
+            if scan.owned and (project / "releases").exists():
+                scan.issue(project, "unrecognized_project_root")
+            continue
+        if not scan.directory(project):
             continue
         releases = project / "releases"
         if not scan.directory(releases):
@@ -206,6 +234,10 @@ def _release_references(
             staging = release.name.startswith(_FREEZING)
             key = release.name.removeprefix(_FREEZING)
             if not _KEY.fullmatch(key):
+                if scan.owned and (
+                    (release / "manifest.json").exists() or release.is_symlink()
+                ):
+                    scan.issue(release, "unrecognized_release_root")
                 continue
             if not scan.directory(release):
                 scan.issue(release, "missing_release_directory")
@@ -222,7 +254,10 @@ def _release_references(
                         info = os.fstat(stream.fileno())
                         if not stat.S_ISREG(info.st_mode):
                             raise ValueError("unsafe release manifest")
-                        scan.observed[path] = _stamp(info)
+                        previous = scan.problem_count
+                        scan.observe(path, info)
+                        if scan.problem_count != previous:
+                            continue
                         manifest = json.load(stream)
                 release_id = manifest.pop("release_id")
                 if (
@@ -260,6 +295,8 @@ def _release_references(
                 if files[name]["storage"] != storage:
                     continue
                 digest, size = member.name, files[name]["size"]
+                if digests is not None and digest not in digests:
+                    continue
                 reference = references.setdefault(digest, _ReleaseReferences(size))
                 if size != reference.size:
                     scan.issue(path, "inconsistent_reference_size")
@@ -379,4 +416,113 @@ def shared_release_inventory(
         else totals["unreferenced_payloads"],
         "payloads": page[:limit],
         "next_after": page[limit - 1]["artifact_id"] if len(page) > limit else None,
+    }
+
+
+def prune_shared_release_payloads(
+    work_root: Path, *, storage: str, digests: list[str], apply: bool = False
+) -> dict[str, Any]:
+    """Prune explicitly named digest files after checking the retained release roots."""
+    if not digests or any(not _KEY.fullmatch(digest) for digest in digests):
+        raise ValueError("prune requires full SHA-256 digests")
+    work_root = work_root.absolute()
+    store = shared_store(work_root, storage)
+    paths = {digest: store / digest[:2] / digest for digest in sorted(set(digests))}
+    rows: list[dict[str, Any]] = []
+    removed: list[str] = []
+    pruned_bytes = 0
+    result = {
+        "store": str(store),
+        "payloads": rows,
+        "pruned": removed,
+    }
+    try:
+        trust = ProofStore(work_root, read_only=True)
+        if not trust.trusted(work_root):
+            raise ValueError("shared release prune requires an owned work root")
+        if symlinked(store) or (store.exists() and not trust.trusted(store)):
+            raise ValueError("unsafe shared release store")
+        with ExitStack() as locks:
+            leased = set()
+            if apply:
+                locks.enter_context(release_retention_lease(work_root, prune=True))
+                for digest, path in paths.items():
+                    if path.exists():
+                        locks.enter_context(shared_payload_lease(path, wait=False))
+                        leased.add(digest)
+            scan = _RetentionScan(work_root, owned=True)
+            references = _release_references(scan, storage, digests=set(paths))
+            for digest, path in paths.items():
+                if symlinked(path):
+                    raise ValueError(f"unsafe shared payload: {path}")
+                info = scan.watch(path)
+                if info is not None and (
+                    not stat.S_ISREG(info.st_mode) or not trust.trusted(path)
+                ):
+                    raise ValueError(f"unsafe shared payload: {path}")
+                if apply and info is not None and digest not in leased:
+                    raise ValueError(f"payload appeared during prune: {digest}")
+                reference = references.get(digest)
+                rows.append(
+                    {
+                        "artifact_id": digest,
+                        "action": "protected"
+                        if reference
+                        else ("prune" if info else "missing"),
+                        "bytes": info.st_size if info else 0,
+                        "published_releases": reference.published if reference else 0,
+                        "staging_releases": reference.staging if reference else 0,
+                        "example_reference": reference.example if reference else None,
+                    }
+                )
+            scan.check_generations()
+            if scan.problem_count:
+                return {
+                    **result,
+                    "status": "blocked",
+                    "payloads": [],
+                    "reason": "release root scan was incomplete",
+                    "problems": scan.problems,
+                    "pruned_bytes": 0,
+                }
+            if not apply:
+                return {**result, "status": "planned", "pruned_bytes": 0}
+            if any(row["action"] == "protected" for row in rows):
+                raise ValueError(
+                    "requested payload is referenced by a retained or staged release"
+                )
+            candidates = [row for row in rows if row["action"] == "prune"]
+            if candidates:
+                with _directory(store) as namespace:
+                    for prefix, batch in groupby(
+                        candidates, key=lambda row: row["artifact_id"][:2]
+                    ):
+                        with _directory(prefix, parent=namespace) as shard:
+                            before = len(removed)
+                            try:
+                                for row in batch:
+                                    digest = row["artifact_id"]
+                                    info = os.stat(
+                                        digest, dir_fd=shard, follow_symlinks=False
+                                    )
+                                    if _stamp(info) != scan.observed[paths[digest]]:
+                                        raise ValueError(
+                                            f"payload changed during prune: {digest}"
+                                        )
+                                    os.unlink(digest, dir_fd=shard)
+                                    removed.append(digest)
+                                    pruned_bytes += row["bytes"]
+                            finally:
+                                if len(removed) != before:
+                                    os.fsync(shard)
+            return {**result, "status": "pruned", "pruned_bytes": pruned_bytes}
+    except BlockingIOError:
+        reason = "shared release publisher or prune holds a required lock"
+    except (OSError, ValueError) as error:
+        reason = str(error)
+    return {
+        **result,
+        "status": "partial" if removed else "blocked",
+        "reason": reason,
+        "pruned_bytes": pruned_bytes,
     }
