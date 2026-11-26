@@ -133,6 +133,28 @@ def prepare(
             next(row for row in retry_build["stages"] if row["id"] == "views")["action"]
             == "resume_candidate"
         )
+        reference_scan = ("corpus", "artifacts", "--build-references", "--json")
+        staged_build = lab.json(*reference_scan)
+        assert staged_build["scan_status"] == "complete"
+        assert staged_build["staging_build_manifests"] == 1
+        references = [
+            row for row in staged_build["partitions"] if row["staging_builds"]
+        ]
+        assert references and all(row["staging_builds"] == 1 for row in references)
+        assert all(row["published_builds"] == 0 for row in references)
+        control = lab.work / references[0]["example_build_reference"] / "build.json"
+        saved = control.with_name(".interrupted-build.json")
+        control.rename(saved)
+        try:
+            unsealed = lab.json(*reference_scan)
+            assert unsealed["scan_status"] == "incomplete"
+            assert any(
+                row["reason"] == "unsealed_build" for row in unsealed["problems"]
+            )
+            assert all(row["staging_builds"] is None for row in unsealed["partitions"])
+        finally:
+            saved.rename(control)
+
         build = Path(lab.run(*build_args))
         assert build.name == expected
         assert not (build / "spans.jsonl").exists()
@@ -147,6 +169,16 @@ def prepare(
         )
         assert span_step["action"] == "verify_build_reference"
         assert span_step["sha256"] == before
+        published_build = lab.json(*reference_scan)
+        assert published_build["scan_status"] == "complete"
+        assert published_build["staging_build_manifests"] == 0
+        published_references = {
+            row["artifact_id"]
+            for row in published_build["partitions"]
+            if row["published_builds"] == 1
+        }
+        assert len(published_references) == span_step["partitions"]
+        assert published_references == {row["artifact_id"] for row in references}
 
         def stop(source, destination):
             if source.name.startswith(".freezing-"):
@@ -167,14 +199,28 @@ def prepare(
             row for row in retry["shared_members"] if row["member"] == "spans.jsonl"
         )
         assert span_step["action"] == "verify_staged_reference"
-        staged = lab.json("corpus", "artifacts", "--release-references", "--json")
+        staged = lab.json(*reference_scan)
         assert staged["scan_status"] == "complete"
+        assert staged["consumed_builds"] == 1
+        assert all(row["published_builds"] == 0 for row in staged["partitions"])
         assert staged["staging_manifests"] == 1
         assert (
             sum(row["staging_releases"] for row in staged["partitions"])
             == span_step["partitions"]
         )
         assert all(row["published_releases"] == 0 for row in staged["partitions"])
+        releasing = build.parents[1] / "releases" / f".freezing-{build.name}"
+        moved = releasing.with_name(".displaced-freeze")
+        releasing.rename(moved)
+        try:
+            missing = lab.json(*reference_scan)
+            assert missing["scan_status"] == "incomplete"
+            assert any(
+                row["reason"] == "missing_consumed_release"
+                for row in missing["problems"]
+            )
+        finally:
+            moved.rename(releasing)
         release = Path(lab.run("corpus", "freeze", str(build), *placement_without_flag))
         assert plan["release_id"] == retry["release_id"] == release.name
         manifest = json.loads((release / "manifest.json").read_bytes())

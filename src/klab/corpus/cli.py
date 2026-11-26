@@ -198,6 +198,8 @@ def _run(args: argparse.Namespace) -> None:
         if storage is not None:
             if args.source_id is not None:
                 raise ValueError("--source-id applies to normalized partitions")
+            if args.build_references:
+                raise ValueError("--build-references applies to normalized partitions")
             inventory = shared_release_inventory(
                 root,
                 storage=storage,
@@ -214,6 +216,7 @@ def _run(args: argparse.Namespace) -> None:
                 limit=args.limit,
                 after=args.after,
                 release_references=args.release_references,
+                build_references=args.build_references,
             )
         if args.json:
             print(json.dumps(inventory, sort_keys=True))
@@ -229,8 +232,8 @@ def _run(args: argparse.Namespace) -> None:
                     f"{inventory['staging_directories']:,} staging directories, "
                     f"{inventory['disappeared_partitions']:,} partitions disappeared during scan"
                 )
-                if args.release_references:
-                    print(f"Release reference scan {inventory['scan_status']}")
+                if args.release_references or args.build_references:
+                    print(f"Reference scan {inventory['scan_status']}")
                     for problem in inventory["problems"]:
                         print(f"  {problem['path']}  {problem['reason']}")
                 for row in inventory["partitions"]:
@@ -240,6 +243,11 @@ def _run(args: argparse.Namespace) -> None:
                         if row.get("published_releases") is not None
                         else ""
                     )
+                    if row.get("published_builds") is not None:
+                        counts += (
+                            f"  {row['published_builds']:,} published, "
+                            f"{row['staging_builds']:,} staged builds"
+                        )
                     print(
                         f"{row['artifact_id']}  {row['retained_bytes']:,} bytes{counts}"
                     )
@@ -846,6 +854,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "--release-references",
         action="store_true",
         help="Look up published and staged release references for normalized partitions",
+    )
+    command.add_argument(
+        "--build-references",
+        action="store_true",
+        help="Look up build and release references for normalized partitions",
     )
     command.add_argument(
         "--unreferenced",
