@@ -742,6 +742,26 @@ renders its project-scoped files. A change to selection, duplicate policy
 or row order can produce different release payloads. Source-level normalized
 partitions continue to be reused separately during preparation.
 
+For an ordinary native disk build with a normalized span inventory, use
+`klab --work-dir WORK corpus freeze BUILD --reference-normalized-spans`.
+Freeze verifies that the ordered span partitions reproduce the exact
+rendered `spans.jsonl` digest. The published release reads those partitions
+in place and omits the flat span file. Build still renders the flat file,
+so this reduces retained bytes after publication. Older builds can use
+inline or digest-based publication. With both document placement options,
+freeze shares `documents.jsonl` by digest and references normalized spans.
+Keep the referenced span files and their receipts under
+`WORK/cache/corpus/normalized` when moving or retaining the release.
+`klab corpus release-prune` only manages the two digest-based stores.
+
+In a synthetic Linux tmpfs benchmark, verifying 256 normalized span
+partitions (1 GiB total) took a median 0.854 s over three runs and read
+1 GiB of payload plus about 81 KiB of process metadata and receipts.
+The same flat payload took 0.421 s to hash once. Projection verification
+computes the partition and logical release hashes in one read. These
+measurements cover byte verification of sparse fixtures, excluding build,
+semantic replay and production storage.
+
 In a post-verification Linux tmpfs test with a 268.57 MB stage output,
 the first move took 0.35 ms and preserved the inode. First reuse took
 269 ms with a cold hash, and the median of three receipt-backed reuses took
@@ -766,14 +786,16 @@ Inspect an existing ordinary build's freeze plan with:
 ```sh
 klab --work-dir WORK corpus plan --build BUILD --share-stage-artifacts --json
 klab --work-dir WORK corpus plan --build BUILD --share-document-artifacts --json
+klab --work-dir WORK corpus plan --build BUILD --reference-normalized-spans --json
 ```
 
 The freeze plan reports the release ID, the dependency order and whether
 the build is ready to freeze, was interrupted during publication, or already
 has a published release. It checks member locations and sizes. For shared
 members, it gives the destination store and counts new store bytes, existing
-candidate bytes and duplicate staging bytes by their planned actions. Omit
-both placement flags to plan inline publication. A retry must match the
+candidate bytes and duplicate staging bytes by their planned actions. The
+normalized span plan reports its partition count and logical bytes. Omit
+the placement flags to plan inline publication. A retry must match the
 interrupted placement.
 
 Publication uses same-filesystem moves with zero payload-copy bytes. The

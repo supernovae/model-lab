@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from klab.corpus.normalized_spans import NORMALIZED_SPANS, SPAN_MEMBER
 from klab.corpus.shards import range_file_identity
 from klab.result_publication import sync_directory
 from klab.safe_io import rename_noreplace, symlinked
@@ -36,15 +37,20 @@ class ReleasePlacement:
 
     stages: bool = False
     documents: bool = False
+    normalized_spans: bool = False
 
     @property
     def shared(self) -> bool:
-        return self.stages or self.documents
+        return self.stages or self.documents or self.normalized_spans
 
     @classmethod
     def from_inventory(cls, files: dict[str, dict[str, Any]]) -> ReleasePlacement:
         stores = {entry.get("storage") for entry in files.values()}
-        return cls(stages=SHARED_STAGE in stores, documents=SHARED_DOCUMENT in stores)
+        return cls(
+            stages=SHARED_STAGE in stores,
+            documents=SHARED_DOCUMENT in stores,
+            normalized_spans=NORMALIZED_SPANS in stores,
+        )
 
 
 def shared_store(work_root: Path, storage: str) -> Path:
@@ -57,6 +63,8 @@ def shared_member_path(root: Path, name: str, entry: dict[str, Any]) -> Path | N
     if "storage" not in entry:
         return None
     storage = entry["storage"]
+    if storage == NORMALIZED_SPANS and name == SPAN_MEMBER:
+        return None
     digest = entry.get("sha256")
     if (
         not (

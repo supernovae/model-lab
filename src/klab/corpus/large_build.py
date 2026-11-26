@@ -41,6 +41,7 @@ from klab.corpus.build_outputs import (
 )
 from klab.corpus.build_stages import StageStore, implementation_digests, run_stage
 from klab.corpus.duplicate_evidence import source_rank
+from klab.corpus.normalized_spans import capture_span_partitions
 from klab.corpus.prepared_shards import (
     SourceParseError,
     prepare_file,
@@ -502,6 +503,7 @@ def _emit_build(
     ordered_rows=None,
     descriptive_census=True,
     diagnostics: Path | None = None,
+    span_partitions: list[dict[str, Any]] | None = None,
 ) -> None:
     from klab.corpus.measurement import summarize_release
 
@@ -772,6 +774,7 @@ def _emit_build(
         stages=stages,
         lock=lock,
         view_digests=view_digests,
+        span_partitions=span_partitions,
     )
 
 
@@ -950,6 +953,7 @@ def build_large(
     rights_files: list[dict[str, Any]] = []
     source_events: list[Path | dict[str, Any]] = []
     prepared: list[Path] = []
+    prepared_raw_paths: list[str] = []
     inputs: list[tuple[Any, dict[str, Any], Path, dict[str, Any], dict[str, Any]]] = []
     total_bytes = 0
     progress.record("verifying_snapshots")
@@ -1060,6 +1064,7 @@ def build_large(
         if counters.reused:
             progress.record("reused_verified_shard")
         prepared.append(shard)
+        prepared_raw_paths.append(file["path"])
         source_events.append(shard)
 
     with pool as executor:
@@ -1149,6 +1154,7 @@ def build_large(
                 progress.record("source_rejected")
                 continue
             prepared.append(shard)
+            prepared_raw_paths.append(name)
             source_events.append(shard)
         while pending:
             finish_one()
@@ -1161,6 +1167,11 @@ def build_large(
     )
     index_inputs = native_index_inputs(
         project, prepared, admission_files=admission_files
+    )
+    span_partitions = (
+        capture_span_partitions(prepared, prepared_raw_paths, index_inputs["shards"])
+        if canary is None and not record_admission
+        else None
     )
     prepared_files = native_prepared_members(prepared)
     generations = [range_file_identity(path) for path in prepared_files]
@@ -1303,6 +1314,7 @@ def build_large(
             progress=progress,
             checkpoints=checkpoints,
             diagnostics=root / "diagnostics" / f"{build_id}.json",
+            span_partitions=span_partitions,
         )
         require_prepared_generation()
         progress.update(phase="publishing")
