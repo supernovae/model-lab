@@ -27,6 +27,7 @@ from klab.corpus.measurement_inputs import MeasurementTokenizer
 from klab.corpus.normalized_spans import (
     NORMALIZED_SPANS,
     SPAN_MEMBER,
+    has_span_projection,
     span_dependencies,
     span_partitions,
     verify_span_projection,
@@ -2393,6 +2394,10 @@ def _verify_build_cold(
         or canonical_digest(manifest["identity"]) != path.name
     ):
         raise ValueError("invalid build identity")
+    if has_span_projection(manifest["files"]) != bool(
+        manifest["identity"].get("reference_normalized_spans")
+    ):
+        raise ValueError("build span placement differs from its identity")
     progress = open_progress(manifest["build_id"], verification_mode=verification_mode)
     _verify_native_outputs(
         path,
@@ -2444,14 +2449,16 @@ def release_manifest_payload(
                 "shared release artifacts require an ordinary Corpus build"
             )
     files = {key: value for key, value in build["files"].items() if key != "build.json"}
+    projected_spans = has_span_projection(files)
     if placement.stages:
         for stage in build["stages"]:
             name = f"stages/{stage['id']}.jsonl"
             files[name] = {**files[name], "storage": SHARED_STAGE}
     if placement.documents:
         for name in DOCUMENT_MEMBERS:
-            files[name] = {**files[name], "storage": SHARED_DOCUMENT}
-    if placement.normalized_spans:
+            if name != SPAN_MEMBER or not projected_spans:
+                files[name] = {**files[name], "storage": SHARED_DOCUMENT}
+    if placement.normalized_spans and not projected_spans:
         if not build.get("span_partitions") or not streaming_verification(
             build["identity"]
         ):
@@ -2544,6 +2551,9 @@ def _freeze(
         if not staging.exists()
         else _resume_source(staging, build_dir)
     )
+    projected_spans = has_span_projection(manifest["files"])
+    if projected_spans and build_dir.parents[2] != work_root / "corpora":
+        raise ValueError("referenced spans require freeze in the build's work area")
     prospective = (
         release_manifest_payload(manifest, placement=placement)
         if placement.shared
@@ -2601,9 +2611,13 @@ def _freeze(
             raise ValueError("existing release has different identity")
         return destination
     parts = span_partitions(destination, payload["files"])
-    checked_spans = (
-        verify_span_projection(parts, payload["files"][SPAN_MEMBER]) if parts else None
-    )
+    checked_spans = None
+    if parts:
+        checked_spans = (
+            {path: range_file_identity(path) for path in span_dependencies(parts)}
+            if projected_spans
+            else verify_span_projection(parts, payload["files"][SPAN_MEMBER])
+        )
     # A file written between verifying the build and renaming it would be
     # published unverified; the stat index is what notices.
     if fingerprint(build_dir, "build.json") != before:
@@ -2655,11 +2669,13 @@ def _publish(
             "the earlier freeze finished, remove the staging directory"
         )
     sealed = canonical_json({**payload, "release_id": release_id}) + b"\n"
+    parts = span_partitions(staging, payload["files"])
+    shared_placement = placement.shared or bool(parts)
     # Keep a staged manifest visible before any shared payload can be moved.
     # The durable manifest protects the files during subsequent cold replay.
     with (
         release_retention_lease(staging.parents[3])
-        if placement.shared
+        if shared_placement
         else nullcontext()
     ):
         tombstone_json = staging / "build.json"
@@ -2680,7 +2696,7 @@ def _publish(
                 raise ValueError("staged release manifest differs from its build")
         else:
             _write_durably(manifest_path, sealed)
-        if placement.shared:
+        if shared_placement:
             sync_directory(staging)
             sync_directory(releases)
         shared = (
@@ -2694,27 +2710,31 @@ def _publish(
             if placement.shared
             else SharedPublication({}, {})
         )
-        if parts := span_partitions(staging, payload["files"]):
+        if parts:
             inline = staging / SPAN_MEMBER
-            if inline.is_symlink():
-                raise ValueError("symlinked staged span projection")
-            if inline.exists():
-                generations = checked_spans or verify_span_projection(
+            inline_present = inline.exists()
+            projected_spans = has_span_projection(build["files"])
+            if inline.is_symlink() or (inline_present and projected_spans):
+                raise ValueError("unexpected inline span payload in staging")
+            if inline_present:
+                checked_spans = checked_spans or verify_span_projection(
                     parts, payload["files"][SPAN_MEMBER]
                 )
+            elif verified and not projected_spans:
+                raise ValueError("verified build is missing its inline span payload")
+            if checked_spans:
                 if any(
                     range_file_identity(path) != stamp
-                    for path, stamp in generations.items()
+                    for path, stamp in checked_spans.items()
                 ):
                     raise ValueError(
                         "normalized span inputs changed before publication"
                     )
-                shared.generations.update(generations)
-                shared.checked.update(generations)
+                shared.generations.update(checked_spans)
+                shared.checked.update(checked_spans)
+            if inline_present:
                 inline.unlink()
                 sync_directory(staging)
-            elif verified:
-                raise ValueError("verified build is missing its inline span payload")
         tombstone_json.unlink(missing_ok=True)
     if not verified:
         # Staging will be renamed, so keep this check out of the operation's
@@ -2892,6 +2912,10 @@ def _verify_release_cold(
         raise ValueError("release manifest identity mismatch")
     if canonical_digest(manifest["build_identity"]) != manifest["build_id"]:
         raise ValueError("release build identity differs from its build")
+    if manifest["build_identity"].get(
+        "reference_normalized_spans"
+    ) and not has_span_projection(manifest["files"]):
+        raise ValueError("release span placement differs from its build identity")
     progress = open_progress(release_id, verification_mode=verification_mode)
     _verify_native_outputs(
         path,

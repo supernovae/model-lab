@@ -66,33 +66,46 @@ class SpanPartition:
         return self.directory / "receipt.json"
 
 
+def has_span_projection(files: dict[str, Any]) -> bool:
+    return files.get(SPAN_MEMBER, {}).get("storage") == NORMALIZED_SPANS
+
+
 def span_partitions(root: Path, files: dict[str, Any]) -> tuple[SpanPartition, ...]:
     """Resolve an ordered span projection through the normalized work area."""
-    entry = files.get(SPAN_MEMBER, {})
-    if entry.get("storage") != NORMALIZED_SPANS:
+    if not has_span_projection(files):
         return ()
-    from klab.corpus.prepared_shards import normalized_store_root
-
+    entry = files[SPAN_MEMBER]
     if (
         set(entry) != {"storage", "sha256", "size", "partitions"}
         or not isinstance(entry["sha256"], str)
         or not _DIGEST.fullmatch(entry["sha256"])
         or type(entry["size"]) is not int
-        or not isinstance(entry["partitions"], list)
-        or not entry["partitions"]
-        or len(root.parents) < 4
-        or root.parent.name != "releases"
-        or root.parents[2].name != "corpora"
     ):
         raise ValueError("invalid normalized span projection")
+    parts = _resolve_span_partitions(root, entry["partitions"])
+    if sum(part.entry["size"] for part in parts) != entry["size"]:
+        raise ValueError("normalized span projection size differs from its partitions")
+    return parts
+
+
+def _resolve_span_partitions(root: Path, catalog: Any) -> tuple[SpanPartition, ...]:
+    from klab.corpus.prepared_shards import normalized_store_root
+
+    if (
+        not isinstance(catalog, list)
+        or not catalog
+        or len(root.parents) < 4
+        or root.parent.name not in {"builds", "releases"}
+        or root.parents[2].name != "corpora"
+    ):
+        raise ValueError("invalid normalized span partition inventory")
     store = normalized_store_root(root.parents[3])
     if symlinked(store):
         raise ValueError("symlinked normalized span store")
     parts = []
     seen_files = set()
     seen_partitions = set()
-    size = 0
-    for part in entry["partitions"]:
+    for part in catalog:
         if (
             not isinstance(part, dict)
             or set(part) != _SEGMENT_FIELDS
@@ -113,10 +126,7 @@ def span_partitions(root: Path, files: dict[str, Any]) -> tuple[SpanPartition, .
             raise ValueError("duplicate normalized span partition")
         seen_files.add(source_file)
         seen_partitions.add(partition)
-        size += part["size"]
         parts.append(SpanPartition(store.joinpath(*partition), part))
-    if size != entry["size"]:
-        raise ValueError("normalized span projection size differs from its partitions")
     return tuple(parts)
 
 
@@ -138,6 +148,27 @@ def verify_span_projection(
     on_read: Callable[[int], None] | None = None,
 ) -> dict[Path, list[int]]:
     """Prove the exact partition receipts and ordered logical span bytes."""
+    digest, generations = _hash_span_projection(parts, on_read)
+    if digest != entry["sha256"]:
+        raise ValueError("normalized span projection differs from the rendered view")
+    return generations
+
+
+def seal_span_projection(
+    build: Path,
+    catalog: list[dict[str, Any]],
+    *,
+    on_read: Callable[[int], None] | None = None,
+) -> str:
+    """Authenticate and hash the logical span stream without writing a flat copy."""
+    parts = _resolve_span_partitions(build, catalog)
+    digest, _ = _hash_span_projection(parts, on_read)
+    return digest
+
+
+def _hash_span_projection(
+    parts: tuple[SpanPartition, ...], on_read: Callable[[int], None] | None
+) -> tuple[str, dict[Path, list[int]]]:
     generations = {path: range_file_identity(path) for path in span_dependencies(parts)}
     whole = hashlib.sha256()
     for part in parts:
@@ -171,8 +202,6 @@ def verify_span_projection(
             or digest.hexdigest() != expected["sha256"]
         ):
             raise ValueError(f"normalized span payload changed: {part.spans}")
-    if whole.hexdigest() != entry["sha256"]:
-        raise ValueError("normalized span projection differs from the rendered view")
     if any(range_file_identity(path) != stamp for path, stamp in generations.items()):
         raise ValueError("normalized span inputs changed during verification")
-    return generations
+    return whole.hexdigest(), generations

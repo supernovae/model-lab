@@ -742,17 +742,44 @@ renders its project-scoped files. A change to selection, duplicate policy
 or row order can produce different release payloads. Source-level normalized
 partitions continue to be reused separately during preparation.
 
-For an ordinary native disk build with a normalized span inventory, use
+Ordinary native disk builds can skip writing the flat evidence span file:
+
+```sh
+klab --work-dir WORK corpus plan PROJECT --reference-normalized-spans --json
+klab --work-dir WORK corpus build PROJECT --reference-normalized-spans
+klab --work-dir WORK corpus freeze BUILD
+```
+
+The option records a distinct build identity. Build authenticates the
+ordered normalized partitions and seals their logical `spans.jsonl`
+digest. If view emission is interrupted after that seal, a retry can
+reuse it while the inputs still match. Freeze inherits the references
+and verifies them as build inputs. `--share-document-artifacts` can
+still share `documents.jsonl` by digest.
+
+For an existing flat native build with a normalized span inventory, use
 `klab --work-dir WORK corpus freeze BUILD --reference-normalized-spans`.
-Freeze verifies that the ordered span partitions reproduce the exact
-rendered `spans.jsonl` digest. The published release reads those partitions
-in place and omits the flat span file. Build still renders the flat file,
-so this reduces retained bytes after publication. Older builds can use
-inline or digest-based publication. With both document placement options,
-freeze shares `documents.jsonl` by digest and references normalized spans.
+Freeze verifies that the normalized partitions reproduce the exact flat
+digest before removing the flat file. Older builds can use inline or
+digest-based publication.
 Keep the referenced span files and their receipts under
-`WORK/cache/corpus/normalized` when moving or retaining the release.
+`WORK/cache/corpus/normalized` when moving or retaining referenced builds
+and releases.
 `klab corpus release-prune` only manages the two digest-based stores.
+
+Three synthetic Linux tmpfs trials per size compared the span-emission
+phase on fixed-width 1 KiB JSONL records. Reference sealing read the span
+payload once. At 512 MiB it wrote about 7.9 KB of seal metadata in place of a
+512 MiB flat span file. Restoring the flat checkpoint reread 512 MiB. Reusing
+the completed projection read about 15.6 KB of metadata. These measurements
+exclude normalization, indexing, other view emission and verification
+replay on production storage.
+
+| Span input | Flat emission | Reference seal | Flat checkpoint retry | Reference seal reuse |
+| ---: | ---: | ---: | ---: | ---: |
+| 16 MiB | 19.5 ms | 15.7 ms | 8.4 ms | 0.16 ms |
+| 128 MiB | 192 ms | 116 ms | 61.9 ms | 0.36 ms |
+| 512 MiB | 600 ms | 451 ms | 232 ms | 0.91 ms |
 
 In a synthetic Linux tmpfs benchmark, verifying 256 normalized span
 partitions (1 GiB total) took a median 0.854 s over three runs and read

@@ -271,7 +271,7 @@ def _run(args: argparse.Namespace) -> None:
             else:
                 _print_freeze_plan(plan)
             return
-        if placement.shared:
+        if placement.stages or placement.documents:
             raise ValueError(
                 "shared release placement requires --build for freeze planning"
             )
@@ -279,7 +279,11 @@ def _run(args: argparse.Namespace) -> None:
             raise ValueError("verification inspection requires --build")
         from klab.corpus.planning import plan_build
 
-        plan = plan_build(load_project(args.project, verify_inputs=False), root)
+        plan = plan_build(
+            load_project(args.project, verify_inputs=False),
+            root,
+            reference_normalized_spans=args.reference_normalized_spans,
+        )
         if args.json:
             print(json.dumps(plan, sort_keys=True))
         elif plan["status"] == "planned":
@@ -295,6 +299,8 @@ def _run(args: argparse.Namespace) -> None:
                     if estimate is not None
                     else ""
                 )
+                if stage.get("reference_normalized_spans"):
+                    details += " (references normalized evidence spans)"
                 reason = stage.get("reason")
                 print(
                     f"  {stage['id']}: {stage['action']}"
@@ -641,6 +647,7 @@ def _run(args: argparse.Namespace) -> None:
                 reuse_completed_preparation=reuse,
                 keep_stages=args.keep_stages,
                 canary=canary,
+                reference_normalized_spans=args.reference_normalized_spans,
                 **verification,
             )
             if canary is None:
@@ -877,7 +884,7 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     command.add_argument(
         "--reference-normalized-spans",
         action="store_true",
-        help="Plan references to native normalized evidence spans",
+        help="Plan a build or freeze that references native normalized evidence spans",
     )
     command.add_argument(
         "--inspect-verification",
@@ -927,6 +934,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
             help="Hash every snapshot from its bytes instead of reusing a signed receipt",
         )
         if name == "build":
+            command.add_argument(
+                "--reference-normalized-spans",
+                action="store_true",
+                help="Build with references to normalized spans and skip writing a flat copy",
+            )
             command.add_argument(
                 "--reuse-completed-preparation",
                 action="store_true",

@@ -155,11 +155,13 @@ directly to the release after verifying that they reproduce the logical
 span digest. Published releases then retain the referenced normalized spans
 and receipts. Normalized inventory can inspect published and staged span
 references for one page of partitions using the same guarded manifest scan
-as the digest stores. Builds still render a flat span file for verification and
-publication. Released documents carry selection, split and duplicate
-decisions, so references to normalized document payloads require a separate
-overlay and ordering contract. That contract and retention for other
-artifact families are tracked in #567.
+as the digest stores. A native build can opt in to a verified span projection
+before view emission and carry it through freeze. The seal binds the ordered
+input hashes and exact file generations, so a view retry can reuse it while
+the original partitions are available. Released documents carry selection,
+split and duplicate decisions, so references to normalized document payloads
+require a separate overlay and ordering contract. That contract and retention
+for other artifact families are tracked in #567.
 
 Start with typed document, passage, annotation, duplicate-group, selection,
 entity, assertion, evidence, edge, index, and compiled sequence payloads.

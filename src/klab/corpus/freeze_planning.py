@@ -14,6 +14,7 @@ from klab.canonical import canonical_digest
 from klab.corpus.normalized_spans import (
     NORMALIZED_SPANS,
     SPAN_MEMBER,
+    has_span_projection,
     span_dependencies,
     span_partitions,
 )
@@ -76,7 +77,12 @@ def _device(path: Path) -> int:
 
 
 def _shared_placement(
-    root: Path, destination: Path, payload: dict[str, Any], *, state: str
+    root: Path,
+    destination: Path,
+    payload: dict[str, Any],
+    *,
+    state: str,
+    projected_spans: bool,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     files = payload["files"]
     members = shared_members(destination, files)
@@ -97,10 +103,10 @@ def _shared_placement(
                 raise ValueError(f"missing normalized spans: {part.spans}")
         size = entry["size"]
         original = _payload_stat(root / SPAN_MEMBER, size)
-        if state == "build" and original is None:
+        if state == "build" and original is None and not projected_spans:
             raise ValueError("missing build span payload")
-        if state == "published" and original is not None:
-            raise ValueError("published spans have different placement")
+        if (state == "published" or projected_spans) and original is not None:
+            raise ValueError("referenced spans have an unexpected flat payload")
         if original is not None:
             totals["duplicate_staging_bytes"] += size
         actions.append(
@@ -112,6 +118,8 @@ def _shared_placement(
                 "partitions": len(parts),
                 "action": "verify_published"
                 if state == "published"
+                else "verify_build_reference"
+                if state == "build" and projected_spans
                 else (
                     "reference_normalized_spans"
                     if original is not None
@@ -384,7 +392,11 @@ def plan_freeze(
         if state == "build" and root.stat().st_dev != _device(releases):
             raise ValueError("release publication requires the same filesystem")
         actions, totals = _shared_placement(
-            root, releases / release_id, payload, state=state
+            root,
+            releases / release_id,
+            payload,
+            state=state,
+            projected_spans=has_span_projection(manifest["files"]),
         )
         verify = {
             "build": "verify_build",

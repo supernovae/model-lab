@@ -526,6 +526,7 @@ def write_release_files(
     tokenizer_sha256: str | None = None,
     view_digests: Mapping[str, ViewFileDigest] | None = None,
     span_partitions: list[dict[str, Any]] | None = None,
+    span_projection: dict[str, Any] | None = None,
 ) -> None:
     """Write `report.json`, `report.md` and the file inventory `build.json`."""
     write_json(staging / "report.json", report)
@@ -561,6 +562,10 @@ def write_release_files(
         (name, digest.inventory_entry(paths[name]))
         for name, digest in view_digests.items()
     )
+    if span_projection is not None:
+        if "spans.jsonl" in files:
+            raise ValueError("a referenced span build contains a flat span file")
+        files["spans.jsonl"] = span_projection
     stage_inventory = [
         {**stage, "output_sha256": files[f"stages/{stage['id']}.jsonl"]["sha256"]}
         for stage in stages
@@ -573,7 +578,11 @@ def write_release_files(
             "identity": identity,
             "stages": stage_inventory,
             "files": files,
-            **({"span_partitions": span_partitions} if span_partitions else {}),
+            **(
+                {"span_partitions": span_partitions}
+                if span_partitions and span_projection is None
+                else {}
+            ),
             "snapshots": [
                 {"source_id": source_id, "sha256": entry["snapshot_sha256"]}
                 for source_id, entry in sorted(lock["sources"].items())

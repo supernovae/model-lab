@@ -256,6 +256,7 @@ def _view_candidate(
     *,
     index_receipt_sha256: str,
     dedup_receipt_sha256: str,
+    reference_normalized_spans: bool = False,
 ) -> dict[str, Any]:
     estimate: dict[str, Any] = {"verification_candidate_bytes": None}
     try:
@@ -307,7 +308,12 @@ def _view_candidate(
         if (
             canonical_digest(body) != entry["sha256"]
             or body["identity"] != checkpoint.identity
-            or outputs.keys() != set(native_view_members(stage_id))
+            or outputs.keys()
+            != set(
+                native_view_members(
+                    stage_id, reference_normalized_spans=reference_normalized_spans
+                )
+            )
             or (count == 1 and previous is not None)
             or (
                 count > 1
@@ -354,7 +360,9 @@ def _view_candidate(
     }
 
 
-def plan_build(project: Project, work_root: Path) -> dict[str, Any]:
+def plan_build(
+    project: Project, work_root: Path, *, reference_normalized_spans: bool = False
+) -> dict[str, Any]:
     """Plan a full native build using acquisition inventory and retained metadata."""
     lock = work_root / "corpora" / project.config.id / "acquisition.json"
     normalized_root = normalized_store_root(work_root)
@@ -403,10 +411,14 @@ def plan_build(project: Project, work_root: Path) -> dict[str, Any]:
             or set(entries) != {source.id for source in project.sources}
         ):
             raise ValueError("acquisition source inventory does not match project")
-        identity, _, _ = build_identity(project, entries)
+        identity, _, _ = build_identity(
+            project, entries, reference_normalized_spans=reference_normalized_spans
+        )
         build_id = canonical_digest(identity)
         target = lock.parent / "builds" / build_id
         stage_by_id = {stage["id"]: stage for stage in plan["stages"]}
+        if reference_normalized_spans:
+            stage_by_id["views"]["reference_normalized_spans"] = True
         stage_by_id["acquire"]["action"] = "verify_pinned"
         if symlinked(target):
             raise ValueError("symlinked build path")
@@ -498,6 +510,7 @@ def plan_build(project: Project, work_root: Path) -> dict[str, Any]:
                             prepared,
                             index_receipt_sha256=index_sha,
                             dedup_receipt_sha256=dedup_sha,
+                            reference_normalized_spans=reference_normalized_spans,
                         )
                     )
     except (KeyError, OSError, TypeError, ValueError) as error:
