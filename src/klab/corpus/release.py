@@ -2803,6 +2803,14 @@ def _freeze(
             destination, proof_store=proof_store, verification_mode=verification_mode
         )
         return destination
+    verified_sources = (
+        {
+            name: range_file_identity(build_dir / name)
+            for name in shared_members(staging, prospective["files"])
+        }
+        if prospective is not None
+        else None
+    )
     before = fingerprint(build_dir, "build.json")
     build = verify_build(
         build_dir, proof_store=proof_store, verification_mode=verification_mode
@@ -2861,6 +2869,7 @@ def _freeze(
         verified=True,
         placement=placement,
         checked_spans=checked_spans,
+        verified_sources=verified_sources,
     )
 
 
@@ -2875,6 +2884,7 @@ def _publish(
     verified: bool,
     placement: ReleasePlacement,
     checked_spans: dict[Path, list[int]] | None = None,
+    verified_sources: dict[str, list[int]] | None = None,
 ) -> Path:
     """Finish a freeze from the renamed build: tombstone, manifest, one rename.
 
@@ -2931,6 +2941,7 @@ def _publish(
                 verified=verified,
                 proof_store=proof_store,
                 verification_mode=verification_mode,
+                verified_sources=verified_sources,
             )
             if placement.shared
             else SharedPublication({}, {})

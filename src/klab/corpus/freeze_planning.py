@@ -33,6 +33,7 @@ from klab.corpus.release_members import (
     SHARED_STAGE,
     ReleasePlacement,
     shared_members,
+    shared_payload_receipt_hit,
 )
 from klab.corpus.release_receipt import lookup
 from klab.corpus.release_verify import (
@@ -83,12 +84,17 @@ def _shared_placement(
     *,
     state: str,
     projected_spans: bool,
+    inspect_verification: bool,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     files = payload["files"]
     members = shared_members(destination, files)
     totals = dict.fromkeys(
         ("new_shared_bytes", "shared_candidate_bytes", "duplicate_staging_bytes"), 0
     )
+    settings = current_settings() if inspect_verification else None
+    if settings is not None:
+        totals["shared_receipt_candidate_bytes"] = 0
+    receipt_candidates = set()
     scheduled: set[Path] = set()
     actions = []
     inline = ReleaseMembers(root, payload)
@@ -151,6 +157,14 @@ def _shared_placement(
             )
             if target not in scheduled:
                 totals["shared_candidate_bytes"] += size
+                if settings is not None and shared_payload_receipt_hit(
+                    target,
+                    files[name],
+                    settings.proof_store,
+                    settings.verification_mode,
+                ):
+                    receipt_candidates.add(target)
+                    totals["shared_receipt_candidate_bytes"] += size
         elif original is not None:
             if original.st_dev != _device(target.parent):
                 raise ValueError(
@@ -173,6 +187,11 @@ def _shared_placement(
                 "storage": files[name]["storage"],
                 "bytes": size,
                 "action": action,
+                **(
+                    {"retained_authentication": "receipt"}
+                    if target in receipt_candidates
+                    else {}
+                ),
             }
         )
     return actions, totals
@@ -397,6 +416,7 @@ def plan_freeze(
             payload,
             state=state,
             projected_spans=has_span_projection(manifest["files"]),
+            inspect_verification=inspect_verification,
         )
         verify = {
             "build": "verify_build",

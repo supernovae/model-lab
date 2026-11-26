@@ -730,6 +730,14 @@ The options can be combined. They use same-filesystem moves and bind the
 physical placement into the release ID. When another release has the same
 output digest, freeze authenticates the stored file before consuming the
 duplicate staging copy. The receipts track the shared file generation.
+When a verified file of at least 64 MiB moves into a digest store, freeze
+records its new generation in a host-local signed placement receipt.
+Matching receipts allow subsequent freezes in verified-reuse mode to
+authenticate the same payload through metadata. Explicit cold verification
+checks the bytes. Smaller members use the existing file verification path.
+`corpus plan --build BUILD --inspect-verification` reports matching retained
+placements as receipt-backed candidates and counts their bytes once per
+digest. The plan inspects metadata and the signed records.
 
 Retry interrupted publication with the same placement options. For a
 shared document or span authenticated during recovery, staged verification
@@ -2390,6 +2398,32 @@ Median inline placement took 1.32 ms. The first shared placement took
 with no storage reads. Shared placement wrote metadata and moved or
 discarded the staged view files. Production-sized freeze and slower
 storage remain to be measured. [#567](https://github.com/supernovae/model-lab/issues/567)
+
+#### Shared payload placement receipts
+
+Three paired NVMe trials measured placement of already verified LM views.
+The train view held seven eighths of the bytes. Each of the
+other files was below the 64 MiB placement-receipt threshold.
+Input-cache eviction was requested before the first reuse. Both
+implementations retained exactly one file for each digest.
+
+| View bytes | First placement before / after | First reuse before / after | First-reuse storage reads before / after |
+| ---: | ---: | ---: | ---: |
+| 256 MiB | 4.74 / 7.15 ms | 288.24 / 44.89 ms | 256 / 32 MiB |
+| 512 MiB | 4.74 / 7.41 ms | 476.53 / 78.96 ms | 512 / 64 MiB |
+
+First placement wrote a small signed record for the moved train file.
+An unchanged generation matched that receipt at first reuse. Both
+versions used receipts on later warm reuse and fetched no payload
+bytes from storage in those trials.
+
+The full NVMe verification and freeze comparison used two native
+72,002-document builds with 72.71 MB of identical LM views. Across
+three paired trials, median second freeze read 601.16 MB before and
+528.45 MB after. Median time moved from 5.049 s to 5.001 s. First freeze
+was near 5.0 s on both revisions. The timing includes byte verification
+of the second build. Production-sized and slower-storage freezes remain
+to be measured.
 
 #### Source-ordered replay index measurements
 

@@ -91,7 +91,10 @@ def _print_freeze_plan(plan: dict) -> None:
         inputs = ", ".join(step["inputs"])
         print(f"  {step['id']}" + (f" after {inputs}" if inputs else ""))
     for row in plan["shared_members"]:
-        print(f"  {row['action']} {row['member']} ({row['bytes']:,} bytes)")
+        receipt = (
+            " by receipt" if row.get("retained_authentication") == "receipt" else ""
+        )
+        print(f"  {row['action']} {row['member']} ({row['bytes']:,} bytes){receipt}")
     print(
         f"{plan['new_shared_bytes']:,} new shared bytes, "
         f"{plan['shared_candidate_bytes']:,} existing candidate bytes, "

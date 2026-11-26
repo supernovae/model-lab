@@ -237,6 +237,32 @@ def test_build_changed_after_verification_is_never_published(
     assert consumed_release(build_dir) is None, "the build was not consumed"
 
 
+def test_shared_view_changed_after_build_rename_is_never_placed(
+    prepared: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from klab.corpus.release_members import SHARED_LM_VIEW, shared_store
+
+    build_dir, work = prepared
+    digest = sha256_file(build_dir / "lm/train.jsonl")
+    publish = release_module.publish_shared_members
+
+    def edit_staging(staging, *args, **kwargs):
+        view = staging / "lm/train.jsonl"
+        stamp = view.stat()
+        data = view.read_bytes()
+        changed = data.replace(b"training", b"traininx", 1)
+        assert changed != data
+        view.write_bytes(changed)
+        os.utime(view, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        return publish(staging, *args, **kwargs)
+
+    monkeypatch.setattr(release_module, "publish_shared_members", edit_staging)
+    with pytest.raises(ValueError, match="shared staging payload changed"):
+        freeze(build_dir, work, share_lm_views=True)
+    store = shared_store(work, SHARED_LM_VIEW)
+    assert not (store / digest[:2] / digest).exists()
+
+
 # Each entry makes the n-th durable write or the n-th publishing rename fail.
 CRASHES = {
     "after the first rename": ("write", 1),
@@ -447,12 +473,13 @@ def test_release_manifest_names_its_files_and_not_the_build_file(
 def test_shared_releases_reuse_members_and_reject_drift(
     prepared: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    from klab.corpus import artifact_inventory
+    from klab.corpus import artifact_inventory, release_members
     from klab.corpus.release_members import LM_VIEW_MEMBERS
     from klab.training import manifest as file_manifest
 
     build_dir, work = prepared
     monkeypatch.setenv("XDG_CONFIG_HOME", str(work.parent / "settings"))
+    monkeypatch.setattr(release_members, "INVENTORY_RECEIPT_MIN_BYTES", 0)
     options = {
         **verification_options(work),
         "share_stage_artifacts": True,
@@ -575,6 +602,15 @@ def test_shared_releases_reuse_members_and_reject_drift(
         == shared_bytes
     )
     assert reuse["new_shared_bytes"] == 0
+    with monkeypatch.context() as metadata_only:
+        metadata_only.setattr(Path, "open", forbid_payload)
+        inspected = plan(next_build, *share, "--inspect-verification")
+    assert inspected["shared_receipt_candidate_bytes"] == shared_bytes
+    assert all(
+        row["retained_authentication"] == "receipt"
+        for row in inspected["shared_members"]
+    )
+    assert plan(next_build, *share, "--cold")["shared_receipt_candidate_bytes"] == 0
     documents = paths["documents.jsonl"]
     original_documents = documents.read_bytes()
     changed = original_documents.replace(b"training", b"traininx", 1)
@@ -587,8 +623,14 @@ def test_shared_releases_reuse_members_and_reject_drift(
         os.utime(documents, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
         return record(*args, **kwargs)
 
+    def forbid_retained_hash(path, **kwargs):
+        if path in paths.values():
+            pytest.fail(f"freeze rehashed a placed member: {path}")
+        return original_hash(path, **kwargs)
+
     with monkeypatch.context() as drift:
         drift.setattr(release_module, "_record_frozen", change_before_receipt)
+        drift.setattr(file_manifest, "sha256_file", forbid_retained_hash)
         second = freeze(next_build, work, **options)
     assert reuse["release_id"] == second.name
     assert second != first
