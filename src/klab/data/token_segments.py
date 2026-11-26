@@ -127,10 +127,20 @@ class SealedContentTokens:
             pending = self.active_path / _MANIFEST
             if pending.exists() or pending.is_symlink():
                 manifest = self._read_manifest(self.active_path)
+                verified = {}
                 for name, entry in manifest["files"].items():
-                    if sha256_file(self.active_path / name) != entry["sha256"]:
+                    path = self.active_path / name
+                    stamp = artifact_fingerprint(path)
+                    if (
+                        sha256_file(path) != entry["sha256"]
+                        or artifact_fingerprint(path) != stamp
+                    ):
                         raise ValueError(f"changed pending token segment: {name}")
-                self._publish(manifest)
+                    verified[name] = stamp
+                name = self._publish(manifest)
+                self.verified_indexes[self.segments / name / "index.bin"] = verified[
+                    "index.bin"
+                ]
             self.names = dict(self.db.execute("SELECT id, name FROM segment"))
             self._register_segments()
             self._open_active()
@@ -268,9 +278,9 @@ class SealedContentTokens:
         rename_noreplace(temporary, self.active_path / _MANIFEST)
         self.active = None
         active.__exit__(None, None, None)
+        stamp = artifact_fingerprint(self.active_path / "index.bin")
         name = self._publish(manifest)
-        path = self.segments / name / "index.bin"
-        self.verified_indexes[path] = artifact_fingerprint(path)
+        self.verified_indexes[self.segments / name / "index.bin"] = stamp
         self._register(name)
         self.published_segments += 1
 
