@@ -799,6 +799,11 @@ With `--cold`, the plan describes an independent check from bytes.
 The capacity is the filesystem's currently available bytes. It uses the
 nearest existing parent of a scratch directory that has yet to be created.
 The plan leaves peak scratch unestimated when byte verification is required.
+When the selected scratch directory has a recent measurement for the
+artifact, inspection includes `prior_scratch_observation` with the attempt's
+mode, completion status and sampled peaks. The previous observation and the
+current receipt forecast can both appear in the same step. Inspection reads
+up to 64 KiB from the progress journal tail.
 These observations use metadata and perform no payload authentication or
 scratch creation. Inspecting an existing signed receipt checks the source
 snapshot and member file generations, so the default placement plan skips
@@ -1562,6 +1567,12 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   the release size for a release that uses the row-store verifier and put
   it on fast storage (NVMe). Disposable indexes are removed after
   verification. A progress journal and checkpoints can survive a stop.
+- **Scratch observations** in the progress journal report logical bytes and
+  allocated bytes for named files in the row verification workspace. Samples
+  occur at existing progress boundaries and once before cleanup. The final
+  record keeps the observed peaks. Retained index files already in this
+  workspace count toward its footprint. Separate processes, anonymous SQLite
+  sort files and other verification phases can add disk demand.
 - **`--workers`** sets the worker processes for every parallel pass over corpus
   files (default: half the CPU count; never more than the CPU count). Use `1` for
   a single-process run. A file smaller than a few hundred MB is read in-process.
@@ -1818,6 +1829,19 @@ needs measurement where the table gives historical or fixture evidence.
 | Corpus `export` | Document license labels and LM or chat split statistics by range with persistent scratch. Final export directory and verification receipt. | Reuse valid license and split statistics. Repeat unfinished ranges and final publication. Later consumers can use the complete receipt. | See [export verification measurements](#export-verification-measurements), [export license scan measurements](#export-license-scan-measurements) and [chat export split measurements](#chat-export-split-measurements). |
 
 #### Native release row index measurements
+
+On Linux tmpfs, the row verifier reported the following logical and allocated
+peaks for named files while building the streaming span and document indexes.
+The measured peaks matched the sum of the completed SQLite files. The
+synthetic inputs used unique documents with about 2 KiB of text and one
+normalized duplicate key each. These figures cover index construction with
+one worker. Full verification also runs source replay and view checks.
+
+| Documents | Document and span input | Observed named index scratch |
+| ---: | ---: | ---: |
+| 10,000 | 25.02 MB | 8.86 MB |
+| 60,000 | 150.17 MB | 53.09 MB |
+| 180,000 | 450.61 MB | 159.64 MB |
 
 One cold NVMe pair used 300,000 synthetic documents, 875 MB of
 document JSONL and 41 MB of span rows. The measured interval covered

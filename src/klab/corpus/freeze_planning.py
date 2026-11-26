@@ -28,7 +28,11 @@ from klab.corpus.release_members import (
     shared_members,
 )
 from klab.corpus.release_receipt import lookup
-from klab.corpus.release_verify import current_settings, scratch_location
+from klab.corpus.release_verify import (
+    current_settings,
+    scratch_location,
+    verification_scratch_observation,
+)
 from klab.experiments.artifacts import snapshot_dependencies
 from klab.safe_io import symlinked
 from klab.verification_proofs import verification_options
@@ -174,6 +178,7 @@ def _verification_step(
     kind = step.removeprefix("verify_")
     build = kind == "build"
     identity = manifest["identity" if build else "build_identity"]
+    artifact_id = manifest["build_id" if build else "release_id"]
     streaming = streaming_verification(identity)
     result = {
         "id": step,
@@ -181,6 +186,8 @@ def _verification_step(
         "scratch_bytes": None,
         "row_indexes": [],
     }
+    if observed := verification_scratch_observation(scratch, artifact_id):
+        result["prior_scratch_observation"] = observed
     if placement_pending:
         return {**result, "method": "after_placement"}
 
@@ -189,7 +196,6 @@ def _verification_step(
         and settings.verification_mode == "verified_reuse"
     ):
         filename = "build.json" if build else "manifest.json"
-        artifact_id = manifest["build_id" if build else "release_id"]
 
         def dependency_paths():
             return list(snapshot_dependencies(root, filename))

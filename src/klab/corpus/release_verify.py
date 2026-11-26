@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 import threading
 from collections.abc import Callable, Iterator
@@ -21,7 +22,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
 
 from klab.corpus.progress import BuildProgress
+from klab.safe_io import symlinked
 from klab.training import manifest as file_manifest
+from klab.verification_proofs import writable_by_others
 
 if TYPE_CHECKING:
     from klab.verification_proofs import ProofStore, VerificationMode
@@ -116,15 +119,79 @@ def worker_count() -> int:
     return max(1, min(current_settings().workers, os.cpu_count() or 1))
 
 
-def open_progress(release_id: str) -> BuildProgress:
+def _verification_journal(scratch: Path, artifact_id: str) -> Path:
+    return scratch / f"verify-{artifact_id[:16]}.progress.jsonl"
+
+
+def open_progress(
+    release_id: str, *, verification_mode: VerificationMode
+) -> BuildProgress:
     """Journal verification progress next to the scratch it uses, and echo it live."""
     settings = current_settings()
     return BuildProgress(
-        scratch_root() / f"verify-{release_id[:16]}.progress.jsonl",
+        _verification_journal(scratch_root(), release_id),
         release_id,
         interval_seconds=10.0,
         echo=settings.echo,
+        verification_mode=verification_mode,
     )
+
+
+def verification_scratch_observation(
+    scratch: Path, artifact_id: str
+) -> dict[str, Any] | None:
+    """Read the last usable scratch observation for this ID from a bounded journal tail."""
+    path = _verification_journal(scratch, artifact_id)
+    if symlinked(path):
+        return None
+    window = 64 * 1024
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or writable_by_others(info)
+            ):
+                return None
+            end = info.st_size
+            offset = max(0, end - window)
+            stream.seek(offset)
+            rows = stream.read(end - offset).split(b"\n")
+    except OSError:
+        return None
+    for raw in reversed(rows[bool(offset) : -1]):
+        try:
+            row = json.loads(raw)
+            observation = row["scratch"]
+            counters = {
+                key: observation[key]
+                for key in (
+                    "samples",
+                    "incomplete_samples",
+                    "observed_peak_logical_bytes",
+                    "observed_peak_allocated_bytes",
+                )
+            }
+            if (
+                row["build_id"] == artifact_id
+                and isinstance(row["attempt"], str)
+                and row["verification_mode"] in {"cold", "verified_reuse"}
+                and all(
+                    type(value) is int and value >= 0 for value in counters.values()
+                )
+                and counters["samples"] > counters["incomplete_samples"]
+            ):
+                return {
+                    "attempt": row["attempt"],
+                    "verification_mode": row["verification_mode"],
+                    "completed": row["event"] == "complete",
+                    **counters,
+                }
+        except KeyError, TypeError, ValueError:
+            continue
+    return None
 
 
 def hash_inventory(

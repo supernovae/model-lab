@@ -9,8 +9,11 @@ from __future__ import annotations
 import json
 import os
 import resource
+import stat
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TextIO
 
@@ -36,6 +39,37 @@ def memory_bytes() -> tuple[int, int, int | None]:
     return rss, peak_bytes, available
 
 
+def _scratch_bytes(directory: Path) -> tuple[int, int, bool]:
+    """Sample named regular files in one operation's workspace."""
+    if directory.is_symlink():
+        return 0, 0, False
+    logical = allocated = 0
+    complete = True
+
+    def unreadable(error: OSError) -> None:
+        nonlocal complete
+        complete = False
+
+    for root, directories, files in os.walk(
+        directory, followlinks=False, onerror=unreadable
+    ):
+        parent = Path(root)
+        for name in files:
+            try:
+                info = (parent / name).lstat()
+            except OSError:
+                complete = False
+                continue
+            if stat.S_ISREG(info.st_mode):
+                logical += info.st_size
+                allocated += info.st_blocks * 512
+            else:
+                complete = False
+        if any((parent / name).is_symlink() for name in directories):
+            complete = False
+    return logical, allocated, complete
+
+
 class BuildProgress:
     """Append a bounded number of fsynced progress samples across interruptions."""
 
@@ -49,6 +83,7 @@ class BuildProgress:
         interval_input_bytes: int = 64 * 1024 * 1024,
         interval_seconds: float = 30.0,
         echo: TextIO | None = None,
+        verification_mode: str | None = None,
     ) -> None:
         if min(interval_documents, interval_input_bytes) < 1 or interval_seconds <= 0:
             raise ValueError("progress intervals must be positive")
@@ -59,6 +94,9 @@ class BuildProgress:
         self.interval_input_bytes = interval_input_bytes
         self.interval_seconds = interval_seconds
         self.echo = echo
+        self.verification_mode = verification_mode
+        self._scratch_directory: Path | None = None
+        self._scratch: dict[str, int] | None = None
         self.started = time.monotonic()
         self.phase_started = self.started
         self.phase_documents = 0
@@ -74,6 +112,40 @@ class BuildProgress:
         self.phase = "starting"
         self.attempt = f"{os.getpid()}-{time.time_ns()}"
         self.record("start")
+
+    @contextmanager
+    def track_scratch(self, directory: Path) -> Iterator[None]:
+        """Sample an owned workspace at journal boundaries and before cleanup."""
+        previous = self._scratch_directory
+        self._scratch_directory = directory
+        if self._scratch is None:
+            self._scratch = {
+                "samples": 0,
+                "incomplete_samples": 0,
+                "observed_peak_logical_bytes": 0,
+                "observed_peak_allocated_bytes": 0,
+            }
+        try:
+            yield
+            # Preserve the pre-cleanup footprint in the completion record,
+            # which can be written after disposable space is released.
+            self._sample_scratch()
+        finally:
+            self._scratch_directory = previous
+
+    def _sample_scratch(self) -> tuple[int, int]:
+        if self._scratch_directory is None or self._scratch is None:
+            return 0, 0
+        logical, allocated, complete = _scratch_bytes(self._scratch_directory)
+        self._scratch["samples"] += 1
+        self._scratch["incomplete_samples"] += not complete
+        self._scratch["observed_peak_logical_bytes"] = max(
+            self._scratch["observed_peak_logical_bytes"], logical
+        )
+        self._scratch["observed_peak_allocated_bytes"] = max(
+            self._scratch["observed_peak_allocated_bytes"], allocated
+        )
+        return logical, allocated
 
     def start_phase(
         self, phase: str, *, expected_input_bytes: int | None = None
@@ -133,7 +205,7 @@ class BuildProgress:
             if remaining == 0
             else None
         )
-        row = {
+        row: dict[str, object] = {
             "attempt": self.attempt,
             "build_id": self.build_id,
             "event": event,
@@ -152,6 +224,15 @@ class BuildProgress:
             "peak_rss_bytes": peak,
             "system_available_bytes": available,
         }
+        if self.verification_mode is not None:
+            row["verification_mode"] = self.verification_mode
+        if self._scratch is not None:
+            logical, allocated = self._sample_scratch()
+            row["scratch"] = {
+                **self._scratch,
+                "logical_bytes": logical,
+                "allocated_bytes": allocated,
+            }
         self.journal.parent.mkdir(parents=True, exist_ok=True)
         with self.journal.open("ab") as output:
             output.write(

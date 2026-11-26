@@ -261,6 +261,10 @@ def test_scratch_and_progress_live_where_the_operator_points(
 ) -> None:
     before = sorted(path.name for path in release.parent.iterdir())
     scratch = tmp_path / "fast-disk"
+    scratch.mkdir()
+    unrelated = scratch / "another-attempt.sqlite"
+    with unrelated.open("wb") as stream:
+        stream.truncate(16 * 1024**2)
     with verification_settings(scratch_dir=scratch, workers=2):
         verify_release(release)
     assert sorted(path.name for path in release.parent.iterdir()) == before
@@ -270,6 +274,12 @@ def test_scratch_and_progress_live_where_the_operator_points(
     assert {"hash_files", "documents", "raw_replay", "lineage"} <= phases
     assert events[-1]["event"] == "complete"
     assert events[-1]["documents_processed"] > 0
+    footprint = events[-1]["scratch"]
+    assert footprint["logical_bytes"] == footprint["allocated_bytes"] == 0
+    assert 0 < footprint["observed_peak_logical_bytes"] < unrelated.stat().st_size
+    assert footprint["observed_peak_allocated_bytes"] > 0
+    assert footprint["samples"] > 0
+    assert footprint["incomplete_samples"] == 0
     phase_start = {
         event["phase"]: event["input_bytes_processed"]
         for event in events
@@ -562,6 +572,43 @@ def test_audit_command_reports_progress_and_honours_scratch(
     monkeypatch.setattr("sys.argv", [*args, "--cold"])
     main()
     assert finished in hashed
+    capsys.readouterr()
+    journal_bytes = journal.read_bytes()
+    measured = json.loads(journal_bytes.splitlines()[-1])
+    build_id = json.loads((release / "manifest.json").read_bytes())["build_id"]
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "klab",
+            "--work-dir",
+            str(receipts),
+            "corpus",
+            "plan",
+            "--build",
+            str(release.parents[1] / "builds" / build_id),
+            "--cold",
+            "--scratch-dir",
+            str(scratch),
+            "--json",
+        ],
+    )
+    with journal.open("ab") as stream:
+        stream.write(b'{"incomplete":')
+    try:
+        main()
+        plan = json.loads(capsys.readouterr().out)
+        (step,) = plan["verification_inspection"]["steps"]
+        history = step["prior_scratch_observation"]
+        assert history["attempt"] == measured["attempt"]
+        assert history["verification_mode"] == "cold" and history["completed"]
+        assert (
+            history["observed_peak_allocated_bytes"]
+            == measured["scratch"]["observed_peak_allocated_bytes"]
+        )
+        assert plan["verification_scratch_bytes"] is None
+        assert journal.read_bytes() == journal_bytes + b'{"incomplete":'
+    finally:
+        journal.write_bytes(journal_bytes)
 
     monkeypatch.setattr("sys.argv", args)
     documents = release / "documents.jsonl"
