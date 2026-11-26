@@ -398,6 +398,7 @@ def _retained_snapshot_parent(declaration: dict[str, Any]) -> Path | None:
 def snapshot_dependencies(path: Path, manifest_name: str) -> tuple[Path, ...]:
     """Return snapshots and external payloads needed to authenticate the release."""
     manifest = _json_file(path / manifest_name)
+    from klab.corpus.normalized_spans import span_dependencies, span_partitions
     from klab.corpus.preparation_inputs import (
         corpus_work_root,
         local_dependencies,
@@ -415,13 +416,15 @@ def snapshot_dependencies(path: Path, manifest_name: str) -> tuple[Path, ...]:
         path.parent.parent / "snapshots" / item["source_id"] / item["sha256"]
         for item in manifest["snapshots"]
     ]
-    shared = shared_members(path, manifest.get("files", {}))
+    files = manifest.get("files", {})
+    shared = shared_members(path, files)
     for name, member in shared.items():
         if not member.is_file():
             raise ValueError(f"missing shared release payload: {name}")
         if member.stat().st_nlink != 1:
             raise ValueError(f"hard-linked shared release payload: {name}")
         snapshots.append(member)
+    snapshots.extend(span_dependencies(span_partitions(path, files)))
     identity = manifest.get("build_identity", manifest.get("identity", {}))
     sources = identity.get("sources", {})
     # Cold replay needs the retained parent as well as the derived bytes.

@@ -234,7 +234,9 @@ def _run(args: argparse.Namespace) -> None:
         from klab.corpus.release_members import ReleasePlacement
 
         placement = ReleasePlacement(
-            stages=args.share_stage_artifacts, documents=args.share_document_artifacts
+            stages=args.share_stage_artifacts,
+            documents=args.share_document_artifacts,
+            normalized_spans=args.reference_normalized_spans,
         )
         inspect_verification = (
             args.inspect_verification or args.cold or args.scratch_dir is not None
@@ -694,6 +696,7 @@ def _run(args: argparse.Namespace) -> None:
                 reuse_completed_preparation=args.reuse_completed_preparation,
                 share_stage_artifacts=args.share_stage_artifacts,
                 share_document_artifacts=args.share_document_artifacts,
+                reference_normalized_spans=args.reference_normalized_spans,
                 **verification,
             )
         )
@@ -849,6 +852,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "--share-document-artifacts",
         action="store_true",
         help="Plan shared document and span placement",
+    )
+    command.add_argument(
+        "--reference-normalized-spans",
+        action="store_true",
+        help="Plan references to native normalized evidence spans",
     )
     command.add_argument(
         "--inspect-verification",
@@ -1165,6 +1173,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "--share-document-artifacts",
         action="store_true",
         help="Publish documents and evidence spans by digest in the Corpus work area",
+    )
+    command.add_argument(
+        "--reference-normalized-spans",
+        action="store_true",
+        help="Reference spans from native normalized source partitions",
     )
     command.add_argument(
         "--reuse-completed-preparation",

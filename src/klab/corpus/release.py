@@ -24,6 +24,13 @@ from klab.corpus.bounded_metadata import metadata_operation, read_metadata
 from klab.corpus.build_stages import StageStore, run_stage
 from klab.corpus.jsonl_records import iter_rows
 from klab.corpus.measurement_inputs import MeasurementTokenizer
+from klab.corpus.normalized_spans import (
+    NORMALIZED_SPANS,
+    SPAN_MEMBER,
+    span_dependencies,
+    span_partitions,
+    verify_span_projection,
+)
 from klab.corpus.project import NormalizerOptions
 from klab.corpus.quota import require_estimated_supply
 from klab.corpus.release_members import (
@@ -144,12 +151,16 @@ def _files(
         if path.is_file() or path.is_symlink()
     }
     shared = shared_members(root, inventory)
+    parts = span_partitions(root, inventory)
     if any(
         inventory[name]["storage"] == SHARED_STAGE and name not in stage_outputs
         for name in shared
     ):
         raise ValueError("shared member is not a declared stage output")
-    if actual != inventory.keys() - shared.keys():
+    external = set(shared)
+    if parts:
+        external.add(SPAN_MEMBER)
+    if actual != inventory.keys() - external:
         raise ValueError("release artifact inventory mismatch")
     eligible = {
         name: entry for name, entry in inventory.items() if name not in stage_outputs
@@ -162,9 +173,23 @@ def _files(
         and name in eligible
         and range_file_identity(path) == checked_shared[path]
     }
+    if (
+        parts
+        and checked_shared
+        and all(
+            path in checked_shared and range_file_identity(path) == checked_shared[path]
+            for path in span_dependencies(parts)
+        )
+    ):
+        reused.add(SPAN_MEMBER)
+    verified_separately = reused | ({SPAN_MEMBER} if parts else set())
     to_hash = (
-        {name: entry for name, entry in eligible.items() if name not in reused}
-        if reused
+        {
+            name: entry
+            for name, entry in eligible.items()
+            if name not in verified_separately
+        }
+        if verified_separately
         else eligible
     )
     if progress is not None:
@@ -184,6 +209,14 @@ def _files(
         proof_store=proof_store,
         verification_mode=verification_mode,
     )
+    if parts and SPAN_MEMBER not in reused:
+        verify_span_projection(
+            parts,
+            inventory[SPAN_MEMBER],
+            on_read=(lambda size: progress.update(input_bytes=size))
+            if progress is not None
+            else None,
+        )
 
 
 def _verify_rights_files(
@@ -431,11 +464,19 @@ def _readonly(database: str) -> sqlite3.Connection:
     return sqlite3.connect(Path(database).resolve().as_uri() + "?mode=ro", uri=True)
 
 
-def _span_rows(spans: str, start: int, end: int):
-    rows = [
-        (span["record_id"], span["raw_path"], span["line_start"], offset, length)
-        for span, offset, length in range_records(Path(spans), start, end)
-    ]
+def _span_rows(
+    spans: str, start: int, end: int, source_file: tuple[str, str] | None = None
+):
+    rows = []
+    for span, offset, length in range_records(Path(spans), start, end):
+        if (
+            source_file is not None
+            and (span["source_id"], span["raw_path"]) != source_file
+        ):
+            raise ValueError("span is outside its normalized source partition")
+        rows.append(
+            (span["record_id"], span["raw_path"], span["line_start"], offset, length)
+        )
     return rows, end - start
 
 
@@ -692,10 +733,12 @@ def _replay_sources(
         / "files"
         for source_id in {group[0] for group in groups}
     }
-    names = (*DOCUMENT_MEMBERS, "license-report.json", "sources.json")
     members = ReleaseMembers(root, receipt)
-    dependencies = [members.member(name) for name in names]
-    documents, spans = dependencies[:2]
+    documents = members.member("documents.jsonl")
+    support = [members.member(name) for name in ("license-report.json", "sources.json")]
+    parts = span_partitions(root, receipt["files"])
+    span_files = {part.source_file: part.spans for part in parts}
+    inline_spans = None if parts else members.member(SPAN_MEMBER)
     use_receipts = proof_store is not None and verification_mode == "verified_reuse"
     if use_receipts:
         # The path separates build, staged, and release checks at distinct locations.
@@ -703,7 +746,14 @@ def _replay_sources(
             [
                 str(root),
                 receipt["build_id"],
-                [receipt["files"][name] for name in names],
+                [
+                    receipt["files"][name]
+                    for name in (
+                        *DOCUMENT_MEMBERS,
+                        "license-report.json",
+                        "sources.json",
+                    )
+                ],
             ]
         )
     tasks = []
@@ -711,10 +761,20 @@ def _replay_sources(
     total = reused = 0
     for source_id, raw_name, count in groups:
         raw_path = _safe(files_roots[source_id], raw_name)
+        spans = (
+            inline_spans
+            if inline_spans is not None
+            else span_files.get((source_id, raw_name))
+        )
+        if spans is None:
+            raise ValueError(
+                f"missing normalized span partition: {source_id}/{raw_name}"
+            )
         size = raw_path.stat().st_size
         total += size
         file = rights.get((source_id, raw_name))
         if use_receipts and file is not None and size >= INVENTORY_RECEIPT_MIN_BYTES:
+            dependencies = [documents, spans, *support]
             identity = canonical_digest(
                 [
                     replay_inputs,
@@ -732,7 +792,12 @@ def _replay_sources(
                 reused += size
                 continue
             if check.index is not None:
-                unfinished[source_id, raw_name] = raw_path, identity, check.index
+                unfinished[source_id, raw_name] = (
+                    raw_path,
+                    identity,
+                    check.index,
+                    dependencies,
+                )
         tasks.append(
             (
                 database,
@@ -754,7 +819,7 @@ def _replay_sources(
     def consume(result):
         source_id, raw_name, count, size = result
         if proof := unfinished.pop((source_id, raw_name), None):
-            path, identity, index = proof
+            path, identity, index, dependencies = proof
             release_receipt.record(
                 proof_store, "raw_replay", path, identity, dependencies, index=index
             )
@@ -973,7 +1038,7 @@ def _row_index_writer(path):
 
 
 def release_row_index_inputs(
-    paths: dict[str, Path],
+    paths: dict[str, tuple[Path, ...]],
     files: dict[str, Any],
     identity: dict[str, Any],
     options: NormalizerOptions,
@@ -983,8 +1048,11 @@ def release_row_index_inputs(
     """Bind the row index keys to the exact files and verification rules."""
     producer = verifier_digest("release") if checkpointed else None
     file_bindings = {
-        name: {"entry": files[name], "generation": range_file_identity(path)}
-        for name, path in paths.items()
+        name: {
+            "entry": files[name],
+            "generation": [range_file_identity(path) for path in members],
+        }
+        for name, members in paths.items()
     }
     return (
         {"files": {"spans.jsonl": file_bindings["spans.jsonl"]}, "producer": producer},
@@ -1002,9 +1070,15 @@ def _release_row_indexes(
 ):
     """Build or restore the checked indexes used by downstream replay queries."""
     members = ReleaseMembers(root, receipt)
-    inputs_by_name = {name: members.member(name) for name in DOCUMENT_MEMBERS}
-    spans_path = inputs_by_name["spans.jsonl"]
-    documents_path = inputs_by_name["documents.jsonl"]
+    parts = span_partitions(root, receipt["files"])
+    span_sources = (
+        tuple((part.spans, part.source_file) for part in parts)
+        if parts
+        else ((members.member(SPAN_MEMBER), None),)
+    )
+    spans_paths = tuple(path for path, _ in span_sources)
+    documents_path = members.member("documents.jsonl")
+    inputs_by_name = {"documents.jsonl": (documents_path,), SPAN_MEMBER: spans_paths}
     span_inputs, document_inputs = release_row_index_inputs(
         inputs_by_name,
         receipt["files"],
@@ -1016,7 +1090,8 @@ def _release_row_indexes(
 
     def check_inputs(files):
         if any(
-            range_file_identity(inputs_by_name[name]) != item["generation"]
+            [range_file_identity(path) for path in inputs_by_name[name]]
+            != item["generation"]
             for name, item in files.items()
         ):
             raise ValueError("release row index inputs changed")
@@ -1060,8 +1135,9 @@ def _release_row_indexes(
             run_tasks(
                 _span_rows,
                 (
-                    (str(spans_path), start, end)
-                    for start, end in chunk_ranges(spans_path)
+                    (str(path), start, end, source_file)
+                    for path, source_file in span_sources
+                    for start, end in chunk_ranges(path)
                 ),
                 load,
                 total_bytes=file_bindings["spans.jsonl"]["entry"]["size"],
@@ -1070,7 +1146,7 @@ def _release_row_indexes(
             result["rows"] = db.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
 
     def build_documents(directory, result):
-        phase("spans", spans_path)
+        phase("spans", *spans_paths)
         span_database, spans = run("spans", span_inputs, build_spans)
         with _row_index_writer(directory / "documents.sqlite") as db:
             db.execute(
@@ -1138,7 +1214,7 @@ def _release_row_indexes(
             ).fetchone()[0]:
                 raise ValueError("duplicate group representative mismatch")
 
-    phase("documents", documents_path, spans_path)
+    phase("documents", documents_path, *spans_paths)
     database, _ = run("documents", document_inputs, build_documents)
     check_inputs(file_bindings)
     if identity["split"].get("assignment_file") is not None:
@@ -2375,6 +2451,18 @@ def release_manifest_payload(
     if placement.documents:
         for name in DOCUMENT_MEMBERS:
             files[name] = {**files[name], "storage": SHARED_DOCUMENT}
+    if placement.normalized_spans:
+        if not build.get("span_partitions") or not streaming_verification(
+            build["identity"]
+        ):
+            raise ValueError(
+                "normalized spans require a native build with a span partition inventory"
+            )
+        files[SPAN_MEMBER] = {
+            **files[SPAN_MEMBER],
+            "storage": NORMALIZED_SPANS,
+            "partitions": build["span_partitions"],
+        }
     return {
         "schema_version": 1,
         "corpus_id": build["identity"]["project_id"],
@@ -2395,12 +2483,15 @@ def freeze(
     reuse_completed_preparation: bool = False,
     share_stage_artifacts: bool = False,
     share_document_artifacts: bool = False,
+    reference_normalized_spans: bool = False,
 ) -> Path:
     """Publish a release identity, optionally retaining its completed local payload."""
     build_dir = Path(build_dir).resolve()
     work_root = Path(work_root).resolve()
     placement = ReleasePlacement(
-        stages=share_stage_artifacts, documents=share_document_artifacts
+        stages=share_stage_artifacts,
+        documents=share_document_artifacts,
+        normalized_spans=reference_normalized_spans,
     )
     if placement.shared and build_dir.parent.parent.parent != work_root / "corpora":
         raise ValueError(
@@ -2509,6 +2600,10 @@ def _freeze(
         }:
             raise ValueError("existing release has different identity")
         return destination
+    parts = span_partitions(destination, payload["files"])
+    checked_spans = (
+        verify_span_projection(parts, payload["files"][SPAN_MEMBER]) if parts else None
+    )
     # A file written between verifying the build and renaming it would be
     # published unverified; the stat index is what notices.
     if fingerprint(build_dir, "build.json") != before:
@@ -2526,6 +2621,7 @@ def _freeze(
         verification_mode=verification_mode,
         verified=True,
         placement=placement,
+        checked_spans=checked_spans,
     )
 
 
@@ -2539,6 +2635,7 @@ def _publish(
     verification_mode: VerificationMode,
     verified: bool,
     placement: ReleasePlacement,
+    checked_spans: dict[Path, list[int]] | None = None,
 ) -> Path:
     """Finish a freeze from the renamed build: tombstone, manifest, one rename.
 
@@ -2597,6 +2694,27 @@ def _publish(
             if placement.shared
             else SharedPublication({}, {})
         )
+        if parts := span_partitions(staging, payload["files"]):
+            inline = staging / SPAN_MEMBER
+            if inline.is_symlink():
+                raise ValueError("symlinked staged span projection")
+            if inline.exists():
+                generations = checked_spans or verify_span_projection(
+                    parts, payload["files"][SPAN_MEMBER]
+                )
+                if any(
+                    range_file_identity(path) != stamp
+                    for path, stamp in generations.items()
+                ):
+                    raise ValueError(
+                        "normalized span inputs changed before publication"
+                    )
+                shared.generations.update(generations)
+                shared.checked.update(generations)
+                inline.unlink()
+                sync_directory(staging)
+            elif verified:
+                raise ValueError("verified build is missing its inline span payload")
         tombstone_json.unlink(missing_ok=True)
     if not verified:
         # Staging will be renamed, so keep this check out of the operation's
@@ -2950,10 +3068,20 @@ class ReleaseMembers:
         if name not in self.manifest["files"]:
             raise ValueError(f"release does not declare member: {name}")
         entry = self.manifest["files"][name]
+        if name == SPAN_MEMBER and entry.get("storage") == NORMALIZED_SPANS:
+            raise ValueError("referenced spans have multiple backing files")
         return shared_member_path(self.root, name, entry) or _safe(self.root, name)
 
+    def member_paths(self, name: str) -> tuple[Path, ...]:
+        if name == SPAN_MEMBER:
+            parts = span_partitions(self.root, self.manifest["files"])
+            if parts:
+                return tuple(part.spans for part in parts)
+        return (self.member(name),)
+
     def rows(self, name: str) -> Iterator[dict[str, Any]]:
-        return iter_rows(self.member(name))
+        for path in self.member_paths(name):
+            yield from iter_rows(path)
 
 
 @dataclass(frozen=True)

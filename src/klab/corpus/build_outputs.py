@@ -525,6 +525,7 @@ def write_release_files(
     lock: Mapping[str, Any],
     tokenizer_sha256: str | None = None,
     view_digests: Mapping[str, ViewFileDigest] | None = None,
+    span_partitions: list[dict[str, Any]] | None = None,
 ) -> None:
     """Write `report.json`, `report.md` and the file inventory `build.json`."""
     write_json(staging / "report.json", report)
@@ -572,6 +573,7 @@ def write_release_files(
             "identity": identity,
             "stages": stage_inventory,
             "files": files,
+            **({"span_partitions": span_partitions} if span_partitions else {}),
             "snapshots": [
                 {"source_id": source_id, "sha256": entry["snapshot_sha256"]}
                 for source_id, entry in sorted(lock["sources"].items())

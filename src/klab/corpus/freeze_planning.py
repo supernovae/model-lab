@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from klab.canonical import canonical_digest
+from klab.corpus.normalized_spans import (
+    NORMALIZED_SPANS,
+    SPAN_MEMBER,
+    span_dependencies,
+    span_partitions,
+)
 from klab.corpus.preparation_inputs import local_scope
 from klab.corpus.project import NormalizerOptions
 from klab.corpus.release import (
@@ -80,7 +86,40 @@ def _shared_placement(
     scheduled: set[Path] = set()
     actions = []
     inline = ReleaseMembers(root, payload)
-    for name in files.keys() - members.keys():
+    parts = span_partitions(destination, files)
+    external = set(members)
+    if parts:
+        external.add(SPAN_MEMBER)
+        span_dependencies(parts)
+        entry = files[SPAN_MEMBER]
+        for part in parts:
+            if _payload_stat(part.spans, part.entry["size"], shared=True) is None:
+                raise ValueError(f"missing normalized spans: {part.spans}")
+        size = entry["size"]
+        original = _payload_stat(root / SPAN_MEMBER, size)
+        if state == "build" and original is None:
+            raise ValueError("missing build span payload")
+        if state == "published" and original is not None:
+            raise ValueError("published spans have different placement")
+        if original is not None:
+            totals["duplicate_staging_bytes"] += size
+        actions.append(
+            {
+                "member": SPAN_MEMBER,
+                "sha256": entry["sha256"],
+                "storage": NORMALIZED_SPANS,
+                "bytes": size,
+                "partitions": len(parts),
+                "action": "verify_published"
+                if state == "published"
+                else (
+                    "reference_normalized_spans"
+                    if original is not None
+                    else "verify_staged_reference"
+                ),
+            }
+        )
+    for name in files.keys() - external:
         if _payload_stat(inline.member(name), files[name]["size"]) is None:
             raise ValueError(f"missing inline payload: {name}")
     for name, target in members.items():
@@ -149,7 +188,7 @@ def _retained_row_indexes(
         raise ValueError(f"unsafe release index workspace: {workspace}")
     members = ReleaseMembers(root, manifest)
     keys = release_row_index_inputs(
-        {name: members.member(name) for name in DOCUMENT_MEMBERS},
+        {name: members.member_paths(name) for name in DOCUMENT_MEMBERS},
         manifest["files"],
         identity,
         NormalizerOptions.model_validate(identity["release"]["normalizer"]),

@@ -12,6 +12,7 @@ stage, the properties those failures violated.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from collections import Counter
 from dataclasses import dataclass
@@ -104,7 +105,37 @@ def prepare(
         for key in ("declaration_sha256", "snapshot_sha256"):
             assert again["sources"][name][key] == lock["sources"][name][key], name
     build = Path(lab.run("corpus", "build", project, "--offline"))
-    release = Path(lab.run("corpus", "freeze", str(build), *placement))
+    if "--reference-normalized-spans" in placement:
+        from klab import safe_io
+
+        before = sha256_file(build / "spans.jsonl")
+        plan = lab.json("corpus", "plan", "--build", str(build), *placement, "--json")
+        rename = safe_io.rename_noreplace
+
+        def stop(source, destination):
+            if source.name.startswith(".freezing-"):
+                raise InterruptedError("after span projection placement")
+            rename(source, destination)
+
+        with monkeypatch.context() as fault:
+            fault.setattr(safe_io, "rename_noreplace", stop)
+            with pytest.raises(
+                InterruptedError, match="after span projection placement"
+            ):
+                lab.run("corpus", "freeze", str(build), *placement)
+        retry = lab.json("corpus", "plan", "--build", str(build), *placement, "--json")
+        assert retry["state"] == "staging"
+        span_step = next(
+            row for row in retry["shared_members"] if row["member"] == "spans.jsonl"
+        )
+        assert span_step["action"] == "verify_staged_reference"
+        release = Path(lab.run("corpus", "freeze", str(build), *placement))
+        assert plan["release_id"] == retry["release_id"] == release.name
+        manifest = json.loads((release / "manifest.json").read_bytes())
+        assert manifest["files"]["spans.jsonl"]["sha256"] == before
+        assert not (release / "spans.jsonl").exists()
+    else:
+        release = Path(lab.run("corpus", "freeze", str(build), *placement))
     return Prepared(lab, recipe, lock, build_before_edit, build, release)
 
 
@@ -591,9 +622,34 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         tmp_path,
         monkeypatch,
         capsys,
-        placement=("--share-stage-artifacts", "--share-document-artifacts"),
+        placement=(
+            "--share-stage-artifacts",
+            "--share-document-artifacts",
+            "--reference-normalized-spans",
+        ),
     )
     lab, recipe, release = prepared.lab, prepared.recipe, prepared.release
+    doc = documents(release)[0]
+    lineage = lab.json("corpus", "lineage", str(release), doc["document_id"])
+    assert lineage["parents"][0]["span"]["record_id"] == doc["document_id"]
+    manifest = json.loads((release / "manifest.json").read_bytes())
+    members = release_module.ReleaseMembers(release, manifest)
+    parts = members.member_paths("spans.jsonl")
+    assert len(parts) > 1
+    assert all(
+        path.is_relative_to(lab.work / "cache/corpus/normalized") for path in parts
+    )
+    path = next(path for path in parts if path.stat().st_size)
+    data, stamp = path.read_bytes(), path.stat()
+    try:
+        path.write_bytes(b" " + data[1:])
+        os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        with pytest.raises(ValueError, match="normalized span payload changed"):
+            lab.run("corpus", "audit", str(release))
+    finally:
+        path.write_bytes(data)
+    lab.run("corpus", "audit", str(release))
+
     inventory = tmp_path / "family-inventory.jsonl"
     write_family_inventory(release, inventory)
 

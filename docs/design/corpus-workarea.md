@@ -149,8 +149,15 @@ explicit digest pruning. The apply path walks all published and staged
 release roots under the work-area publication lease and uses the same
 per-digest locks as freeze. These roots protect the payloads reached by
 exports, prepared bundles and runs through their release manifests.
-Direct release references to reusable normalized source partitions and
-retention for other artifact families are tracked in #567.
+Ordinary native builds catalog normalized evidence span partitions in
+acquisition order. Freeze can bind the ordered partition keys and receipts
+directly to the release after verifying that they reproduce the logical
+span digest. Published releases then retain the referenced normalized spans
+and receipts. Builds still render a flat span file for verification and
+publication. Released documents carry selection, split and duplicate
+decisions, so references to normalized document payloads require a separate
+overlay and ordering contract. That contract and retention for other
+artifact families are tracked in #567.
 
 Start with typed document, passage, annotation, duplicate-group, selection,
 entity, assertion, evidence, edge, index, and compiled sequence payloads.
