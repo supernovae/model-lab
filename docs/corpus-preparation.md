@@ -2644,6 +2644,21 @@ validation documents may not be left out), `eval_split`, `max_fit_bytes`,
 outside the nine groups). The report also lists unmeasured groups and
 unclassified source kinds.
 
+Bakeoff resolves train and validation members through the verified release
+reader. Selection reads the document table once for both splits, and the
+report binds the view digests from the release manifest. The reader checks
+the release generation before publication. Text for grouped documents is
+still retained while selecting and scoring the sample.
+
+The table uses medians of three warm synthetic runs and measures selection
+and binding after release verification. Linux `rchar` reports logical
+process reads. The binding digests matched at both sizes.
+
+| Documents | Wall time before / after | Logical reads before / after |
+| --- | ---: | ---: |
+| 128 | 11.7 / 4.4 ms | 18.49 / 6.17 MB |
+| 512 | 49.5 / 16.2 ms | 73.97 / 24.70 MB |
+
 ## Materialize a mixture
 
 ```sh

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 from contextlib import nullcontext
 from dataclasses import asdict
@@ -18,17 +17,6 @@ from klab.workdir import resolve_work_dir
 _CACHE_HELP = (
     "Operator-local cold storage for raw downloads (flag > KLAB_TRANSPORT_CACHE > none)"
 )
-
-
-def _release_path(value: str, work_root: Path) -> Path:
-    if "@" in value and not Path(value).exists():
-        corpus_id, digest = value.split("@", 1)
-        if not re.fullmatch(r"[a-z][a-z0-9_-]*", corpus_id) or not re.fullmatch(
-            r"[0-9a-f]{64}", digest
-        ):
-            raise ValueError("release reference must be <corpus-id>@<full-sha256>")
-        return work_root / "corpora" / corpus_id / "releases" / digest
-    return Path(value).resolve()
 
 
 def _verification_flags(
@@ -539,7 +527,7 @@ def _run(args: argparse.Namespace) -> None:
         config = load_config(Path(args.config))
         print(json.dumps(verify_release_export(config.dataset), sort_keys=True))
         return
-    release = _release_path(args.release, root)
+    release = publication.resolve_release_reference(args.release, root)
     if command == "measure-tokens":
         from klab.corpus.release import _verification_operation
         from klab.corpus.token_denominator import measure_source_tokens
@@ -557,7 +545,9 @@ def _run(args: argparse.Namespace) -> None:
                 Path(args.policy),
                 Path(args.output),
                 tokenizer_origin_release=(
-                    _release_path(args.tokenizer_origin_release, root)
+                    publication.resolve_release_reference(
+                        args.tokenizer_origin_release, root
+                    )
                     if args.tokenizer_origin_release is not None
                     else None
                 ),

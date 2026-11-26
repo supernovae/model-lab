@@ -1524,9 +1524,9 @@ class AttemptBudget:
             ):
                 raise AttemptBudgetError("tokenizer release differs from acceptance")
             if classified.operation in {"corpus measure-tokens", "corpus export"}:
-                from klab.corpus.cli import _release_path
+                from klab.corpus.release import resolve_release_reference
 
-                measured = _release_path(classified.args[2], resolved_root)
+                measured = resolve_release_reference(classified.args[2], resolved_root)
                 if measured.resolve() != Path(review["release_path"]).resolve():
                     raise AttemptBudgetError("measured release differs from acceptance")
             if classified.operation in {

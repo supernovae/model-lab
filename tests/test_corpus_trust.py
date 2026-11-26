@@ -214,7 +214,7 @@ def bakeoff_report(tmp_path_factory: pytest.TempPathFactory) -> Path:
         declaration.write_text(
             yaml.safe_dump(
                 {
-                    "release_path": str(release),
+                    "release_path": f"bakeoff-fixture@{release.name}",
                     "vocab_sizes": list(VOCABS),
                     "max_fit_bytes": 268435456,
                     "eval_split": "validation",
@@ -228,7 +228,11 @@ def bakeoff_report(tmp_path_factory: pytest.TempPathFactory) -> Path:
         return bakeoff(declaration, root / "bakeoff")
 
 
-def test_bakeoff_selection_verifies_against_its_release(bakeoff_report: Path) -> None:
+def test_bakeoff_selection_verifies_against_its_release(
+    bakeoff_report: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from klab.corpus import tokenizer_bakeoff as bakeoff_module
+
     report = json.loads(bakeoff_report.read_text(encoding="utf-8"))
     scores = {
         item["vocab_size"]: item["weighted_bytes_per_token"]
@@ -241,10 +245,27 @@ def test_bakeoff_selection_verifies_against_its_release(bakeoff_report: Path) ->
         v for v, s in scores.items() if s >= 0.98 * max(scores.values())
     )
     tokenizer = bakeoff_report.parent / "candidates" / str(chosen) / "tokenizer.json"
+    scans = []
+    read_rows = bakeoff_module.ReleaseReader.rows
+
+    def track_rows(reader, member):
+        scans.append(member)
+        return read_rows(reader, member)
+
+    def hash_control(path):
+        assert (
+            path.name not in {"train.jsonl", "validation.jsonl"}
+            or path.parent.name != "lm"
+        )
+        return sha256_file(path)
+
+    monkeypatch.setattr(bakeoff_module.ReleaseReader, "rows", track_rows)
+    monkeypatch.setattr(bakeoff_module, "sha256_file", hash_control)
     assert verify_selection(bakeoff_report) == (
         sha256_file(tokenizer),
         f"{report['identity']['release_id']}:{chosen}",
     )
+    assert scans.count("documents.jsonl") == 1
 
 
 def test_bakeoff_selection_refuses_a_forged_choice(bakeoff_report: Path) -> None:

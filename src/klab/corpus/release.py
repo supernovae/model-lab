@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -2777,6 +2778,18 @@ def open_release(
         proofs = _verified_releases.get()
         assert proofs is not None
         yield ReleaseReader(root, manifest, proofs[root].fingerprint)
+
+
+def resolve_release_reference(value: str, work_root: Path) -> Path:
+    """Resolve a directory or a full Corpus release reference to its location."""
+    if "@" in value and not Path(value).exists():
+        corpus_id, digest = value.split("@", 1)
+        if not re.fullmatch(r"[a-z][a-z0-9_-]*", corpus_id) or not re.fullmatch(
+            r"[0-9a-f]{64}", digest
+        ):
+            raise ValueError("release reference must be <corpus-id>@<full-sha256>")
+        return work_root / "corpora" / corpus_id / "releases" / digest
+    return Path(value).resolve()
 
 
 def sources(path: Path) -> dict[str, Any]:
