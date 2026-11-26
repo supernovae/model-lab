@@ -580,7 +580,7 @@ def _document_rows(
                 raise ValueError("document rights attribution mismatch")
             return source, path, snapshot, raw_sha, normalizer, json.loads(rights)
 
-        rows, duplicate_keys = [], []
+        rows, replay_rows, duplicate_keys = [], [], []
         for doc, _, _ in range_records(Path(documents), start, end):
             content_digest = hashlib.sha256(doc["text"].encode("utf-8")).digest()
             if doc["content_sha256"] != content_digest.hex():
@@ -636,16 +636,24 @@ def _document_rows(
                     doc["split"],
                     doc["representative_id"],
                     doc["drop_reason"],
-                    file_id,
-                    start_line,
                     content_digest,
                     doc["source_family"],
                     doc["modality"],
                     json.dumps(doc["domains"]),
+                )
+            )
+            replay_rows.append(
+                (
+                    file_id,
+                    start_line,
+                    bytes.fromhex(doc["document_id"]),
                     end_line,
                     byte_start,
                     byte_end,
                     raw_content,
+                    content_digest
+                    if byte_start is None or structure is not None
+                    else None,
                     structure,
                 )
             )
@@ -654,7 +662,7 @@ def _document_rows(
             duplicate_keys.extend(
                 (method, key, compact) for method, key in _declared_keys(doc, keys)
             )
-        return rows, duplicate_keys, end - start
+        return rows, replay_rows, duplicate_keys, end - start
 
 
 def _verify_replay_location(location, path, start, end, byte_start, byte_end):
@@ -709,8 +717,8 @@ def _raw_group(
             structure,
         ) in db.execute(
             "SELECT line_start,line_end,byte_start,byte_end,raw_content_sha256,"
-            "content_sha256,structure_sha256 FROM docs "
-            "WHERE file=? ORDER BY line_start,id",
+            "content_sha256,structure_sha256 FROM replay "
+            "WHERE file=? ORDER BY line_start,document",
             (file_id,),
         ):
             count += 1
@@ -1111,6 +1119,11 @@ def _row_index_writer(path, *, cache_kib: int = 65536):
 
 _REPLAY_SUPPORT = ("sources.json", "license-report.json")
 RELEASE_ROW_INDEX_MEMBERS = (*DOCUMENT_MEMBERS, *_REPLAY_SUPPORT)
+_REPLAY_COLUMNS = (
+    "file INTEGER, line_start INTEGER, document BLOB, line_end INTEGER, "
+    "byte_start INTEGER, byte_end INTEGER, raw_content_sha256 BLOB, "
+    "content_sha256 BLOB, structure_sha256 BLOB"
+)
 
 
 def release_row_index_inputs(
@@ -1306,13 +1319,11 @@ def _release_row_indexes(
         span_database, spans = run("spans", span_inputs, build_spans)
         files_database = str(Path(span_database).with_name("files.sqlite"))
 
-        def index_documents(db, evidence):
+        def index_documents(db, evidence, spool):
             db.execute(
                 "CREATE TABLE docs (id TEXT, source TEXT, split TEXT, "
-                "representative TEXT, dropped TEXT, file INTEGER, "
-                "line_start INTEGER, content_sha256 BLOB, source_family TEXT, "
-                "modality TEXT, domains TEXT, line_end INTEGER, byte_start INTEGER, "
-                "byte_end INTEGER, raw_content_sha256 BLOB, structure_sha256 BLOB)"
+                "representative TEXT, dropped TEXT, content_sha256 BLOB, "
+                "source_family TEXT, modality TEXT, domains TEXT)"
             )
             db.execute(
                 "ATTACH DATABASE ? AS span_files",
@@ -1324,9 +1335,10 @@ def _release_row_indexes(
             db.execute("INSERT INTO files SELECT id,source,path FROM span_files.files")
 
             def load(rows):
-                docs, keys, size = rows
-                db.executemany(
-                    "INSERT INTO docs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", docs
+                docs, replay, keys, size = rows
+                db.executemany("INSERT INTO docs VALUES (?,?,?,?,?,?,?,?,?)", docs)
+                spool.executemany(
+                    "INSERT INTO replay VALUES (?,?,?,?,?,?,?,?,?)", replay
                 )
                 evidence.executemany("INSERT INTO duplicate_keys VALUES (?,?,?)", keys)
                 advance(len(docs), size)
@@ -1353,7 +1365,6 @@ def _release_row_indexes(
             _unique_index(db, "docs_id", "docs", "id", "duplicate document identity")
             if db.execute("SELECT COUNT(*) FROM docs").fetchone()[0] != spans["rows"]:
                 raise ValueError("document evidence span inventory mismatch")
-            db.execute("CREATE INDEX docs_raw_order_idx ON docs(file,line_start,id)")
             if db.execute(
                 "SELECT COUNT(*) FROM docs AS doc LEFT JOIN docs AS representative "
                 "ON doc.representative=representative.id WHERE representative.id IS NULL "
@@ -1373,15 +1384,23 @@ def _release_row_indexes(
 
         # The evidence is used once. Commit only the checked document index to
         # the stage so retries neither store nor rehash these grouping inputs.
+        index_path = directory / "documents.sqlite"
         evidence_path = temporary / "duplicate-keys.sqlite"
-        with _row_index_writer(evidence_path, cache_kib=8192) as evidence:
+        spool_path = temporary / "raw-order.sqlite"
+        with (
+            _row_index_writer(evidence_path, cache_kib=8192) as evidence,
+            _row_index_writer(spool_path, cache_kib=8192) as spool,
+            _row_index_writer(index_path) as db,
+        ):
             evidence.execute(
                 "CREATE TABLE duplicate_keys "
                 "(method INTEGER NOT NULL, key BLOB NOT NULL, representative BLOB NOT NULL)"
             )
-            with _row_index_writer(directory / "documents.sqlite") as db:
-                index_documents(db, evidence)
-            evidence.commit()
+            spool.execute(f"CREATE TABLE replay ({_REPLAY_COLUMNS})")
+            index_documents(db, evidence, spool)
+        with closing(_readonly(str(evidence_path))) as evidence:
+            evidence.execute("PRAGMA cache_size=-8192")
+            evidence.execute("PRAGMA temp_store=FILE")
             if progress is not None:
                 progress.start_phase("document_duplicates")
             # Every row already has a valid, non-null representative. Extremes
@@ -1392,6 +1411,30 @@ def _release_row_indexes(
             ).fetchone():
                 raise ValueError("duplicate group representative mismatch")
         evidence_path.unlink()
+
+        # The primary key is also the storage order. Binary document IDs sort
+        # the same as their canonical hex form when source positions tie.
+        if progress is not None:
+            progress.start_phase("raw_replay_order")
+        with _row_index_writer(index_path) as db:
+            db.execute(
+                "ATTACH DATABASE ? AS replay_input",
+                (spool_path.resolve().as_uri() + "?mode=ro",),
+            )
+            db.execute("PRAGMA replay_input.cache_size=-8192")
+            db.execute(
+                f"CREATE TABLE replay ({_REPLAY_COLUMNS}, "
+                "PRIMARY KEY(file,line_start,document)) WITHOUT ROWID"
+            )
+            copied = db.execute(
+                "INSERT INTO replay SELECT * FROM replay_input.replay "
+                "ORDER BY file,line_start,document"
+            ).rowcount
+            if copied != spans["rows"]:
+                raise ValueError("document replay inventory mismatch")
+        if progress is not None:
+            progress.record("ordered_replay_facts")
+        spool_path.unlink()
 
     phase("documents", documents_path, *spans_paths)
     database, _ = run("documents", document_inputs, build_documents)
@@ -1494,7 +1537,7 @@ def _validate_rows_streaming(
 
             groups = db.execute(
                 "SELECT files.source,files.path,g.records,g.file FROM files JOIN "
-                "(SELECT file,COUNT(*) AS records FROM docs GROUP BY file) g "
+                "(SELECT file,COUNT(*) AS records FROM replay GROUP BY file) g "
                 "ON files.id=g.file ORDER BY g.records DESC,files.source,files.path"
             ).fetchall()
             _replay_sources(
