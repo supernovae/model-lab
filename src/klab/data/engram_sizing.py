@@ -24,6 +24,7 @@ import json
 import math
 import sys
 from collections.abc import Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -124,7 +125,7 @@ def sample_blocks(
     if total == 0:
         raise ValueError("no tokens to analyze")
     if total <= max_tokens:
-        return [np.asarray(a, dtype=np.int64) for a in arrays]
+        return [np.asarray(a[:], dtype=np.int64) for a in arrays]
     size = max(block_multiple, max_tokens // blocks // block_multiple * block_multiple)
     count = max(1, max_tokens // size)
     starts = [int(i * (total - size) / max(count - 1, 1)) for i in range(count)]
@@ -626,8 +627,22 @@ def _setup(args: argparse.Namespace) -> EngramSetup:
 def _handle(args: argparse.Namespace) -> None:
     try:
         setup = _setup(args)
-        arrays = open_tokens(args.tokens)
-        blocks = sample_blocks(arrays, args.max_tokens, args.blocks, setup.seq_len or 1)
+        with ExitStack() as resources:
+            manifest = args.tokens / "manifest.json"
+            if (
+                not (args.tokens / "train.npy").is_file()
+                and manifest.is_file()
+                and "train_reference" in json.loads(manifest.read_text())
+            ):
+                from klab.data.packing import load_prepared_data
+
+                data = load_prepared_data(args.tokens, byte_enabled=False)
+                arrays = [resources.enter_context(data.open_train())]
+            else:
+                arrays = open_tokens(args.tokens)
+            blocks = sample_blocks(
+                arrays, args.max_tokens, args.blocks, setup.seq_len or 1
+            )
         report = analyze(
             blocks,
             setup,

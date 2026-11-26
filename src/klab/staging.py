@@ -287,7 +287,12 @@ def _verify_inventory(
 
 
 def _load_inventory_prepared(
-    assets: Path, proofs: dict[str, VerifiedFile], *, byte_enabled: bool
+    assets: Path,
+    proofs: dict[str, VerifiedFile],
+    *,
+    byte_enabled: bool,
+    proof_store: ProofStore | None = None,
+    verification_mode: Literal["cold", "verified_reuse"] = "cold",
 ) -> Any:
     root = assets / "data"
     manifest_proof = proofs["data/manifest.json"]
@@ -297,14 +302,19 @@ def _load_inventory_prepared(
         memo={(manifest_proof.path, manifest_proof.fingerprint): manifest_proof},
     )
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    arrays = {
-        name.removeprefix("data/"): proof
-        for name, proof in proofs.items()
-        if name.startswith("data/") and name.endswith(".npy")
+    from klab.data.verification import required_prepared_members
+
+    members = {
+        name: proofs[f"data/{name}"] for name in required_prepared_members(manifest)
     }
-    receipt = _receipt_from_proofs(root, manifest, arrays)
+    receipt = _receipt_from_proofs(root, manifest, members)
     return load_prepared_data(
-        root, byte_enabled=byte_enabled, verification="structural", receipt=receipt
+        root,
+        byte_enabled=byte_enabled,
+        verification="structural",
+        receipt=receipt,
+        proof_store=proof_store,
+        verification_mode=verification_mode,
     )
 
 
@@ -368,6 +378,8 @@ def pilot_config(
                     root / "assets",
                     proofs,
                     byte_enabled=config.model.memory == "byte",
+                    proof_store=proof_store,
+                    verification_mode=verification_mode,
                 )
                 tokenizer = load_tokenizer(root / "assets" / "tokenizer.json")
                 matched_dataset = _pilot_story_dataset(
@@ -452,7 +464,11 @@ def verify_stage_bundle(
         verification_mode=verification_mode,
     )
     data = _load_inventory_prepared(
-        assets, proofs, byte_enabled=base.model.memory == "byte"
+        assets,
+        proofs,
+        byte_enabled=base.model.memory == "byte",
+        proof_store=proof_store,
+        verification_mode=verification_mode,
     )
     tokenizer = load_tokenizer(root / "assets" / "tokenizer.json")
     if matched_pilot:
@@ -476,7 +492,7 @@ def verify_stage_bundle(
         from klab.workers.bundles import verify_portable_corpus_binding
 
         verify_portable_corpus_binding(base, assets)
-    if not len(data.train) or not len(data.validation):
+    if not data.train_tokens or not len(data.validation):
         raise ValueError("staged data is empty")
     if purpose == "training":
         bundle = _read_sealed(root / "bundle.json")
@@ -872,7 +888,11 @@ def verify_prepared_inputs(
         verification_mode=verification_mode,
     )
     data = _load_inventory_prepared(
-        assets, proofs, byte_enabled=config.model.memory == "byte"
+        assets,
+        proofs,
+        byte_enabled=config.model.memory == "byte",
+        proof_store=proof_store,
+        verification_mode=verification_mode,
     )
     tokenizer = load_tokenizer(root / "assets" / "tokenizer.json")
     if tokenizer.get_vocab_size() != config.model.vocab_size:
@@ -881,7 +901,7 @@ def verify_prepared_inputs(
         from klab.workers.bundles import verify_portable_corpus_binding
 
         verify_portable_corpus_binding(config, assets)
-    if not len(data.train) or not len(data.validation):
+    if not data.train_tokens or not len(data.validation):
         raise ValueError("prepared data is empty")
     if _proofs is not None:
         _proofs.update(proofs)

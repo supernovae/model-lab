@@ -90,9 +90,9 @@ def _bind_config(manifest: dict, config: RunConfig) -> dict | None:
     return snapshot
 
 
-def _block_counts(ids: np.ndarray, mask: np.ndarray | None, seq_len: int) -> dict:
+def _block_counts(positions: int, mask: np.ndarray | None, seq_len: int) -> dict:
     """Count the exact causal mask slices without allocating a block index list."""
-    blocks, tail = divmod(max(0, len(ids) - 1), seq_len)
+    blocks, tail = divmod(max(0, positions - 1), seq_len)
     usable = targets = 0
     if mask is None:
         usable, targets = blocks, blocks * seq_len
@@ -113,7 +113,7 @@ def _block_counts(ids: np.ndarray, mask: np.ndarray | None, seq_len: int) -> dic
         "zero_supervision_blocks": blocks - usable,
         "complete_block_target_positions": blocks * seq_len,
         "supervised_targets": targets,
-        "initial_token_without_target": min(1, len(ids)),
+        "initial_token_without_target": min(1, positions),
         "dropped_tail_tokens": tail,
         "dropped_tail_supervised_targets": tail_targets,
     }
@@ -196,15 +196,15 @@ def coverage(prepared_root: Path, config: RunConfig | Path | None = None) -> dic
         snapshot = verified_snapshot
     splits = {}
     for split in ("train", "validation"):
-        ids = getattr(data, split)
+        positions = manifest[split]["tokens"]
         mask = getattr(data, f"{split}_supervision")
         splits[split] = {
             "source_coverage": _source_coverage(snapshot, split, manifest[split]),
             "preparation": manifest[split],
-            "packed_tokens": len(ids),
+            "packed_tokens": positions,
             "blocks": None
             if config is None
-            else _block_counts(ids, mask, config.training.seq_len),
+            else _block_counts(positions, mask, config.training.seq_len),
         }
     return {
         "format": "klab-dataset-coverage-v1",

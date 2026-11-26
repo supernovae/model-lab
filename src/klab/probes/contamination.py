@@ -65,6 +65,7 @@ def find_windows(train: np.ndarray, windows: set[Window]) -> set[Window]:
     if not wanted:
         return set()
     width = 1 << (min(min(map(len, wanted)), _PREFILTER).bit_length() - 1)
+    overlap = max(map(len, wanted)) - 1
     groups: dict[int, list[Window]] = {}
     for window in wanted:
         lead = _hash_windows(np.asarray(window[:width], dtype=np.int64), width)
@@ -73,14 +74,14 @@ def find_windows(train: np.ndarray, windows: set[Window]) -> set[Window]:
     table[np.fromiter(groups, dtype=np.uint64, count=len(groups)) >> _SHIFT] = True
     found: set[Window] = set()
     for start in range(0, total - width + 1, _CHUNK):
-        chunk = np.asarray(train[start : min(start + _CHUNK + width - 1, total)])
-        hashed = _hash_windows(chunk, width)
+        chunk = np.asarray(train[start : min(start + _CHUNK + overlap, total)])
+        hashed = _hash_windows(chunk[: _CHUNK + width - 1], width)
         candidates = np.flatnonzero(table[hashed >> _SHIFT])
         if candidates.size == 0:
             continue
         keys = hashed[candidates]
         order = np.argsort(keys, kind="stable")
-        keys, positions = keys[order], candidates[order] + start
+        keys, positions = keys[order], candidates[order]
         for key, group in groups.items():
             low = np.searchsorted(keys, np.uint64(key), side="left")
             high = np.searchsorted(keys, np.uint64(key), side="right")
@@ -88,8 +89,8 @@ def find_windows(train: np.ndarray, windows: set[Window]) -> set[Window]:
                 if low == high or window in found:
                     continue
                 at = positions[low:high]
-                at = at[at + len(window) <= total]
-                if _verify(train, at, window):
+                at = at[at + len(window) <= len(chunk)]
+                if _verify(chunk, at, window):
                     found.add(window)
     return found
 
@@ -225,17 +226,18 @@ def check_prepared(
             "seconds": round(time.monotonic() - started, 3),
         }
     scan_started = time.monotonic()
-    screen = leakage_screen(
-        lambda text, answer: item_windows(tokenizer, text, answer, n),
-        lambda windows: find_windows(data.train, windows),
-        parametric_seed=seed,
-    )
+    with data.open_train() as train:
+        screen = leakage_screen(
+            lambda text, answer: item_windows(tokenizer, text, answer, n),
+            lambda windows: find_windows(train, windows),
+            parametric_seed=seed,
+        )
     contaminated = {split: row["contaminated"] for split, row in screen.items()}
     result: dict[str, Any] = {
         **identity,
         "key": key,
         "status": CONTAMINATED if any(contaminated.values()) else CLEAN,
-        "train_tokens": len(data.train),
+        "train_tokens": data.train_tokens,
         "checked": {split: row["checked"] for split, row in screen.items()},
         "contaminated": contaminated,
         "items": screen["heldout"]["items"],

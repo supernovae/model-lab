@@ -21,7 +21,7 @@ from klab.data.packing import (
     supervision_requires_mask,
 )
 from klab.data.tokenizer import load_tokenizer
-from klab.data.verification import _receipt_from_proofs
+from klab.data.verification import _receipt_from_proofs, required_prepared_members
 from klab.engines.base import Microbatch
 from klab.engines.mlx import MLXEngine, preserve_rng_state
 from klab.evaluation.evidence import _validated_artifacts
@@ -265,23 +265,11 @@ def load_run(
         verification_mode=verification_mode,
         hash_data=hash_run_data,
     )
-    required = {
-        "tokenizer.json",
-        "data/manifest.json",
-        "data/train.npy",
-        "data/validation.npy",
-    }
+    required = {"tokenizer.json", "data/manifest.json"}
     data_manifest = json.loads((run / "data" / "manifest.json").read_text())
     if not isinstance(data_manifest, dict):
         raise TypeError("prepared-data manifest must be an object")
-    if supervision_requires_mask(data_manifest):
-        required.update(
-            {"data/train_supervision.npy", "data/validation_supervision.npy"}
-        )
-    if config.model.memory == "byte":
-        required.update(
-            {"data/train_byte_addresses.npy", "data/validation_byte_addresses.npy"}
-        )
+    required.update(f"data/{name}" for name in required_prepared_members(data_manifest))
     if not required <= artifacts.keys():
         raise ValueError(
             f"run lacks verified artifacts: {sorted(required - artifacts.keys())}"
@@ -293,6 +281,8 @@ def load_run(
             byte_enabled=config.model.memory == "byte",
             verification="structural",
             receipt=receipt,
+            proof_store=proof_store,
+            verification_mode=verification_mode,
         )
 
     # The checkpoint and training runtime were verified before authorization.
@@ -324,7 +314,10 @@ def load_run(
         "config": config.model_dump(mode="json"),
         "tokenizer_sha256": artifacts["tokenizer.json"],
         "data_sha256": {
-            key: artifacts[f"data/{key}.npy"] for key in ("train", "validation")
+            "train": data_manifest["train"]["sha256"]
+            if "train_reference" in data_manifest
+            else artifacts["data/train.npy"],
+            "validation": artifacts["data/validation.npy"],
         },
         "source_identity_sha256": manifest["source_identity"]["sha256"],
         "training_runtime": {

@@ -258,7 +258,8 @@ def required_arrays(
         entry = manifest.get(split)
         if not isinstance(entry, dict):
             raise ValueError("missing prepared split metadata")  # noqa: TRY004 - invalid serialized schema
-        result[f"{split}.npy"] = (entry, "int32", 1)
+        if split != "train" or "train_reference" not in manifest:
+            result[f"{split}.npy"] = (entry, "int32", 1)
     supervision = manifest.get("supervision")
     if (
         isinstance(supervision, dict)
@@ -293,6 +294,74 @@ def required_arrays(
     return result
 
 
+def required_prepared_members(manifest: dict) -> dict:
+    """Describe prepared files, including byte files in a reference bundle."""
+    members = required_arrays(manifest)
+    reference_only = "train_reference" in manifest
+    packing = (manifest.get("cache_identity") or {}).get("packing") or {}
+    if reference_only != (packing.get("mixture_prepared_storage") == "references"):
+        raise ValueError("prepared storage differs from its packing settings")
+    if not reference_only:
+        return members
+    reference = manifest["train_reference"]
+    mixture = manifest.get("token_mixture")
+    schedule = mixture.get("token_schedule") if isinstance(mixture, dict) else None
+    train = manifest["train"]
+    positions = train.get("tokens")
+    if (
+        manifest.get("source") != "local_token_mixture"
+        or manifest.get("byte_addressing") is not None
+        or "train_supervision.npy" not in members
+        or not isinstance(reference, dict)
+        or set(reference) != {"cache_root", "bos", "pad", "seq_len"}
+        or not isinstance(reference["cache_root"], str)
+        or not Path(reference["cache_root"]).is_absolute()
+        or ".." in Path(reference["cache_root"]).parts
+        or any(
+            type(reference[k]) is not int or not 0 <= reference[k] < 2**31
+            for k in ("bos", "pad")
+        )
+        or type(reference["seq_len"]) is not int
+        or reference["seq_len"] <= 0
+        or reference["seq_len"] != packing.get("mixture_row_tokens")
+        or not isinstance(schedule, dict)
+        or train.get("dtype") != "int32"
+        or type(positions) is not int
+        or positions < 2
+        or train.get("shape") != [positions]
+        or (positions - 1) % reference["seq_len"]
+        or type(train.get("size_bytes")) is not int
+        or train["size_bytes"] <= 4 * positions
+    ):
+        raise ValueError("invalid reference-only prepared training descriptor")
+    files = {
+        "train.schedule.bin": (schedule.get("sha256"), schedule.get("bytes")),
+        "train.records.jsonl": (
+            mixture.get("train_records_sha256"),
+            mixture.get("train_records_bytes"),
+        ),
+    }
+    for name, (digest, size) in {
+        **files,
+        "logical train": (train.get("sha256"), train["size_bytes"]),
+    }.items():
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            or type(size) is not int
+            or size <= 0
+        ):
+            raise ValueError(f"invalid prepared reference file metadata: {name}")
+    members.update(
+        {
+            name: ({"sha256": digest, "size_bytes": size}, None, 0)
+            for name, (digest, size) in files.items()
+        }
+    )
+    return members
+
+
 def _receipt_from_proofs(
     root: Path, manifest: dict[str, object], proofs: dict[str, VerifiedFile]
 ) -> VerifiedPreparedData:
@@ -313,7 +382,7 @@ def _receipt_from_proofs(
     digest = signed.pop("manifest_sha256", None)
     if not isinstance(digest, str) or canonical_digest(signed) != digest:
         raise ValueError("prepared manifest signature mismatch")
-    required = required_arrays(manifest)
+    required = required_prepared_members(manifest)
     if set(proofs) != set(required):
         raise ValueError("prepared array proofs do not match manifest inventory")
     expected = {*required, "manifest.json"}
@@ -337,6 +406,13 @@ def _receipt_from_proofs(
             or proof.fingerprint != _fingerprint(path)
         ):
             raise ValueError(f"prepared proof is stale or forged: {path}")
+        if dtype is None:
+            if (
+                metadata.get("sha256") != proof.sha256
+                or metadata.get("size_bytes") != proof.size_bytes
+            ):
+                raise ValueError(f"prepared file metadata mismatch: {path}")
+            continue
         values = np.load(path, mmap_mode="r", allow_pickle=False)
         shape = metadata.get("shape")
         if (

@@ -82,7 +82,10 @@ def _validated_artifacts(
                 closure={"run_id": manifest["run_id"], "inventory": artifacts},
             ),
         )
-        if Path(name).parts[0] == "data" and path.suffix == ".npy":
+        if relative.parts[0] == "data" and (
+            path.suffix == ".npy"
+            or path.name in {"train.records.jsonl", "train.schedule.bin"}
+        ):
             proofs[path.name] = proof
         verified[name] = digest
     return verified, proofs

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -499,7 +500,7 @@ def _verify_artifacts(root: Path, manifest: dict[str, Any], *, resume: bool) -> 
     names: set[str] = set()
     required = {"tokenizer.json"}
     if resume:
-        required.update({"data/manifest.json", "data/train.npy", "data/validation.npy"})
+        required.add("data/manifest.json")
     for record in records:
         name = record["relative_path"]
         if name in names:
@@ -523,6 +524,11 @@ def _verify_artifacts(root: Path, manifest: dict[str, Any], *, resume: bool) -> 
             or sha256_file(path) != record["sha256"]
         ):
             raise ValueError(f"run artifact integrity failure: {name}")
+    if resume and "data/manifest.json" in names:
+        from klab.data.verification import required_prepared_members
+
+        prepared = json.loads((root / "data/manifest.json").read_text())
+        required.update(f"data/{name}" for name in required_prepared_members(prepared))
     if not required <= names:
         raise ValueError(
             f"run lacks bound continuation artifacts: {sorted(required - names)}; "

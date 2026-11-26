@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import closing, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
 from functools import lru_cache, partial, wraps
@@ -56,6 +56,7 @@ from klab.data.verification import (
     _verify_file_with_hasher,
     _written_file,
     required_arrays,
+    required_prepared_members,
 )
 from klab.host_capacity import run_ordered, sha_work_plan
 from klab.progress import progress_phase
@@ -84,7 +85,7 @@ _MIXTURE_COPY_BYTES = 64 * 1024**2
 @dataclass(frozen=True)
 class PreparedData:
     root: Path
-    train: np.ndarray
+    train: np.ndarray | None
     validation: np.ndarray
     train_supervision: np.ndarray | None
     validation_supervision: np.ndarray | None
@@ -93,6 +94,34 @@ class PreparedData:
     manifest: dict[str, object]
     receipt: VerifiedPreparedData
     mixture_schedule: VerifiedSchedule | None = None
+
+    @property
+    def train_tokens(self) -> int:
+        return self.manifest["train"]["tokens"]
+
+    @contextmanager
+    def open_train(self) -> Iterator[np.ndarray | ReferencedTokenArray]:
+        """Open packed positions from the array or the authenticated segment view."""
+        if self.train is not None:
+            yield self.train
+            return
+        from klab.data.mixture_batches import ReferencedTokenArray
+
+        assert self.mixture_schedule is not None
+        reference = self.manifest["train_reference"]
+        with ReferencedTokenArray(
+            self.mixture_schedule,
+            self.root / "train.records.jsonl",
+            self.manifest["token_mixture"],
+            seq_len=reference["seq_len"],
+            bos=reference["bos"],
+            pad=reference["pad"],
+        ) as source:
+            if len(source) != self.train_tokens:
+                raise ValueError(
+                    "reference training length differs from the prepared mixture"
+                )
+            yield source
 
 
 @dataclass(frozen=True)
@@ -149,6 +178,12 @@ def packing_identity(config: RunConfig) -> dict[str, object]:
         **(
             {"mixture_row_tokens": config.training.seq_len}
             if config.dataset.source == "local_token_mixture"
+            else {}
+        ),
+        **(
+            {"mixture_prepared_storage": "references"}
+            if getattr(config.training, "mixture_prepared_storage", "contiguous")
+            == "references"
             else {}
         ),
     }
@@ -218,7 +253,7 @@ def _verified_receipt(
         != hashlib.sha256(canonical_json(identity)).hexdigest()
     ):
         raise ValueError("prepared cache identity mismatch")
-    required = required_arrays(manifest)
+    required = required_prepared_members(manifest)
     byte = manifest.get("byte_addressing")
     if (byte is not None) != byte_enabled:
         raise ValueError("prepared byte-address mode mismatch")
@@ -288,6 +323,7 @@ def load_prepared_data(
     receipt: VerifiedPreparedData | None = None,
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
+    mixture_schedule: VerifiedSchedule | None = None,
 ) -> PreparedData:
     """Open a verified immutable cache or run-owned copy without reacquiring data."""
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
@@ -321,9 +357,31 @@ def load_prepared_data(
         verification_mode=verification_mode,
     )
     has_supervision = supervision_requires_mask(manifest)
+    reference = manifest.get("train_reference")
+    if reference is not None:
+        from klab.corpus.mixture_schedule import verify_schedule
+        from klab.corpus.release_verify import verification_settings
+
+        mixture = manifest["token_mixture"]
+        files = list(verified.proofs.values())
+        if mixture_schedule is not None:
+            files.extend((*mixture_schedule.tokens, *mixture_schedule.indexes))
+        memo = {(file.path, file.fingerprint): file for file in files}
+        with verification_settings(
+            proof_store=proof_store, verification_mode=verification_mode
+        ):
+            mixture_schedule = verify_schedule(
+                root,
+                Path(reference["cache_root"]),
+                mixture,
+                mixture["token_schedule"]["eos"],
+                memo=memo,
+            )
     return PreparedData(
         root,
-        np.load(train, mmap_mode="r", allow_pickle=False),
+        np.load(train, mmap_mode="r", allow_pickle=False)
+        if reference is None
+        else None,
         np.load(validation, mmap_mode="r", allow_pickle=False),
         np.load(train_supervision, mmap_mode="r", allow_pickle=False)
         if has_supervision
@@ -339,6 +397,7 @@ def load_prepared_data(
         else None,
         manifest,
         verified,
+        mixture_schedule,
     )
 
 
@@ -727,7 +786,7 @@ def _collect_pairs(
     )
 
 
-def _collect_token_mixture(
+def collect_token_mixture(
     config: RunConfig,
     tokenizer: Tokenizer,
     receipt: dict[str, object],
@@ -735,7 +794,8 @@ def _collect_token_mixture(
     *,
     proofs: dict[str, VerifiedFile] | None = None,
     schedule: VerifiedSchedule | None = None,
-) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    store_train: bool = True,
+) -> tuple[np.ndarray | _LogicalTokenArray, np.ndarray, dict[str, object]]:
     """Pack exact scheduled targets with BOS and masked block-end padding.
 
     The mixture stores its targets as raw int32 beside one small JSON row per
@@ -773,7 +833,11 @@ def _collect_token_mixture(
     ends = np.cumsum(np.asarray(lengths, dtype=np.int64))
     if schedule is None and dataset.train_path.stat().st_size != 4 * target_count:
         raise ValueError("token mixture target count differs from verified receipt")
-    ids = _ArraySpool(root / "train.npy", np.dtype(np.int32))
+    ids = (
+        _ArraySpool(root / "train.npy", np.dtype(np.int32))
+        if store_train
+        else _LogicalTokenArray(padded_targets + 1)
+    )
     mask = _ArraySpool(root / "train_supervision.npy", np.dtype(bool))
     ids.append([bos])
     mask.append([False])
@@ -832,7 +896,7 @@ def _collect_token_mixture(
         ids.append([pad] * count)
         mask.append([False] * count)
         remaining_padding -= count
-    for spool in (ids, mask):
+    for spool in (ids, mask) if store_train else (mask,):
         proof = spool.finish()
         if proofs is not None:
             proofs[spool.path.name] = proof
@@ -847,10 +911,60 @@ def _collect_token_mixture(
         "masked_padding_positions": padded_targets - target_count,
     }
     return (
-        np.load(root / "train.npy", mmap_mode="r", allow_pickle=False),
+        np.load(root / "train.npy", mmap_mode="r", allow_pickle=False)
+        if store_train
+        else ids,
         np.load(root / "train_supervision.npy", mmap_mode="r", allow_pickle=False),
         stats,
     )
+
+
+def _npy_header(stream, dtype: np.dtype, tokens: int) -> None:
+    np.lib.format.write_array_header_1_0(
+        stream,
+        {
+            "descr": np.lib.format.dtype_to_descr(dtype),
+            "fortran_order": False,
+            "shape": (tokens,),
+        },
+    )
+
+
+class _LogicalTokenArray:
+    """Compute the exact logical NPY digest without writing token payloads."""
+
+    def __init__(self, positions: int):
+        self.positions = positions
+        self.digest = hashlib.sha256()
+        self.size = 0
+        self.written = 0
+        _npy_header(self, np.dtype(np.int32), positions)
+
+    def write(self, raw: bytes | memoryview) -> int:
+        self.digest.update(raw)
+        self.size += len(raw)
+        return len(raw)
+
+    def append(self, values: list[int]) -> None:
+        self.append_array(np.asarray(values, dtype=np.int32))
+
+    def append_array(self, values: np.ndarray) -> None:
+        self.written += len(values)
+        self.write(memoryview(values).cast("B"))
+
+    def __len__(self) -> int:
+        return self.written
+
+    def metadata(self) -> dict:
+        if self.written != self.positions:
+            raise ValueError("logical mixture size differs from its packed shape")
+        return {
+            "dtype": "int32",
+            "shape": [self.positions],
+            "tokens": self.positions,
+            "sha256": self.digest.hexdigest(),
+            "size_bytes": self.size,
+        }
 
 
 class _ArraySpool:
@@ -911,14 +1025,7 @@ class _ArraySpool:
         temporary = self.path.with_name(self.path.stem + ".tmp.npy")
         with temporary.open("xb") as output, self.raw_path.open("rb") as source:
             writer = HashingWriter(output)
-            np.lib.format.write_array_header_1_0(
-                writer,
-                {
-                    "descr": np.lib.format.dtype_to_descr(self.dtype),
-                    "fortran_order": False,
-                    "shape": (self.count,),
-                },
-            )
+            _npy_header(writer, self.dtype, self.count)
             copy_started = time.monotonic()
             shutil.copyfileobj(source, writer, length=1024 * 1024)
             copy_seconds = time.monotonic() - copy_started
@@ -2080,6 +2187,7 @@ def _prepare_data(
     generic_snapshot = None
     token_mixture = None
     mixture_schedule = None
+    reference_storage = config.training.mixture_prepared_storage == "references"
     if config.dataset.source == "local_token_mixture":
         from klab.corpus.mixture import verified_mixture_dataset
 
@@ -2280,6 +2388,7 @@ def _prepare_data(
                 receipt=recovered_receipt,
                 proof_store=proof_store,
                 verification_mode=verification_mode,
+                mixture_schedule=mixture_schedule if reference_storage else None,
             )
             _write_preparation_receipt(
                 root, cached.manifest["manifest_sha256"], telemetry, reused=True
@@ -2297,6 +2406,7 @@ def _prepare_data(
             return (
                 replace(cached, mixture_schedule=mixture_schedule)
                 if config.training.mixture_loader == "references"
+                and not reference_storage
                 else cached
             )
     if require_prepared:
@@ -2522,14 +2632,29 @@ def _prepare_data(
             temporary_root / "validation.npy", mmap_mode="r", allow_pickle=False
         )
     elif token_mixture is not None:
-        train, train_supervision, train_stats = _collect_token_mixture(
+        train, train_supervision, train_stats = collect_token_mixture(
             config,
             tokenizer,
             token_mixture,
             temporary_root,
             proofs=proofs,
             schedule=mixture_schedule,
+            store_train=not reference_storage,
         )
+        if reference_storage:
+            from klab.owned_copy import owned_copy
+
+            assert mixture_schedule is not None
+            schedule = mixture_schedule.schedule
+            records = schedule.path.with_name("train.records.jsonl")
+            proofs[schedule.path.name] = owned_copy(
+                schedule.path, temporary_root / schedule.path.name, proof=schedule
+            ).proof
+            proofs[records.name] = owned_copy(
+                records,
+                temporary_root / records.name,
+                expected_sha256=token_mixture["train_records_sha256"],
+            ).proof
         train_byte = None
         validation, validation_supervision, validation_byte, validation_stats = (
             _collect(
@@ -2675,6 +2800,18 @@ def _prepare_data(
         "dataset_config": config.dataset.dataset_config,
         **({"token_mixture": token_mixture} if token_mixture is not None else {}),
         **(
+            {
+                "train_reference": {
+                    "cache_root": str(mixture_schedule.cache_root),
+                    "seq_len": config.training.seq_len,
+                    "bos": tokenizer.token_to_id("<bos>"),
+                    "pad": tokenizer.token_to_id("<pad>"),
+                }
+            }
+            if reference_storage
+            else {}
+        ),
+        **(
             {"repeat_token_symbols": len(repeat_symbols(tokenizer))}
             if config.dataset.source == "synthetic"
             and config.dataset.synthetic_task == "repeat_token"
@@ -2687,7 +2824,11 @@ def _prepare_data(
         "source_identity_sha256": source_identity()["sha256"],
         "train": {
             **train_stats,
-            **metadata(temporary_root / "train.npy"),
+            **(
+                train.metadata()
+                if reference_storage
+                else metadata(temporary_root / "train.npy")
+            ),
         },
         "validation": {
             **validation_stats,
@@ -2777,6 +2918,9 @@ def _prepare_data(
             telemetry=telemetry,
             verification="structural",
             receipt=sealed,
+            proof_store=proof_store,
+            verification_mode=verification_mode,
+            mixture_schedule=mixture_schedule if reference_storage else None,
         )
         _write_preparation_receipt(
             root, manifest["manifest_sha256"], telemetry, reused=False
@@ -2789,7 +2933,7 @@ def _prepare_data(
         )
     return (
         replace(prepared, mixture_schedule=mixture_schedule)
-        if config.training.mixture_loader == "references"
+        if config.training.mixture_loader == "references" and not reference_storage
         else prepared
     )
 

@@ -121,16 +121,26 @@ def _train_positions(config: RunConfig) -> int:
 def projected_data_bytes(config: RunConfig) -> int:
     """Planning allowance for prepared arrays, sized by the arrays a config has.
 
-    Token IDs are int32 and always present. A loss mask is one byte per token
-    and is allowed for every source, byte addresses are int32 with byte-addressed
-    memory. The sum is doubled because staging and the published arrays
+    Token IDs are int32, and reference-only training keeps the ranges instead.
+    A loss mask is one byte per token, and byte addresses are int32 with
+    byte-addressed memory. The sum is doubled because staging and the published arrays
     coexist during finalization, then given a quarter of headroom.
     """
-    targets = _train_positions(config) + config.dataset.validation_max_tokens
+    training_positions = _train_positions(config)
+    targets = training_positions + config.dataset.validation_max_tokens
     per_token = 4 + 1
     if config.model.memory == "byte":
         per_token += 4
-    return math.ceil(1.25 * 2 * targets * per_token) + 32 * 1024 * 1024
+    packed_bytes = targets * per_token
+    if config.training.mixture_prepared_storage == "references":
+        path = config.dataset.train_path
+        assert path is not None
+        members = (path, path.with_name("train.records.jsonl"))
+        metadata_bytes = sum(
+            member.stat().st_size for member in members if member.is_file()
+        )
+        packed_bytes += metadata_bytes - 4 * training_positions
+    return math.ceil(1.25 * 2 * packed_bytes) + 32 * 1024 * 1024
 
 
 def verified_prepared_footprint(receipt: VerifiedPreparedData) -> tuple[int, int]:

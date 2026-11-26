@@ -26,28 +26,57 @@ def benchmark_loaders(root, schedule, receipt, records, *, blocks, seq_len):
     import psutil
 
     from klab.data.mixture_batches import ReferencedTokenArray
-    from klab.data.packing import TokenBlockDataset
+    from klab.data.packing import TokenBlockDataset, collect_token_mixture
+    from klab.owned_copy import owned_copy
 
     root.mkdir()
-    padded = -(-schedule.target_count // seq_len) * seq_len
-    path = root / "train.npy"
-    ids = np.lib.format.open_memmap(
-        path, mode="w+", dtype=np.int32, shape=(padded + 1,)
+    configurations = SimpleNamespace(
+        dataset=SimpleNamespace(train_path=schedule.schedule.path),
+        training=SimpleNamespace(seq_len=seq_len),
+        model=SimpleNamespace(vocab_size=260),
     )
-    mask = np.lib.format.open_memmap(
-        root / "train_supervision.npy", mode="w+", dtype=bool, shape=(padded + 1,)
-    )
-    ids[0] = 2
-    position = 1
-    for raw in schedule.blocks(64 * 1024**2):
-        values = np.frombuffer(raw, dtype="<i4")
-        ids[position : position + len(values)] = values
-        position += len(values)
-    ids[position:] = 1
-    mask[:] = False
-    mask[1:position] = True
-    ids.flush()
-    mask.flush()
+    specials = {"<bos>": 2, "<pad>": 1, "<eos>": 3}
+    tokenizer = SimpleNamespace(token_to_id=specials.get)
+    prep = {}
+    for kind in ("contiguous", "references"):
+        packed = root / kind
+        packed.mkdir()
+        proofs = {}
+        started = time.perf_counter()
+        packed_ids, packed_mask, _ = collect_token_mixture(
+            configurations,
+            tokenizer,
+            receipt,
+            packed,
+            proofs=proofs,
+            schedule=schedule,
+            store_train=kind == "contiguous",
+        )
+        if kind == "contiguous":
+            ids, mask = packed_ids, packed_mask
+            path = packed / "train.npy"
+            packed_hash = proofs["train.npy"].sha256
+        else:
+            owned_copy(
+                schedule.schedule.path,
+                packed / schedule.schedule.path.name,
+                proof=schedule.schedule,
+            )
+            owned_copy(
+                records,
+                packed / records.name,
+                expected_sha256=receipt["train_records_sha256"],
+            )
+            packed_hash = packed_ids.metadata()["sha256"]
+        prep[kind] = {
+            "seconds": time.perf_counter() - started,
+            "physical_bytes": sum(path.stat().st_size for path in packed.iterdir()),
+            "train_sha256": packed_hash,
+        }
+        if kind == "references" and not np.array_equal(mask, packed_mask):
+            raise ValueError("prepared supervision differs")
+    if prep["references"]["train_sha256"] != prep["contiguous"]["train_sha256"]:
+        raise ValueError("logical prepared training differs")
     inline = TokenBlockDataset(ids, seq_len, supervision=mask)
     order = np.random.default_rng(42).permutation(len(inline))[:blocks].tolist()
     process = psutil.Process()
@@ -106,6 +135,7 @@ def benchmark_loaders(root, schedule, receipt, records, *, blocks, seq_len):
         "row_tokens": seq_len,
         "reference_open_seconds": open_seconds,
         "results": results,
+        "preparation": prep,
     }
 
 

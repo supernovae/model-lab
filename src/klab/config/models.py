@@ -1153,6 +1153,9 @@ class TrainingConfig(StrictModel):
     mixture_loader: Literal["contiguous", "references"] = Field(
         default="contiguous", exclude_if=lambda value: value == "contiguous"
     )
+    mixture_prepared_storage: Literal["contiguous", "references"] = Field(
+        default="contiguous", exclude_if=lambda value: value == "contiguous"
+    )
     matched_stories: MatchedStoryConfig | None = Field(
         default=None, exclude_if=lambda v: v is None
     )
@@ -1451,6 +1454,13 @@ class RunConfig(StrictModel):
     @model_validator(mode="after")
     def validate_cross_section(self) -> RunConfig:
         matched = self.training.matched_stories
+        if (
+            self.training.mixture_prepared_storage == "references"
+            and self.training.mixture_loader != "references"
+        ):
+            raise ValueError(
+                "training.mixture_prepared_storage=references requires mixture_loader=references"
+            )
         if self.training.mixture_loader == "references" and (
             self.dataset.source != "local_token_mixture"
             or self.model.memory == "byte"
