@@ -182,7 +182,11 @@ candidate lock against both the origins and the copies before publication.
   missing; it never downloads. `--offline` verifies an already published lock.
 - **Retained subsets.** A Hugging Face source can declare
   `acquisition.retained_subset` to take a seeded 1% row sample of an existing
-  snapshot (pinned by path and digests) without any network access.
+  snapshot (pinned by path and digests) without any network access. Keep both
+  snapshots for full build and release verification. Warm receipts track the
+  retained parent alongside the subset. Parent changes force verification
+  from bytes, and a missing parent blocks verification. Existing receipts
+  for retained subsets refresh the first time they are used with this check.
 - **Preview.** `corpus preview DECLARATION --input-root INPUTS --output NEW_DIR`
   shows seeded sample excerpts from acquired JSONL in place, without copying or
   admitting anything.

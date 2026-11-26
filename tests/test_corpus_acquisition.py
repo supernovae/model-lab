@@ -35,6 +35,7 @@ from klab.corpus.acquisition import (
 )
 from klab.corpus.project import acquisition_identity_payload, load_project
 from klab.corpus.transport_budget import TransportBudget
+from klab.training.manifest import sha256_file
 
 
 def _yaml(path: Path, value: dict) -> None:
@@ -706,6 +707,96 @@ def test_hf_declaration_hash_and_receipt_reuse(
     assert "row_encoding" not in manifest["retrieval"]
     assert acquire(project, tmp_path / "work") == first
     assert len(calls) == 1
+
+
+def test_warm_release_audit_requires_retained_subset_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from klab.corpus import retained_subset
+    from klab.corpus.pipeline import build
+    from klab.corpus.release import audit, freeze
+    from klab.corpus.release_verify import verification_settings
+    from klab.verification_proofs import verification_options
+
+    content = b'{"text":"One verified technical document."}\n'
+    recipe = _bounded_hf_fixture(tmp_path, content, "default/train/data.jsonl", rows=1)
+    source_path = recipe.parent / "sources/one.yaml"
+    source = yaml.safe_load(source_path.read_text())
+    part = source["acquisition"]["bounded_shards"][0]
+    part.update(hash_modulus=1, hash_remainders=[0])
+    _yaml(source_path, source)
+    requests = _mock_hf_stream(monkeypatch, content)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    work = tmp_path / "work"
+    work.mkdir(mode=0o700)
+    parent = acquire(load_project(recipe), work)["sources"]["one"]
+    snapshot = Path(parent["snapshot_path"])
+    manifest = verify_snapshot(snapshot)
+    (retained,) = manifest["retrieval"]["shards"][0]["selected_rows"]
+    profile = "ancestry_fixture"
+    identity = [
+        "one",
+        parent["snapshot_sha256"],
+        retained["source_row_index"],
+        retained["source_row_sha256"],
+    ]
+    seed = next(
+        candidate
+        for candidate in range(10_000)
+        if int(canonical_digest([profile, candidate, *identity]), 16) % 100 == 0
+    )
+    source["acquisition"]["retained_subset"] = {
+        "snapshot_path": str(snapshot),
+        "snapshot_sha256": parent["snapshot_sha256"],
+        "manifest_sha256": sha256_file(snapshot / "manifest.json"),
+        "profile_id": profile,
+        "seed": seed,
+    }
+    _yaml(source_path, source)
+    config = yaml.safe_load(recipe.read_text())
+    config.update(id="derivative", transforms=["transforms/lm.yaml"])
+    _yaml(recipe, config)
+    release_path = recipe.parent / "release.yaml"
+    declaration = yaml.safe_load(release_path.read_text())
+    declaration["lm"]["training_splits"] = ["train"]
+    _yaml(release_path, declaration)
+    _yaml(
+        recipe.parent / "transforms/lm.yaml",
+        {
+            "id": "lm",
+            "kind": "lm_text",
+            "version": "1",
+            "inputs": ["one"],
+            "parameters": {},
+        },
+    )
+    _yaml(
+        recipe.parent / "splits.yaml",
+        {
+            "schema_version": 1,
+            "unit": "source_document_family",
+            "family_key": "source_family",
+            "assignments": {"docs": "train"},
+        },
+    )
+    project = load_project(recipe)
+    acquire(project, work)
+    release = freeze(build(project, work, offline=True), work)
+    assert len(requests) == 1
+
+    def forbid_parent_replay(*args, **kwargs):
+        pytest.fail("warm release audit replayed its retained parent")
+
+    with verification_settings(**verification_options(work)):
+        expected = audit(release)
+        with monkeypatch.context() as warm:
+            warm.setattr(retained_subset, "derive_subset", forbid_parent_replay)
+            assert audit(release) == expected
+        payload = snapshot / "files" / manifest["files"][0]["path"]
+        original = payload.read_bytes()
+        payload.write_bytes(original.replace(b"technical", b"technicAl", 1))
+        with pytest.raises(ValueError, match="snapshot byte mismatch"):
+            audit(release)
 
 
 @pytest.mark.parametrize("damage_selection", [False, True])
