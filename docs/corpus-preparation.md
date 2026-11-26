@@ -3598,6 +3598,9 @@ documents their own rows.
   store](token-store.md#tokens-by-content), so rebuilding a mixture does not
   tokenize unchanged documents again. Allow about 512 MiB per worker; the
   count is lowered to what the host's memory allows.
+- **Token cache.** Add `token_cache: sealed` to the mixture declaration to
+  write bounded [sealed content segments](token-store.md#sealed-content-segments)
+  as the existing encoder runs. `token_cache: append` is the default.
 - **Progress.** `.OUTPUT.assembly-ID/progress.json`, refreshed every few
   seconds, reports per-stratum counts, time spent waiting for the encoder,
   worker utilization and memory.
@@ -3630,6 +3633,8 @@ documents their own rows.
 
 `tools/benchmark_mixture.py` runs a synthetic mixture cold and warm and writes
 timings and output hashes, for comparing two Lab revisions on one host.
+Set `--token-cache sealed` to compare immutable cache segments with the
+default append cache.
 
 The record-file check below used three warm runs per size with exposure and
 row-layout verification. It measures record verification alone. Logical

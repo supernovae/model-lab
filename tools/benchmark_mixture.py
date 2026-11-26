@@ -24,13 +24,14 @@ def main():
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--documents", type=int, default=512)
     parser.add_argument("--text-bytes", type=int, default=512)
+    parser.add_argument("--token-cache", choices=("append", "sealed"), default="append")
     args = parser.parse_args()
     if (
         not 1 <= args.workers <= 8
-        or not 8 <= args.documents <= 2048
+        or not 8 <= args.documents <= 65_536
         or not 32 <= args.text_bytes <= 2048
     ):
-        parser.error("bounds: workers 1..8, documents 8..2048, text-bytes 32..2048")
+        parser.error("bounds: workers 1..8, documents 8..65536, text-bytes 32..2048")
     # Affinity also bounds the baseline's default Rayon planner. Do this before
     # importing Lab or tokenizers; no nested BLAS/Rayon pool inherits more cores.
     if hasattr(os, "sched_getaffinity"):
@@ -133,6 +134,7 @@ def main():
         max_exposures=1,
         strata={},
         packing="contiguous",
+        token_cache=args.token_cache,
         seed=42,
         order_policy=None,
         family_inventory=inventory,
@@ -218,6 +220,7 @@ def main():
         "workers": args.workers,
         "documents": args.documents,
         "text_bytes": args.text_bytes,
+        "token_cache": args.token_cache,
         "fixture_sha256": sha256_file(source),
         "scratch_bytes": sum(p.stat().st_size for p in root.rglob("*") if p.is_file()),
         "results": results,

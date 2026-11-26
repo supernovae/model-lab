@@ -126,6 +126,53 @@ present. Every read checks the stored digest. One build holds a store at a
 time; a second build on the same tokenizer and corpus is refused with a clear
 message instead of waiting.
 
+### Sealed content segments
+
+A mixture declaration can set `token_cache: sealed`. This uses the same
+encoder and int32 append format for the active segment. The writer seals by
+rename before exceeding 256 MiB of tokens or 65,536 documents and at
+successful completion.
+A document that exceeds the byte target occupies its own segment. Sealing
+syncs the active files and publishes them with `segment.json`, without
+copying their token bytes.
+
+The store namespace binds the exact tokenizer artifact SHA-256, installed
+tokenizers version, exact UTF-8 input, little-endian int32 encoding and the
+choice to omit special tokens and EOS. Each index row binds the source
+content SHA-256 to the location, count and SHA-256 of its token IDs. The
+segment path is the digest of its canonical manifest, which binds both binary
+files by size and digest.
+
+Sealed caches live under `cache/source-tokens/sealed` in the Corpus work
+root. An on-disk SQLite index locates documents using an 8 MiB page cache;
+the writer keeps one active segment's index in memory and opens at most 16
+sealed segments at a time. The locator can be rebuilt from the sealed
+indexes. A retry registers a segment that was published before the locator
+transaction finished. A lookup checks the sealed index and the digest of
+the requested token range. The mixture assembly's `progress.json` reports
+`sealed_token_cache_hits` and `published_token_segments`.
+
+The `append` cache is the default. To try the `sealed` mode, use a new
+mixture output directory. The first run fills a separate cache for that
+encoding. Later sealed runs reuse content across mixture seeds, quotas and
+projects within the same work root. Both modes write the same contiguous
+token and record streams for the trainer. Loading a schedule directly from
+immutable segments is tracked in [#569](https://github.com/supernovae/model-lab/issues/569).
+
+On an NVMe synthetic retained release with two workers and about 2 KiB of
+text per document, the median schedule times across three trials were:
+
+| Documents | Append cold | Sealed cold | Append warm | Sealed warm |
+| --- | ---: | ---: | ---: | ---: |
+| 2,048 | 0.612 s | 0.629 s | 0.249 s | 0.253 s |
+| 32,768 | 6.570 s | 6.721 s | 1.536 s | 1.924 s |
+
+The output receipt and file digests matched across modes. The larger
+fixture used 1.45 MB more logical space across the cold and warm builds,
+including the SQLite locator. A separate 65,536-document trial published
+two segments and reused both on the warm run. Production-scale and
+media-cold random access remain unmeasured.
+
 ## Mixture output
 
 A materialized mixture is binary too. Its output directory holds:

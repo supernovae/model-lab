@@ -1075,6 +1075,7 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
         max_exposures=1,
         strata={},
         packing="contiguous",
+        token_cache="append",
         seed=42,
         order_policy=None,
         family_inventory=family_inventory,
@@ -1479,6 +1480,53 @@ def test_admitted_ordinary_metadata_can_bypass_warm_source_fetch(tmp_path, monke
     progress = json.loads((_assembly(tmp_path, "warm") / "progress.json").read_bytes())
     assert progress["cache_hits"] == 3
     assert progress.get("read_worker_seconds", 0) == 0
+
+
+def test_sealed_mixture_recovers_published_segments_and_refuses_corrupt_tokens(
+    tmp_path, monkeypatch
+):
+    from klab.data import token_segments
+
+    declaration, _, _ = _fixture(tmp_path, monkeypatch, actual_content=True)
+    declaration.write_text(declaration.read_text() + "\ntoken_cache: sealed\n")
+    baseline = tmp_path / "baseline"
+    expected = mixture._materialize_mixture(declaration, baseline, reuse_tokens=False)
+    monkeypatch.setattr(token_segments, "SHARD_TOKENS", 8)
+    publish = token_segments.rename_noreplace
+
+    def stop_after_publish(source, destination):
+        publish(source, destination)
+        if destination.parent.name == "segments":
+            raise InterruptedError("token segment published before locator commit")
+
+    output = tmp_path / "interrupted"
+    with monkeypatch.context() as interruption:
+        interruption.setattr(token_segments, "rename_noreplace", stop_after_publish)
+        with pytest.raises(InterruptedError):
+            mixture.materialize_mixture(declaration, output)
+    (committed,) = tmp_path.glob(".source-tokens/sealed/*/segments/*/tokens.ids")
+    first_inode = committed.stat().st_ino
+    assert not output.exists()
+    assert mixture.materialize_mixture(declaration, output) == expected
+    assert len(list(committed.parent.parent.iterdir())) == 3
+    assert committed.stat().st_ino == first_inode
+
+    warm = tmp_path / "warm"
+    assert mixture.materialize_mixture(declaration, warm) == expected
+    progress = json.loads((_assembly(tmp_path, "warm") / "progress.json").read_bytes())
+    assert progress["sealed_token_cache_hits"] == 3
+    assert progress["published_token_segments"] == 0
+    for name in (mixture.TRAIN_TOKENS, mixture.TRAIN_RECORDS):
+        assert (warm / name).read_bytes() == (baseline / name).read_bytes()
+
+    with committed.open("r+b") as corrupt:
+        first = corrupt.read(1)
+        corrupt.seek(0)
+        corrupt.write(bytes([first[0] ^ 1]))
+    with pytest.raises(
+        ValueError, match="sealed token segment payload digest mismatch"
+    ):
+        mixture.materialize_mixture(declaration, tmp_path / "corrupt")
 
 
 def test_worker_telemetry_survives_a_vanished_worker():
