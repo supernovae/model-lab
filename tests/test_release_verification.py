@@ -31,7 +31,9 @@ from klab.corpus.release import (
 from klab.corpus.release_verify import verification_settings
 
 TEXTS = {
-    "prose_train": [f"training document number {n} with words\n" for n in range(6)],
+    "prose_train": [
+        f"training document number {n} with words\n" for n in (0, 0, 1, 2, 3, 4, 5)
+    ],
     "prose_validation": ["validation document\n", "another held-out document\n"],
     "prose_test": ["test document\n"],
 }
@@ -147,6 +149,12 @@ def _self_duplicate(rows):
     rows[0]["drop_reason"] = "duplicate"
 
 
+def _keep_both_duplicates(rows):
+    duplicate = next(row for row in rows if row["drop_reason"] == "duplicate")
+    duplicate["drop_reason"] = None
+    duplicate["representative_id"] = duplicate["document_id"]
+
+
 def _foreign_license(rows):
     rows[0]["license"] = "Apache-2.0"
 
@@ -183,6 +191,10 @@ FORGERIES = {
     "document claims to duplicate itself": (
         _documents(_self_duplicate),
         "invalid duplicate representative identity",
+    ),
+    "duplicate key shares two valid representatives": (
+        _documents(_keep_both_duplicates),
+        "duplicate group representative mismatch",
     ),
     "document identity repeated": (
         _documents(_repeat_row),
@@ -279,7 +291,13 @@ def test_scratch_and_progress_live_where_the_operator_points(
     [journal] = scratch.glob("verify-*.progress.jsonl")
     events = [json.loads(line) for line in journal.read_text().splitlines()]
     phases = {event["phase"] for event in events}
-    assert {"hash_files", "documents", "raw_replay", "lineage"} <= phases
+    assert {
+        "hash_files",
+        "documents",
+        "document_duplicates",
+        "raw_replay",
+        "lineage",
+    } <= phases
     assert events[-1]["event"] == "complete"
     assert events[-1]["documents_processed"] > 0
     footprint = events[-1]["scratch"]
@@ -658,20 +676,3 @@ def test_each_snapshot_is_hashed_once_per_verification(
     )
     verify_release(release)
     assert len(seen) == len(set(seen)) == len(TEXTS)
-
-
-def test_duplicate_keys_follow_the_declared_policy() -> None:
-    # Two pages with the same URL are distinct documents unless the release
-    # declares canonical_origin duplicates; verification must not assume they merge.
-    doc = {
-        "raw_content_sha256": "r" * 64,
-        "content_sha256": "n" * 64,
-        "source_id": "web",
-        "metadata": {"url": "https://example.org/page"},
-    }
-    strict = release_module._declared_keys(doc, ("raw", "normalized"))
-    assert strict == ["raw:" + "r" * 64, "normalized:" + "n" * 64]
-    full = release_module._declared_keys(doc, ("raw", "normalized", "canonical_origin"))
-    assert full[:2] == strict
-    assert full[2:] == ["origin:url:example.org/page"]
-    assert release_module._declared_keys(doc, ("canonical_origin",)) == full[2:]
