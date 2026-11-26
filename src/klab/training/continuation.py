@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any, Literal
 
 from klab.canonical import canonical_digest
 from klab.config.models import RunConfig
+from klab.data.verification import VerifiedFile, verify_file
 from klab.runtime import RuntimeInfo
 from klab.training.checkpoints import (
     CheckpointManager,
@@ -38,6 +40,7 @@ class Continuation:
     parent_checkpoint_sha256: str | None = None
     decisions: tuple[dict[str, object], ...] = ()
     lineage_best: LineageBest | None = None
+    artifact_proofs: dict[str, VerifiedFile] = dataclass_field(default_factory=dict)
 
 
 def _resume_settings(config: RunConfig) -> str:
@@ -495,9 +498,12 @@ def validate_budget_extension(
     }
 
 
-def _verify_artifacts(root: Path, manifest: dict[str, Any], *, resume: bool) -> None:
+def _verify_artifacts(
+    root: Path, manifest: dict[str, Any], *, resume: bool
+) -> dict[str, VerifiedFile]:
     records = manifest.get("artifacts", [])
     names: set[str] = set()
+    proofs: dict[str, VerifiedFile] = {}
     required = {"tokenizer.json"}
     if resume:
         required.add("data/manifest.json")
@@ -521,9 +527,12 @@ def _verify_artifacts(root: Path, manifest: dict[str, Any], *, resume: bool) -> 
             not path.is_file()
             or not path.resolve().is_relative_to(root)
             or path.stat().st_size != record["size_bytes"]
-            or sha256_file(path) != record["sha256"]
         ):
             raise ValueError(f"run artifact integrity failure: {name}")
+        try:
+            proofs[name] = verify_file(path, expected_sha256=record["sha256"])
+        except (OSError, ValueError) as error:
+            raise ValueError(f"run artifact integrity failure: {name}") from error
     if resume and "data/manifest.json" in names:
         from klab.data.verification import required_prepared_members
 
@@ -534,6 +543,7 @@ def _verify_artifacts(root: Path, manifest: dict[str, Any], *, resume: bool) -> 
             f"run lacks bound continuation artifacts: {sorted(required - names)}; "
             "use weight promotion to start from its weights"
         )
+    return proofs
 
 
 def load_continuation(
@@ -639,7 +649,7 @@ def load_continuation(
         )
         if not binding.valid:
             raise ValueError(f"checkpoint run binding failed: {binding.errors}")
-        _verify_artifacts(root, manifest, resume=promote is None)
+        artifact_proofs = _verify_artifacts(root, manifest, resume=promote is None)
         source_config = RunConfig.model_validate(manifest["effective_config"])
         if not (allow_runtime_optimization or add_ngram_memory) and architecture_sha256(
             source_config.model_dump(mode="json")
@@ -822,4 +832,5 @@ def load_continuation(
             manager.lineage_best_for_child(
                 str(manifest["run_id"]), snapshot.checkpoint_sha256
             ),
+            artifact_proofs=artifact_proofs,
         )

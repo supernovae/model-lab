@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from klab.canonical import canonical_digest, reject_duplicate_keys
 from klab.config.models import RunConfig
+from klab.corpus.mixture_schedule import PORTABLE_SEGMENTS
 from klab.data.encoding import (
     TOKENIZER_BATCH_DOCUMENTS,
     TOKENIZER_BATCH_SOURCE_BYTES,
@@ -315,6 +316,11 @@ def _load_inventory_prepared(
         receipt=receipt,
         proof_store=proof_store,
         verification_mode=verification_mode,
+        dependency_proofs=[
+            proof
+            for name, proof in proofs.items()
+            if name.startswith(f"{PORTABLE_SEGMENTS}/")
+        ],
     )
 
 
@@ -675,6 +681,7 @@ def materialize_prepared_inputs(
     _proofs: dict[str, VerifiedFile] | None = None,
     observer: BottleneckObserver | None = None,
     copy_observations: list[dict[str, object]] | None = None,
+    portable_mixture: bool = False,
 ) -> Path:
     """Publish immutable, engine-neutral training inputs without probing a runtime.
 
@@ -770,7 +777,7 @@ def materialize_prepared_inputs(
                 if observer is not None
                 else nullcontext()
             ):
-                verify_prepared_inputs(
+                _, data = _verified_prepared_inputs(
                     source,
                     config,
                     proof_store=proof_store,
@@ -785,6 +792,18 @@ def materialize_prepared_inputs(
                     copy_observations=copy_observations,
                     observer=observer,
                 )
+            )
+        if (
+            portable_mixture
+            and data.train is None
+            and not (assets / PORTABLE_SEGMENTS).exists()
+        ):
+            assert data.mixture_schedule is not None
+            copied.update(
+                (f"{PORTABLE_SEGMENTS}/{name}", proof)
+                for name, proof in data.mixture_schedule.copy_dependencies(
+                    assets / PORTABLE_SEGMENTS
+                ).items()
             )
         _seal(
             work / "inputs.json",
@@ -867,6 +886,26 @@ def verify_prepared_inputs(
     _seals: dict[str, VerifiedFile] | None = None,
 ) -> dict[str, Any]:
     """Verify a materialized input root without acquiring a target accelerator."""
+    result, _ = _verified_prepared_inputs(
+        root,
+        config,
+        proof_store=proof_store,
+        verification_mode=verification_mode,
+        _proofs=_proofs,
+        _seals=_seals,
+    )
+    return result
+
+
+def _verified_prepared_inputs(
+    root: Path,
+    config: RunConfig,
+    *,
+    proof_store: ProofStore | None = None,
+    verification_mode: Literal["cold", "verified_reuse"] = "cold",
+    _proofs: dict[str, VerifiedFile] | None = None,
+    _seals: dict[str, VerifiedFile] | None = None,
+) -> tuple[dict[str, Any], PreparedData]:
     root = root.resolve(strict=True)
     inputs = _read_sealed(root / "inputs.json")
     saved = RunConfig.model_validate(inputs["requested_config"])
@@ -905,7 +944,7 @@ def verify_prepared_inputs(
         raise ValueError("prepared data is empty")
     if _proofs is not None:
         _proofs.update(proofs)
-    return {**inputs, "assets_root": str(root / "assets")}
+    return {**inputs, "assets_root": str(root / "assets")}, data
 
 
 def _prepared_pointer(work_dir: Path, config: RunConfig) -> Path:

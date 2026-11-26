@@ -258,7 +258,7 @@ def load_run(
     runtime_config = _ephemeral_config(config, backend)
     requested = runtime_config.runtime.backend
     require_authorization(runtime_config, authorization)
-    artifacts, array_proofs = _validated_artifacts(
+    artifacts, input_proofs = _validated_artifacts(
         run,
         manifest,
         proof_store=proof_store,
@@ -275,7 +275,11 @@ def load_run(
             f"run lacks verified artifacts: {sorted(required - artifacts.keys())}"
         )
     if hash_run_data:
-        receipt = _receipt_from_proofs(run / "data", data_manifest, array_proofs)
+        receipt = _receipt_from_proofs(
+            run / "data",
+            data_manifest,
+            {name: proof for name, proof in input_proofs.items() if "/" not in name},
+        )
         load_prepared_data(
             run / "data",
             byte_enabled=config.model.memory == "byte",
@@ -283,6 +287,9 @@ def load_run(
             receipt=receipt,
             proof_store=proof_store,
             verification_mode=verification_mode,
+            dependency_proofs=[
+                proof for name, proof in input_proofs.items() if "/" in name
+            ],
         )
 
     # The checkpoint and training runtime were verified before authorization.

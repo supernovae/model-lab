@@ -348,6 +348,9 @@ class Controller:
             resume=request.get("resume"),
             extend_budget=request.get("extend_budget"),
             allow_runtime_drift=bool(request.get("allow_runtime_drift", False)),
+            include_referenced_token_segments=request.get(
+                "include_referenced_token_segments", False
+            ),
             proof_store=self.proof_store,
             verification_mode=self.verification_mode,
         )
@@ -395,6 +398,7 @@ class Controller:
         requirements: Any | None = None,
         preferred: str | None = None,
         matrix: dict | None = None,
+        include_referenced_token_segments: bool = False,
         resource_envelope: ResourceEnvelope | None = None,
         tokenizer_batch_documents: int = TOKENIZER_BATCH_DOCUMENTS,
         tokenizer_batch_source_bytes: int = TOKENIZER_BATCH_SOURCE_BYTES,
@@ -409,6 +413,7 @@ class Controller:
                     "requirements": requirements,
                     "preferred": preferred,
                     "matrix": matrix,
+                    "include_referenced_token_segments": include_referenced_token_segments,
                     "resource_envelope": resource_envelope,
                     "tokenizer_batch_documents": tokenizer_batch_documents,
                     "tokenizer_batch_source_bytes": tokenizer_batch_source_bytes,
@@ -1314,6 +1319,7 @@ class Controller:
         *,
         worker: str | None = None,
         allow_runtime_drift: bool = False,
+        include_referenced_token_segments: bool = False,
     ) -> Any:
         parent = self.store.attempt_by_run(run_id)
         if parent is None:
@@ -1370,6 +1376,7 @@ class Controller:
                     "matrix": spec.matrix,
                     "resume": checkpoint_path,
                     "allow_runtime_drift": allow_runtime_drift,
+                    "include_referenced_token_segments": include_referenced_token_segments,
                 }
             )
         ]

@@ -11,15 +11,17 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from klab.canonical import canonical_digest
+from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.mixture_index import MAX_ROW_BYTES, rows
 from klab.corpus.release_verify import current_settings
-from klab.data.token_segments import read_token_segment
+from klab.data.token_segments import TOKEN_SEGMENT_MANIFEST, read_token_segment
 from klab.data.verification import VerifiedFile, verify_file
+from klab.owned_copy import owned_copy
 from klab.safe_io import read_file_range, symlinked
 from klab.verification_proofs import ProofStore, artifact_fingerprint
 
 TRAIN_SCHEDULE = "train.schedule.bin"
+PORTABLE_SEGMENTS = "token-segments"
 SCHEDULE_RANGE = struct.Struct(
     "<IQI"
 )  # segment ordinal, token offset, targets including EOS
@@ -90,8 +92,47 @@ class VerifiedSchedule:
     schedule: VerifiedFile
     tokens: tuple[VerifiedFile, ...]
     indexes: tuple[VerifiedFile, ...]
+    manifest_sha256: tuple[str, ...]
     eos: int
     target_count: int
+
+    def copy_dependencies(self, destination: Path) -> dict[str, VerifiedFile]:
+        """Own just the referenced sealed segments, reusing authenticated bytes."""
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError(f"token segment destination exists: {destination}")
+        from klab.workspace_preflight import check_storage, require_storage
+
+        size, files = self.dependency_footprint()
+        require_storage(
+            [
+                check_storage(
+                    destination.parent, projected_bytes=size, projected_inodes=files * 2
+                )
+            ]
+        )
+        copied = {}
+        for tokens, index, digest in zip(
+            self.tokens, self.indexes, self.manifest_sha256, strict=True
+        ):
+            for proof in (tokens, index):
+                name = proof.path.relative_to(self.cache_root).as_posix()
+                target = destination / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                copied[name] = owned_copy(proof.path, target, proof=proof).proof
+            manifest = tokens.path.with_name(TOKEN_SEGMENT_MANIFEST)
+            name = manifest.relative_to(self.cache_root).as_posix()
+            copied[name] = owned_copy(
+                manifest, destination / name, expected_sha256=digest
+            ).proof
+        return copied
+
+    def dependency_footprint(self) -> tuple[int, int]:
+        """Reserve payload, index and bounded manifest bytes and file count."""
+        return (
+            sum(proof.size_bytes for proof in (*self.tokens, *self.indexes))
+            + 8192 * len(self.tokens),
+            3 * len(self.tokens),
+        )
 
     def require_unchanged(self):
         for proof in (self.schedule, *self.tokens, *self.indexes):
@@ -178,6 +219,7 @@ def verify_schedule(
     eos: int,
     *,
     memo: dict[object, VerifiedFile] | None = None,
+    portable: bool = False,
 ) -> VerifiedSchedule:
     """Verify the schedule bytes and exact sealed dependencies, including unused bytes."""
     schedule = receipt["token_schedule"]
@@ -209,10 +251,22 @@ def verify_schedule(
     store = cache_root / "sealed" / schedule["encoding"] / "segments"
     if symlinked(store):
         raise ValueError("unsafe mixture token segment store")
+    if portable:
+        members = {
+            store / segment / name
+            for segment in schedule["segments"]
+            for name in (TOKEN_SEGMENT_MANIFEST, "tokens.ids", "index.bin")
+        }
+        if {
+            path
+            for path in cache_root.rglob("*")
+            if path.is_file() or path.is_symlink()
+        } != members:
+            raise ValueError("portable token segment inventory differs from schedule")
     settings = current_settings()
     proofs = settings.proof_store
     if proofs is None or not proofs.trusted(store):
-        proofs = ProofStore(cache_root)
+        proofs = None if portable else ProofStore(cache_root)
 
     def check(segment):
         directory = store / segment
@@ -235,17 +289,18 @@ def verify_schedule(
             if proof.size_bytes != entry["size"]:
                 raise ValueError("mixture token segment size differs from its manifest")
             files.append(proof)
-        return files
+        return *files, hashlib.sha256(canonical_json(manifest) + b"\n").hexdigest()
 
     workers = min(8, settings.workers, len(schedule["segments"]))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         files = list(pool.map(check, schedule["segments"], buffersize=workers))
-    tokens, indexes = zip(*files, strict=True)
+    tokens, indexes, manifests = zip(*files, strict=True)
     return VerifiedSchedule(
-        cache_root,
+        cache_root.resolve(),
         schedule_file,
         tokens,
         indexes,
+        manifests,
         eos,
         targets,
     )

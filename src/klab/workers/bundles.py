@@ -13,13 +13,18 @@ from typing import Any, Literal
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.models import RunConfig
-from klab.data.packing import _publish_prepared_directory, load_prepared_data
+from klab.corpus.mixture_schedule import PORTABLE_SEGMENTS
+from klab.data.packing import (
+    PreparedData,
+    _publish_prepared_directory,
+    load_prepared_data,
+)
 from klab.data.tokenizer import load_tokenizer
 from klab.data.verification import (
     VerifiedFile,
     _receipt_from_proofs,
     _relocate_proofs,
-    required_arrays,
+    required_prepared_members,
     verify_file,
 )
 from klab.owned_copy import owned_copy
@@ -111,13 +116,14 @@ def _inventory(
     return result
 
 
-def _require_safe(root: Path, identity: ArtifactIdentity) -> Path:
+def _require_safe(
+    root: Path, identity: ArtifactIdentity, *, seal: VerifiedFile | None = None
+) -> VerifiedFile:
     path = _safe_member(root, identity.relative_path)
     if path is None or not path.is_file() or path.stat().st_size != identity.size_bytes:
         raise ValueError(f"missing or unsafe bundle asset: {identity.relative_path}")
-    if sha256_file(path) != identity.sha256:
-        raise ValueError(f"bundle asset digest mismatch: {identity.relative_path}")
-    return path
+    memo = {(seal.path, seal.fingerprint): seal} if seal is not None else None
+    return verify_file(path, expected_sha256=identity.sha256, memo=memo)
 
 
 def _destination(root: Path, name: str) -> Path:
@@ -192,7 +198,7 @@ def _drift_authorized(continuation: Any) -> bool:
 
 def _verify_parent_closure(
     config: RunConfig, selected: Path, *, resume: bool, budget_extension: bool = False
-) -> tuple[Path, Path, dict[str, Any], dict[str, Any]]:
+) -> tuple[Path, dict[str, Any], dict[str, Any], dict[str, VerifiedFile]]:
     """Verify a selected generation and every parent-declared local input."""
     run, generation = _selected_run(selected)
     parent = read_manifest(run / "manifest.json")
@@ -223,20 +229,29 @@ def _verify_parent_closure(
     by_name = {item.relative_path: item for item in identities}
     if len(by_name) != len(identities):
         raise ValueError("parent manifest has duplicate artifact entries")
-    for item in identities:
-        _require_safe(run, item)
+    seals = {item.relative_path: _require_safe(run, item) for item in identities}
     required = {"tokenizer.json"}
     if resume:
-        required.update({"data/manifest.json", "data/train.npy", "data/validation.npy"})
+        if "data/manifest.json" not in seals:
+            raise ValueError("selected continuation lacks bound run-owned artifacts")
+        prepared = strict_json(run / "data/manifest.json")
+        required.update(
+            {
+                "data/manifest.json",
+                *(f"data/{name}" for name in required_prepared_members(prepared)),
+            }
+        )
     if not required <= by_name.keys():
         raise ValueError("selected continuation lacks bound run-owned artifacts")
     parent_config = RunConfig.model_validate(parent["effective_config"])
     if parent_config.model.vocab_size != config.model.vocab_size:
         raise ValueError("continuation tokenizer/model vocabulary differs")
-    return run, generation, parent, generation_manifest
+    return run, parent, generation_manifest, seals
 
 
-def _continuation_assets(destination: Path, selected: Path, *, resume: bool) -> None:
+def _continuation_assets(
+    destination: Path, selected: Path, *, resume: bool, reference_resume: bool
+) -> None:
     run, generation = _selected_run(selected)
     manifest = read_manifest(run / "manifest.json")
     _copy_tree(
@@ -250,12 +265,9 @@ def _continuation_assets(destination: Path, selected: Path, *, resume: bool) -> 
         generation, destination / "continuation" / "checkpoints" / generation.name
     )
     artifacts = {item["relative_path"] for item in manifest.get("artifacts", [])}
-    required = {"tokenizer.json"}
-    if resume:
-        required.update({"data/manifest.json", "data/train.npy", "data/validation.npy"})
-    if not required <= artifacts:
-        raise ValueError("selected continuation lacks bound run-owned artifacts")
     for name in sorted(artifacts):
+        if reference_resume and name.startswith(("data/", f"{PORTABLE_SEGMENTS}/")):
+            continue  # The sealed dispatch assets already carry these bytes.
         if resume or name == "tokenizer.json":
             source = _safe_member(run, name)
             if source is None:
@@ -504,13 +516,20 @@ def prepare_dispatch_bundle(
     resume: Path | None = None,
     extend_budget: Path | None = None,
     allow_runtime_drift: bool = False,
+    include_referenced_token_segments: bool = False,
     proof_store: ProofStore | None = None,
     verification_mode: Literal["cold", "verified_reuse"] = "cold",
 ) -> Any:
     """Freeze offline inputs and verified parent state without probing a device."""
-    if config.training.mixture_prepared_storage == "references":
+    references = config.training.mixture_prepared_storage == "references"
+    if references and not include_referenced_token_segments:
         raise ValueError(
-            "offline dispatch requires contiguous prepared storage; this reference-only bundle uses the host's sealed segments"
+            "offline reference training requires --include-referenced-token-segments; "
+            "whole sealed segments can include tokens outside the mixture"
+        )
+    if config.training.mixture_loader == "references" and not references:
+        raise ValueError(
+            "offline reference loading requires training.mixture_prepared_storage=references"
         )
     if sum(path is not None for path in (promote, resume, extend_budget)) > 1:
         raise ValueError(
@@ -519,11 +538,12 @@ def prepare_dispatch_bundle(
     if allow_runtime_drift and resume is None:
         raise ValueError("runtime drift requires an explicit full resume")
     selected = resume or extend_budget or promote
+    full_resume = resume is not None or extend_budget is not None
     parent_details = (
         _verify_parent_closure(
             config,
             selected,
-            resume=resume is not None or extend_budget is not None,
+            resume=full_resume,
             budget_extension=extend_budget is not None,
         )
         if selected is not None
@@ -548,16 +568,22 @@ def prepare_dispatch_bundle(
     ) as temp:
         work = Path(temp)
         prepared_seals: dict[str, VerifiedFile] = {}
-        if (
-            parent_details is not None
-            and (resume is not None or extend_budget is not None)
-            and stage_bundle is None
-        ):
-            run, _, parent, _ = parent_details
-            for identity in parent["artifacts"]:
-                _copy_tree(
-                    run / identity["relative_path"],
-                    work / "assets" / identity["relative_path"],
+        if parent_details is not None and full_resume and stage_bundle is None:
+            _, _, _, parent_seals = parent_details
+            for name, seal in parent_seals.items():
+                target = _destination(work, f"assets/{name}")
+                prepared_seals[f"assets/{name}"] = owned_copy(
+                    seal.path, target, proof=seal
+                ).proof
+            assets = work / "assets"
+            if references and not (assets / PORTABLE_SEGMENTS).exists():
+                data = _load_bundle_data(assets, config, prepared_seals)
+                assert data.mixture_schedule is not None
+                prepared_seals.update(
+                    (f"assets/{PORTABLE_SEGMENTS}/{name}", proof)
+                    for name, proof in data.mixture_schedule.copy_dependencies(
+                        assets / PORTABLE_SEGMENTS
+                    ).items()
                 )
         else:
             prepared_config = config
@@ -590,6 +616,7 @@ def prepare_dispatch_bundle(
                 proof_store=proof_store,
                 verification_mode=verification_mode,
                 _proofs=prepared_seals,
+                portable_mixture=references,
             )
             _publish_prepared_directory(prepared / "assets", work / "assets")
             prepared_seals = {
@@ -619,33 +646,10 @@ def prepare_dispatch_bundle(
                     raise ValueError("parent corpus evidence lacks a portable binding")
                 _copy_portable_corpus(config, assets)
         if parent_details is not None:
-            run, _, parent, generation_manifest = parent_details
-            parent_artifacts = {
-                item["relative_path"]: item for item in parent["artifacts"]
-            }
-            for name in (
-                "tokenizer.json",
-                *(
-                    ("data/manifest.json", "data/train.npy", "data/validation.npy")
-                    if resume is not None or extend_budget is not None
-                    else ()
-                ),
-            ):
-                staged = work / "assets" / name
-                identity = parent_artifacts[name]
-                if (
-                    not staged.is_file()
-                    or staged.stat().st_size != identity["size_bytes"]
-                    or sha256_file(staged) != identity["sha256"]
-                ):
-                    raise ValueError(
-                        f"continuation {name} differs from prepared inputs"
-                    )
+            run, parent, generation_manifest, _ = parent_details
             continuation = _models().ContinuationSpec.model_validate(
                 {
-                    "kind": "RESUMED"
-                    if resume is not None or extend_budget is not None
-                    else "PROMOTED",
+                    "kind": "RESUMED" if full_resume else "PROMOTED",
                     "parent_run_id": parent["run_id"],
                     "checkpoint_sha256": generation_manifest["sha256"],
                     "artifact_identity": {
@@ -659,7 +663,10 @@ def prepare_dispatch_bundle(
             )
             assert selected is not None
             _continuation_assets(
-                work, selected, resume=resume is not None or extend_budget is not None
+                work,
+                selected,
+                resume=full_resume,
+                reference_resume=full_resume and references,
             )
         else:
             continuation = _models().ContinuationSpec(kind="FRESH")
@@ -678,7 +685,7 @@ def prepare_dispatch_bundle(
             }
         )
         _write_bundle_manifest(work / "bundle.json", manifest)
-        verify_dispatch_bundle(work)
+        verify_dispatch_bundle(work, _seals=prepared_seals)
         _publish_prepared_directory(work, output)
         _fsync_directory(output.parent)
     return manifest
@@ -736,27 +743,41 @@ def _verify_embedded_continuation(root: Path, manifest: Any, config: RunConfig) 
         for item in parent.get("artifacts", [])
         if isinstance(item, dict)
     }
-    tokenizer = root / "assets" / "tokenizer.json"
-    tokenizer_identity = parent_assets.get("tokenizer.json")
-    if (
-        not isinstance(tokenizer_identity, dict)
-        or not tokenizer.is_file()
-        or sha256_file(tokenizer) != tokenizer_identity.get("sha256")
-    ):
-        raise ValueError("embedded continuation tokenizer differs from bundle")
+    bundle_assets = {item.relative_path: item for item in manifest.files}
+    required = {"tokenizer.json"}
     if continuation.kind == "RESUMED":
-        for name in ("data/manifest.json", "data/train.npy", "data/validation.npy"):
-            if not (root / "assets" / name).is_file():
-                raise ValueError("full continuation lacks offline prepared data")
+        prepared = strict_json(root / "assets/data/manifest.json")
+        required.update(
+            {
+                "data/manifest.json",
+                *(f"data/{name}" for name in required_prepared_members(prepared)),
+            }
+        )
+        if config.training.mixture_prepared_storage == "references":
+            required.update(
+                name
+                for name in parent_assets
+                if name.startswith(("data/", f"{PORTABLE_SEGMENTS}/"))
+            )
+    for name in required:
+        staged = bundle_assets.get(f"assets/{name}")
+        parent_item = parent_assets.get(name)
+        if (
+            staged is None
+            or parent_item is None
+            or (staged.sha256, staged.size_bytes)
+            != (parent_item.get("sha256"), parent_item.get("size_bytes"))
+        ):
+            raise ValueError(f"embedded continuation {name} differs from bundle")
 
 
-def verify_dispatch_bundle(root: Path) -> Any:
+def verify_dispatch_bundle(
+    root: Path, *, _seals: Mapping[str, VerifiedFile] | None = None
+) -> Any:
     root = root.resolve(strict=True)
     manifest = _read_bundle_manifest(root / "bundle.json")
     _models().validate_required_versions(manifest.required_versions)
     config = RunConfig.model_validate(manifest.config)
-    if config.training.mixture_prepared_storage == "references":
-        raise ValueError("offline dispatch requires contiguous prepared storage")
     if manifest.config_sha256 != config_sha256(config.model_dump(mode="json")):
         raise ValueError("dispatch bundle config hash mismatch")
     if manifest.source_identity_sha256 != source_identity()[
@@ -769,6 +790,7 @@ def verify_dispatch_bundle(root: Path) -> Any:
         else None
     )
     names: set[str] = set()
+    seals: dict[str, VerifiedFile] = {}
     for value in manifest.files:
         identity = ArtifactIdentity(
             **(value.model_dump() if hasattr(value, "model_dump") else value)
@@ -777,7 +799,9 @@ def verify_dispatch_bundle(root: Path) -> Any:
             raise ValueError("duplicate dispatch bundle asset")
         names.add(identity.relative_path)
         if cache_assets is None:
-            _require_safe(root, identity)
+            seals[identity.relative_path] = _require_safe(
+                root, identity, seal=(_seals or {}).get(identity.relative_path)
+            )
         else:
             _require_safe(
                 cache_assets,
@@ -786,7 +810,23 @@ def verify_dispatch_bundle(root: Path) -> Any:
     if not {"assets/tokenizer.json", "assets/data/manifest.json"} <= names:
         raise ValueError("dispatch bundle lacks required offline assets")
     if cache_assets is None:
-        _verify_bundle_inputs(root, config, manifest)
+        if config.training.mixture_prepared_storage == "references":
+            segment_assets = root / "assets" / PORTABLE_SEGMENTS
+            actual = {
+                path.relative_to(root).as_posix()
+                for path in segment_assets.rglob("*")
+                if path.is_file() or path.is_symlink()
+            }
+            advertised = {
+                name
+                for name in names
+                if name.startswith(f"assets/{PORTABLE_SEGMENTS}/")
+            }
+            if actual != advertised:
+                raise ValueError(
+                    "dispatch portable token segment inventory differs from bundle"
+                )
+        _verify_bundle_inputs(root, config, seals=seals)
         _verify_embedded_continuation(root, manifest, config)
     return manifest
 
@@ -794,36 +834,62 @@ def verify_dispatch_bundle(root: Path) -> Any:
 def _verify_bundle_inputs(
     bundle_root: Path,
     config: RunConfig,
-    manifest: Any,
     *,
-    seals: Mapping[str, VerifiedFile] | None = None,
+    seals: Mapping[str, VerifiedFile],
 ) -> None:
     """Verify offline inputs, reusing only owned destination seals in this operation."""
     assets = bundle_root / "assets"
-    receipt = None
-    if seals is not None:
-        import json
-
-        prepared = assets / "data"
-        metadata = json.loads((prepared / "manifest.json").read_text(encoding="utf-8"))
-        receipt = _receipt_from_proofs(
-            prepared,
-            metadata,
-            {name: seals[f"assets/data/{name}"] for name in required_arrays(metadata)},
-        )
-    data = load_prepared_data(
-        assets / "data",
-        byte_enabled=config.model.memory == "byte",
-        verification="structural" if receipt is not None else "deep",
-        receipt=receipt,
+    data = _load_bundle_data(
+        assets,
+        config,
+        seals,
+        require_portable_segments=config.training.mixture_prepared_storage
+        == "references",
     )
     tokenizer = load_tokenizer(assets / "tokenizer.json")
     if tokenizer.get_vocab_size() != config.model.vocab_size:
         raise ValueError("bundle tokenizer vocabulary does not match model")
     if config.dataset.corpus_release_path is not None:
         verify_portable_corpus_binding(config, assets)
-    if not len(data.train) or not len(data.validation):
+    if (data.train is None) != (
+        config.training.mixture_prepared_storage == "references"
+    ):
+        raise ValueError("offline prepared storage differs from the configuration")
+    if config.training.mixture_loader == "references" and data.train is not None:
+        raise ValueError(
+            "offline reference loading requires reference-only prepared data"
+        )
+    if not data.train_tokens or not len(data.validation):
         raise ValueError("bundle prepared data is empty")
+
+
+def _load_bundle_data(
+    assets: Path,
+    config: RunConfig,
+    seals: Mapping[str, VerifiedFile],
+    *,
+    require_portable_segments: bool = False,
+) -> PreparedData:
+    prepared = assets / "data"
+    metadata = strict_json(prepared / "manifest.json")
+    names = required_prepared_members(metadata)
+    if not {f"assets/data/{name}" for name in names} <= seals.keys():
+        raise ValueError("dispatch bundle lacks verified prepared data members")
+    receipt = _receipt_from_proofs(
+        prepared, metadata, {name: seals[f"assets/data/{name}"] for name in names}
+    )
+    return load_prepared_data(
+        prepared,
+        byte_enabled=config.model.memory == "byte",
+        verification="structural",
+        receipt=receipt,
+        require_portable_segments=require_portable_segments,
+        dependency_proofs=[
+            proof
+            for name, proof in seals.items()
+            if name.startswith(f"assets/{PORTABLE_SEGMENTS}/")
+        ],
+    )
 
 
 def _cache_paths(worker_root: Path, digest: str) -> tuple[Path, Path]:
@@ -840,29 +906,22 @@ def _cache_paths(worker_root: Path, digest: str) -> tuple[Path, Path]:
 
 
 def _cache_binding(
-    path: Path, item: ArtifactIdentity, manifest: Any
+    path: Path, item: ArtifactIdentity, bundle_digest: str
 ) -> dict[str, object]:
     return file_binding(
         path,
         item.sha256,
         kind="dispatch_cache_asset",
         identifier=item.sha256,
-        closure={
-            "bundle_digest": manifest.digest(),
-            "files": [
-                entry.model_dump() if hasattr(entry, "model_dump") else entry
-                for entry in manifest.files
-            ],
-            "config_sha256": manifest.config_sha256,
-            "continuation": manifest.continuation.model_dump(mode="json"),
-        },
+        # The digest already commits the whole inventory and continuation.
+        closure={"bundle_digest": bundle_digest},
     )
 
 
 def _cached_asset(
     assets: Path,
     item: ArtifactIdentity,
-    manifest: Any,
+    bundle_digest: str,
     *,
     proof_store: ProofStore | None,
     verification_mode: Literal["cold", "verified_reuse"],
@@ -875,7 +934,7 @@ def _cached_asset(
     if not path.is_file() or path.stat().st_size != item.size_bytes:
         raise ValueError("cached dispatch asset is missing or corrupt")
     try:
-        binding = _cache_binding(path, item, manifest)
+        binding = _cache_binding(path, item, bundle_digest)
         hit = (
             verification_mode == "verified_reuse"
             and proof_store is not None
@@ -913,7 +972,8 @@ def install_dispatch_bundle(
         "sha256"
     ] and not _drift_authorized(manifest.continuation):
         raise ValueError("dispatch bundle source identity mismatch")
-    assets, bundle_dir = _cache_paths(worker_root, manifest.digest())
+    bundle_digest = manifest.digest()
+    assets, bundle_dir = _cache_paths(worker_root, bundle_digest)
     assets.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(assets.parent, 0o700)
     os.chmod(assets, 0o700)
@@ -934,7 +994,7 @@ def install_dispatch_bundle(
         seal = _cached_asset(
             assets,
             item,
-            manifest,
+            bundle_digest,
             proof_store=proof_store,
             verification_mode=verification_mode,
         )
@@ -952,7 +1012,7 @@ def install_dispatch_bundle(
         )
     if check_only:
         return {
-            "bundle_digest": manifest.digest(),
+            "bundle_digest": bundle_digest,
             "missing_asset_digests": sorted(set(missing)),
             "installed": False,
         }
@@ -999,7 +1059,7 @@ def install_dispatch_bundle(
             seal = _cached_asset(
                 assets,
                 item,
-                manifest,
+                bundle_digest,
                 proof_store=proof_store,
                 verification_mode=verification_mode,
             )
@@ -1027,20 +1087,20 @@ def install_dispatch_bundle(
                             "logical_bytes": checked.logical_bytes,
                         }
                     )
-            _verify_bundle_inputs(root, config, manifest, seals=checked_seals)
+            _verify_bundle_inputs(root, config, seals=checked_seals)
             _verify_embedded_continuation(root, manifest, config)
         if proof_store is not None and verification_mode == "verified_reuse":
             for item in {entry.sha256: entry for entry in identities}.values():
                 seal = cached_seals[item.sha256]
                 if seal.cold_verified:
                     proof_store.record(
-                        _cache_binding(assets / item.sha256, item, manifest), seal
+                        _cache_binding(assets / item.sha256, item, bundle_digest), seal
                     )
     with (worker_root / _CACHE / ".lock").open("a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if bundle_dir.exists():
             existing = _read_bundle_manifest(bundle_dir / "bundle.json")
-            if existing.digest() != manifest.digest():
+            if existing.digest() != bundle_digest:
                 raise ValueError("conflicting bundle digest publication")
         else:
             with tempfile.TemporaryDirectory(
@@ -1051,10 +1111,10 @@ def install_dispatch_bundle(
                 # Cache files were authenticated above against this exact closure.
                 _publish_prepared_directory(temporary, bundle_dir)
                 _fsync_directory(bundle_dir.parent)
-    if _read_bundle_manifest(bundle_dir / "bundle.json").digest() != manifest.digest():
+    if _read_bundle_manifest(bundle_dir / "bundle.json").digest() != bundle_digest:
         raise ValueError("conflicting bundle digest publication")
     return {
-        "bundle_digest": manifest.digest(),
+        "bundle_digest": bundle_digest,
         "missing_asset_digests": [],
         "installed": True,
     }
@@ -1099,7 +1159,7 @@ def materialize_dispatch_bundle(
             seal = _cached_asset(
                 assets,
                 item,
-                manifest,
+                bundle_digest,
                 proof_store=proof_store,
                 verification_mode=verification_mode,
             )
@@ -1124,8 +1184,7 @@ def materialize_dispatch_bundle(
                 )
         _verify_bundle_inputs(
             work,
-            RunConfig.model_validate(manifest.config),
-            manifest,
+            config,
             seals=copied_seals,
         )
         _verify_embedded_continuation(

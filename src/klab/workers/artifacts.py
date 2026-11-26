@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.models import RunConfig
+from klab.corpus.mixture_schedule import PORTABLE_SEGMENTS
 from klab.training.checkpoints import (
     CheckpointManager,
     _fsync_directory,
@@ -321,7 +322,7 @@ def _verify_complete_run(
         if name not in {
             "tokenizer.json",
             "tokenizer_manifest.json",
-        } and not name.startswith(("data/", "corpus/")):
+        } and not name.startswith(("data/", "corpus/", f"{PORTABLE_SEGMENTS}/")):
             continue
         received = expected.get(name)
         if received is None or (received.sha256, received.size_bytes) != (

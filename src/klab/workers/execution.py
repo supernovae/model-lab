@@ -23,7 +23,9 @@ from typing import Any
 
 from klab.canonical import canonical_digest, canonical_json, reject_duplicate_keys
 from klab.config.models import RunConfig
+from klab.corpus.mixture_schedule import PORTABLE_SEGMENTS
 from klab.evaluation.post_train_triage import read_triage, triage_summary
+from klab.owned_copy import owned_copy
 from klab.resource_envelope import check_envelope, current_process_rss_bytes
 from klab.runtime import discover_all_runtimes, discover_runtimes, validate_runtime
 from klab.runtime_profile import authorize_worker, require_authorization
@@ -728,6 +730,16 @@ def _continuation_run(materialized: Path, kind: str) -> Path | None:
             shutil.copytree(member, destination)
         else:
             shutil.copy2(member, destination)
+    offline = materialized / "assets"
+    if kind == "RESUMED" and (offline / PORTABLE_SEGMENTS).is_dir():
+        for name in ("data", PORTABLE_SEGMENTS):
+            shutil.copytree(
+                offline / name,
+                run / name,
+                copy_function=lambda original, target: owned_copy(
+                    Path(original), Path(target)
+                ),
+            )
     for name in ("resolved_config.yaml", "tokenizer.json", "tokenizer_manifest.json"):
         candidate = source / name
         if candidate.is_file() and not (run / name).exists():
