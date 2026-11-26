@@ -328,6 +328,10 @@ and exact row generations. Raw replay reads those checked facts and the
 original source bytes. It uses the document and span payloads during index
 construction. [Raw replay measurements](../corpus-preparation.md#raw-replay-from-checked-index-facts)
 report full audit costs and the small increase in sampled named scratch.
+The checked document index clusters raw replay facts by source position.
+The build sorts narrow temporary records once, and repeated replay scans
+the resulting table in storage order. [Source-ordered replay measurements](../corpus-preparation.md#source-ordered-replay-index-measurements)
+include the cold scan, index construction and full audit trade-offs.
 
 | Workload | Evidence |
 | --- | --- |

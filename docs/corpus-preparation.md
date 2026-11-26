@@ -2345,6 +2345,46 @@ The full audit still hashes release members and reads them to construct the
 row indexes. Production-sized and slower-storage audits remain open.
 [#450](https://github.com/supernovae/model-lab/issues/450)
 
+#### Source-ordered replay index measurements
+
+The checked document index stores narrow replay facts in source file and
+position order. A binary document ID breaks ties. The storage order lets
+raw replay scan a file's facts without following a secondary index into
+document rows. The `raw_replay_order` phase sorts temporary facts on disk
+after duplicate validation has released its evidence. The sorted table
+seals with the document index. A stop before that seal can repeat the
+document pass and sort. A verified retry reuses the sorted table.
+
+The isolated NVMe comparison generated 16 source files' worth of facts
+with source positions permuted across document rows. A third of the
+facts included a structure digest. Each size had three paired trials
+with identical ordered replay evidence. Cache eviction was requested
+before each cold index scan. The warm scan followed immediately.
+
+| Facts | Cold scan before / after | Warm scan before / after | Cold storage reads before / after |
+| ---: | ---: | ---: | ---: |
+| 100,000 | 0.535 / 0.071 s | 0.135 / 0.069 s | 37.36 / 12.51 MB |
+| 1,000,000 | 2.592 / 0.711 s | 1.500 / 0.682 s | 373.81 / 128.27 MB |
+
+At one million facts, logical scan reads dropped from 4.18 GB to 128.26 MB.
+Index construction took 3.143 s before and 3.970 s after. The sealed index
+shrank from 448.27 MB to 418.95 MB. Sampled peak allocated scratch,
+including open SQLite sort files, grew from 464.93 MB to 585.26 MB.
+An immediately repeated scan of the 100,000-fact index on rotational ZFS
+took 0.199 s before and 0.071 s after. Those ZFS trials measure cached
+scans on that filesystem.
+
+Three paired full cold audits on the same 100,002-document NVMe Markdown
+release took 5.816 s before and 5.831 s after. Replay alone took
+0.270 s before and 0.200 s after, with logical reads falling from
+476.56 MB to 93.74 MB. The complete audit's logical reads fell from
+2.35 GB to 1.96 GB. Storage reads stayed at 633.5 MB and writes rose
+from 95.79 MB to 102.19 MB. Sampled peak allocated space for named
+scratch fell from 81.75 MB to 78.00 MB. Peak RSS rose from about 176 MiB
+to 190 MiB. Both revisions verified the same release ID. Production-size
+and media-cold rotational audits remain open.
+[#450](https://github.com/supernovae/model-lab/issues/450)
+
 #### Describe link planning recovery measurements
 
 When measurement caching is enabled, `describe` stores the row count
