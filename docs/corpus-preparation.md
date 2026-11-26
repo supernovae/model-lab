@@ -768,23 +768,37 @@ largest plan accounted for 4.29 GB of logical build payloads.
 | 128 | 7.31 ms | 28.24 KB |
 | 1,024 | 54.96 ms | 225.41 KB |
 
-Run `plan` to see the local acquisition pins, eligible source partitions,
-candidate normalized cache hits and the source bytes that would need
-normalization if a new native disk build runs. A missing lock reports
-`acquisition_required`.
-An inconsistent source inventory reports `blocked` with a reason. The
-dependency list shows the order through freeze. Reuse and resource costs for
-indexing, deduplication and view construction are resolved during the build.
-In-memory and reviewed-row-admission builds report `unsupported`.
+Run `plan PROJECT` to see the native build ID, acquisition pins and stage
+dependencies. If the build already exists, the plan shows whether its
+payloads are still in the build directory or have moved into a release.
+Otherwise it lists eligible source partitions, candidate normalized cache
+hits and source bytes that need normalization. A missing lock reports
+`acquisition_required`. An inconsistent inventory reports `blocked` with
+a reason. In-memory and reviewed-row-admission builds report `unsupported`.
+
+When every eligible partition has a published receipt, the plan computes
+the index key. A matching published index receipt or sealed assembly also
+provides the deduplication key. Retained stages report `verify_candidate`
+and their payload bytes, which the build will hash before reuse.
+`resume_candidate` identifies a retained checkpoint or assembly. If input
+identities are still unknown, the plan leaves the dependent key unresolved.
+`corpus build PROJECT --keep-stages 2` retains recent index and deduplication
+results for subsequent builds. A view-only policy change can preserve both
+keys. A duplicate-resolution policy change can preserve the index and
+change the deduplication key. The planner leaves view recovery, fresh stage
+write costs and peak scratch unestimated.
 
 Planning writes no artifacts or verification receipts. It streams the
 acquisition lock and snapshot manifests, discards row-level inventories and
 reads bounded file rights evidence where needed. Each lock or snapshot
 manifest has a 4 MiB retained metadata limit. Large acquisition receipts
-still cost a sequential metadata scan. `verify_candidate` means a matching
-cache location exists. Build verifies the snapshots and candidate shard
-outputs before reuse. Candidate source byte counts describe the inputs
-associated with those locations. They do not estimate verification I/O.
+still cost a sequential metadata scan. The plan hashes normalized receipts
+and reads stage receipts up to 4 MiB. It checks candidate file inventories
+and sizes. Build authenticates snapshots and candidate outputs before
+reuse. Candidate source byte counts describe the original inputs associated
+with normalized cache locations. Stage candidate bytes cover the payloads
+named by the stage receipt, with additional reads and write costs resolved
+during execution.
 
 Planning scans compact Hugging Face selected-row receipts in bounded batches.
 Other valid formatting uses the same strict JSON parser used for the inventory.
@@ -800,6 +814,19 @@ Peak process RSS was 22.0 MiB with the per-row parser and 22.2 MiB with
 batching. These scans read each metadata file once and use no payload or
 scratch I/O. Measure end-to-end planning separately on a production
 inventory, where storage and the fraction of rows in compact form matter.
+
+The downstream plan was measured independently on Linux tmpfs with sparse
+4 MiB source files, published normalized receipts and synthetic index and
+deduplication receipts. Each row is the median of three in-process plans.
+The 1,024-partition case accounted for 4.29 GB of source bytes and 5.37 GB
+of candidate stage payloads. Its process RSS peaked at 63.2 MiB, including
+the Python process and fixture setup. These are planning measurements.
+
+| Partitions | Median wall time | Process reads |
+| ---: | ---: | ---: |
+| 4 | 2.0 ms | 0.69 MB |
+| 128 | 15.2 ms | 0.88 MB |
+| 1,024 | 115.0 ms | 2.28 MB |
 
 Inspect shared normalized storage with:
 

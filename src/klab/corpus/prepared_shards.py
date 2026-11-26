@@ -54,10 +54,16 @@ def _receipt_identity(
     document_policy,
     decision,
     row_limit,
+    *,
+    implementation: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     return {
         "artifact_type": "normalized_source_partition",
-        "implementation": prepared_shard_implementation(),
+        "implementation": (
+            prepared_shard_implementation()
+            if implementation is None
+            else implementation
+        ),
         "source": source.model_dump(mode="json"),
         "source_id": source.id,
         "revision": source.revision,
@@ -72,6 +78,33 @@ def _receipt_identity(
     }
 
 
+def prepared_file_directory(
+    prepared_root,
+    source,
+    snapshot_sha,
+    file,
+    normalizer_options,
+    document_policy,
+    decision,
+    row_limit,
+    *,
+    implementation: dict[str, str] | None = None,
+) -> Path:
+    """Resolve the published native partition for an input without reviewed rows."""
+    identity = _receipt_identity(
+        source,
+        snapshot_sha,
+        file,
+        normalizer_options,
+        document_policy,
+        decision,
+        row_limit,
+        implementation=implementation,
+    )
+    store = StageStore(prepared_root)
+    return store.directory(source.id, store.key(identity))
+
+
 def prepared_file_exists(
     prepared_root,
     source,
@@ -83,7 +116,8 @@ def prepared_file_exists(
     row_limit,
 ) -> bool:
     """Check a native partition's location before scanning input for worker admission."""
-    identity = _receipt_identity(
+    destination = prepared_file_directory(
+        prepared_root,
         source,
         snapshot_sha,
         file,
@@ -92,9 +126,7 @@ def prepared_file_exists(
         decision,
         row_limit,
     )
-    store = StageStore(prepared_root)
-    key = store.key(identity)
-    destination = store.directory(source.id, key)
+    key = destination.name
     return (
         destination.exists()
         or (destination.parent / f".incomplete-{key}" / "receipt.json").is_file()
