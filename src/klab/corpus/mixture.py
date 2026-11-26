@@ -34,7 +34,7 @@ from klab.corpus.mixture_index import (
     rows,
 )
 from klab.corpus.quota import shortfall_message
-from klab.corpus.release import _verification_operation, verify_release
+from klab.corpus.release import ReleaseMembers, _verification_operation, verify_release
 from klab.corpus.release_verify import current_settings
 from klab.data.row_layout import document_rows
 from klab.data.tokenizer import load_tokenizer, verify_tokenizer_artifact
@@ -226,7 +226,7 @@ def minimum_document_tokens(spec) -> dict[str, int]:
     }
 
 
-def record_summary(lines, policy: dict) -> dict:
+def record_summary(lines, policy: dict, *, digest=None) -> dict:
     """Per-stratum exposure counts and the document_start row layout.
 
     ``lines`` are the encoded record rows; ``policy`` holds the effective
@@ -244,6 +244,8 @@ def record_summary(lines, policy: dict) -> dict:
     )
     layout = document_rows(policy["row_layout"]) if "row_layout" in policy else None
     for line in lines:
+        if digest is not None:
+            digest.update(line)
         row = json.loads(line)
         if counts is not None:
             entry = counts[row["stratum"]]
@@ -278,24 +280,28 @@ def receipt_policy(spec) -> dict:
     return policy
 
 
-def _check_record_summary(
-    output: Path, receipt: dict, *, records_hashed: bool = False
+def _verify_records(
+    output: Path, receipt: dict, *, require_digest: bool = True
 ) -> None:
-    """Recompute the receipt's exposure counts and row layout from its records."""
+    """Verify bytes and any recorded exposure or row layout in one pass."""
     policy = {
         key: receipt[key]
         for key in ("stratum_max_exposures", "row_layout")
         if key in receipt
     }
-    if not policy:
+    path = output / TRAIN_RECORDS
+    if policy:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            summary = record_summary(stream, policy, digest=digest)
+        actual = digest.hexdigest()
+    elif require_digest:
+        summary = {}
+        actual = sha256_file(path)
+    else:
         return
-    if (
-        not records_hashed
-        and sha256_file(output / TRAIN_RECORDS) != receipt["train_records_sha256"]
-    ):
+    if actual != receipt["train_records_sha256"]:
         raise ValueError("mixture token export digest mismatch")
-    with (output / TRAIN_RECORDS).open("rb") as stream:
-        summary = record_summary(stream, policy)
     if any(receipt.get(key) != value for key, value in summary.items()):
         raise ValueError(
             "mixture exposure counts or document rows differ from the receipt"
@@ -324,9 +330,14 @@ def validate_source_strata(sources_path: Path, source_strata: dict[str, str]) ->
             raise ValueError("source lacks a reviewed training rights path")
 
 
-def _tokenizer(spec: MixtureDeclaration, release: Path, release_id: str):
+def _verified_members(path: Path) -> ReleaseMembers:
+    return ReleaseMembers(path, verify_release(path))
+
+
+def _tokenizer(spec: MixtureDeclaration, release: ReleaseMembers):
     config = load_tokenizer_config(spec.tokenizer_config)
     dataset = config.dataset
+    release_id = release.manifest["release_id"]
     origin = spec.tokenizer_origin_release_id or release_id
     if (
         dataset.source != "local_text"
@@ -334,14 +345,14 @@ def _tokenizer(spec: MixtureDeclaration, release: Path, release_id: str):
         or (
             dataset.corpus_release_path.resolve().name != origin
             and not (
-                dataset.corpus_release_path.resolve() == release
+                dataset.corpus_release_path.resolve() == release.root
                 and origin == release_id
             )
         )
         or dataset.revision != origin
         or (
             spec.tokenizer_origin_release_id is None
-            and dataset.corpus_release_path.resolve() != release
+            and dataset.corpus_release_path.resolve() != release.root
         )
     ):
         raise ValueError("tokenizer configuration is not bound to this release")
@@ -349,11 +360,8 @@ def _tokenizer(spec: MixtureDeclaration, release: Path, release_id: str):
     if getattr(spec, "tokenizer_observation", None) is not None:
         from klab.corpus.tokenizer_observation import verify_observed_tokenizer
 
-        manifest = json.loads((release / "manifest.json").read_text(encoding="utf-8"))
-        if manifest.get("release_id") != release_id:
-            raise ValueError("tokenizer observation release identity changed")
         observed = verify_observed_tokenizer(
-            spec.tokenizer_observation, spec.tokenizer_config, config, release, manifest
+            spec.tokenizer_observation, spec.tokenizer_config, config, release
         )
         digest = observed["tokenizer_sha256"]
     else:
@@ -396,7 +404,8 @@ def _materialize_mixture(
         if reuse_tokens and not spec.additional_releases
         else (None, None)
     )
-    manifest = verify_release(release)
+    members = _verified_members(release)
+    manifest = members.manifest
     cohorts = None
     additive_evidence = []
     if spec.additional_releases:
@@ -417,7 +426,7 @@ def _materialize_mixture(
             raise ValueError(
                 "additive releases must be distinct and inside the same work root"
             )
-        if spec.family_inventory.resolve() != release / "family-inventory.jsonl":
+        if spec.family_inventory.resolve() != members.member("family-inventory.jsonl"):
             raise ValueError(
                 "additive mixture requires the base release family inventory"
             )
@@ -437,10 +446,11 @@ def _materialize_mixture(
             mapped = {
                 source: spec.source_strata[source] for source in cohort["source_ids"]
             }
-            validate_source_strata(
-                Path(cohort["release_path"]) / "sources.json", mapped
+            cohort_members = ReleaseMembers(
+                Path(cohort["release_path"]), cohort["manifest"]
             )
-            report_path = Path(cohort["release_path"]) / "report.json"
+            validate_source_strata(cohort_members.member("sources.json"), mapped)
+            report_path = cohort_members.member("report.json")
             summary = json.loads(report_path.read_bytes())
             if (
                 summary["view_counts"]["lm"]["train"]
@@ -450,8 +460,8 @@ def _materialize_mixture(
                     "additive release TRAIN view does not cover its kept TRAIN documents"
                 )
     else:
-        validate_source_strata(release / "sources.json", spec.source_strata)
-    report = json.loads((release / "report.json").read_text(encoding="utf-8"))
+        validate_source_strata(members.member("sources.json"), spec.source_strata)
+    report = json.loads(members.member("report.json").read_bytes())
     requested = report.get("requested_mixture")
     total_quota = sum(spec.target_quotas.values())
     if (
@@ -465,7 +475,7 @@ def _materialize_mixture(
         raise ValueError(
             "target quotas disagree with verified release requested mixture"
         )
-    tokenizer, tokenizer_sha = _tokenizer(spec, release, manifest["release_id"])
+    tokenizer, tokenizer_sha = _tokenizer(spec, members)
     if early_tokenizer_sha not in {None, tokenizer_sha}:
         raise ValueError("tokenizer changed while the mixture was being checked")
     from klab.corpus.completed_preparation import local_scope
@@ -504,10 +514,13 @@ def _materialize_mixture(
 
                 # The release manifest already carries the documents and lineage
                 # digests; only the family inventory is outside it.
+                documents = members.member("documents.jsonl")
+                lineage = members.member("lm/train.lineage.jsonl")
                 digests = {
-                    release / name: manifest["files"][name]["sha256"]
-                    for name in ("documents.jsonl", "lm/train.lineage.jsonl")
-                } | {spec.family_inventory: _inventory_sha256(spec.family_inventory)}
+                    documents: manifest["files"]["documents.jsonl"]["sha256"],
+                    lineage: manifest["files"]["lm/train.lineage.jsonl"]["sha256"],
+                    spec.family_inventory: _inventory_sha256(spec.family_inventory),
+                }
 
                 if reuse_tokens:
                     preflight = MixturePreflight(
@@ -519,7 +532,7 @@ def _materialize_mixture(
                     )
                 index = MixtureIndex(
                     Path(scratch),
-                    release / "documents.jsonl",
+                    documents,
                     digests,
                     prepared=preflight.snapshot if preflight else None,
                 )
@@ -542,7 +555,7 @@ def _materialize_mixture(
                         spec.seed,
                         spec.order_policy,
                     )
-                    index.select(release / "lm/train.lineage.jsonl")
+                    index.select(lineage)
                     if preflight is not None:
                         preflight.publish(index)
                 frontier = None
@@ -561,8 +574,7 @@ def _materialize_mixture(
                 receipt = _schedule(
                     spec,
                     raw,
-                    release,
-                    manifest,
+                    members,
                     tokenizer,
                     tokenizer_sha,
                     eos,
@@ -594,8 +606,7 @@ def _materialize_mixture(
                 spec.tokenizer_observation,
                 spec.tokenizer_config,
                 load_tokenizer_config(spec.tokenizer_config),
-                release,
-                manifest,
+                members,
             )
             if observed["tokenizer_sha256"] != tokenizer_sha:
                 raise ValueError("observed tokenizer changed during mixture execution")
@@ -633,8 +644,7 @@ def _materialize_mixture(
 def _schedule(
     spec,
     raw,
-    release,
-    manifest,
+    release: ReleaseMembers,
     tokenizer,
     tokenizer_sha,
     eos,
@@ -644,6 +654,7 @@ def _schedule(
     reuse_tokens=True,
     frontier=None,
 ):
+    manifest = release.manifest
     totals: Counter[str] = Counter()
     unique: Counter[str] = Counter()
     available_unique: Counter[str] = Counter()
@@ -671,7 +682,7 @@ def _schedule(
     from klab.data.token_store import ContentTokens
 
     try:
-        token_root = corpus_work_root(release) / "cache" / "source-tokens"
+        token_root = corpus_work_root(release.root) / "cache" / "source-tokens"
     except ValueError:
         token_root = staging.parent / ".source-tokens"
     with (
@@ -1000,7 +1011,7 @@ def _schedule(
     receipt = {
         "schema_version": 2,
         "release_id": manifest["release_id"],
-        "release_manifest_sha256": sha256_file(release / "manifest.json"),
+        "release_manifest_sha256": sha256_file(release.root / "manifest.json"),
         "tokenizer_sha256": tokenizer_sha,
         "declaration_sha256": hashlib.sha256(raw).hexdigest(),
         "family_inventory_sha256": (
@@ -1117,14 +1128,13 @@ def _seal_completed_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
 def _verify_completed_mixture(declaration, output, receipt):
     raw = declaration.read_bytes()
     spec = MixtureDeclaration.model_validate(yaml.safe_load(raw))
-    manifest = verify_release(spec.release_path.resolve())
+    release = _verified_members(spec.release_path.resolve())
+    manifest = release.manifest
     from klab.corpus.completed_preparation import local_scope
 
     if local_scope(manifest) is None:
         raise ValueError("completed mixture has no matching local preparation scope")
-    _, tokenizer_sha = _tokenizer(
-        spec, spec.release_path.resolve(), manifest["release_id"]
-    )
+    _, tokenizer_sha = _tokenizer(spec, release)
     cached = _completed_mixture_cache(spec).load(
         "completed-mixture",
         _completed_mixture_request(spec, raw, output, manifest, tokenizer_sha),
@@ -1241,10 +1251,9 @@ def _reseal_mixture(declaration: Path, output: Path) -> dict:
     receipt = json.loads(raw_receipt)
     raw = declaration.read_bytes()
     spec = MixtureDeclaration.model_validate(yaml.safe_load(raw))
-    manifest = verify_release(spec.release_path.resolve())
-    _, tokenizer_sha = _tokenizer(
-        spec, spec.release_path.resolve(), manifest["release_id"]
-    )
+    release = _verified_members(spec.release_path.resolve())
+    manifest = release.manifest
+    _, tokenizer_sha = _tokenizer(spec, release)
     expected = {
         "schema_version": 2,
         "declaration_sha256": hashlib.sha256(raw).hexdigest(),
@@ -1278,18 +1287,19 @@ def _reseal_mixture(declaration: Path, output: Path) -> dict:
         raise ValueError("mixture receipt counts are not self-consistent")
     from concurrent.futures import ThreadPoolExecutor
 
-    paths = [output / TRAIN_TOKENS, output / TRAIN_RECORDS]
-    with ThreadPoolExecutor(len(paths)) as pool:
-        digests = list(pool.map(lambda p: sha256_file(p, _DIGEST_CHUNK), paths))
-    if digests != [
-        receipt["train_tokens_sha256"],
-        receipt["train_records_sha256"],
-    ] or [p.stat().st_size for p in paths] != [
-        receipt["train_tokens_bytes"],
-        receipt["train_records_bytes"],
-    ]:
+    if any(
+        (output / name).stat().st_size != receipt[key]
+        for name, key in (
+            (TRAIN_TOKENS, "train_tokens_bytes"),
+            (TRAIN_RECORDS, "train_records_bytes"),
+        )
+    ):
         raise ValueError("mixture token export digest mismatch")
-    _check_record_summary(output, receipt, records_hashed=True)
+    with ThreadPoolExecutor(2) as pool:
+        tokens = pool.submit(sha256_file, output / TRAIN_TOKENS, _DIGEST_CHUNK)
+        _verify_records(output, receipt)
+        if tokens.result() != receipt["train_tokens_sha256"]:
+            raise ValueError("mixture token export digest mismatch")
     if (
         receipt.get("completed_preparation", {}).get("policy")
         == "completed_local_preparation"
@@ -1308,26 +1318,26 @@ def _verify_mixture(declaration: Path, output: Path, *, audit: bool) -> dict:
     if len(raw) > MAX_RECEIPT_BYTES:
         raise ValueError("mixture receipt-byte cap exceeded")
     receipt = json.loads(raw)
-    _check_record_summary(output, receipt)
     if (
         receipt.get("completed_preparation", {}).get("policy")
         == "completed_local_preparation"
         and not audit
     ):
+        _verify_records(output, receipt, require_digest=False)
         return _verify_completed_mixture(declaration, output, receipt)
     if (
         receipt.get("schema_version") != 2
         or sha256_file(output / TRAIN_TOKENS) != receipt["train_tokens_sha256"]
-        or sha256_file(output / TRAIN_RECORDS) != receipt["train_records_sha256"]
+        or (output / TRAIN_RECORDS).stat().st_size != receipt["train_records_bytes"]
     ):
         raise ValueError("mixture token export digest mismatch")
+    _verify_records(output, receipt)
     if not audit:
         raw = declaration.read_bytes()
         spec = MixtureDeclaration.model_validate(yaml.safe_load(raw))
-        manifest = verify_release(spec.release_path.resolve())
-        _, tokenizer_sha = _tokenizer(
-            spec, spec.release_path.resolve(), manifest["release_id"]
-        )
+        release = _verified_members(spec.release_path.resolve())
+        manifest = release.manifest
+        _, tokenizer_sha = _tokenizer(spec, release)
         cache, request = _native_mixture_completion(
             spec, raw, output, manifest, tokenizer_sha
         )
@@ -1349,10 +1359,9 @@ def _verify_mixture(declaration: Path, output: Path, *, audit: bool) -> dict:
     # Explicit audit can recover an unsigned/legacy output without replacing it.
     raw = declaration.read_bytes()
     spec = MixtureDeclaration.model_validate(yaml.safe_load(raw))
-    manifest = verify_release(spec.release_path.resolve())
-    _, tokenizer_sha = _tokenizer(
-        spec, spec.release_path.resolve(), manifest["release_id"]
-    )
+    release = _verified_members(spec.release_path.resolve())
+    manifest = release.manifest
+    _, tokenizer_sha = _tokenizer(spec, release)
     if (
         receipt.get("completed_preparation", {}).get("policy")
         == "completed_local_preparation"
@@ -1381,8 +1390,7 @@ def verify_mixture_tokenizer_origin(
     ):
         raise ValueError("tokenizer origin path or vocabulary mismatch")
     with _verification_operation():
-        manifest = verify_release(release)
-        _, digest = _tokenizer(spec, release, manifest["release_id"])
+        _, digest = _tokenizer(spec, _verified_members(release))
     result = json.loads(
         tokenizer_path.with_name("tokenizer_manifest.json").read_bytes()
     )
@@ -1403,6 +1411,13 @@ def verify_mixture_dataset(
         or dataset.validation_path is None
     ):
         raise ValueError("complete local token-mixture dataset required")
+    with _verification_operation():
+        return _verify_mixture_dataset_members(dataset, tokenizer_path, vocab_size)
+
+
+def _verify_mixture_dataset_members(
+    dataset: DatasetConfig, tokenizer_path: Path, vocab_size: int
+) -> dict:
     spec = MixtureDeclaration.model_validate(
         yaml.safe_load(dataset.mixture_declaration_path.read_bytes())
     )
@@ -1410,12 +1425,12 @@ def verify_mixture_dataset(
         dataset.mixture_declaration_path, dataset.mixture_output_path
     )
     fit = load_tokenizer_config(spec.tokenizer_config)
-    release = spec.release_path.resolve()
+    release = _verified_members(spec.release_path.resolve())
+    validation = release.member("lm/validation.jsonl")
     if (
         dataset.train_path.resolve()
         != (dataset.mixture_output_path / TRAIN_TOKENS).resolve()
-        or dataset.validation_path.resolve()
-        != (release / "lm/validation.jsonl").resolve()
+        or dataset.validation_path.resolve() != validation.resolve()
         or dataset.revision != receipt["release_id"]
         or dataset.train_max_tokens != sum(receipt["actual_target_tokens"].values())
         or dataset.train_max_documents != receipt["records"]
@@ -1433,10 +1448,10 @@ def verify_mixture_dataset(
     else:
         from klab.corpus.export import release_licenses, split_stats
 
-        records, rendered_bytes = split_stats(dataset.validation_path, "lm")
+        records, rendered_bytes = split_stats(validation, "lm")
         token_budget = rendered_bytes + records + 1
         expected_license = release_licenses(
-            release / "sources.json", release / "documents.jsonl"
+            release.member("sources.json"), release.member("documents.jsonl")
         )
     if (
         dataset.license != expected_license

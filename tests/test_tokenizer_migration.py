@@ -20,15 +20,15 @@ def test_observed_tokenizer_refuses_malformed_split_metadata(tmp_path, case):
     from tokenizer_observation_fixtures import observed_tokenizer
 
     from klab.corpus.export import _export_binding
+    from klab.corpus.release import ReleaseMembers
     from klab.corpus.tokenizer_observation import verify_observed_tokenizer
 
     observation, path, config, release, manifest, export, token_manifest, write = (
         observed_tokenizer(tmp_path)
     )
+    members = ReleaseMembers(release, manifest)
     assert (
-        verify_observed_tokenizer(observation, path, config, release, manifest)[
-            "method"
-        ]
+        verify_observed_tokenizer(observation, path, config, members)["method"]
         == "post_run_observation"
     )
     if case == "missing_train":
@@ -66,4 +66,4 @@ def test_observed_tokenizer_refuses_malformed_split_metadata(tmp_path, case):
             token_manifest,
         )
     with pytest.raises(ValueError, match="^tokenizer observation split differs$"):
-        verify_observed_tokenizer(observation, path, config, release, manifest)
+        verify_observed_tokenizer(observation, path, config, members)

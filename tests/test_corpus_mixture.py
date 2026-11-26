@@ -18,6 +18,7 @@ from klab.config.loading import load_config
 from klab.config.models import DatasetConfig
 from klab.corpus import mixture
 from klab.corpus.mixture_index import document_rank
+from klab.corpus.release import ReleaseMembers
 from klab.corpus.release_verify import verification_settings
 from klab.data.packing import TokenBlockDataset, _collect_token_mixture
 from klab.training.manifest import sha256_file
@@ -29,7 +30,14 @@ def _manifest(release: Path) -> dict:
         "release_id": release.name,
         "files": {
             name: {"sha256": sha256_file(release / name)}
-            for name in ("documents.jsonl", "lm/train.lineage.jsonl")
+            for name in (
+                "documents.jsonl",
+                "lm/train.lineage.jsonl",
+                "lm/validation.jsonl",
+                "sources.json",
+                "report.json",
+            )
+            if (release / name).is_file()
         },
     }
 
@@ -260,6 +268,9 @@ def test_reseal_rebuilds_lost_completion_without_replay_and_refuses_tampering(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     declaration, _, _ = _fixture(tmp_path, monkeypatch)
+    policy = yaml.safe_load(declaration.read_bytes())
+    policy["strata"] = {"general": {"max_exposures": policy["max_exposures"]}}
+    declaration.write_text(yaml.safe_dump(policy))
     output = tmp_path / "output"
     receipt = mixture.materialize_mixture(declaration, output)
     shutil.rmtree(tmp_path / "cache")
@@ -272,8 +283,28 @@ def test_reseal_rebuilds_lost_completion_without_replay_and_refuses_tampering(
     )
     with pytest.raises(ValueError, match="never"):
         mixture.verify_mixture(declaration, output, audit=True, reseal=True)
-    assert mixture.verify_mixture(declaration, output, reseal=True) == receipt
-    assert mixture.verify_mixture(declaration, output) == receipt
+    records = output / "train.records.jsonl"
+    opened = []
+    original_open = Path.open
+
+    def count_records(path, mode="r", *args, **kwargs):
+        if path == records and mode == "rb":
+            opened.append(path)
+        return original_open(path, mode, *args, **kwargs)
+
+    with monkeypatch.context() as observe:
+        observe.setattr(Path, "open", count_records)
+        assert mixture.verify_mixture(declaration, output, reseal=True) == receipt
+        assert mixture.verify_mixture(declaration, output) == receipt
+    assert opened == [records, records]
+
+    original = records.read_bytes()
+    changed = original.replace(b'"document_id":"g1"', b'"document_id":"x1"', 1)
+    assert changed != original and len(changed) == len(original)
+    records.write_bytes(changed)
+    with pytest.raises(ValueError, match="digest mismatch"):
+        mixture.verify_mixture(declaration, output)
+    records.write_bytes(original)
 
     shutil.rmtree(tmp_path / "cache")
     tokens = output / "train.tokens.ids"
@@ -700,14 +731,15 @@ def test_tokenizer_accepts_retained_release_path_but_not_a_different_origin(
         lambda *args, **kwargs: {"sha256": "t" * 64},
     )
     monkeypatch.setattr(mixture, "load_tokenizer", lambda path: "tokenizer")
-    assert mixture._tokenizer(spec, release, release_id) == ("tokenizer", "t" * 64)
+    members = ReleaseMembers(release, {"release_id": release_id})
+    assert mixture._tokenizer(spec, members) == ("tokenizer", "t" * 64)
     dataset.revision = "c" * 64
     with pytest.raises(ValueError, match="not bound to this release"):
-        mixture._tokenizer(spec, release, release_id)
+        mixture._tokenizer(spec, members)
     dataset.revision = release_id
     dataset.corpus_release_path = tmp_path / ("d" * 64)
     with pytest.raises(ValueError, match="not bound to this release"):
-        mixture._tokenizer(spec, release, release_id)
+        mixture._tokenizer(spec, members)
 
 
 def test_tokenizer_verification_uses_the_operators_receipts(
@@ -734,7 +766,7 @@ def test_tokenizer_verification_uses_the_operators_receipts(
     )
     store = object()
     with verification_settings(proof_store=store, verification_mode="verified_reuse"):
-        mixture._tokenizer(spec, tmp_path, release_id)
+        mixture._tokenizer(spec, ReleaseMembers(tmp_path, {"release_id": release_id}))
     assert (seen[0]["proof_store"], seen[0]["verification_mode"]) == (
         store,
         "verified_reuse",
@@ -1083,8 +1115,7 @@ def test_real_batch_matches_single_document_output_and_warm_cache(
             result = mixture._schedule(
                 spec,
                 b"declaration",
-                release,
-                {"release_id": "a" * 64},
+                ReleaseMembers(release, {"release_id": "a" * 64}),
                 tokenizer,
                 "a" * 64,
                 3,

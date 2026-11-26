@@ -28,6 +28,7 @@ from klab.corpus.admission_inspection_cache import (
 from klab.corpus.completed_preparation import _producer
 from klab.corpus.completed_release import verify_retained_release
 from klab.corpus.mixture_index import MAX_ROW_BYTES, MixtureIndex, document_rank
+from klab.corpus.release import ReleaseMembers
 from klab.corpus.split_runs import (
     SplitStages,
     checkpoint_stamp,
@@ -407,12 +408,13 @@ class RetainedMixtureIndex(MixtureIndex):
             )
             if "release_path" in cohort:
                 release = Path(cohort["release_path"])
+                members = ReleaseMembers(release, cohort["manifest"])
                 paths.extend(
                     [
                         release / "manifest.json",
                         release / "release-publication.json",
-                        release / "sources.json",
-                        release / "report.json",
+                        members.member("sources.json"),
+                        members.member("report.json"),
                     ]
                 )
             if cohort.get("anchor"):
