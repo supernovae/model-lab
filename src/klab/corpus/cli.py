@@ -896,7 +896,7 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     command.set_defaults(handler=_handle)
     command = sub.add_parser(
         "audit-protected-lineage",
-        help="Cold-check protected evaluation documents against a candidate release",
+        help="Verify protected evaluation documents against a candidate release",
     )
     for field in (
         "prior-release",
@@ -909,6 +909,10 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     ):
         command.add_argument(f"--{field}", required=True)
     command.add_argument("--json", action="store_true")
+    _verification_flags(
+        command,
+        scratch_help="Scratch for cold release verification and reordered family inventories",
+    )
     command.set_defaults(handler=_handle)
     command = sub.add_parser(
         "freeze-splits", help="Freeze reviewed admission-aware family assignments"

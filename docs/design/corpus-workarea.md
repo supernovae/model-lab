@@ -113,7 +113,8 @@ also use this reader. Export and bakeoff check the verified generation before
 publishing their results. Sampled tokenizer fitting resolves the members
 through its authenticated export proof and keeps their recorded input
 generations through fit and audit. Native and additive mixture preparation,
-tokenizer observation and the training validation view also resolve their
+tokenizer observation, the training validation view, publication metadata,
+declared family inventories and protected-lineage audits also resolve their
 release payloads through the shared contract. Reference publication and the
 remaining payload readers are tracked in #567.
 
