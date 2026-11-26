@@ -41,7 +41,12 @@ from klab.corpus.build_outputs import (
 )
 from klab.corpus.build_stages import StageStore, implementation_digests, run_stage
 from klab.corpus.duplicate_evidence import source_rank
-from klab.corpus.normalized_spans import capture_span_partitions
+from klab.corpus.normalized_spans import (
+    NORMALIZED_SPANS,
+    SPAN_MEMBER,
+    capture_span_partitions,
+    seal_span_projection,
+)
 from klab.corpus.prepared_shards import (
     SourceParseError,
     prepare_file,
@@ -471,11 +476,13 @@ _VIEW_CHECKPOINT_ROWS = 25_000
 _VIEW_CHECKPOINT_BYTES = 64 * 1024**2
 
 
-def native_view_members(stage_id: str) -> tuple[str, ...]:
+def native_view_members(
+    stage_id: str, *, reference_normalized_spans: bool = False
+) -> tuple[str, ...]:
     """Logical outputs whose prefixes the native view journal tracks."""
     return (
         "documents.jsonl",
-        "spans.jsonl",
+        *((SPAN_MEMBER,) if not reference_normalized_spans else ()),
         "lineage.jsonl",
         f"stages/{stage_id}.jsonl",
         *(f"lm/{split}.jsonl" for split in SPLITS),
@@ -504,6 +511,7 @@ def _emit_build(
     descriptive_census=True,
     diagnostics: Path | None = None,
     span_partitions: list[dict[str, Any]] | None = None,
+    span_projection: dict[str, Any] | None = None,
 ) -> None:
     from klab.corpus.measurement import summarize_release
 
@@ -534,9 +542,13 @@ def _emit_build(
                 return checkpoints.add(name, stream)
             return stack.enter_context(path.open("wb"))
 
-        resumable = {name: writer(name) for name in native_view_members(stage_id)}
+        resumable = {
+            name: writer(name)
+            for name in native_view_members(
+                stage_id, reference_normalized_spans=span_projection is not None
+            )
+        }
         documents = resumable["documents.jsonl"]
-        spans = resumable["spans.jsonl"]
         lineage = resumable["lineage.jsonl"]
         stage = resumable[f"stages/{stage_id}.jsonl"]
         views = {split: resumable[f"lm/{split}.jsonl"] for split in SPLITS}
@@ -598,11 +610,12 @@ def _emit_build(
             pending_bytes = pending_rows = 0
 
         # Source spans retain acquisition order; documents and views use ID order.
-        span_rows = ordered_rows.span_rows(span_cursor)
-        for span_cursor, span in stack.enter_context(closing(span_rows)):
-            spans.write(span + b"\n")
-            boundary(len(span))
-        boundary(0, finished=True)
+        if spans := resumable.get(SPAN_MEMBER):
+            span_rows = ordered_rows.span_rows(span_cursor)
+            for span_cursor, span in stack.enter_context(closing(span_rows)):
+                spans.write(span + b"\n")
+                boundary(len(span))
+            boundary(0, finished=True)
         document_rows = ordered_rows.documents(document_cursor)
         for (
             raw_doc,
@@ -775,6 +788,7 @@ def _emit_build(
         lock=lock,
         view_digests=view_digests,
         span_partitions=span_partitions,
+        span_projection=span_projection,
     )
 
 
@@ -1297,6 +1311,46 @@ def build_large(
         # previous attempt. The inventory must never include the manifest itself.
         (staging / "build.json").unlink(missing_ok=True)
         stage_declared_inputs(project, staging, admission_path, resume=True)
+        span_projection = None
+        span_receipt_generations = {}
+        if identity.get("reference_normalized_spans"):
+            if not span_partitions:
+                raise ValueError("no normalized span partitions to reference")
+            span_receipts = [path / "receipt.json" for path in prepared]
+            span_receipt_generations = {
+                path: range_file_identity(path) for path in span_receipts
+            }
+            progress.update(phase="sealing_spans")
+
+            def seal(directory, _result):
+                digest = seal_span_projection(
+                    target,
+                    span_partitions,
+                    on_read=lambda size: progress.update(input_bytes=size),
+                )
+                write_json(directory / "sha256.json", digest)
+
+            projection_store = StageStore(view_root / "span-projection")
+            projection_store.discard_incomplete("seal")
+            sealed, _ = run_stage(
+                projection_store,
+                "seal",
+                {
+                    "views": checkpoints.identity,
+                    "catalog": canonical_digest(span_partitions),
+                    "receipts": list(span_receipt_generations.values()),
+                    "implementation": implementation_digests("normalized_spans.py"),
+                },
+                seal,
+                on_reuse=lambda: progress.record("reused_span_projection"),
+            )
+            span_projection = {
+                "storage": NORMALIZED_SPANS,
+                "sha256": json.loads((sealed / "sha256.json").read_bytes()),
+                "size": sum(part["size"] for part in span_partitions),
+                "partitions": span_partitions,
+            }
+            progress.update(phase="writing_views")
         _emit_build(
             connection=connection,
             staging=staging,
@@ -1315,8 +1369,14 @@ def build_large(
             checkpoints=checkpoints,
             diagnostics=root / "diagnostics" / f"{build_id}.json",
             span_partitions=span_partitions,
+            span_projection=span_projection,
         )
         require_prepared_generation()
+        if any(
+            range_file_identity(path) != before
+            for path, before in span_receipt_generations.items()
+        ):
+            raise ValueError("normalized span receipts changed during native build")
         progress.update(phase="publishing")
         publish_staging(staging, target)
         shutil.rmtree(view_root)

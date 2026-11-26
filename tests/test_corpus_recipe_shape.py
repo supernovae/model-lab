@@ -108,9 +108,45 @@ def prepare(
     if "--reference-normalized-spans" in placement:
         from klab import safe_io
 
+        inline_build = build
         before = sha256_file(build / "spans.jsonl")
-        plan = lab.json("corpus", "plan", "--build", str(build), *placement, "--json")
         rename = safe_io.rename_noreplace
+        flag = "--reference-normalized-spans"
+        native_plan = ("corpus", "plan", project, flag, "--json")
+        build_args = ("corpus", "build", project, "--offline", flag)
+        expected = lab.json(*native_plan)["build_id"]
+
+        def stop_build(source, destination):
+            if destination.name == expected:
+                raise InterruptedError("before publishing the projected build")
+            rename(source, destination)
+
+        with monkeypatch.context() as interrupted:
+            interrupted.setattr(safe_io, "rename_noreplace", stop_build)
+            with pytest.raises(
+                InterruptedError, match="before publishing the projected build"
+            ):
+                lab.run(*build_args)
+        retry_build = lab.json(*native_plan)
+        assert retry_build["build_id"] == expected
+        assert (
+            next(row for row in retry_build["stages"] if row["id"] == "views")["action"]
+            == "resume_candidate"
+        )
+        build = Path(lab.run(*build_args))
+        assert build.name == expected
+        assert not (build / "spans.jsonl").exists()
+        journal = build.parents[1] / "progress" / f"{expected}.jsonl"
+        assert "reused_span_projection" in journal.read_text()
+        placement_without_flag = tuple(option for option in placement if option != flag)
+        plan = lab.json(
+            "corpus", "plan", "--build", str(build), *placement_without_flag, "--json"
+        )
+        span_step = next(
+            row for row in plan["shared_members"] if row["member"] == "spans.jsonl"
+        )
+        assert span_step["action"] == "verify_build_reference"
+        assert span_step["sha256"] == before
 
         def stop(source, destination):
             if source.name.startswith(".freezing-"):
@@ -122,8 +158,10 @@ def prepare(
             with pytest.raises(
                 InterruptedError, match="after span projection placement"
             ):
-                lab.run("corpus", "freeze", str(build), *placement)
-        retry = lab.json("corpus", "plan", "--build", str(build), *placement, "--json")
+                lab.run("corpus", "freeze", str(build), *placement_without_flag)
+        retry = lab.json(
+            "corpus", "plan", "--build", str(build), *placement_without_flag, "--json"
+        )
         assert retry["state"] == "staging"
         span_step = next(
             row for row in retry["shared_members"] if row["member"] == "spans.jsonl"
@@ -137,11 +175,16 @@ def prepare(
             == span_step["partitions"]
         )
         assert all(row["published_releases"] == 0 for row in staged["partitions"])
-        release = Path(lab.run("corpus", "freeze", str(build), *placement))
+        release = Path(lab.run("corpus", "freeze", str(build), *placement_without_flag))
         assert plan["release_id"] == retry["release_id"] == release.name
         manifest = json.loads((release / "manifest.json").read_bytes())
         assert manifest["files"]["spans.jsonl"]["sha256"] == before
         assert not (release / "spans.jsonl").exists()
+        converted = Path(lab.run("corpus", "freeze", str(inline_build), *placement))
+        legacy_manifest = json.loads((converted / "manifest.json").read_bytes())
+        assert (
+            legacy_manifest["files"]["spans.jsonl"] == manifest["files"]["spans.jsonl"]
+        )
     else:
         release = Path(lab.run("corpus", "freeze", str(build), *placement))
     return Prepared(lab, recipe, lock, build_before_edit, build, release)
@@ -662,14 +705,14 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     partition = next(
         row for row in retained["partitions"] if row["computation_key"] == key
     )
-    assert (partition["published_releases"], partition["staging_releases"]) == (1, 0)
-    assert partition["example_reference"] == str(release.relative_to(lab.work))
+    assert (partition["published_releases"], partition["staging_releases"]) == (2, 0)
+    assert (lab.work / partition["example_reference"]).parent == release.parent
     unfinished = release.parent / (".freezing-" + "e" * 64)
     unfinished.mkdir()
     try:
         uncertain = lab.json(*lookup)
         assert uncertain["scan_status"] == "incomplete"
-        assert uncertain["published_manifests"] == 1
+        assert uncertain["published_manifests"] == 2
         assert all(
             row["published_releases"] is None and row["staging_releases"] is None
             for row in uncertain["partitions"]

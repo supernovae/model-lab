@@ -924,7 +924,10 @@ def uses_disk_lm_builder(project: Any, transforms: list[Any]) -> bool:
 
 
 def build_identity(
-    project: Any, source_pins: dict[str, Any]
+    project: Any,
+    source_pins: dict[str, Any],
+    *,
+    reference_normalized_spans: bool = False,
 ) -> tuple[dict[str, Any], list[Any], bool]:
     """Resolve the build identity, ordered transforms and builder from its pins."""
     transforms = _ordered_transforms(project)
@@ -958,6 +961,10 @@ def build_identity(
         ),
     }
     large_lm_build = uses_disk_lm_builder(project, transforms)
+    if reference_normalized_spans:
+        if not large_lm_build or project.release.record_admission is not None:
+            raise ValueError("referenced spans require an ordinary native disk build")
+        identity["reference_normalized_spans"] = True
     if large_lm_build:
         from klab.corpus.native_dedup import DEDUP_IMPLEMENTATION_FILES
         from klab.corpus.native_index import INDEX_IMPLEMENTATION_FILES
@@ -993,12 +1000,17 @@ def build(
     reuse_completed_preparation: bool = False,
     keep_stages: int = 0,
     canary: CanarySample | None = None,
+    reference_normalized_spans: bool = False,
 ) -> Path:
     """Keep bounded metadata alive through native admission and build consumers."""
     if reuse_completed_preparation and canary is not None:
         raise ValueError(
             "--canary and --reuse-completed-preparation exclude each other"
         )
+    if reference_normalized_spans and (
+        canary is not None or reuse_completed_preparation
+    ):
+        raise ValueError("referenced spans require an ordinary native disk build")
     if reuse_completed_preparation:
         from klab.corpus.completed_preparation import build_completed
 
@@ -1017,6 +1029,7 @@ def build(
             verification_mode=verification_mode,
             keep_stages=keep_stages,
             canary=canary,
+            reference_normalized_spans=reference_normalized_spans,
         )
 
 
@@ -1029,6 +1042,7 @@ def _build_stored(
     verification_mode: VerificationMode = "cold",
     keep_stages: int = 0,
     canary: CanarySample | None = None,
+    reference_normalized_spans: bool = False,
 ) -> Path:
     """Build an immutable derived inventory from the exact acquisition lock."""
     from klab.corpus.acquisition import verify_acquisition
@@ -1072,7 +1086,9 @@ def _build_stored(
         shutil.rmtree(workspace, ignore_errors=True)
     root = workspace / "builds"
     root.mkdir(parents=True, exist_ok=True)
-    identity, transforms, large_lm_build = build_identity(project, lock["sources"])
+    identity, transforms, large_lm_build = build_identity(
+        project, lock["sources"], reference_normalized_spans=reference_normalized_spans
+    )
     stage_specs = identity["transforms"]
     if canary is not None:
         if not large_lm_build:
