@@ -1063,7 +1063,10 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         yaml.safe_dump(
             {
                 "tokenizer": {"path": str(tokenizer_json)},
-                "training": {"mixture_loader": "references"},
+                "training": {
+                    "mixture_loader": "references",
+                    "mixture_prepared_storage": "references",
+                },
                 "dataset": {
                     "source": "local_token_mixture",
                     "revision": bound["revision"],
@@ -1105,6 +1108,13 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     lab.run("inspect", str(run_config))
     prepared_dir = Path(lab.run("data", "prepare", str(run_config)))
     assert prepared_dir.is_dir()
+    assert not (prepared_dir / "train.npy").exists()
+    bundle = tmp_path / "prepared-inputs"
+    lab.run(
+        "data", "prepared-inputs", "publish", str(run_config), "--output", str(bundle)
+    )
+    assert (bundle / "assets/data/train.schedule.bin").is_file()
+    assert not (bundle / "assets/data/train.npy").exists()
 
     # A storage-only change reuses sealed encodings and reaches identical
     # packed targets and supervision through the same preparation command.
@@ -1120,6 +1130,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     )
     inline_config = yaml.safe_load(run_config.read_text())
     inline_config["training"].pop("mixture_loader")
+    inline_config["training"].pop("mixture_prepared_storage")
     inline_config["dataset"].update(
         mixture_declaration_path=str(inline_declaration),
         mixture_output_path=str(inline_output),
@@ -1128,10 +1139,13 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     inline_run = tmp_path / "inline-pretrain.yaml"
     inline_run.write_text(yaml.safe_dump(inline_config))
     inline_prepared = Path(lab.run("data", "prepare", str(inline_run)))
-    for name in ("train.npy", "train_supervision.npy"):
-        assert (prepared_dir / name).read_bytes() == (
-            inline_prepared / name
-        ).read_bytes()
+    prepared_manifest = json.loads((prepared_dir / "manifest.json").read_text())
+    assert prepared_manifest["train"]["sha256"] == sha256_file(
+        inline_prepared / "train.npy"
+    )
+    assert (prepared_dir / "train_supervision.npy").read_bytes() == (
+        inline_prepared / "train_supervision.npy"
+    ).read_bytes()
 
     shorter = yaml.safe_load(run_config.read_text())
     shorter["training"]["seq_len"] //= 2
@@ -1155,11 +1169,27 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         str(run_config),
         "--run-id",
         "mini",
+        "--stop-after-step",
+        "1",
         "--require-prepared",
         "--preflight",
         "waive:two-step CPU run in the recipe-shape test, not a pretraining run",
     )
     run = tmp_path / "runs/mini"
     assert fetched
-    assert json.loads((run / "progress.json").read_text())["step"] == 2
+    assert not (run / "data/train.npy").exists()
+    assert json.loads((run / "progress.json").read_text())["step"] == 1
     assert (run / "checkpoints/latest.json").is_file()
+    # Run-owned metadata plus the sealed store are enough for continuation.
+    mixture.rename(tmp_path / "original-mixture")
+    lab.run(
+        "train",
+        str(run_config),
+        "--resume",
+        str(run / "checkpoints/latest.json"),
+        "--run-id",
+        "mini-resumed",
+    )
+    resumed = tmp_path / "runs/mini-resumed"
+    assert not (resumed / "data/train.npy").exists()
+    assert json.loads((resumed / "progress.json").read_text())["step"] == 2

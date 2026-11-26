@@ -19,6 +19,7 @@ def exposure_context(
     run_id: str,
     continuation: str,
     prior: dict[str, Any] | None,
+    logical_train_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Capture the denominator and already-verified input identities once."""
     inventory = {
@@ -26,7 +27,7 @@ def exposure_context(
     }
     identities = {
         "prepared_manifest_sha256": inventory["data/manifest.json"],
-        "train_tokens_sha256": inventory["data/train.npy"],
+        "train_tokens_sha256": logical_train_sha256 or inventory["data/train.npy"],
         "tokenizer_sha256": inventory["tokenizer.json"],
         "supervision_sha256": inventory["data/train_supervision.npy"]
         if dataset.supervision is not None

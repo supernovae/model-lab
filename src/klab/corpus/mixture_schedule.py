@@ -86,6 +86,7 @@ def open_verified_schedule_member(proof: VerifiedFile):
 
 @dataclass(frozen=True)
 class VerifiedSchedule:
+    cache_root: Path
     schedule: VerifiedFile
     tokens: tuple[VerifiedFile, ...]
     indexes: tuple[VerifiedFile, ...]
@@ -171,7 +172,12 @@ def _is_digest(value):
 
 
 def verify_schedule(
-    output: Path, cache_root: Path, receipt: dict, eos: int
+    output: Path,
+    cache_root: Path,
+    receipt: dict,
+    eos: int,
+    *,
+    memo: dict[object, VerifiedFile] | None = None,
 ) -> VerifiedSchedule:
     """Verify the schedule bytes and exact sealed dependencies, including unused bytes."""
     schedule = receipt["token_schedule"]
@@ -197,7 +203,7 @@ def verify_schedule(
     path = output / TRAIN_SCHEDULE
     if symlinked(path):
         raise ValueError("unsafe mixture schedule path")
-    schedule_file = verify_file(path, expected_sha256=schedule["sha256"])
+    schedule_file = verify_file(path, expected_sha256=schedule["sha256"], memo=memo)
     if schedule_file.size_bytes != schedule["bytes"]:
         raise ValueError("mixture schedule size differs from receipt")
     store = cache_root / "sealed" / schedule["encoding"] / "segments"
@@ -221,6 +227,7 @@ def verify_schedule(
             proof = verify_file(
                 directory / name,
                 expected_sha256=entry["sha256"],
+                memo=memo,
                 proof_store=proofs,
                 verification_mode=settings.verification_mode,
                 chunk_size=4 * 1024**2,
@@ -235,6 +242,7 @@ def verify_schedule(
         files = list(pool.map(check, schedule["segments"], buffersize=workers))
     tokens, indexes = zip(*files, strict=True)
     return VerifiedSchedule(
+        cache_root,
         schedule_file,
         tokens,
         indexes,

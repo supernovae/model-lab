@@ -154,7 +154,7 @@ def build(tmp: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     prepared = SimpleNamespace(
         root=tmp / "prepared",
         manifest={"manifest_sha256": "p1", "token_mixture": receipt},
-        train=np.zeros(1000, dtype=np.int32),
+        train_tokens=1000,
         validation=np.zeros(10, dtype=np.int32),
     )
     monkeypatch.setattr("klab.corpus.release.verify_release", lambda *a, **k: manifest)

@@ -20,7 +20,7 @@ from klab.corpus import mixture
 from klab.corpus.mixture_index import document_rank
 from klab.corpus.release import ReleaseMembers
 from klab.corpus.release_verify import verification_settings
-from klab.data.packing import TokenBlockDataset, _collect_token_mixture
+from klab.data.packing import TokenBlockDataset, collect_token_mixture
 from klab.training.manifest import sha256_file
 
 
@@ -449,7 +449,7 @@ def test_native_packing_supervises_exact_exported_quota(
         token_to_id=lambda value: {"<bos>": 2, "<eos>": 3, "<pad>": 0}[value]
     )
     (tmp_path / "pack").mkdir()
-    ids, mask, stats = _collect_token_mixture(
+    ids, mask, stats = collect_token_mixture(
         config, tokenizer, receipt, tmp_path / "pack"
     )
     assert ids[0] == 2 and not mask[0]
@@ -527,7 +527,7 @@ def test_yaml_mixture_consumer_and_storage_identity_are_independent_of_cwd(
         )
         assert verified == receipt
         (cwd / "pack").mkdir()
-        ids, mask, stats = _collect_token_mixture(
+        ids, mask, stats = collect_token_mixture(
             config, tokenizer, verified, cwd / "pack"
         )
         assert stats["supervised_target_positions"] == 20
@@ -594,7 +594,7 @@ def test_native_packing_rejects_malformed_targets(
     )
     (tmp_path / "pack").mkdir()
     with pytest.raises(ValueError, match="token mixture"):
-        _collect_token_mixture(config, tokenizer, receipt, tmp_path / "pack")
+        collect_token_mixture(config, tokenizer, receipt, tmp_path / "pack")
 
 
 LONG_TEXT = "abcdefghijklmnopqrst"
@@ -667,7 +667,7 @@ def test_document_start_rows_and_stratum_exposures(
         "filler_positions": 3,
         "strata": {"general": {"min_document_tokens": 9, "documents": 1, "rows": 2}},
     }
-    ids, mask, stats = _collect_token_mixture(
+    ids, mask, stats = collect_token_mixture(
         config, tokenizer, receipt, tmp_path / "pack"
     )
     assert stats["supervised_target_positions"] == 38
@@ -684,6 +684,7 @@ def test_document_start_rows_and_stratum_exposures(
             validation_max_tokens=0,
         ),
         model=SimpleNamespace(memory="none"),
+        training=SimpleNamespace(mixture_prepared_storage="contiguous"),
     )
     assert projected_data_bytes(planned) - 32 * 1024**2 >= 2 * (
         ids.nbytes + mask.nbytes
@@ -700,6 +701,7 @@ def test_document_start_rows_and_stratum_exposures(
 
     from klab.corpus.mixture_schedule import verify_schedule
     from klab.data import mixture_batches
+    from klab.probes import contamination
 
     reference_declaration = tmp_path / "reference.yaml"
     reference_declaration.write_text(
@@ -719,6 +721,10 @@ def test_document_start_rows_and_stratum_exposures(
         bos=2,
         pad=0,
     ) as source:
+        # The exact scan must also catch a window that crosses a slice boundary.
+        monkeypatch.setattr(contamination, "_CHUNK", 8)
+        planted = tuple(int(token) for token in ids[14:27])
+        assert contamination.find_windows(source, {planted}) == {planted}
         reference_blocks = TokenBlockDataset(source, 8, supervision=mask)
         assert reference_blocks.exposure_supply() == blocks.exposure_supply()
         for index in reversed(range(len(blocks))):
@@ -739,7 +745,7 @@ def test_document_start_refuses_mismatched_rows(
     receipt = mixture.materialize_mixture(declaration, output)
     if damage == "seq_len":
         with pytest.raises(ValueError, match="rows hold 8 targets"):
-            _collect_token_mixture(config, tokenizer, receipt, tmp_path / "pack")
+            collect_token_mixture(config, tokenizer, receipt, tmp_path / "pack")
         return
     receipt["row_layout"]["strata"]["general"]["rows"] = 3
     (output / "receipt.json").write_bytes(canonical_json(receipt) + b"\n")

@@ -40,6 +40,7 @@ from klab.data.packing import (
     PairedBlockDataset,
     PreparedData,
     TokenBlockDataset,
+    canonical_tokenizer_sha256,
     epoch_order,
     load_prepared_data,
     prepare_data,
@@ -982,6 +983,8 @@ def _train_impl(
                         artifact_source,
                         staged_proofs,
                         byte_enabled=config.model.memory == "byte",
+                        proof_store=proof_store,
+                        verification_mode=verification_mode,
                     )
                 else:
                     data = _load_run_data(
@@ -1047,7 +1050,41 @@ def _train_impl(
             )
             _check_startup_cancel(cancel_path)
         train_ids = data.train
-        if config.training.mixture_loader == "references":
+        if data.train is None:
+            if (
+                config.training.mixture_prepared_storage != "references"
+                or data.manifest["cache_identity"]["packing"].get("mixture_row_tokens")
+                != config.training.seq_len
+            ):
+                raise ValueError(
+                    "reference-only preparation differs from the training config"
+                )
+            with pilot_phase("reference_loader_open"):
+                reference_tokenizer = load_tokenizer(
+                    artifact_source / "tokenizer.json"
+                    if artifact_source
+                    else config.tokenizer.path
+                )
+                reference = data.manifest["train_reference"]
+                specials = [
+                    reference["bos"],
+                    data.manifest["token_mixture"]["token_schedule"]["eos"],
+                    reference["pad"],
+                ]
+                if (
+                    specials
+                    != [
+                        reference_tokenizer.token_to_id(token)
+                        for token in ("<bos>", "<eos>", "<pad>")
+                    ]
+                    or canonical_tokenizer_sha256(reference_tokenizer)
+                    != data.manifest["tokenizer_sha256"]
+                ):
+                    raise ValueError("reference-only prepared tokenizer mismatch")
+                train_ids = resources.enter_context(data.open_train())
+        elif config.training.mixture_prepared_storage == "references":
+            raise ValueError("training config requires reference-only prepared data")
+        elif config.training.mixture_loader == "references":
             from klab.data.mixture_batches import reference_training_tokens
 
             with pilot_phase("reference_loader_open"):
@@ -1310,6 +1347,9 @@ def _train_impl(
             run_id=run_id,
             continuation=continuation,
             prior=prior_exposure,
+            logical_train_sha256=data.manifest["train"]["sha256"]
+            if data.train is None
+            else None,
         )
         pilot_reports = tuple(staged["pilot_reports"]) if staged else ()
         stage_digest = str(staged["sha256"]) if staged else None

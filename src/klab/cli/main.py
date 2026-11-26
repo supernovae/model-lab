@@ -736,20 +736,21 @@ def _data_ngram_table(args: argparse.Namespace) -> None:
         verification="deep",
     )
     tokenizer = load_tokenizer(run / "tokenizer.json")
-    manifest = build_ngram_table(
-        data.train,
-        args.output,
-        order=args.order,
-        table_size=args.table_size,
-        vocab_size=tokenizer.get_vocab_size(),
-        eos_id=tokenizer.token_to_id("<eos>"),
-        source={
-            "run_id": args.run_id,
-            "split": "train",
-            "prepared_manifest_sha256": data.manifest["manifest_sha256"],
-            "tokenizer_sha256": sha256_file(run / "tokenizer.json"),
-        },
-    )
+    with data.open_train() as train:
+        manifest = build_ngram_table(
+            train,
+            args.output,
+            order=args.order,
+            table_size=args.table_size,
+            vocab_size=tokenizer.get_vocab_size(),
+            eos_id=tokenizer.token_to_id("<eos>"),
+            source={
+                "run_id": args.run_id,
+                "split": "train",
+                "prepared_manifest_sha256": data.manifest["manifest_sha256"],
+                "tokenizer_sha256": sha256_file(run / "tokenizer.json"),
+            },
+        )
     print(json.dumps(manifest, sort_keys=True))
 
 
@@ -1011,9 +1012,8 @@ def _train(args: argparse.Namespace) -> None:
             }
         )
     # The corpus gate reuses the release's signed receipt instead of re-hashing it.
-    with verification_settings(
-        echo=sys.stderr, **verification_options(resolve_work_dir(args.work_dir))
-    ):
+    options = verification_options(resolve_work_dir(args.work_dir))
+    with verification_settings(echo=sys.stderr, **options):
         run_id = train(
             config,
             spot_policy=load_spot_policy(args.spot_policy)
@@ -1038,6 +1038,11 @@ def _train(args: argparse.Namespace) -> None:
             tokenizer_batch_source_bytes=args.tokenizer_batch_source_bytes,
             require_prepared=args.require_prepared,
             preflight=args.preflight,
+            **(
+                options
+                if config.training.mixture_prepared_storage == "references"
+                else {}
+            ),
         )
     print(run_id)
     progress = config.logging.root_dir / run_id / "progress.json"

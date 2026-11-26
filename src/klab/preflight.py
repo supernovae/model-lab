@@ -503,7 +503,7 @@ def check_prepared(ev: Evidence) -> Check:
     evidence = {
         "root": str(data.root),
         "manifest_sha256": manifest["manifest_sha256"],
-        "train_tokens": len(data.train),
+        "train_tokens": data.train_tokens,
         "validation_tokens": len(data.validation),
     }
     if manifest.get("token_mixture") != ev.receipt:

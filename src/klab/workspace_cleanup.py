@@ -24,6 +24,8 @@ _CACHE_MEMBERS = frozenset(
         _MARKER,
         "manifest.json",
         "train.npy",
+        "train.records.jsonl",
+        "train.schedule.bin",
         "validation.npy",
         "train_supervision.npy",
         "validation_supervision.npy",

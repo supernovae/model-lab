@@ -508,6 +508,10 @@ def prepare_dispatch_bundle(
     verification_mode: Literal["cold", "verified_reuse"] = "cold",
 ) -> Any:
     """Freeze offline inputs and verified parent state without probing a device."""
+    if config.training.mixture_prepared_storage == "references":
+        raise ValueError(
+            "offline dispatch requires contiguous prepared storage; this reference-only bundle uses the host's sealed segments"
+        )
     if sum(path is not None for path in (promote, resume, extend_budget)) > 1:
         raise ValueError(
             "promotion, full resume and budget extension are mutually exclusive"
@@ -751,6 +755,8 @@ def verify_dispatch_bundle(root: Path) -> Any:
     manifest = _read_bundle_manifest(root / "bundle.json")
     _models().validate_required_versions(manifest.required_versions)
     config = RunConfig.model_validate(manifest.config)
+    if config.training.mixture_prepared_storage == "references":
+        raise ValueError("offline dispatch requires contiguous prepared storage")
     if manifest.config_sha256 != config_sha256(config.model_dump(mode="json")):
         raise ValueError("dispatch bundle config hash mismatch")
     if manifest.source_identity_sha256 != source_identity()[

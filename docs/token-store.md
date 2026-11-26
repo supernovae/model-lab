@@ -248,13 +248,32 @@ the prepared supervision mask. A sparse position index supports shuffled
 batches, quota truncation, EOS and `document_start` filler. The loader keeps
 at most 16 segment files open and caches at most 256 pages of range metadata.
 
-The run still keeps its contiguous prepared arrays for checkpoint inventory,
-validation and evidence readers. The direct loader needs the original
-declaration, schedule, records and sealed store on the execution host,
-including when resuming from a checkpoint. The default
-`training.mixture_loader: contiguous` reads the prepared arrays. Direct
-loading with a reference-only prepared bundle is tracked in
-[#569](https://github.com/supernovae/model-lab/issues/569).
+By default, preparation retains the contiguous arrays.
+`training.mixture_prepared_storage: references` with the direct loader omits
+`train.npy` from the prepared cache, local stage inputs and run data. The
+bundle owns the schedule, records, supervision mask and validation arrays.
+Preparation checks the selected IDs and records the digest the packed
+`train.npy` would have had. Evidence readers can open the same logical
+training stream through the bundle.
+
+Reference-only runs keep the sealed segment store on the execution host.
+Local continuation uses the run-owned schedule and records, so it can
+resume after the original mixture output moves. Offline worker dispatch
+uses contiguous prepared storage. Set both training options to
+`contiguous` for an independent portable bundle.
+
+On the same verified reference schedules, the packing benchmark compared
+contiguous and reference-only output on ext4 over NVMe. Times are medians of
+three paired trials at the first two sizes and one pair at 65,536 documents.
+Training files include the mask and either `train.npy` or the schedule and
+records. Validation arrays, verification and the shared store are outside this
+measurement. The logical token digest and supervision mask matched each time.
+
+| Documents | Contiguous packing | Reference-only packing | Training files |
+| --- | ---: | ---: | ---: |
+| 2,048 | 0.034 s | 0.021 s | 10.49 → 2.37 MB |
+| 32,768 | 0.415 s | 0.216 s | 167.77 → 37.92 MB |
+| 65,536 | 0.852 s | 0.429 s | 335.54 → 75.85 MB |
 
 The retained-mixture benchmark accepts `--loader-blocks 8192` and
 `--loader-row-tokens 1024` with the reference output. It runs the same
