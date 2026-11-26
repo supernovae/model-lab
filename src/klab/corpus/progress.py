@@ -15,7 +15,10 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
+
+from klab.safe_io import symlinked
+from klab.verification_proofs import writable_by_others
 
 
 def memory_bytes() -> tuple[int, int, int | None]:
@@ -70,6 +73,35 @@ def _scratch_bytes(directory: Path) -> tuple[int, int, bool]:
     return logical, allocated, complete
 
 
+def recent_progress(path: Path) -> Iterator[dict[str, Any]]:
+    """Yield complete journal rows, newest first, from the last 64 KiB."""
+    if symlinked(path):
+        return
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or writable_by_others(info)
+            ):
+                return
+            end = info.st_size
+            offset = max(0, end - 64 * 1024)
+            stream.seek(offset)
+            rows = stream.read(end - offset).split(b"\n")
+    except OSError:
+        return
+    for raw in reversed(rows[bool(offset) : -1]):
+        try:
+            row = json.loads(raw)
+        except UnicodeError, ValueError:
+            continue
+        if isinstance(row, dict):
+            yield row
+
+
 class BuildProgress:
     """Append a bounded number of fsynced progress samples across interruptions."""
 
@@ -97,6 +129,7 @@ class BuildProgress:
         self.verification_mode = verification_mode
         self._scratch_directory: Path | None = None
         self._scratch: dict[str, int] | None = None
+        self._stage_outputs: dict[str, dict[str, str | int]] = {}
         self.started = time.monotonic()
         self.phase_started = self.started
         self.phase_documents = 0
@@ -158,6 +191,13 @@ class BuildProgress:
         self.phase_bytes = self.input_bytes
         self.phase_reused_bytes = self.input_bytes_reused
         self.record("phase")
+
+    def observe_stage_output(self, stage: str, key: str, payload_bytes: int) -> None:
+        """Carry a sealed stage's logical output footprint in later samples."""
+        self._stage_outputs[stage] = {
+            "computation_key": key,
+            "payload_bytes": payload_bytes,
+        }
 
     def update(
         self,
@@ -226,6 +266,8 @@ class BuildProgress:
         }
         if self.verification_mode is not None:
             row["verification_mode"] = self.verification_mode
+        if self._stage_outputs:
+            row["stage_outputs"] = self._stage_outputs
         if self._scratch is not None:
             logical, allocated = self._sample_scratch()
             row["scratch"] = {

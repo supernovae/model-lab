@@ -131,6 +131,32 @@ def _print_freeze_plan(plan: dict) -> None:
         print("Peak verification scratch is unestimated.")
 
 
+def _print_build_storage(storage: dict) -> None:
+    for role, filesystem in storage["filesystems"].items():
+        print(f"  {role} storage has {filesystem['available_bytes']:,} available bytes")
+    for name, size in (storage["normalized_candidate_payload_bytes"] or {}).items():
+        print(f"  {name} in published normalized candidates has {size:,} bytes")
+    spans = storage["spans"]
+    logical = spans["logical_bytes"]
+    output = spans["flat_output_bytes"]
+    append = spans["append_candidate_bytes"]
+    if logical is not None:
+        print(f"  Logical span stream {logical:,} bytes")
+    print(
+        "  Flat span output is unknown"
+        if output is None
+        else f"  Flat span output {output:,} bytes"
+    )
+    if append is not None:
+        print(f"  Candidate flat span bytes to append {append:,}")
+    if observed := storage["prior_stage_observation"]:
+        status = "completed" if observed["completed"] else "incomplete"
+        for stage, output in observed["stage_outputs"].items():
+            print(
+                f"  Prior {stage} payload {output['payload_bytes']:,} bytes ({status} build)"
+            )
+
+
 def _handle(args: argparse.Namespace) -> None:
     """Run one command with the operator's verification placement and receipts."""
     from klab.corpus.release_verify import verification_settings
@@ -273,6 +299,10 @@ def _run(args: argparse.Namespace) -> None:
             args.inspect_verification or args.cold or args.scratch_dir is not None
         )
         if args.build is not None:
+            if args.inspect_storage:
+                raise ValueError(
+                    "--inspect-storage requires a project for build planning"
+                )
             from klab.corpus.freeze_planning import plan_freeze
 
             plan = plan_freeze(
@@ -298,6 +328,7 @@ def _run(args: argparse.Namespace) -> None:
             load_project(args.project, verify_inputs=False),
             root,
             reference_normalized_spans=args.reference_normalized_spans,
+            inspect_storage=args.inspect_storage,
         )
         if args.json:
             print(json.dumps(plan, sort_keys=True))
@@ -330,6 +361,8 @@ def _run(args: argparse.Namespace) -> None:
                         f"{stage['stage_replay_candidate_bytes']:,} stage replay bytes, "
                         f"{stage['uncommitted_tail_bytes']:,} uncommitted bytes"
                     )
+            if storage := plan.get("storage_inspection"):
+                _print_build_storage(storage)
             for source in plan["sources"]:
                 print(source["source_id"])
                 for partition in source["partitions"]:
@@ -914,6 +947,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "--inspect-verification",
         action="store_true",
         help="Inspect signed verification receipts and available scratch for freeze",
+    )
+    command.add_argument(
+        "--inspect-storage",
+        action="store_true",
+        help="Inspect known build output bytes, prior stage footprints and storage capacity",
     )
     command.add_argument(
         "--scratch-dir",

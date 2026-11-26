@@ -479,7 +479,7 @@ def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(
     staging = next(lab.work.glob("corpora/*/.views-*/build"))
     assert (staging / "documents.jsonl").read_bytes().endswith(b"uncommitted tail")
 
-    plan_args = ("corpus", "plan", project, "--json")
+    plan_args = ("corpus", "plan", project, "--inspect-storage", "--json")
     open_file = Path.open
     receipts = sorted(staging.parent.glob("commit-*.json"))
     opened_receipts = []
@@ -503,6 +503,10 @@ def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(
     assert view["checkpoint_records"] == len(receipts)
     assert view["uncommitted_tail_bytes"] == len(b"uncommitted tail")
     outputs = json.loads(receipts[-1].read_bytes())["body"]["outputs"]
+    spans = plan["storage_inspection"]["spans"]
+    assert spans["flat_output_bytes"] == manifest["files"]["spans.jsonl"]["size"]
+    assert outputs["spans.jsonl"]["end"] == spans["flat_output_bytes"]
+    assert spans["append_candidate_bytes"] == 0
     assert view["verification_candidate_bytes"] == sum(
         (staging / name).stat().st_size for name in outputs
     ) - len(b"uncommitted tail")
@@ -516,11 +520,16 @@ def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(
     parked = first.with_suffix(".parked")
     first.rename(parked)
     try:
+        incomplete_plan = lab.json(*plan_args)
         incomplete = next(
-            stage for stage in lab.json(*plan_args)["stages"] if stage["id"] == "views"
+            stage for stage in incomplete_plan["stages"] if stage["id"] == "views"
         )
         assert incomplete["action"] == "resolve"
         assert incomplete["verification_candidate_bytes"] is None
+        assert (
+            incomplete_plan["storage_inspection"]["spans"]["append_candidate_bytes"]
+            is None
+        )
     finally:
         parked.rename(first)
 

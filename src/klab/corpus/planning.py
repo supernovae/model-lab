@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -22,8 +23,10 @@ from klab.corpus.large_build import (
     native_view_checkpoints,
     native_view_members,
 )
+from klab.corpus.normalized_spans import SPAN_MEMBER
 from klab.corpus.pipeline import build_identity, uses_disk_lm_builder
 from klab.corpus.prepared_shards import normalized_store_root, prepared_file_directory
+from klab.corpus.progress import recent_progress
 from klab.corpus.project import (
     Project,
     SourceDeclaration,
@@ -33,12 +36,14 @@ from klab.corpus.project import (
 from klab.corpus.release import consumed_release
 from klab.corpus.shards import range_file_identity
 from klab.safe_io import symlinked
+from klab.workspace_preflight import check_storage
 
 _ELIGIBLE = {"eligible", "eligible_with_obligations"}
 _RIGHTS_METADATA_BYTES = 4 * 1024**2
 _STAGE_RECEIPT_BYTES = 4 * 1024**2
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _VIEW_COMMIT = re.compile(r"commit-([0-9]{12})\.json")
+_OBSERVED_STAGES = {"index", "deduplicate", "views"}
 
 
 def _acquisition_inventory(
@@ -356,12 +361,115 @@ def _view_candidate(
         "committed_document_rows": rows,
         "verification_candidate_bytes": prefix,
         "stage_replay_candidate_bytes": outputs[f"stages/{stage_id}.jsonl"]["end"],
+        "span_prefix_bytes": outputs.get(SPAN_MEMBER, {}).get("end", 0),
         "uncommitted_tail_bytes": tail,
     }
 
 
+def _stage_observation(workspace: Path, build_id: str) -> dict[str, Any] | None:
+    journal = workspace / "progress" / f"{build_id}.jsonl"
+    for row in recent_progress(journal):
+        outputs = row.get("stage_outputs")
+        if (
+            row.get("build_id") != build_id
+            or not isinstance(row.get("attempt"), str)
+            or not isinstance(outputs, dict)
+            or not outputs
+            or not outputs.keys() <= _OBSERVED_STAGES
+        ):
+            continue
+        if all(
+            isinstance(value, dict)
+            and isinstance(value.get("computation_key"), str)
+            and _DIGEST.fullmatch(value["computation_key"])
+            and type(value.get("payload_bytes")) is int
+            and value["payload_bytes"] >= 0
+            for value in outputs.values()
+        ):
+            return {
+                "attempt": row["attempt"],
+                "completed": row.get("event") == "complete",
+                "stage_outputs": outputs,
+            }
+    return None
+
+
+def _build_storage(
+    workspace: Path,
+    normalized_root: Path,
+    build_id: str,
+    *,
+    views: dict[str, Any],
+    prepared: list[Path],
+    all_prepared: bool,
+    existing_manifest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    filesystems = {}
+    for role, path in (
+        ("build", workspace / "builds"),
+        ("normalized", normalized_root),
+    ):
+        storage = check_storage(
+            path,
+            projected_bytes=0,
+            projected_inodes=0,
+            reserve_bytes=0,
+            reserve_inodes=0,
+        )
+        filesystems[role] = {
+            "path": storage.path,
+            "filesystem_path": storage.filesystem_path,
+            "device": Path(storage.filesystem_path).stat().st_dev,
+            "available_bytes": storage.available_bytes,
+            "available_inodes": storage.available_inodes,
+        }
+
+    candidates = None
+    logical_spans = None
+    if existing_manifest is not None:
+        logical_spans = existing_manifest["files"][SPAN_MEMBER]["size"]
+    else:
+        candidates = dict.fromkeys(("docs.jsonl", SPAN_MEMBER, "rejected.jsonl"), 0)
+        for directory in prepared:
+            for name in candidates:
+                path = directory / name
+                info = path.lstat()
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError(f"unsafe normalized payload: {path}")
+                candidates[name] += info.st_size
+        if all_prepared:
+            logical_spans = candidates[SPAN_MEMBER]
+
+    referenced = bool(views.get("reference_normalized_spans"))
+    file_bytes = 0 if referenced else logical_spans
+    append_bytes = None
+    if referenced or existing_manifest is not None:
+        append_bytes = 0
+    elif file_bytes is not None and views["action"] in {"run", "resume_candidate"}:
+        remaining = file_bytes - views.get("span_prefix_bytes", 0)
+        if remaining >= 0:
+            append_bytes = remaining
+    return {
+        "filesystems": filesystems,
+        "normalized_candidate_payload_bytes": candidates,
+        "all_normalized_candidates_present": all_prepared
+        if candidates is not None
+        else None,
+        "spans": {
+            "logical_bytes": logical_spans,
+            "flat_output_bytes": file_bytes,
+            "append_candidate_bytes": append_bytes,
+        },
+        "prior_stage_observation": _stage_observation(workspace, build_id),
+    }
+
+
 def plan_build(
-    project: Project, work_root: Path, *, reference_normalized_spans: bool = False
+    project: Project,
+    work_root: Path,
+    *,
+    reference_normalized_spans: bool = False,
+    inspect_storage: bool = False,
 ) -> dict[str, Any]:
     """Plan a full native build using acquisition inventory and retained metadata."""
     lock = work_root / "corpora" / project.config.id / "acquisition.json"
@@ -456,6 +564,21 @@ def plan_build(
                 "release_id": release_id,
                 "normalization_source_bytes": 0,
                 "verification_candidate_source_bytes": 0,
+                **(
+                    {
+                        "storage_inspection": _build_storage(
+                            lock.parent,
+                            normalized_root,
+                            build_id,
+                            views=stage_by_id["views"],
+                            prepared=[],
+                            all_prepared=False,
+                            existing_manifest=manifest,
+                        )
+                    }
+                    if inspect_storage
+                    else {}
+                ),
             }
 
         prepared: list[Path] = []
@@ -513,6 +636,15 @@ def plan_build(
                             reference_normalized_spans=reference_normalized_spans,
                         )
                     )
+        if inspect_storage:
+            plan["storage_inspection"] = _build_storage(
+                lock.parent,
+                normalized_root,
+                build_id,
+                views=stage_by_id["views"],
+                prepared=prepared,
+                all_prepared=not pending,
+            )
     except (KeyError, OSError, TypeError, ValueError) as error:
         return {**plan, "status": "blocked", "reason": str(error)}
     return {

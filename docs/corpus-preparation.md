@@ -908,8 +908,41 @@ The plan checks the receipt filenames for gaps and reads only the latest
 receipt and file metadata. Build authenticates the entire chain and can
 resume from an earlier verified record if a checkpoint is damaged. A gap
 or a short output leaves the byte forecast unresolved. Output byte counts
-cover the checkpointed files. Fresh-stage writes and peak scratch remain
-unestimated.
+cover the checkpointed files.
+
+Inspect native build storage with:
+
+```sh
+klab --work-dir WORK corpus plan PROJECT --inspect-storage --json
+```
+
+The inspection reports current filesystem capacity for the build and
+normalized stores, with device IDs for paths on the same filesystem. It
+totals published normalized candidate files from metadata. An incomplete
+candidate inventory leaves the total logical span size unknown. When all
+normalized inputs are present, the plan reports the expected flat span
+output. A known view frontier also gives the candidate bytes still to append.
+A build that references normalized spans has zero flat span bytes to write.
+Build still authenticates its inputs and journal before reusing the prefix.
+
+The last 64 KiB of the same build's progress journal can supply observed
+logical output bytes for the sealed index, deduplication and checkpointed
+view files, with their computation keys and the attempt's completion status.
+Those footprints include reused outputs and exclude temporary scratch and
+physical write amplification. Other fresh-stage writes and peak build
+scratch remain unestimated.
+
+Three synthetic Linux tmpfs runs per size measured the added inspection
+step over sparse normalized files and a populated progress journal. The
+4,096-partition case accounted for 17 GiB of candidate files and 512 MiB of
+candidate flat span appends. These timings cover storage inspection apart
+from the existing build plan.
+
+| Normalized partitions | Added inspection median | Process reads |
+| ---: | ---: | ---: |
+| 4 | 0.14 ms | 1.39 KB |
+| 128 | 1.16 ms | 1.39 KB |
+| 4,096 | 38.3 ms | 1.40 KB |
 
 Planning writes no artifacts or verification receipts. It streams the
 acquisition lock and snapshot manifests, discards row-level inventories and
