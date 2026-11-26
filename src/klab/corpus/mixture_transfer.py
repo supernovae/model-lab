@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+from contextlib import contextmanager
 from itertools import groupby
 from operator import itemgetter
 from pathlib import Path
@@ -17,8 +18,11 @@ _SORT_BUFFER_BYTES = 2 * 1024**2
 _RANGE_LINE_BOUND = 55
 
 
-def plan_transfer(schedule: VerifiedSchedule) -> dict[str, object]:
-    """Union physical token ranges without rereading their payload bytes."""
+@contextmanager
+def selected_intervals(
+    schedule: VerifiedSchedule, *, additional_scratch_bytes: int = 0
+):
+    """Stream the sorted union of selected half-open physical token ranges."""
     records = schedule.schedule.size_bytes // SCHEDULE_RANGE.size
     interval_bytes = records * _RANGE_LINE_BOUND
     runs = max(1, (interval_bytes + _SORT_BUFFER_BYTES - 1) // _SORT_BUFFER_BYTES)
@@ -32,14 +36,12 @@ def plan_transfer(schedule: VerifiedSchedule) -> dict[str, object]:
     require_storage(
         [
             check_storage(
-                scratch, projected_bytes=scratch_bytes, projected_inodes=files + 2
+                scratch,
+                projected_bytes=scratch_bytes + additional_scratch_bytes,
+                projected_inodes=files + 2,
             )
         ]
     )
-    width = schedule.token_dtype.itemsize
-    without_content = len(schedule.tokens)
-    covered_tokens = coalesced_ranges = 0
-    fully_used = sum(member.size_bytes == 0 for member in schedule.tokens)
     with tempfile.TemporaryDirectory(prefix="mixture-transfer-", dir=scratch) as temp:
         ordered = external_sort(
             (
@@ -50,15 +52,42 @@ def plan_transfer(schedule: VerifiedSchedule) -> dict[str, object]:
             Path(temp) / "ranges",
             buffer_bytes=_SORT_BUFFER_BYTES,
         )
-        for segment, intervals in groupby(rows(ordered["path"]), key=itemgetter(0)):
+        yield (
+            _coalesce(rows(ordered["path"])),
+            {
+                "planned_byte_bound": scratch_bytes,
+                **ordered["sort_work"],
+            },
+        )
+
+
+def _coalesce(records):
+    segment, start, stop = None, 0, 0
+    for ordinal, left, right in records:
+        if ordinal == segment and left <= stop:
+            stop = max(stop, right)
+            continue
+        if segment is not None:
+            yield segment, start, stop
+        segment, start, stop = ordinal, left, right
+    if segment is not None:
+        yield segment, start, stop
+
+
+def plan_transfer(schedule: VerifiedSchedule) -> dict[str, object]:
+    """Union physical token ranges without rereading their payload bytes."""
+    records = schedule.schedule.size_bytes // SCHEDULE_RANGE.size
+    width = schedule.token_dtype.itemsize
+    without_content = len(schedule.tokens)
+    covered_tokens = coalesced_ranges = 0
+    fully_used = sum(member.size_bytes == 0 for member in schedule.tokens)
+    with selected_intervals(schedule) as (ordered, scratch):
+        for segment, intervals in groupby(ordered, key=itemgetter(0)):
             without_content -= 1
-            end = -1
             covered = 0
             for _, start, stop in intervals:
-                if start > end:
-                    coalesced_ranges += 1
-                covered += max(0, stop - max(start, end))
-                end = max(stop, end)
+                covered += stop - start
+                coalesced_ranges += 1
             covered_tokens += covered
             fully_used += covered * width == schedule.tokens[segment].size_bytes
 
@@ -84,10 +113,11 @@ def plan_transfer(schedule: VerifiedSchedule) -> dict[str, object]:
         },
         "selected_ranges": {
             "unique_token_bytes": selected_bytes,
+            "rebased_schedule_bytes": schedule.schedule.size_bytes,
             "repeated_token_bytes": (schedule.target_count - records - covered_tokens)
             * width,
             "coalesced_ranges": coalesced_ranges,
             "segments_without_selected_content": without_content,
         },
-        "scratch": {"planned_byte_bound": scratch_bytes, **ordered["sort_work"]},
+        "scratch": scratch,
     }

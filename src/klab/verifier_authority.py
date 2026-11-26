@@ -557,6 +557,18 @@ _SCOPES: dict[str, dict[str, tuple[str, ...]]] = {
 # The array and inventory files inside those bundles are verified by the same code.
 _SCOPES["prepared_array"] = _SCOPES["prepared_data"]
 _SCOPES["stage_inventory_file"] = _SCOPES["stage_bundle"]
+_SCOPES["selected_mixture"] = {
+    "data": _PREPARED_DATA,
+    "leaves": (
+        *SHARED,
+        "corpus.mixture_projection",
+        "corpus.mixture_transfer",
+        "corpus.mixture_schedule",
+        "corpus.split_runs",
+        "data.mixture_batches",
+        "data.row_layout",
+    ),
+}
 
 
 def scoped_modules(

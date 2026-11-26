@@ -715,6 +715,7 @@ def test_document_start_rows_and_stratum_exposures(
     assert inspected == reference_receipt
     assert transfer["selected_ranges"] == {
         "unique_token_bytes": 4 * 27,
+        "rebased_schedule_bytes": (references / "train.schedule.bin").stat().st_size,
         "repeated_token_bytes": 4 * 6,
         "coalesced_ranges": 2,
         "segments_without_selected_content": 0,
@@ -723,6 +724,17 @@ def test_document_start_rows_and_stratum_exposures(
     schedule = verify_schedule(
         references, tmp_path / ".source-tokens", reference_receipt, 3
     )
+    from klab.corpus.mixture_projection import load_projection, project_dependencies
+
+    projection = tmp_path / "portable"
+    files = project_dependencies(schedule, projection, "a" * 64)
+    projected = load_projection(
+        projection,
+        {"manifest_sha256": "a" * 64, "token_mixture": reference_receipt},
+        memo={(proof.path, proof.fingerprint): proof for proof in files.values()},
+    )
+    assert b"".join(projected.blocks(32)) == b"".join(schedule.blocks(32))
+    assert list(projected.ranges()) != list(schedule.ranges())
     monkeypatch.setattr(mixture_batches, "_PAGE_RECORDS", 2)
     with mixture_batches.ReferencedTokenArray(
         schedule,

@@ -139,6 +139,84 @@ def benchmark_loaders(root, schedule, receipt, records, *, blocks, seq_len):
     }
 
 
+def benchmark_projection(root, schedule, receipt, records, *, seq_len):
+    """Measure selected-range packaging and exact replay on the same mixture."""
+    import psutil
+
+    from klab.canonical import canonical_digest
+    from klab.corpus.mixture_projection import (
+        load_projection,
+        project_dependencies,
+        verify_projection_replay,
+    )
+    from klab.data.packing import PreparedData, collect_token_mixture
+
+    configuration = SimpleNamespace(
+        dataset=SimpleNamespace(train_path=schedule.schedule.path),
+        training=SimpleNamespace(seq_len=seq_len),
+        model=SimpleNamespace(vocab_size=260),
+    )
+    reference = {"seq_len": seq_len, "bos": 2, "pad": 1}
+    specials = {"<bos>": reference["bos"], "<pad>": reference["pad"], "<eos>": 3}
+    root.mkdir()
+    logical, mask, _ = collect_token_mixture(
+        configuration,
+        SimpleNamespace(token_to_id=specials.get),
+        receipt,
+        root,
+        schedule=schedule,
+        store_train=False,
+    )
+    manifest = {
+        "train": logical.metadata(),
+        "token_mixture": receipt,
+        "train_reference": reference,
+    }
+    manifest["manifest_sha256"] = canonical_digest(manifest)
+    process = psutil.Process()
+    io_counters = getattr(process, "io_counters", None)
+    before = io_counters() if io_counters is not None else None
+    started = time.monotonic()
+    destination = root / "selected"
+    files = project_dependencies(schedule, destination, manifest["manifest_sha256"])
+    packaged = time.monotonic()
+    after = io_counters() if io_counters is not None else None
+    compact = load_projection(
+        destination,
+        manifest,
+        memo={(proof.path, proof.fingerprint): proof for proof in files.values()},
+    )
+    data = PreparedData(
+        records.parent,
+        None,
+        None,
+        mask,
+        None,
+        None,
+        None,
+        manifest,
+        SimpleNamespace(manifest_sha256=manifest["manifest_sha256"]),
+        compact,
+    )
+    verify_projection_replay(data, proof_store=None, verification_mode="cold")
+    verified = time.monotonic()
+    checked = io_counters() if io_counters is not None else None
+    return {
+        "whole_bytes": schedule.dependency_footprint()[0],
+        "projected_bytes": compact.dependency_footprint()[0],
+        "projected_schedule_bytes": compact.schedule.size_bytes,
+        "logical_sha256": manifest["train"]["sha256"],
+        "package_seconds": packaged - started,
+        "verify_seconds": verified - packaged,
+        "package_process_reads": after.read_chars - before.read_chars
+        if after is not None
+        else None,
+        "verify_process_reads": checked.read_chars - after.read_chars
+        if checked is not None
+        else None,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
@@ -154,6 +232,7 @@ def main():
     parser.add_argument("--loader-row-tokens", type=int, default=1024)
     parser.add_argument("--portable-segments", action="store_true")
     parser.add_argument("--transfer-plan", action="store_true")
+    parser.add_argument("--project-selected", action="store_true")
     args = parser.parse_args()
     if (
         not 1 <= args.workers <= 8
@@ -176,6 +255,8 @@ def main():
         parser.error("portable segment packaging requires reference token output")
     if args.transfer_plan and args.token_output != "references":
         parser.error("transfer planning requires reference token output")
+    if args.project_selected and args.token_output != "references":
+        parser.error("selected-range packaging requires reference token output")
     # Affinity also bounds the baseline's default Rayon planner. Do this before
     # importing Lab or tokenizers; no nested BLAS/Rayon pool inherits more cores.
     if hasattr(os, "sched_getaffinity"):
@@ -460,6 +541,15 @@ def main():
             if checked is not None
             else None,
         }
+    if args.project_selected:
+        with verification_settings(scratch_dir=root):
+            result["selected_packaging"] = benchmark_projection(
+                root / "projected",
+                schedule,
+                receipt,
+                staging / "train.records.jsonl",
+                seq_len=args.loader_row_tokens,
+            )
     (root / "benchmark.json").write_bytes(canonical_json(result) + b"\n")
     print(json.dumps(result, sort_keys=True))
 

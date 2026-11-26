@@ -1166,6 +1166,8 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     # A training update must actually obtain its IDs from the segment view.
     from klab.config.loading import load_config
     from klab.data.mixture_batches import ReferencedTokenArray
+    from klab.data.packing import PreparedData, load_prepared_data
+    from klab.verification_proofs import verification_options
     from klab.workers.bundles import (
         install_dispatch_bundle,
         materialize_dispatch_bundle,
@@ -1176,21 +1178,37 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
 
     config = load_config(run_config)
     worker = tmp_path / "worker"
+    worker.mkdir()
+    verification = verification_options(worker)
 
     def transport(dispatch, manifest, destination):
-        plan = install_dispatch_bundle(worker, manifest, {}, check_only=True)
+        plan = install_dispatch_bundle(
+            worker, manifest, {}, check_only=True, **verification
+        )
         missing = set(plan["missing_asset_digests"])
         attachments = {
             f"assets/{item.sha256}": dispatch / item.relative_path
             for item in manifest.files
             if item.sha256 in missing
         }
-        install_dispatch_bundle(worker, manifest, attachments, check_only=False)
-        materialize_dispatch_bundle(worker, manifest.digest(), destination)
+        install_dispatch_bundle(
+            worker, manifest, attachments, check_only=False, **verification
+        )
+        materialize_dispatch_bundle(
+            worker, manifest.digest(), destination, **verification
+        )
         return missing
 
     with pytest.raises(ValueError, match="whole sealed segments"):
         prepare_dispatch_bundle(config, tmp_path / "refused-dispatch")
+    whole = prepare_dispatch_bundle(
+        config, tmp_path / "whole-dispatch", include_referenced_token_segments=True
+    )
+    assert transfer["whole_segments"]["bytes"] == sum(
+        item.size_bytes
+        for item in whole.files
+        if item.relative_path.startswith("assets/token-segments/")
+    )
     store = tmp_path / "controller"
     lab.run(
         "experiment",
@@ -1198,7 +1216,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         str(run_config),
         "--store",
         str(store),
-        "--include-referenced-token-segments",
+        "--project-referenced-token-segments",
     )
     dispatch = next((store / ".dispatch").iterdir())
     portable = verify_dispatch_bundle(dispatch)
@@ -1208,29 +1226,45 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         if item.relative_path.startswith("assets/token-segments/")
     }
     assert segment_digests
-    assert transfer["whole_segments"]["bytes"] == sum(
-        item.size_bytes
-        for item in portable.files
-        if item.relative_path.startswith("assets/token-segments/")
+    projected = dispatch / "assets/token-segments"
+    assert transfer["selected_ranges"]["unique_token_bytes"] == sum(
+        path.stat().st_size for path in projected.glob("*.ids")
     )
-    assert transfer["selected_ranges"]["unique_token_bytes"] > 0
+    assert not (projected / "sealed").exists()
     assert not (dispatch / "assets/data/train.npy").exists()
     mixture.rename(tmp_path / "original-mixture")
     Path(prepared_manifest["train_reference"]["cache_root"]).rename(
         tmp_path / "original-token-store"
     )
     tokenizer_json.rename(tmp_path / "original-tokenizer.json")
-    payload = next((dispatch / "assets/token-segments").rglob("tokens.ids"))
-    segment = json.loads(payload.with_name("segment.json").read_bytes())
-    assert segment["encoding"]["dtype"] == "uint16-le"
-    assert payload.stat().st_size == 2 * segment["tokens"]
+    payload = next(path for path in projected.glob("*.ids") if path.stat().st_size)
+    marker = projected / "projection.json"
+    metadata = marker.read_bytes()
+    projection = json.loads(metadata)
+    assert projection["token_dtype"] == "uint16"
     original = payload.read_bytes()
     payload.write_bytes(bytes([original[0] ^ 1]) + original[1:])
     with pytest.raises(ValueError, match="digest mismatch"):
         verify_dispatch_bundle(dispatch)
+    # An internally resealed projection must still match the original logical stream.
+    projection["files"][payload.name]["sha256"] = sha256_file(payload)
+    marker.write_bytes(canonical_json(projection) + b"\n")
+    with pytest.raises(ValueError, match="changed the logical training stream"):
+        load_prepared_data(dispatch / "assets/data", byte_enabled=False)
     payload.write_bytes(original)
+    marker.write_bytes(metadata)
     offline = tmp_path / "offline"
-    assert segment_digests <= transport(dispatch, portable, offline)
+    replay = PreparedData.verify_logical_train
+    replays = []
+
+    def count_replay(data):
+        replays.append(data.root)
+        return replay(data)
+
+    with monkeypatch.context() as worker_scope:
+        worker_scope.setattr(PreparedData, "verify_logical_train", count_replay)
+        assert segment_digests <= transport(dispatch, portable, offline)
+    assert len(replays) == 1
     stage = tmp_path / "offline-stage"
     lab.run(
         "stage",
@@ -1267,7 +1301,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     run = tmp_path / "runs/mini"
     assert fetched
     assert not (run / "data/train.npy").exists()
-    assert (run / "token-segments/sealed").is_dir()
+    assert (run / "token-segments/projection.json").is_file()
     assert json.loads((run / "progress.json").read_text())["step"] == 1
     assert (run / "checkpoints/latest.json").is_file()
     # A second outbound bundle uses the run's authenticated closure. The
@@ -1277,7 +1311,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         config,
         resume_dispatch,
         resume=run / "checkpoints/latest.json",
-        include_referenced_token_segments=True,
+        project_referenced_token_segments=True,
     )
     assert not (resume_dispatch / "continuation/run_assets/token-segments").exists()
     offline_resume = tmp_path / "offline-resume"

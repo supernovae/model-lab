@@ -224,16 +224,23 @@ filesystem.
 Submission verifies and seals an engine-neutral dispatch bundle before atomically reserving experiment, attempt, and run IDs. It contains exact tokenizer/data/package bytes, configuration and source identities, supported version requirements, and selected continuation artifacts. Original input paths are not needed after successful preparation. Promotion must match the requested tokenizer/package identity before any path is rebased; full resume can prepare from verified parent-owned inputs after the originals are gone.
 
 For a [reference-only Corpus configuration](token-store.md#training-batch-loaders),
-use `--include-referenced-token-segments` on `experiment submit` and
-`experiment resume` to include the complete sealed segments named by the
-schedule. A segment can hold tokens outside the selected ranges. Use this
-option only when the worker may receive the entire segments. The worker's
-asset cache reuses segments by digest across bundles, and the run owns the
-segment files it needs for offline resume. Contiguous configurations use the
-ordinary submission command.
+`experiment submit` and `experiment resume` accept two segment policies.
+
+- `--project-referenced-token-segments` packages the union of selected token
+  ranges and a rebased schedule. The worker checks the entire packed stream
+  against the original prepared digest. A verified-reuse receipt binds that
+  check to the prepared and projection identities on the current host.
+- `--include-referenced-token-segments` packages the complete sealed segments.
+  A segment can hold tokens outside the selected ranges. Use this option
+  when the worker may receive the entire segments.
+
+The worker asset cache reuses files by digest across bundles. A portable run
+owns its segment closure and full resume carries that same closure and mode.
+For a local parent that used a shared store, choose either portable mode at
+resume. Contiguous configurations use the ordinary submission command.
 
 Use [offline transfer inspection](token-store.md#offline-transfer-inspection)
-to count the selected and unselected bytes before bundling whole segments.
+to compare the whole inventory with the selected payload and rebased schedule.
 
 The worker checks its content-addressed cache, installs only missing verified assets, revalidates its actual runtime, and runs disposable smoke/warmup pilots. Pilots are separate runs and never advance the experiment's optimizer, schedule, cursor, RNG, or target budget. Memory failure produces a proposal rather than silently reducing scientific settings.
 
