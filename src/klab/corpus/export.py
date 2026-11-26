@@ -7,6 +7,9 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,7 +24,7 @@ from klab.safe_io import rename_noreplace, write_canonical_json
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
-    from klab.corpus.release import ReleaseReader
+    from klab.corpus.release import ReleaseMembers, ReleaseReader
     from klab.verification_proofs import ProofStore, VerificationMode
 
 
@@ -417,12 +420,61 @@ def _publish_export(
     return destination
 
 
+@dataclass(frozen=True)
+class AuthenticatedExport:
+    """An export binding plus the file generation authenticated for it."""
+
+    binding: dict[str, object]
+    release_root: Path
+    sidecar: Path
+    dependencies: tuple[Path, ...]
+    generation: str
+
+    @contextmanager
+    def release_members(self) -> Iterator[ReleaseMembers]:
+        """Resolve members under the export proof without verifying the release again."""
+        from klab.corpus.release import ReleaseMembers
+        from klab.corpus.release_receipt import stat_index
+
+        export_bytes = self.sidecar.read_bytes()
+        if hashlib.sha256(export_bytes).hexdigest() != self.binding["export_sha256"]:
+            raise ValueError("corpus export changed before reading its release")
+        export = json.loads(export_bytes)
+        manifest_bytes = (self.release_root / "manifest.json").read_bytes()
+        if (
+            hashlib.sha256(manifest_bytes).hexdigest()
+            != export["release_manifest_sha256"]
+        ):
+            raise ValueError("corpus export release manifest has changed")
+        manifest = json.loads(manifest_bytes)
+        if manifest["release_id"] != self.binding["release_id"]:
+            raise ValueError("corpus export release identity mismatch")
+        yield ReleaseMembers(self.release_root, manifest)
+        if (
+            stat_index([self.sidecar, *self.dependencies], strict=False)[0]
+            != self.generation
+        ):
+            raise ValueError("corpus export or release changed during member reads")
+
+
 def verify_release_export(
     dataset: DatasetConfig,
     *,
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode | None = None,
 ) -> dict[str, object]:
+    """Verify the frozen export and return its portable training binding."""
+    return authenticate_release_export(
+        dataset, proof_store=proof_store, verification_mode=verification_mode
+    ).binding
+
+
+def authenticate_release_export(
+    dataset: DatasetConfig,
+    *,
+    proof_store: ProofStore | None = None,
+    verification_mode: VerificationMode | None = None,
+) -> AuthenticatedExport:
     """Verify an export and its release, by signed receipt when one still holds.
 
     Without a `verification_mode` the receipt store chosen by
@@ -441,21 +493,21 @@ def verify_release_export(
             ambient.verification_mode,
         )
     export_dir, release_dir = dataset.corpus_export_path, dataset.corpus_release_path
+    sidecar = export_dir / "export.json"
 
     def reused() -> dict[str, object]:
         # A receipt vouches for the export directory, not for a caller's dataset.
         if load_config(export_dir / "run.yaml").dataset != dataset:
             raise ValueError("corpus export generated dataset mismatch")
-        return _export_binding(
-            json.loads((export_dir / "export.json").read_text(encoding="utf-8"))
-        )
+        return _export_binding(json.loads(sidecar.read_bytes()))
 
     with _verification_operation():
-        binding, _ = receipt_first(
+        dependencies = _export_receipt_dependencies(export_dir, release_dir)
+        binding, generation = receipt_first(
             "export",
-            export_dir / "export.json",
+            sidecar,
             export_dir.name,
-            _export_receipt_dependencies(export_dir, release_dir),
+            dependencies,
             proof_store,
             verification_mode,
             lambda: _verify_release_export_cold(
@@ -463,7 +515,9 @@ def verify_release_export(
             ),
             reused,
         )
-        return binding
+        return AuthenticatedExport(
+            binding, release_dir.resolve(), sidecar, tuple(dependencies), generation
+        )
 
 
 def _export_binding(export: dict[str, object]) -> dict[str, object]:

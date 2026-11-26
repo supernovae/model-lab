@@ -486,30 +486,47 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     tokenizer_config = tmp_path / "tokenizer.yaml"
     tokenizer_config.write_text(yaml.safe_dump(tokenizer))
     scratch = ("--scratch-dir", str(tmp_path / "tokenizer-scratch"))
+    from klab.corpus import export as export_module
+
+    def unexpected_verification(*args, **kwargs):
+        pytest.fail("warm sampled fit replayed release or export verification")
+
     with monkeypatch.context() as fault:
         fault.setenv("KLAB_FAULT", "tokenizer sampling: candidates:1")
+        fault.setattr(release_module, "_verify_release_cold", unexpected_verification)
+        fault.setattr(
+            export_module, "_verify_release_export_cold", unexpected_verification
+        )
         with pytest.raises(RuntimeError, match="KLAB_FAULT"):
             lab.run("tokenizer", "train", str(tokenizer_config), *scratch)
     capsys.readouterr()
     from klab.data import tokenizer as tokenizer_module
 
-    sources = release / "sources.json"
-    source_bytes = sources.read_bytes()
     progress_phase = tokenizer_module.progress_phase
 
-    def change_sources_before_fit(name, **options):
-        if name == "tokenizer_bpe_training":
-            sources.write_bytes(source_bytes + b"\n")
-        return progress_phase(name, **options)
+    for member in ("sources.json", "manifest.json"):
+        control = release / member
+        original = control.read_bytes()
 
-    try:
-        with monkeypatch.context() as fault:
-            fault.setattr(tokenizer_module, "progress_phase", change_sources_before_fit)
-            with pytest.raises(ValueError, match="tokenizer sampling input changed"):
-                lab.run("tokenizer", "train", str(tokenizer_config), *scratch)
-        assert not Path(tokenizer["output_dir"]).exists()
-    finally:
-        sources.write_bytes(source_bytes)
+        def change_control_before_fit(
+            name, *, path=control, content=original, **options
+        ):
+            if name == "tokenizer_bpe_training":
+                path.write_bytes(content + b"\n")
+            return progress_phase(name, **options)
+
+        try:
+            with monkeypatch.context() as fault:
+                fault.setattr(
+                    tokenizer_module, "progress_phase", change_control_before_fit
+                )
+                with pytest.raises(
+                    ValueError, match=f"tokenizer sampling input changed: .*{member}"
+                ):
+                    lab.run("tokenizer", "train", str(tokenizer_config), *scratch)
+            assert not Path(tokenizer["output_dir"]).exists()
+        finally:
+            control.write_bytes(original)
 
     output = Path(tokenizer["output_dir"])
 
@@ -555,7 +572,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     clean_config.write_text(
         yaml.safe_dump({**tokenizer, "output_dir": str(clean_output)})
     )
-    lab.run("tokenizer", "train", str(clean_config), *scratch)
+    lab.run("tokenizer", "train", str(clean_config), *scratch, "--cold")
     for name in ("tokenizer.json", "tokenizer_manifest.json"):
         assert (output / name).read_bytes() == (clean_output / name).read_bytes()
     verify = ("tokenizer", "verify", str(export / "run.yaml"), "--json")
@@ -630,10 +647,10 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     )
     assert receipt["complete"]
     assert receipt["actual_target_tokens"] == quotas
-    # The tokenizer's export and byte sample were authenticated once, with the
-    # sampling scan run once, and are not derived again by the next command.
+    # The tokenizer fit has refreshed the export receipt. Mixture creation
+    # authenticates the byte sample once, and the next command reuses it.
     assert lab.stderr.count("tokenizer sampling: rank histogram:") == 2
-    assert lab.stderr.count("verified from the bytes") == 1  # the export
+    assert "verified from the bytes" not in lab.stderr
     verified = lab.json(
         "corpus", "verify-mixture", str(declaration), "--output", str(mixture)
     )

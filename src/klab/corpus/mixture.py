@@ -305,8 +305,9 @@ def _check_record_summary(
 _rows = rows
 
 
-def _source_rights(release: Path, source_strata: dict[str, str]) -> None:
-    sources = json.loads((release / "sources.json").read_text(encoding="utf-8"))
+def validate_source_strata(sources_path: Path, source_strata: dict[str, str]) -> None:
+    """Require complete stratum assignments and an eligible source rights path."""
+    sources = json.loads(sources_path.read_text(encoding="utf-8"))
     source_map = {row["id"]: row for row in sources}
     if set(source_map) != set(source_strata):
         raise ValueError(
@@ -436,7 +437,9 @@ def _materialize_mixture(
             mapped = {
                 source: spec.source_strata[source] for source in cohort["source_ids"]
             }
-            _source_rights(Path(cohort["release_path"]), mapped)
+            validate_source_strata(
+                Path(cohort["release_path"]) / "sources.json", mapped
+            )
             report_path = Path(cohort["release_path"]) / "report.json"
             summary = json.loads(report_path.read_bytes())
             if (
@@ -447,7 +450,7 @@ def _materialize_mixture(
                     "additive release TRAIN view does not cover its kept TRAIN documents"
                 )
     else:
-        _source_rights(release, spec.source_strata)
+        validate_source_strata(release / "sources.json", spec.source_strata)
     report = json.loads((release / "report.json").read_text(encoding="utf-8"))
     requested = report.get("requested_mixture")
     total_quota = sum(spec.target_quotas.values())

@@ -2541,8 +2541,16 @@ within a fit, across retries, and during verification.
 
 ```sh
 klab tokenizer train TOKENIZER.yaml --scratch-dir SCRATCH
+klab tokenizer train TOKENIZER.yaml --cold --scratch-dir SCRATCH
 klab tokenizer verify RUN.yaml --scratch-dir SCRATCH
 ```
+
+Training reuses a valid host-local Corpus export receipt. Use `--cold` to
+verify the export and release from bytes before fitting. For seeded sampling,
+the authenticated export supplies the declared document, TRAIN lineage and
+source rights paths. The sampler checks that generation when it finishes
+selection and retains the resolved document path and input identities for
+both the fit and audit.
 
 Receipts bind the input files, range options and sampling implementation. An
 interrupted run skips intact ranges and rebuilds missing ones. The scratch
@@ -2566,6 +2574,17 @@ preserves an occupied destination and refuses an unverifiable published pair,
 including partial outputs left by older versions.
 
 #### Tokenizer fit timings
+
+The following CLI measurements cover startup, export verification, selection,
+and selected input replay up to the BPE call. They use actual built and frozen
+synthetic releases with their export receipts already present, one worker and
+warm files. The table reports medians of three repeated runs per size. The fit
+digests matched.
+
+| Documents | Time before / after | Logical reads before / after |
+| --- | ---: | ---: |
+| 128 | 187.9 / 33.7 ms | 107.64 / 13.45 MB |
+| 512 | 642.5 / 72.4 ms | 428.95 / 52.91 MB |
 
 The fixture used 8,192 generated documents, a 16 MiB fit quota, a 2,048-token
 vocabulary and Tokenizers 0.22.2 on CPU with one selection worker. It supplied

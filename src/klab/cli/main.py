@@ -801,10 +801,11 @@ def _tokenizer_train(args: argparse.Namespace) -> None:
     from klab.corpus.release_verify import verification_settings
     from klab.data.tokenizer import train_tokenizer
 
+    options = verification_options(resolve_work_dir(args.work_dir), cold=args.cold)
     with verification_settings(
-        workers=args.workers, scratch_dir=args.scratch_dir, echo=sys.stderr
+        workers=args.workers, scratch_dir=args.scratch_dir, echo=sys.stderr, **options
     ):
-        print(train_tokenizer(load_tokenizer_config(Path(args.config))))
+        print(train_tokenizer(load_tokenizer_config(Path(args.config)), **options))
 
 
 def _stage(args: argparse.Namespace) -> None:
@@ -2648,6 +2649,11 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         dest="tokenizer_command", required=True
     )
     tokenizer_train = tokenizer_commands.add_parser("train")
+    tokenizer_train.add_argument(
+        "--cold",
+        action="store_true",
+        help="Verify frozen Corpus export inputs from bytes before fitting",
+    )
     tokenizer_train.add_argument("config")
     from klab.data.tokenizer_cli import (
         add_sampling_flags,

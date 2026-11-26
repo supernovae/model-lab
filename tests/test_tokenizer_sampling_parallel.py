@@ -13,6 +13,7 @@ import pytest
 from klab.canonical import canonical_json
 from klab.config.models import TokenizerTrainConfig
 from klab.corpus import shards
+from klab.corpus.release import ReleaseMembers
 from klab.corpus.release_verify import verification_settings
 from klab.data import tokenizer_sampling
 
@@ -62,6 +63,17 @@ def _release(root: Path, *, ineligible_from: int | None = None) -> Path:
                 }
                 for source in STRATA
             ]
+        )
+    )
+    (release / "manifest.json").write_bytes(
+        canonical_json(
+            {
+                "files": {
+                    "documents.jsonl": {},
+                    "lm/train.lineage.jsonl": {},
+                    "sources.json": {},
+                }
+            }
         )
     )
     return release
@@ -160,11 +172,18 @@ def _serial(config: TokenizerTrainConfig) -> dict:
     return {"texts": texts, "ids": selected, "reserve": reserve}
 
 
+def _select(config: TokenizerTrainConfig) -> tokenizer_sampling.Selection:
+    root = config.dataset.corpus_release_path
+    return tokenizer_sampling.select_documents(
+        config, ReleaseMembers(root, json.loads((root / "manifest.json").read_bytes()))
+    )
+
+
 def _sampled(config: TokenizerTrainConfig, workers: int) -> dict:
     stats: dict = {}
     with verification_settings(workers=workers):
-        texts = list(tokenizer_sampling.documents(config, stats))
-        selection = tokenizer_sampling.select_documents(config)
+        selection = _select(config)
+        texts = list(tokenizer_sampling.documents(config, stats, selection=selection))
     return {
         "texts": texts,
         "ids": {k: [c.document_id for c in v] for k, v in selection.fit.items()},
@@ -222,7 +241,7 @@ def test_the_sample_fills_each_quota_and_states_how_it_was_chosen(
     config = _config(_release(tmp_path))
     stats: dict = {}
     with verification_settings(workers=2):
-        selection = tokenizer_sampling.select_documents(config)
+        selection = _select(config)
     io_counters = Path("/proc/self/io")
     before = None
     if io_counters.is_file():
@@ -242,9 +261,10 @@ def test_the_sample_fills_each_quota_and_states_how_it_was_chosen(
         )
     other: dict = {}
     with verification_settings(workers=2):
+        other_config = _config(config.dataset.corpus_release_path, seed=12)
         list(
             tokenizer_sampling.documents(
-                _config(config.dataset.corpus_release_path, seed=12), other
+                other_config, other, selection=_select(other_config)
             )
         )
     assert other["digest"] != stats["digest"]
