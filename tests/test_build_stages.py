@@ -122,6 +122,12 @@ def test_a_build_killed_at_any_stage_resumes_without_redoing_earlier_stages(
                 lab.run("corpus", "build", project, "--offline")
         [committed] = scanned
         assert not reference.exists()
+        plan = lab.json("corpus", "plan", project, "--json")
+        assert plan["build_id"] == reference.name
+        assert (
+            next(row for row in plan["stages"] if row["id"] == "index")["action"]
+            == "resume_candidate"
+        )
         scanned.clear()
         reference = Path(lab.run("corpus", "build", project, "--offline"))
         assert scanned and committed not in scanned
@@ -929,31 +935,3 @@ def test_completed_preparation_recovers_views_and_signed_publication(
     assert tree(target) == expected
     assert completed_preparation.verify_completed_build(target)["build_id"] == build_id
     assert not (stages().root / "view-emission").exists()
-
-
-def test_stage_keys_follow_exactly_their_inputs(tmp_path: Path) -> None:
-    project = neutral_corpus(tmp_path)
-    base = large_build._stage_inputs(project, [])
-    policy = project.release.policy
-    flipped = "error" if policy.duplicates.rights_conflict == "allow" else "allow"
-    changed = project.model_copy(
-        update={
-            "release": project.release.model_copy(
-                update={
-                    "policy": policy.model_copy(
-                        update={
-                            "duplicates": policy.duplicates.model_copy(
-                                update={"rights_conflict": flipped}
-                            )
-                        }
-                    )
-                }
-            )
-        }
-    )
-    after = large_build._stage_inputs(changed, [])
-    # Relaxing a duplicate-only option keeps the index and redoes deduplication.
-    assert after["index"] == base["index"]
-    assert after["dedup"] != base["dedup"]
-    store = build_stages.StageStore(tmp_path / "stages")
-    assert store.key(base["index"]) != store.key(base["dedup"])

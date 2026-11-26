@@ -188,18 +188,39 @@ def _run(args: argparse.Namespace) -> None:
         if args.json:
             print(json.dumps(plan, sort_keys=True))
         elif plan["status"] == "planned":
-            print(f"{plan['project_id']} native build plan")
+            print(
+                f"{plan['project_id']} native build {plan['build_id']} "
+                f"({plan['build_state']})"
+            )
+            for stage in plan["stages"]:
+                key = stage.get("computation_key")
+                estimate = stage.get("verification_candidate_bytes")
+                details = (
+                    f" ({estimate:,} candidate verification bytes)"
+                    if estimate is not None
+                    else ""
+                )
+                reason = stage.get("reason")
+                print(
+                    f"  {stage['id']}: {stage['action']}"
+                    + (f" {key}" if key else "")
+                    + details
+                    + (f" ({reason})" if reason else "")
+                )
             for source in plan["sources"]:
                 print(source["source_id"])
                 for partition in source["partitions"]:
                     print(
                         f"  {partition['action']} {partition['path']} ({partition['reason']})"
                     )
+            if plan["build_state"] == "new":
+                print(
+                    f"{plan['normalization_source_bytes']:,} source bytes need normalization"
+                )
+            if plan.get("release_id") is not None:
+                print(f"Existing release {plan['release_id']}")
             print(
-                f"{plan['normalization_source_bytes']:,} source bytes need normalization if a new build runs"
-            )
-            print(
-                "Build verifies cache candidates before reuse and resolves downstream stages."
+                "Build verifies cache candidates before reuse. Scratch is unestimated."
             )
         else:
             print(f"{plan['project_id']} {plan['status']} ({plan['reason']})")

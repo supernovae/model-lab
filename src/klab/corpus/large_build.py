@@ -804,19 +804,18 @@ def _open_decided(index_dir: Path, dedup_dir: Path):
     return closing(connection)
 
 
-def _stage_inputs(
+def native_index_inputs(
     project: Any,
     prepared: list[Path],
     *,
     admission_files: tuple[tuple[str, str], ...] = (),
-) -> dict[str, dict[str, Any]]:
-    """Exactly what each checkpointed stage depends on.
+) -> dict[str, Any]:
+    """Resolve the index identity from ordered prepared receipts and policy.
 
     The index follows the receipts of the prepared shards (which bind the
     source bytes, rights, normalizer and document policy), the split
     declaration, duplicate keys, source ranks and the ordered files with
-    row-level admission evidence. Deduplication adds the full duplicate policy
-    to the index it reads.
+    row-level admission evidence.
     """
     index = {
         "shards": [
@@ -838,15 +837,18 @@ def _stage_inputs(
     }
     if admission_files:
         index["row_admission_files"] = admission_files
+    return {"stage": "index", **index}
+
+
+def native_dedup_inputs(project: Any, index_receipt_sha256: str) -> dict[str, Any]:
+    """Resolve duplicate policy against the exact index receipt it reads."""
     return {
-        "index": {"stage": "index", **index},
-        "dedup": {
-            "stage": "dedup",
-            "duplicates": project.release.policy.duplicates.model_dump(mode="json"),
-            "implementation": implementation_digests(
-                *native_dedup.DEDUP_IMPLEMENTATION_FILES
-            ),
-        },
+        "stage": "dedup",
+        "duplicates": project.release.policy.duplicates.model_dump(mode="json"),
+        "implementation": implementation_digests(
+            *native_dedup.DEDUP_IMPLEMENTATION_FILES
+        ),
+        "index": index_receipt_sha256,
     }
 
 
@@ -1114,12 +1116,14 @@ def build_large(
             key for key, admitted in record_admission.items() if "decisions" in admitted
         )
     )
-    stage_inputs = _stage_inputs(project, prepared, admission_files=admission_files)
+    index_inputs = native_index_inputs(
+        project, prepared, admission_files=admission_files
+    )
     prepared_files = [
         shard / name for shard in prepared for name in ("docs.jsonl", "spans.jsonl")
     ]
     generations = [range_file_identity(path) for path in prepared_files]
-    index_key = stages.key(stage_inputs["index"])
+    index_key = stages.key(index_inputs)
     groups_root = stages.root / f".index-{index_key}.groups"
     if groups_root.is_symlink():
         raise ValueError(f"symlinked index checkpoint: {groups_root}")
@@ -1152,7 +1156,7 @@ def build_large(
         index_dir, _ = run_stage(
             stages,
             "index",
-            stage_inputs["index"],
+            index_inputs,
             index_stage,
             on_reuse=lambda: progress.record("reused_index_stage"),
             retained=groups_root / "assembly",
@@ -1179,10 +1183,7 @@ def build_large(
                     connection, record_admission, admission_files
                 )
     progress.update(phase="deduplicating")
-    dedup_inputs = {
-        **stage_inputs["dedup"],
-        "index": sha256_file(index_dir / "receipt.json"),
-    }
+    dedup_inputs = native_dedup_inputs(project, sha256_file(index_dir / "receipt.json"))
     dedup_groups_root = stages.root / f".dedup-{stages.key(dedup_inputs)}.groups"
     if dedup_groups_root.is_symlink():
         raise ValueError(f"symlinked dedup checkpoint: {dedup_groups_root}")

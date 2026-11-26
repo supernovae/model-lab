@@ -301,10 +301,78 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     assert lab.json(*plan_args)["status"] == "blocked"
     lock_path.write_bytes(lock_bytes)
 
-    other_build = Path(lab.run("corpus", "build", str(config_path), "--offline"))
+    build_args = (
+        "corpus",
+        "build",
+        str(config_path),
+        "--offline",
+        "--keep-stages",
+        "2",
+    )
+    other_build = Path(lab.run(*build_args))
+    assert plan["build_id"] == other_build.name
     assert normalized == []
     for name in ("documents.jsonl", "spans.jsonl"):
         assert (other_build / name).read_bytes() == (release / name).read_bytes()
+
+    existing = lab.json(*plan_args)
+    assert existing["build_state"] == "published"
+    assert existing["build_id"] == other_build.name
+    assert existing["sources"] == []
+
+    # A view-only change reuses the exact index and deduplication stages.
+    release_path = other / "release.yaml"
+    original_release = release_path.read_bytes()
+    view = yaml.safe_load(original_release)
+    view["lm"]["training_splits"] = ["train"]
+    release_path.write_text(yaml.safe_dump(view))
+    real_open = Path.open
+
+    def no_stage_body(path, *args, **kwargs):
+        if path.suffix == ".sqlite" or (
+            path.is_relative_to(lab.work / "cache/corpus/normalized")
+            and path.suffix == ".jsonl"
+        ):
+            pytest.fail(f"build planning opened payload bytes: {path}")
+        return real_open(path, *args, **kwargs)
+
+    with monkeypatch.context() as forecast:
+        forecast.setattr(Path, "open", no_stage_body)
+        view_plan = lab.json(*plan_args)
+    assert view_plan["build_id"] != other_build.name
+    candidate_stages = {row["id"]: row for row in view_plan["stages"]}
+    stage_store = other_build.parent / "stages"
+    for label, directory in (("index", "index"), ("deduplicate", "dedup")):
+        step = candidate_stages[label]
+        assert step["action"] == "verify_candidate", view_plan
+        (stored,) = (stage_store / directory).glob("*/receipt.json")
+        assert step["computation_key"] == stored.parent.name
+        assert step["verification_candidate_bytes"] == sum(
+            item.stat().st_size for item in stored.parent.iterdir() if item != stored
+        )
+    view_build = Path(lab.run(*build_args))
+    assert view_build.name == view_plan["build_id"]
+    progress = (
+        view_build.parent.parent / "progress" / f"{view_build.name}.jsonl"
+    ).read_text()
+    assert "reused_index_stage" in progress and "reused_dedup_stage" in progress
+
+    # A dedup-only option changes its key, keeping the index verification candidate.
+    view["policy"]["duplicates"]["heldout_overlap"] = "error"
+    release_path.write_text(yaml.safe_dump(view))
+    changed = {row["id"]: row for row in lab.json(*plan_args)["stages"]}
+    assert changed["index"] == candidate_stages["index"]
+    assert changed["deduplicate"]["action"] == "run"
+    assert (
+        changed["deduplicate"]["computation_key"]
+        != candidate_stages["deduplicate"]["computation_key"]
+    )
+    release_path.write_bytes(original_release)
+
+    other_release = lab.run("corpus", "freeze", str(other_build))
+    consumed = lab.json(*plan_args)
+    assert consumed["build_state"] == "consumed"
+    assert consumed["release_id"] == Path(other_release).name
 
     appended = yaml.safe_load((other / "sources/ref_tldr_pages.yaml").read_text())
     repo = tmp_path / "appended-reference"
@@ -347,7 +415,12 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     source_bytes = len(b"# Extra\n\nAn independent reference.\n")
     assert scheduled == [("ref_append", name, source_bytes)]
     assert plan["normalization_source_bytes"] == source_bytes
+    assert (
+        next(row for row in plan["stages"] if row["id"] == "index")["action"]
+        == "await_normalization"
+    )
     appended_build = Path(lab.run("corpus", "build", str(config_path), "--offline"))
+    assert plan["build_id"] == appended_build.name
     assert normalized == ["ref_append"]
     assert {doc["source_id"] for doc in documents(appended_build)} == set(DECLARED) | {
         "ref_append"

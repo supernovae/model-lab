@@ -101,9 +101,17 @@ within one Lab work root. The typed receipt binds the pinned source,
 resolved rights and admission, renderer options and three payload digests.
 Projects resolve eligibility before lookup. The shared cache is outside
 project-specific stage retention. `klab corpus plan PROJECT` reads the pinned
-inventory and reports expected normalization work and cache candidates for
-full native builds. Build resolves and verifies artifact reuse. Downstream
-stage planning, reference publication and closure-aware pruning remain in #567.
+inventory and resolves the native build ID. It reports an existing build or
+consumed release, or predicts normalization work and index and deduplication
+reuse from the ordered input receipts. Those candidates carry byte counts
+for payloads the build will verify. Missing receipts defer dependent keys.
+The planner and builder share identity construction. Updating those modules
+changes the normalized artifact producer and the native build key. New
+builds at this cutover re-normalize from their existing source snapshots
+and derive fresh index and deduplication keys. Existing releases remain
+addressable by their recorded IDs.
+View recovery, fresh-stage scratch estimates, reference publication and
+closure-aware pruning remain in #567.
 `klab corpus plan --build BUILD` previews ordinary freeze from existing
 build metadata. It reports the release identity, verification and placement
 dependencies, shared store growth and duplicate staging bytes. It leaves

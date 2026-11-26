@@ -923,6 +923,66 @@ def uses_disk_lm_builder(project: Any, transforms: list[Any]) -> bool:
     return eligible
 
 
+def build_identity(
+    project: Any, source_pins: dict[str, Any]
+) -> tuple[dict[str, Any], list[Any], bool]:
+    """Resolve the build identity, ordered transforms and builder from its pins."""
+    transforms = _ordered_transforms(project)
+    stage_specs = [declaration_payload(t) for t in transforms]
+    for t in stage_specs:
+        if t["kind"] not in KINDS:
+            raise ValueError(f"unregistered transform: {t['kind']}")
+    identity = {
+        "project_id": project.config.id,
+        "project": declaration_payload(project.config),
+        "lock": {
+            key: {
+                "declaration_sha256": value["declaration_sha256"],
+                "snapshot_sha256": value.get("snapshot_sha256"),
+            }
+            for key, value in sorted(source_pins.items())
+        },
+        "sources": source_build_declarations(project.sources),
+        "transforms": stage_specs,
+        "split": declaration_payload(project.splits),
+        "release": declaration_payload(project.release),
+        "implementation_sha256": sha256_file(Path(__file__)),
+        "schema_implementation_sha256": sha256_file(
+            Path(__file__).with_name("project.py")
+        ),
+        "provenance_implementation_sha256": sha256_file(
+            Path(__file__).with_name("provenance.py")
+        ),
+        "rights_implementation_sha256": sha256_file(
+            Path(__file__).with_name("rights.py")
+        ),
+    }
+    large_lm_build = uses_disk_lm_builder(project, transforms)
+    if large_lm_build:
+        from klab.corpus.native_dedup import DEDUP_IMPLEMENTATION_FILES
+        from klab.corpus.native_index import INDEX_IMPLEMENTATION_FILES
+        from klab.corpus.prepared_shards import prepared_shard_implementation
+
+        identity["large_builder_implementation_sha256"] = sha256_file(
+            Path(__file__).with_name("large_build.py")
+        )
+        identity["normalization_implementation"] = prepared_shard_implementation()
+        identity["native_stage_implementation"] = implementation_digests(
+            *INDEX_IMPLEMENTATION_FILES,
+            *DEDUP_IMPLEMENTATION_FILES,
+            "build_outputs.py",
+            "measurement.py",
+        )
+    else:
+        identity["normalization_implementation"] = implementation_digests(
+            *NORMALIZATION_IMPLEMENTATION_FILES
+        )
+        identity["duplicate_implementation"] = implementation_digests(
+            "dedup_policy.py", "duplicate_evidence.py"
+        )
+    return identity, transforms, large_lm_build
+
+
 def build(
     project: Any,
     work_root: Path,
@@ -1012,59 +1072,8 @@ def _build_stored(
         shutil.rmtree(workspace, ignore_errors=True)
     root = workspace / "builds"
     root.mkdir(parents=True, exist_ok=True)
-    transforms = _ordered_transforms(project)
-    stage_specs = [declaration_payload(t) for t in transforms]
-    for t in stage_specs:
-        if t["kind"] not in KINDS:
-            raise ValueError(f"unregistered transform: {t['kind']}")
-    identity = {
-        "project_id": project.config.id,
-        "project": declaration_payload(project.config),
-        "lock": {
-            key: {
-                "declaration_sha256": value["declaration_sha256"],
-                "snapshot_sha256": value.get("snapshot_sha256"),
-            }
-            for key, value in sorted(lock["sources"].items())
-        },
-        "sources": source_build_declarations(project.sources),
-        "transforms": stage_specs,
-        "split": declaration_payload(project.splits),
-        "release": declaration_payload(project.release),
-        "implementation_sha256": sha256_file(Path(__file__)),
-        "schema_implementation_sha256": sha256_file(
-            Path(__file__).with_name("project.py")
-        ),
-        "provenance_implementation_sha256": sha256_file(
-            Path(__file__).with_name("provenance.py")
-        ),
-        "rights_implementation_sha256": sha256_file(
-            Path(__file__).with_name("rights.py")
-        ),
-    }
-    large_lm_build = uses_disk_lm_builder(project, transforms)
-    if large_lm_build:
-        from klab.corpus.native_dedup import DEDUP_IMPLEMENTATION_FILES
-        from klab.corpus.native_index import INDEX_IMPLEMENTATION_FILES
-        from klab.corpus.prepared_shards import prepared_shard_implementation
-
-        identity["large_builder_implementation_sha256"] = sha256_file(
-            Path(__file__).with_name("large_build.py")
-        )
-        identity["normalization_implementation"] = prepared_shard_implementation()
-        identity["native_stage_implementation"] = implementation_digests(
-            *INDEX_IMPLEMENTATION_FILES,
-            *DEDUP_IMPLEMENTATION_FILES,
-            "build_outputs.py",
-            "measurement.py",
-        )
-    else:
-        identity["normalization_implementation"] = implementation_digests(
-            *NORMALIZATION_IMPLEMENTATION_FILES
-        )
-        identity["duplicate_implementation"] = implementation_digests(
-            "dedup_policy.py", "duplicate_evidence.py"
-        )
+    identity, transforms, large_lm_build = build_identity(project, lock["sources"])
+    stage_specs = identity["transforms"]
     if canary is not None:
         if not large_lm_build:
             raise ValueError(
