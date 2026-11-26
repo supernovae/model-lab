@@ -23,6 +23,7 @@ from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.bounded_metadata import metadata_operation, read_metadata
 from klab.corpus.build_stages import StageStore, run_stage
 from klab.corpus.jsonl_records import iter_rows
+from klab.corpus.measurement_inputs import MeasurementTokenizer
 from klab.corpus.project import NormalizerOptions
 from klab.corpus.quota import require_estimated_supply
 from klab.corpus.release_receipt import receipt_first, verifier_digest
@@ -2671,28 +2672,84 @@ def describe(
 ) -> dict[str, Any]:
     if mixture is not None and tokenizer is None:
         raise ValueError("--mixture needs --tokenizer to count tokens")
-    manifest = verify_release(path)
-    report = _load(Path(path) / "report.json")
-    from klab.corpus.measurement import measure_views
+    with open_release(path) as release:
+        bound = (
+            MeasurementTokenizer.from_path(tokenizer) if tokenizer is not None else None
+        )
+        result = _describe_verified(release, bound, mixture)
+        if bound is not None:
+            bound.require_unchanged()
+        return result
 
-    # Finished runs are kept with the proof store, so a rerun or a describe that
-    # was stopped measures only what is missing.
-    store = current_settings().proof_store
+
+def _description_measurements(
+    release: ReleaseReader, tokenizer: MeasurementTokenizer | None
+) -> dict[str, Any]:
+    settings = current_settings()
+    store = settings.proof_store
+    base = store.root / "cache" if store is not None else settings.scratch_dir
     cache = (
-        None
-        if store is None
-        else store.root / "cache" / "describe" / manifest["release_id"]
+        base / "describe" / release.manifest["release_id"] if base is not None else None
     )
-    measured = measure_views(
-        Path(path),
-        tokenizer,
-        release_spec=manifest["build_identity"]["release"],
-        cache=cache,
-    )
-    if tokenizer is not None:
-        from klab.corpus.measurement import measure_source_rights
 
-        counted = measure_source_rights(Path(path), tokenizer, cache=cache)
+    def measure() -> dict[str, Any]:
+        from klab.corpus.measurement import measure_source_rights, measure_views
+
+        return {
+            "views": measure_views(
+                release,
+                tokenizer,
+                release_spec=release.manifest["build_identity"]["release"],
+                cache=cache,
+            ),
+            "rights": measure_source_rights(release, tokenizer, cache=cache)
+            if tokenizer is not None
+            else None,
+        }
+
+    if cache is None:
+        return measure()
+    inputs = {
+        "release_id": release.manifest["release_id"],
+        "tokenizer": tokenizer.identity() if tokenizer is not None else None,
+        "implementation": verifier_digest("release"),
+    }
+    stages = StageStore(cache)
+    locks = cache / "locks"
+    locks.mkdir(parents=True, exist_ok=True)
+    with (locks / f"{stages.key(inputs)}.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = bytearray()
+        if (
+            stages.verified(
+                "description", inputs, hash_chunks={"measurement.json": data.extend}
+            )
+            is not None
+        ):
+            if settings.echo is not None:
+                print("describe: reused completed measurement", file=settings.echo)
+            return json.loads(data)
+        del data
+        with stages.build("description", inputs) as (staging, _):
+            from klab.corpus.build_outputs import write_json
+
+            value = measure()
+            write_json(staging / "measurement.json", value)
+            if tokenizer is not None:
+                tokenizer.require_unchanged()
+            release.require_unchanged()
+        return value
+
+
+def _describe_verified(
+    release: ReleaseReader,
+    tokenizer: MeasurementTokenizer | None,
+    mixture: Path | None,
+) -> dict[str, Any]:
+    report = _load(release.member("report.json"))
+    completed = _description_measurements(release, tokenizer)
+    measured, counted = completed["views"], completed["rights"]
+    if counted is not None:
         rights = report["rights"]
         report = {
             **report,
@@ -2714,7 +2771,7 @@ def describe(
             },
         }
     result = {
-        "release_id": manifest["release_id"],
+        "release_id": release.manifest["release_id"],
         "report": report,
         "measurement": measured,
     }

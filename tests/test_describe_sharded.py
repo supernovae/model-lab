@@ -12,7 +12,12 @@ from measurement_oracle import measure_source_rights as serial_source_rights
 from measurement_oracle import measure_views as serial_measure_views
 
 from klab.corpus import measurement, shards
-from klab.corpus.measurement import measure_source_rights, measure_views
+from klab.corpus.measurement import (
+    measure_source_rights,
+    measure_views,
+)
+from klab.corpus.measurement_inputs import MeasurementTokenizer
+from klab.corpus.release import ReleaseMembers
 from klab.corpus.release_verify import verification_settings
 
 RELEASE_SPEC = {
@@ -24,6 +29,17 @@ RELEASE_SPEC = {
 def _write(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def _members(root: Path) -> ReleaseMembers:
+    return ReleaseMembers(
+        root,
+        {
+            "files": {
+                path.relative_to(root).as_posix(): {} for path in root.rglob("*.jsonl")
+            }
+        },
+    )
 
 
 def _texts(generator: random.Random, count: int) -> list[str]:
@@ -178,7 +194,11 @@ def test_sharded_measurement_equals_the_serial_pass(
     chosen = tokenizer if counted else None
     expected = serial_measure_views(release, chosen, release_spec=RELEASE_SPEC)
     with verification_settings(workers=1):
-        assert measure_views(release, chosen, release_spec=RELEASE_SPEC) == expected
+        pinned = MeasurementTokenizer.from_path(chosen) if chosen is not None else None
+        assert (
+            measure_views(_members(release), pinned, release_spec=RELEASE_SPEC)
+            == expected
+        )
     assert expected["views"]["lm"]["train"]["records"] == 40
     assert bool(
         expected["views"]["chat"]["train"]["concentration"].get("ngram_count_reason")
@@ -239,7 +259,7 @@ def test_a_killed_describe_reuses_its_finished_runs(
         with monkeypatch.context() as stop:
             stop.setenv("KLAB_FAULT", f"{measurement.INDEX_STAGE}:2")
             with pytest.raises(RuntimeError, match="KLAB_FAULT"):
-                measure_views(release, release_spec=RELEASE_SPEC, cache=cache)
+                measure_views(_members(release), release_spec=RELEASE_SPEC, cache=cache)
         committed_ranges = set(index_ranges_read)
         assert len(committed_ranges) == 2 and not links_read
         damaged = next(cache.rglob("rows.npy"))
@@ -251,7 +271,7 @@ def test_a_killed_describe_reuses_its_finished_runs(
         with monkeypatch.context() as stop:
             stop.setenv("KLAB_FAULT", f"{measurement.LINK_STAGE}:1")
             with pytest.raises(RuntimeError, match="KLAB_FAULT"):
-                measure_views(release, release_spec=RELEASE_SPEC, cache=cache)
+                measure_views(_members(release), release_spec=RELEASE_SPEC, cache=cache)
         assert len(committed_ranges.intersection(index_ranges_read)) == 1
         assert not list(cache.rglob("rows.npy")), "committed index replaces the ranges"
         index_ranges_read.clear()
@@ -262,7 +282,7 @@ def test_a_killed_describe_reuses_its_finished_runs(
         with monkeypatch.context() as stop:
             stop.setenv("KLAB_FAULT", f"{measurement.VIEW_STAGE}:3")
             with pytest.raises(RuntimeError, match="KLAB_FAULT"):
-                measure_views(release, release_spec=RELEASE_SPEC, cache=cache)
+                measure_views(_members(release), release_spec=RELEASE_SPEC, cache=cache)
         assert links_read and committed_links not in links_read
         assert len(views_read) == 3
         committed_views = set(views_read)
@@ -270,12 +290,14 @@ def test_a_killed_describe_reuses_its_finished_runs(
         views_read.clear()
 
         assert (
-            measure_views(release, release_spec=RELEASE_SPEC, cache=cache) == expected
+            measure_views(_members(release), release_spec=RELEASE_SPEC, cache=cache)
+            == expected
         )
         assert views_read and committed_views.isdisjoint(views_read)
         views_read.clear()
         assert (
-            measure_views(release, release_spec=RELEASE_SPEC, cache=cache) == expected
+            measure_views(_members(release), release_spec=RELEASE_SPEC, cache=cache)
+            == expected
         )
         assert not index_ranges_read and not links_read and not views_read
 
@@ -286,7 +308,8 @@ def test_a_killed_describe_reuses_its_finished_runs(
         os.utime(replacement, ns=(info.st_atime_ns, info.st_mtime_ns))
         replacement.replace(committed_links)
         assert (
-            measure_views(release, release_spec=RELEASE_SPEC, cache=cache) == expected
+            measure_views(_members(release), release_spec=RELEASE_SPEC, cache=cache)
+            == expected
         )
         assert links_read == [committed_links]
 
@@ -300,7 +323,7 @@ def test_a_lineage_link_to_no_record_is_refused(release: Path) -> None:
         verification_settings(workers=1),
         pytest.raises(ValueError, match="reference mismatch"),
     ):
-        measure_views(release, release_spec=RELEASE_SPEC)
+        measure_views(_members(release), release_spec=RELEASE_SPEC)
 
 
 def test_source_rights_count_each_passage_once_whichever_run_holds_it(
@@ -326,10 +349,25 @@ def test_source_rights_count_each_passage_once_whichever_run_holds_it(
     rows[7].pop("rights")
     _write(release / "documents.jsonl", rows)
     monkeypatch.setattr(shards, "CHUNK_BYTES", 900)
-    expected = serial_source_rights(release, tokenizer)
+    path = release.parent / "local-tokenizer.json"
+    path.write_bytes(tokenizer.read_bytes())
+    bound = MeasurementTokenizer.from_path(path)
+    expected = serial_source_rights(release, path)
     with verification_settings(workers=1):
-        assert measure_source_rights(release, tokenizer) == expected
+        assert measure_source_rights(_members(release), bound) == expected
     assert expected["eligible"]["documents"] > 1
+    content = json.loads(path.read_bytes())
+    content["pre_tokenizer"] = None
+    path.write_text(json.dumps(content))
+    changed = serial_source_rights(release, path)
+    assert changed != expected
+    with verification_settings(workers=1):
+        assert (
+            measure_source_rights(
+                _members(release), MeasurementTokenizer.from_path(path)
+            )
+            == changed
+        )
     rows[1]["rights"]["training_eligibility"] = "ineligible"
     rows[1]["split"], rows[1]["drop_reason"] = "train", None
     _write(release / "documents.jsonl", rows)
@@ -337,4 +375,6 @@ def test_source_rights_count_each_passage_once_whichever_run_holds_it(
         verification_settings(workers=1),
         pytest.raises(ValueError, match="ineligible"),
     ):
-        measure_source_rights(release, tokenizer)
+        measure_source_rights(
+            _members(release), MeasurementTokenizer.from_path(tokenizer)
+        )

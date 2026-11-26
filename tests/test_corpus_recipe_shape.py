@@ -640,10 +640,28 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     # worded as materialize-mixture words it. The template may still hold
     # placeholders.
     template_path = recipe.corpus / "mixture.template.yaml"
-    lab.json(
-        "corpus", "describe", str(release),
-        "--tokenizer", str(tokenizer_json), "--mixture", str(template_path),
-    )  # fmt: skip
+    from klab.corpus import measurement
+
+    def no_shard_merge(*args, **kwargs):
+        pytest.fail("warm describe merged measurement shards")
+
+    with monkeypatch.context() as warm:
+        warm.setattr(measurement, "measure_views", no_shard_merge)
+        assert lab.json(
+            "corpus", "describe", str(release),
+            "--tokenizer", str(tokenizer_json), "--mixture", str(template_path),
+        ) == described  # fmt: skip
+    [completed] = (lab.work / "cache" / "describe" / release.name).glob(
+        "description/*/measurement.json"
+    )
+    data = completed.read_bytes()
+    changed = data.replace(b'"records":', b'"recxrds":', 1)
+    assert changed != data
+    completed.write_bytes(changed)
+    assert (
+        lab.json("corpus", "describe", str(release), "--tokenizer", str(tokenizer_json))
+        == described
+    )
     inflated = yaml.safe_load(template_path.read_text())
     inflated["target_quotas"]["web"] = 10**6
     inflated_path = tmp_path / "inflated.template.yaml"
