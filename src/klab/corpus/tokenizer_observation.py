@@ -15,6 +15,7 @@ from pathlib import Path
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.loading import load_config, load_tokenizer_config
 from klab.corpus.export import _export_binding, _export_request
+from klab.corpus.release import ReleaseMembers
 from klab.safe_io import symlinked
 
 
@@ -33,7 +34,7 @@ def _read(path: Path, expected: str, *, limit: int = 4 * 1024 * 1024) -> bytes:
 
 
 def verify_observed_tokenizer(
-    observation, config_path, config, release, release_manifest
+    observation, config_path, config, release: ReleaseMembers
 ):
     """Validate bounded metadata and current bytes, not a historical digest proof."""
     values = observation.model_dump(mode="json")
@@ -152,9 +153,13 @@ def verify_observed_tokenizer(
     export_path = config.dataset.corpus_export_path
     from klab.corpus.completed_release import in_place
 
-    if not in_place(release, release_manifest):
+    release_manifest = release.manifest
+    if not in_place(release.root, release_manifest):
         raise ValueError("tokenizer observation requires a retained native release")
-    if export_path is None or config.dataset.corpus_release_path.resolve() != release:
+    if (
+        export_path is None
+        or config.dataset.corpus_release_path.resolve() != release.root
+    ):
         raise ValueError("tokenizer observation release differs")
     export_raw = read("export")
     if names["export"] != (export_path / "export.json").resolve():
@@ -184,7 +189,7 @@ def verify_observed_tokenizer(
         dataset_path = getattr(config.dataset, f"{split}_path")
         if (
             dataset_path is None
-            or dataset_path.resolve() != (release / view).resolve()
+            or dataset_path.resolve() != release.member(view).resolve()
             or split_values[split][0] != view
             or split_values[split][1] != release_manifest["files"][view]["sha256"]
             or split_values[split][2]
@@ -221,7 +226,7 @@ def verify_observed_tokenizer(
             "lm",
         )
         or export.get("release_manifest_sha256")
-        != hashlib.sha256((release / "manifest.json").read_bytes()).hexdigest()
+        != hashlib.sha256((release.root / "manifest.json").read_bytes()).hexdigest()
         or export.get("report_sha256")
         != release_manifest["files"]["report.json"]["sha256"]
         or export.get("license_report_sha256")

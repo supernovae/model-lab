@@ -2832,6 +2832,10 @@ documents their own rows.
   through the same signed receipts as the release:
   the export is read from its bytes and the sample scanned once, by the first
   command that needs them, and later commands check file metadata only.
+  Mixture input paths, including the held-out view used by training, resolve
+  from the verified release manifest. When the receipt specifies exposure or
+  row-layout checks, verification hashes the records during the same pass that
+  recomputes those checks.
 - **Reseal.** When the recorded completion is gone or no longer matches the Lab
   code (`native mixture completion unavailable or changed`), `verify-mixture
   --reseal` records it again without replaying the schedule: it hashes
@@ -2851,6 +2855,15 @@ documents their own rows.
 
 `tools/benchmark_mixture.py` runs a synthetic mixture cold and warm and writes
 timings and output hashes, for comparing two Lab revisions on one host.
+
+The record-file check below used three warm runs per size with exposure and
+row-layout verification. It measures record verification alone. Logical
+reads come from the Linux process counters.
+
+| Records | File size | Logical reads before / after | Median time before / after |
+| --- | ---: | ---: | ---: |
+| 100,000 | 21.30 MB | 63.90 / 21.30 MB | 199.6 / 184.9 ms |
+| 1,000,000 | 213.00 MB | 639.00 / 213.00 MB | 1.681 / 1.556 s |
 
 A mixture declaration's `tokenizer_observation` (`method:
 post_run_observation`) reuses a tokenizer from a completed local job by binding
