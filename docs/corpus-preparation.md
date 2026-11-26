@@ -2722,6 +2722,39 @@ process reads. The binding digests matched at both sizes.
 | 128 | 11.7 / 4.4 ms | 18.49 / 6.17 MB |
 | 512 | 49.5 / 16.2 ms | 73.97 / 24.70 MB |
 
+### Measure source token supply
+
+```sh
+klab corpus measure-tokens RELEASE --tokenizer TOKENIZER --policy POLICY --output RECEIPT
+```
+
+The measurement counts distinct kept training content per requested domain
+using the supplied tokenizer and the token floors in the policy. Use
+`--tokenizer-origin-release` with `--family-inventory` when the tokenizer
+comes from an earlier release. The inventory must cover every kept
+document and respect family, content and measured-stratum isolation.
+
+Counting hashes the verified release's document member in one pass. When an
+inventory is supplied, the same pass verifies its rows and digest. Scratch
+SQLite indexes store family, content and per-domain deduplication keys. If
+the inventory is reordered, the join indexes its unmatched suffix. The
+receipt is published only after the input generation checks pass. An
+existing receipt checks the current input bindings with one document scan
+and skips tokenization. Regenerate source-token receipts made with the
+previous measurement implementation using a fresh output path.
+
+The following medians compare three Linux tmpfs runs per version after
+release and tokenizer authentication. The fixture had 100,000 ordered
+documents of roughly 1 KiB each and a separate tokenizer origin of the same
+size. Fresh runs used a single-threaded WordLevel tokenizer. Counts and
+input digests matched. Cold verification, production storage and reordered
+inventories were outside this comparison.
+
+| Operation | Elapsed before → after | Logical reads before → after | Peak RSS before → after |
+| --- | ---: | ---: | ---: |
+| Fresh measurement | 12.732 s → 11.847 s | 693.59 MB → 156.72 MB | 269 MiB → 194 MiB |
+| Existing receipt | 1.174 s → 0.668 s | 434.04 MB → 138.76 MB | 247 MiB → 176 MiB |
+
 ## Materialize a mixture
 
 ```sh

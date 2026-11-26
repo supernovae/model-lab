@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from klab.config.loading import load_tokenizer_config
-from klab.corpus.release import _verification_operation, verify_release
+from klab.corpus.admission_inspection_cache import capture, unchanged
+from klab.corpus.release import ReleaseReader, open_release
 from klab.data.tokenizer import verify_tokenizer_artifact
 from klab.safe_io import symlinked
 from klab.training.manifest import sha256_file
 
 
-def _safe_path(path: Path) -> Path:
+def safe_measurement_path(path: Path) -> Path:
     """Reject symlinks anywhere in an existing path, before canonicalizing it."""
     path = Path(path)
     if ".." in path.parts:
@@ -28,15 +32,15 @@ def _dataset_for_tokenizer(release: Path, tokenizer: Path, metadata: dict):
     """Recover only the export configuration adjacent to a bound tokenizer."""
     if metadata.get("corpus_export") is None:
         return None
-    export = _safe_path(tokenizer.parent.parent)
-    config = load_tokenizer_config(_safe_path(export / "tokenizer.yaml"))
+    export = safe_measurement_path(tokenizer.parent.parent)
+    config = load_tokenizer_config(safe_measurement_path(export / "tokenizer.yaml"))
     dataset = config.dataset
     if (
-        _safe_path(config.output_dir) != tokenizer.parent
+        safe_measurement_path(config.output_dir) != tokenizer.parent
         or dataset.corpus_release_path is None
-        or _safe_path(dataset.corpus_release_path) != release
+        or safe_measurement_path(dataset.corpus_release_path) != release
         or dataset.corpus_export_path is None
-        or _safe_path(dataset.corpus_export_path) != export
+        or safe_measurement_path(dataset.corpus_export_path) != export
         or dataset.source != metadata.get("source")
         or dataset.revision != metadata.get("revision")
         or config.vocab_size != metadata.get("vocab_size")
@@ -45,31 +49,56 @@ def _dataset_for_tokenizer(release: Path, tokenizer: Path, metadata: dict):
     return dataset
 
 
-def _authenticate_inputs(
+@dataclass(frozen=True)
+class TokenInputs:
+    release: ReleaseReader
+    origin: ReleaseReader | None
+    bindings: dict[str, Any]
+    tokenizer_files: dict[str, Any]
+
+    def require_unchanged(self) -> None:
+        unchanged(self.tokenizer_files)
+        self.release.require_unchanged()
+        if self.origin is not None:
+            self.origin.require_unchanged()
+
+
+@contextmanager
+def authenticate_token_inputs(
     release: Path,
     tokenizer: Path,
     *,
     tokenizer_origin_release: Path | None = None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Verify measured release and tokenizer provenance cold, including an explicit origin."""
-    release = _safe_path(release)
-    tokenizer = _safe_path(tokenizer)
+) -> Iterator[TokenInputs]:
+    """Bind measurement inputs to their authenticated local generations."""
+    release = safe_measurement_path(release)
+    tokenizer = safe_measurement_path(tokenizer)
     origin = (
-        _safe_path(tokenizer_origin_release)
+        safe_measurement_path(tokenizer_origin_release)
         if tokenizer_origin_release is not None
         else None
     )
     if origin is not None and origin == release:
         raise ValueError("tokenizer origin must differ from measured release")
-    with _verification_operation():
-        manifest = verify_release(release)
-        origin_manifest = verify_release(origin) if origin is not None else None
-        tokenizer_manifest_path = _safe_path(
+    with ExitStack() as stack:
+        measured = stack.enter_context(open_release(release))
+        reference = (
+            stack.enter_context(open_release(origin)) if origin is not None else None
+        )
+        origin_manifest = reference.manifest if reference is not None else None
+        tokenizer_manifest_path = safe_measurement_path(
             tokenizer.with_name("tokenizer_manifest.json")
         )
+        dependencies = capture([tokenizer, tokenizer_manifest_path])
         metadata = json.loads(tokenizer_manifest_path.read_bytes())
         if not isinstance(metadata, dict):
             raise TypeError("invalid tokenizer manifest")
+        export = tokenizer.parent.parent
+        config = export / "tokenizer.yaml"
+        if metadata.get("corpus_export") is not None:
+            dependencies.update(
+                capture([config, export / "export.json", export / "run.yaml"])
+            )
         dataset = _dataset_for_tokenizer(origin or release, tokenizer, metadata)
         if origin is not None and (
             dataset is None
@@ -109,9 +138,8 @@ def _authenticate_inputs(
                     "tokenizer_origin_documents_size": origin_manifest["files"][
                         "documents.jsonl"
                     ]["size"],
-                    "tokenizer_config_sha256": sha256_file(
-                        _safe_path(tokenizer.parent.parent / "tokenizer.yaml")
-                    ),
+                    "tokenizer_config_sha256": sha256_file(config),
                 }
             )
-        return manifest, bindings
+        unchanged(dependencies)
+        yield TokenInputs(measured, reference, bindings, dependencies)

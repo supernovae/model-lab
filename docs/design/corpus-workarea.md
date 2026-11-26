@@ -114,10 +114,10 @@ publishing their results. Sampled tokenizer fitting resolves the members
 through its authenticated export proof and keeps their recorded input
 generations through fit and audit. Native and additive mixture preparation,
 tokenizer observation, the training validation view, publication metadata,
-family inventory derivation and finalization, prior split preparation and
-protected-lineage audits also resolve their release payloads through the
-shared contract. Reference publication and the remaining payload readers are
-tracked in #567.
+family inventory derivation and finalization, prior split preparation,
+protected-lineage audits and source-token measurement also resolve their
+release payloads through the shared contract. Reference publication and the
+remaining payload readers are tracked in #567.
 
 Start with typed document, passage, annotation, duplicate-group, selection,
 entity, assertion, evidence, edge, index, and compiled sequence payloads.

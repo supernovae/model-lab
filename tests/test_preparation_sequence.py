@@ -1483,6 +1483,52 @@ def test_offline_preparation_sequence_through_native_supervision(
             "BATCH_SOURCE_BYTES": "1024",
         },
     )
+    from klab.corpus import token_denominator
+    from klab.corpus.release_verify import verification_settings
+    from klab.verification_proofs import verification_options
+
+    monkeypatch.setenv("KLAB_WORK_DIR", str(root))
+    supply = _out(paths, "measure-accepted-supply")
+    supply_receipt = json.loads(supply.read_bytes())
+    assert supply_receipt["family_inventory_sha256"] == sha256_file(family)
+    assert supply_receipt["tokenizer_origin_release_id"] == prior_release.name
+    assert all(row["source_tokens"] > 0 for row in supply_receipt["domains"].values())
+    measurement = {
+        "tokenizer_origin_release": prior_release,
+        "family_inventory": family,
+        "batch_source_bytes": 1024,
+    }
+    with verification_settings(**verification_options(root)):
+        cached = token_denominator.measure_source_tokens(
+            release, tokenizer_path, floors, supply, **measurement
+        )
+    assert cached == supply_receipt
+
+    export_sidecar = tokenizer_path.parent.parent / "export.json"
+    measure = token_denominator._measure_source_domains
+
+    def change_export_after_count(*args, **kwargs):
+        result = measure(*args, **kwargs)
+        export_sidecar.write_bytes(export_sidecar.read_bytes())
+        return result
+
+    interrupted_supply = recipe / "interrupted-supply.json"
+    with (
+        monkeypatch.context() as fault,
+        verification_settings(**verification_options(root)),
+    ):
+        fault.setattr(
+            token_denominator, "_measure_source_domains", change_export_after_count
+        )
+        with pytest.raises(ValueError, match="inputs changed during execution"):
+            token_denominator.measure_source_tokens(
+                release,
+                tokenizer_path,
+                floors,
+                interrupted_supply,
+                **measurement,
+            )
+    assert not interrupted_supply.exists()
     mixture = _out(paths, "mixture-declaration")
     _render(
         paths,
