@@ -266,6 +266,59 @@ target scan including SHA-256 took 0.062 s for the contiguous file and
 bytes fell from 643.09 MB to 377.92 MB. These timings exclude packing and
 training.
 
+### Source-coherent ordering
+
+Start with a verified reference mixture that uses `packing: contiguous`.
+Copy its declaration and add the following option to create a paired arm.
+
+```yaml
+sequence_order:
+  kind: source
+  base_declaration: /work/baseline.yaml
+  base_output: /work/baseline-mixture
+```
+
+```sh
+klab corpus materialize-mixture ORDERED.yaml --output ORDERED_MIXTURE_DIR
+```
+
+The declarations must resolve to the same selection settings. Within each
+stratum and exposure window, the output groups records by source in order
+of first appearance. It preserves the parent's order within each group and
+moves each record with its original token range. Selected documents, quota
+cuts, exposure labels, sealed segment IDs and the contiguous supervision
+mask stay fixed. The original seed sets the baseline order.
+
+The receipt pins the base receipt and schedule digests and reports source
+groups and transitions. Audit replays the base selection and derives the
+same ordering. Reseal checks the ordering against the verified base output.
+Use the new schedule path in the usual `local_token_mixture` config. A
+retry before publication rebuilds the ordered metadata from the verified
+base while the source segment files remain shared.
+
+Use `verify-mixture --reseal` to refresh a stale base proof before creating
+the paired arm, or to recover an ordered output if publication finished
+before its local proof was written. Preparing the new order creates a
+separate prepared-data identity.
+
+The table reports medians of three synthetic NVMe trials per size, using two
+CPUs and 2,048 bytes of source text per document. The reorder timed here runs
+after base verification. It reads and writes about twice the selected record
+and range bytes through scratch. It uses at most 16 open group files, with
+one scratch file per active source and exposure group.
+
+| Input documents | Sources | Selected metadata | Reorder | Source transitions |
+| --- | --- | --- | --- | --- |
+| 2,048 | 4 | 0.27 MB | 0.006 s | 787 → 3 |
+| 32,768 | 8 | 4.41 MB | 0.052 s | 14,241 → 7 |
+| 65,536 | 32 | 8.84 MB | 0.172 s | 31,678 → 31 |
+
+On the largest fixture, reading 8,192 identical shuffled block positions
+took 0.569 s for the original reference schedule and 0.815 s for the source
+order after file-page eviction advice. Storage reads rose from 61.0 MB to
+67.0 MB. Warm reads took 0.059 s and 0.060 s. Production storage locality,
+large source counts and learning effects need separate measurements.
+
 ### Offline transfer inspection
 
 ```sh

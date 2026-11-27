@@ -24,7 +24,7 @@ import numpy as np
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from klab.canonical import canonical_json
+from klab.canonical import canonical_digest, canonical_json
 from klab.config.loading import load_tokenizer_config
 from klab.config.models import DatasetConfig
 from klab.corpus.mixture_index import (
@@ -124,6 +124,14 @@ class StratumPolicy(BaseModel):
         return self
 
 
+class SourceSequenceOrder(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["source"]
+    base_declaration: Path
+    base_output: Path
+
+
 class MixtureDeclaration(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -170,6 +178,13 @@ class MixtureDeclaration(BaseModel):
     token_output: Literal["contiguous", "references"] = Field(
         default="contiguous", exclude_if=lambda value: value == "contiguous"
     )
+    sequence_order: SourceSequenceOrder | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    def referenced_cache_root(self, output: Path) -> Path:
+        origin = self.sequence_order.base_output if self.sequence_order else output
+        return token_cache_root(self.release_path.resolve(), origin.resolve().parent)
 
     @field_validator("max_exposures", mode="before")
     @classmethod
@@ -194,6 +209,12 @@ class MixtureDeclaration(BaseModel):
             raise ValueError("reference token output requires token_cache: sealed")
         if self.segment_dtype == "uint16" and self.token_cache != "sealed":
             raise ValueError("segment_dtype: uint16 requires token_cache: sealed")
+        if self.sequence_order is not None and (
+            self.token_output != "references" or self.packing != "contiguous"
+        ):
+            raise ValueError(
+                "source sequence ordering requires reference output and contiguous packing"
+            )
         if (
             not self.source_strata
             or not self.target_quotas
@@ -413,6 +434,77 @@ def materialize_mixture(declaration: Path, output: Path) -> dict:
         return _materialize_mixture(declaration, output)
 
 
+def _source_order_result(
+    spec: MixtureDeclaration, raw: bytes, destination: Path, *, audit_base: bool
+) -> tuple[dict, VerifiedSchedule]:
+    from klab.corpus.source_sequence_order import order_by_source
+
+    order = spec.sequence_order
+    assert order is not None
+    base_raw = order.base_declaration.read_bytes()
+    base_config = MixtureDeclaration.model_validate(yaml.safe_load(base_raw))
+    if base_config != spec.model_copy(update={"sequence_order": None}):
+        raise ValueError(
+            "source sequence ordering requires the same selection declaration as its base"
+        )
+    base, schedule = _verify_mixture(
+        order.base_declaration, order.base_output, audit=audit_base
+    )
+    if base["declaration_sha256"] != hashlib.sha256(base_raw).hexdigest():
+        raise ValueError("source ordering base declaration changed during verification")
+    if schedule is None:
+        raise ValueError(
+            "source sequence ordering requires a verified reference schedule"
+        )
+    members, coverage = order_by_source(
+        order.base_output / TRAIN_RECORDS,
+        base,
+        schedule,
+        destination,
+        spec.source_strata,
+        {stratum: stratum_exposures(spec, stratum) for stratum in spec.target_quotas},
+    )
+    receipt = {
+        **base,
+        **members,
+        "declaration_sha256": hashlib.sha256(raw).hexdigest(),
+        "sequence_order": {
+            "kind": order.kind,
+            "base_receipt_sha256": canonical_digest(base),
+            "base_schedule_sha256": schedule.schedule.sha256,
+            **coverage,
+        },
+    }
+    if len(canonical_json(receipt)) + 1 > MAX_RECEIPT_BYTES:
+        raise ValueError("mixture receipt-byte cap exceeded")
+    return receipt, schedule
+
+
+def _publish_source_order(spec: MixtureDeclaration, raw: bytes, output: Path) -> dict:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".source-sequence-", dir=output.parent
+    ) as path:
+        staging = Path(path)
+        receipt, _ = _source_order_result(spec, raw, staging, audit_base=False)
+        if receipt.get("completed_preparation"):
+            _require_completed_mixture_storage(spec, output)
+        write_canonical_json(staging / "receipt.json", receipt, exclusive=True)
+        sync_directory(staging)
+        rename_noreplace(staging, output)
+        sync_directory(output.parent)
+    manifest = _verified_members(spec.release_path.resolve()).manifest
+    if receipt.get("completed_preparation"):
+        _seal_completed_mixture(
+            spec, raw, output, manifest, receipt["tokenizer_sha256"], receipt
+        )
+    else:
+        _seal_native_mixture(
+            spec, raw, output, manifest, receipt["tokenizer_sha256"], receipt
+        )
+    return receipt
+
+
 def _materialize_mixture(
     declaration: Path, output: Path, *, reuse_tokens: bool = True
 ) -> dict:
@@ -422,6 +514,8 @@ def _materialize_mixture(
     output = output.resolve()
     if output.exists():
         return verify_mixture(declaration, output)
+    if spec.sequence_order is not None:
+        return _publish_source_order(spec, raw, output)
     # Everything that can refuse this output for its own sake refuses now, before
     # the hours of verification and indexing below.
     assembly, early_tokenizer_sha = (
@@ -510,22 +604,7 @@ def _materialize_mixture(
     if eos is None:
         raise ValueError("verified tokenizer lacks EOS token")
     if completed is not None:
-        cache = _completed_mixture_cache(spec)
-        bound = [
-            output,
-            spec.family_inventory.resolve(),
-            spec.tokenizer_config.resolve(),
-            load_tokenizer_config(spec.tokenizer_config).output_dir.resolve(),
-            *(item.release_path.resolve() for item in spec.additional_releases),
-        ]
-        if (
-            cache.proofs is None
-            or not cache.writable
-            or any(not p.is_relative_to(cache.root) for p in bound)
-        ):
-            raise ValueError(
-                "completed mixture requires existing trusted work-root completion storage"
-            )
+        _require_completed_mixture_storage(spec, output)
     output.parent.mkdir(parents=True, exist_ok=True)
     checkpoint_cache, checkpoint_request = _native_mixture_completion(
         spec, raw, output, manifest, tokenizer_sha
@@ -1175,7 +1254,30 @@ def _completed_mixture_cache(spec):
         cache.authority["mixture"]["retained_mixture.py"] = sha256_file(
             Path(__file__).with_name("retained_mixture.py")
         )
+    if spec.sequence_order is not None:
+        cache.authority["mixture"]["source_sequence_order.py"] = sha256_file(
+            Path(__file__).with_name("source_sequence_order.py")
+        )
     return cache
+
+
+def _require_completed_mixture_storage(spec, output):
+    cache = _completed_mixture_cache(spec)
+    bound = [
+        output,
+        spec.family_inventory.resolve(),
+        spec.tokenizer_config.resolve(),
+        load_tokenizer_config(spec.tokenizer_config).output_dir.resolve(),
+        *(item.release_path.resolve() for item in spec.additional_releases),
+    ]
+    if (
+        cache.proofs is None
+        or not cache.writable
+        or any(not p.is_relative_to(cache.root) for p in bound)
+    ):
+        raise ValueError(
+            "completed mixture requires existing trusted work-root completion storage"
+        )
 
 
 def _completed_mixture_request(spec, raw, output, manifest, tokenizer_sha):
@@ -1353,7 +1455,7 @@ def mixture_train_file(receipt: dict) -> str:
     return TRAIN_SCHEDULE if "token_schedule" in receipt else TRAIN_TOKENS
 
 
-def _reference_schedule(spec, output, receipt, tokenizer, tokenizer_sha):
+def _reference_schedule(spec, output, receipt, tokenizer, tokenizer_sha, *, memo=None):
     reference = spec.token_output == "references"
     if (
         reference != ("token_schedule" in receipt)
@@ -1365,13 +1467,30 @@ def _reference_schedule(spec, output, receipt, tokenizer, tokenizer_sha):
         return None
     schedule = verify_schedule(
         output,
-        token_cache_root(spec.release_path.resolve(), output.parent),
+        spec.referenced_cache_root(output),
         receipt,
         tokenizer.token_to_id("<eos>"),
+        memo=memo,
     )
     if schedule.token_dtype.name != spec.segment_dtype:
         raise ValueError("mixture segment encoding differs from the declaration")
     return schedule
+
+
+def _replay_source_order(spec, raw, receipt, output, *, audit_base):
+    with tempfile.TemporaryDirectory(
+        prefix=".verify-source-order-", dir=output.parent
+    ) as path:
+        expected, base = _source_order_result(
+            spec, raw, Path(path), audit_base=audit_base
+        )
+    if receipt != expected:
+        raise ValueError(
+            "source-ordered mixture differs from its verified base selection"
+        )
+    return {
+        (file.path, file.fingerprint): file for file in (*base.tokens, *base.indexes)
+    }
 
 
 _DIGEST_CHUNK = 16 * 1024 * 1024
@@ -1431,7 +1550,14 @@ def _reseal_mixture(
 
     if (output / TRAIN_RECORDS).stat().st_size != receipt["train_records_bytes"]:
         raise ValueError("mixture token export digest mismatch")
-    schedule = _reference_schedule(spec, output, receipt, tokenizer, tokenizer_sha)
+    memo = (
+        _replay_source_order(spec, raw, receipt, output, audit_base=False)
+        if spec.sequence_order
+        else None
+    )
+    schedule = _reference_schedule(
+        spec, output, receipt, tokenizer, tokenizer_sha, memo=memo
+    )
     if schedule is not None:
         _verify_records(output, receipt)
         schedule.validate_counts(row["tokens"] for row in rows(output / TRAIN_RECORDS))
@@ -1500,7 +1626,23 @@ def _verify_mixture(declaration: Path, output: Path, *, audit: bool):
         return receipt, _reference_schedule(
             spec, output, receipt, tokenizer, tokenizer_sha
         )
-    schedule = _reference_schedule(spec, output, receipt, tokenizer, tokenizer_sha)
+    if spec.sequence_order:
+        memo = _replay_source_order(spec, raw, receipt, output, audit_base=True)
+        schedule = _reference_schedule(
+            spec, output, receipt, tokenizer, tokenizer_sha, memo=memo
+        )
+    else:
+        schedule = _reference_schedule(spec, output, receipt, tokenizer, tokenizer_sha)
+        _replay_selection(declaration, output, receipt, schedule)
+    # Explicit audit can recover an unsigned/legacy output without replacing it.
+    if completed:
+        _seal_completed_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
+    else:
+        _seal_native_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
+    return receipt, schedule
+
+
+def _replay_selection(declaration, output, receipt, schedule):
     with tempfile.TemporaryDirectory(
         prefix=".verify-mixture-", dir=output.parent
     ) as temp:
@@ -1522,12 +1664,6 @@ def _verify_mixture(declaration: Path, output: Path, *, audit: bool):
             comparison["train_tokens_sha256"] = digest.hexdigest()
         if replay != comparison:
             raise ValueError("mixture receipt differs from authenticated replay")
-    # Explicit audit can recover an unsigned/legacy output without replacing it.
-    if completed:
-        _seal_completed_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
-    else:
-        _seal_native_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
-    return receipt, schedule
 
 
 def verify_mixture_tokenizer_origin(

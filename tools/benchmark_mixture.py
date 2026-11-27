@@ -14,6 +14,7 @@ import os
 import struct
 import subprocess
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -233,6 +234,7 @@ def main():
     parser.add_argument("--portable-segments", action="store_true")
     parser.add_argument("--transfer-plan", action="store_true")
     parser.add_argument("--project-selected", action="store_true")
+    parser.add_argument("--source-order-sources", type=int, default=0)
     args = parser.parse_args()
     if (
         not 1 <= args.workers <= 8
@@ -257,6 +259,11 @@ def main():
         parser.error("transfer planning requires reference token output")
     if args.project_selected and args.token_output != "references":
         parser.error("selected-range packaging requires reference token output")
+    if args.source_order_sources and (
+        args.token_output != "references"
+        or not 2 <= args.source_order_sources <= min(64, args.documents)
+    ):
+        parser.error("source ordering requires reference output and 2–64 sources")
     # Affinity also bounds the baseline's default Rayon planner. Do this before
     # importing Lab or tokenizers; no nested BLAS/Rayon pool inherits more cores.
     if hasattr(os, "sched_getaffinity"):
@@ -270,7 +277,7 @@ def main():
     import psutil
     from tokenizers import Tokenizer, models, pre_tokenizers
 
-    from klab.canonical import canonical_json
+    from klab.canonical import canonical_digest, canonical_json
     from klab.corpus.mixture import _native_mixture_completion, _schedule
     from klab.corpus.mixture_pipeline import MixtureFrontier, pipeline_request
     from klab.corpus.mixture_schedule import token_cache_root, verify_schedule
@@ -284,7 +291,11 @@ def main():
     release = workspace / "builds" / "build"
     release.mkdir(parents=True)
     (release / "manifest.json").write_text("{}\n")
-    source = workspace / "render.jsonl"
+    source_ids = [f"source-{i:02d}" for i in range(args.source_order_sources)] or [
+        "source"
+    ]
+    sources = [workspace / f"{name}.jsonl" for name in source_ids]
+    source_strata = dict.fromkeys(source_ids, "general")
     refs = workspace / "references.jsonl"
     parents = workspace / "parents.bin"
     origins = workspace / "origins.jsonl"
@@ -294,7 +305,8 @@ def main():
     origins.write_bytes(b"")
     inventory.write_bytes(b"synthetic-only\n")
     references = []
-    with source.open("wb") as stream:
+    with ExitStack() as files:
+        streams = [files.enter_context(source.open("wb")) for source in sources]
         for i in range(args.documents):
             # Deterministic duplicates, empty records and uneven lengths.
             key = i - 1 if i % 17 == 1 else i
@@ -306,9 +318,11 @@ def main():
                 ]
             )
             content = hashlib.sha256(text.encode()).hexdigest()
+            shard = i % len(sources)
+            stream = streams[shard]
             row = {
                 "document_id": str(i),
-                "source_id": "source",
+                "source_id": source_ids[shard],
                 "content_sha256": content,
                 "text": text,
                 "domains": ["general"],
@@ -320,7 +334,7 @@ def main():
             references.append(
                 [
                     str(i),
-                    0,
+                    shard,
                     offset,
                     len(raw),
                     "train",
@@ -344,13 +358,13 @@ def main():
         "references": str(refs),
         "parents": str(parents),
         "origins": str(origins),
-        "sources": [str(source)],
-        "source_ids": ["source"],
+        "sources": [str(source) for source in sources],
+        "source_ids": source_ids,
         "evidence": {
             "references": proof,
             "deduplication": proof,
             "origins": proof,
-            "sources": {"source": proof},
+            "sources": dict.fromkeys(source_ids, proof),
         },
     }
     spec = SimpleNamespace(
@@ -393,9 +407,7 @@ def main():
         scratch = staging / "index"
         scratch.mkdir()
         started = time.monotonic()
-        with RetainedMixtureIndex(
-            scratch, root, [cohort], 42, {"source": "general"}
-        ) as index:
+        with RetainedMixtureIndex(scratch, root, [cohort], 42, source_strata) as index:
             indexed = time.monotonic()
             cache, request = _native_mixture_completion(
                 spec, declaration, staging, members.manifest, tokenizer_sha
@@ -469,7 +481,11 @@ def main():
         "token_cache": args.token_cache,
         "segment_dtype": args.segment_dtype,
         "token_output": args.token_output,
-        "fixture_sha256": sha256_file(source),
+        "fixture_sha256": (
+            sha256_file(sources[0])
+            if len(sources) == 1
+            else canonical_digest([sha256_file(source) for source in sources])
+        ),
         "scratch_bytes": sum(p.stat().st_size for p in root.rglob("*") if p.is_file()),
         "results": results,
     }
@@ -488,6 +504,60 @@ def main():
             blocks=args.loader_blocks,
             seq_len=args.loader_row_tokens,
         )
+    if args.source_order_sources:
+        from klab.corpus.source_sequence_order import order_by_source
+
+        ordered = root / "source-ordered"
+        ordered.mkdir()
+        process = psutil.Process()
+        io_counters = getattr(process, "io_counters", None)
+        before = io_counters() if io_counters is not None else None
+        started = time.monotonic()
+        with verification_settings(scratch_dir=root):
+            members, coverage = order_by_source(
+                staging / "train.records.jsonl",
+                receipt,
+                schedule,
+                ordered,
+                source_strata,
+                {"general": 1},
+            )
+        elapsed = time.monotonic() - started
+        after = io_counters() if io_counters is not None else None
+        result["source_order"] = {
+            **coverage,
+            "sources": len(source_ids),
+            "seconds": elapsed,
+            "input_metadata_bytes": receipt["train_records_bytes"]
+            + schedule.schedule.size_bytes,
+            "process_read_bytes": after.read_chars - before.read_chars
+            if after is not None
+            else None,
+            "process_write_bytes": after.write_chars - before.write_chars
+            if after is not None
+            else None,
+            "schedule_sha256": members["token_schedule"]["sha256"],
+        }
+        if args.loader_blocks:
+            ordered_receipt = {**receipt, **members}
+            ordered_schedule = verify_schedule(
+                ordered,
+                schedule.cache_root,
+                ordered_receipt,
+                schedule.eos,
+                memo={
+                    (file.path, file.fingerprint): file
+                    for file in (*schedule.tokens, *schedule.indexes)
+                },
+            )
+            result["source_order"]["loaders"] = benchmark_loaders(
+                root / "ordered-loader",
+                ordered_schedule,
+                ordered_receipt,
+                ordered / "train.records.jsonl",
+                blocks=args.loader_blocks,
+                seq_len=args.loader_row_tokens,
+            )
     if args.transfer_plan:
         from klab.corpus.mixture_transfer import plan_transfer
 
