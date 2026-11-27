@@ -1087,6 +1087,9 @@ def _eval(args: argparse.Namespace) -> None:
         return
     if args.output is not None:
         raise ValueError("--output requires --panel")
+    from klab.evaluation.rankings import read_ranking, score_ranking
+
+    ranking = read_ranking(args.ranking) if args.ranking is not None else None
     loaded = load_run(
         args.run_id,
         Path(args.runs_dir),
@@ -1094,6 +1097,11 @@ def _eval(args: argparse.Namespace) -> None:
         args.backend,
         authorization=args.runtime_authorization,
     )
+    if ranking is not None:
+        result = score_ranking(loaded, *ranking)
+        path = write_inference_result(loaded.run, "ranking", result)
+        print(json.dumps({**result, "output": str(path)}, indent=2))
+        return
     bottleneck = None
     if loaded.config.evaluation.gradient_bottleneck:
         from klab.evaluation.gradient_bottleneck import GradientBottleneck
@@ -2921,8 +2929,12 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         help="Run directory (default: selected persistent state root/runs)",
     )
     evaluation.add_argument("--checkpoint")
-    evaluation.add_argument(
+    evaluation_kind = evaluation.add_mutually_exclusive_group()
+    evaluation_kind.add_argument(
         "--panel", type=Path, help="Pinned development heldout panel JSON"
+    )
+    evaluation_kind.add_argument(
+        "--ranking", type=Path, help="Score declared answer choices from JSON"
     )
     evaluation.add_argument(
         "--output", type=Path, help="New panel result file outside input roots"

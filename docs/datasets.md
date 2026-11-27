@@ -316,6 +316,13 @@ tokenizer:
 origin snapshot must stay available. Sharing a tokenizer does not make the two
 datasets' splits disjoint; check that separately.
 
+For a tokenizer fitted on a local text compilation, set the origin dataset's
+`source: local_text` and add `train_sha256` beside `manifest_sha256`.
+`train_sha256` pins the origin training file. Lab checks that file and
+replays the bounded fit selection against the tokenizer manifest before
+preparing either run. Keep the original compiled training file and its
+receipt available. The consumer can use a different compiled training file.
+
 A tokenizer fitted on a mixture names `mixture_declaration_path` and
 `mixture_declaration_sha256` in its `origin` instead of `dataset`. Lab checks the
 mixture's release and tokenizer-fitting closure; it does not replay the mixture.

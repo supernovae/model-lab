@@ -461,7 +461,7 @@ def verify_run_tokenizer(
         return verify_mixture_tokenizer_origin(
             origin.mixture_declaration_path, path, config.model.vocab_size
         )
-    return verify_tokenizer_artifact(
+    manifest = verify_tokenizer_artifact(
         path,
         source=dataset.source,
         revision=dataset.revision,
@@ -470,6 +470,58 @@ def verify_run_tokenizer(
         proof_store=proof_store,
         verification_mode=verification_mode,
     )
+    if origin is not None and origin.train_sha256 is not None:
+        _verify_local_fit(
+            path,
+            dataset,
+            manifest,
+            origin.train_sha256,
+            proof_store=proof_store,
+            verification_mode=verification_mode,
+        )
+    return manifest
+
+
+def _verify_local_fit(
+    path, dataset, manifest, digest, *, proof_store, verification_mode
+):
+    from klab.data.verification import verify_file
+    from klab.verification_proofs import artifact_fingerprint
+
+    assert dataset.train_path is not None
+    proof = verify_file(
+        dataset.train_path,
+        expected_sha256=digest,
+        proof_store=proof_store,
+        verification_mode=verification_mode,
+    )
+    contract = manifest["training_contract"]
+    # The export verifier already reproduces sampled fits against the release.
+    if "sampling" not in contract:
+        fit = TokenizerTrainConfig(
+            schema_version=1,
+            vocab_size=contract["vocab_size"],
+            min_frequency=contract["min_frequency"],
+            max_documents=contract["max_documents"],
+            output_dir=path.parent,
+            dataset=dataset,
+        )
+        stats = {}
+        for document in _bounded_documents(fit, stats, whole_documents=True):
+            # The fit digest uses NUL as the document separator.
+            if "\0" in document:
+                raise ValueError("pinned local tokenizer origin contains a NUL")
+        if (
+            dataset.train_max_tokens != contract["input_byte_budget_utf8"]
+            or stats["digest"] != contract["content_digest_sha256"]
+            or stats["bytes"] != contract["selected_input_bytes_utf8"]
+            or stats["acquired"] != contract["acquired_documents"]
+            or stats["selected"] != manifest["selected_documents"]
+            or stats["stop_reason"] != contract["stop_reason"]
+        ):
+            raise ValueError("pinned local tokenizer origin differs from tokenizer fit")
+    if artifact_fingerprint(dataset.train_path) != ((".", *proof.fingerprint),):
+        raise ValueError("pinned local tokenizer origin changed during verification")
 
 
 def _bounded_documents(

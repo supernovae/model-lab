@@ -19,6 +19,43 @@ all, because dense attention over 16,384 tokens holds `heads × 16,384²` scores
 24 GiB in FP32 for 24 heads, 12 GiB in BF16. `eval`, panels, `try` and `probe`
 all score this way. Panel results record `scoring_precision`.
 
+### Score declared answer choices
+
+Use a JSON ranking declaration with a name and one or more items. Each item
+has a unique ID, a category, a prefix, two to sixteen distinct candidates,
+and the exact answer from those candidates.
+
+```json
+{
+  "schema_version": 1,
+  "name": "routes-development",
+  "items": [
+    {
+      "id": "two-hop-1",
+      "category": "composition",
+      "prefix": "The inlet feeds the pool. The pool feeds the drain. Two links after the inlet is the",
+      "candidates": ["drain", "pool", "inlet"],
+      "answer": "drain"
+    }
+  ]
+}
+```
+
+```sh
+klab eval RUN_ID --ranking ranking.json
+```
+
+Lab uses its PyTorch probe scorer to average continuation log probability
+per token, with one space between the prefix and each candidate. Tied top
+choices split credit. Items must fit the checkpoint context and preserve
+the prefix's token boundary. Results include each choice score, chance
+accuracy, overall and category accuracy, the declaration's SHA-256, and
+the checkpoint and tokenizer identity. Compare results from the same
+declaration and tokenizer. The result is saved alongside the run's
+ordinary evaluation results. Use separate development and final
+declarations and keep final items outside model selection. The study owns
+the answer keys and split assignments.
+
 ### Bits per byte
 
 Loss per token depends on the tokenizer: a larger vocabulary makes tokens
