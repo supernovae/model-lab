@@ -102,6 +102,7 @@ class VerifiedSchedule:
     token_dtype: np.dtype
     eos: int
     target_count: int
+    projection_files: tuple[VerifiedFile, ...] = ()
 
     def copy_dependencies(self, destination: Path) -> dict[str, VerifiedFile]:
         """Own just the referenced sealed segments, reusing authenticated bytes."""
@@ -118,6 +119,13 @@ class VerifiedSchedule:
             ]
         )
         copied = {}
+        if self.projection_files:
+            for proof in self.projection_files:
+                name = proof.path.relative_to(self.cache_root).as_posix()
+                copied[name] = owned_copy(
+                    proof.path, destination / name, proof=proof
+                ).proof
+            return copied
         for tokens, index, digest in zip(
             self.tokens, self.indexes, self.manifest_sha256, strict=True
         ):
@@ -135,6 +143,10 @@ class VerifiedSchedule:
 
     def dependency_footprint(self) -> tuple[int, int]:
         """Count the authenticated payload, index and manifest bytes and files."""
+        if self.projection_files:
+            return sum(proof.size_bytes for proof in self.projection_files), len(
+                self.projection_files
+            )
         return (
             sum(proof.size_bytes for proof in (*self.tokens, *self.indexes))
             + sum(self.manifest_sizes),
@@ -142,7 +154,11 @@ class VerifiedSchedule:
         )
 
     def require_unchanged(self):
-        for proof in (self.schedule, *self.tokens, *self.indexes):
+        for proof in self.projection_files or (
+            self.schedule,
+            *self.tokens,
+            *self.indexes,
+        ):
             require_schedule_generation(proof)
 
     def ranges(self):
@@ -228,6 +244,30 @@ def _is_digest(value):
     return isinstance(value, str) and _SHA256.fullmatch(value) is not None
 
 
+def schedule_metadata(receipt: dict) -> tuple[dict, int]:
+    """Validate the logical schedule contract shared by whole and compact inputs."""
+    schedule = receipt["token_schedule"]
+    targets = sum(receipt["actual_target_tokens"].values())
+    if (
+        not isinstance(schedule, dict)
+        or schedule.keys()
+        != {"format", "encoding", "segments", "eos", "bytes", "sha256"}
+        or schedule["format"] != _FORMAT
+        or not _is_digest(schedule["encoding"])
+        or type(schedule["eos"]) is not int
+        or not 0 <= schedule["eos"] < 2**31
+        or not _is_digest(schedule["sha256"])
+        or not isinstance(schedule["segments"], list)
+        or not 0 < len(schedule["segments"]) <= receipt["records"]
+        or any(not _is_digest(segment) for segment in schedule["segments"])
+        or len(set(schedule["segments"])) != len(schedule["segments"])
+        or schedule["bytes"] != SCHEDULE_RANGE.size * receipt["records"]
+        or receipt["train_tokens_bytes"] != 4 * targets
+    ):
+        raise ValueError("invalid mixture token schedule receipt")
+    return schedule, targets
+
+
 def verify_schedule(
     output: Path,
     cache_root: Path,
@@ -238,25 +278,8 @@ def verify_schedule(
     portable: bool = False,
 ) -> VerifiedSchedule:
     """Verify the schedule bytes and exact sealed dependencies, including unused bytes."""
-    schedule = receipt["token_schedule"]
-    targets = sum(receipt["actual_target_tokens"].values())
-    if (
-        not isinstance(schedule, dict)
-        or schedule.keys()
-        != {"format", "encoding", "segments", "eos", "bytes", "sha256"}
-        or schedule["format"] != _FORMAT
-        or not _is_digest(schedule["encoding"])
-        or type(schedule["eos"]) is not int
-        or schedule["eos"] != eos
-        or not 0 <= eos < 2**31
-        or not _is_digest(schedule["sha256"])
-        or not isinstance(schedule["segments"], list)
-        or not 0 < len(schedule["segments"]) <= receipt["records"]
-        or any(not _is_digest(segment) for segment in schedule["segments"])
-        or len(set(schedule["segments"])) != len(schedule["segments"])
-        or schedule["bytes"] != SCHEDULE_RANGE.size * receipt["records"]
-        or receipt["train_tokens_bytes"] != 4 * targets
-    ):
+    schedule, targets = schedule_metadata(receipt)
+    if schedule["eos"] != eos:
         raise ValueError("invalid mixture token schedule receipt")
     path = output / TRAIN_SCHEDULE
     if symlinked(path):

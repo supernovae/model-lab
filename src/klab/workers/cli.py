@@ -313,6 +313,7 @@ def _matrix_requests(args: argparse.Namespace) -> list[dict[str, object]]:
             "stage_bundle": Path(args.stage_bundle) if args.stage_bundle else None,
             "promote": Path(args.promote) if args.promote else None,
             "include_referenced_token_segments": args.include_referenced_token_segments,
+            "project_referenced_token_segments": args.project_referenced_token_segments,
             "requirements": item.requirements,
             "preferred": item.preferred_worker,
             "matrix": {
@@ -376,6 +377,7 @@ def _experiment_resume(args: argparse.Namespace) -> None:
         worker=args.worker,
         allow_runtime_drift=args.allow_runtime_drift,
         include_referenced_token_segments=args.include_referenced_token_segments,
+        project_referenced_token_segments=args.project_referenced_token_segments,
     )
     _json(submission.model_dump(mode="json"))
 
@@ -492,6 +494,7 @@ def _submit_config(args: argparse.Namespace, config: Any) -> tuple[Any, Any]:
         stage_bundle=Path(args.stage_bundle) if args.stage_bundle else None,
         promote=Path(args.promote) if args.promote else None,
         include_referenced_token_segments=args.include_referenced_token_segments,
+        project_referenced_token_segments=args.project_referenced_token_segments,
         resource_envelope=args.resource_envelope_value,
         tokenizer_batch_documents=(
             args.tokenizer_batch_documents
@@ -635,10 +638,16 @@ def add_commands(
     )
     submit.add_argument("--stage-bundle")
     submit.add_argument("--promote")
-    submit.add_argument(
+    segment_mode = submit.add_mutually_exclusive_group()
+    segment_mode.add_argument(
         "--include-referenced-token-segments",
         action="store_true",
         help="Bundle entire referenced sealed token segments, including ranges outside the mixture",
+    )
+    segment_mode.add_argument(
+        "--project-referenced-token-segments",
+        action="store_true",
+        help="Bundle only selected ranges of the referenced token segments",
     )
     submit.add_argument("--dry-run", action="store_true")
     submit.add_argument("--max-runs", type=int, default=1000)
@@ -656,10 +665,16 @@ def add_commands(
     resume.add_argument("run_id")
     resume.add_argument("--worker")
     resume.add_argument("--allow-runtime-drift", action="store_true")
-    resume.add_argument(
+    segment_mode = resume.add_mutually_exclusive_group()
+    segment_mode.add_argument(
         "--include-referenced-token-segments",
         action="store_true",
         help="Bundle entire referenced sealed token segments, including ranges outside the mixture",
+    )
+    segment_mode.add_argument(
+        "--project-referenced-token-segments",
+        action="store_true",
+        help="Carry the selected ranges of the portable parent or project a local parent's schedule",
     )
     _store_argument(resume, default_store)
     resume.set_defaults(handler=_experiment_resume)

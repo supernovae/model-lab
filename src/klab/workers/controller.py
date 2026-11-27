@@ -351,6 +351,9 @@ class Controller:
             include_referenced_token_segments=request.get(
                 "include_referenced_token_segments", False
             ),
+            project_referenced_token_segments=request.get(
+                "project_referenced_token_segments", False
+            ),
             proof_store=self.proof_store,
             verification_mode=self.verification_mode,
         )
@@ -399,6 +402,7 @@ class Controller:
         preferred: str | None = None,
         matrix: dict | None = None,
         include_referenced_token_segments: bool = False,
+        project_referenced_token_segments: bool = False,
         resource_envelope: ResourceEnvelope | None = None,
         tokenizer_batch_documents: int = TOKENIZER_BATCH_DOCUMENTS,
         tokenizer_batch_source_bytes: int = TOKENIZER_BATCH_SOURCE_BYTES,
@@ -414,6 +418,7 @@ class Controller:
                     "preferred": preferred,
                     "matrix": matrix,
                     "include_referenced_token_segments": include_referenced_token_segments,
+                    "project_referenced_token_segments": project_referenced_token_segments,
                     "resource_envelope": resource_envelope,
                     "tokenizer_batch_documents": tokenizer_batch_documents,
                     "tokenizer_batch_source_bytes": tokenizer_batch_source_bytes,
@@ -957,7 +962,11 @@ class Controller:
             record_assignment(self.root, attempt["attempt_id"], worker)
         spec = self._model("ExperimentSpec", attempt["spec"])
         bundle_root, _ = self._dispatch_bundle(spec)
-        manifest = verify_dispatch_bundle(bundle_root)
+        manifest = verify_dispatch_bundle(
+            bundle_root,
+            proof_store=self.proof_store,
+            verification_mode=self.verification_mode,
+        )
         check = call_worker(
             worker,
             "install_bundle",
@@ -1320,6 +1329,7 @@ class Controller:
         worker: str | None = None,
         allow_runtime_drift: bool = False,
         include_referenced_token_segments: bool = False,
+        project_referenced_token_segments: bool = False,
     ) -> Any:
         parent = self.store.attempt_by_run(run_id)
         if parent is None:
@@ -1377,6 +1387,7 @@ class Controller:
                     "resume": checkpoint_path,
                     "allow_runtime_drift": allow_runtime_drift,
                     "include_referenced_token_segments": include_referenced_token_segments,
+                    "project_referenced_token_segments": project_referenced_token_segments,
                 }
             )
         ]

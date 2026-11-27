@@ -668,6 +668,30 @@ def _link_stage_assets(
     return result, refreshed
 
 
+def stage_mixture_dependencies(
+    data: PreparedData, assets: Path, mode: Literal["whole", "selected"]
+) -> dict[str, VerifiedFile]:
+    """Own the requested portable dependencies in the private input staging area."""
+    from klab.corpus.mixture_projection import PROJECTION_MANIFEST, project_dependencies
+
+    store = assets / PORTABLE_SEGMENTS
+    if store.exists():
+        if (store / PROJECTION_MANIFEST).is_file() != (mode == "selected"):
+            raise ValueError(
+                "portable token segment mode differs from the existing closure"
+            )
+        return {}
+    assert data.mixture_schedule is not None
+    if mode == "whole" and data.mixture_schedule.projection_files:
+        raise ValueError("whole token segments require the original sealed store")
+    files = (
+        project_dependencies(data.mixture_schedule, store, data.receipt.manifest_sha256)
+        if mode == "selected"
+        else data.mixture_schedule.copy_dependencies(store)
+    )
+    return {f"{PORTABLE_SEGMENTS}/{name}": proof for name, proof in files.items()}
+
+
 def materialize_prepared_inputs(
     config: RunConfig,
     destination: Path,
@@ -681,7 +705,7 @@ def materialize_prepared_inputs(
     _proofs: dict[str, VerifiedFile] | None = None,
     observer: BottleneckObserver | None = None,
     copy_observations: list[dict[str, object]] | None = None,
-    portable_mixture: bool = False,
+    portable_mixture: Literal["whole", "selected"] | None = None,
 ) -> Path:
     """Publish immutable, engine-neutral training inputs without probing a runtime.
 
@@ -793,18 +817,8 @@ def materialize_prepared_inputs(
                     observer=observer,
                 )
             )
-        if (
-            portable_mixture
-            and data.train is None
-            and not (assets / PORTABLE_SEGMENTS).exists()
-        ):
-            assert data.mixture_schedule is not None
-            copied.update(
-                (f"{PORTABLE_SEGMENTS}/{name}", proof)
-                for name, proof in data.mixture_schedule.copy_dependencies(
-                    assets / PORTABLE_SEGMENTS
-                ).items()
-            )
+        if portable_mixture is not None and data.train is None:
+            copied.update(stage_mixture_dependencies(data, assets, portable_mixture))
         _seal(
             work / "inputs.json",
             {

@@ -102,6 +102,13 @@ class HashingWriter:
         self.size += count
         return count
 
+    def seal(self, path: Path) -> VerifiedFile:
+        """Sync a new private file and bind its generation to the written bytes."""
+        os.fchmod(self.handle.fileno(), 0o600)
+        self.handle.flush()
+        os.fsync(self.handle.fileno())
+        return _written_file(path, self.digest.hexdigest(), self.size)
+
 
 @dataclass(frozen=True, init=False)
 class VerifiedPreparedData:

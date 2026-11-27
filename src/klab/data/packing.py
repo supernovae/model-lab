@@ -135,6 +135,20 @@ class PreparedData:
                 )
             yield source
 
+    def verify_logical_train(self) -> None:
+        """Authenticate a relocated stream against the prepared logical NPY digest."""
+        writer = _LogicalTokenArray(self.train_tokens)
+        step = _MIXTURE_COPY_BYTES // np.dtype(np.int32).itemsize
+        with self.open_train() as source:
+            for start in range(0, self.train_tokens, step):
+                writer.append_array(
+                    np.ascontiguousarray(source[start : start + step], dtype=np.int32)
+                )
+        if writer.metadata()["sha256"] != self.manifest["train"]["sha256"]:
+            raise ValueError(
+                "selected token projection changed the logical training stream"
+            )
+
 
 @dataclass(frozen=True)
 class PreparedPrefix:
@@ -377,6 +391,7 @@ def load_prepared_data(
             "offline reference training requires reference-only prepared data"
         )
     if reference is not None:
+        from klab.corpus.mixture_projection import PROJECTION_MANIFEST, load_projection
         from klab.corpus.mixture_schedule import PORTABLE_SEGMENTS, verify_schedule
         from klab.corpus.release_verify import verification_settings
 
@@ -398,15 +413,19 @@ def load_prepared_data(
         with verification_settings(
             proof_store=proof_store, verification_mode=verification_mode
         ):
-            mixture_schedule = verify_schedule(
-                root,
-                store,
-                mixture,
-                mixture["token_schedule"]["eos"],
-                memo=memo,
-                portable=portable,
-            )
-    return PreparedData(
+            marker = store / PROJECTION_MANIFEST
+            if portable and (marker.exists() or marker.is_symlink()):
+                mixture_schedule = load_projection(store, manifest, memo=memo)
+            else:
+                mixture_schedule = verify_schedule(
+                    root,
+                    store,
+                    mixture,
+                    mixture["token_schedule"]["eos"],
+                    memo=memo,
+                    portable=portable,
+                )
+    data = PreparedData(
         root,
         np.load(train, mmap_mode="r", allow_pickle=False)
         if reference is None
@@ -428,6 +447,13 @@ def load_prepared_data(
         verified,
         mixture_schedule,
     )
+    if mixture_schedule is not None and mixture_schedule.projection_files:
+        from klab.corpus.mixture_projection import verify_projection_replay
+
+        verify_projection_replay(
+            data, proof_store=proof_store, verification_mode=verification_mode
+        )
+    return data
 
 
 def _encoded_token_bytes(

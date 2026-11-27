@@ -31,6 +31,7 @@ from klab.owned_copy import owned_copy
 from klab.staging import (
     materialize_prepared_inputs,
     scoped_source_sha256,
+    stage_mixture_dependencies,
     verify_prepared_inputs,
     verify_stage_bundle,
 )
@@ -117,13 +118,24 @@ def _inventory(
 
 
 def _require_safe(
-    root: Path, identity: ArtifactIdentity, *, seal: VerifiedFile | None = None
+    root: Path,
+    identity: ArtifactIdentity,
+    *,
+    seal: VerifiedFile | None = None,
+    proof_store: ProofStore | None = None,
+    verification_mode: Literal["cold", "verified_reuse"] = "cold",
 ) -> VerifiedFile:
     path = _safe_member(root, identity.relative_path)
     if path is None or not path.is_file() or path.stat().st_size != identity.size_bytes:
         raise ValueError(f"missing or unsafe bundle asset: {identity.relative_path}")
     memo = {(seal.path, seal.fingerprint): seal} if seal is not None else None
-    return verify_file(path, expected_sha256=identity.sha256, memo=memo)
+    return verify_file(
+        path,
+        expected_sha256=identity.sha256,
+        memo=memo,
+        proof_store=proof_store,
+        verification_mode=verification_mode,
+    )
 
 
 def _destination(root: Path, name: str) -> Path:
@@ -517,15 +529,29 @@ def prepare_dispatch_bundle(
     extend_budget: Path | None = None,
     allow_runtime_drift: bool = False,
     include_referenced_token_segments: bool = False,
+    project_referenced_token_segments: bool = False,
     proof_store: ProofStore | None = None,
     verification_mode: Literal["cold", "verified_reuse"] = "cold",
 ) -> Any:
     """Freeze offline inputs and verified parent state without probing a device."""
     references = config.training.mixture_prepared_storage == "references"
-    if references and not include_referenced_token_segments:
+    if include_referenced_token_segments and project_referenced_token_segments:
+        raise ValueError("choose whole or selected token segments for dispatch")
+    portable_mixture = (
+        (
+            "selected"
+            if project_referenced_token_segments
+            else "whole"
+            if include_referenced_token_segments
+            else None
+        )
+        if references
+        else None
+    )
+    if references and portable_mixture is None:
         raise ValueError(
-            "offline reference training requires --include-referenced-token-segments; "
-            "whole sealed segments can include tokens outside the mixture"
+            "offline reference training requires --project-referenced-token-segments or "
+            "--include-referenced-token-segments; whole sealed segments can include tokens outside the mixture"
         )
     if config.training.mixture_loader == "references" and not references:
         raise ValueError(
@@ -576,15 +602,30 @@ def prepare_dispatch_bundle(
                     seal.path, target, proof=seal
                 ).proof
             assets = work / "assets"
-            if references and not (assets / PORTABLE_SEGMENTS).exists():
-                data = _load_bundle_data(assets, config, prepared_seals)
-                assert data.mixture_schedule is not None
-                prepared_seals.update(
-                    (f"assets/{PORTABLE_SEGMENTS}/{name}", proof)
-                    for name, proof in data.mixture_schedule.copy_dependencies(
-                        assets / PORTABLE_SEGMENTS
-                    ).items()
-                )
+            if portable_mixture is not None:
+                from klab.corpus.mixture_projection import PROJECTION_MANIFEST
+
+                store = assets / PORTABLE_SEGMENTS
+                if store.exists() and (store / PROJECTION_MANIFEST).is_file() != (
+                    portable_mixture == "selected"
+                ):
+                    raise ValueError(
+                        "resume requires the parent's portable token segment mode"
+                    )
+                if not store.exists():
+                    data = _load_bundle_data(
+                        assets,
+                        config,
+                        prepared_seals,
+                        proof_store=proof_store,
+                        verification_mode=verification_mode,
+                    )
+                    prepared_seals.update(
+                        (f"assets/{name}", proof)
+                        for name, proof in stage_mixture_dependencies(
+                            data, assets, portable_mixture
+                        ).items()
+                    )
         else:
             prepared_config = config
             if parent_details is not None:
@@ -616,7 +657,7 @@ def prepare_dispatch_bundle(
                 proof_store=proof_store,
                 verification_mode=verification_mode,
                 _proofs=prepared_seals,
-                portable_mixture=references,
+                portable_mixture=portable_mixture,
             )
             _publish_prepared_directory(prepared / "assets", work / "assets")
             prepared_seals = {
@@ -685,7 +726,12 @@ def prepare_dispatch_bundle(
             }
         )
         _write_bundle_manifest(work / "bundle.json", manifest)
-        verify_dispatch_bundle(work, _seals=prepared_seals)
+        verify_dispatch_bundle(
+            work,
+            _seals=prepared_seals,
+            proof_store=proof_store,
+            verification_mode=verification_mode,
+        )
         _publish_prepared_directory(work, output)
         _fsync_directory(output.parent)
     return manifest
@@ -772,7 +818,11 @@ def _verify_embedded_continuation(root: Path, manifest: Any, config: RunConfig) 
 
 
 def verify_dispatch_bundle(
-    root: Path, *, _seals: Mapping[str, VerifiedFile] | None = None
+    root: Path,
+    *,
+    _seals: Mapping[str, VerifiedFile] | None = None,
+    proof_store: ProofStore | None = None,
+    verification_mode: Literal["cold", "verified_reuse"] = "cold",
 ) -> Any:
     root = root.resolve(strict=True)
     manifest = _read_bundle_manifest(root / "bundle.json")
@@ -800,7 +850,11 @@ def verify_dispatch_bundle(
         names.add(identity.relative_path)
         if cache_assets is None:
             seals[identity.relative_path] = _require_safe(
-                root, identity, seal=(_seals or {}).get(identity.relative_path)
+                root,
+                identity,
+                seal=(_seals or {}).get(identity.relative_path),
+                proof_store=proof_store,
+                verification_mode=verification_mode,
             )
         else:
             _require_safe(
@@ -826,7 +880,13 @@ def verify_dispatch_bundle(
                 raise ValueError(
                     "dispatch portable token segment inventory differs from bundle"
                 )
-        _verify_bundle_inputs(root, config, seals=seals)
+        _verify_bundle_inputs(
+            root,
+            config,
+            seals=seals,
+            proof_store=proof_store,
+            verification_mode=verification_mode,
+        )
         _verify_embedded_continuation(root, manifest, config)
     return manifest
 
@@ -836,6 +896,8 @@ def _verify_bundle_inputs(
     config: RunConfig,
     *,
     seals: Mapping[str, VerifiedFile],
+    proof_store: ProofStore | None,
+    verification_mode: Literal["cold", "verified_reuse"],
 ) -> None:
     """Verify offline inputs, reusing only owned destination seals in this operation."""
     assets = bundle_root / "assets"
@@ -845,6 +907,8 @@ def _verify_bundle_inputs(
         seals,
         require_portable_segments=config.training.mixture_prepared_storage
         == "references",
+        proof_store=proof_store,
+        verification_mode=verification_mode,
     )
     tokenizer = load_tokenizer(assets / "tokenizer.json")
     if tokenizer.get_vocab_size() != config.model.vocab_size:
@@ -869,6 +933,8 @@ def _load_bundle_data(
     seals: Mapping[str, VerifiedFile],
     *,
     require_portable_segments: bool = False,
+    proof_store: ProofStore | None = None,
+    verification_mode: Literal["cold", "verified_reuse"] = "cold",
 ) -> PreparedData:
     prepared = assets / "data"
     metadata = strict_json(prepared / "manifest.json")
@@ -884,6 +950,8 @@ def _load_bundle_data(
         verification="structural",
         receipt=receipt,
         require_portable_segments=require_portable_segments,
+        proof_store=proof_store,
+        verification_mode=verification_mode,
         dependency_proofs=[
             proof
             for name, proof in seals.items()
@@ -1087,7 +1155,13 @@ def install_dispatch_bundle(
                             "logical_bytes": checked.logical_bytes,
                         }
                     )
-            _verify_bundle_inputs(root, config, seals=checked_seals)
+            _verify_bundle_inputs(
+                root,
+                config,
+                seals=checked_seals,
+                proof_store=proof_store,
+                verification_mode=verification_mode,
+            )
             _verify_embedded_continuation(root, manifest, config)
         if proof_store is not None and verification_mode == "verified_reuse":
             for item in {entry.sha256: entry for entry in identities}.values():
@@ -1186,6 +1260,8 @@ def materialize_dispatch_bundle(
             work,
             config,
             seals=copied_seals,
+            proof_store=proof_store,
+            verification_mode=verification_mode,
         )
         _verify_embedded_continuation(
             work, manifest, RunConfig.model_validate(manifest.config)
@@ -1225,6 +1301,8 @@ def materialize_dispatch_bundle(
         verify_prepared_inputs(
             input_root,
             RunConfig.model_validate(manifest.config),
+            proof_store=proof_store,
+            verification_mode=verification_mode,
             _seals={
                 name.removeprefix("assets/"): seal
                 for name, seal in copied_seals.items()

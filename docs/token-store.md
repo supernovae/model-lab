@@ -283,6 +283,8 @@ positions. The count uses the actual segment width and excludes the EOS
 added by the schedule. `unselected_token_bytes` gives the rest of the
 sealed token payload. `logical_target_bytes` gives the scheduled int32
 stream size including EOS, before padding or supervision masks.
+Projected dispatch adds `selected_ranges.rebased_schedule_bytes` and a
+small projection manifest to the selected physical bytes.
 
 After verification, inspection reads the schedule and merges overlapping
 and adjacent physical ranges. It uses bounded sort runs under
@@ -322,15 +324,39 @@ the referenced sealed segments. The worker verifies their identities and
 owns a copy in the run, so continuation can use the run even when the
 original store is unavailable.
 
-Worker dispatch ships entire referenced segments, including tokens outside
-the selected ranges. A sparse selection can ship more bytes than contiguous
-storage. The retained-mixture benchmark's `--portable-segments` option
+With `--include-referenced-token-segments`, dispatch ships entire referenced
+segments, including tokens outside the selected ranges. A sparse selection
+can ship more bytes than contiguous storage. The retained-mixture benchmark's
+`--portable-segments` option
 measures the owned copy and the subsequent verification using its file
 proofs. On ext4 over NVMe, the one-segment 65,536-document fixture packaged
 270.91 MB in 0.360 s. The copy issued 541.86 MB of process reads, including
 destination authentication. Verification of the resulting closure took
 0.95 ms and read 624 bytes. This trial excludes input preparation and
 network transfer.
+
+With `--project-referenced-token-segments`, dispatch copies each selected
+physical range once and writes a rebased schedule over the compact files.
+The original prepared manifest, record bytes, logical token digest and mask
+stay bound to the run. Cold verification checks that every projected
+position is used and replays the original packed token digest, including BOS,
+EOS and filler. Receipt reuse skips the replay after checking all member
+bytes or their current-generation file proofs. The rebased schedule costs 16
+bytes per record, and the first replay visits each scheduled exposure.
+
+The retained-mixture benchmark compares both policies with
+`--portable-segments --project-selected`. On uint16 NVMe fixtures, the
+following medians use three trials after source verification. Replay checks
+the selected coverage and original packed digest from a fresh projection.
+
+| Documents | Whole segment files | Projected files | Whole copy | Projected packaging | Projected replay |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2,048 | 8.28 MB | 4.21 MB | 0.022 s | 0.014 s | 0.014 s |
+| 32,768 | 132.48 MB | 67.34 MB | 0.169 s | 0.130 s | 0.287 s |
+| 65,536 | 136.70 MB | 134.68 MB | 0.185 s | 0.367 s | 0.364 s |
+
+The comparison covers local packaging and replay. Network throughput and
+the receiving worker's digest cache determine the transfer savings.
 
 On the same verified reference schedules, the packing benchmark compared
 contiguous and reference-only output on ext4 over NVMe. Times are medians of
