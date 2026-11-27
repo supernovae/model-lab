@@ -1716,6 +1716,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     )
 
     from klab.data.coverage import coverage as read_coverage
+    from klab.lab_mode import read_record
 
     budget = lab.json(
         "data",
@@ -1765,15 +1766,16 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     scoring_config = yaml.safe_load(run_config.read_text())
     scoring_config["evaluation"]["text_documents"] = 1
     scoring_run.write_text(yaml.safe_dump(scoring_config))
-    compared = lab.json(
+    lab.run(
         "try",
         str(delta_path),
         "--vs",
         str(scoring_run),
         "--config",
         str(policy_path),
-        "--json",
     )
+    (comparison_path,) = (lab.work / "lab" / "tries").glob("*/try.json")
+    compared = read_record(comparison_path)
     assert compared["comparison"]["comparable"]
     assert compared["comparison"]["bits_per_byte_delta"] is not None
     for arm in compared["arms"].values():
