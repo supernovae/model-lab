@@ -1244,14 +1244,61 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         == ordered
     )
 
-    source_config = yaml.safe_load(run_config.read_text())
-    source_config["dataset"].update(
-        mixture_declaration_path=str(order_declaration),
-        mixture_output_path=str(order_output),
-        train_path=ordered["train_schedule_path"],
+    from klab.corpus import lexical_topics as topics_module
+
+    lexical_declaration = tmp_path / "lexical-order.yaml"
+    ordering["sequence_order"].update(kind="lexical", max_topics=8)
+    lexical_declaration.write_text(yaml.safe_dump(ordering))
+    lexical_output = tmp_path / "lexical-order" / "mixture"
+    lexical = lab.json(
+        "corpus",
+        "materialize-mixture",
+        str(lexical_declaration),
+        "--output",
+        str(lexical_output),
     )
-    run_config = tmp_path / "source-ordered-pretrain.yaml"
-    run_config.write_text(yaml.safe_dump(source_config))
+    coverage = lexical["sequence_order"]
+    assert (
+        coverage["lexical_index"]["indexed_documents"]
+        == json.loads((release / "report.json").read_bytes())["split_counts"]["train"]
+    )
+    assert coverage["topic_records"] > 0
+    assert coverage["topic_transitions_after"] < coverage["topic_transitions_before"]
+    assert selection_pairs(mixture) == selection_pairs(lexical_output)
+    with monkeypatch.context() as warm:
+
+        def unexpected_features(*args, **kwargs):
+            pytest.fail("resealing read training text despite the verified index")
+
+        warm.setattr(topics_module, "build_lexical_index", unexpected_features)
+        lab.run(
+            "corpus",
+            "verify-mixture",
+            str(lexical_declaration),
+            "--output",
+            str(lexical_output),
+            "--reseal",
+        )
+    assert (
+        lab.json(
+            "corpus",
+            "verify-mixture",
+            str(lexical_declaration),
+            "--output",
+            str(lexical_output),
+            "--audit",
+        )
+        == lexical
+    )
+
+    lexical_config = yaml.safe_load(run_config.read_text())
+    lexical_config["dataset"].update(
+        mixture_declaration_path=str(lexical_declaration),
+        mixture_output_path=str(lexical_output),
+        train_path=lexical["train_schedule_path"],
+    )
+    run_config = tmp_path / "lexical-ordered-pretrain.yaml"
+    run_config.write_text(yaml.safe_dump(lexical_config))
     source_prepared = Path(lab.run("data", "prepare", str(run_config)))
     assert (source_prepared / "train_supervision.npy").read_bytes() == (
         prepared_dir / "train_supervision.npy"
@@ -1329,7 +1376,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     assert not (projected / "sealed").exists()
     assert not (dispatch / "assets/data/train.npy").exists()
     mixture.rename(tmp_path / "original-mixture")
-    order_output.rename(tmp_path / "original-source-order")
+    lexical_output.rename(tmp_path / "original-lexical-order")
     Path(prepared_manifest["train_reference"]["cache_root"]).rename(
         tmp_path / "original-token-store"
     )

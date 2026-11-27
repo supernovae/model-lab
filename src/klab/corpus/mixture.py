@@ -124,12 +124,21 @@ class StratumPolicy(BaseModel):
         return self
 
 
-class SourceSequenceOrder(BaseModel):
+class SequenceOrder(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["source"]
+    kind: Literal["source", "lexical"]
     base_declaration: Path
     base_output: Path
+    max_topics: int | None = Field(
+        default=None, strict=True, ge=1, le=32, exclude_if=lambda value: value is None
+    )
+
+    @model_validator(mode="after")
+    def validate_topics(self):
+        if self.kind == "source" and self.max_topics is not None:
+            raise ValueError("max_topics requires lexical sequence ordering")
+        return self
 
 
 class MixtureDeclaration(BaseModel):
@@ -178,7 +187,7 @@ class MixtureDeclaration(BaseModel):
     token_output: Literal["contiguous", "references"] = Field(
         default="contiguous", exclude_if=lambda value: value == "contiguous"
     )
-    sequence_order: SourceSequenceOrder | None = Field(
+    sequence_order: SequenceOrder | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
 
@@ -213,7 +222,7 @@ class MixtureDeclaration(BaseModel):
             self.token_output != "references" or self.packing != "contiguous"
         ):
             raise ValueError(
-                "source sequence ordering requires reference output and contiguous packing"
+                "sequence ordering requires reference output and contiguous packing"
             )
         if (
             not self.source_strata
@@ -434,10 +443,10 @@ def materialize_mixture(declaration: Path, output: Path) -> dict:
         return _materialize_mixture(declaration, output)
 
 
-def _source_order_result(
+def _sequence_order_result(
     spec: MixtureDeclaration, raw: bytes, destination: Path, *, audit_base: bool
 ) -> tuple[dict, VerifiedSchedule]:
-    from klab.corpus.source_sequence_order import order_by_source
+    from klab.corpus.sequence_order import order_sequences
 
     order = spec.sequence_order
     assert order is not None
@@ -445,25 +454,37 @@ def _source_order_result(
     base_config = MixtureDeclaration.model_validate(yaml.safe_load(base_raw))
     if base_config != spec.model_copy(update={"sequence_order": None}):
         raise ValueError(
-            "source sequence ordering requires the same selection declaration as its base"
+            "sequence ordering requires the same selection declaration as its base"
         )
     base, schedule = _verify_mixture(
         order.base_declaration, order.base_output, audit=audit_base
     )
     if base["declaration_sha256"] != hashlib.sha256(base_raw).hexdigest():
-        raise ValueError("source ordering base declaration changed during verification")
-    if schedule is None:
         raise ValueError(
-            "source sequence ordering requires a verified reference schedule"
+            "sequence ordering base declaration changed during verification"
         )
-    members, coverage = order_by_source(
-        order.base_output / TRAIN_RECORDS,
-        base,
-        schedule,
-        destination,
-        spec.source_strata,
-        {stratum: stratum_exposures(spec, stratum) for stratum in spec.target_quotas},
-    )
+    if schedule is None:
+        raise ValueError("sequence ordering requires a verified reference schedule")
+    topic_scope = nullcontext()
+    if order.kind == "lexical":
+        from klab.corpus.lexical_topics import lexical_topics
+
+        topic_scope = lexical_topics(
+            spec, base, audit_directory=destination if audit_base else None
+        )
+    with topic_scope as topics:
+        members, coverage = order_sequences(
+            order.base_output / TRAIN_RECORDS,
+            base,
+            schedule,
+            destination,
+            spec.source_strata,
+            {
+                stratum: stratum_exposures(spec, stratum)
+                for stratum in spec.target_quotas
+            },
+            topics=topics,
+        )
     receipt = {
         **base,
         **members,
@@ -480,13 +501,13 @@ def _source_order_result(
     return receipt, schedule
 
 
-def _publish_source_order(spec: MixtureDeclaration, raw: bytes, output: Path) -> dict:
+def _publish_sequence_order(spec: MixtureDeclaration, raw: bytes, output: Path) -> dict:
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
-        prefix=".source-sequence-", dir=output.parent
+        prefix=".sequence-order-", dir=output.parent
     ) as path:
         staging = Path(path)
-        receipt, _ = _source_order_result(spec, raw, staging, audit_base=False)
+        receipt, _ = _sequence_order_result(spec, raw, staging, audit_base=False)
         if receipt.get("completed_preparation"):
             _require_completed_mixture_storage(spec, output)
         write_canonical_json(staging / "receipt.json", receipt, exclusive=True)
@@ -515,7 +536,7 @@ def _materialize_mixture(
     if output.exists():
         return verify_mixture(declaration, output)
     if spec.sequence_order is not None:
-        return _publish_source_order(spec, raw, output)
+        return _publish_sequence_order(spec, raw, output)
     # Everything that can refuse this output for its own sake refuses now, before
     # the hours of verification and indexing below.
     assembly, early_tokenizer_sha = (
@@ -1255,9 +1276,13 @@ def _completed_mixture_cache(spec):
             Path(__file__).with_name("retained_mixture.py")
         )
     if spec.sequence_order is not None:
-        cache.authority["mixture"]["source_sequence_order.py"] = sha256_file(
-            Path(__file__).with_name("source_sequence_order.py")
+        cache.authority["mixture"]["sequence_order.py"] = sha256_file(
+            Path(__file__).with_name("sequence_order.py")
         )
+        if spec.sequence_order.kind == "lexical":
+            cache.authority["mixture"]["lexical_topics.py"] = sha256_file(
+                Path(__file__).with_name("lexical_topics.py")
+            )
     return cache
 
 
@@ -1477,17 +1502,15 @@ def _reference_schedule(spec, output, receipt, tokenizer, tokenizer_sha, *, memo
     return schedule
 
 
-def _replay_source_order(spec, raw, receipt, output, *, audit_base):
+def _replay_sequence_order(spec, raw, receipt, output, *, audit_base):
     with tempfile.TemporaryDirectory(
-        prefix=".verify-source-order-", dir=output.parent
+        prefix=".verify-sequence-order-", dir=output.parent
     ) as path:
-        expected, base = _source_order_result(
+        expected, base = _sequence_order_result(
             spec, raw, Path(path), audit_base=audit_base
         )
     if receipt != expected:
-        raise ValueError(
-            "source-ordered mixture differs from its verified base selection"
-        )
+        raise ValueError("ordered mixture differs from its verified base selection")
     return {
         (file.path, file.fingerprint): file for file in (*base.tokens, *base.indexes)
     }
@@ -1551,7 +1574,7 @@ def _reseal_mixture(
     if (output / TRAIN_RECORDS).stat().st_size != receipt["train_records_bytes"]:
         raise ValueError("mixture token export digest mismatch")
     memo = (
-        _replay_source_order(spec, raw, receipt, output, audit_base=False)
+        _replay_sequence_order(spec, raw, receipt, output, audit_base=False)
         if spec.sequence_order
         else None
     )
@@ -1627,7 +1650,7 @@ def _verify_mixture(declaration: Path, output: Path, *, audit: bool):
             spec, output, receipt, tokenizer, tokenizer_sha
         )
     if spec.sequence_order:
-        memo = _replay_source_order(spec, raw, receipt, output, audit_base=True)
+        memo = _replay_sequence_order(spec, raw, receipt, output, audit_base=True)
         schedule = _reference_schedule(
             spec, output, receipt, tokenizer, tokenizer_sha, memo=memo
         )
