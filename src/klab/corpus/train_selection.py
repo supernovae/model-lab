@@ -81,6 +81,36 @@ class TrainRowLanguage:
             ),
         )
 
+    def verify_source_decision(self, decision, row, *, code):
+        """Check published selection against the row in its pinned source."""
+        label = (
+            row.get("_klab_source", {}).get("language", row.get("language"))
+            if row is not None
+            else None
+        )
+        if self.decision(label, code=code) != decision:
+            raise ValueError(
+                "document row language decision differs from pinned source"
+            )
+
+
+def source_language_code_context(declaration, document_policy, raw_path):
+    """Resolve code context from the pinned declaration and input format."""
+    kinds = declaration["document_kinds"]
+    suffix = raw_path.suffix.lower()
+    if (
+        suffix in {".md", ".markdown"}
+        and "prose" in kinds
+        and document_policy["markdown_kind"] == "prose_when_declared"
+    ):
+        return False
+    qualification = declaration["acquisition"].get("qualification")
+    return kinds[0] == "code" or (
+        suffix == ".jsonl"
+        and bool(qualification)
+        and qualification["profile"] == "code"
+    )
+
 
 def train_row_language(transforms) -> TrainRowLanguage | None:
     selected = [spec for spec in transforms if ROW_LANGUAGE in spec["parameters"]]

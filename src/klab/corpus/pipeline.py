@@ -969,12 +969,8 @@ def build_identity(
         raise ValueError(
             "minimum TRAIN text size requires an ordinary native disk LM build"
         )
-    if language is not None and (
-        not large_lm_build or project.release.record_admission is not None
-    ):
-        raise ValueError(
-            "train_row_language requires native disk LM without reviewed admission"
-        )
+    if language is not None and not large_lm_build:
+        raise ValueError("train_row_language requires a native disk LM build")
     if reference_normalized_spans:
         if not large_lm_build or project.release.record_admission is not None:
             raise ValueError("referenced spans require an ordinary native disk build")
@@ -1035,9 +1031,10 @@ def build(
 
         specs = [declaration_payload(t) for t in project.transforms]
         minimum = minimum_train_bytes(specs)
-        if train_row_language(specs) is not None:
+        language = train_row_language(specs)
+        if canary is not None and language is not None:
             raise ValueError(
-                "train_row_language requires native disk LM without a canary or completed-preparation adoption"
+                "train_row_language requires native disk LM without a canary"
             )
         if canary is not None and minimum is not None:
             raise ValueError(

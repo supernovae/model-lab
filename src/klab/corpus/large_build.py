@@ -737,7 +737,9 @@ def _emit_build(
                         excluded_train[BELOW_MINIMUM] += 1
                         boundary(len(raw_doc))
                         continue
-                if language_reason == CHECK_ROW_LABEL:
+                if language is not None and (
+                    completed is not None or language_reason == CHECK_ROW_LABEL
+                ):
                     language_reason = language.document_decision(doc)
                 if language_reason:
                     excluded_train[LANGUAGE_EXCLUSIONS[language_reason]] += 1
@@ -843,15 +845,18 @@ def _emit_build(
         from klab.corpus.quota import estimate_supply
 
         selection_report = {"excluded_by_reason": dict(excluded_train)}
+        if completed is not None:
+            selection_report["source_render_ids"] = completed["source_stage_ids"]
         if minimum is not None:
             selection_report["minimum_utf8_bytes"] = minimum
-            if completed is not None:
-                selection_report["source_render_ids"] = completed["source_stage_ids"]
-            else:
+            if completed is None:
                 selection_report["sidecars"] = train_annotations.sidecars
         if language is not None:
             selection_report["row_language"] = language.report()
-            selection_report["language_sidecars"] = train_annotations.language_sidecars
+            if completed is None:
+                selection_report["language_sidecars"] = (
+                    train_annotations.language_sidecars
+                )
         report["train_selection"] = selection_report
         report["mixture_supply"] = estimate_supply(
             project.release.policy.mixture, project.release.mixture, train_bytes
