@@ -31,7 +31,7 @@ The [D1–D12 decision table](https://github.com/supernovae/model-lab/blob/b5302
 | 6. Freeze and verification | #500–#502 landed signed receipt reuse, freeze by verified rename, and resumable describe measurement. Cold verification performs full checks. Reviewed, fractional and chat releases retain signed range-index checkpoints across interruption. | Keep integrity, transformation replay and sampled audits distinct. |
 | 7. Shared work area | `StageStore`, normalized shards, and token caches exist. Most source and build artifacts are still project-scoped. | Share immutable outputs across projects, narrow identities, and protect reference closure during explicit pruning. |
 | 8–9. Operators and sidecars | #448/#451 moved choice into recorded release policy. The shared annotation path publishes text, upstream and detected language, quality, privacy, and source-local repeated-line evidence. Native TRAIN selection consumes approved predicates. The native index retains policy-independent exact groups with bounded inspection. Labeled audits cover annotations and document or passage screens. | Measure detector coverage and source quality on each planned production recipe. |
-| 10. Reference releases and mixtures | #503–#507 improved quota checks, mixture indexing, and the ordered writer. #519–#523 and #557 improved reuse and verification keys. Mixture checkpoints bind prefixes of the files that will be published. The sealed cache publishes bounded int32 or opt-in uint16 segments keyed on exact content, tokenizer behavior and physical encoding. Reference schedules bind exact segment dependencies. An opt-in direct loader reads those segments. Reference-only bundles own the schedule, records, validation and masks. Offline dispatch supports whole sealed segments or selected ranges with fidelity checks, and transfer inspection compares their physical bytes. | Measure accelerator use and batch wait at production sizes. Compare loader modes before choosing a default. Measure the transfer and replay costs of selected ranges on deployed workers. |
+| 10. Reference releases and mixtures | Mixture checkpoints bind prefixes of the files that will be published. The sealed cache publishes bounded int32 or opt-in uint16 segments keyed on exact content, tokenizer behavior and physical encoding. Reference schedules bind exact segment dependencies. An opt-in direct loader reads those segments. Reference-only bundles own the schedule, records, validation and masks. Offline dispatch supports whole sealed segments or selected ranges with fidelity checks. The [retained Workshop mixture comparison](../token-store.md#retained-workshop-mixture-comparison) supports keeping contiguous as the default. | Measure transfer and replay costs when deploying selected ranges on hosted workers. |
 | 11–12. Planner and external operators | Existing CLI, journals, preflight and dashboard supply entry points. | Add dependency plans, bounded inspection and explicitly authorized command operators. |
 | 13. Training preemption | #533 added opt-in device-layout changes under runtime optimization. #535/#537 added finished-run data cleanup and reuse. | Trainer recovery stays with #485 and #516. Corpus tracks data and schedule identity so those changes can proceed independently. |
 
@@ -439,7 +439,9 @@ from measurements. Require bounded memory and scratch, no release-sized
 copy at reference freeze, and zero re-encoding after a schedule-only
 change. Before a loader default changes, compare both modes on the same
 schedule for batch waits, access locality, host memory, step throughput,
-and accelerator utilization.
+and accelerator utilization. The [Workshop comparison](../token-store.md#retained-workshop-mixture-comparison)
+records the reference and contiguous loader decision and the production-data
+sample used to check source grouping.
 
 ### Acquisition replay measurements
 

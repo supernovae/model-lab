@@ -1592,6 +1592,18 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     assert (prepared_dir / "train_supervision.npy").read_bytes() == (
         inline_prepared / "train_supervision.npy"
     ).read_bytes()
+    compared = lab.json(
+        "data",
+        "benchmark-loader",
+        str(inline_prepared),
+        str(prepared_dir),
+        "--blocks",
+        "8",
+    )
+    assert compared["train_sha256"] == prepared_manifest["train"]["sha256"]
+    assert {
+        row["blocks"] for mode in compared["loaders"].values() for row in mode["passes"]
+    } == {8}
 
     shorter = yaml.safe_load(run_config.read_text())
     shorter["training"]["seq_len"] //= 2
