@@ -188,6 +188,36 @@ def _run(args: argparse.Namespace) -> None:
 
     root = resolve_work_dir(args.work_dir)
     command = args.corpus_command
+    if command == "mechanisms":
+        from klab.corpus.mechanism_compile import (
+            MechanismCompilation,
+            compile_mechanisms,
+            mechanism_memberships,
+        )
+        from klab.corpus.mechanisms import audit_mechanisms, simulate_mechanisms
+
+        if args.mechanism_command == "simulate":
+            result = simulate_mechanisms(root, args.declaration, plan_only=args.plan)
+        elif args.mechanism_command == "compile":
+            options = MechanismCompilation.model_validate_json(
+                args.options.read_bytes()
+            )
+            result = compile_mechanisms(root, args.key, options, plan_only=args.plan)
+        elif args.mechanism_command == "audit":
+            result = audit_mechanisms(
+                root, args.key, samples=args.samples, seed=args.seed
+            )
+        else:
+            result = mechanism_memberships(
+                root,
+                args.key,
+                args.release,
+                max_inventory_bytes=args.max_inventory_bytes,
+                max_scratch_bytes=args.max_scratch_bytes,
+                max_output_bytes=args.max_output_bytes,
+            )
+        print(json.dumps(result, sort_keys=True))
+        return
     if command == "relations":
         from klab.corpus.relation_compile import CompileRelations, compile_relations
         from klab.corpus.relations import extract_relations, inspect_relations
@@ -989,6 +1019,43 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "corpus", help="Acquire, derive, freeze and inspect corpus releases"
     )
     sub = corpus.add_subparsers(dest="corpus_command", required=True)
+    mechanisms = sub.add_parser(
+        "mechanisms", help="Simulate, compile and audit procedural worlds"
+    )
+    mechanism_sub = mechanisms.add_subparsers(dest="mechanism_command", required=True)
+    simulate = mechanism_sub.add_parser(
+        "simulate", help="Publish observations from pinned worlds"
+    )
+    simulate.add_argument("declaration", type=Path)
+    simulate.add_argument("--plan", action="store_true")
+    add_workers_flag(simulate)
+    curriculum = mechanism_sub.add_parser(
+        "compile", help="Compile a split-scoped procedural curriculum"
+    )
+    curriculum.add_argument("key")
+    curriculum.add_argument("options", type=Path)
+    curriculum.add_argument("--plan", action="store_true")
+    audit = mechanism_sub.add_parser(
+        "audit", help="Select and replay a bounded sample of worlds"
+    )
+    audit.add_argument("key")
+    audit.add_argument("--samples", type=int, default=20)
+    audit.add_argument("--seed", type=int, default=0)
+    memberships = mechanism_sub.add_parser(
+        "memberships", help="Bind mechanisms to verified TRAIN release documents"
+    )
+    memberships.add_argument("key")
+    memberships.add_argument("release", type=Path)
+    for option in ("max-inventory-bytes", "max-scratch-bytes", "max-output-bytes"):
+        memberships.add_argument(f"--{option}", type=int, required=True)
+    for action in (simulate, curriculum, audit, memberships):
+        action.add_argument("--work-dir", type=Path)
+        action.add_argument(
+            "--cold",
+            action="store_true",
+            help="Verify every byte and refresh the receipt",
+        )
+        action.set_defaults(handler=_handle)
     relations = sub.add_parser(
         "relations", help="Extract, compile and inspect typed assertions"
     )
