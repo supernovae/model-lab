@@ -124,20 +124,35 @@ class StratumPolicy(BaseModel):
         return self
 
 
+class LinkEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: Path
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    max_neighborhoods: int = Field(default=16, strict=True, ge=1, le=32)
+
+
 class SequenceOrder(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["source", "lexical"]
+    kind: Literal["source", "lexical", "links"]
     base_declaration: Path
     base_output: Path
     max_topics: int | None = Field(
         default=None, strict=True, ge=1, le=32, exclude_if=lambda value: value is None
     )
+    links: LinkEvidence | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
-    def validate_topics(self):
-        if self.kind == "source" and self.max_topics is not None:
+    def validate_grouping(self):
+        if self.kind != "lexical" and self.max_topics is not None:
             raise ValueError("max_topics requires lexical sequence ordering")
+        if (self.kind == "links") != (self.links is not None):
+            raise ValueError(
+                "links evidence is required exactly for link sequence ordering"
+            )
         return self
 
 
@@ -466,13 +481,20 @@ def _sequence_order_result(
     if schedule is None:
         raise ValueError("sequence ordering requires a verified reference schedule")
     topic_scope = nullcontext()
+    link_scope = nullcontext()
     if order.kind == "lexical":
         from klab.corpus.lexical_topics import lexical_topics
 
         topic_scope = lexical_topics(
             spec, base, audit_directory=destination if audit_base else None
         )
-    with topic_scope as topics:
+    elif order.kind == "links":
+        from klab.corpus.link_neighborhoods import link_neighborhoods
+
+        link_scope = link_neighborhoods(
+            spec, base, audit_directory=destination if audit_base else None
+        )
+    with topic_scope as topics, link_scope as neighborhoods:
         members, coverage = order_sequences(
             order.base_output / TRAIN_RECORDS,
             base,
@@ -484,6 +506,7 @@ def _sequence_order_result(
                 for stratum in spec.target_quotas
             },
             topics=topics,
+            neighborhoods=neighborhoods,
         )
     receipt = {
         **base,
@@ -1283,6 +1306,10 @@ def _completed_mixture_cache(spec):
             cache.authority["mixture"]["lexical_topics.py"] = sha256_file(
                 Path(__file__).with_name("lexical_topics.py")
             )
+        elif spec.sequence_order.kind == "links":
+            cache.authority["mixture"]["link_neighborhoods.py"] = sha256_file(
+                Path(__file__).with_name("link_neighborhoods.py")
+            )
     return cache
 
 
@@ -1382,12 +1409,15 @@ def _inventory_sha256(path: Path) -> str:
     )
 
 
-def _native_mixture_request(spec, raw, output, release_id, tokenizer_sha):
+def _native_mixture_request(
+    spec, raw, output, release_id, tokenizer_sha, *, family_sha256=None
+):
     return {
         "declaration_sha256": hashlib.sha256(raw).hexdigest(),
         "release_id": release_id,
         "release_manifest_sha256": sha256_file(spec.release_path / "manifest.json"),
-        "family_inventory_sha256": _inventory_sha256(spec.family_inventory),
+        "family_inventory_sha256": family_sha256
+        or _inventory_sha256(spec.family_inventory),
         "tokenizer_sha256": tokenizer_sha,
         "output": str(output),
     }
@@ -1411,7 +1441,9 @@ def _early_assembly(spec, raw, output, release):
     return claim_assembly(output, request), tokenizer_sha
 
 
-def _native_mixture_completion(spec, raw, output, manifest, tokenizer_sha):
+def _native_mixture_completion(
+    spec, raw, output, manifest, tokenizer_sha, *, family_sha256=None
+):
     from klab.corpus.admission_inspection_cache import InspectionCache
     from klab.verification_proofs import ProofStore
     from klab.verifier_authority import scoped_authority
@@ -1426,7 +1458,12 @@ def _native_mixture_completion(spec, raw, output, manifest, tokenizer_sha):
     # whole corpus package: unrelated Lab changes keep a completed mixture valid.
     cache.authority = {**cache.authority, "corpus": scoped_authority("native_mixture")}
     request = _native_mixture_request(
-        spec, raw, output, manifest["release_id"], tokenizer_sha
+        spec,
+        raw,
+        output,
+        manifest["release_id"],
+        tokenizer_sha,
+        family_sha256=family_sha256,
     )
     return cache, request
 
@@ -1461,6 +1498,42 @@ def inspect_mixture_transfer(
     if schedule is None:
         raise ValueError("transfer inspection requires a reference mixture schedule")
     return receipt, plan_transfer(schedule)
+
+
+def inspect_mixture_links(declaration, output, document, *, after=None, limit=20):
+    """Page over verified links using the signed mixture receipt as authority."""
+    from klab.corpus.link_neighborhoods import link_neighborhoods
+
+    with _verification_operation():
+        raw = declaration.read_bytes()
+        spec = MixtureDeclaration.model_validate(yaml.safe_load(raw))
+        if spec.sequence_order is None or spec.sequence_order.kind != "links":
+            raise ValueError("link inspection requires a link-ordered mixture")
+        output = output.resolve()
+        receipt = _read_mixture_receipt(output)
+        release = _verified_members(spec.release_path.resolve())
+        _, tokenizer_sha = _tokenizer(spec, release)
+        _authenticate_mixture_receipt(
+            spec,
+            raw,
+            output,
+            release.manifest,
+            tokenizer_sha,
+            receipt,
+            # Locate the signed receipt by its claimed digest, then require equality.
+            # The index independently checks the inventory generation or hashes it.
+            family_sha256=receipt["family_inventory_sha256"],
+        )
+        with link_neighborhoods(spec, receipt) as index:
+            if receipt["sequence_order"]["link_index"] != index.receipt:
+                raise ValueError(
+                    "link index differs from the authenticated mixture receipt"
+                )
+            return {
+                "release_id": receipt["release_id"],
+                "link_index": index.receipt,
+                **index.outgoing(document, after=after, limit=limit),
+            }
 
 
 def _verify_or_reseal(
@@ -1603,14 +1676,36 @@ def _reseal_mixture(
     return receipt, schedule
 
 
-def _verify_mixture(declaration: Path, output: Path, *, audit: bool):
-    output = output.resolve()
-    receipt_path = output / "receipt.json"
-    with receipt_path.open("rb") as stream:
+def _read_mixture_receipt(output):
+    with (output / "receipt.json").open("rb") as stream:
         raw = stream.read(MAX_RECEIPT_BYTES + 1)
     if len(raw) > MAX_RECEIPT_BYTES:
         raise ValueError("mixture receipt-byte cap exceeded")
-    receipt = json.loads(raw)
+    return json.loads(raw)
+
+
+def _authenticate_mixture_receipt(
+    spec, raw, output, manifest, tokenizer_sha, receipt, *, family_sha256=None
+):
+    if (
+        receipt.get("completed_preparation", {}).get("policy")
+        == "completed_local_preparation"
+    ):
+        _verify_completed_mixture(spec, raw, output, manifest, tokenizer_sha, receipt)
+    else:
+        cache, request = _native_mixture_completion(
+            spec, raw, output, manifest, tokenizer_sha, family_sha256=family_sha256
+        )
+        cached = cache.load("native-mixture", request, limit=MAX_RECEIPT_BYTES)
+        if cached is None or cached[0] != receipt:
+            raise ValueError(
+                "native mixture completion unavailable or changed; run verify-mixture --reseal (cheap) or --audit (full replay)"
+            )
+
+
+def _verify_mixture(declaration: Path, output: Path, *, audit: bool):
+    output = output.resolve()
+    receipt = _read_mixture_receipt(output)
     reference = "token_schedule" in receipt
     completed = (
         receipt.get("completed_preparation", {}).get("policy")
@@ -1633,19 +1728,9 @@ def _verify_mixture(declaration: Path, output: Path, *, audit: bool):
     manifest = release.manifest
     tokenizer, tokenizer_sha = _tokenizer(spec, release)
     if not audit:
-        if completed:
-            _verify_completed_mixture(
-                spec, raw, output, manifest, tokenizer_sha, receipt
-            )
-        else:
-            cache, request = _native_mixture_completion(
-                spec, raw, output, manifest, tokenizer_sha
-            )
-            cached = cache.load("native-mixture", request, limit=MAX_RECEIPT_BYTES)
-            if cached is None or cached[0] != receipt:
-                raise ValueError(
-                    "native mixture completion unavailable or changed; run verify-mixture --reseal (cheap) or --audit (full replay)"
-                )
+        _authenticate_mixture_receipt(
+            spec, raw, output, manifest, tokenizer_sha, receipt
+        )
         return receipt, _reference_schedule(
             spec, output, receipt, tokenizer, tokenizer_sha
         )

@@ -32,14 +32,21 @@ def order_sequences(
     exposure_limits: dict[str, int],
     *,
     topics=None,
+    neighborhoods=None,
 ) -> tuple[dict, dict]:
     """Stably group exact record/range pairs within each selection window."""
     scratch = scratch_root()
     size = base["train_records_bytes"] + schedule.schedule.size_bytes
+    index = topics if topics is not None else neighborhoods
+    cap = (
+        topics.max_topics
+        if topics is not None
+        else (neighborhoods.max_neighborhoods if neighborhoods is not None else None)
+    )
     inode_bound = min(
         base["records"],
-        sum(exposure_limits.values()) * (topics.max_topics + 1)
-        if topics is not None
+        sum(exposure_limits.values()) * (cap + 1)
+        if cap is not None
         else sum(exposure_limits[stratum] for stratum in source_strata.values()),
     )
     if scratch.stat().st_dev == destination.stat().st_dev:
@@ -61,15 +68,15 @@ def order_sequences(
         )
     with tempfile.TemporaryDirectory(prefix="source-sequence-", dir=scratch) as temp:
         groups, transitions, assigned = _partition(
-            records, base, schedule, Path(temp), source_strata, exposure_limits, topics
+            records, base, schedule, Path(temp), source_strata, exposure_limits, index
         )
         windows = {}
         for key, ordinal in groups.items():
             windows.setdefault(key[:2], ordinal)
         ordered = sorted(groups, key=lambda key: (windows[key[:2]], groups[key]))
         after = sum(
-            (left if topics is not None else left[2])
-            != (right if topics is not None else right[2])
+            (left if index is not None else left[2])
+            != (right if index is not None else right[2])
             for left, right in pairwise(ordered)
         )
         with (
@@ -91,7 +98,11 @@ def order_sequences(
     ):
         raise ValueError("sequence ordering changed the mixture inventory size")
     schedule.require_unchanged()
-    transition_label = "topic" if topics is not None else "source"
+    transition_label = "source"
+    if topics is not None:
+        transition_label = "topic"
+    elif neighborhoods is not None:
+        transition_label = "neighborhood"
     coverage = {
         "groups": len(groups),
         f"{transition_label}_transitions_before": transitions,
@@ -99,6 +110,8 @@ def order_sequences(
     }
     if topics is not None:
         coverage.update(lexical_index=topics.receipt, topic_records=assigned)
+    if neighborhoods is not None:
+        coverage.update(link_index=neighborhoods.receipt, linked_records=assigned)
     return (
         {
             "train_records_sha256": record_proof.sha256,
@@ -112,7 +125,7 @@ def order_sequences(
 
 
 def _partition(
-    records, base, schedule, directory, source_strata, exposure_limits, topics
+    records, base, schedule, directory, source_strata, exposure_limits, index
 ):
     groups, streams = {}, OrderedDict()
     previous, transitions, count, assigned = None, 0, 0, 0
@@ -148,11 +161,11 @@ def _partition(
                     raise ValueError(
                         "sequence ordering input token count differs from the schedule"
                     )
-                group = name if topics is None else topics.group(row["document_id"])
-                if topics is not None and group:
+                group = name if index is None else index.group(row["document_id"])
+                if index is not None and group:
                     assigned += 1
                 key = (row["stratum"], exposure, group)
-                current = group if topics is None else key
+                current = group if index is None else key
                 if previous is not None and current != previous:
                     transitions += 1
                 previous = current

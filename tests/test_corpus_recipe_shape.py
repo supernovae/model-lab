@@ -1291,14 +1291,99 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         == lexical
     )
 
-    lexical_config = yaml.safe_load(run_config.read_text())
-    lexical_config["dataset"].update(
-        mixture_declaration_path=str(lexical_declaration),
-        mixture_output_path=str(lexical_output),
-        train_path=lexical["train_schedule_path"],
+    by_stratum = {}
+    for line in (mixture / "train.records.jsonl").read_bytes().splitlines():
+        row = json.loads(line)
+        by_stratum.setdefault(row["stratum"], {})[row["document_id"]] = None
+    linked_ids = list(max(by_stratum.values(), key=len))
+    assert len(linked_ids) >= 4
+    anchors = linked_ids[-2:]
+    from_doc = linked_ids[0]
+    edges = [
+        {"from_document_id": doc, "to_document_id": anchors[i % 2]}
+        for i, doc in enumerate(linked_ids[:-2])
+    ]
+    edges.append({"from_document_id": from_doc, "to_document_id": anchors[1]})
+    held_out = next(
+        row["document_id"]
+        for line in inventory.read_bytes().splitlines()
+        if (row := json.loads(line))["split"] != "train"
     )
-    run_config = tmp_path / "lexical-ordered-pretrain.yaml"
-    run_config.write_text(yaml.safe_dump(lexical_config))
+    links_path = tmp_path / "source-links.jsonl"
+    link_declaration = tmp_path / "link-order.yaml"
+    link_output = tmp_path / "link-order" / "mixture"
+    del ordering["sequence_order"]["max_topics"]
+
+    def declare_links(graph):
+        links_path.write_bytes(b"".join(canonical_json(edge) + b"\n" for edge in graph))
+        ordering["sequence_order"].update(
+            kind="links",
+            links={
+                "path": str(links_path),
+                "sha256": sha256_file(links_path),
+                "max_neighborhoods": 2,
+            },
+        )
+        link_declaration.write_text(yaml.safe_dump(ordering))
+
+    declare_links([*edges, {"from_document_id": from_doc, "to_document_id": held_out}])
+    with pytest.raises(ValueError, match="outside the verified TRAIN family inventory"):
+        mixture_module.materialize_mixture(link_declaration, link_output)
+    assert not link_output.exists()
+    declare_links(edges)
+    linked = lab.json(
+        "corpus",
+        "materialize-mixture",
+        str(link_declaration),
+        "--output",
+        str(link_output),
+    )
+    assert linked["sequence_order"]["link_index"]["edges"] == len(edges)
+    assert linked["sequence_order"]["linked_records"] >= len(linked_ids)
+    assert selection_pairs(mixture) == selection_pairs(link_output)
+    assert (
+        lab.json(
+            "corpus",
+            "verify-mixture",
+            str(link_declaration),
+            "--output",
+            str(link_output),
+            "--audit",
+        )
+        == linked
+    )
+    inspect = (
+        "corpus",
+        "inspect-links",
+        str(link_declaration),
+        "--output",
+        str(link_output),
+        "--document",
+        from_doc,
+        "--limit",
+        "1",
+    )
+    from klab.corpus import link_neighborhoods as links_module
+
+    with monkeypatch.context() as warm:
+        warm.setattr(links_module, "build_link_index", unexpected_features)
+        warm.setattr(mixture_module, "_reference_schedule", unexpected_features)
+        warm.setattr(mixture_module, "_inventory_sha256", unexpected_features)
+        first = lab.json(*inspect)
+        second = lab.json(*inspect, "--after", first["next_after"])
+    assert first["outgoing_document_ids"] + second["outgoing_document_ids"] == sorted(
+        anchors
+    )
+    assert second["next_after"] is None
+
+    link_config = yaml.safe_load(run_config.read_text())
+    link_config["dataset"].update(
+        mixture_declaration_path=str(link_declaration),
+        mixture_output_path=str(link_output),
+        train_path=linked["train_schedule_path"],
+    )
+    run_config = tmp_path / "link-ordered-pretrain.yaml"
+    run_config.write_text(yaml.safe_dump(link_config))
     source_prepared = Path(lab.run("data", "prepare", str(run_config)))
     assert (source_prepared / "train_supervision.npy").read_bytes() == (
         prepared_dir / "train_supervision.npy"
@@ -1376,7 +1461,8 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     assert not (projected / "sealed").exists()
     assert not (dispatch / "assets/data/train.npy").exists()
     mixture.rename(tmp_path / "original-mixture")
-    lexical_output.rename(tmp_path / "original-lexical-order")
+    link_output.rename(tmp_path / "original-link-order")
+    links_path.rename(tmp_path / "original-source-links.jsonl")
     Path(prepared_manifest["train_reference"]["cache_root"]).rename(
         tmp_path / "original-token-store"
     )

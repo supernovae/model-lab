@@ -641,6 +641,18 @@ def _run(args: argparse.Namespace) -> None:
         if result["status"] != "PASS":
             raise ValueError("protected evaluation lineage collision")
         return
+    if command == "inspect-links":
+        from klab.corpus.mixture import inspect_mixture_links
+
+        result = inspect_mixture_links(
+            Path(args.declaration),
+            Path(args.output),
+            args.document,
+            after=args.after,
+            limit=args.limit,
+        )
+        print(json.dumps(result, sort_keys=True))
+        return
     if command in {"materialize-mixture", "verify-mixture"}:
         from klab.corpus.mixture import (
             inspect_mixture_transfer,
@@ -671,7 +683,7 @@ def _run(args: argparse.Namespace) -> None:
                         {
                             "reseal": (
                                 "output matches its declared ordering of the verified base selection; "
-                                "use --audit to replay the base selection"
+                                "use --audit for independent replay"
                                 if "sequence_order" in result
                                 else "output byte-identical to its receipt and "
                                 "receipt matches this declaration; schedule NOT replayed "
@@ -1347,6 +1359,16 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
                 help="Count selected, repeated and unused physical token bytes for offline dispatch",
             )
         command.set_defaults(handler=_handle)
+    command = sub.add_parser(
+        "inspect-links", help="Page through verified outgoing document links"
+    )
+    command.add_argument("declaration")
+    command.add_argument("--output", required=True)
+    command.add_argument("--document", required=True)
+    command.add_argument("--after")
+    command.add_argument("--limit", type=int, default=20)
+    _verification_flags(command)
+    command.set_defaults(handler=_handle)
     command = sub.add_parser(
         "measure-tokens", help="Measure authenticated distinct source-domain tokens"
     )
