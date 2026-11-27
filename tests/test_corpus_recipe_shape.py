@@ -648,6 +648,16 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     original_train = (
         (other_build / "lm/train.jsonl").read_bytes().splitlines(keepends=True)
     )
+    document_by_id = {
+        doc["document_id"]: doc
+        for line in (other_build / "documents.jsonl").read_bytes().split(b"\n")
+        if line
+        for doc in (json.loads(line),)
+    }
+    train_documents = [
+        document_by_id[json.loads(line)["record_id"]]
+        for line in (other_build / "lm/train.lineage.jsonl").read_bytes().splitlines()
+    ]
     threshold = (
         min(len(json.loads(row)["text"].encode("utf-8")) for row in original_train) + 1
     )
@@ -655,6 +665,10 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     selection_release["policy"]["mixture"]["total_tokens"] = 10
     release_path.write_text(yaml.safe_dump(selection_release))
     transform["parameters"]["minimum_train_utf8_bytes"] = threshold
+    transform["parameters"]["train_row_language"] = {
+        "allowed": ["en"],
+        "missing": "keep",
+    }
     transform_path.write_text(yaml.safe_dump(transform))
     planned = lab.json(*plan_args)
     assert planned["normalization_source_bytes"] == 0
@@ -669,6 +683,8 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     )
     assert stages["text_statistics"]["action"] == "verify_or_build_sidecars"
     assert "text_statistics" in stages["views"]["inputs"]
+    assert stages["source_language"]["action"] == "verify_or_build_sidecars"
+    assert "source_language" in stages["views"]["inputs"]
 
     from klab.corpus import train_selection
 
@@ -694,11 +710,19 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     selected_build = Path(lab.run(*build_args))
     assert selected_build.name == planned["build_id"]
     selected_release = Path(lab.run("corpus", "freeze", str(selected_build), "--cold"))
-    expected_train = [
-        row
-        for row in original_train
-        if len(json.loads(row)["text"].encode("utf-8")) >= threshold
-    ]
+    expected_train, disallowed = [], []
+    short = 0
+    for row, doc in zip(original_train, train_documents, strict=True):
+        if len(doc["text"].encode("utf-8")) < threshold:
+            short += 1
+        elif (
+            doc["document_kind"] != "code"
+            and (doc.get("metadata") or {}).get("language") == "fr"
+        ):
+            disallowed.append(doc["document_id"])
+        else:
+            expected_train.append(row)
+    assert disallowed
     assert 0 < len(expected_train) < len(original_train)
     assert (selected_release / "lm/train.jsonl").read_bytes() == b"".join(
         expected_train
@@ -711,8 +735,30 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         "train_selection"
     ]
     assert policy_result["excluded_by_reason"] == {
-        "below_minimum_utf8_bytes": len(original_train) - len(expected_train)
+        "below_minimum_utf8_bytes": short,
+        "row_language_not_allowed": len(disallowed),
+        "row_language_missing": 0,
     }
+
+    def change_language(path):
+        documents = path / "documents.jsonl"
+        with (
+            documents.open("rb") as source,
+            (path / "changed.jsonl").open("wb") as output,
+        ):
+            for line in source:
+                doc = json.loads(line)
+                if doc["document_id"] == disallowed[0]:
+                    doc["metadata"]["language"] = "en"
+                    line = canonical_json(doc) + b"\n"
+                output.write(line)
+        (path / "changed.jsonl").replace(documents)
+
+    forged_language = forge_release(selected_release, change_language)
+    with pytest.raises(
+        ValueError, match="row language decision differs from pinned source"
+    ):
+        lab.run("corpus", "audit", str(forged_language), "--cold")
     selected_inventory = tmp_path / "selected-family-inventory.jsonl"
     write_family_inventory(selected_release, selected_inventory)
     selected_export = Path(
@@ -767,23 +813,45 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     }
     assert used_train and used_train <= known_train
 
-    transform["parameters"]["minimum_train_utf8_bytes"] = 1
+    transform["parameters"] = {
+        "train_row_language": {"allowed": ["en", "fr"], "missing": "keep"}
+    }
     transform_path.write_text(yaml.safe_dump(transform))
     relaxed = Path(lab.run(*build_args))
     relaxed_report = json.loads((relaxed / "report.json").read_bytes())
-    assert relaxed_report["train_selection"]["sidecars"] == policy_result["sidecars"]
+    assert (
+        relaxed_report["train_selection"]["language_sidecars"]
+        == policy_result["language_sidecars"]
+    )
     assert (relaxed / "lm/train.jsonl").read_bytes() == b"".join(original_train)
     relaxed_progress = (
         relaxed.parent.parent / "progress" / f"{relaxed.name}.jsonl"
     ).read_text()
     assert (
-        "reused_text_statistics" in relaxed_progress
-        and "built_text_statistics" not in relaxed_progress
+        "reused_source_language" in relaxed_progress
+        and "built_source_language" not in relaxed_progress
     )
     assert (
         "reused_index_stage" in relaxed_progress
         and "reused_dedup_stage" in relaxed_progress
     )
+    language_option = transform["parameters"]["train_row_language"]
+    language_option["missing"] = "drop"
+    transform_path.write_text(yaml.safe_dump(transform))
+    strict_language = Path(lab.run(*build_args))
+    kept = [
+        row
+        for row, document in zip(original_train, train_documents, strict=True)
+        if document["document_kind"] == "code"
+        or (document.get("metadata") or {}).get("language")
+        in language_option["allowed"]
+    ]
+    assert 0 < len(kept) < len(original_train)
+    assert (strict_language / "lm/train.jsonl").read_bytes() == b"".join(kept)
+    strict_report = json.loads((strict_language / "report.json").read_bytes())
+    assert strict_report["train_selection"]["excluded_by_reason"][
+        "row_language_missing"
+    ] == (len(original_train) - len(kept))
     assert not normalized
     transform_path.write_bytes(original_transform)
     release_path.write_bytes(original_release)

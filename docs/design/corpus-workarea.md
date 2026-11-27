@@ -277,8 +277,10 @@ explicit execution again for a requested replay of external code.
   The source-language annotator uses the same receipt and page path. It
   keeps explicit source declarations separate from recorded row labels
   and scores. These metadata claims bind the partition receipt rather
-  than memoizing by text digest. Language detection and selection over
-  this evidence remain separate operators.
+  than memoizing by text digest. Ordinary native LM builds can select
+  TRAIN by upstream row label after duplicate resolution. Their source
+  replay checks the decision. Language detection and integration with
+  reviewed workflows remain separate work.
 - **Coherent packing first.** Compare seeded random, source-coherent,
   lexical-topic, explicit-entity and link-neighborhood schedules using
   identical natural-language bytes and exposure budgets. Assign semantic

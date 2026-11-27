@@ -458,7 +458,7 @@ def _verify_source_snapshots(
 
 def streaming_verification(identity: dict[str, Any]) -> bool:
     """Whether the bounded-memory row validator applies (no reviewed admission)."""
-    from klab.corpus.train_selection import minimum_train_bytes
+    from klab.corpus.train_selection import minimum_train_bytes, train_row_language
 
     release = identity["release"]
     lm_only = (
@@ -469,6 +469,12 @@ def streaming_verification(identity: dict[str, Any]) -> bool:
     if not lm_only and minimum_train_bytes(identity["transforms"]) is not None:
         raise ValueError(
             "minimum TRAIN text size requires ordinary disk LM verification"
+        )
+    if train_row_language(identity["transforms"]) is not None and (
+        not lm_only or release.get("record_admission") is not None
+    ):
+        raise ValueError(
+            "train_row_language requires native disk LM without reviewed admission"
         )
     return lm_only and release.get("record_admission") is None
 
@@ -575,6 +581,7 @@ def _document_rows(
     options: NormalizerOptions,
     keys: tuple[str, ...],
     include_text_bytes: bool = False,
+    language=None,
 ):
     with (
         closing(_readonly(span_database)) as db,
@@ -643,6 +650,13 @@ def _document_rows(
                 if (doc.get("structure") or {}).get("normalizer") != options.identity:
                     raise ValueError("structured document normalizer mismatch")
                 structure = bytes.fromhex(canonical_digest(doc["structure"]))
+            language_reason = (
+                language.document_decision(doc)
+                if language is not None
+                and doc["split"] == "train"
+                and doc["drop_reason"] is None
+                else None
+            )
             rows.append(
                 (
                     doc["document_id"],
@@ -655,6 +669,7 @@ def _document_rows(
                     doc["modality"],
                     json.dumps(doc["domains"]),
                     *((text_bytes,) if include_text_bytes else ()),
+                    *((language_reason,) if language is not None else ()),
                 )
             )
             replay_rows.append(
@@ -670,6 +685,7 @@ def _document_rows(
                     if byte_start is None or structure is not None
                     else None,
                     structure,
+                    *((language_reason,) if language is not None else ()),
                 )
             )
             representative = doc["representative_id"]
@@ -710,6 +726,8 @@ def _raw_group(
     raw_sha: str,
     text_field: str | None,
     options: NormalizerOptions,
+    language=None,
+    code: bool = False,
 ):
     """Replay one raw file using checked facts from the document index."""
     from klab.corpus.document_normalization import normalize_text
@@ -722,6 +740,7 @@ def _raw_group(
     ):
         current_line = current_offset = 0
         raw_rows = iter_jsonl_records(raw_stream, source=str(raw_path))
+        language_column = "row_language" if language is not None else "NULL"
         for (
             start,
             end,
@@ -730,9 +749,10 @@ def _raw_group(
             raw_digest,
             content_digest,
             structure,
+            language_reason,
         ) in db.execute(
             "SELECT line_start,line_end,byte_start,byte_end,raw_content_sha256,"
-            "content_sha256,structure_sha256 FROM replay "
+            f"content_sha256,structure_sha256,{language_column} FROM replay "
             "WHERE file=? ORDER BY line_start,document",
             (file_id,),
         ):
@@ -765,6 +785,13 @@ def _raw_group(
                     current_offset,
                 ) or digest.digest() != raw_digest:
                     raise ValueError("document raw byte range mismatch")
+                if (
+                    language_reason is not None
+                    and language.decision(None, code=code) != language_reason
+                ):
+                    raise ValueError(
+                        "document row language decision differs from pinned source"
+                    )
                 if structure is None:
                     continue
                 text = b"".join(lines).decode("utf-8")
@@ -780,6 +807,14 @@ def _raw_group(
                 ):
                     raise ValueError("document raw row content mismatch")
                 text = item[text_field]
+                if language_reason is not None:
+                    label = item.get("_klab_source", {}).get(
+                        "language", item.get("language")
+                    )
+                    if language.decision(label, code=code) != language_reason:
+                        raise ValueError(
+                            "document row language decision differs from pinned source"
+                        )
                 if structure is None:
                     seen = hashlib.sha256(normalize_text(text).encode("utf-8")).digest()
                     if seen != raw_digest or seen != content_digest:
@@ -813,6 +848,7 @@ def _replay_sources(
     checked_inputs: dict[Path, list[int]],
     proof_store: ProofStore | None,
     verification_mode: VerificationMode,
+    language=None,
 ) -> None:
     """Replay source files or reuse checks of the exact sealed replay inputs."""
     from klab.corpus import release_receipt
@@ -825,6 +861,7 @@ def _replay_sources(
         / "files"
         for source_id in {source for source, _, _, _ in groups}
     }
+    identity = receipt.get("identity", receipt.get("build_identity"))
     members = ReleaseMembers(root, receipt)
     documents = members.member("documents.jsonl")
     support = [members.member(name) for name in ("license-report.json", "sources.json")]
@@ -897,6 +934,21 @@ def _replay_sources(
                     check.index,
                     dependencies,
                 )
+        code = False
+        if language is not None:
+            declaration = identity["sources"][source_id]
+            kinds = declaration["document_kinds"]
+            code = kinds[0] == "code"
+            if (
+                raw_path.suffix.lower() in {".md", ".markdown"}
+                and "prose" in kinds
+                and identity["release"]["policy"]["documents"]["markdown_kind"]
+                == "prose_when_declared"
+            ):
+                code = False
+            qualification = declaration["acquisition"].get("qualification")
+            if raw_path.suffix.lower() == ".jsonl" and qualification:
+                code = code or qualification["profile"] == "code"
         tasks.append(
             (
                 database,
@@ -907,6 +959,8 @@ def _replay_sources(
                 file["sha256"],
                 snapshots[source_id]["declaration"]["acquisition"].get("text_field"),
                 options,
+                language,
+                code,
             )
         )
 
@@ -997,10 +1051,12 @@ def _stage_rows(
     end: int,
     selected: frozenset[str],
     minimum: int | None = None,
+    check_language: bool = False,
 ):
     db = _readonly(database)
     try:
         ids = array("q")
+        language_column = ", row_language" if check_language else ""
         for row, _, _ in range_records(Path(path), start, end):
             if (
                 not isinstance(row, dict)
@@ -1009,7 +1065,8 @@ def _stage_rows(
             ):
                 raise ValueError("LM stage record differs from selected document")
             doc = db.execute(
-                "SELECT content_sha256, split, source, dropped, rowid FROM docs WHERE id=?",
+                "SELECT content_sha256, split, source, dropped, rowid"
+                f"{language_column} FROM docs WHERE id=?",
                 (row["record_id"],),
             ).fetchone()
             text = row["text"].encode("utf-8")
@@ -1020,6 +1077,7 @@ def _stage_rows(
                 or (selected and doc[2] not in selected)
                 or doc[3] is not None
                 or (minimum is not None and doc[1] == "train" and len(text) < minimum)
+                or (check_language and doc[5])
             ):
                 raise ValueError("LM stage record differs from selected document")
             ids.append(doc[4])
@@ -1038,10 +1096,12 @@ def _view_rows(
     count: int,
     eligible_sources: frozenset[str],
     minimum: int | None = None,
+    check_language: bool = False,
 ):
     db = _readonly(database)
     try:
         ids, size = array("q"), 0
+        language_column = ", row_language" if check_language else ""
         with Path(view).open("rb") as payloads, Path(links).open("rb") as refs:
             payloads.seek(view_start)
             refs.seek(link_start)
@@ -1057,7 +1117,8 @@ def _view_rows(
                 ):
                     raise ValueError("invalid LM record or lineage")
                 found = db.execute(
-                    "SELECT content_sha256, split, dropped, source, rowid FROM docs WHERE id=?",
+                    "SELECT content_sha256, split, dropped, source, rowid"
+                    f"{language_column} FROM docs WHERE id=?",
                     (ref["record_id"],),
                 ).fetchone()
                 text = row["text"].encode("utf-8")
@@ -1072,6 +1133,7 @@ def _view_rows(
                     or (
                         minimum is not None and split == "train" and len(text) < minimum
                     )
+                    or (check_language and found[5])
                 ):
                     raise ValueError("invalid LM record or lineage")
                 if found[3] not in eligible_sources:
@@ -1167,7 +1229,7 @@ def release_row_index_inputs(
     checkpointed: bool,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Bind the row index keys to the exact files and verification rules."""
-    from klab.corpus.train_selection import minimum_train_bytes
+    from klab.corpus.train_selection import minimum_train_bytes, train_row_language
 
     producer = verifier_digest("release") if checkpointed else None
     file_bindings = {
@@ -1178,6 +1240,8 @@ def release_row_index_inputs(
         for name, members in paths.items()
     }
     common = {"producer": producer, "normalizer": options.model_dump(mode="json")}
+    transforms = identity.get("transforms", ())
+    language = train_row_language(transforms)
     return (
         {
             **common,
@@ -1193,9 +1257,10 @@ def release_row_index_inputs(
             "keys": identity["release"]["policy"]["duplicates"]["keys"],
             **(
                 {"include_text_bytes": True}
-                if minimum_train_bytes(identity.get("transforms", ())) is not None
+                if minimum_train_bytes(transforms) is not None or language is not None
                 else {}
             ),
+            **({"row_language": language.report()} if language is not None else {}),
         },
     )
 
@@ -1354,18 +1419,30 @@ def _release_row_indexes(
             result["rows"] = db.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
 
     def build_documents(directory, result):
+        from klab.corpus.train_selection import train_row_language
+
         phase("spans", *spans_paths)
         span_database, spans = run("spans", span_inputs, build_spans)
         files_database = str(Path(span_database).with_name("files.sqlite"))
         include_text_bytes = document_inputs.get("include_text_bytes", False)
+        language = (
+            train_row_language(identity["transforms"])
+            if "row_language" in document_inputs
+            else None
+        )
         byte_column = ", utf8_bytes INTEGER" if include_text_bytes else ""
-        placeholders = ",".join("?" for _ in range(9 + include_text_bytes))
+        language_column = ", row_language INTEGER" if language is not None else ""
+        replay_columns = _REPLAY_COLUMNS + language_column
+        placeholders = ",".join(
+            "?" for _ in range(9 + include_text_bytes + (language is not None))
+        )
+        replay_placeholders = ",".join("?" for _ in range(9 + (language is not None)))
 
         def index_documents(db, evidence, spool):
             db.execute(
                 "CREATE TABLE docs (id TEXT, source TEXT, split TEXT, "
                 "representative TEXT, dropped TEXT, content_sha256 BLOB, "
-                f"source_family TEXT, modality TEXT, domains TEXT{byte_column})"
+                f"source_family TEXT, modality TEXT, domains TEXT{byte_column}{language_column})"
             )
             db.execute(
                 "ATTACH DATABASE ? AS span_files",
@@ -1380,7 +1457,7 @@ def _release_row_indexes(
                 docs, replay, keys, size = rows
                 db.executemany(f"INSERT INTO docs VALUES ({placeholders})", docs)
                 spool.executemany(
-                    "INSERT INTO replay VALUES (?,?,?,?,?,?,?,?,?)", replay
+                    f"INSERT INTO replay VALUES ({replay_placeholders})", replay
                 )
                 evidence.executemany("INSERT INTO duplicate_keys VALUES (?,?,?)", keys)
                 advance(len(docs), size)
@@ -1398,6 +1475,7 @@ def _release_row_indexes(
                         options,
                         tuple(document_inputs["keys"]),
                         include_text_bytes,
+                        language,
                     )
                     for start, end in chunk_ranges(documents_path)
                 ),
@@ -1439,7 +1517,7 @@ def _release_row_indexes(
                 "CREATE TABLE duplicate_keys "
                 "(method INTEGER NOT NULL, key BLOB NOT NULL, representative BLOB NOT NULL)"
             )
-            spool.execute(f"CREATE TABLE replay ({_REPLAY_COLUMNS})")
+            spool.execute(f"CREATE TABLE replay ({replay_columns})")
             index_documents(db, evidence, spool)
         with closing(_readonly(str(evidence_path))) as evidence:
             evidence.execute("PRAGMA cache_size=-8192")
@@ -1466,7 +1544,7 @@ def _release_row_indexes(
             )
             db.execute("PRAGMA replay_input.cache_size=-8192")
             db.execute(
-                f"CREATE TABLE replay ({_REPLAY_COLUMNS}, "
+                f"CREATE TABLE replay ({replay_columns}, "
                 "PRIMARY KEY(file,line_start,document)) WITHOUT ROWID"
             )
             copied = db.execute(
@@ -1507,7 +1585,9 @@ def _validate_rows_streaming(
     and the checked facts without revisiting the release payloads.
     """
     from klab.corpus.train_selection import (
+        LANGUAGE_EXCLUSIONS,
         minimum_train_bytes,
+        train_row_language,
         verify_train_selection_report,
     )
 
@@ -1524,6 +1604,7 @@ def _validate_rows_streaming(
     members = ReleaseMembers(root, receipt)
     identity = receipt.get("identity", receipt.get("build_identity"))
     minimum = minimum_train_bytes(identity["transforms"])
+    language = train_row_language(identity["transforms"])
     options = _release_normalizer(identity)
     pinned_snapshots = {row["source_id"]: row["sha256"] for row in receipt["snapshots"]}
     if len(pinned_snapshots) != len(receipt["snapshots"]) or pinned_snapshots != {
@@ -1602,6 +1683,7 @@ def _validate_rows_streaming(
                 checked_inputs=checked_inputs,
                 proof_store=proof_store,
                 verification_mode=verification_mode,
+                language=language,
             )
 
             # The index inserts dense positive row IDs and never deletes rows.
@@ -1611,15 +1693,32 @@ def _validate_rows_streaming(
                     "SELECT source, COUNT(*) FROM docs WHERE dropped IS NULL GROUP BY source"
                 )
             )
-            excluded_by_source = {}
+            size_exclusions = {}
             if minimum is not None:
-                excluded_by_source = dict(
+                size_exclusions = dict(
                     db.execute(
                         "SELECT source, COUNT(*) FROM docs WHERE dropped IS NULL AND split='train' "
                         "AND utf8_bytes < ? GROUP BY source",
                         (minimum,),
                     )
                 )
+            excluded_by_source = Counter(size_exclusions)
+            language_exclusions = Counter(
+                dict.fromkeys(LANGUAGE_EXCLUSIONS.values(), 0)
+            )
+            if language is not None:
+                transform_sources = (
+                    frozenset(identity["transforms"][0]["inputs"]) or sources.keys()
+                )
+                for source, reason, count in db.execute(
+                    "SELECT source, row_language, COUNT(*) FROM docs "
+                    "WHERE dropped IS NULL AND split='train' AND row_language>0 "
+                    "AND utf8_bytes>=? GROUP BY source, row_language",
+                    (minimum or 0,),
+                ):
+                    excluded_by_source[source] += count
+                    if source in transform_sources:
+                        language_exclusions[LANGUAGE_EXCLUSIONS[reason]] += count
 
             def expected_rows(selected):
                 return sum(
@@ -1664,7 +1763,15 @@ def _validate_rows_streaming(
                     run_tasks(
                         _stage_rows,
                         (
-                            (database, str(stage_path), start, end, selected, minimum)
+                            (
+                                database,
+                                str(stage_path),
+                                start,
+                                end,
+                                selected,
+                                minimum,
+                                language is not None,
+                            )
                             for start, end in chunk_ranges(stage_path)
                         ),
                         partial(consume, coverage),
@@ -1688,13 +1795,14 @@ def _validate_rows_streaming(
                 if (shapes is None or "raw_document" in shapes)
                 and (wanted_origins is None or origins[source] in wanted_origins)
             )
-            if minimum is not None:
+            if minimum is not None or language is not None:
                 available = Counter()
+                language_filter = "AND row_language=0 " if language is not None else ""
                 for source, domains, size in db.execute(
                     "SELECT source, domains, SUM(utf8_bytes) FROM docs "
                     "WHERE dropped IS NULL AND split='train' AND utf8_bytes>=? "
-                    "GROUP BY source, domains",
-                    (minimum,),
+                    f"{language_filter}GROUP BY source, domains",
+                    (minimum or 0,),
                 ):
                     if source in eligible_sources:
                         for domain in json.loads(domains):
@@ -1703,11 +1811,11 @@ def _validate_rows_streaming(
                     _load(root / "report.json"),
                     release,
                     minimum,
-                    sum(
-                        excluded_by_source.get(source, 0) for source in allowed_sources
-                    ),
+                    sum(size_exclusions.get(source, 0) for source in allowed_sources),
                     available,
                     documents,
+                    language=language,
+                    language_exclusions=language_exclusions,
                 )
             expected = expected_rows(eligible_sources)
             with document_coverage(
@@ -1736,6 +1844,7 @@ def _validate_rows_streaming(
                                 min(VIEW_LINES, view_lines - index * VIEW_LINES),
                                 eligible_sources,
                                 minimum,
+                                language is not None,
                             )
                             for index, (view_start, link_start) in enumerate(
                                 zip(view_starts, link_starts, strict=True)

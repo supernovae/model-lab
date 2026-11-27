@@ -346,10 +346,10 @@ _MAX_DOCUMENT_CACHE_BYTES = 1024**3
 class _SQLBuildRows:
     """The ordinary builder's ordered inputs to the shared release writer."""
 
-    def __init__(self, connection, prepared, text_sizes=None):
+    def __init__(self, connection, prepared, annotations=None):
         self.connection = connection
         self.prepared = prepared
-        self.text_sizes = text_sizes
+        self.annotations = annotations
 
     def span_rows(self, after: int | None):
         with ExitStack() as sources:
@@ -374,7 +374,7 @@ class _SQLBuildRows:
                 yield rowid, raw.removesuffix(b"\n")
 
     def documents(self, after: str | None):
-        ordinal = "d.rowid" if self.text_sizes is not None else "NULL"
+        ordinal = "d.rowid" if self.annotations is not None else "NULL"
         references = self.connection.execute(
             "SELECT d.shard,d.document_offset,d.document_length,d.split,"
             f"x.representative_id,x.drop_reason,d.document_id,{ordinal} "
@@ -397,7 +397,7 @@ class _SQLBuildRows:
                 ) in references:
                     stream = self._document_stream(streams, shard)
                     raw = read_file_range(stream, offset, length)
-                    size = self.text_sizes[rowid] if rowid is not None else None
+                    evidence = self.annotations[rowid] if rowid is not None else None
                     yield (
                         raw.removesuffix(b"\n"),
                         split,
@@ -405,7 +405,7 @@ class _SQLBuildRows:
                         reason,
                         doc_id,
                         doc_id,
-                        size,
+                        evidence,
                     )
                 return
             batch = []
@@ -480,7 +480,7 @@ class _SQLBuildRows:
         for raw, (_, _, _, split, representative, reason, doc_id, rowid) in zip(
             payloads, batch, strict=True
         ):
-            size = self.text_sizes[rowid] if rowid is not None else None
+            evidence = self.annotations[rowid] if rowid is not None else None
             yield (
                 raw.removesuffix(b"\n"),
                 split,
@@ -488,7 +488,7 @@ class _SQLBuildRows:
                 reason,
                 doc_id,
                 doc_id,
-                size,
+                evidence,
             )
 
     def family_splits(self):
@@ -548,27 +548,41 @@ def _emit_build(
     diagnostics: Path | None = None,
     span_partitions: list[dict[str, Any]] | None = None,
     span_projection: dict[str, Any] | None = None,
-    train_text_sizes=None,
+    train_annotations=None,
 ) -> None:
     from klab.corpus.measurement import summarize_release
-    from klab.corpus.train_selection import BELOW_MINIMUM, minimum_train_bytes
+    from klab.corpus.train_selection import (
+        BELOW_MINIMUM,
+        CHECK_ROW_LABEL,
+        LANGUAGE_EXCLUSIONS,
+        minimum_train_bytes,
+        train_row_language,
+    )
 
-    ordered_rows = ordered_rows or _SQLBuildRows(connection, prepared, train_text_sizes)
+    ordered_rows = ordered_rows or _SQLBuildRows(
+        connection, prepared, train_annotations
+    )
     sources = source_declarations(project, lock)
     rights = rights_report(project, sources, rights_files)
     source_origins = {source.id: source.origin for source in project.sources}
     release_spec = declaration_payload(project.release)
     stage_spec = declaration_payload(transform)
     minimum = minimum_train_bytes([stage_spec])
+    language = train_row_language([stage_spec])
+    filtering = minimum is not None or language is not None
     completed = identity.get("completed_preparation")
-    if completed is None and (minimum is None) != (train_text_sizes is None):
-        raise ValueError("TRAIN selection requires verified text-statistics sizes")
+    if completed is None and filtering != (train_annotations is not None):
+        raise ValueError("TRAIN selection requires verified sidecars")
     stage_id = stage_spec["id"]
     selected_sources = set(stage_spec["inputs"])
     tally = Tally()
     lm_counts: Counter[str] = Counter()
     train_bytes: Counter[str] = Counter()
-    excluded_train = 0
+    excluded_train = Counter()
+    if minimum is not None:
+        excluded_train[BELOW_MINIMUM] = 0
+    if language is not None:
+        excluded_train.update(dict.fromkeys(LANGUAGE_EXCLUSIONS.values(), 0))
     count = 0
     stage_count = 0
     stage_digest = hashlib.sha256()
@@ -623,8 +637,8 @@ def _emit_build(
                 state["document_cursor"],
             )
             count, stage_count = state["count"], state["stage_count"]
-            if minimum is not None:
-                excluded_train = state["excluded_train"]
+            if filtering:
+                excluded_train.update(state["excluded_train"])
                 train_bytes.update(state["selected_train_bytes"])
             with (staging / f"stages/{stage_id}.jsonl").open("rb") as prefix:
                 for index, line in enumerate(prefix):
@@ -657,7 +671,7 @@ def _emit_build(
                             "excluded_train": excluded_train,
                             "selected_train_bytes": train_bytes,
                         }
-                        if minimum is not None
+                        if filtering
                         else {}
                     ),
                 }
@@ -679,7 +693,7 @@ def _emit_build(
             reason,
             document_id,
             document_cursor,
-            annotated_size,
+            annotation,
         ) in stack.enter_context(closing(document_rows)):
             doc = json.loads(raw_doc)
             if doc["document_id"] != document_id:
@@ -711,13 +725,22 @@ def _emit_build(
             selected_for_stage = (
                 not selected_sources or doc["source_id"] in selected_sources
             )
-            if selected_for_stage and minimum is not None and split == "train":
-                if completed is not None:
-                    # The completed renderer already authenticated this source
-                    # body. Measure the decoded text while emitting the views.
-                    annotated_size = len(text.encode("utf-8"))
-                if annotated_size < minimum:
-                    excluded_train += 1
+            if selected_for_stage and filtering and split == "train":
+                size, language_reason = (
+                    annotation if annotation is not None else (None, 0)
+                )
+                if minimum is not None:
+                    if size is None:
+                        # Completed source renders were authenticated before emission.
+                        size = len(text.encode("utf-8"))
+                    if size < minimum:
+                        excluded_train[BELOW_MINIMUM] += 1
+                        boundary(len(raw_doc))
+                        continue
+                if language_reason == CHECK_ROW_LABEL:
+                    language_reason = language.document_decision(doc)
+                if language_reason:
+                    excluded_train[LANGUAGE_EXCLUSIONS[language_reason]] += 1
                     boundary(len(raw_doc))
                     continue
             if selected_for_stage:
@@ -742,9 +765,11 @@ def _emit_build(
                 _output(views[split], {"text": text})
                 _output(links[split], {"record_id": record_id, "split": split})
                 lm_counts[split] += 1
-                if minimum is not None and split == "train":
+                if filtering and split == "train":
+                    if size is None:
+                        size = len(text.encode("utf-8"))
                     for domain in doc["domains"]:
-                        train_bytes[domain] += annotated_size
+                        train_bytes[domain] += size
                 progress.update(output_records=1)
             boundary(len(raw_doc))
         boundary(0, finished=True)
@@ -814,18 +839,20 @@ def _emit_build(
         duplicate_groups=group_count,
         warnings=warnings,
     )
-    if minimum is not None:
+    if filtering:
         from klab.corpus.quota import estimate_supply
 
-        report["train_selection"] = {
-            "minimum_utf8_bytes": minimum,
-            "excluded_by_reason": {BELOW_MINIMUM: excluded_train},
-            **(
-                {"source_render_ids": completed["source_stage_ids"]}
-                if completed is not None
-                else {"sidecars": train_text_sizes.sidecars}
-            ),
-        }
+        selection_report = {"excluded_by_reason": dict(excluded_train)}
+        if minimum is not None:
+            selection_report["minimum_utf8_bytes"] = minimum
+            if completed is not None:
+                selection_report["source_render_ids"] = completed["source_stage_ids"]
+            else:
+                selection_report["sidecars"] = train_annotations.sidecars
+        if language is not None:
+            selection_report["row_language"] = language.report()
+            selection_report["language_sidecars"] = train_annotations.language_sidecars
+        report["train_selection"] = selection_report
         report["mixture_supply"] = estimate_supply(
             project.release.policy.mixture, project.release.mixture, train_bytes
         )
@@ -1475,14 +1502,21 @@ def build_large(
             progress.update(phase="writing_views")
         from klab.corpus.train_selection import (
             minimum_train_bytes,
-            open_train_text_sizes,
+            open_train_annotations,
+            train_row_language,
         )
 
-        sizes = None
-        if minimum_train_bytes([declaration_payload(transform)]) is not None:
-            progress.update(phase="text_statistics")
-            sizes = selection.enter_context(
-                open_train_text_sizes(work_root, prepared, connection, progress)
+        specs = [declaration_payload(transform)]
+        minimum, language = minimum_train_bytes(specs), train_row_language(specs)
+        annotations = None
+        if minimum is not None or language is not None:
+            progress.update(
+                phase="train_annotations" if language else "text_statistics"
+            )
+            annotations = selection.enter_context(
+                open_train_annotations(
+                    work_root, prepared, connection, minimum, language, progress
+                )
             )
             progress.update(phase="writing_views")
         _emit_build(
@@ -1504,7 +1538,7 @@ def build_large(
             diagnostics=root / "diagnostics" / f"{build_id}.json",
             span_partitions=span_partitions,
             span_projection=span_projection,
-            train_text_sizes=sizes,
+            train_annotations=annotations,
         )
         require_prepared_generation()
         if any(

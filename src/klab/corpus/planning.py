@@ -36,7 +36,7 @@ from klab.corpus.project import (
 )
 from klab.corpus.release import consumed_release
 from klab.corpus.shards import range_file_identity
-from klab.corpus.train_selection import minimum_train_bytes
+from klab.corpus.train_selection import minimum_train_bytes, train_row_language
 from klab.safe_io import symlinked
 from klab.workspace_preflight import check_storage
 
@@ -494,17 +494,18 @@ def plan_build(
         "verification_candidate_source_bytes": None,
         "build_scratch_bytes": None,
     }
-    minimum = minimum_train_bytes([declaration_payload(t) for t in project.transforms])
+    specs = [declaration_payload(t) for t in project.transforms]
+    minimum, language = minimum_train_bytes(specs), train_row_language(specs)
+    annotations = {}
     if minimum is not None:
-        plan["stages"][4]["inputs"].append("text_statistics")
-        plan["stages"].insert(
-            2,
-            {
-                "id": "text_statistics",
-                "inputs": ["normalize"],
-                "minimum_train_utf8_bytes": minimum,
-            },
-        )
+        annotations["text_statistics"] = {"minimum_train_utf8_bytes": minimum}
+    if language is not None:
+        annotations["source_language"] = {"train_row_language": language.report()}
+    plan["stages"][4]["inputs"].extend(annotations)
+    plan["stages"][2:2] = [
+        {"id": name, "inputs": ["normalize"], **params}
+        for name, params in annotations.items()
+    ]
     if not uses_disk_lm_builder(project, list(project.transforms)):
         return {
             **plan,
@@ -567,7 +568,7 @@ def plan_build(
                 "index",
                 "deduplicate",
                 "views",
-                "text_statistics",
+                *annotations,
             ):
                 if name not in stage_by_id:
                     continue
@@ -633,8 +634,8 @@ def plan_build(
         stage_by_id["index"]["action"] = "await_normalization"
         stage_by_id["deduplicate"]["action"] = "await_index"
         stage_by_id["views"]["action"] = "await_deduplication"
-        if minimum is not None:
-            stage_by_id["text_statistics"]["action"] = (
+        for name in annotations:
+            stage_by_id[name]["action"] = (
                 "await_normalization" if pending else "verify_or_build_sidecars"
             )
         stage_by_id["freeze"]["action"] = "plan_after_build"

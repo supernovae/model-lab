@@ -9,24 +9,29 @@ import struct
 import sys
 import tempfile
 from array import array
-from contextlib import contextmanager
+from contextlib import ExitStack, closing, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from klab.corpus.artifact_inventory import parse_normalized_partition_id
 from klab.corpus.project import MixturePolicy
 from klab.corpus.quota import estimate_supply
 from klab.corpus.release_verify import scratch_root
+from klab.corpus.source_language import annotate_source_language
 from klab.corpus.text_statistics import annotate_normalized
 from klab.workspace_preflight import check_storage, require_storage
 
 MINIMUM = "minimum_train_utf8_bytes"
 BELOW_MINIMUM = "below_minimum_utf8_bytes"
+ROW_LANGUAGE = "train_row_language"
+LANGUAGE_EXCLUSIONS = {1: "row_language_not_allowed", 2: "row_language_missing"}
 # The documented text-statistics v1 sidecar row, independent of the producer.
 _STATISTICS = struct.Struct("<32sIII")
+_LANGUAGE = struct.Struct("<32sIBd")
 _UINT32 = struct.Struct("<I")
 _BATCH_ROWS = 8192
 _DIGEST = re.compile(r"[0-9a-f]{64}")
+CHECK_ROW_LABEL = 255
 
 
 def minimum_train_bytes(transforms) -> int | None:
@@ -42,41 +47,110 @@ def minimum_train_bytes(transforms) -> int | None:
     return value
 
 
-def _verified_rows(sidecar):
+def _usable_label(value):
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= 64
+        and bool(value.strip())
+        and len(value.encode("utf-8")) <= 64
+    )
+
+
+@dataclass(frozen=True)
+class TrainRowLanguage:
+    allowed: frozenset[str]
+    missing: str
+
+    def report(self):
+        return {"allowed": sorted(self.allowed), "missing": self.missing}
+
+    def decision(self, label, *, code=False):
+        if code:
+            return 0
+        if not _usable_label(label):
+            return 2 if self.missing == "drop" else 0
+        return 0 if label in self.allowed else 1
+
+    def document_decision(self, doc):
+        metadata = doc.get("metadata") or {}
+        return self.decision(
+            metadata.get("language"),
+            code=(
+                doc["document_kind"] == "code"
+                or metadata.get("qualification_profile") == "code"
+            ),
+        )
+
+
+def train_row_language(transforms) -> TrainRowLanguage | None:
+    selected = [spec for spec in transforms if ROW_LANGUAGE in spec["parameters"]]
+    if not selected:
+        return None
+    if len(transforms) != 1 or selected[0]["kind"] != "lm_text":
+        raise ValueError(f"{ROW_LANGUAGE} requires a single LM text transform")
+    value = selected[0]["parameters"][ROW_LANGUAGE]
+    if not isinstance(value, dict) or set(value) != {"allowed", "missing"}:
+        raise ValueError(f"{ROW_LANGUAGE} requires allowed and missing")
+    labels = value["allowed"]
+    if (
+        not isinstance(labels, list)
+        or not labels
+        or not all(_usable_label(label) for label in labels)
+        or len(set(labels)) != len(labels)
+        or value["missing"] not in ("keep", "drop")
+    ):
+        raise ValueError(
+            f"{ROW_LANGUAGE} requires unique labels and missing: keep or drop"
+        )
+    return TrainRowLanguage(frozenset(labels), value["missing"])
+
+
+def _verified_rows(sidecar, kind, row):
     payload = sidecar["payload"]
     count = sidecar["documents"]
     if (
-        sidecar["artifact_type"] != "text-statistics"
+        sidecar["artifact_type"] != kind
         or sidecar["schema_version"] != 1
-        or payload["bytes"] != count * _STATISTICS.size
+        or payload["bytes"] != count * row.size
     ):
-        raise ValueError("unsupported text-statistics sidecar format")
+        raise ValueError(f"unsupported {kind} sidecar format")
     digest = hashlib.sha256()
     with Path(payload["path"]).open("rb") as stream:
         for offset in range(0, count, _BATCH_ROWS):
-            size = min(_BATCH_ROWS, count - offset) * _STATISTICS.size
+            size = min(_BATCH_ROWS, count - offset) * row.size
             block = stream.read(size)
             if len(block) != size:
-                raise ValueError("truncated text-statistics sidecar")
+                raise ValueError(f"truncated {kind} sidecar")
             digest.update(block)
-            yield from _STATISTICS.iter_unpack(block)
+            yield from row.iter_unpack(block)
         if stream.read(1) or digest.hexdigest() != payload["sha256"]:
-            raise ValueError("text-statistics sidecar digest differs from its receipt")
+            raise ValueError(f"{kind} sidecar digest differs from its receipt")
 
 
-class TrainTextSizes:
-    """One four-byte size per native index row, addressed by dense row ID."""
+class TrainAnnotations:
+    """Optional fixed-width selections addressed by the dense native row ID."""
 
-    def __init__(self, mapping: mmap.mmap, sidecars: list[dict[str, Any]]):
-        self.mapping = mapping
+    def __init__(self, sizes, languages, sidecars, language_sidecars):
+        self.sizes = sizes
+        self.languages = languages
         self.sidecars = sidecars
+        self.language_sidecars = language_sidecars
 
-    def __getitem__(self, rowid: int) -> int:
-        return _UINT32.unpack_from(self.mapping, (rowid - 1) * _UINT32.size)[0]
+    def __getitem__(self, rowid):
+        offset = rowid - 1
+        size = (
+            _UINT32.unpack_from(self.sizes, offset * _UINT32.size)[0]
+            if self.sizes is not None
+            else None
+        )
+        language = self.languages[offset] if self.languages is not None else 0
+        return size, language
 
 
 @contextmanager
-def open_train_text_sizes(work_root, prepared, connection, progress=None):
+def open_train_annotations(
+    work_root, prepared, connection, minimum, language, progress=None
+):
     """Join normalized-order sidecars to the existing native index in one scan."""
     # Native document row IDs are dense. The endpoint lookup avoids a second
     # full index scan, and the ordered join below checks every ordinal.
@@ -84,57 +158,149 @@ def open_train_text_sizes(work_root, prepared, connection, progress=None):
         "SELECT COALESCE(MAX(rowid), 0) FROM documents"
     ).fetchone()[0]
     scratch = scratch_root()
-    require_storage([check_storage(scratch, projected_bytes=count * _UINT32.size)])
+    width = _UINT32.size * (minimum is not None) + (language is not None)
+    require_storage([check_storage(scratch, projected_bytes=count * width)])
     indexed = iter(
         connection.execute(
             "SELECT rowid, shard, document_id FROM documents ORDER BY rowid"
         )
     )
-    sidecars = []
+    sidecars, language_sidecars = [], []
     observations = set()
     rowid = 0
-    with tempfile.TemporaryFile(dir=scratch) as output:
+
+    def sidecar(partition, kind, annotate, layout, inventory):
+        evidence = annotate(work_root, partition)
+        if evidence["input"]["partition"] != partition:
+            raise ValueError(f"{kind} sidecar names a different partition")
+        inventory.append(
+            {
+                **evidence["input"],
+                "computation_key": evidence["computation_key"],
+                "payload_sha256": evidence["payload"]["sha256"],
+                "documents": evidence["documents"],
+            }
+        )
+        action = "reused" if evidence["reused"] else "built"
+        observations.add(f"{action}_{kind.replace('-', '_')}")
+        return evidence, _verified_rows(evidence, kind, layout)
+
+    with ExitStack() as stack:
+        output = (
+            stack.enter_context(tempfile.TemporaryFile(dir=scratch))
+            if minimum is not None
+            else None
+        )
+        decisions = (
+            stack.enter_context(tempfile.TemporaryFile(dir=scratch))
+            if language is not None
+            else None
+        )
         widths = array("I")
-        if widths.itemsize != _UINT32.size:
+        outcomes = bytearray()
+        if output is not None and widths.itemsize != _UINT32.size:
             raise ValueError("host does not provide four-byte text size entries")
         for shard, partition in enumerate(prepared):
             identifier = f"{partition.parent.name}/{partition.name}"
-            sidecar = annotate_normalized(work_root, identifier)
-            if sidecar["input"]["partition"] != identifier:
-                raise ValueError("text-statistics sidecar names a different partition")
-            sidecars.append(
-                {
-                    **sidecar["input"],
-                    "computation_key": sidecar["computation_key"],
-                    "payload_sha256": sidecar["payload"]["sha256"],
-                    "documents": sidecar["documents"],
-                }
-            )
-            for doc_id, size, _, _ in _verified_rows(sidecar):
-                rowid += 1
-                if next(indexed, None) != (rowid, shard, doc_id.hex()):
-                    raise ValueError(
-                        "text-statistics rows differ from the native document index"
+            with ExitStack() as inputs:
+                primary = aligned_language = None
+                if output is not None:
+                    _, rows = sidecar(
+                        identifier,
+                        "text-statistics",
+                        annotate_normalized,
+                        _STATISTICS,
+                        sidecars,
                     )
-                widths.append(size)
-                if len(widths) == _BATCH_ROWS:
-                    _write_sizes(output, widths)
-            observations.add(
-                "reused_text_statistics"
-                if sidecar["reused"]
-                else "built_text_statistics"
-            )
-        _write_sizes(output, widths)
+                    primary = inputs.enter_context(closing(rows))
+                if decisions is not None:
+                    evidence, rows = sidecar(
+                        identifier,
+                        "source-language",
+                        annotate_source_language,
+                        _LANGUAGE,
+                        language_sidecars,
+                    )
+                    language_rows = inputs.enter_context(closing(rows))
+                    if primary is None:
+                        primary = language_rows
+                    else:
+                        aligned_language = language_rows
+                    labels = evidence["row_labels"]
+                    label_decisions = [
+                        language.decision(None),
+                        *(language.decision(label) for label in labels),
+                    ]
+                for record in primary:
+                    rowid += 1
+                    if next(indexed, None) != (rowid, shard, record[0].hex()):
+                        kind = (
+                            "text-statistics"
+                            if output is not None
+                            else "source-language"
+                        )
+                        raise ValueError(
+                            f"{kind} rows differ from the native document index"
+                        )
+                    if output is not None:
+                        widths.append(record[1])
+                        if len(widths) == _BATCH_ROWS:
+                            _write_sizes(output, widths)
+                    if decisions is not None:
+                        language_record = record
+                        if aligned_language is not None:
+                            language_record = next(aligned_language, None)
+                            if (
+                                language_record is None
+                                or language_record[0] != record[0]
+                            ):
+                                raise ValueError(
+                                    "source-language rows differ from the native document index"
+                                )
+                        _, label, code, _ = language_record
+                        if code not in (0, 1):
+                            raise ValueError("invalid source-language code context")
+                        if label == 2**32 - 1:
+                            # The v1 sidecar combines malformed labels and
+                            # dictionary overflow. The writer already decodes
+                            # the original row and can distinguish those cases.
+                            result = CHECK_ROW_LABEL
+                        elif label < len(label_decisions):
+                            result = label_decisions[label]
+                        else:
+                            raise ValueError("invalid source-language label code")
+                        outcomes.append(0 if code else result)
+                        if len(outcomes) == _BATCH_ROWS:
+                            decisions.write(outcomes)
+                            outcomes.clear()
+                if (
+                    aligned_language is not None
+                    and next(aligned_language, None) is not None
+                ):
+                    raise ValueError(
+                        "source-language rows exceed the native document index"
+                    )
+        if output is not None:
+            _write_sizes(output, widths)
+        if decisions is not None:
+            decisions.write(outcomes)
         if rowid != count or next(indexed, None) is not None:
-            raise ValueError(
-                "text-statistics sidecars do not cover the native document index"
-            )
+            raise ValueError("TRAIN sidecars do not cover the native document index")
         if progress is not None:
             for event in sorted(observations):
                 progress.record(event)
-        output.flush()
-        with mmap.mmap(output.fileno(), 0, access=mmap.ACCESS_READ) as mapping:
-            yield TrainTextSizes(mapping, sidecars)
+
+        def map_rows(stream):
+            if stream is None or not count:
+                return None
+            stream.flush()
+            return stack.enter_context(
+                mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ)
+            )
+
+        yield TrainAnnotations(
+            map_rows(output), map_rows(decisions), sidecars, language_sidecars
+        )
 
 
 def _write_sizes(output, widths):
@@ -151,19 +317,39 @@ def verify_train_selection_report(
     expected_exclusions,
     available,
     documents,
+    *,
+    language=None,
+    language_exclusions=None,
 ):
     """Verify aggregate reasons and supply against independently checked text."""
     selection = report.get("train_selection")
+    expected = {BELOW_MINIMUM: expected_exclusions} if minimum is not None else {}
+    if language is not None:
+        expected.update(language_exclusions)
     if (
         not isinstance(selection, dict)
         or selection.get("minimum_utf8_bytes") != minimum
-        or selection.get("excluded_by_reason") != {BELOW_MINIMUM: expected_exclusions}
-        or not isinstance(selection.get("sidecars"), list)
+        or selection.get("excluded_by_reason") != expected
+        or selection.get("row_language") != (language.report() if language else None)
     ):
         raise ValueError("TRAIN selection report differs from verified documents")
+    if minimum is not None:
+        _verify_sidecar_inventory(selection.get("sidecars"), documents)
+    if language is not None:
+        _verify_sidecar_inventory(selection.get("language_sidecars"), documents)
+    policy = MixturePolicy.model_validate(release["policy"]["mixture"])
+    if report.get("mixture_supply") != estimate_supply(
+        policy, release["mixture"], available
+    ):
+        raise ValueError("TRAIN mixture supply differs from verified selection")
+
+
+def _verify_sidecar_inventory(sidecars, documents):
+    if not isinstance(sidecars, list):
+        raise ValueError("invalid TRAIN selection sidecar inventory")  # noqa: TRY004 - invalid serialized artifact
     inventory = set()
     count = 0
-    for sidecar in selection["sidecars"]:
+    for sidecar in sidecars:
         if not isinstance(sidecar, dict) or not isinstance(
             sidecar.get("partition"), str
         ):
@@ -192,8 +378,3 @@ def verify_train_selection_report(
         raise ValueError(
             "TRAIN selection sidecar inventory differs from document count"
         )
-    policy = MixturePolicy.model_validate(release["policy"]["mixture"])
-    if report.get("mixture_supply") != estimate_supply(
-        policy, release["mixture"], available
-    ):
-        raise ValueError("TRAIN mixture supply differs from verified selection")

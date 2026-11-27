@@ -625,10 +625,12 @@ def _materialize_mixture(
     report = json.loads(members.member("report.json").read_bytes())
     verified_selection = False
     if "train_selection" in report:
-        from klab.corpus.train_selection import minimum_train_bytes
+        from klab.corpus.train_selection import minimum_train_bytes, train_row_language
 
+        specs = manifest["build_identity"]["transforms"]
         verified_selection = (
-            minimum_train_bytes(manifest["build_identity"]["transforms"]) is not None
+            minimum_train_bytes(specs) is not None
+            or train_row_language(specs) is not None
         )
     requested = report.get("requested_mixture")
     total_quota = sum(spec.target_quotas.values())
