@@ -17,6 +17,7 @@ import sqlite3
 import struct
 import threading
 from collections import OrderedDict
+from contextlib import ExitStack, closing
 from pathlib import Path
 
 from klab.canonical import canonical_digest
@@ -25,8 +26,10 @@ from klab.corpus.admission_inspection_cache import (
     capture,
     unchanged,
 )
+from klab.corpus.build_stages import implementation_digests
 from klab.corpus.completed_preparation import _producer
 from klab.corpus.completed_release import verify_retained_release
+from klab.corpus.jsonl_records import records_from_path
 from klab.corpus.mixture_index import MAX_ROW_BYTES, MixtureIndex, document_rank
 from klab.corpus.release import ReleaseMembers
 from klab.corpus.split_runs import (
@@ -36,8 +39,10 @@ from klab.corpus.split_runs import (
     rows,
     write_rows,
 )
-from klab.training.manifest import sha256_file
+from klab.corpus.train_selection import minimum_train_bytes
 from klab.verification_proofs import read_trusted_small as _small
+
+_DOCUMENT_ID = re.compile(r"[0-9a-f]{64}")
 
 
 def _phase(
@@ -155,6 +160,30 @@ def prepared_release(root, release):
         raise ValueError("retained mixture release escapes work root")
     manifest = verify_retained_release(release)
     identity = manifest["build_identity"]
+    members = ReleaseMembers(release, manifest)
+    report = json.loads(members.member("report.json").read_bytes())
+    minimum = minimum_train_bytes(identity["transforms"])
+    view_count = report["view_counts"]["lm"]["train"]
+    selection = None
+    if minimum is None:
+        if view_count != report["split_counts"]["train"]:
+            raise ValueError(
+                "additive release TRAIN view does not cover its kept TRAIN documents"
+            )
+    else:
+        recorded = report["train_selection"]
+        if (
+            recorded["minimum_utf8_bytes"] != minimum
+            or recorded["source_render_ids"]
+            != identity["completed_preparation"]["source_stage_ids"]
+        ):
+            raise ValueError("retained TRAIN selection evidence differs from its build")
+        name = "lm/train.lineage.jsonl"
+        selection = {
+            "path": str(members.member(name)),
+            "sha256": manifest["files"][name]["sha256"],
+            "rows": view_count,
+        }
     request = identity["completed_preparation"]["request"]
     workspace = release.parent.parent
     stage_root = workspace / "build-stages" / canonical_digest(request)
@@ -224,6 +253,7 @@ def prepared_release(root, release):
         "documents": refs["documents"],
         "parents": dedupe["parents"],
         "origins": origins["origins"],
+        "selection": selection,
         "sources": sources,
         "source_ids": sorted(identity["lock"]),
         "evidence": {
@@ -309,16 +339,55 @@ def _cross_release_isolation(directory, cohorts):
     return {"files": [item], "overlaps": overlaps}
 
 
+def _selected_train_ids(selection):
+    """Stream the manifest-bound LM selection without reading its text payload."""
+    previous, count = "", 0
+    source = records_from_path(
+        Path(selection["path"]),
+        max_record_bytes=4096,
+        expected_sha256=selection["sha256"],
+    )
+    with closing(source):
+        for record in source:
+            row = record.value
+            doc_id = row.get("record_id") if isinstance(row, dict) else None
+            if (
+                not isinstance(doc_id, str)
+                or not _DOCUMENT_ID.fullmatch(doc_id)
+                or set(row) != {"record_id", "split"}
+                or row["split"] != "train"
+                or doc_id <= previous
+            ):
+                raise ValueError("invalid or unordered retained TRAIN selection")
+            previous = doc_id
+            count += 1
+            yield doc_id
+    if count != selection["rows"]:
+        raise ValueError("retained TRAIN selection count differs from its release")
+
+
 def _ranked(directory, cohorts, seed, strata, order_policy=None):
     """Sort kept TRAIN offsets from prior native metadata, not document bodies."""
 
     def candidates():
         for cohort_index, cohort in enumerate(cohorts):
             count = cohort["documents"]
-            with Path(cohort["parents"]).open("rb") as stream:
+            with ExitStack() as stack:
+                stream = stack.enter_context(Path(cohort["parents"]).open("rb"))
                 if Path(cohort["parents"]).stat().st_size != count * 8:
                     raise ValueError("retained deduplication index size differs")
+                selection = cohort.get("selection")
+                selected = (
+                    stack.enter_context(closing(_selected_train_ids(selection)))
+                    if selection is not None
+                    else None
+                )
+                wanted = next(selected, None) if selected is not None else None
                 if not count:
+                    if wanted is not None:
+                        raise ValueError(
+                            "retained TRAIN selection lacks a kept reference"
+                        )
                     continue
                 with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as parents:
                     seen = 0
@@ -337,12 +406,21 @@ def _ranked(directory, cohorts, seed, strata, order_policy=None):
                             current = parent
                         if current != ordinal or row[8] or row[4] != "train":
                             continue
+                        doc_id = row[0]
+                        if selected is not None:
+                            if wanted is None or doc_id < wanted:
+                                continue
+                            if doc_id != wanted:
+                                raise ValueError(
+                                    "retained TRAIN selection lacks a kept reference"
+                                )
+                            wanted = next(selected, None)
                         shard = row[1]
                         if type(shard) is not int or not 0 <= shard < len(
                             cohort["sources"]
                         ):
                             raise ValueError("retained source index differs")
-                        stratum, family, doc_id = row[12], row[11], row[0]
+                        stratum, family = row[12], row[11]
                         source_id = cohort["source_ids"][shard]
                         if strata.get(source_id) != stratum or stratum not in row[10]:
                             raise ValueError("retained source stratum differs")
@@ -360,6 +438,10 @@ def _ranked(directory, cohorts, seed, strata, order_policy=None):
                         ]
                     if seen != count:
                         raise ValueError("retained reference count differs")
+                    if wanted is not None:
+                        raise ValueError(
+                            "retained TRAIN selection lacks a kept reference"
+                        )
 
     ordered = external_sort(candidates(), directory / "ranked")
     return {"files": [ordered], "ranked": ordered["path"], "rows": ordered["rows"]}
@@ -406,6 +488,8 @@ class RetainedMixtureIndex(MixtureIndex):
                     *cohort["sources"],
                 ]
             )
+            if selection := cohort.get("selection"):
+                paths.append(selection["path"])
             if "release_path" in cohort:
                 release = Path(cohort["release_path"])
                 members = ReleaseMembers(release, cohort["manifest"])
@@ -431,11 +515,9 @@ class RetainedMixtureIndex(MixtureIndex):
                     paths.append(proof["proof_path"])
         self.dependencies = capture(paths)
         request = {
-            "producer": {
-                "retained_mixture.py": sha256_file(Path(__file__)),
-                "split_runs.py": sha256_file(Path(__file__).with_name("split_runs.py")),
-                "mixture.py": sha256_file(Path(__file__).with_name("mixture.py")),
-            },
+            "producer": implementation_digests(
+                "retained_mixture.py", "split_runs.py", "mixture.py", "jsonl_records.py"
+            ),
             "releases": [cohort["release_id"] for cohort in cohorts],
             "evidence": [cohort["evidence"] for cohort in cohorts],
             "seed": seed,

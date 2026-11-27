@@ -1021,10 +1021,10 @@ def build(
     if reuse_completed_preparation or canary is not None:
         from klab.corpus.train_selection import minimum_train_bytes
 
-        if (
-            minimum_train_bytes([declaration_payload(t) for t in project.transforms])
-            is not None
-        ):
+        minimum = minimum_train_bytes(
+            [declaration_payload(t) for t in project.transforms]
+        )
+        if canary is not None and minimum is not None:
             raise ValueError(
                 "minimum TRAIN text size requires an ordinary native disk LM build"
             )

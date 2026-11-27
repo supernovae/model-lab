@@ -560,7 +560,8 @@ def _emit_build(
     release_spec = declaration_payload(project.release)
     stage_spec = declaration_payload(transform)
     minimum = minimum_train_bytes([stage_spec])
-    if (minimum is None) != (train_text_sizes is None):
+    completed = identity.get("completed_preparation")
+    if completed is None and (minimum is None) != (train_text_sizes is None):
         raise ValueError("TRAIN selection requires verified text-statistics sizes")
     stage_id = stage_spec["id"]
     selected_sources = set(stage_spec["inputs"])
@@ -710,15 +711,15 @@ def _emit_build(
             selected_for_stage = (
                 not selected_sources or doc["source_id"] in selected_sources
             )
-            if (
-                selected_for_stage
-                and minimum is not None
-                and split == "train"
-                and annotated_size < minimum
-            ):
-                excluded_train += 1
-                boundary(len(raw_doc))
-                continue
+            if selected_for_stage and minimum is not None and split == "train":
+                if completed is not None:
+                    # The completed renderer already authenticated this source
+                    # body. Measure the decoded text while emitting the views.
+                    annotated_size = len(text.encode("utf-8"))
+                if annotated_size < minimum:
+                    excluded_train += 1
+                    boundary(len(raw_doc))
+                    continue
             if selected_for_stage:
                 output = {"record_id": record_id, "text": text, "split": split}
                 encoded = canonical_json(output)
@@ -819,7 +820,11 @@ def _emit_build(
         report["train_selection"] = {
             "minimum_utf8_bytes": minimum,
             "excluded_by_reason": {BELOW_MINIMUM: excluded_train},
-            "sidecars": train_text_sizes.sidecars,
+            **(
+                {"source_render_ids": completed["source_stage_ids"]}
+                if completed is not None
+                else {"sidecars": train_text_sizes.sidecars}
+            ),
         }
         report["mixture_supply"] = estimate_supply(
             project.release.policy.mixture, project.release.mixture, train_bytes
