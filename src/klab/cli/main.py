@@ -1564,6 +1564,7 @@ def _lab_lookup_failure(args: argparse.Namespace, error: Exception) -> None:
 def _try(args: argparse.Namespace) -> None:
     """Lab mode: YAML delta (or config) vs baseline -> one scored comparison."""
     from klab.lab_mode import run_try, summarize
+    from klab.probes.lm_eval_adapter import LmEvalUnavailable
 
     try:
         record, path = run_try(
@@ -1606,7 +1607,7 @@ def _try(args: argparse.Namespace) -> None:
                 else None,
             },
         )
-    except (ValueError, OSError) as error:
+    except (ValueError, OSError, LmEvalUnavailable) as error:
         raise SystemExit(f"klab try: {error}") from None
     if args.json:
         print(json.dumps({**record, "record": str(path)}, indent=2, sort_keys=True))
@@ -1629,6 +1630,7 @@ def _device_list(text: str) -> list[int]:
 
 def _sweep(args: argparse.Namespace) -> None:
     """Run a sweep declaration as a series of tries and summarize it."""
+    from klab.probes.lm_eval_adapter import LmEvalUnavailable
     from klab.sweep import run_sweep, summarize_sweep
 
     try:
@@ -1647,7 +1649,7 @@ def _sweep(args: argparse.Namespace) -> None:
             devices=args.devices,
             runtime_id=args.runtime,
         )
-    except (ValueError, OSError) as error:
+    except (ValueError, OSError, LmEvalUnavailable) as error:
         raise SystemExit(f"klab sweep: {error}") from None
     if args.json:
         print(json.dumps({**record, "record": str(path)}, indent=2, sort_keys=True))
@@ -1789,6 +1791,7 @@ def _probe(args: argparse.Namespace) -> None:
     """Run the fast-fail probe battery on a run or checkpoint."""
     from klab.lab_mode import lab_root
     from klab.probes.cli import run_probe
+    from klab.probes.lm_eval_adapter import LmEvalUnavailable
     from klab.probes.render import render, use_color
     from klab.reference_models import ReferenceUnavailable
 
@@ -1806,6 +1809,7 @@ def _probe(args: argparse.Namespace) -> None:
             lm_eval_tasks=args.lm_eval_tasks,
             lm_eval_limit=args.lm_eval_limit,
             lm_eval_protocol=args.lm_eval_protocol,
+            lm_eval=args.lm_eval,
             final=args.final,
             request={
                 **args.probe_config_loaded.model_dump(mode="json"),
@@ -1830,7 +1834,7 @@ def _probe(args: argparse.Namespace) -> None:
                 else None,
             },
         )
-    except (ValueError, OSError, ReferenceUnavailable) as error:
+    except (ValueError, OSError, ReferenceUnavailable, LmEvalUnavailable) as error:
         _lab_lookup_failure(args, error)
         raise SystemExit(f"klab probe: {error}") from None
     except KeyboardInterrupt:

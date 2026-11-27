@@ -18,7 +18,13 @@ from klab.lab_results import (
     resolve_checkpoint,
     resolve_result,
 )
-from klab.probes.runner import Arm, lm_eval_spec, progress_writer, run_battery
+from klab.probes.runner import (
+    Arm,
+    lm_eval_spec,
+    progress_writer,
+    require_tier,
+    run_battery,
+)
 from klab.reference_models import load_reference, require_reference_extras
 
 
@@ -58,6 +64,7 @@ def run_probe(
     lm_eval_tasks: list[str] | None = None,
     lm_eval_limit: int | None = None,
     lm_eval_protocol: Any = None,
+    lm_eval: bool = True,
     final: bool = False,
     request: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], Path]:
@@ -88,7 +95,13 @@ def run_probe(
             raise ValueError(
                 "reference models are scored on lm-eval tasks only: use --config full"
             )
+        if not lm_eval:
+            raise ValueError(
+                "reference models are scored on lm-eval tasks: drop `lm_eval: false`"
+            )
         require_reference_extras()
+    # Seconds now, not after every other probe has run.
+    require_tier(tier, lm_spec if lm_eval else False)
     if final and tier == "fast":
         raise ValueError(
             "final evaluation scores the held-back text probes: use --config final or final-full"
@@ -183,7 +196,7 @@ def run_probe(
                 fast_fail=fast_fail,
                 progress=progress,
                 context=context,
-                lm_eval=lm_spec,
+                lm_eval=lm_spec if lm_eval else False,
                 final=final,
             )
         except (LabSignal, KeyboardInterrupt, Exception) as error:

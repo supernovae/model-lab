@@ -1228,24 +1228,61 @@ def test_surface_scores_only_cells_inside_the_window(
     assert list(row["details"]["by_length"]) == ["64"]
 
 
-def test_full_tier_skips_a_surface_no_cell_of_which_fits(
+@pytest.mark.parametrize("gap", ["harness", "dataset"])
+def test_full_tier_needs_lm_eval_up_front_or_a_declared_omission(
+    gap: str,
     tried: tuple[Path, dict[str, Any]],
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    import importlib.machinery
+    import importlib.util
+    import types
+
     root, record = tried
+    run_id = record["arms"]["candidate"]["run_id"]
+    if gap == "harness":
+        find_spec = importlib.util.find_spec
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name, *a: None if name == "lm_eval" else find_spec(name, *a),
+        )
+        refusal = "cannot import lm_eval"
+    else:
+        # The harness imports, but one task's dataset cannot be fetched.
+        def get_task_dict(names: list[str], manager: Any) -> dict[str, Any]:
+            if names == ["hellaswag"]:
+                raise ConnectionError("no route to the dataset host")
+            return {}
+
+        harness = types.ModuleType("lm_eval")
+        harness.__spec__ = importlib.machinery.ModuleSpec("lm_eval", None)
+        tasks = types.ModuleType("lm_eval.tasks")
+        tasks.TaskManager = object  # type: ignore[attr-defined]
+        tasks.get_task_dict = get_task_dict  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "lm_eval", harness)
+        monkeypatch.setitem(sys.modules, "lm_eval.tasks", tasks)
+        refusal = "task 'hellaswag' does not load"
+    probes = root / "work" / "lab" / "probes"
+    before = sorted(probes.iterdir()) if probes.exists() else []
+    # The command refuses before it scores anything and names the interpreter
+    # that would have run it.
+    with pytest.raises(SystemExit, match=refusal) as refused:
+        _cli(monkeypatch, capsys, root, "probe", run_id, "--config", "full")
+    assert sys.executable in str(refused.value)
+    assert (sorted(probes.iterdir()) if probes.exists() else []) == before
+
+    declared = tmp_path / "full-without-lm-eval.yaml"
+    declared.write_text("tier: full\nlm_eval: false\n", encoding="utf-8")
     out = _cli(
-        monkeypatch,
-        capsys,
-        root,
-        "probe",
-        record["arms"]["candidate"]["run_id"],
-        "--config",
-        "full",
-        "--json",
+        monkeypatch, capsys, root, "probe", run_id, "--config", str(declared), "--json"
     )
     result = json.loads(out)
     rows = {r["id"]: r for r in result["probes"]}
+    assert "lm_eval" not in rows and result["request"]["lm_eval"] is False
+    assert "lm_eval" not in [m["id"] for m in result["verdict"]["missing"]]
     # The smoke window is 64 tokens; the shortest cell is thousands. Out of
     # window is inapplicable, never chance and never missing evidence.
     for probe in ("long_needle", "kv_recall"):

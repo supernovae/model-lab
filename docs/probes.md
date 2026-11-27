@@ -145,9 +145,24 @@ records each task, the chance level and this caveat in the result.
   under a second on the CPU smoke model.
 - `standard`: adds fact recall from weights, reworded fact recall and needle
   retrieval.
-- `full`: adds long-context needle retrieval and lm-eval. The `lmeval` extra
-  stays optional: without it that probe is `unavailable` with the install hint
-  and the battery is **incomplete** (see below), never a pass.
+- `full`: adds long-context needle retrieval and lm-eval. The tier needs the
+  `lmeval` extra in the interpreter that runs it, and each lm-eval task's
+  dataset. `klab probe`, `klab try` and `klab sweep` check both before any
+  training or scoring: they import the harness and load every task the probe
+  will score, which fetches a missing dataset then (or, under
+  `lm_eval_protocol`, verifies the offline cache). A refusal names the
+  interpreter and the install command or the task, so a gap costs seconds and
+  not the run before it. A registered runtime is a separate interpreter from
+  the project environment and needs its own install:
+
+  ```sh
+  uv pip install --python /absolute/runtime/bin/python --dry-run 'lm-eval>=0.4.9,<0.5'
+  ```
+
+  Check that the dry run only adds packages (it must not replace the vendor
+  PyTorch), then run it without `--dry-run`. To run the tier without lm-eval,
+  use a declaration with `tier: full` and `lm_eval: false`: the probe is left
+  out and the record's request says so.
 
 ### Long-context needle
 
@@ -716,6 +731,8 @@ name wins over a file of the same name; `./standard` loads the file. Unknown
 fields, wrong types and non-mapping documents fail before anything loads.
 `final: true` needs the standard or full tier. `lm_eval_tasks` and
 `lm_eval_limit` need `tier: full` and form their own benchmark group.
+`lm_eval: false` also needs `tier: full`, takes no other `lm_eval_*` field and
+leaves the lm-eval probe out of the battery.
 
 `--backend cpu` overrides a checkpoint's saved accelerator backend. `--runtime
 ID` and a declaration's `runtime_profile` select an interpreter; use one, not

@@ -22,7 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -1031,6 +1031,21 @@ def _require_complete_benchmark(results: list[dict[str, Any]], spec: ProbeSpec) 
             )
 
 
+def require_tier(tier: str, lm_eval: ProbeSpec | Literal[False] | None = None) -> None:
+    """Refuse before any work when TIER needs something this interpreter lacks.
+
+    The full tier ends with lm-eval: without the harness or one of its task
+    datasets, every earlier probe (or both arms of a try) would run first.
+    LM_EVAL is the probe as it will run; ``False`` means it is left out.
+    """
+    if tier != "full" or lm_eval is False:
+        return
+    from klab.probes.lm_eval_adapter import require_tasks
+
+    spec = lm_eval or BY_ID["lm_eval"]
+    require_tasks(spec.params["tasks"], spec.params.get("protocol"))
+
+
 def run_battery(
     target: Any, baseline: Any | None = None, *, final: bool = False, **options: Any
 ) -> dict[str, Any]:
@@ -1061,11 +1076,14 @@ def _run_battery(
     progress: Progress | None = None,
     context: LabContext | None = None,
     now: Callable[[], datetime] | None = None,
-    lm_eval: ProbeSpec | None = None,
+    lm_eval: ProbeSpec | Literal[False] | None = None,
     comparison: Mapping[str, Any] | None = None,
     leakage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the battery through TIER and return one result (never raises on probes).
+
+    LM_EVAL replaces the lm-eval probe's tasks or limit; ``False`` leaves the
+    probe out of the battery (a declared choice, recorded in the request).
 
     COMPARISON is the enclosing try's held-out comparison, when there is one;
     a ``NOT_COMPARABLE`` try gets a non-escalating verdict whatever the probes
@@ -1094,7 +1112,8 @@ def _run_battery(
     specs = [
         lm_spec if s.id == "lm_eval" else s
         for s in ordered(tier)
-        if not t_arm.reference or s.id in REFERENCE_PROBES
+        if (not t_arm.reference or s.id in REFERENCE_PROBES)
+        and (lm_eval is not False or s.id != "lm_eval")
     ]
     results: list[dict[str, Any]] = []
     dev: dict[str, dict[str, Any]] = {}

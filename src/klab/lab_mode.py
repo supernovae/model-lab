@@ -900,8 +900,13 @@ def run_try(
     from klab.training.manifest import source_identity
     from klab.try_config import TryConfig
 
-    # Only seed errors precede attempt creation. Other parsing/setup failures
-    # still produce the established failed/interrupted record below.
+    if probe_tier is not None:
+        from klab.probes.runner import require_tier
+
+        require_tier(probe_tier)  # before either arm trains
+
+    # Only this and seed errors precede attempt creation. Other parsing/setup
+    # failures still produce the established failed/interrupted record below.
     policy = TryConfig(
         seed=seed, repeat_baseline=repeat_baseline, continuation=continuation
     )

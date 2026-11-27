@@ -102,6 +102,10 @@ resource_envelope: ./bounds.yaml
   [preflight waiver](pretraining-preflight.md#the-training-gate) on fresh
   Corpus token-mixture arms of a try or sweep. The try record and run manifest
   retain the reason. With no waiver, the native gate still applies.
+- **`probe_tier: full`** needs the `lmeval` extra and its task datasets in the
+  interpreter that runs the try. `try` and `sweep` refuse before any arm
+  trains when either is missing and print the cause. You can use `standard`
+  and run `klab probe` afterwards. See [probe tiers](probes.md#tiers-and-fast-fail).
 - **Paths** resolve relative to the declaration.
 - **Runtime.** Use `runtime_profile` or `--runtime ID`, not both. `--backend`
   overrides the backend.
