@@ -98,6 +98,10 @@ resource_envelope: ./bounds.yaml
 - **`seed`** applies to both arms, overriding any seed in the baseline or the
   delta (0 to 2³²−1). Without it, a delta that sets `seed` makes the seed a
   changed variable. The record shows which.
+- **`preflight_waiver`** optionally records the reason for using the trainer's
+  [preflight waiver](pretraining-preflight.md#the-training-gate) on fresh
+  Corpus token-mixture arms of a try or sweep. The try record and run manifest
+  retain the reason. With no waiver, the native gate still applies.
 - **Paths** resolve relative to the declaration.
 - **Runtime.** Use `runtime_profile` or `--runtime ID`, not both. `--backend`
   overrides the backend.

@@ -1742,6 +1742,37 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     with pytest.raises(ValueError, match="configured token mixture differs"):
         read_coverage(prepared_dir, ordered_run)
 
+    policy_path = tmp_path / "mixture-try.yaml"
+    reason = "Bounded verified CPU recipe fixture"
+    policy_path.write_text(
+        yaml.safe_dump({"preflight_waiver": reason, "probe_tier": "none"})
+    )
+    delta_path = tmp_path / "mixture-order-delta.yaml"
+    delta_path.write_text(
+        yaml.safe_dump(
+            {
+                "kind": "delta",
+                "set": {
+                    "dataset.train_path": ordered["train_schedule_path"],
+                    "dataset.mixture_declaration_path": str(order_declaration),
+                    "dataset.mixture_output_path": str(order_output),
+                },
+            }
+        )
+    )
+    compared = lab.json(
+        "try",
+        str(delta_path),
+        "--vs",
+        str(run_config),
+        "--config",
+        str(policy_path),
+    )
+    assert compared["comparison"]["comparable"]
+    for arm in compared["arms"].values():
+        run_manifest = json.loads((Path(arm["run_dir"]) / "manifest.json").read_text())
+        assert run_manifest["preflight"]["waived"] == reason
+
     from klab.corpus import lexical_topics as topics_module
 
     lexical_declaration = tmp_path / "lexical-order.yaml"

@@ -691,6 +691,7 @@ def _run_tries(
                     fresh_baseline=policy.fresh_baseline,
                     repeat_baseline=policy.repeat_baseline,
                     continuation=policy.continuation,
+                    preflight_waiver=policy.preflight_waiver,
                     probe_tier=None
                     if policy.probe_tier == "none"
                     else policy.probe_tier,

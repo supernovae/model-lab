@@ -475,6 +475,7 @@ def _train_and_score(
     measurements: dict[str, Any] | None = None,
     continuation: Any = None,
     continuation_identity: Mapping[str, Any] | None = None,
+    preflight_waiver: str | None = None,
     text_documents: int | None = None,
     gradient_bottleneck: bool = False,
 ) -> dict[str, Any]:
@@ -500,9 +501,18 @@ def _train_and_score(
         raise ValueError("parent checkpoint changed between try arms")
     started = time.monotonic()
     if not reuse:
+        preflight = {}
+        if (
+            preflight_waiver is not None
+            and config.dataset.source == "local_token_mixture"
+        ):
+            from klab.preflight import WAIVER_PREFIX
+
+            preflight["preflight"] = WAIVER_PREFIX + preflight_waiver
         try:
             returned = train_fn(
                 config,
+                **preflight,
                 **(
                     {
                         "extend_budget": continuation.checkpoint,
@@ -867,6 +877,7 @@ def run_try(
     fresh_baseline: bool = False,
     repeat_baseline: bool = False,
     continuation: Any = None,
+    preflight_waiver: str | None = None,
     train_fn: Callable[..., str] | None = None,
     now: Callable[[], datetime] | None = None,
     probe_tier: str | None = "fast",
@@ -947,6 +958,8 @@ def run_try(
     from klab.lab_results import baseline_provenance
 
     request = dict(request) if request is not None else {"baseline": str(baseline_path)}
+    if preflight_waiver is not None:
+        request["preflight_waiver"] = preflight_waiver
     provenance = baseline_provenance(request.get("baseline", str(baseline_path)))
     baseline_path = Path(baseline_path).absolute()
     provenance.update(
@@ -1033,6 +1046,11 @@ def run_try(
             context.check_cancel()
             # Bind baseline reuse to tokenizer and data contents as they are now; the candidate's identity is hashed the same way.
             inputs = current_inputs(base_config)
+            if (
+                preflight_waiver is not None
+                and base_config.dataset.source == "local_token_mixture"
+            ):
+                inputs["preflight_waiver"] = preflight_waiver
             context.check_cancel()
             cand_inputs = current_inputs(cand_config)
             context.check_cancel()
@@ -1147,6 +1165,7 @@ def run_try(
             "context": context,
             "continuation": continuation,
             "continuation_identity": record.get("continuation"),
+            "preflight_waiver": preflight_waiver,
             "text_documents": base_config.evaluation.text_documents,
             "gradient_bottleneck": base_config.evaluation.gradient_bottleneck,
         }

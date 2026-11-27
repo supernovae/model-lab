@@ -11,7 +11,7 @@ import json
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import yaml
@@ -21,10 +21,15 @@ from klab.config.loading import load_config
 from klab.config.models import RunConfig
 from klab.training.manifest import sha256_file, source_identity
 
+if TYPE_CHECKING:
+    from klab.corpus.mixture_schedule import VerifiedSchedule
+
 _CHUNK_TOKENS = 1 << 20
 
 
-def _bind_config(manifest: dict, config: RunConfig) -> dict | None:
+def _bind_config(
+    manifest: dict, config: RunConfig
+) -> tuple[dict | None, VerifiedSchedule | None]:
     """Match the native packing identity, including live source bindings."""
     identity = manifest["cache_identity"]
     from klab.data.packing import (
@@ -48,6 +53,7 @@ def _bind_config(manifest: dict, config: RunConfig) -> dict | None:
         "local_chat_source": _local_chat_identity(config.dataset),
     }
     snapshot = None
+    schedule = None
     if config.dataset.source == "snapshot":
         from klab.data.sources import verify_snapshot
 
@@ -77,7 +83,7 @@ def _bind_config(manifest: dict, config: RunConfig) -> dict | None:
         from klab.corpus.release_verify import verification_settings
 
         with verification_settings(verification_mode="verified_reuse"):
-            mixture, _ = verified_mixture_dataset(
+            mixture, schedule = verified_mixture_dataset(
                 config.dataset, config.tokenizer.path, config.model.vocab_size
             )
         if mixture != manifest.get("token_mixture"):
@@ -90,7 +96,7 @@ def _bind_config(manifest: dict, config: RunConfig) -> dict | None:
         raise ValueError(
             "prepared dataset/tokenizer/packing/source binding differs from config"
         )
-    return snapshot
+    return snapshot, schedule
 
 
 def _block_counts(positions: int, mask: np.ndarray | None, seq_len: int) -> dict:
@@ -181,10 +187,17 @@ def coverage(prepared_root: Path, config: RunConfig | Path | None = None) -> dic
     if isinstance(config, (str, Path)):
         config = load_config(Path(config))
     header = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    verified_snapshot, schedule = (
+        _bind_config(header, config) if config is not None else (None, None)
+    )
     data = load_prepared_data(
-        root, byte_enabled=header.get("byte_addressing") is not None
+        root,
+        byte_enabled=header.get("byte_addressing") is not None,
+        mixture_schedule=schedule,
     )
     manifest = data.manifest
+    if manifest != header:
+        raise ValueError("prepared manifest changed while reading coverage")
     snapshot = manifest.get("dataset_snapshot")
     if snapshot is not None and (
         not isinstance(snapshot, dict)
@@ -193,7 +206,6 @@ def coverage(prepared_root: Path, config: RunConfig | Path | None = None) -> dic
     ):
         raise ValueError("embedded snapshot source binding mismatch")
     if config is not None:
-        verified_snapshot = _bind_config(manifest, config)
         if snapshot is not None and snapshot != verified_snapshot:
             raise ValueError("embedded snapshot differs from verified source")
         snapshot = verified_snapshot
