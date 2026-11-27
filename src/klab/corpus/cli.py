@@ -172,7 +172,8 @@ def _handle(args: argparse.Namespace) -> None:
         **verification_options(
             root,
             cold=getattr(args, "cold", False),
-            read_only=args.corpus_command in {"plan", "artifacts", "release-prune"},
+            read_only=args.corpus_command in {"plan", "artifacts", "release-prune"}
+            or getattr(args, "plan", False),
         ),
     ):
         _run(args)
@@ -187,6 +188,27 @@ def _run(args: argparse.Namespace) -> None:
 
     root = resolve_work_dir(args.work_dir)
     command = args.corpus_command
+    if command == "relations":
+        from klab.corpus.relation_compile import CompileRelations, compile_relations
+        from klab.corpus.relations import extract_relations, inspect_relations
+
+        if args.relation_command == "extract":
+            result = extract_relations(root, args.declaration, plan_only=args.plan)
+        elif args.relation_command == "compile":
+            options = CompileRelations.model_validate_json(args.options.read_bytes())
+            result = compile_relations(root, args.key, options, plan_only=args.plan)
+        else:
+            result = inspect_relations(
+                root,
+                args.key,
+                entity=args.entity,
+                assertion=args.assertion,
+                unresolved=args.unresolved,
+                limit=args.limit,
+                after=args.after,
+            )
+        print(json.dumps(result, sort_keys=True))
+        return
     if command == "annotate-normalized":
         from klab.corpus.annotation_kinds import ANNOTATORS
 
@@ -957,6 +979,40 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "corpus", help="Acquire, derive, freeze and inspect corpus releases"
     )
     sub = corpus.add_subparsers(dest="corpus_command", required=True)
+    relations = sub.add_parser(
+        "relations", help="Extract, compile and inspect typed assertions"
+    )
+    relation_sub = relations.add_subparsers(dest="relation_command", required=True)
+    extract = relation_sub.add_parser(
+        "extract", help="Build an index from pinned source shards"
+    )
+    extract.add_argument("declaration", type=Path)
+    extract.add_argument("--plan", action="store_true")
+    compile_command = relation_sub.add_parser(
+        "compile", help="Compile triples or walks into training text"
+    )
+    compile_command.add_argument("key")
+    compile_command.add_argument("options", type=Path)
+    compile_command.add_argument("--plan", action="store_true")
+    inspect = relation_sub.add_parser(
+        "inspect", help="Read coverage and paginated assertions or evidence"
+    )
+    inspect.add_argument("key")
+    query = inspect.add_mutually_exclusive_group()
+    query.add_argument("--entity")
+    query.add_argument("--assertion")
+    query.add_argument("--unresolved", action="store_true")
+    inspect.add_argument("--after", type=int, default=0)
+    inspect.add_argument("--limit", type=int, default=50)
+    for command in (extract, compile_command, inspect):
+        command.add_argument("--work-dir", type=Path)
+        command.add_argument(
+            "--cold",
+            action="store_true",
+            help="Verify every byte and refresh the receipt",
+        )
+        command.set_defaults(handler=_handle)
+    add_workers_flag(extract)
     command = sub.add_parser(
         "artifacts", help="Inspect shared Corpus storage and release references"
     )

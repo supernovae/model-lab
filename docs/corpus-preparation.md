@@ -2317,6 +2317,9 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   | --- | --- |
   | `wikimedia member decode` | opt-in threaded decoding of verified compressed members, consumed and checkpointed in source order |
   | `wikimedia member parse` | opt-in process decoding and XML parsing of verified members, with bounded candidates consumed in source order |
+  | `relation source extraction` | independent pinned source files, with receipted typed assertions and unresolved locators |
+  | `relation index reduction` | single writer builds compact dictionaries and split-scoped adjacency |
+  | `relational sequence compilation` | one ordered writer streams split partitions from the read-only adjacency index |
   | `release verification` | shardable: byte ranges of the release files |
   | `tokenizer sampling: TRAIN lineage` | shardable: byte ranges of the lineage view |
   | `family inventory` | shardable: byte ranges of `documents.jsonl`, written in file order |
@@ -4059,6 +4062,137 @@ inventories were outside this comparison.
 | --- | ---: | ---: | ---: |
 | Fresh measurement | 12.732 s → 11.847 s | 693.59 MB → 156.72 MB | 269 MiB → 194 MiB |
 | Existing receipt | 1.174 s → 0.668 s | 434.04 MB → 138.76 MB | 247 MiB → 176 MiB |
+
+## Extract and compile typed relations
+
+Use a JSON declaration with a pinned scope and one or more bounded source
+shards. A pin declares the exact JSONL file's `path`, lowercase `sha256`,
+and `max_rows`. Paths are relative to the declaration or absolute. The
+optional `max_record_bytes` defaults to 1 MiB and can be raised to 4 MiB.
+Every nonblank scope row declares an entity and its semantic family.
+
+```json
+{"id":"world:mars","family":"world:solar-system","split":"train"}
+```
+
+Assign splits before extraction. Each family belongs to exactly one of
+`train`, `validation`, and `test`. Use the same family assignment across
+representations of the same source information. Corpus checks the supplied
+assignment and entity endpoints, including entity-valued qualifiers. It
+reports absent and cross-split endpoints without admitting their assertions.
+Designate held-out families when creating the scope. Source adapters do
+not infer families or link aliases across namespaces.
+
+A source pin also declares `id`, `format`, an upstream `uri`, a
+`license` statement, and `origin` (`human`, `structured`, `procedural`,
+`teacher`, `unknown`, or `mixed`). Keep each pinned file and its
+declaration to resolve the physical line and JSON pointer in its evidence.
+The declaration has two storage limits, `max_index_bytes` for SQLite and
+`max_shard_output_bytes` for each extracted shard. Corpus checks free space
+against those bounds before a cold build. Choose several reasonably sized
+files to expose parallel work and keep recovery granular.
+
+| Format | JSONL record |
+| --- | --- |
+| `records` | An explicit miniature world or domain assertion. Required fields are `subject`, `predicate`, and a typed `value`. Optional fields are `qualifiers`, `references`, `rank`, `source_id`, and `claim_class` (`explicit`, `derived`, or `candidate`). |
+| `wikipedia` | One Action API `query.pages` object with `pageid`, `ns`, `title`, and optional `links` and `categories` arrays. Declare `site` on this source, for example `enwiki`. Flatten a bounded pinned capture to page rows and retain its provenance. [Links API](https://www.mediawiki.org/wiki/API:Links), [Categories API](https://www.mediawiki.org/wiki/API:Categories). |
+| `wikidata` | One Wikidata item object with `id`, `type`, and `claims`. Use JSONL with one bounded item per physical line. Corpus handles value snaks for item/property IDs, strings, and time, including the item's calendar, precision, timezone and uncertainty bounds. It preserves statement GUIDs, ranks, qualifiers, and grouped reference snaks. A claim with any unsupported snak is left in the pinned source and reported at its statement locator. [Wikidata JSON format](https://www.wikidata.org/wiki/Wikidata:Data_formats/JSON). |
+
+Explicit records use values such as `{"kind":"entity","id":"world:mars"}`
+or `{"kind":"text","text":"Mars"}`. Time values have `kind: time`,
+`time`, `calendar`, `precision`, `timezone`, `before`, and `after`.
+A qualifier is a `{"predicate":...,"value":...}` pair. A reference group has
+an optional `id` and a `snaks` list of the same typed pairs.
+Wikipedia entity names are `wikipedia:` followed by the SHA-256 of the
+canonical JSON array `[site, namespace, title]`, with title underscores
+converted to spaces and Unicode normalized to NFC. Match the returned case.
+Wikidata entity and predicate names use `wikidata:Q…` and `wikidata:P…`.
+
+```bash
+klab corpus relations extract relations.json --plan
+klab corpus relations extract relations.json --workers 4
+klab corpus relations inspect INDEX_KEY
+klab corpus relations inspect INDEX_KEY --entity world:mars --limit 10
+klab corpus relations inspect INDEX_KEY --assertion ASSERTION_ID
+klab corpus relations inspect INDEX_KEY --unresolved
+klab corpus relations compile INDEX_KEY compiler.json --plan
+klab corpus relations compile INDEX_KEY compiler.json
+```
+
+Commands return JSON. Inspection pages return a `next` cursor for the same
+query with `--after`. Each page has at most 1,000 records and about 8 MiB of
+row payload. The index uses compact SQLite entity/predicate dictionaries,
+assertion tables ordered by split, separate evidence, and directed
+integer adjacency. Coverage includes families, entities, unique assertions,
+edges, qualifiers, and per-source admitted and unresolved counts. Semantic
+assertion IDs hash the subject, predicate, typed value and sorted qualifiers.
+Multiple evidence rows can support the same assertion. Conflicting values
+retain distinct assertion IDs.
+
+The compiler declaration requires `target` (`triples` or `walks`),
+`max_sequences` and `max_bytes`. For walks, give `seed`, `hops`, and
+`walks_per_entity`. Each walk starts at an entity with a directed edge,
+chooses a seeded outgoing edge, and ends at a dead end or the hop limit.
+Walks may revisit entities. A serialized sequence has an 8 MiB size cap. Only entity edges are eligible. A triple contains
+the subject, predicate, typed value and any qualifiers. An additional
+`claim_classes` field distinguishes derived or candidate evidence.
+`qualifiers: omit` drops qualifiers from the serialization and reports their
+count. The compiler receipt reports other omitted evidence fields and binds
+the verified index's computation ID and bytes.
+
+Use `train.jsonl` and `validation.jsonl` from the compiler's output as the
+`train_path` and `validation_path` of a [local text dataset](datasets.md).
+Set `revision` to the compiled key and provide the training recipe's license
+statement after reviewing the source rights. Use the same dataset declaration
+when fitting the tokenizer and preparing data. Set each split’s document
+budget to the number of distinct rows to prepare, within the compiled
+split’s supply. The existing token store reuses encoded documents when
+sequence length changes. The standard next-token loader keeps its existing
+document boundary and masking behavior. Parallel
+`*.lineage.jsonl` files connect prepared source rows to assertion IDs.
+Keep `test.jsonl` for separate held-out evaluation.
+
+Completed source shards resume independently through ShardRunner. A source
+addition or scope edit reuses unaffected extracted shards and rebuilds the
+scope-wide SQLite reduction. An interrupted reduction or compiler publication
+restarts only that stage. Compilation options and tokenization do not change
+the canonical index. Optional `--cold` verifies byte integrity without a
+host-local proof hit. The source locators and qualified claims still need
+semantic review for experiments that depend on factual correctness.
+
+### Relational compilation measurements
+
+One local NVMe workstation run used cold artifact stores for the first build
+and warm OS caches. The inputs were four pinned JSONL shards of synthetic
+directed edges, with five outgoing predicates per entity and no cross-family
+edges. The 100k-edge graph had 20k entities, ten families across three splits,
+and 12.53 MB of source and scope files. The exact same SQLite digest was
+produced by the one-worker, two-worker, and resumed builds.
+
+| Operation | Wall time | User + system CPU | Peak process RSS |
+| --- | ---: | ---: | ---: |
+| Cold 10k edges, one worker | 0.64 s | 0.61 s | 88 MiB |
+| Cold 100k edges, one worker | 3.37 s | 3.31 s | 95 MiB |
+| Cold 100k edges, two workers | 2.62 s | 3.58 s | 94 MiB |
+| Resume 100k edges, one of four shards reused, one worker | 3.10 s | 3.04 s | 95 MiB |
+| Warm verified index, 100k edges | 0.59 s | 0.59 s | 100 MiB |
+| Add a 25k-row evidence shard, four of five shards reused | 2.64 s | 3.01 s | 95 MiB |
+| Compile 100k triples | 1.33 s | 1.30 s | 98 MiB |
+| Compile 20k walks of four hops | 1.39 s | 1.36 s | 99 MiB |
+
+CLI startup is included. RSS is the largest process as reported by GNU time.
+The 100k-edge build retained 25.24 MB of shard outputs and a 21.00 MB
+SQLite index. Compilation wrote 18.89 MB for triples or 13.47 MB for walks,
+including lineage. The result establishes bounded-fixture performance and
+resume parity. Full-dump behavior, slow storage, and model learning effects
+remain to be measured.
+
+A separate bounded [Mercury Wikipedia page query](https://en.wikipedia.org/w/api.php?action=query&prop=links%7Ccategories&format=json&formatversion=2&titles=Mercury%20%28planet%29&pllimit=10&cllimit=10)
+and [Wikidata item Q308](https://www.wikidata.org/wiki/Q308) at revision
+`2574509839` compiled 149 triples, including 25 qualified assertions.
+The adapters admitted all 20 captured page links and categories and 129
+Wikidata statements. They reported 51 unsupported statements with locators
+in the pinned entity row.
 
 ## Materialize a mixture
 
