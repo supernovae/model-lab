@@ -561,6 +561,26 @@ inspection times across three trials were 103 ms and 155 ms, respectively.
 
 ### Training batch loaders
 
+Compare a contiguous prepared cache with a reference-only cache from the
+same mixture before choosing a loader for a recipe. Use the directories
+printed by preparation with each storage mode.
+
+```sh
+klab data benchmark-loader "$CONTIGUOUS_PREPARED" "$REFERENCE_PREPARED" \
+  --blocks 8192 --batch-blocks 4 --seed 42
+```
+
+The command verifies both caches and checks that the tokenizer, logical
+training array and supervision match. It reports verification and loader
+opening separately. Both passes use the same prefix of the trainer's
+seeded epoch order, comparing digests of the inputs and masked labels.
+The JSON reports CPU read time and p95 batch latency, process read counters
+where available, and resident memory before and after each pass.
+Verification can warm file pages. On a separate
+benchmark copy, `--evict-file-pages` advises the OS to discard file pages
+before the first pass without dropping the system's cache. Physical read
+counters show how much storage I/O followed the advice.
+
 For an experimental direct loader, set `training.mixture_loader: references`
 on a `local_token_mixture` run whose `dataset.train_path` names
 `train.schedule.bin`. Run preparation as usual. The existing training
@@ -655,7 +675,6 @@ with warm pages and the same prepared mask in both modes.
 Input and label hashes matched. On the larger fixture, storage reads on
 the first pass were 75.4 MB for contiguous and 91.3 MB for references.
 Creating the sparse reference index took 70 ms after verification.
-Accelerator utilization and production step throughput remain unmeasured.
 
 A separate CPU benchmark exercised schedule cache misses on deterministic
 synthetic data. Sixteen verified uint16 segments supplied variable-length
@@ -684,6 +703,43 @@ documents, both loaders produced the same batch digest. For the same 8,192
 shuffled 512-target blocks, first-pass times were 0.91 s contiguous and
 0.86 s referenced. Warm times were 27 ms and 65 ms respectively. This
 comparison used the usual CPU loaders and includes no model execution.
+
+#### Retained Workshop mixture comparison
+
+A sample from the retained Workshop mixture used 327,494 records and
+334,984,971 target positions across ten strata on ext4 NVMe. Five sealed
+segments stored content tokens in seeded, shuffled record order. The
+schedule restored the sampled token IDs in their original mixture order,
+including EOS. Each result below is the median of three paired
+shuffles with seeds 42–44. File-page eviction advice preceded the first pass and each
+repeated pass used the same block sequence. Input and masked target
+digests matched for each pair.
+
+| Measurement | Contiguous | References |
+| --- | ---: | ---: |
+| CPU first pass, 16,384 blocks of 512 | 3.02 s | 4.95 s |
+| CPU repeated pass | 0.141 s | 0.305 s |
+| CPU first-pass storage reads | 111.0 MB | 136.5 MB |
+| CPU peak process RSS, including mappings | 794 MiB | 696 MiB |
+| Arc Pro B70 first-pass training throughput | 285k positions/s | 192k positions/s |
+| Arc Pro B70 repeated-pass training throughput | 292k positions/s | 287k positions/s |
+| Arc Pro B70 first-pass p95 host batch assembly | 0.10 ms | 5.93 ms |
+
+The Arc pilot used a two-layer decoder with BF16 autocast, four
+512-position blocks per optimizer step, and 256 measured steps per pass.
+The host timing includes the trainer's existing read-ahead advice for the
+next batch. The driver-reported compute engine cycle ratio was about
+12% in both modes. This pilot used one device and a bounded, real-data
+sample. Keep contiguous as the default for its first-pass throughput.
+Use references when shared storage or portability outweighs that cost.
+
+On the same sample, source grouping reused all exact record and range
+pairs across 27 sources. Grouping took 1.04 s and reduced source
+transitions from 79,996 to 30. Shuffled reference reads were similar
+before and after grouping. The first pass took 4.95 s and 5.06 s, and
+storage reads were 136.5 MB and 136.2 MB. The repeated pass took
+0.305 s and 0.299 s. Learning comparisons belong to the paired
+[Workshop study](https://github.com/supernovae/kybern-workshop/issues/118).
 
 ## Mixture speed
 

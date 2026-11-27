@@ -2714,10 +2714,12 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
 
     register_benchmark(data_commands)
     from klab.data.coverage import register_parser as register_coverage
+    from klab.data.loader_benchmark import register_parser as register_loader_benchmark
     from klab.data.source_cli import register_parser as register_dataset_sources
 
     register_dataset_sources(data_commands)
     register_coverage(data_commands)
+    register_loader_benchmark(data_commands)
     from klab.data.engram_sizing import register_parser as register_engram_sizing
 
     register_engram_sizing(data_commands)
@@ -3354,7 +3356,11 @@ def _prepare_runtime_command(args: argparse.Namespace) -> None:
 def _read_only_command(args: argparse.Namespace) -> bool:
     if args.command == "tokenizer" and args.tokenizer_command == "verify":
         return True
-    if args.command == "data" and args.data_command in {"coverage", "engram-sizing"}:
+    if args.command == "data" and args.data_command in {
+        "benchmark-loader",
+        "coverage",
+        "engram-sizing",
+    }:
         return True
     if args.command == "data" and args.data_command == "prepared-inputs":
         return args.inputs_command == "verify"
