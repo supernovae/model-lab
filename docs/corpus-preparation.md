@@ -2317,6 +2317,7 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   | --- | --- |
   | `wikimedia member decode` | opt-in threaded decoding of verified compressed members, consumed and checkpointed in source order |
   | `wikimedia member parse` | opt-in process decoding and XML parsing of verified members, with bounded candidates consumed in source order |
+  | `authorized command operator` | one approved command with private input snapshots and validated atomic output |
   | `procedural world simulation` | independent pinned world shards with committed observation and offset files |
   | `procedural scope validation` | one writer validates semantic families and world IDs across shards |
   | `procedural curriculum compilation` | one ordered writer streams split files and validates any structural parents |
@@ -4371,6 +4372,114 @@ referenced shard digests. The 5,000-world fixture simulated in 0.68 s and
 compiled in 1.18 s. These measurements cover the closed transfer system
 and artifact path. Learning effects and throughput on other mechanisms
 remain experimental questions.
+
+## Run an explicitly authorized Corpus command
+
+A command declaration pins one executable, optional file dependencies, and
+named typed inputs and outputs. Pins give an exact `path`, lowercase
+`sha256`, and byte `size`. The computation key binds those bytes, the
+contract declarations and bounds, implementation, host architecture,
+arguments, environment and determinism claim. Local paths resolve relative
+to the declaration and appear separately in the approval plan.
+
+For example, declare a document-preserving text transform as follows.
+
+```json
+{
+  "operator": "clean-text",
+  "determinism": "deterministic",
+  "executable": {"path": "clean-text", "sha256": "<executable sha256>", "size": 2048},
+  "inputs": {
+    "source": {"path": "source.jsonl", "sha256": "<source sha256>", "size": 4096, "contract": "local_text", "max_rows": 100}
+  },
+  "outputs": {
+    "train.jsonl": {"contract": "local_text", "aligned_to": "source", "max_rows": 100, "max_bytes": 8192}
+  },
+  "timeout_seconds": 30
+}
+```
+
+```bash
+klab corpus operator plan command.json
+klab corpus operator run command.json --allow-command-operators APPROVAL
+klab corpus operator inspect ARTIFACT_KEY
+klab corpus operator plan command.json --replay ARTIFACT_KEY
+klab corpus operator run command.json --replay ARTIFACT_KEY --allow-command-operators REPLAY_APPROVAL
+```
+
+Review the plan and the pinned program before passing the printed approval.
+The approval binds the resolved declaration, file locations, and requested
+replay artifact. It is an explicit invocation choice. The recipe cannot
+grant it. Planning and inspection never launch the program. A subsequent
+replay uses its own approval. Deterministic runs verify and reuse an
+existing result by key. On reuse, changed source generations are rechecked
+against their pins. A deterministic replay verifies exact output bytes and
+keeps the original on mismatch. Nondeterministic runs create distinct
+artifact keys. Use an exact published key and output digest to reuse one.
+
+The program receives literal `arguments` and a private working directory.
+`KLAB_OPERATOR_REQUEST` points to a JSON file that names its staged
+`inputs`, `dependencies` and expected `outputs`. It must write only the
+named files inside `outputs/`. Arguments can reference a staged file,
+such as `dependencies/transform.py` when the pinned executable is a Python
+interpreter. The child receives the declared `environment` plus the resolved
+default locale, time zone, PATH, and request variable shown by the plan.
+Supply output-affecting files as pinned dependencies. Keep credentials out
+of the declaration and receipt.
+
+The available JSONL contracts are:
+
+| Contract | Boundary checks |
+| --- | --- |
+| `local_text` | One nonblank `{"text": ...}` document per line. Optional `aligned_to` checks row counts against a local-text input. |
+| `document_ids` | A lowercase SHA-256 `document_id` per row. |
+| `text_statistics` | A document ID and nonnegative `utf8_bytes`, `codepoints`, and `lines`. `aligned_to` requires the same ordered document IDs as a pinned document-ID or statistics input. |
+| `relation_scope` | Input-only entity ID, family and split rows, using the existing relation scope contract. |
+| `relation_records` | The existing explicit typed assertion format. Outputs require a named `scope` input. All entity endpoints and entity-valued qualifiers must resolve within one split. |
+
+Inputs and outputs have a `max_rows` cap and an optional
+`max_record_bytes` cap (1 MiB by default, at most 64 MiB). Set
+`max_validation_bytes` to budget the temporary entity index for scoped outputs.
+The stage checks every row, the declared file and record sizes, output names,
+and any alignment rule before publication. Inputs and executable data are
+copied while hashing. The output is privately snapshotted before validation
+and published through the shared artifact store. The receipt records the
+declared environment, output hashes, record counts and timing. A failed
+command or validation leaves no published result. A retry starts the failed
+command again. Typed validation establishes shape and alignment. The
+operator remains responsible for the meaning of its computed values.
+
+The subprocess runs with **the caller's filesystem and network permissions**.
+Lab supplies private staged copies, a declared wall-time limit, a hard
+per-regular-file write limit inherited by the command, and 64 KiB per
+diagnostic stream. The declared output byte budgets and scratch-space check
+apply to the files managed by Lab. Other file paths, aggregate temporary
+files, CPU, RAM, network access, and detached descendants remain subject
+to the host and caller. A caught timeout or interruption stops the launch
+process group. The command can access the ambient interpreter, libraries
+and tools allowed by the caller, so the plan records the platform and
+launcher version as well as the explicit dependency pins. Run only reviewed
+code under an account appropriate for that code.
+
+### Command operator measurements
+
+A synthetic NVMe benchmark used a pinned Python executable and script to
+uppercase 100,000 ordered local-text records. The input and output were
+13.90 MB each. It validated both JSONL contracts and the row count, and
+the replay reproduced the original output digest.
+
+| Operation | Wall time | User + system CPU | Peak process RSS |
+| --- | ---: | ---: | ---: |
+| Plan | 0.31 s | 0.31 s | 82 MiB |
+| Cold staging, execution and publication | 0.70 s | 0.69 s | 84 MiB |
+| Warm verified reuse | 0.59 s | 0.59 s | 98 MiB |
+| Explicit replay | 0.96 s | 0.96 s | 99 MiB |
+
+CLI startup is included. Cold staging hashes each pinned source while
+copying. Warm reuse checks unchanged source generations and uses the
+verified output receipt. The 5,000-record control took 0.37 s cold and
+0.59 s warm. These timings measure the bounded fixture and the command
+boundary. Larger or more complex operators have their own execution costs.
 
 ## Materialize a mixture
 
