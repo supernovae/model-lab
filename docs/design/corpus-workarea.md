@@ -115,12 +115,15 @@ identify a view checkpoint and report the candidate verified prefix and
 uncommitted tail from metadata. Build authenticates the checkpoint chain
 before reuse. The shared view identity implementation changes the native
 build key. New builds can reuse verified normalization, index and deduplication
-artifacts across that change. Fresh-stage scratch estimates remain in #567.
+artifacts across that change.
 Native storage inspection reports the filesystems' available bytes, published
 normalized candidate sizes and the flat span output and append bytes when
 their inputs are known. Builds journal logical output footprints for sealed
-index, deduplication and checkpointed view payloads. Planning reports the
-same-build observations separately from prospective bytes.
+index, deduplication and checkpointed view payloads. Planning can use a
+same-key observation to forecast new writes, subtracting a verified-candidate
+view prefix. Build also samples named workspace allocations with a bounded
+entry budget. The planner shows matching historical peaks. Unmeasured first
+builds, anonymous scratch and aggregate peak demand remain explicit gaps.
 `klab corpus plan --build BUILD` previews ordinary freeze from existing
 build metadata. It reports the release identity, verification and placement
 dependencies, shared store growth and duplicate staging bytes. Optional

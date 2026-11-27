@@ -47,6 +47,14 @@ _STAGE_RECEIPT_BYTES = 4 * 1024**2
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _VIEW_COMMIT = re.compile(r"commit-([0-9]{12})\.json")
 _OBSERVED_STAGES = {"index", "deduplicate", "views"}
+_WORKSPACE_COUNTERS = (
+    "samples",
+    "incomplete_samples",
+    "initial_logical_bytes",
+    "initial_allocated_bytes",
+    "observed_peak_logical_bytes",
+    "observed_peak_allocated_bytes",
+)
 
 
 def _acquisition_inventory(
@@ -371,32 +379,110 @@ def _view_candidate(
     }
 
 
-def _stage_observation(workspace: Path, build_id: str) -> dict[str, Any] | None:
+def _stage_observations(workspace: Path, build_id: str) -> Iterator[dict[str, Any]]:
     journal = workspace / "progress" / f"{build_id}.jsonl"
     for row in recent_progress(journal):
-        outputs = row.get("stage_outputs")
+        outputs = row.get("stage_outputs", {})
+        workspaces = row.get("stage_workspaces", {})
         if (
             row.get("build_id") != build_id
             or not isinstance(row.get("attempt"), str)
             or not isinstance(outputs, dict)
-            or not outputs
+            or not isinstance(workspaces, dict)
+            or not (outputs or workspaces)
             or not outputs.keys() <= _OBSERVED_STAGES
+            or not workspaces.keys() <= _OBSERVED_STAGES
         ):
             continue
-        if all(
+        if not all(
             isinstance(value, dict)
             and isinstance(value.get("computation_key"), str)
             and _DIGEST.fullmatch(value["computation_key"])
-            and type(value.get("payload_bytes")) is int
-            and value["payload_bytes"] >= 0
-            for value in outputs.values()
+            for value in (*outputs.values(), *workspaces.values())
         ):
-            return {
-                "attempt": row["attempt"],
-                "completed": row.get("event") == "complete",
-                "stage_outputs": outputs,
-            }
-    return None
+            continue
+        if any(
+            type(value.get("payload_bytes")) is not int or value["payload_bytes"] < 0
+            for value in outputs.values()
+        ) or any(
+            type(value.get("completed")) is not bool
+            or any(
+                type(value.get(key)) is not int or value[key] < 0
+                for key in _WORKSPACE_COUNTERS
+            )
+            or not 0 < value["samples"]
+            or value["incomplete_samples"] > value["samples"]
+            or value["initial_logical_bytes"] > value["observed_peak_logical_bytes"]
+            or value["initial_allocated_bytes"] > value["observed_peak_allocated_bytes"]
+            for value in workspaces.values()
+        ):
+            continue
+        yield {
+            "attempt": row["attempt"],
+            "completed": row.get("event") == "complete",
+            "stage_outputs": outputs,
+            "stage_workspaces": workspaces,
+        }
+
+
+def _stage_storage_estimates(stages, history, *, already_built, all_prepared):
+    """Forecast only reusable or previously observed logical stage payloads."""
+    results = {
+        "normalize": {
+            "payload_bytes": 0 if already_built or all_prepared else None,
+            "basis": "existing_build"
+            if already_built
+            else "retained_candidate"
+            if all_prepared
+            else "unknown",
+        }
+    }
+    for name in ("index", "deduplicate", "views"):
+        stage = stages[name]
+        action = stage["action"]
+        key = stage.get("computation_key")
+        estimate = {
+            "payload_bytes": None,
+            "basis": "unknown",
+            "prior_named_peak_allocated_bytes": None,
+        }
+        if action == "skip_existing_build":
+            estimate.update(payload_bytes=0, basis="existing_build")
+        elif (
+            name != "views"
+            and action in {"verify_candidate", "resume_candidate"}
+            and stage["verification_candidate_bytes"] is not None
+        ):
+            estimate.update(payload_bytes=0, basis="retained_candidate")
+        elif key is not None and action in {"run", "resume_candidate"}:
+            prefix = stage.get("verification_candidate_bytes") or 0
+            output = next(
+                (
+                    item
+                    for row in history
+                    if (item := row["stage_outputs"].get(name)) is not None
+                    and item["computation_key"] == key
+                ),
+                None,
+            )
+            if output is not None and prefix <= output["payload_bytes"]:
+                estimate.update(
+                    payload_bytes=output["payload_bytes"] - prefix,
+                    basis="same_key_observation",
+                )
+            estimate["prior_named_peak_allocated_bytes"] = next(
+                (
+                    item["observed_peak_allocated_bytes"]
+                    for row in history
+                    if (item := row["stage_workspaces"].get(name)) is not None
+                    and item["computation_key"] == key
+                    and item["completed"]
+                    and item["incomplete_samples"] == 0
+                ),
+                None,
+            )
+        results[name] = estimate
+    return results
 
 
 def _build_storage(
@@ -404,11 +490,12 @@ def _build_storage(
     normalized_root: Path,
     build_id: str,
     *,
-    views: dict[str, Any],
+    stages: dict[str, dict[str, Any]],
     prepared: list[Path],
     all_prepared: bool,
     existing_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    views = stages["views"]
     filesystems = {}
     for role, path in (
         ("build", workspace / "builds"),
@@ -454,6 +541,7 @@ def _build_storage(
         remaining = file_bytes - views.get("span_prefix_bytes", 0)
         if remaining >= 0:
             append_bytes = remaining
+    history = list(_stage_observations(workspace, build_id))
     return {
         "filesystems": filesystems,
         "normalized_candidate_payload_bytes": candidates,
@@ -478,7 +566,13 @@ def _build_storage(
             "flat_output_bytes": file_bytes,
             "append_candidate_bytes": append_bytes,
         },
-        "prior_stage_observation": _stage_observation(workspace, build_id),
+        "stage_storage_estimates": _stage_storage_estimates(
+            stages,
+            history,
+            already_built=existing_manifest is not None,
+            all_prepared=all_prepared,
+        ),
+        "prior_stage_observation": history[0] if history else None,
     }
 
 
@@ -633,7 +727,7 @@ def plan_build(
                             lock.parent,
                             normalized_root,
                             build_id,
-                            views=stage_by_id["views"],
+                            stages=stage_by_id,
                             prepared=[],
                             all_prepared=False,
                             existing_manifest=manifest,
@@ -708,7 +802,7 @@ def plan_build(
                 lock.parent,
                 normalized_root,
                 build_id,
-                views=stage_by_id["views"],
+                stages=stage_by_id,
                 prepared=prepared,
                 all_prepared=not pending,
             )

@@ -20,6 +20,9 @@ from typing import Any, TextIO
 from klab.safe_io import symlinked
 from klab.verification_proofs import writable_by_others
 
+_STAGE_SAMPLE_SECONDS = 30
+_STAGE_SAMPLE_ENTRIES = 8192
+
 
 def memory_bytes() -> tuple[int, int, int | None]:
     """Return current RSS, process peak RSS, and system available bytes."""
@@ -69,6 +72,52 @@ def _scratch_bytes(directory: Path) -> tuple[int, int, bool]:
             else:
                 complete = False
         if any((parent / name).is_symlink() for name in directories):
+            complete = False
+    return logical, allocated, complete
+
+
+def _stage_workspace_bytes(roots: tuple[Path, ...]) -> tuple[int, int, bool]:
+    """Sample named files with a shared entry budget across stage roots."""
+    pending = list(roots)
+    seen = set()
+    logical = allocated = visited = 0
+    complete = True
+    while pending:
+        directory = pending.pop()
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            if directory not in roots:
+                complete = False
+            continue
+        except OSError:
+            complete = False
+            continue
+        if not stat.S_ISDIR(info.st_mode):
+            complete = False
+            continue
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if visited == _STAGE_SAMPLE_ENTRIES:
+                        return logical, allocated, False
+                    visited += 1
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        complete = False
+                        continue
+                    if stat.S_ISDIR(info.st_mode):
+                        pending.append(Path(entry.path))
+                    elif stat.S_ISREG(info.st_mode):
+                        inode = info.st_dev, info.st_ino
+                        if inode not in seen:
+                            seen.add(inode)
+                            logical += info.st_size
+                            allocated += info.st_blocks * 512
+                    else:
+                        complete = False
+        except OSError:
             complete = False
     return logical, allocated, complete
 
@@ -130,6 +179,9 @@ class BuildProgress:
         self._scratch_directory: Path | None = None
         self._scratch: dict[str, int] | None = None
         self._stage_outputs: dict[str, dict[str, str | int]] = {}
+        self._stage_workspaces: dict[str, dict[str, Any]] = {}
+        self._stage_sample_scope: tuple[str, tuple[Path, ...]] | None = None
+        self._last_stage_sample = 0.0
         self.started = time.monotonic()
         self.phase_started = self.started
         self.phase_documents = 0
@@ -199,6 +251,47 @@ class BuildProgress:
             "payload_bytes": payload_bytes,
         }
 
+    @contextmanager
+    def track_stage_workspace(
+        self, stage: str, key: str, *directories: Path
+    ) -> Iterator[None]:
+        """Record named workspace samples while a native stage writes files."""
+        self._stage_workspaces[stage] = {
+            "computation_key": key,
+            "completed": False,
+            "samples": 0,
+            "incomplete_samples": 0,
+            "initial_logical_bytes": 0,
+            "initial_allocated_bytes": 0,
+            "observed_peak_logical_bytes": 0,
+            "observed_peak_allocated_bytes": 0,
+        }
+        self._stage_sample_scope = stage, directories
+        try:
+            self._sample_stage_workspace(time.monotonic())
+            yield
+            self._sample_stage_workspace(time.monotonic())
+            self._stage_workspaces[stage]["completed"] = True
+        finally:
+            self._stage_sample_scope = None
+
+    def _sample_stage_workspace(self, now: float) -> None:
+        stage, roots = self._stage_sample_scope
+        logical, allocated, complete = _stage_workspace_bytes(roots)
+        state = self._stage_workspaces[stage]
+        if not state["samples"]:
+            state["initial_logical_bytes"] = logical
+            state["initial_allocated_bytes"] = allocated
+        state["samples"] += 1
+        state["incomplete_samples"] += not complete
+        state["observed_peak_logical_bytes"] = max(
+            state["observed_peak_logical_bytes"], logical
+        )
+        state["observed_peak_allocated_bytes"] = max(
+            state["observed_peak_allocated_bytes"], allocated
+        )
+        self._last_stage_sample = now
+
     def update(
         self,
         *,
@@ -227,6 +320,11 @@ class BuildProgress:
 
     def record(self, event: str = "interval") -> None:
         now = time.monotonic()
+        if (
+            self._stage_sample_scope is not None
+            and now - self._last_stage_sample >= _STAGE_SAMPLE_SECONDS
+        ):
+            self._sample_stage_workspace(now)
         elapsed = max(now - self.started, 1e-9)
         phase_elapsed = max(now - self.phase_started, 1e-9)
         phase_documents = self.documents - self.phase_documents
@@ -268,6 +366,8 @@ class BuildProgress:
             row["verification_mode"] = self.verification_mode
         if self._stage_outputs:
             row["stage_outputs"] = self._stage_outputs
+        if self._stage_workspaces:
+            row["stage_workspaces"] = self._stage_workspaces
         if self._scratch is not None:
             logical, allocated = self._sample_scratch()
             row["scratch"] = {
