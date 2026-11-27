@@ -102,7 +102,7 @@ def test_near_duplicates_reports_a_planted_cross_split_pair(
 
 
 def test_template_aware_near_duplicates_keeps_the_planted_pair_on_the_cli(
-    planted_release: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    planted_release: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     strict = _klab(
         monkeypatch, capsys, "corpus", "near-duplicates", str(planted_release)
@@ -114,6 +114,9 @@ def test_template_aware_near_duplicates_keeps_the_planted_pair_on_the_cli(
         "near-duplicates",
         str(planted_release),
         "--template-aware",
+        "--retain-evidence",
+        "--scratch-dir",
+        str(tmp_path / "scratch"),
         "--workers",
         "2",
         "--shard-bytes",
@@ -123,6 +126,7 @@ def test_template_aware_near_duplicates_keeps_the_planted_pair_on_the_cli(
     [pair] = aware["candidates"]
     assert pair["class"] == "leak" and pair["content_jaccard"] >= 0.65
     assert aware["class_counts"]["template_only"] == 0
+    assert any((tmp_path / "scratch" / "near-duplicates").rglob("evidence.bin"))
     [same] = strict["candidates"]
     assert (pair["left_document_id"], pair["right_document_id"]) == (
         same["left_document_id"],

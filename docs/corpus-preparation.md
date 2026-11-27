@@ -2289,10 +2289,11 @@ The training pass commits its accumulators and byte offset every
 `--checkpoint-every` training documents (default 200,000) and at each
 shard's end. Both use `SCRATCH/near-duplicates`. The key binds the
 release, local file generation, implementation, screen options and
-shard plan. Retry reads healthy evidence shards, regenerates missing or
-damaged ranges, rebuilds the in-memory index and template tables, and
-resumes unfinished training shards. Checkpoint data is reclaimed on
-success. Interrupted generations remain available at the same key.
+shard plan for training checkpoints. Retry reads healthy evidence shards,
+regenerates missing or damaged ranges, rebuilds the in-memory index and
+template tables, and resumes unfinished training shards. Checkpoint data is
+reclaimed on success by default. Interrupted generations remain available at
+the same key.
 `--max-heldout-documents` (default 1,000,000) and `--max-heldout-shingles`
 (default 200,000,000) bound the index; passing one stops the command with no
 report, because every document is screened or none is.
@@ -2314,6 +2315,28 @@ nothing from the corpus:
 ```sh
 klab corpus near-duplicates RELEASE --template-aware > near-duplicates.json
 ```
+
+Use `--retain-evidence` to keep the first-pass shards for a series of screens.
+
+```sh
+klab corpus near-duplicates RELEASE --template-aware --retain-evidence
+```
+
+Repeat `--retain-evidence` with the same scratch directory to reuse verified
+held-out shingles, coverage counts and sampled training shingles. Changes to
+boilerplate frequency and share thresholds, candidate limits and worker counts
+reuse these shards. The resolved documents file and its local generation,
+shard size, sampling stride and producer behavior must match. This also works
+for a lexical-only screen, which retains its own evidence without a training
+sample. Every screen still verifies the release, rebuilds the index and
+compares training documents against it. Reports are identical to a fresh
+screen with the same comparison settings.
+
+Retained evidence includes held-out document IDs, source locations and
+shingle hashes. Its size grows with the held-out text and training sample.
+It belongs to scratch and is unused by published releases. Remove inactive
+`near-duplicates-*.retained-evidence` directories from `SCRATCH/near-duplicates`
+to reclaim disk space. Missing or damaged ranges are regenerated.
 
 A shingle is boilerplate in a source when at least
 `--boilerplate-heldout-documents` (default 20) held-out documents of that
@@ -3393,6 +3416,18 @@ A separate cold end-to-end template-aware pair used two workers and the
 same inputs. The full screen took 30.340 s before and 31.548 s with
 checkpointing, including the training comparison pass. Both processes
 read 478 MB from storage and produced identical report digests.
+
+A separate retention benchmark used 400,000 synthetic documents, including
+8,000 held-out documents, in 479 MB of JSONL on NVMe with a mostly warm OS
+cache. The runs used one worker, 32 MiB shards and a 22-bit template sketch.
+After changing the sample frequency threshold, median setup fell from 2.65 s
+to 0.80 s across three pairs and logical reads fell from 500 MB to 19.6 MB.
+The retained shingle files took 8.83 MB. In one full pair, changing the
+threshold with reuse reduced logical reads from 980 MB to 500 MB and elapsed
+time from 65.69 s to 63.14 s. Peak process RSS was about 261 MiB in both runs
+and the resulting report digests matched. These timings exclude release
+verification and include rebuilding the in-memory index. The full runs still
+streamed the training split and scored it under the changed threshold.
 
 ### Prepare data, train, and score
 

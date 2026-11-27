@@ -127,7 +127,7 @@ def test_template_only_pairs_are_counted_and_real_copies_stay_candidates(
 
 
 def test_the_training_sample_finds_a_template_the_heldout_side_barely_shows(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     rng = random.Random(3)
     rows = [_row("h0", "validation", "threads_heldout", f"{TEMPLATE} {_words(rng, 8)}")]
@@ -137,17 +137,45 @@ def test_the_training_sample_finds_a_template_the_heldout_side_barely_shows(
     ]
     documents = _write(tmp_path / "documents.jsonl", rows)
     strict = screen_documents(documents, identity="x")
+    retained = {
+        "template_aware": True,
+        "checkpoint_dir": tmp_path / "checkpoints",
+        "retain_evidence": True,
+        "shard_bytes": 2048,
+    }
     sampled = screen_documents(
-        documents, identity="x", template_aware=True, boilerplate_sample_stride=1
-    )
-    unsampled = screen_documents(
-        documents, identity="x", template_aware=True, boilerplate_sample_stride=10**9
+        documents, identity="x", boilerplate_sample_stride=1, **retained
     )
     assert strict["candidate_count"] == 12
     assert sampled["candidate_count"] == 0 and sampled["template_only_count"] == 12
+
+    def rescan(*args):
+        pytest.fail("a classification change reread a retained evidence range")
+
+    new_policy = {
+        "identity": "other release using the same documents",
+        "boilerplate_sample_stride": 1,
+        "boilerplate_sample_documents": 13,
+        "max_candidates": 5,
+    }
+    fresh = screen_documents(documents, template_aware=True, **new_policy)
+    with monkeypatch.context() as patch:
+        patch.setattr(near_duplicates, "_scan_file", rescan)
+        assert screen_documents(documents, **retained, **new_policy) == fresh
+    assert fresh["candidate_count"] == 12 and fresh["candidates_truncated"]
+
+    unsampled = screen_documents(
+        documents, identity="x", boilerplate_sample_stride=10**9, **retained
+    )
     # With too few held-out documents and no sample the template is unknown,
     # so every pair stays a candidate: the failure is toward review.
     assert unsampled["candidate_count"] == 12 and unsampled["template_only_count"] == 0
+
+    rows.append(_row("h1", "test", "threads_heldout", f"{TEMPLATE} {_words(rng, 8)}"))
+    _write(documents, rows)
+    fresh = screen_documents(documents, template_aware=True, **new_policy)
+    assert fresh["document_count"] == len(rows)
+    assert screen_documents(documents, **retained, **new_policy) == fresh
 
 
 @pytest.mark.parametrize("template_aware", [False, True])

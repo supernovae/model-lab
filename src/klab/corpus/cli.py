@@ -920,6 +920,7 @@ def _run(args: argparse.Namespace) -> None:
             workers=min(args.workers or 8, os.cpu_count() or 1),
             shard_bytes=args.shard_bytes,
             template_aware=args.template_aware,
+            retain_evidence=args.retain_evidence,
             **caps,
         )
     else:
@@ -1483,6 +1484,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
                 "--template-aware",
                 action="store_true",
                 help="Set aside boilerplate shingles and report pairs similar only through them as template_only",
+            )
+            command.add_argument(
+                "--retain-evidence",
+                action="store_true",
+                help="Keep verified first-pass shingles in scratch for later screens",
             )
             command.add_argument(
                 "--shard-bytes",
