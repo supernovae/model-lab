@@ -16,6 +16,7 @@ import os
 import shutil
 from collections import Counter
 from dataclasses import dataclass
+from itertools import groupby
 from pathlib import Path
 
 import pytest
@@ -1163,6 +1164,101 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     shorter_run.write_text(yaml.safe_dump(shorter))
     assert Path(lab.run("data", "prepare", str(shorter_run))) != prepared_dir
 
+    from klab.corpus import mixture as mixture_module
+    from klab.corpus.mixture_schedule import SCHEDULE_RANGE
+
+    order_declaration = tmp_path / "source-order.yaml"
+    ordering = yaml.safe_load(declaration.read_text())
+    ordering["sequence_order"] = {
+        "kind": "source",
+        "base_declaration": str(declaration),
+        "base_output": str(mixture),
+    }
+    order_output = tmp_path / "source-order" / "mixture"
+    order_declaration.write_text(
+        yaml.safe_dump({**ordering, "seed": ordering["seed"] + 1})
+    )
+    with pytest.raises(ValueError, match="same selection declaration"):
+        mixture_module.materialize_mixture(order_declaration, order_output)
+    assert not order_output.exists()
+    order_declaration.write_text(yaml.safe_dump(ordering))
+    with monkeypatch.context() as no_reselect:
+
+        def unexpected_selection(*args, **kwargs):
+            pytest.fail("source ordering recomputed the baseline selection")
+
+        no_reselect.setattr(mixture_module, "_schedule", unexpected_selection)
+        publish = mixture_module.rename_noreplace
+
+        def interrupted_publish(source, destination):
+            if destination == order_output:
+                raise InterruptedError("stop before publishing the derived order")
+            return publish(source, destination)
+
+        with monkeypatch.context() as interrupted:
+            interrupted.setattr(mixture_module, "rename_noreplace", interrupted_publish)
+            with pytest.raises(InterruptedError):
+                mixture_module.materialize_mixture(order_declaration, order_output)
+        assert not order_output.exists()
+        ordered = lab.json(
+            "corpus",
+            "materialize-mixture",
+            str(order_declaration),
+            "--output",
+            str(order_output),
+        )
+
+    def selection_pairs(output):
+        records = (output / "train.records.jsonl").read_bytes().splitlines()
+        ranges = SCHEDULE_RANGE.iter_unpack(
+            (output / "train.schedule.bin").read_bytes()
+        )
+        return sorted(zip(records, ranges, strict=True))
+
+    assert selection_pairs(mixture) == selection_pairs(order_output)
+    ordered_rows = [
+        json.loads(line)
+        for line in (order_output / "train.records.jsonl").read_bytes().splitlines()
+    ]
+    order_keys = [
+        (row["stratum"], row["exposure"], row["source_id"]) for row in ordered_rows
+    ]
+    assert (
+        len(list(groupby(order_keys)))
+        == len(set(order_keys))
+        == ordered["sequence_order"]["groups"]
+    )
+    assert (
+        ordered["sequence_order"]["source_transitions_after"]
+        < ordered["sequence_order"]["source_transitions_before"]
+    )
+    assert (
+        lab.json(
+            "corpus",
+            "verify-mixture",
+            str(order_declaration),
+            "--output",
+            str(order_output),
+            "--audit",
+        )
+        == ordered
+    )
+
+    source_config = yaml.safe_load(run_config.read_text())
+    source_config["dataset"].update(
+        mixture_declaration_path=str(order_declaration),
+        mixture_output_path=str(order_output),
+        train_path=ordered["train_schedule_path"],
+    )
+    run_config = tmp_path / "source-ordered-pretrain.yaml"
+    run_config.write_text(yaml.safe_dump(source_config))
+    source_prepared = Path(lab.run("data", "prepare", str(run_config)))
+    assert (source_prepared / "train_supervision.npy").read_bytes() == (
+        prepared_dir / "train_supervision.npy"
+    ).read_bytes()
+    ordered_manifest = json.loads((source_prepared / "manifest.json").read_text())
+    assert ordered_manifest["train"]["sha256"] != prepared_manifest["train"]["sha256"]
+
     # A training update must actually obtain its IDs from the segment view.
     from klab.config.loading import load_config
     from klab.data.mixture_batches import ReferencedTokenArray
@@ -1233,6 +1329,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     assert not (projected / "sealed").exists()
     assert not (dispatch / "assets/data/train.npy").exists()
     mixture.rename(tmp_path / "original-mixture")
+    order_output.rename(tmp_path / "original-source-order")
     Path(prepared_manifest["train_reference"]["cache_root"]).rename(
         tmp_path / "original-token-store"
     )

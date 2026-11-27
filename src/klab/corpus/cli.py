@@ -669,9 +669,14 @@ def _run(args: argparse.Namespace) -> None:
                     "complete": True,
                     **(
                         {
-                            "reseal": "output byte-identical to its receipt and "
-                            "receipt matches this declaration; schedule NOT replayed "
-                            "(use --audit for independent replay)"
+                            "reseal": (
+                                "output matches its declared ordering of the verified base selection; "
+                                "use --audit to replay the base selection"
+                                if "sequence_order" in result
+                                else "output byte-identical to its receipt and "
+                                "receipt matches this declaration; schedule NOT replayed "
+                                "(use --audit for independent replay)"
+                            )
                         }
                         if getattr(args, "reseal", False)
                         else {}
@@ -688,7 +693,7 @@ def _run(args: argparse.Namespace) -> None:
                     **transfer,
                     **{
                         key: result[key]
-                        for key in ("stratum_exposures", "row_layout")
+                        for key in ("stratum_exposures", "row_layout", "sequence_order")
                         if key in result
                     },
                 },

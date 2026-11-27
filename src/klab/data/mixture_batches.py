@@ -19,7 +19,6 @@ from klab.corpus.mixture_schedule import (
     VerifiedSchedule,
     open_verified_schedule_member,
     require_schedule_generation,
-    token_cache_root,
     verify_schedule,
 )
 from klab.corpus.release_verify import verification_settings
@@ -258,7 +257,7 @@ def reference_training_tokens(
         ):
             schedule = verify_schedule(
                 output,
-                token_cache_root(spec.release_path.resolve(), output.parent),
+                spec.referenced_cache_root(output),
                 receipt,
                 eos,
             )
