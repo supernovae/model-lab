@@ -18,7 +18,13 @@ from klab.lab_results import (
     resolve_checkpoint,
     resolve_result,
 )
-from klab.probes.runner import Arm, lm_eval_spec, progress_writer, run_battery
+from klab.probes.runner import (
+    Arm,
+    lm_eval_spec,
+    progress_writer,
+    require_tier,
+    run_battery,
+)
 from klab.reference_models import load_reference, require_reference_extras
 
 
@@ -94,10 +100,8 @@ def run_probe(
                 "reference models are scored on lm-eval tasks: drop `lm_eval: false`"
             )
         require_reference_extras()
-    elif tier == "full" and lm_eval:
-        from klab.probes.lm_eval_adapter import require_harness
-
-        require_harness()  # seconds now, not after every other probe has run
+    # Seconds now, not after every other probe has run.
+    require_tier(tier, lm_spec if lm_eval else False)
     if final and tier == "fast":
         raise ValueError(
             "final evaluation scores the held-back text probes: use --config final or final-full"

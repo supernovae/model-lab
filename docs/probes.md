@@ -146,9 +146,12 @@ records each task, the chance level and this caveat in the result.
 - `standard`: adds fact recall from weights, reworded fact recall and needle
   retrieval.
 - `full`: adds long-context needle retrieval and lm-eval. The tier needs the
-  `lmeval` extra in the interpreter that runs it. `klab probe`, `klab try` and
-  `klab sweep` check this before any training or scoring and refuse with the
-  install command for that interpreter, so a missing harness costs seconds and
+  `lmeval` extra in the interpreter that runs it, and each lm-eval task's
+  dataset. `klab probe`, `klab try` and `klab sweep` check both before any
+  training or scoring: they import the harness and load every task the probe
+  will score, which fetches a missing dataset then (or, under
+  `lm_eval_protocol`, verifies the offline cache). A refusal names the
+  interpreter and the install command or the task, so a gap costs seconds and
   not the run before it. A registered runtime is a separate interpreter from
   the project environment and needs its own install:
 

@@ -78,6 +78,50 @@ def require_harness() -> None:
         )
 
 
+def require_tasks(tasks: Sequence[str], protocol: Any = None) -> None:
+    """Refuse when the harness is missing or one of TASKS does not load.
+
+    Loading a task fetches its dataset (or, under a controlled PROTOCOL,
+    reads and verifies the offline cache), so a dataset that cannot be had is
+    found before any training or scoring and not by the last probe.
+    """
+    import sys
+
+    require_harness()
+    remedy = (
+        "The full probe tier scores these tasks last, so they must load before "
+        "it starts: fix the cause, or probe with a config that sets "
+        "`lm_eval: false`"
+    )
+    if protocol is not None:
+        from klab.probes.benchmark_protocol import (
+            BenchmarkProtocol,
+            offline,
+            pinned_tasks,
+        )
+
+        try:
+            with offline():
+                pinned_tasks(BenchmarkProtocol.model_validate(protocol))
+        except Exception as error:
+            raise LmEvalUnavailable(
+                f"the pinned lm-eval tasks do not load offline in {sys.executable} "
+                f"({type(error).__name__}: {error}). {remedy}"
+            ) from error
+        return
+    from lm_eval.tasks import TaskManager, get_task_dict
+
+    manager = TaskManager()
+    for task in tasks:
+        try:
+            get_task_dict([task], manager)
+        except Exception as error:
+            raise LmEvalUnavailable(
+                f"lm-eval task {task!r} does not load in {sys.executable} "
+                f"({type(error).__name__}: {error}). {remedy}"
+            ) from error
+
+
 def _harness() -> Any:
     require_harness()
     import lm_eval
