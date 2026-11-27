@@ -177,10 +177,12 @@ partition IDs and checks the combined release and build roots, plus durable
 pins for interrupted native preparation. Builders hold a shared normalized
 lease, and apply takes that lease exclusively along with the release lease
 and selected writer locks. Apply retires each directory by rename before
-deleting its members. Released documents carry selection,
-split and duplicate decisions, so references to normalized document payloads
-require a separate overlay and ordering contract. That contract and retention
-for other artifact families are tracked in #567.
+deleting its members. Native builds can opt in to a [document text overlay](../corpus-preparation.md#reference-normalized-document-text).
+The overlay keeps release-specific split and duplicate decisions in logical
+document order and references exact normalized rows through the existing
+span catalog. Verified readers rejoin the text where needed, while metadata
+queries use the narrow view. The same retention closure protects both kinds
+of referenced record. Retention for other artifact families remains in #567.
 
 Start with typed document, passage, annotation, duplicate-group, selection,
 entity, assertion, evidence, edge, index, and compiled sequence payloads.

@@ -2073,3 +2073,91 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     resumed = tmp_path / "runs/mini-resumed"
     assert not (resumed / "data/train.npy").exists()
     assert json.loads((resumed / "progress.json").read_text())["step"] == 2
+
+
+def test_document_overlay_reuses_normalized_text_through_release_consumers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    from klab.corpus.normalized_documents import DOCUMENT_REFERENCES, TEXT_REFERENCE
+    from klab.corpus.normalized_spans import span_partitions
+    from klab.token_encode_worker import read_texts
+
+    prepared = prepare(tmp_path, monkeypatch, capsys)
+    lab, project, inline = prepared.lab, prepared.project, prepared.release
+    expected = documents(inline)
+    option = "--reference-normalized-documents"
+    plan = lab.json("corpus", "plan", project, option, "--inspect-storage", "--json")
+    build = Path(lab.run("corpus", "build", project, "--offline", option))
+    assert build.name == plan["build_id"]
+    assert (build / DOCUMENT_REFERENCES).is_file()
+    physical = (build / "documents.jsonl").read_bytes().splitlines(keepends=True)
+    assert all(
+        TEXT_REFERENCE in json.loads(row) and "text" not in json.loads(row)
+        for row in physical
+    )
+    assert (
+        lab.json("corpus", "plan", "--build", str(build), "--json")["status"]
+        == "planned"
+    )
+    projected = Path(lab.run("corpus", "freeze", str(build)))
+    assert documents(projected) == expected
+    locations = [(0, len(physical[0])), (len(physical[0]), len(physical[1]))]
+    assert read_texts(str(projected / "documents.jsonl"), locations) == [
+        row["text"] for row in expected[:2]
+    ]
+    for split in ("train", "validation", "test"):
+        assert (projected / "lm" / f"{split}.jsonl").read_bytes() == (
+            inline / "lm" / f"{split}.jsonl"
+        ).read_bytes()
+
+    export = Path(
+        lab.run(
+            "corpus",
+            "export",
+            str(projected),
+            "--view",
+            "lm",
+            "--vocab-size",
+            str(VOCAB_SIZE),
+            "--base-run-config",
+            str(prepared.recipe.corpus / "export-base.yaml"),
+        )
+    )
+    assert Path(lab.run("tokenizer", "train", str(export / "tokenizer.yaml"))).is_file()
+    assert Path(lab.run("data", "prepare", str(export / "run.yaml"))).is_dir()
+    inventory = tmp_path / "overlay-family-inventory.jsonl"
+    write_family_inventory(projected, inventory)
+    template = (prepared.recipe.corpus / "mixture.template.yaml").read_text()
+    for name, value in {
+        "RELEASE_PATH": projected,
+        "TOKENIZER_CONFIG": export / "tokenizer.yaml",
+        "FAMILY_INVENTORY": inventory,
+        "RELEASE_ID": projected.name,
+    }.items():
+        template = template.replace("${" + name + "}", str(value))
+    declaration = tmp_path / "overlay-mixture.yaml"
+    declaration.write_text(template)
+    output = tmp_path / "overlay-mixture"
+    schedule = lab.json(
+        "corpus", "materialize-mixture", str(declaration), "--output", str(output)
+    )
+    assert schedule["complete"]
+    assert schedule["actual_target_tokens"] == yaml.safe_load(template)["target_quotas"]
+    manifest = release_module.verify_release(projected)
+    part = span_partitions(projected, manifest["files"])[0]
+    retained = lab.json(
+        "corpus",
+        "release-prune",
+        "--kind",
+        "normalized",
+        "--partition",
+        f"{part.entry['source_id']}/{part.entry['partition_key']}",
+        "--json",
+    )
+    assert retained["payloads"][0]["action"] == "protected"
+    payload = part.directory / "docs.jsonl"
+    before = payload.read_bytes()
+    payload.write_bytes(before.replace(b"{", b"[", 1))
+    with pytest.raises(ValueError, match="tampered artifact:.*docs.jsonl"):
+        release_module.verify_release(projected)
+    payload.write_bytes(before)

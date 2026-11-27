@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from klab.canonical import canonical_digest
+from klab.corpus.normalized_documents import DOCUMENT_REFERENCES
 from klab.corpus.normalized_retention import VIEW_INPUTS, normalized_uses
 from klab.corpus.normalized_spans import (
     NORMALIZED_SPANS,
@@ -387,6 +388,10 @@ def _release_references(
                     }
                     if any(files[name]["sha256"] != outputs[name] for name in stages):
                         raise ValueError("stage digest mismatch")
+                if DOCUMENT_REFERENCES in files and not has_span_projection(files):
+                    raise ValueError(
+                        "document overlay lacks the normalized retention catalog"
+                    )
                 if storage == NORMALIZED_SPANS:
                     retained = _span_references(release, files)
                 else:

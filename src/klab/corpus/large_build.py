@@ -41,6 +41,7 @@ from klab.corpus.build_outputs import (
 )
 from klab.corpus.build_stages import StageStore, implementation_digests, run_stage
 from klab.corpus.duplicate_evidence import source_rank
+from klab.corpus.normalized_documents import DOCUMENT_REFERENCES, TEXT_REFERENCE
 from klab.corpus.normalized_retention import (
     bind_normalized_view,
     clear_normalized_use,
@@ -406,6 +407,7 @@ class _SQLBuildRows:
                         doc_id,
                         doc_id,
                         evidence,
+                        (shard, offset, length),
                     )
                 return
             batch = []
@@ -477,9 +479,16 @@ class _SQLBuildRows:
             for index in indices:
                 _, offset, length, *_ = batch[index]
                 payloads[index] = read_file_range(stream, offset, length)
-        for raw, (_, _, _, split, representative, reason, doc_id, rowid) in zip(
-            payloads, batch, strict=True
-        ):
+        for raw, (
+            shard,
+            offset,
+            length,
+            split,
+            representative,
+            reason,
+            doc_id,
+            rowid,
+        ) in zip(payloads, batch, strict=True):
             evidence = self.annotations[rowid] if rowid is not None else None
             yield (
                 raw.removesuffix(b"\n"),
@@ -489,6 +498,7 @@ class _SQLBuildRows:
                 doc_id,
                 doc_id,
                 evidence,
+                (shard, offset, length),
             )
 
     def family_splits(self):
@@ -587,6 +597,12 @@ def _emit_build(
     stage_count = 0
     stage_digest = hashlib.sha256()
     stage_digest.update(b"[" + canonical_json(stage_id) + b",[")
+
+    document_overlay = bool(identity.get("reference_normalized_documents"))
+    if document_overlay:
+        if span_projection is None:
+            raise ValueError("normalized document text requires a span projection")
+        write_json(staging / DOCUMENT_REFERENCES, span_projection)
 
     with ExitStack() as stack:
 
@@ -694,6 +710,7 @@ def _emit_build(
             document_id,
             document_cursor,
             annotation,
+            *locator,
         ) in stack.enter_context(closing(document_rows)):
             doc = json.loads(raw_doc)
             if doc["document_id"] != document_id:
@@ -701,7 +718,17 @@ def _emit_build(
             doc["split"] = split
             doc["representative_id"] = representative
             doc["drop_reason"] = reason
-            _output(documents, doc)
+            if document_overlay:
+                (reference,) = locator
+                _output(
+                    documents,
+                    {
+                        **{key: value for key, value in doc.items() if key != "text"},
+                        TEXT_REFERENCE: reference,
+                    },
+                )
+            else:
+                _output(documents, doc)
             _output(
                 lineage,
                 _document_lineage(

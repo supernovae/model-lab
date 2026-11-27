@@ -25,6 +25,7 @@ from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.bounded_metadata import metadata_operation
 from klab.corpus.build_stages import implementation_digests
 from klab.corpus.family_inventory_rows import join_family_documents
+from klab.corpus.normalized_documents import DocumentText
 from klab.corpus.progress import memory_bytes
 from klab.corpus.release import ReleaseReader
 from klab.corpus.shards import range_file_identity
@@ -109,17 +110,25 @@ class _DocumentScan:
         self.digest = hashlib.sha256()
         self.size = self.rows_scanned = self.kept_documents = 0
 
-    def rows(self) -> Iterator[dict]:
-        with self.path.open("rb") as stream:
-            for line in stream:
-                self.digest.update(line)
-                self.size += len(line)
-                if not line.strip():
-                    continue
-                row = json.loads(line)
-                self.rows_scanned += 1
-                self.kept_documents += row["drop_reason"] is None
-                yield row
+    def rows(self, *, text=True) -> Iterator[dict]:
+        def scanned():
+            with self.path.open("rb") as stream:
+                for line in stream:
+                    offset = self.size
+                    self.digest.update(line)
+                    self.size += len(line)
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    self.rows_scanned += 1
+                    self.kept_documents += row["drop_reason"] is None
+                    yield row, offset, len(line)
+
+        if text:
+            with DocumentText(self.path) as documents:
+                yield from (row for row, _, _ in documents.records(scanned()))
+        else:
+            yield from (row for row, _, _ in scanned())
 
 
 def _inventory(manifest: dict[str, Any], digest: str, size: int) -> None:
@@ -565,7 +574,7 @@ def _verify_source_receipt(
         scan = _DocumentScan(document_path)
         with (
             metadata_operation(_scratch_dir(), max_database_bytes=None) as store,
-            closing(scan.rows()) as documents,
+            closing(scan.rows(text=False)) as documents,
             closing(
                 _checked_family_documents(
                     documents, inventory, inventory_sha, policy, store.connection

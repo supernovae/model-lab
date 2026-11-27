@@ -216,7 +216,11 @@ def lexical_topics(spec, base, *, audit_directory=None):
                 *(a.release_path for a in spec.additional_releases),
             )
         ]
-        paths = [release.member("documents.jsonl") for release in releases]
+        paths = [
+            path
+            for release in releases
+            for path in release.member_paths("documents.jsonl")
+        ]
         max_documents = sum(
             json.loads(release.member("report.json").read_bytes())["split_counts"][
                 "train"

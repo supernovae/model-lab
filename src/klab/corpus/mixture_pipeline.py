@@ -261,7 +261,7 @@ def encode_ahead(
                         item[3] = tokens.lookup(digest, count_miss=False)
                     if item[3] is None:
                         item[5] = (
-                            doc["location"][1]
+                            doc.get("document_bytes", doc["location"][1])
                             if "location" in doc
                             else len(doc["text"].encode("utf-8"))
                         )

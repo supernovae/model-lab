@@ -47,6 +47,11 @@ import numpy as np
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.build_stages import implementation_digests
+from klab.corpus.normalized_documents import (
+    document_chunks,
+    document_range,
+    source_generations,
+)
 from klab.corpus.release_verify import verification_settings
 from klab.corpus.shards import (
     ShardPlan,
@@ -1040,16 +1045,8 @@ def _line_ranges(path: Path, shard_bytes: int) -> list[tuple[int, int]]:
 def _document_rows(
     path: Path, start: int, end: int
 ) -> Iterable[tuple[int, dict[str, Any]]]:
-    with path.open("rb") as handle:
-        handle.seek(start)
-        offset = start
-        while offset < end:
-            line = handle.readline()
-            if not line:
-                break
-            offset += len(line)
-            if line.strip():
-                yield offset, json.loads(line)
+    for row, offset, length in document_range(path, start, end):
+        yield offset + length, row
 
 
 def screen_documents(
@@ -1078,7 +1075,12 @@ def screen_documents(
         )
     documents = documents.resolve(strict=True)
     observed = range_file_identity(documents)
-    shards = _line_ranges(documents, shard_bytes)
+    normalized_generations = source_generations(documents)
+    shards = (
+        document_chunks(documents, max_bytes=shard_bytes)
+        if normalized_generations
+        else _line_ranges(documents, shard_bytes)
+    )
     options = {
         **options,
         "template_aware": template_aware,
@@ -1094,6 +1096,7 @@ def screen_documents(
     else:
         evidence_inputs = {
             "file": observed,
+            "normalized_documents": normalized_generations,
             "numpy_version": np.__version__,
             "unicode_version": unicodedata.unidata_version,
             "implementation": implementation_digests("near_duplicates.py"),
@@ -1120,7 +1123,7 @@ def screen_documents(
         plan = ShardPlan(
             EVIDENCE_STAGE,
             [(str(documents), start, end) for start, end in shards],
-            observed[2],
+            observed[2] + sum(generation[2] for generation in normalized_generations),
             inputs=evidence_inputs if retain_evidence else {"screen": key},
             store=evidence,
         )
@@ -1145,7 +1148,10 @@ def screen_documents(
             )
             if not retain_evidence and evidence.exists():
                 shutil.rmtree(evidence)
-    if range_file_identity(documents) != observed:
+    if (
+        range_file_identity(documents) != observed
+        or source_generations(documents) != normalized_generations
+    ):
         raise ValueError("documents changed during near-duplicate screen")
     return report
 

@@ -413,6 +413,10 @@ def _run(args: argparse.Namespace) -> None:
     if command == "plan":
         from klab.corpus.release_members import ReleasePlacement
 
+        if args.build is not None and args.reference_normalized_documents:
+            raise ValueError(
+                "normalized document references are selected during build planning"
+            )
         placement = ReleasePlacement(
             stages=args.share_stage_artifacts,
             documents=args.share_document_artifacts,
@@ -453,6 +457,7 @@ def _run(args: argparse.Namespace) -> None:
             root,
             reference_normalized_spans=args.reference_normalized_spans,
             inspect_storage=args.inspect_storage,
+            reference_normalized_documents=args.reference_normalized_documents,
         )
         if args.json:
             print(json.dumps(plan, sort_keys=True))
@@ -469,7 +474,9 @@ def _run(args: argparse.Namespace) -> None:
                     if estimate is not None
                     else ""
                 )
-                if stage.get("reference_normalized_spans"):
+                if stage.get("reference_normalized_documents"):
+                    details += " (references normalized document text and spans)"
+                elif stage.get("reference_normalized_spans"):
                     details += " (references normalized evidence spans)"
                 reason = stage.get("reason")
                 print(
@@ -849,6 +856,7 @@ def _run(args: argparse.Namespace) -> None:
                 keep_stages=args.keep_stages,
                 canary=canary,
                 reference_normalized_spans=args.reference_normalized_spans,
+                reference_normalized_documents=args.reference_normalized_documents,
                 **verification,
             )
             if canary is None:
@@ -1252,6 +1260,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         help="Plan shared language-model view placement",
     )
     command.add_argument(
+        "--reference-normalized-documents",
+        action="store_true",
+        help="Retain only release document metadata and reference normalized text and spans",
+    )
+    command.add_argument(
         "--reference-normalized-spans",
         action="store_true",
         help="Plan a build or freeze that references native normalized evidence spans",
@@ -1309,6 +1322,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
             help="Hash every snapshot from its bytes instead of reusing a signed receipt",
         )
         if name == "build":
+            command.add_argument(
+                "--reference-normalized-documents",
+                action="store_true",
+                help="Write an overlay over verified normalized document text and spans",
+            )
             command.add_argument(
                 "--reference-normalized-spans",
                 action="store_true",

@@ -27,6 +27,15 @@ from klab.corpus.build_stages import StageStore, run_stage
 from klab.corpus.document_coverage import document_coverage
 from klab.corpus.jsonl_records import iter_rows
 from klab.corpus.measurement_inputs import MeasurementTokenizer
+from klab.corpus.normalized_documents import (
+    DOCUMENT_REFERENCES,
+    DOCUMENTS,
+    DocumentText,
+    document_chunks,
+    document_range,
+    overlay_dependencies,
+    overlay_inventory,
+)
 from klab.corpus.normalized_spans import (
     NORMALIZED_SPANS,
     SPAN_MEMBER,
@@ -198,10 +207,12 @@ def _files(
         if verified_separately
         else eligible
     )
+    normalized_documents = overlay_inventory(root, inventory)
     if progress is not None:
         progress.start_phase(
             "hash_files",
-            expected_input_bytes=sum(entry["size"] for entry in eligible.values()),
+            expected_input_bytes=sum(entry["size"] for entry in eligible.values())
+            + sum(entry["size"] for entry in normalized_documents.values()),
         )
         if reused:
             progress.update(
@@ -222,6 +233,28 @@ def _files(
             on_read=(lambda size: progress.update(input_bytes=size))
             if progress is not None
             else None,
+        )
+    if normalized_documents:
+        members = {
+            "/".join(path.parts[-3:]): (path, entry)
+            for path, entry in normalized_documents.items()
+        }
+        pending = {
+            name: entry
+            for name, (path, entry) in members.items()
+            if not (
+                checked_shared
+                and path in checked_shared
+                and range_file_identity(path) == checked_shared[path]
+            )
+        }
+        hash_inventory(
+            root,
+            pending,
+            lambda _, name: members[name][0],
+            progress,
+            proof_store=proof_store,
+            verification_mode=verification_mode,
         )
 
 
@@ -597,7 +630,7 @@ def _document_rows(
             return source, path, snapshot, raw_sha, normalizer, json.loads(rights)
 
         rows, replay_rows, duplicate_keys = [], [], []
-        for doc, _, _ in range_records(Path(documents), start, end):
+        for doc, _, _ in document_range(documents, start, end):
             encoded_text = doc["text"].encode("utf-8")
             content_digest = hashlib.sha256(encoded_text).digest()
             text_bytes = len(encoded_text)
@@ -855,10 +888,19 @@ def _replay_sources(
     }
     build_identity = receipt.get("identity", receipt.get("build_identity"))
     members = ReleaseMembers(root, receipt)
-    documents = members.member("documents.jsonl")
+    documents = [members.member(DOCUMENTS)]
     support = [members.member(name) for name in ("license-report.json", "sources.json")]
     parts = span_partitions(root, receipt["files"])
     span_files = {part.source_file: part.spans for part in parts}
+    normalized = {}
+    if DOCUMENT_REFERENCES in receipt["files"]:
+        documents.append(members.member(DOCUMENT_REFERENCES))
+        normalized = {
+            part.source_file: path
+            for part, path in zip(
+                parts, overlay_dependencies(root, receipt["files"]), strict=True
+            )
+        }
     inline_spans = None if parts else members.member(SPAN_MEMBER)
     use_receipts = proof_store is not None and verification_mode == "verified_reuse"
     if use_receipts:
@@ -897,7 +939,9 @@ def _replay_sources(
         if file is None or file["role"] != "document":
             raise ValueError("document lacks pinned file rights")
         if use_receipts and size >= INVENTORY_RECEIPT_MIN_BYTES:
-            dependencies = [documents, spans, *support]
+            dependencies = [*documents, spans, *support]
+            if normalized:
+                dependencies.append(normalized[source_id, raw_name])
             identity = canonical_digest(
                 [
                     replay_inputs,
@@ -1329,8 +1373,7 @@ def _release_row_indexes(
     spans_paths = tuple(path for path, _ in span_sources)
     documents_path = members.member("documents.jsonl")
     inputs_by_name = {
-        name: spans_paths if name == SPAN_MEMBER else (members.member(name),)
-        for name in RELEASE_ROW_INDEX_MEMBERS
+        name: members.member_paths(name) for name in RELEASE_ROW_INDEX_MEMBERS
     }
     span_inputs, document_inputs = release_row_index_inputs(
         inputs_by_name,
@@ -1457,7 +1500,7 @@ def _release_row_indexes(
                 evidence.executemany("INSERT INTO duplicate_keys VALUES (?,?,?)", keys)
                 advance(len(docs), size)
 
-            total = phase("documents", documents_path)
+            total = phase("documents", *members.member_paths(DOCUMENTS))
             run_tasks(
                 _document_rows,
                 (
@@ -1472,7 +1515,7 @@ def _release_row_indexes(
                         include_text_bytes,
                         row_selection,
                     )
-                    for start, end in chunk_ranges(documents_path)
+                    for start, end in document_chunks(documents_path)
                 ),
                 load,
                 total_bytes=total,
@@ -3013,6 +3056,10 @@ def _verify_build_cold(
         or canonical_digest(manifest["identity"]) != path.name
     ):
         raise ValueError("invalid build identity")
+    if (DOCUMENT_REFERENCES in manifest["files"]) != bool(
+        manifest["identity"].get("reference_normalized_documents")
+    ):
+        raise ValueError("build document overlay differs from its identity")
     if has_span_projection(manifest["files"]) != bool(
         manifest["identity"].get("reference_normalized_spans")
     ):
@@ -3075,7 +3122,9 @@ def release_manifest_payload(
             files[name] = {**files[name], "storage": SHARED_STAGE}
     if placement.documents:
         for name in DOCUMENT_MEMBERS:
-            if name != SPAN_MEMBER or not projected_spans:
+            if (name != SPAN_MEMBER or not projected_spans) and (
+                name != DOCUMENTS or DOCUMENT_REFERENCES not in files
+            ):
                 files[name] = {**files[name], "storage": SHARED_DOCUMENT}
     if placement.lm_views:
         for name in LM_VIEW_MEMBERS:
@@ -3137,9 +3186,7 @@ def freeze(
     # One operation, so a snapshot authenticated for the build is hashed once.
     with (
         _verification_operation(),
-        normalized_retention_lease(work_root)
-        if reference_normalized_spans
-        else nullcontext(),
+        normalized_retention_lease(work_root),
     ):
         return _freeze(build_dir, work_root, proof_store, verification_mode, placement)
 
@@ -3251,7 +3298,13 @@ def _freeze(
     checked_spans = None
     if parts:
         checked_spans = (
-            {path: range_file_identity(path) for path in span_dependencies(parts)}
+            {
+                path: range_file_identity(path)
+                for path in (
+                    *span_dependencies(parts),
+                    *overlay_dependencies(destination, payload["files"]),
+                )
+            }
             if projected_spans
             else verify_span_projection(parts, payload["files"][SPAN_MEMBER])
         )
@@ -3367,9 +3420,7 @@ def _publish(
                     range_file_identity(path) != stamp
                     for path, stamp in checked_spans.items()
                 ):
-                    raise ValueError(
-                        "normalized span inputs changed before publication"
-                    )
+                    raise ValueError("normalized inputs changed before publication")
                 shared.generations.update(checked_spans)
                 shared.checked.update(checked_spans)
             if inline_present:
@@ -3737,13 +3788,34 @@ class ReleaseMembers:
         return shared_member_path(self.root, name, entry) or _safe(self.root, name)
 
     def member_paths(self, name: str) -> tuple[Path, ...]:
+        if name == DOCUMENTS:
+            return (
+                self.member(name),
+                *overlay_dependencies(self.root, self.manifest["files"]),
+                *(
+                    (self.member(DOCUMENT_REFERENCES),)
+                    if DOCUMENT_REFERENCES in self.manifest["files"]
+                    else ()
+                ),
+            )
         if name == SPAN_MEMBER:
             parts = span_partitions(self.root, self.manifest["files"])
             if parts:
                 return tuple(part.spans for part in parts)
         return (self.member(name),)
 
-    def rows(self, name: str) -> Iterator[dict[str, Any]]:
+    def rows(
+        self, name: str, *, document_text: bool = True
+    ) -> Iterator[dict[str, Any]]:
+        if name == DOCUMENTS and DOCUMENT_REFERENCES in self.manifest["files"]:
+            path = self.member(name)
+            if document_text:
+                yield from (
+                    row for row, _, _ in document_range(path, 0, path.stat().st_size)
+                )
+            else:
+                yield from iter_rows(path)
+            return
         for path in self.member_paths(name):
             yield from iter_rows(path)
 
@@ -3817,7 +3889,7 @@ def _parent_domain_index(release: ReleaseReader, stack: ExitStack):
         db,
         (
             {"id": row["document_id"], "domains": row["domains"]}
-            for row in release.rows("documents.jsonl")
+            for row in release.rows(DOCUMENTS, document_text=False)
         ),
         lambda row: row["id"],
     )
@@ -3869,12 +3941,18 @@ def _find_rows(
     release: ReleaseReader, name: str, field: str, wanted: set[str]
 ) -> dict[str, dict[str, Any]]:
     found = {}
-    for row in release.rows(name):
-        key = row[field]
-        if key in wanted:
-            found[key] = row
-            if len(found) == len(wanted):
-                return found
+    with ExitStack() as stack:
+        text = (
+            stack.enter_context(DocumentText(release.member(name)))
+            if name == DOCUMENTS
+            else None
+        )
+        for row in release.rows(name, document_text=False):
+            key = row[field]
+            if key in wanted:
+                found[key] = text.hydrate(row) if text else row
+                if len(found) == len(wanted):
+                    return found
     return found
 
 

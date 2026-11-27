@@ -928,6 +928,7 @@ def build_identity(
     source_pins: dict[str, Any],
     *,
     reference_normalized_spans: bool = False,
+    reference_normalized_documents: bool = False,
 ) -> tuple[dict[str, Any], list[Any], bool]:
     """Resolve the build identity, ordered transforms and builder from its pins."""
     transforms = _ordered_transforms(project)
@@ -973,6 +974,9 @@ def build_identity(
         )
     if row_selection is not None and not large_lm_build:
         raise ValueError("TRAIN row selection requires a native disk LM build")
+    if reference_normalized_documents:
+        reference_normalized_spans = True
+        identity["reference_normalized_documents"] = True
     if reference_normalized_spans:
         if not large_lm_build or project.release.record_admission is not None:
             raise ValueError("referenced spans require an ordinary native disk build")
@@ -1030,6 +1034,7 @@ def build(
     keep_stages: int = 0,
     canary: CanarySample | None = None,
     reference_normalized_spans: bool = False,
+    reference_normalized_documents: bool = False,
 ) -> Path:
     """Keep bounded metadata alive through native admission and build consumers."""
     if reuse_completed_preparation and canary is not None:
@@ -1052,7 +1057,7 @@ def build(
             raise ValueError(
                 "minimum TRAIN text size requires an ordinary native disk LM build"
             )
-    if reference_normalized_spans and (
+    if (reference_normalized_spans or reference_normalized_documents) and (
         canary is not None or reuse_completed_preparation
     ):
         raise ValueError("referenced spans require an ordinary native disk build")
@@ -1075,6 +1080,7 @@ def build(
             keep_stages=keep_stages,
             canary=canary,
             reference_normalized_spans=reference_normalized_spans,
+            reference_normalized_documents=reference_normalized_documents,
         )
 
 
@@ -1088,6 +1094,7 @@ def _build_stored(
     keep_stages: int = 0,
     canary: CanarySample | None = None,
     reference_normalized_spans: bool = False,
+    reference_normalized_documents: bool = False,
 ) -> Path:
     """Build an immutable derived inventory from the exact acquisition lock."""
     from klab.corpus.acquisition import verify_acquisition
@@ -1132,7 +1139,10 @@ def _build_stored(
     root = workspace / "builds"
     root.mkdir(parents=True, exist_ok=True)
     identity, transforms, large_lm_build = build_identity(
-        project, lock["sources"], reference_normalized_spans=reference_normalized_spans
+        project,
+        lock["sources"],
+        reference_normalized_spans=reference_normalized_spans,
+        reference_normalized_documents=reference_normalized_documents,
     )
     stage_specs = identity["transforms"]
     if canary is not None:
