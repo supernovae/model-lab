@@ -51,6 +51,9 @@ def relation_inputs(root):
         category,
         "wikidata:Q1",
         "wikidata:Q2",
+        "python:pkg",
+        "python:pkg.helper",
+        "python:pkg.main",
     ]
     scope = (
         [{"id": name, "family": "world:train", "split": "train"} for name in names]
@@ -63,6 +66,11 @@ def relation_inputs(root):
             for i in range(2)
         ]
         + [
+            {
+                "id": "python:heldout",
+                "family": "software:heldout",
+                "split": "validation",
+            },
             {"id": "world:test", "family": "world:test", "split": "test"},
         ]
     )
@@ -160,6 +168,37 @@ def relation_inputs(root):
         "max_index_bytes": 4 * 1024**2,
         "max_shard_output_bytes": 1024**2,
     }
+    spec["sources"].append(
+        pin(
+            root,
+            "python.jsonl",
+            [
+                {
+                    "module": "pkg.main",
+                    "path": "pkg/main.py",
+                    "is_package": False,
+                    "source": (
+                        "raise AssertionError('must never execute')\n"
+                        "import heldout, pkg.helper as helper\n"
+                        "from .helper import something\n"
+                        "from . import exported\n"
+                        "from ..outside import other\n"
+                    ),
+                },
+                {
+                    "module": "pkg.bad",
+                    "path": "pkg/bad.py",
+                    "is_package": False,
+                    "source": "from . invalid\n",
+                },
+            ],
+            id="z-python",
+            format="python-ast",
+            license="CC0-1.0",
+            uri="https://example.com/python",
+            origin="human",
+        )
+    )
     declaration = root / "relation.json"
     declaration.write_bytes(canonical_json(spec))
     return declaration, spec, scope, claims, article, category
@@ -178,9 +217,9 @@ def test_relational_sources_compile_and_train(tmp_path, monkeypatch, capsys):
             lab.json(*extract, "--workers", "1")
     assert not Path(plan["path"]).exists()
     index = lab.json(*extract, "--workers", "2")
-    assert "reused 1/3" in lab.stderr
+    assert "reused 1/4" in lab.stderr
     assert index["key"] == plan["key"]
-    assert index["coverage"]["train"]["assertions"] == 7
+    assert index["coverage"]["train"]["assertions"] == 9
     inspect = ("corpus", "relations", "inspect", index["key"])
     page = lab.json(*inspect, "--entity", "wikidata:Q1", "--limit", "1")
     (qualified,) = page["records"]
@@ -207,6 +246,9 @@ def test_relational_sources_compile_and_train(tmp_path, monkeypatch, capsys):
     ] == [
         ("records", 5, "/", "cross_split_assertion"),
         ("wikidata", 2, "/claims/P1/3", "unsupported_statement"),
+        ("z-python", 2, "/source@5:0", "unresolved_python_import"),
+        ("z-python", 3, "/source", "python_parse_failed"),
+        ("z-python", 2, "/source@2:7", "cross_split_assertion"),
     ]
     wikipedia = lab.json(*inspect, "--entity", article)["records"]
     assert [(row["predicate"], row["value"]["id"]) for row in wikipedia] == [
@@ -217,6 +259,16 @@ def test_relational_sources_compile_and_train(tmp_path, monkeypatch, capsys):
         lab.json(*inspect, "--assertion", wikipedia[0]["id"])["records"][0]["source_id"]
         == "18417"
     )
+    helper, package = lab.json(*inspect, "--entity", "python:pkg.main")["records"]
+    assert [(row["predicate"], row["value"]) for row in (helper, package)] == [
+        ("python:import-source", entity_value("python:pkg.helper")),
+        ("python:import-source", entity_value("python:pkg")),
+    ]
+    evidence = lab.json(*inspect, "--assertion", helper["id"])["records"]
+    assert [(row["source_id"], row["line"], row["location"]) for row in evidence] == [
+        ("pkg/main.py", 2, "/source@2:16"),
+        ("pkg/main.py", 2, "/source@3:0"),
+    ]
 
     options = tmp_path / "compile.json"
     compile_command = ("corpus", "relations", "compile", index["key"], str(options))

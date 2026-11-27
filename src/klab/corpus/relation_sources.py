@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ast
+import sys
 import unicodedata
 from collections.abc import Iterable
+from importlib.util import resolve_name
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -21,6 +24,7 @@ Nonempty = Annotated[str, StringConstraints(min_length=1)]
 Split = Literal["train", "validation", "test"]
 ClaimClass = Literal["explicit", "derived", "candidate"]
 MAX_ROW_BYTES = 4 * 1024**2
+MAX_PYTHON_SOURCE_BYTES = 256 * 1024
 
 
 class PinnedRows(StrictModel):
@@ -50,7 +54,7 @@ class PinnedRows(StrictModel):
 
 class RelationSource(PinnedRows):
     id: Identifier
-    format: Literal["records", "wikipedia", "wikidata"]
+    format: Literal["records", "wikipedia", "wikidata", "python-ast"]
     uri: Nonempty
     license: Nonempty
     origin: Literal["human", "structured", "procedural", "teacher", "unknown", "mixed"]
@@ -80,6 +84,19 @@ class ScopedEntity(StrictModel):
     id: Identifier
     family: Identifier
     split: Split
+
+
+class PythonModule(StrictModel):
+    module: Annotated[
+        str,
+        StringConstraints(
+            max_length=185,
+            pattern=r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$",
+        ),
+    ]
+    path: Nonempty
+    is_package: Annotated[bool, Field(strict=True)]
+    source: str
 
 
 class EntityValue(StrictModel):
@@ -280,11 +297,56 @@ def _wikidata_claims(row):
                 yield location, (assertion, evidence)
 
 
+def _python_claims(row):
+    module = PythonModule.model_validate(row)
+    subject = f"python:{module.module}"
+    package = module.module if module.is_package else module.module.rpartition(".")[0]
+    if len(module.source.encode("utf-8")) > MAX_PYTHON_SOURCE_BYTES:
+        yield "/source", "python_source_limit"
+        return
+    try:
+        tree = ast.parse(module.source, mode="exec")
+    except SyntaxError, RecursionError, ValueError:
+        yield "/source", "python_parse_failed"
+        return
+
+    evidence = Evidence(source_id=module.path)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            targets = [(alias, alias.name) for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            name = "." * node.level + (node.module or "")
+            try:
+                targets = [(node, resolve_name(name, package))]
+            except ImportError:
+                yield (
+                    f"/source@{node.lineno}:{node.col_offset}",
+                    "unresolved_python_import",
+                )
+                continue
+        else:
+            continue
+        for target, name in targets:
+            location = f"/source@{target.lineno}:{target.col_offset}"
+            try:
+                assertion = Assertion(
+                    subject=subject,
+                    predicate="python:import-source",
+                    value=EntityValue(kind="entity", id=f"python:{name}"),
+                )
+            except ValueError:
+                yield location, "unsupported_python_module_name"
+            else:
+                yield location, (assertion, evidence)
+
+
 def _records(row, source):
     if source.format == "wikipedia":
         yield from _wiki_claims(row, source.site)
     elif source.format == "wikidata":
         yield from _wikidata_claims(row)
+    elif source.format == "python-ast":
+        yield from _python_claims(row)
     else:
         record = ExplicitRecord.model_validate(row)
         yield (
@@ -297,10 +359,16 @@ def _records(row, source):
 
 
 def extract_relation_source(
-    staging: Path, path: str, declaration: dict, max_bytes: int
+    staging: Path,
+    path: str,
+    declaration: dict,
+    max_bytes: int,
+    ast_runtime: str | None = None,
 ):
-    """ShardRunner producer. Keep neither source bodies nor process-wide row lists."""
+    """ShardRunner producer holding one pinned source row at a time."""
     source = RelationSource.model_validate({**declaration, "path": path})
+    if source.format == "python-ast" and ast_runtime != sys.version:
+        raise ValueError("Python AST extraction requires the planned interpreter")
     rows = claims = unresolved = bytes_written = 0
     with (
         (staging / "claims.jsonl").open("wb") as accepted,

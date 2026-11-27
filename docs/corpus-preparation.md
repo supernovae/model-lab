@@ -4239,6 +4239,7 @@ files to expose parallel work and keep recovery granular.
 | `records` | An explicit miniature world or domain assertion. Required fields are `subject`, `predicate`, and a typed `value`. Optional fields are `qualifiers`, `references`, `rank`, `source_id`, and `claim_class` (`explicit`, `derived`, or `candidate`). |
 | `wikipedia` | One Action API `query.pages` object with `pageid`, `ns`, `title`, and optional `links` and `categories` arrays. Declare `site` on this source, for example `enwiki`. Flatten a bounded pinned capture to page rows and retain its provenance. [Links API](https://www.mediawiki.org/wiki/API:Links), [Categories API](https://www.mediawiki.org/wiki/API:Categories). |
 | `wikidata` | One Wikidata item object with `id`, `type`, and `claims`. Use JSONL with one bounded item per physical line. Corpus handles value snaks for item/property IDs, strings, and time, including the item's calendar, precision, timezone and uncertainty bounds. It preserves statement GUIDs, ranks, qualifiers, and grouped reference snaks. A claim with any unsupported snak is left in the pinned source and reported at its statement locator. [Wikidata JSON format](https://www.wikidata.org/wiki/Wikidata:Data_formats/JSON). |
+| `python-ast` | One module per row with `module` (dotted ASCII name), `path` (source path in the upstream revision), `is_package` (boolean), and `source` (Python text, at most 256 KiB in UTF-8). Use a pinned source revision and a scope of `python:`-prefixed module names. |
 
 Explicit records use values such as `{"kind":"entity","id":"world:mars"}`
 or `{"kind":"text","text":"Mars"}`. Time values have `kind: time`,
@@ -4249,6 +4250,17 @@ Wikipedia entity names are `wikipedia:` followed by the SHA-256 of the
 canonical JSON array `[site, namespace, title]`, with title underscores
 converted to spaces and Unicode normalized to NFC. Match the returned case.
 Wikidata entity and predicate names use `wikidata:Q…` and `wikidata:P…`.
+
+The Python adapter emits `python:import-source` edges for the modules named by
+`import` and `from … import …`. It resolves relative prefixes from the declared
+package and treats `from . import name` as naming the current package. Evidence
+records the source path and a locator `/source@LINE:BYTE_COLUMN` inside the
+JSONL row. Lines start at one and byte columns at zero. The parser sees imports
+in conditional and nested code. The graph describes syntactic references.
+Dynamic imports, import execution, and member-to-submodule resolution are
+outside that contract. Invalid syntax and unresolvable relative prefixes are
+reported against the pinned source. The interpreter version is part of the
+index and Python shard keys. Source modules are parsed without loading them.
 
 ```bash
 klab corpus relations extract relations.json --plan
