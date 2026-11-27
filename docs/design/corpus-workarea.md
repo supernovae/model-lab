@@ -286,6 +286,11 @@ explicit execution again for a requested replay of external code.
   counts and family-qualification evidence. It reports missing and
   invalid fields separately and leaves calibration and selection to
   explicit downstream policies.
+  Recorded privacy exclusions use a sparse sidecar over the normalized
+  rejection inventory. It records reason codes and numeric locators for
+  events that occurred before document IDs were assigned. It reuses
+  prior screening without reading source bodies or changing exclusion
+  rules. Candidate scanning of surviving documents remains separate.
 - **Coherent packing first.** Compare seeded random, source-coherent,
   lexical-topic, explicit-entity and link-neighborhood schedules using
   identical natural-language bytes and exposure budgets. Assign semantic
