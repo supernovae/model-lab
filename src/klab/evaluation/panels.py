@@ -18,7 +18,7 @@ from klab.config.models import FixedValidationPanel
 from klab.data.packing import (
     canonical_tokenizer_sha256,
 )
-from klab.evaluation.inference import load_run
+from klab.evaluation.inference import InferenceRun, load_run
 from klab.evaluation.language_model import evaluate
 from klab.evaluation.panel_data import select_panel as _dataset
 from klab.evaluation.positions import PositionLoss
@@ -34,6 +34,32 @@ class HeldoutPanel(FixedValidationPanel):
     checkpoint_sha256: Digest
 
 
+def read_heldout_panel(declaration: Path) -> tuple[HeldoutPanel, Path]:
+    panel = HeldoutPanel.model_validate_json(declaration.read_text(encoding="utf-8"))
+    return panel, declaration.resolve().parent / panel.prepared_path
+
+
+def validate_panel_run(
+    panel: HeldoutPanel, loaded: InferenceRun, tokenizer_canonical_sha256: str
+) -> None:
+    if (
+        loaded.engine is not None
+        or loaded.config.model.memory not in {"none", "ngram"}
+        or loaded.config.ffn_kinds != {"dense"}
+        or not isinstance(loaded.device, torch.device)
+    ):
+        raise ValueError(
+            "named panels require dense-FFN PyTorch with no memory or token ngram memory"
+        )
+    if (
+        loaded.identity["tokenizer_sha256"] != panel.tokenizer_file_sha256
+        or tokenizer_canonical_sha256 != panel.tokenizer_canonical_sha256
+    ):
+        raise ValueError("panel checkpoint tokenizer identity mismatch")
+    if panel.sequence_length > loaded.config.model.max_seq_len:
+        raise ValueError("panel sequence length exceeds checkpoint context")
+
+
 def run_panel(
     run_id: str,
     runs_dir: Path,
@@ -45,10 +71,7 @@ def run_panel(
     authorization: Any = None,
 ) -> dict[str, Any]:
     """Preserve incomplete evidence; output must be a new file outside input roots."""
-    panel = HeldoutPanel.model_validate_json(declaration.read_text(encoding="utf-8"))
-    prepared_root = panel.prepared_path
-    if not prepared_root.is_absolute():
-        prepared_root = declaration.resolve().parent / prepared_root
+    panel, prepared_root = read_heldout_panel(declaration)
     for root in ((runs_dir / run_id).resolve(), prepared_root.resolve()):
         if output.resolve().is_relative_to(root):
             raise ValueError("panel output must be outside the immutable input roots")
@@ -116,23 +139,9 @@ def run_panel(
                     }
                 )
             ).hexdigest()
-            if (
-                loaded.engine is not None
-                or loaded.config.model.memory not in {"none", "ngram"}
-                or loaded.config.ffn_kinds != {"dense"}
-                or not isinstance(loaded.device, torch.device)
-            ):
-                raise ValueError(
-                    "named panels require dense-FFN PyTorch with no memory or token ngram memory"
-                )
-            if (
-                loaded.identity["tokenizer_sha256"] != panel.tokenizer_file_sha256
-                or canonical_tokenizer_sha256(loaded.tokenizer)
-                != panel.tokenizer_canonical_sha256
-            ):
-                raise ValueError("panel checkpoint tokenizer identity mismatch")
-            if panel.sequence_length > loaded.config.model.max_seq_len:
-                raise ValueError("panel sequence length exceeds checkpoint context")
+            validate_panel_run(
+                panel, loaded, canonical_tokenizer_sha256(loaded.tokenizer)
+            )
 
             def before_batch(positions: int) -> None:
                 if (

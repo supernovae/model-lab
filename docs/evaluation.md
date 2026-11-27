@@ -197,6 +197,32 @@ Two results are comparable when both are complete and their `comparison_group`
 values match. The group covers the panel protocol and runtime but not the
 checkpoint, so one panel can follow a run's trajectory.
 
+### Gradient alignment between panels
+
+Pin both development panels to the same checkpoint, then compare the
+gradients of their mean next-token losses:
+
+```sh
+klab eval RUN_ID --checkpoint GENERATION --panel software.json \
+  --gradient-against astronomy.json --output alignment.json
+```
+
+Lab loads the checkpoint once and makes one forward and backward pass per
+panel batch on CPU in FP32. Each panel gradient is normalized by the actual
+supervised target count. The result records panel coverage, gradient norms,
+dot product and cosine. A zero norm leaves the cosine undefined. A negative
+dot product means a small step down one raw gradient would raise the other
+panel's loss to first order at this checkpoint. Adam updates and changes over
+a training trajectory are separate measurements.
+
+The diagnostic supports dense next-token PyTorch checkpoints with no memory
+or token n-gram memory. The output is a new file outside the input roots.
+The command exits nonzero for incomplete measurements and retains the status
+and reason. The default gradient storage cap is 64 MiB for the two gradients.
+Set `--gradient-max-bytes` to choose another cap. Model, activation and logits
+storage are additional. Each panel retains its own batch size and forward
+position bound.
+
 ### Loss by position
 
 A complete panel result also reports `position_buckets`: the same scored

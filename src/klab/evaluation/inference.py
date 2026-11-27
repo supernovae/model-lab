@@ -146,6 +146,7 @@ def _verified_checkpoint(
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
     hash_training_state: bool = True,
+    check_config: Callable[[RunConfig], None] | None = None,
 ) -> tuple[
     RunConfig,
     dict[str, Any],
@@ -159,6 +160,8 @@ def _verified_checkpoint(
     manifest_digest = canonical_digest(manifest)
     if RunConfig.model_validate(manifest["effective_config"]) != config:
         raise ValueError("resolved config differs from the verified run manifest")
+    if check_config is not None:
+        check_config(config)
     selected = Path(checkpoint or "latest.json")
     if not selected.is_absolute() and not selected.exists():
         selected = (
@@ -236,6 +239,7 @@ def load_run(
     quantized: Path | None = None,
     hash_training_state: bool = True,
     hash_run_data: bool = True,
+    check_config: Callable[[RunConfig], None] | None = None,
 ) -> InferenceRun:
     """Load a verified checkpoint; QUANTIZED applies a ``weights quantize``
     artifact made from exactly this checkpoint (PyTorch engine only).
@@ -247,7 +251,11 @@ def load_run(
     ``hash_run_data=False`` likewise skips hashing the run's own prepared arrays
     (``data/*.npy``, tens of GB for a pretraining run), which generation never reads:
     their sizes are still checked against the manifest, the identity carries
-    ``run_data_hashed: False`` and ``validation_dataset`` refuses such a load."""
+    ``run_data_hashed: False`` and ``validation_dataset`` refuses such a load.
+
+    ``check_config`` can refuse a bound run configuration before reading or
+    allocating checkpoint tensors.
+    """
     run = (runs_dir / run_id).resolve()
     config, manifest, selected, metadata, manager, report = _verified_checkpoint(
         run,
@@ -255,6 +263,7 @@ def load_run(
         proof_store=proof_store,
         verification_mode=verification_mode,
         hash_training_state=hash_training_state,
+        check_config=check_config,
     )
     if (
         expected_checkpoint_sha256 is not None
