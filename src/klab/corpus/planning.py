@@ -31,10 +31,12 @@ from klab.corpus.project import (
     Project,
     SourceDeclaration,
     acquisition_identity_payload,
+    declaration_payload,
     safe_name,
 )
 from klab.corpus.release import consumed_release
 from klab.corpus.shards import range_file_identity
+from klab.corpus.train_selection import minimum_train_bytes
 from klab.safe_io import symlinked
 from klab.workspace_preflight import check_storage
 
@@ -492,6 +494,17 @@ def plan_build(
         "verification_candidate_source_bytes": None,
         "build_scratch_bytes": None,
     }
+    minimum = minimum_train_bytes([declaration_payload(t) for t in project.transforms])
+    if minimum is not None:
+        plan["stages"][4]["inputs"].append("text_statistics")
+        plan["stages"].insert(
+            2,
+            {
+                "id": "text_statistics",
+                "inputs": ["normalize"],
+                "minimum_train_utf8_bytes": minimum,
+            },
+        )
     if not uses_disk_lm_builder(project, list(project.transforms)):
         return {
             **plan,
@@ -549,7 +562,15 @@ def plan_build(
                 not isinstance(release_id, str) or not _DIGEST.fullmatch(release_id)
             ):
                 raise ValueError("invalid consumed release identity")
-            for name in ("normalize", "index", "deduplicate", "views"):
+            for name in (
+                "normalize",
+                "index",
+                "deduplicate",
+                "views",
+                "text_statistics",
+            ):
+                if name not in stage_by_id:
+                    continue
                 stage_by_id[name]["action"] = "skip_existing_build"
             plan["stages"][-1] = {
                 "id": "freeze",
@@ -612,6 +633,10 @@ def plan_build(
         stage_by_id["index"]["action"] = "await_normalization"
         stage_by_id["deduplicate"]["action"] = "await_index"
         stage_by_id["views"]["action"] = "await_deduplication"
+        if minimum is not None:
+            stage_by_id["text_statistics"]["action"] = (
+                "await_normalization" if pending else "verify_or_build_sidecars"
+            )
         stage_by_id["freeze"]["action"] = "plan_after_build"
         if not pending:
             store = StageStore(target.parent / "stages")

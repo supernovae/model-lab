@@ -562,7 +562,9 @@ class MixturePreflight:
     schedule state is never part of it.
     """
 
-    def __init__(self, cache, digests, *, seed, order_policy, strata):
+    def __init__(
+        self, cache, digests, *, seed, order_policy, strata, verified_selection=False
+    ):
         """`digests` maps the documents, inventory and TRAIN lineage files to SHA-256."""
         self.cache = cache
         self.request = {
@@ -570,6 +572,7 @@ class MixturePreflight:
             "seed": seed,
             "order_policy": order_policy,
             "source_strata": strata,
+            **({"verified_selection": True} if verified_selection else {}),
         }
         prior = cache.load("mixture-preflight", self.request, limit=4 * 1024**2)
         self.snapshot = prior[0]["snapshot"] if prior is not None else None

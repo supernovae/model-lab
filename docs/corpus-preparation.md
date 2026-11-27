@@ -1158,7 +1158,60 @@ A separate million-document fixture with 512 text bytes per document read
 606.37 MB of logical process bytes from a 606.00 MB document file and
 produced a 44.00 MB sidecar in 2.94 s. Peak process RSS was 63 MB. A warm
 32-row page took 2.30 ms and read 0.26 MB of process metadata and sidecar
-bytes. Release selection over these columns remains under #568.
+bytes.
+
+#### Select TRAIN text by byte count
+
+Set `minimum_train_utf8_bytes` in the parameters of the existing `lm_text`
+transform. Use a positive integer. For example:
+
+```yaml
+id: lm
+version: "1"
+kind: lm_text
+inputs: []
+parameters:
+  minimum_train_utf8_bytes: 256
+```
+
+The option filters TRAIN records after duplicate decisions and source
+selection. It applies to the transform output and its LM view. Keep the
+document inventory for lineage and split checks. Validation and test
+records follow the existing view rules. The release report records the
+threshold, sidecar digests, total excluded under `below_minimum_utf8_bytes`,
+and mixture supply from the selected TRAIN text.
+
+Use an ordinary native disk-backed LM-only build. Reviewed row admission,
+completed-preparation adoption, canaries, and in-memory builds require
+separate integration. The option belongs to the view-producing transform,
+so a threshold-only edit reuses the same normalized partitions, native
+index, duplicate decisions and available sidecars. The planner shows the
+sidecar dependency before view emission. The build automatically produces
+missing sidecars, checks their ordered document IDs against the native
+index, and joins their sizes in a four-byte-per-document scratch map.
+
+Cold release verification independently checks the byte counts, stage and
+view coverage, and the resulting quota estimate. The verified TRAIN
+lineage feeds ordinary mixture materialization.
+
+Three synthetic NVMe trials per size joined the sidecars to an existing
+native-style document index. These medians cover sidecar authentication,
+alignment and scratch-map writing. The fresh case also builds the sidecars.
+The reuse case applies a different threshold. Source and index pages were
+in the OS cache. The join timing starts after normalization and ends before
+release emission and cold release verification.
+
+| Documents | Fresh annotation and join | Join with verified sidecars |
+| ---: | ---: | ---: |
+| 2,048 | 0.030 s | 0.003 s |
+| 32,768 | 0.201 s | 0.021 s |
+| 65,536 | 0.373 s | 0.036 s |
+
+On a separate one-million-document fixture, fresh annotation and alignment
+took 3.42 s. The verified join took 0.52 s, read 118.77 MB from sidecars and
+index work, and wrote a 4.00 MB scratch map. It reused the sidecar digest
+across both thresholds. The size predicate took 0.08 s over the map, and
+peak process RSS was 75 MB. The normalized document file was 613.50 MB.
 
 ### Prune shared artifacts
 

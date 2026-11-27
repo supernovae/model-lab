@@ -932,6 +932,9 @@ def build_identity(
     """Resolve the build identity, ordered transforms and builder from its pins."""
     transforms = _ordered_transforms(project)
     stage_specs = [declaration_payload(t) for t in transforms]
+    from klab.corpus.train_selection import minimum_train_bytes
+
+    minimum = minimum_train_bytes(stage_specs)
     for t in stage_specs:
         if t["kind"] not in KINDS:
             raise ValueError(f"unregistered transform: {t['kind']}")
@@ -961,6 +964,12 @@ def build_identity(
         ),
     }
     large_lm_build = uses_disk_lm_builder(project, transforms)
+    if minimum is not None and (
+        not large_lm_build or project.release.record_admission is not None
+    ):
+        raise ValueError(
+            "minimum TRAIN text size requires an ordinary native disk LM build"
+        )
     if reference_normalized_spans:
         if not large_lm_build or project.release.record_admission is not None:
             raise ValueError("referenced spans require an ordinary native disk build")
@@ -980,6 +989,10 @@ def build_identity(
             "build_outputs.py",
             "measurement.py",
         )
+        if minimum is not None:
+            identity["native_stage_implementation"].update(
+                implementation_digests("train_selection.py", "text_statistics.py")
+            )
     else:
         identity["normalization_implementation"] = implementation_digests(
             *NORMALIZATION_IMPLEMENTATION_FILES
@@ -1007,6 +1020,16 @@ def build(
         raise ValueError(
             "--canary and --reuse-completed-preparation exclude each other"
         )
+    if reuse_completed_preparation or canary is not None:
+        from klab.corpus.train_selection import minimum_train_bytes
+
+        if (
+            minimum_train_bytes([declaration_payload(t) for t in project.transforms])
+            is not None
+        ):
+            raise ValueError(
+                "minimum TRAIN text size requires an ordinary native disk LM build"
+            )
     if reference_normalized_spans and (
         canary is not None or reuse_completed_preparation
     ):
@@ -1137,6 +1160,7 @@ def _build_stored(
                 build_id,
                 target,
                 progress,
+                work_root=Path(work_root),
                 prepared_root=normalized_store_root(Path(work_root)),
                 proof_store=proof_store,
                 verification_mode=verification_mode,

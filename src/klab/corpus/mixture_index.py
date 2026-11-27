@@ -342,8 +342,8 @@ def _join_inventory(path, documents, strata, seed, order_policy):
     }, labels["family"]
 
 
-def _train_view(path: Path, table):
-    """Mark the documents of the TRAIN lineage; it must be exactly the eligible train set."""
+def _train_view(path: Path, table, *, verified_selection=False):
+    """Mark the TRAIN lineage from a release, including its verified selection."""
     columns, _ = _collect(_plan(LINEAGE_STAGE, path), _lineage_range, {"id": "S"})
     ids = np.unique(columns["id"])
     position = _locate(table["id"], ids)
@@ -351,7 +351,7 @@ def _train_view(path: Path, table):
         raise ValueError(COVERAGE_ERROR)
     selected = np.zeros(len(table["id"]), dtype=bool)
     selected[position] = True
-    if ((table["split"] == 0) & ~selected).any():
+    if not verified_selection and ((table["split"] == 0) & ~selected).any():
         raise ValueError(COVERAGE_ERROR)
     if not table["eligible"][selected].all():
         raise ValueError("train document lacks admitted file or record rights")
@@ -549,14 +549,14 @@ class MixtureIndex:
         self.staged = (table, strata, families, sources)
         return len(table["id"])
 
-    def select(self, lineage):
+    def select(self, lineage, *, verified_selection=False):
         """Keep the documents of the TRAIN lineage view, ordered for the schedule."""
         if self.staged is None:
             raise ValueError("select needs the family inventory first")
         if lineage not in self.input_digests:
             self.bind(lineage)
         table, strata, families, sources = self.staged
-        chosen = _train_view(lineage, table)
+        chosen = _train_view(lineage, table, verified_selection=verified_selection)
         names = _stratum_names(strata)
         ordered = []
         for code in range(len(names)):

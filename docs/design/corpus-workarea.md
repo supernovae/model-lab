@@ -270,8 +270,10 @@ explicit execution again for a requested replay of external code.
   The text-statistics annotator publishes fixed-width counts keyed to one
   verified normalized partition. It binds the exact document order and
   IDs, supports bounded inspection, and reuses completed evidence across
-  release view changes. Release policy can adopt this artifact in a later
-  increment.
+  release view changes. The ordinary native LM transform can apply a
+  minimum TRAIN byte count from these sidecars after duplicate resolution.
+  This option changes view and release identities, and cold verification
+  checks the resulting coverage and quota supply against released text.
 - **Coherent packing first.** Compare seeded random, source-coherent,
   lexical-topic, explicit-entity and link-neighborhood schedules using
   identical natural-language bytes and exposure budgets. Assign semantic

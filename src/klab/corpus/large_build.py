@@ -346,9 +346,10 @@ _MAX_DOCUMENT_CACHE_BYTES = 1024**3
 class _SQLBuildRows:
     """The ordinary builder's ordered inputs to the shared release writer."""
 
-    def __init__(self, connection, prepared):
+    def __init__(self, connection, prepared, text_sizes=None):
         self.connection = connection
         self.prepared = prepared
+        self.text_sizes = text_sizes
 
     def span_rows(self, after: int | None):
         with ExitStack() as sources:
@@ -373,9 +374,10 @@ class _SQLBuildRows:
                 yield rowid, raw.removesuffix(b"\n")
 
     def documents(self, after: str | None):
+        ordinal = "d.rowid" if self.text_sizes is not None else "NULL"
         references = self.connection.execute(
             "SELECT d.shard,d.document_offset,d.document_length,d.split,"
-            "x.representative_id,x.drop_reason,d.document_id "
+            f"x.representative_id,x.drop_reason,d.document_id,{ordinal} "
             "FROM documents d CROSS JOIN dedup x ON x.document_number=d.rowid "
             "WHERE d.document_id>? ORDER BY d.document_id",
             (after or "",),
@@ -383,10 +385,28 @@ class _SQLBuildRows:
         streams = OrderedDict()
         try:
             if not after and self._warm_document_cache():
-                for shard, offset, length, *metadata in references:
+                for (
+                    shard,
+                    offset,
+                    length,
+                    split,
+                    representative,
+                    reason,
+                    doc_id,
+                    rowid,
+                ) in references:
                     stream = self._document_stream(streams, shard)
                     raw = read_file_range(stream, offset, length)
-                    yield raw.removesuffix(b"\n"), *metadata, metadata[-1]
+                    size = self.text_sizes[rowid] if rowid is not None else None
+                    yield (
+                        raw.removesuffix(b"\n"),
+                        split,
+                        representative,
+                        reason,
+                        doc_id,
+                        doc_id,
+                        size,
+                    )
                 return
             batch = []
             size = 0
@@ -457,8 +477,19 @@ class _SQLBuildRows:
             for index in indices:
                 _, offset, length, *_ = batch[index]
                 payloads[index] = read_file_range(stream, offset, length)
-        for raw, (_, _, _, *metadata) in zip(payloads, batch, strict=True):
-            yield raw.removesuffix(b"\n"), *metadata, metadata[-1]
+        for raw, (_, _, _, split, representative, reason, doc_id, rowid) in zip(
+            payloads, batch, strict=True
+        ):
+            size = self.text_sizes[rowid] if rowid is not None else None
+            yield (
+                raw.removesuffix(b"\n"),
+                split,
+                representative,
+                reason,
+                doc_id,
+                doc_id,
+                size,
+            )
 
     def family_splits(self):
         for (family,) in self.connection.execute(
@@ -517,19 +548,26 @@ def _emit_build(
     diagnostics: Path | None = None,
     span_partitions: list[dict[str, Any]] | None = None,
     span_projection: dict[str, Any] | None = None,
+    train_text_sizes=None,
 ) -> None:
     from klab.corpus.measurement import summarize_release
+    from klab.corpus.train_selection import BELOW_MINIMUM, minimum_train_bytes
 
-    ordered_rows = ordered_rows or _SQLBuildRows(connection, prepared)
+    ordered_rows = ordered_rows or _SQLBuildRows(connection, prepared, train_text_sizes)
     sources = source_declarations(project, lock)
     rights = rights_report(project, sources, rights_files)
     source_origins = {source.id: source.origin for source in project.sources}
     release_spec = declaration_payload(project.release)
     stage_spec = declaration_payload(transform)
+    minimum = minimum_train_bytes([stage_spec])
+    if (minimum is None) != (train_text_sizes is None):
+        raise ValueError("TRAIN selection requires verified text-statistics sizes")
     stage_id = stage_spec["id"]
     selected_sources = set(stage_spec["inputs"])
     tally = Tally()
     lm_counts: Counter[str] = Counter()
+    train_bytes: Counter[str] = Counter()
+    excluded_train = 0
     count = 0
     stage_count = 0
     stage_digest = hashlib.sha256()
@@ -584,6 +622,9 @@ def _emit_build(
                 state["document_cursor"],
             )
             count, stage_count = state["count"], state["stage_count"]
+            if minimum is not None:
+                excluded_train = state["excluded_train"]
+                train_bytes.update(state["selected_train_bytes"])
             with (staging / f"stages/{stage_id}.jsonl").open("rb") as prefix:
                 for index, line in enumerate(prefix):
                     if index:
@@ -610,6 +651,14 @@ def _emit_build(
                     "stage_count": stage_count,
                     "lm_counts": lm_counts,
                     "tally": tally.snapshot(),
+                    **(
+                        {
+                            "excluded_train": excluded_train,
+                            "selected_train_bytes": train_bytes,
+                        }
+                        if minimum is not None
+                        else {}
+                    ),
                 }
             )
             pending_bytes = pending_rows = 0
@@ -629,6 +678,7 @@ def _emit_build(
             reason,
             document_id,
             document_cursor,
+            annotated_size,
         ) in stack.enter_context(closing(document_rows)):
             doc = json.loads(raw_doc)
             if doc["document_id"] != document_id:
@@ -660,6 +710,15 @@ def _emit_build(
             selected_for_stage = (
                 not selected_sources or doc["source_id"] in selected_sources
             )
+            if (
+                selected_for_stage
+                and minimum is not None
+                and split == "train"
+                and annotated_size < minimum
+            ):
+                excluded_train += 1
+                boundary(len(raw_doc))
+                continue
             if selected_for_stage:
                 output = {"record_id": record_id, "text": text, "split": split}
                 encoded = canonical_json(output)
@@ -682,6 +741,9 @@ def _emit_build(
                 _output(views[split], {"text": text})
                 _output(links[split], {"record_id": record_id, "split": split})
                 lm_counts[split] += 1
+                if minimum is not None and split == "train":
+                    for domain in doc["domains"]:
+                        train_bytes[domain] += annotated_size
                 progress.update(output_records=1)
             boundary(len(raw_doc))
         boundary(0, finished=True)
@@ -751,6 +813,17 @@ def _emit_build(
         duplicate_groups=group_count,
         warnings=warnings,
     )
+    if minimum is not None:
+        from klab.corpus.quota import estimate_supply
+
+        report["train_selection"] = {
+            "minimum_utf8_bytes": minimum,
+            "excluded_by_reason": {BELOW_MINIMUM: excluded_train},
+            "sidecars": train_text_sizes.sidecars,
+        }
+        report["mixture_supply"] = estimate_supply(
+            project.release.policy.mixture, project.release.mixture, train_bytes
+        )
     progress.update(phase="measuring")
     if not descriptive_census:
         report["measurement"] = {
@@ -950,6 +1023,7 @@ def build_large(
     target: Path,
     progress: BuildProgress,
     *,
+    work_root: Path,
     prepared_root: Path,
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
@@ -1338,6 +1412,7 @@ def build_large(
     with (
         _open_decided(index_dir, dedup_dir) as connection,
         (workspace / ".view-emission.lock").open("a") as lock_file,
+        ExitStack() as selection,
     ):
         try:
             fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1393,6 +1468,18 @@ def build_large(
                 "partitions": span_partitions,
             }
             progress.update(phase="writing_views")
+        from klab.corpus.train_selection import (
+            minimum_train_bytes,
+            open_train_text_sizes,
+        )
+
+        sizes = None
+        if minimum_train_bytes([declaration_payload(transform)]) is not None:
+            progress.update(phase="text_statistics")
+            sizes = selection.enter_context(
+                open_train_text_sizes(work_root, prepared, connection, progress)
+            )
+            progress.update(phase="writing_views")
         _emit_build(
             connection=connection,
             staging=staging,
@@ -1412,6 +1499,7 @@ def build_large(
             diagnostics=root / "diagnostics" / f"{build_id}.json",
             span_partitions=span_partitions,
             span_projection=span_projection,
+            train_text_sizes=sizes,
         )
         require_prepared_generation()
         if any(
