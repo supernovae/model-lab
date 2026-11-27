@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from typing import Any
 
 import numpy as np
@@ -53,6 +54,15 @@ def _byte_inputs(loaded: Any, ids: list[int]) -> dict[str, Any]:
     }
 
 
+def _autocast(loaded: Any) -> Any:
+    """The run's scoring precision; reference models are always scored in fp32."""
+    if getattr(loaded.config, "runtime", None) is None:
+        return nullcontext()
+    from klab.runtime import precision_context
+
+    return precision_context(loaded.config, loaded.device)
+
+
 def log_probs(loaded: Any, ids: Sequence[int], last: int | None = None) -> np.ndarray:
     """Log-softmax over the vocabulary at every position of IDS -> [T, V].
 
@@ -66,7 +76,7 @@ def log_probs(loaded: Any, ids: Sequence[int], last: int | None = None) -> np.nd
     if not ids or len(ids) > limit:
         raise ValueError(f"log_probs needs 1..{limit} tokens, got {len(ids)}")
     x = torch.tensor([ids], dtype=torch.long, device=loaded.device)
-    with torch.inference_mode():
+    with torch.inference_mode(), _autocast(loaded):
         logits = loaded.model(x, **_byte_inputs(loaded, ids))[0]
         if last is not None:
             logits = logits[-last:]

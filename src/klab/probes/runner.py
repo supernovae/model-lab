@@ -188,7 +188,7 @@ def _describe(loaded: Any, arm: Arm) -> None:
 # --- Per-arm measurements ----------------------------------------------------
 
 
-def validation(loaded: Any, arm: Arm, protocol: Mapping[str, int]) -> dict[str, Any]:
+def validation(loaded: Any, arm: Arm, protocol: Mapping[str, Any]) -> dict[str, Any]:
     """Native held-out scoring with the probe observer, computed once per arm."""
     cached = arm.cache.get("validation")
     if cached is not None and cached.get("protocol") == dict(protocol):
@@ -339,7 +339,7 @@ def _ranked(loaded: Any, items: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _measure(
-    spec: ProbeSpec, loaded: Any, arm: Arm, protocol: Mapping[str, int]
+    spec: ProbeSpec, loaded: Any, arm: Arm, protocol: Mapping[str, Any]
 ) -> dict[str, Any]:
     """Everything one arm contributes to SPEC; judged later against the other."""
     if spec.id in {"heldout_loss", "calibration"}:
@@ -479,7 +479,7 @@ def probe_cache_key(probe_id: str) -> str:
 
 
 def _measure_safely(
-    spec: ProbeSpec, loaded: Any, arm: Arm, protocol: Mapping[str, int]
+    spec: ProbeSpec, loaded: Any, arm: Arm, protocol: Mapping[str, Any]
 ) -> dict[str, Any]:
     """Probe failures become evidence gaps; OOM and stops propagate."""
     key = probe_cache_key(spec.id)
@@ -884,7 +884,7 @@ def _run_battery(
     *,
     tier: str = "fast",
     fast_fail: bool = True,
-    protocol: Mapping[str, int] | None = None,
+    protocol: Mapping[str, Any] | None = None,
     progress: Progress | None = None,
     context: LabContext | None = None,
     now: Callable[[], datetime] | None = None,
@@ -903,7 +903,7 @@ def _run_battery(
     opened one at a time per tier: the baseline first, then the candidate,
     which is judged probe by probe so a hard failure stops it immediately.
     """
-    from klab.lab_mode import eval_protocol
+    from klab.lab_mode import eval_protocol, with_scoring_precision
 
     started_at = (now or (lambda: datetime.now(UTC)))()
     started = time.monotonic()
@@ -968,6 +968,9 @@ def _run_battery(
             _describe(loaded, arm)
             if state["protocol"] is None and not arm.reference:
                 state["protocol"] = eval_protocol(loaded.config)
+            if not arm.reference and "precision" in state["protocol"]:
+                # Both arms are scored at the protocol's precision.
+                loaded = with_scoring_precision(loaded, state["protocol"]["precision"])
             was_training = loaded.model.training
             loaded.model.eval()
             try:

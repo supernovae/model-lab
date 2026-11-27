@@ -12,7 +12,12 @@ klab eval RUN_ID [--runs-dir RUNS] [--checkpoint GENERATION]
 
 `eval` loads the run's verified checkpoint (latest by default) and reports
 held-out loss and perplexity on its validation split, using the run's
-evaluation settings. Scoring runs in FP32 even for a model trained in BF16.
+evaluation settings. Scoring runs at the run's own `runtime.precision`, as its
+in-training validation does: a BF16 run is scored under BF16 autocast and the
+loss is reduced in FP32. At a long window this decides whether scoring fits at
+all, because dense attention over 16,384 tokens holds `heads × 16,384²` scores:
+24 GiB in FP32 for 24 heads, 12 GiB in BF16. `eval`, panels, `try` and `probe`
+all score this way. Panel results record `scoring_precision`.
 
 ### Bits per byte
 

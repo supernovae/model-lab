@@ -396,17 +396,46 @@ def _peak_rss_bytes() -> int | None:
     return int(peak) if sys.platform == "darwin" else int(peak) * 1024
 
 
-def eval_protocol(config: Any) -> dict[str, int]:
-    """The evaluation windowing and batching both arms are scored with."""
+def eval_protocol(config: Any) -> dict[str, Any]:
+    """The evaluation windowing, batching and precision both arms are scored with.
+
+    Scoring runs at the run's own ``runtime.precision``, as its in-training
+    validation does. Losses scored at different precisions are in different
+    eval groups.
+    """
     return {
         "seq_len": config.training.seq_len,
         "batch_size": config.evaluation.batch_size or config.training.micro_batch_size,
         "max_batches": config.evaluation.max_batches,
+        "precision": _scoring_precision(config),
     }
 
 
-def _with_eval_protocol(loaded: Any, protocol: Mapping[str, int]) -> Any:
+def _scoring_precision(config: Any) -> str:
+    from klab.runtime import scoring_precision
+
+    return scoring_precision(config)
+
+
+def with_scoring_precision(loaded: Any, precision: str) -> Any:
+    """LOADED scored at PRECISION; its training config is untouched."""
+    config = loaded.config
+    if _scoring_precision(config) == precision:
+        return loaded
+    return dataclasses.replace(
+        loaded,
+        config=config.model_copy(
+            update={
+                "runtime": config.runtime.model_copy(update={"precision": precision})
+            }
+        ),
+    )
+
+
+def _with_eval_protocol(loaded: Any, protocol: Mapping[str, Any]) -> Any:
     """Score a loaded run under PROTOCOL without touching its training config."""
+    if "precision" in protocol:
+        loaded = with_scoring_precision(loaded, protocol["precision"])
     config = loaded.config
     return dataclasses.replace(
         loaded,
@@ -436,7 +465,7 @@ def _train_and_score(
     run_id: str,
     reuse: bool,
     key: str | None,
-    protocol: Mapping[str, int],
+    protocol: Mapping[str, Any],
     context: LabContext,
     max_wall_seconds: float | None,
     authorization: Any,
@@ -1293,7 +1322,7 @@ def leakage_screen(
 def _probe_arms(
     record: Mapping[str, Any],
     runs: Path,
-    protocol: Mapping[str, int],
+    protocol: Mapping[str, Any],
     tier: str,
     try_dir: Path,
     authorization: Any,

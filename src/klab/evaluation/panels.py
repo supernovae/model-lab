@@ -22,6 +22,7 @@ from klab.evaluation.inference import load_run
 from klab.evaluation.language_model import evaluate
 from klab.evaluation.panel_data import select_panel as _dataset
 from klab.evaluation.positions import PositionLoss
+from klab.runtime import precision_context, scoring_precision
 from klab.training.attempt_budget import AttemptBudget
 
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -105,11 +106,13 @@ def run_panel(
                 expected_checkpoint_sha256=panel.checkpoint_sha256,
             )
             result["identity"] = loaded.identity
+            result["scoring_precision"] = scoring_precision(loaded.config)
             result["comparison_group"] = hashlib.sha256(
                 canonical_json(
                     {
                         "protocol_sha256": protocol_sha,
                         "runtime": loaded.identity["runtime"],
+                        "scoring_precision": result["scoring_precision"],
                     }
                 )
             ).hexdigest()
@@ -159,6 +162,7 @@ def run_panel(
                 before_batch=before_batch,
                 progress=progress,
                 positions=by_position,
+                autocast=precision_context(loaded.config, loaded.device),
             )
             if metrics["valid_targets"] != panel.supervised_targets:
                 raise ValueError("native evaluation did not complete panel coverage")

@@ -356,6 +356,13 @@ seen, parameters, parameter bytes, tokenizer and validation digests,
 `eval_group` hashes the validation data, tokenizer, loss mask and eval
 protocol: losses are only comparable within one group.
 
+`protocol` is the window (`seq_len`), `batch_size`, `max_batches` and
+`precision`. The precision is the first lab arm's `runtime.precision`, and
+both arms are scored at it, so a BF16 run is probed in BF16 like its
+in-training validation. Reference models are scored in FP32. A loss scored at
+another precision is in a different `eval_group`; records written before
+`precision` was part of the protocol have to be scored again to be compared.
+
 Each probe row: `id`, `title`, `tier`, `cost`, `metric`, `higher_is_better`,
 `hard`, `thresholds` (`mode`, `warn`, `fail`), `uncertainty`, `suggests`,
 `explains`, `reference`, `status`

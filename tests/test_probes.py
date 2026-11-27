@@ -1081,6 +1081,38 @@ def test_try_runs_the_fast_tier_and_records_it(
     assert progress["state"] == "done"
 
 
+def test_scoring_runs_at_the_protocol_precision(
+    tried: tuple[Path, dict[str, Any]],
+) -> None:
+    """A bf16 run is scored in bf16: fp32 attention at a long window does not fit
+    on the card the run trained on."""
+    import torch
+
+    from klab.evaluation.inference import load_run
+    from klab.lab_mode import eval_protocol, with_scoring_precision
+
+    root, record = tried
+    assert record["probe"]["protocol"]["precision"] == "fp32"
+    loaded = load_run(
+        record["arms"]["candidate"]["run_id"], root / "work/lab/runs", backend="cpu"
+    )
+    scored = with_scoring_precision(loaded, "bf16")
+    assert eval_protocol(scored.config)["precision"] == "bf16"
+    assert loaded.config.runtime.precision == "fp32"
+    seen: list[torch.dtype] = []
+    hook = scored.model.register_forward_hook(
+        lambda _module, _inputs, output: seen.append(output.dtype)
+    )
+    try:
+        half = scored.evaluate()["loss"]
+        rows = scoring.log_probs(scored, scoring.encode(scored, "Once upon a time"))
+    finally:
+        hook.remove()
+    assert seen and set(seen) == {torch.bfloat16}
+    assert half == pytest.approx(loaded.evaluate()["loss"], rel=2e-2)
+    assert rows.dtype == np.float64 and np.isfinite(rows).all()
+
+
 @pytest.mark.parametrize("policy", ["standard", "final"])
 def test_probe_cli_json_and_report(
     policy: str,
