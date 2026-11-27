@@ -641,13 +641,14 @@ def _run(args: argparse.Namespace) -> None:
         if result["status"] != "PASS":
             raise ValueError("protected evaluation lineage collision")
         return
-    if command == "inspect-links":
-        from klab.corpus.mixture import inspect_mixture_links
+    if command in {"inspect-links", "inspect-entities"}:
+        from klab.corpus.mixture import inspect_mixture_neighborhood
 
-        result = inspect_mixture_links(
+        result = inspect_mixture_neighborhood(
             Path(args.declaration),
             Path(args.output),
-            args.document,
+            args.lookup,
+            kind=command.removeprefix("inspect-"),
             after=args.after,
             limit=args.limit,
         )
@@ -1359,16 +1360,26 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
                 help="Count selected, repeated and unused physical token bytes for offline dispatch",
             )
         command.set_defaults(handler=_handle)
-    command = sub.add_parser(
-        "inspect-links", help="Page through verified outgoing document links"
-    )
-    command.add_argument("declaration")
-    command.add_argument("--output", required=True)
-    command.add_argument("--document", required=True)
-    command.add_argument("--after")
-    command.add_argument("--limit", type=int, default=20)
-    _verification_flags(command)
-    command.set_defaults(handler=_handle)
+    for name, option, description in (
+        (
+            "inspect-links",
+            "--document",
+            "Page through verified outgoing document links",
+        ),
+        (
+            "inspect-entities",
+            "--entity",
+            "Page through verified TRAIN documents for an entity",
+        ),
+    ):
+        command = sub.add_parser(name, help=description)
+        command.add_argument("declaration")
+        command.add_argument("--output", required=True)
+        command.add_argument(option, dest="lookup", required=True)
+        command.add_argument("--after")
+        command.add_argument("--limit", type=int, default=20)
+        _verification_flags(command)
+        command.set_defaults(handler=_handle)
     command = sub.add_parser(
         "measure-tokens", help="Measure authenticated distinct source-domain tokens"
     )
