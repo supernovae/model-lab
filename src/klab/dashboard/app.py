@@ -24,6 +24,7 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from klab.dashboard import (
+    corpus_view,
     engram_view,
     generation,
     inspection,
@@ -50,6 +51,7 @@ from klab.dashboard.stores import (
 from klab.evaluation.post_train_triage import read_triage, triage_summary
 from klab.training.checkpoints import CheckpointManager, _safe_member
 from klab.training.metric_registry import metric_spec
+from klab.workdir import resolve_work_dir
 
 _HELP_PACKAGE = "klab.dashboard"
 _PILOT_PURPOSES = frozenset({"smoke", "warmup"})
@@ -1445,6 +1447,12 @@ def main() -> None:
             title="Explorer",
             icon=":material/account_tree:",
             url_path="explorer",
+        ),
+        st.Page(
+            lambda: corpus_view.corpus_page(resolve_work_dir()),
+            title="Corpus",
+            icon=":material/dataset:",
+            url_path="corpus",
         ),
     ]
     pages.update({p.url_path: p for p in lab})

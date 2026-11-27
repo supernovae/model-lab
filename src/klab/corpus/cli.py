@@ -402,7 +402,10 @@ def _run(args: argparse.Namespace) -> None:
                 raise SystemExit(1)
             return
         if args.kind == "typed":
-            from klab.corpus.typed_retention import typed_inventory
+            from klab.corpus.typed_retention import (
+                typed_artifact_detail,
+                typed_inventory,
+            )
 
             if (
                 args.source_id is not None
@@ -412,8 +415,36 @@ def _run(args: argparse.Namespace) -> None:
                 raise ValueError(
                     "typed inventory reports its retained dependencies without normalized filters"
                 )
+            if args.detail is not None:
+                if args.after is not None or args.artifact_kind or args.unreferenced:
+                    raise ValueError(
+                        "artifact detail does not accept inventory filters"
+                    )
+                detail = typed_artifact_detail(
+                    root, args.detail, offset=args.offset or 0, limit=args.limit
+                )
+                if args.json:
+                    print(json.dumps(detail, sort_keys=True))
+                else:
+                    print(
+                        f"{detail['artifact_id']} ({detail['bytes']:,} recorded bytes)"
+                    )
+                    print(
+                        f"{detail['source_count']} sources, {detail['dependency_count']} dependencies"
+                    )
+                    for entry in (*detail["sources"], *detail["dependencies"]):
+                        print(f"  {entry}")
+                    if detail["next_offset"] is not None:
+                        print(f"Next offset: {detail['next_offset']}")
+                return
+            if args.offset is not None:
+                raise ValueError("artifact offset requires --detail")
             inventory = typed_inventory(
-                root, limit=args.limit, after=args.after, unreferenced=args.unreferenced
+                root,
+                limit=args.limit,
+                after=args.after,
+                unreferenced=args.unreferenced,
+                artifact_kind=args.artifact_kind,
             )
             if args.json:
                 print(json.dumps(inventory, sort_keys=True))
@@ -433,6 +464,8 @@ def _run(args: argparse.Namespace) -> None:
                 if inventory["next_after"] is not None:
                     print(f"Next page --after {inventory['next_after']}")
             return
+        if args.detail or args.artifact_kind or args.offset is not None:
+            raise ValueError("typed artifact filters require --kind typed")
         if storage is not None:
             if args.source_id is not None:
                 raise ValueError("--source-id applies to normalized partitions")
@@ -1250,6 +1283,11 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     command.add_argument("--source-id")
     command.add_argument("--limit", type=int, default=100)
     command.add_argument("--after", help="Continue after a key from this inventory")
+    command.add_argument("--artifact-kind", help="Page only this typed artifact kind")
+    command.add_argument(
+        "--detail", metavar="KIND/KEY", help="Inspect one typed artifact's metadata"
+    )
+    command.add_argument("--offset", type=int, help="Continue a typed detail page")
     command.add_argument(
         "--release-references",
         action="store_true",

@@ -3,7 +3,7 @@
 Commands below use the [activated, provisioned environment](../README.md#install).
 
 `klab dashboard` opens a local, read-only Streamlit app on the **Runs** page:
-what is training now and how every earlier run went. The **Lab** pages follow.
+what is training now and how every earlier run went. The **Lab** and **Corpus** pages follow.
 Each page answers one question, opens with the verdict, explains its
 numbers in plain words and, when it has nothing to show, names the command that
 would fill it. **Run detail** shows one run's telemetry (training curves, runtime,
@@ -27,8 +27,9 @@ with Streamlit so stop signals and the server's exit status are preserved.
 | **Models** | Where does each checkpoint sit on cost vs quality, next to known models? | checkpoint catalog, Pareto frontier, reference models, runs nobody has scored yet |
 | **Behaviors** | What does the model actually do, and where does it fail? | greedy generations side by side, fact-recall hits and misses, needle by length, reliability diagram |
 | **Explorer** | What is inside this model, and how does it process a sentence? | architecture diagram, per-token loss and top-k, attention maps, weight stats, residual activation RMS, expert routing, memory lookups, paired checkpoint comparison |
+| **Corpus** | What did Corpus publish, and what supports an assertion? | typed storage, source pins, compilation counts, dependencies, and indexed assertion and evidence queries |
 
-Every page reads lab records through the same verified reader as
+The Lab pages read records through the same verified reader as
 `klab report` (`klab.lab_records`). A record that fails its seal is
 listed as rejected, never shown as a result. Numbers are only put next to each
 other inside one comparison group (`eval_group` for held-out loss,
@@ -46,6 +47,45 @@ trained for 60 steps on synthetic text, plus four one-variable tries (wider
 FFN, a third layer, 4 experts with 1 active, an n-gram memory table) at the
 standard tier, one full-tier probe and three explorations. The models are tiny
 on purpose. The point is how the pages read, not the scores.
+
+## Corpus
+
+The **Corpus** page reads typed artifacts from the dashboard's selected work root
+(`--work-dir` or `KLAB_WORK_DIR`). Run store and Lab record selectors are
+independent of this root. **Scan inventory** reads typed store receipts and
+file metadata on demand. It shows recorded sizes and observed retention and
+returns 20 artifacts at a time. The optional kind filter applies to rows and
+the totals cover the typed store. An incomplete scan shows its problems and
+withholds reclaimable bytes.
+
+Select an artifact from the inventory or enter its full `KIND/KEY` ID to inspect
+one receipt. Follow direct dependencies from a compilation back to its sources.
+The detail view shows advisory source pins, recorded coverage, compilation
+options, and sequence counts when available. It pages sources and dependencies
+without reading sequence payloads. The equivalent CLI is
+[typed artifact inspection](corpus-preparation.md#inspect-and-retain-typed-corpus-artifacts).
+
+A relation index supports indexed outgoing assertions by exact entity name,
+evidence by full assertion ID, and unresolved source records. A page contains
+up to 20 records, with the relation reader's byte limit. The app uses an
+unchanged host-local verification receipt for each query. If the receipt is
+missing or stale, run the displayed `klab corpus relations inspect KEY` command
+and submit again. The CLI verifies the bytes and records a fresh proof where
+the filesystem supports it. The dashboard checks the proof and file generations
+without writing receipts or starting a cold payload scan. Published typed
+artifacts keep their keys and formats. Existing typed stage proofs refresh
+once under the new inspector.
+
+On synthetic NVMe indexes with the OS page cache warm, the table compares
+forced byte verification with receipt-backed queries of the same 20-assertion
+page. Read counts are Linux process logical bytes. Each cell is the median of
+ten queries in one process, excluding Streamlit rendering. Rows and cursors
+matched in every trial.
+
+| Assertions | Verify bytes before query | Query with receipt |
+| ---: | ---: | ---: |
+| 25,600 | 2.70 ms · 4.79 MB read | 0.57 ms · 56 KB read |
+| 256,000 | 23.75 ms · 49.93 MB read | 0.62 ms · 64 KB read |
 
 ## Runs
 

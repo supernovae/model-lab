@@ -205,6 +205,111 @@ def relation_inputs(root):
     return declaration, spec, scope, claims, article, category
 
 
+def render_corpus_view(work):
+    from pathlib import Path
+
+    from klab.dashboard.corpus_view import corpus_page
+
+    corpus_page(Path(work))
+
+
+def test_dashboard_follows_compiled_lineage_and_queries_verified_relation_pages(
+    tmp_path, monkeypatch, capsys
+):
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    from klab.corpus import stage_inspection
+
+    lab = Lab(tmp_path, monkeypatch, capsys)
+    declaration, spec, _, claims, _, _ = relation_inputs(tmp_path)
+    claims.extend(triple("world:b", f"world:link-{i}", "world:a") for i in range(23))
+    spec["sources"][0].update(pin(tmp_path, "records.jsonl", claims))
+    declaration.write_bytes(canonical_json(spec))
+    index = lab.json(
+        "corpus", "relations", "extract", str(declaration), "--workers", "1"
+    )
+    key = index["key"]
+    graph = f"relation-index/{key}"
+    app = AppTest.from_function(render_corpus_view, args=(str(lab.work),)).run()
+
+    def click(label):
+        next(button for button in app.button if button.label == label).click().run()
+        assert not app.exception
+
+    def refuse_payload_read(*args, **kwargs):
+        pytest.fail("dashboard requested a cold byte scan")
+
+    app.text_input(key="corpus_artifact_id").input(graph).run()
+    with monkeypatch.context() as patch:
+        patch.setattr(stage_inspection, "verify_stage", refuse_payload_read)
+        app.text_input(key="corpus_query_value").input("world:b")
+        click("Query relation index")
+        assert app.warning and not app.dataframe
+        assert f"relations inspect {key}" in app.code[0].value
+
+    options = tmp_path / "compile.json"
+    options.write_bytes(
+        canonical_json(
+            {"target": "triples", "max_sequences": 100, "max_bytes": 1024**2}
+        )
+    )
+    compiled = lab.json("corpus", "relations", "compile", key, str(options))
+    compiled_id = f"relation-sequences/{compiled['key']}"
+    detail = lab.json(
+        "corpus", "artifacts", "--kind", "typed", "--detail", compiled_id, "--json"
+    )
+    assert detail["dependencies"] == [graph]
+    assert detail["result"]["sequences"] == compiled["sequences"]
+    detail_graph = (
+        "corpus",
+        "artifacts",
+        "--kind",
+        "typed",
+        "--detail",
+        graph,
+        "--limit",
+        "1",
+        "--json",
+    )
+    sources_first = lab.json(*detail_graph)
+    sources_next = lab.json(
+        *detail_graph, "--offset", str(sources_first["next_offset"])
+    )
+    assert sources_first["source_count"] == 4
+    assert sources_first["sources"][0]["id"] != sources_next["sources"][0]["id"]
+
+    with monkeypatch.context() as patch:
+        patch.setattr(stage_inspection, "verify_stage", refuse_payload_read)
+        next(box for box in app.selectbox if box.label == "Artifact kind").select(
+            "relation-sequences"
+        )
+        click("Scan inventory")
+        click("Inspect selected artifact")
+        assert app.text_input(key="corpus_artifact_id").value == compiled_id
+        click("Inspect dependency")
+        assert app.text_input(key="corpus_artifact_id").value == graph
+        first = app.dataframe[-1].value
+        assert len(first) == 20
+        click("Next relation page")
+        second = app.dataframe[-1].value
+        assert len(second) == 5
+        assert set(first["Assertion ID"]).isdisjoint(second["Assertion ID"])
+        click("Show assertion evidence")
+        assert any("Assertion evidence" in caption.value for caption in app.caption)
+        evidence = json.loads(app.get("json")[-1].proto.body)
+        assert len(evidence) == 1 and evidence[0]["source"] == "records"
+
+        # A same-size mutation loses its proof. The dashboard must show neither
+        # stale rows nor a cold scan, even though the graph still exists.
+        database = next(Path(index["path"]).glob("*.sqlite"))
+        with database.open("r+b") as stream:
+            stream.write(b"!")
+        app.run()
+        assert app.warning and not app.exception
+        assert not any("Assertion evidence" in caption.value for caption in app.caption)
+
+
 def test_relational_sources_compile_and_train(tmp_path, monkeypatch, capsys):
     lab = Lab(tmp_path, monkeypatch, capsys)
     declaration, _, _, claims, article, category = relation_inputs(tmp_path)
