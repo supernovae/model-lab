@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from contextlib import closing, contextmanager
 from functools import lru_cache
 from pathlib import Path
@@ -106,7 +107,7 @@ def _result(path, receipt, *, reused):
 
 
 def _inputs(spec):
-    return {
+    inputs = {
         "implementation": implementation_digests(
             "relations.py", "relation_sources.py", "jsonl_records.py"
         ),
@@ -118,6 +119,9 @@ def _inputs(spec):
         "max_index_bytes": spec.max_index_bytes,
         "max_shard_output_bytes": spec.max_shard_output_bytes,
     }
+    if any(source.format == "python-ast" for source in spec.sources):
+        inputs["python_ast_runtime"] = sys.version
+    return inputs
 
 
 def extract_relations(root: Path, declaration: Path, *, plan_only=False):
@@ -138,7 +142,12 @@ def extract_relations(root: Path, declaration: Path, *, plan_only=False):
     def produce(staging, result):
         sources = sorted(spec.sources, key=lambda item: item.id)
         tasks = [
-            (str((base / source.path).resolve()), metadata, spec.max_shard_output_bytes)
+            (
+                str((base / source.path).resolve()),
+                metadata,
+                spec.max_shard_output_bytes,
+                inputs["python_ast_runtime"] if source.format == "python-ast" else None,
+            )
             for source, metadata in zip(sources, inputs["sources"], strict=True)
         ]
         # Each shard has a separately enforced output bound; index pages have their own cap.
