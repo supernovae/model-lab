@@ -23,15 +23,18 @@ from klab.training.manifest import sha256_file
 def test_retained_train_selection_reuses_rows_and_limits_ranked_offsets(
     tmp_path, monkeypatch, capsys
 ):
+    from corpus_fixtures import forge_release
+
     from klab.corpus import split_inventory_adoption
     from klab.corpus.acquisition import acquire
     from klab.corpus.admission_draft import draft_admission_manifest
     from klab.corpus.pipeline import build
     from klab.corpus.project import declaration_payload, load_project
+    from klab.corpus.release import verify_release
     from klab.corpus.retained_mixture import RetainedMixtureIndex, prepared_release
     from klab.corpus.split_freeze import freeze_splits
     from klab.corpus.split_inventory import write_split_inventory
-    from klab.corpus.split_runs import rows
+    from klab.corpus.split_runs import rows, write_rows
 
     root = Lab(tmp_path, monkeypatch, capsys).work
     source = declaration_payload(neutral_corpus(root).sources[0])
@@ -44,8 +47,11 @@ def test_retained_train_selection_reuses_rows_and_limits_ranked_offsets(
             {
                 "text": f"Chapter {number}\n" + "A café has a quiet garden. " * number,
                 "url": f"https://example.org/chapter/{number}",
+                "language": label,
             }
-            for number in range(1, 9)
+            for number, label in enumerate(
+                ("en", "fr", "de", "it", "es", "pt", "nl", "pl"), 1
+            )
         ],
     )
     source["acquisition"].update(
@@ -189,11 +195,55 @@ def test_retained_train_selection_reuses_rows_and_limits_ranked_offsets(
         "build.yaml", {**config, "release": "release.yaml", "splits": frozen.name}
     )
     baseline = build(load_project(recipe), root, reuse_completed_preparation=True)
-    train = list(rows(baseline / "lm/train.jsonl"))
-    [shortest, *remaining] = sorted(len(row["text"].encode("utf-8")) for row in train)
-    assert len(remaining) == 3 and min(remaining) > shortest
 
-    transform["parameters"]["minimum_train_utf8_bytes"] = shortest + 1
+    def width(doc):
+        return len(doc["text"].encode("utf-8"))
+
+    shortest, disallowed, *kept = sorted(
+        (doc for doc in rows(baseline / "documents.jsonl") if doc["split"] == "train"),
+        key=width,
+    )
+    assert len(kept) == 2 and width(shortest) < width(disallowed)
+    selection = {
+        "allowed": sorted(doc["metadata"]["language"] for doc in kept),
+        "missing": "drop",
+    }
+    transform["parameters"].update(
+        minimum_train_utf8_bytes=width(shortest) + 1, train_row_language=selection
+    )
+    expected = {doc["document_id"] for doc in kept}
+    write("transforms/lm.yaml", transform)
+    ordinary = freeze(build(load_project(recipe), root, offline=True), root)
+    assert {
+        row["record_id"] for row in rows(ordinary / "lm/train.lineage.jsonl")
+    } == expected
+    audited = json.loads((ordinary / "report.json").read_bytes())["train_selection"]
+    assert audited["excluded_by_reason"] == {
+        "below_minimum_utf8_bytes": 1,
+        "row_language_not_allowed": 1,
+        "row_language_missing": 0,
+    }
+    assert audited["language_sidecars"]
+
+    def edit_row_label(path):
+        def edited():
+            for doc in rows(path / "documents.jsonl"):
+                if doc["document_id"] == disallowed["document_id"]:
+                    doc["metadata"]["language"] = selection["allowed"][0]
+                yield doc
+
+        changed = path / "label-edited.jsonl"
+        write_rows(changed, edited())
+        changed.replace(path / "documents.jsonl")
+
+    with pytest.raises(
+        ValueError, match="row language decision differs from pinned source"
+    ):
+        verify_release(
+            forge_release(ordinary, edit_row_label), verification_mode="cold"
+        )
+
+    del transform["parameters"]["minimum_train_utf8_bytes"]
     write("transforms/lm.yaml", transform)
     selected = build(load_project(recipe), root, reuse_completed_preparation=True)
     assert freeze(selected, root, reuse_completed_preparation=True) == selected
@@ -205,10 +255,11 @@ def test_retained_train_selection_reuses_rows_and_limits_ranked_offsets(
         assert (selected / name).read_bytes() == (baseline / name).read_bytes()
     report = json.loads((selected / "report.json").read_bytes())
     assert report["train_selection"]["excluded_by_reason"] == {
-        "below_minimum_utf8_bytes": 1
+        "row_language_not_allowed": 2,
+        "row_language_missing": 0,
     }
     assert report["mixture_supply"]["strata"][stratum]["train_utf8_bytes"] == sum(
-        remaining
+        map(width, kept)
     )
     progress = (
         selected.parent.parent / "progress" / f"{selected.name}.jsonl"
@@ -221,20 +272,21 @@ def test_retained_train_selection_reuses_rows_and_limits_ranked_offsets(
         assert event in progress
 
     cohort = prepared_release(root, selected)
-    expected = {row["record_id"] for row in rows(selected / "lm/train.lineage.jsonl")}
+    assert {
+        row["record_id"] for row in rows(selected / "lm/train.lineage.jsonl")
+    } == expected
     scratch = root / "mixture-scratch"
     scratch.mkdir()
     with RetainedMixtureIndex(
         scratch, root, [cohort], 17, {source_id: stratum}
     ) as index:
         assert {row[2] for row in rows(index.ranked)} == expected
-    assert len(expected) == 3
     with (selected / "lm/train.lineage.jsonl").open("ab") as stream:
         stream.write(b"\n")
     with pytest.raises(ValueError, match="JSONL source SHA-256 mismatch"):
         RetainedMixtureIndex(scratch, root, [cohort], 17, {source_id: stratum})
 
-    transform["parameters"]["minimum_train_utf8_bytes"] = max(remaining) + 1
+    selection["allowed"] = ["und"]
     write("transforms/lm.yaml", transform)
     empty = build(load_project(recipe), root, reuse_completed_preparation=True)
     with pytest.raises(ValueError, match="declared mixture cannot be supplied"):

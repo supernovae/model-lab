@@ -1530,6 +1530,10 @@ def test_archive_plan_step_snapshot_and_reviewed_release(
     sizes = [len(json.loads(row)["text"].encode("utf-8")) for row in old_train]
     minimum = min(sizes) + 1
     transform["parameters"]["minimum_train_utf8_bytes"] = minimum
+    transform["parameters"]["train_row_language"] = {
+        "allowed": ["en"],
+        "missing": "keep",
+    }
     release["policy"]["mixture"]["total_tokens"] = 10
     _yaml(transform_path, transform)
     _yaml(recipe.parent / "release.yaml", release)
@@ -1547,7 +1551,11 @@ def test_archive_plan_step_snapshot_and_reviewed_release(
             name = f"lm/{split}{suffix}"
             assert (selected / name).read_bytes() == baseline.member(name).read_bytes()
     report = json.loads((selected / "report.json").read_bytes())["train_selection"]
-    assert report["excluded_by_reason"] == {"below_minimum_utf8_bytes": 1}
+    assert report["excluded_by_reason"] == {
+        "below_minimum_utf8_bytes": 1,
+        "row_language_not_allowed": 0,
+        "row_language_missing": 0,
+    }
 
     def omit_eligible_train(path):
         for name in ("lm/train.jsonl", "lm/train.lineage.jsonl"):
@@ -1563,7 +1571,12 @@ def test_archive_plan_step_snapshot_and_reviewed_release(
     relaxed = build(load_project(recipe), root, offline=True)
     assert (relaxed / "lm/train.jsonl").read_bytes() == b"".join(old_train)
     events = (relaxed.parent.parent / "progress" / f"{relaxed.name}.jsonl").read_text()
-    for event in ("reused_index_stage", "reused_dedup_stage", "reused_text_statistics"):
+    for event in (
+        "reused_index_stage",
+        "reused_dedup_stage",
+        "reused_text_statistics",
+        "reused_source_language",
+    ):
         assert event in events
 
 

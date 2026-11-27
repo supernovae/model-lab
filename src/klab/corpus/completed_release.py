@@ -15,7 +15,7 @@ from klab.corpus.admission_inspection_cache import capture, unchanged
 from klab.corpus.preparation_inputs import corpus_work_root, local_scope
 from klab.corpus.quota import require_estimated_supply
 from klab.corpus.split_runs import SplitStages, checkpoint_stamp, write_rows
-from klab.corpus.train_selection import minimum_train_bytes
+from klab.corpus.train_selection import minimum_train_bytes, train_row_language
 from klab.result_publication import sync_directory
 from klab.training.manifest import sha256_file
 from klab.verification_proofs import read_trusted_small as _small
@@ -196,7 +196,11 @@ def freeze_retained(path, work_root):
     if root != Path(work_root).resolve(strict=True):
         raise ValueError("retained release must stay in its owned corpus work root")
     build, evidence = retained_payload(path)
-    if minimum_train_bytes(build["identity"].get("transforms", ())) is not None:
+    transforms = build["identity"].get("transforms", ())
+    if (
+        minimum_train_bytes(transforms) is not None
+        or train_row_language(transforms) is not None
+    ):
         report = json.loads(_small(path / "report.json", root))
         require_estimated_supply(report)
         if not report["view_counts"]["lm"]["train"]:

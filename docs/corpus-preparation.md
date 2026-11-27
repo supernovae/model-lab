@@ -1188,7 +1188,8 @@ payload digest.
 #### Select TRAIN text by upstream row language
 
 Set `train_row_language` in the parameters of an `lm_text` transform
-for an ordinary native disk LM build without reviewed admission.
+for a native disk LM build. This includes reviewed admission and builds
+using `--reuse-completed-preparation`.
 
 ```yaml
 parameters:
@@ -1207,15 +1208,36 @@ first. For rows that pass it, the report counts `row_language_not_allowed`
 and `row_language_missing` separately and estimates mixture supply from
 selected TRAIN text.
 
-The build verifies or creates the source-language sidecars and joins
+The ordinary builder verifies or creates the source-language sidecars and joins
 them to the existing index by document ID and partition ordinal. A
 language-only edit reuses normalization, native indexes, duplicate
-decisions and annotation. The planner shows the dependency. The join
+decisions and annotation. The ordinary native planner shows the
+dependency for builds without reviewed admission. The join
 uses one byte per document for language decisions, plus the existing
 four-byte sizes when the byte floor is enabled. Dictionary overflow is
 resolved from the same normalized row already decoded for view emission.
 Cold verification checks the recorded language decisions against the
 pinned source during raw replay and verifies coverage and quota supply.
+
+Reviewed verification ties each checked HF language decision to the
+source row identified by the reviewed admission. File-admitted documents
+use the missing-label policy when they carry no upstream row label.
+Verification then checks ordered views using narrow document metadata.
+
+Completed preparation evaluates row labels during the same pass that
+emits views from authenticated source renders and records those render
+identities in the signed report. Policy edits can reuse source renders
+and completed row phases. In-place freeze checks selected quota supply.
+Retained additive mixtures join the signed selected TRAIN lineage to
+existing offsets and keep their full duplicate-key isolation checks.
+
+In three synthetic NVMe trials with 1 million projected documents and
+550,000 selected rows across splits, the reviewed language comparison
+took a median 4.43 s at about 59 MiB peak process RSS. It read 929.50 MB
+for 929.50 MB of metadata, stage, and view inputs. The byte-floor
+comparison took 4.35 s before and after this change with the same
+selection and without language metadata. This measures the comparison
+after source replay and metadata extraction.
 
 In three single-worker synthetic trials over 1 million native index rows,
 the warm language join took a median 0.45 s and read 119.66 MB. The combined
@@ -1226,8 +1248,7 @@ cover reading the existing index and sidecars and writing the scratch
 maps. Cold sidecar creation and full release verification have separate
 costs.
 
-Reviewed-admission builds, completed-preparation adoption, canaries and
-in-memory builds need separate integration for this option.
+Canaries and in-memory builds require separate integration for this option.
 
 #### Text-statistics measurements
 
