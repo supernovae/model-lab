@@ -267,6 +267,11 @@ explicit execution again for a requested replay of external code.
   path. Preserve duplicate evidence, representative decisions, and the
   original material. Approximate document and passage matches default to
   reporting. Continue explicit exact-overlap policy for held-out data.
+  The text-statistics annotator publishes fixed-width counts keyed to one
+  verified normalized partition. It binds the exact document order and
+  IDs, supports bounded inspection, and reuses completed evidence across
+  release view changes. Release policy can adopt this artifact in a later
+  increment.
 - **Coherent packing first.** Compare seeded random, source-coherent,
   lexical-topic, explicit-entity and link-neighborhood schedules using
   identical natural-language bytes and exposure budgets. Assign semantic

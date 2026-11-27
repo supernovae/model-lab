@@ -45,7 +45,8 @@ _NATIVE_CHECKPOINT = re.compile(r"\.(index|dedup)-[0-9a-f]{64}\.groups")
 _NORMALIZED_PAYLOADS = frozenset({"docs.jsonl", "spans.jsonl", "rejected.jsonl"})
 
 
-def _partition_id(value: str) -> tuple[str, str]:
+def parse_normalized_partition_id(value: str) -> tuple[str, str]:
+    """Validate a published normalized partition's source and computation key."""
     source, _, key = value.partition("/")
     if not _SOURCE.fullmatch(source) or not _KEY.fullmatch(key):
         raise ValueError(
@@ -527,7 +528,7 @@ def _resumable_normalized_use(
     """Resolve durable native pins and refuse unknown interrupted stage roots."""
     selected: dict[str, set[str]] = {}
     for artifact_id in artifact_ids:
-        source, _ = _partition_id(artifact_id)
+        source, _ = parse_normalized_partition_id(artifact_id)
         selected.setdefault(source, set()).add(artifact_id)
     counts = dict.fromkeys(artifact_ids, 0)
     declared_builds: set[tuple[str, str]] = set()
@@ -569,7 +570,7 @@ def _resumable_normalized_use(
                         }
                     else:
                         if any(
-                            _partition_id(item)[0] not in source_keys
+                            parse_normalized_partition_id(item)[0] not in source_keys
                             for item in partitions
                         ):
                             raise ValueError("normalized input outside build sources")
@@ -876,7 +877,7 @@ def _selected_partition_bytes(
         receipt = scan.control(path, "receipt.json")
         if receipt is None:
             return None
-        source, key = _partition_id(artifact_id)
+        source, key = parse_normalized_partition_id(artifact_id)
         identity = receipt["identity"]
         files = receipt["files"]
         if (
@@ -915,7 +916,8 @@ def prune_normalized_partitions(
     work_root = work_root.absolute()
     store = normalized_store_root(work_root)
     paths = {
-        item: store.joinpath(*_partition_id(item)) for item in sorted(set(partitions))
+        item: store.joinpath(*parse_normalized_partition_id(item))
+        for item in sorted(set(partitions))
     }
     rows: list[dict[str, Any]] = []
     removed: list[str] = []
