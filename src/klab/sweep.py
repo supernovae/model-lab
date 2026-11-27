@@ -509,6 +509,10 @@ def run_sweep(
     policy = load_try_config(config.config)
     if policy.seed is not None and config.seeds is not None:
         raise ValueError("set seeds in the sweep or in its try config, not both")
+    if policy.probe_tier == "full":
+        from klab.probes.lm_eval_adapter import require_harness
+
+        require_harness()  # before any point trains
     device_backend = (
         require_devices(devices, config.baseline, backend)
         if devices is not None

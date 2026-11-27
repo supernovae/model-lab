@@ -57,14 +57,32 @@ def greedy_until(loaded: Any, context: str, gen_kwargs: dict[str, Any]) -> str:
     return out
 
 
-def _harness() -> Any:
-    try:
-        import lm_eval
-        from lm_eval.api.model import LM
-    except ImportError as error:
+def require_harness() -> None:
+    """Refuse, naming the install for this interpreter, when lm-eval is missing.
+
+    Commands call this before any training or scoring, so a missing harness
+    costs seconds, not the run that precedes the lm-eval probe.
+    """
+    import importlib.util
+    import sys
+
+    if importlib.util.find_spec("lm_eval") is None:
         raise LmEvalUnavailable(
-            "lm-evaluation-harness is not installed: uv sync --extra lmeval"
-        ) from error
+            "the full probe tier scores lm-eval tasks and "
+            f"{sys.executable} cannot import lm_eval. In the project environment "
+            "run `uv sync --locked --extra lmeval`; in a registered runtime run "
+            f"`uv pip install --python {sys.executable} 'lm-eval>=0.4.9,<0.5'` "
+            "(add --dry-run first and check that it only adds packages). To go "
+            "without it, probe with a config that sets `lm_eval: false`; for a try "
+            "or sweep use the standard tier and probe afterwards"
+        )
+
+
+def _harness() -> Any:
+    require_harness()
+    import lm_eval
+    from lm_eval.api.model import LM
+
     return lm_eval, LM
 
 
