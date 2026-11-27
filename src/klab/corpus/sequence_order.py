@@ -23,20 +23,24 @@ from klab.workspace_preflight import check_storage, require_storage
 _OPEN_GROUPS = 16
 
 
-def order_by_source(
+def order_sequences(
     records: Path,
     base: dict,
     schedule: VerifiedSchedule,
     destination: Path,
     source_strata: dict[str, str],
     exposure_limits: dict[str, int],
+    *,
+    topics=None,
 ) -> tuple[dict, dict]:
-    """Stably group records inside each stratum and exposure's selection window."""
+    """Stably group exact record/range pairs within each selection window."""
     scratch = scratch_root()
     size = base["train_records_bytes"] + schedule.schedule.size_bytes
     inode_bound = min(
         base["records"],
-        sum(exposure_limits[stratum] for stratum in source_strata.values()),
+        sum(exposure_limits.values()) * (topics.max_topics + 1)
+        if topics is not None
+        else sum(exposure_limits[stratum] for stratum in source_strata.values()),
     )
     if scratch.stat().st_dev == destination.stat().st_dev:
         require_storage(
@@ -56,14 +60,18 @@ def order_by_source(
             ]
         )
     with tempfile.TemporaryDirectory(prefix="source-sequence-", dir=scratch) as temp:
-        groups, transitions = _partition(
-            records, base, schedule, Path(temp), source_strata, exposure_limits
+        groups, transitions, assigned = _partition(
+            records, base, schedule, Path(temp), source_strata, exposure_limits, topics
         )
         windows = {}
         for key, ordinal in groups.items():
             windows.setdefault(key[:2], ordinal)
         ordered = sorted(groups, key=lambda key: (windows[key[:2]], groups[key]))
-        after = sum(left[2] != right[2] for left, right in pairwise(ordered))
+        after = sum(
+            (left if topics is not None else left[2])
+            != (right if topics is not None else right[2])
+            for left, right in pairwise(ordered)
+        )
         with (
             (destination / records.name).open("xb") as record_output,
             (destination / TRAIN_SCHEDULE).open("xb") as schedule_output,
@@ -81,8 +89,16 @@ def order_by_source(
         record_proof.size_bytes != base["train_records_bytes"]
         or schedule_proof.size_bytes != schedule.schedule.size_bytes
     ):
-        raise ValueError("source ordering changed the mixture inventory size")
+        raise ValueError("sequence ordering changed the mixture inventory size")
     schedule.require_unchanged()
+    transition_label = "topic" if topics is not None else "source"
+    coverage = {
+        "groups": len(groups),
+        f"{transition_label}_transitions_before": transitions,
+        f"{transition_label}_transitions_after": after,
+    }
+    if topics is not None:
+        coverage.update(lexical_index=topics.receipt, topic_records=assigned)
     return (
         {
             "train_records_sha256": record_proof.sha256,
@@ -91,17 +107,15 @@ def order_by_source(
                 "sha256": schedule_proof.sha256,
             },
         },
-        {
-            "groups": len(groups),
-            "source_transitions_before": transitions,
-            "source_transitions_after": after,
-        },
+        coverage,
     )
 
 
-def _partition(records, base, schedule, directory, source_strata, exposure_limits):
+def _partition(
+    records, base, schedule, directory, source_strata, exposure_limits, topics
+):
     groups, streams = {}, OrderedDict()
-    previous, transitions, count = None, 0, 0
+    previous, transitions, count, assigned = None, 0, 0, 0
     digest = hashlib.sha256()
     try:
         with (
@@ -116,7 +130,7 @@ def _partition(records, base, schedule, directory, source_strata, exposure_limit
                     or len(item) != SCHEDULE_RANGE.size
                 ):
                     raise ValueError(
-                        "source ordering input records differ from the schedule"
+                        "sequence ordering input records differ from the schedule"
                     )
                 digest.update(line)
                 row = json.loads(line)
@@ -128,17 +142,21 @@ def _partition(records, base, schedule, directory, source_strata, exposure_limit
                     or not 1 <= exposure <= exposure_limits[row["stratum"]]
                 ):
                     raise ValueError(
-                        "source ordering input has an invalid stratum or exposure"
+                        "sequence ordering input has an invalid stratum or exposure"
                     )
                 if SCHEDULE_RANGE.unpack(item)[2] != row["tokens"]:
                     raise ValueError(
-                        "source ordering input token count differs from the schedule"
+                        "sequence ordering input token count differs from the schedule"
                     )
-                if previous is not None and name != previous:
+                group = name if topics is None else topics.group(row["document_id"])
+                if topics is not None and group:
+                    assigned += 1
+                key = (row["stratum"], exposure, group)
+                current = group if topics is None else key
+                if previous is not None and current != previous:
                     transitions += 1
-                previous = name
+                previous = current
                 count += 1
-                key = (row["stratum"], exposure, name)
                 ordinal = groups.setdefault(key, len(groups))
                 if ordinal not in streams:
                     if len(streams) == _OPEN_GROUPS:
@@ -152,8 +170,8 @@ def _partition(records, base, schedule, directory, source_strata, exposure_limit
                 or count != base["records"]
                 or digest.hexdigest() != base["train_records_sha256"]
             ):
-                raise ValueError("source ordering input changed during partitioning")
+                raise ValueError("sequence ordering input changed during partitioning")
     finally:
         for stream in streams.values():
             stream.close()
-    return groups, transitions
+    return groups, transitions, assigned

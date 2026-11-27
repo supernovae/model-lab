@@ -319,6 +319,66 @@ order after file-page eviction advice. Storage reads rose from 61.0 MB to
 67.0 MB. Warm reads took 0.059 s and 0.060 s. Production storage locality,
 large source counts and learning effects need separate measurements.
 
+### Lexical-topic ordering
+
+Use the same baseline declaration and output as for source ordering. Set
+the following `sequence_order` and run the same `materialize-mixture`
+command for a new output.
+
+```yaml
+sequence_order:
+  kind: lexical
+  base_declaration: /work/baseline.yaml
+  base_output: /work/baseline-mixture
+  max_topics: 16
+```
+
+Each stratum uses eligible, kept TRAIN text from the verified releases.
+The index takes up to four case-folded word features from the first 4,096
+characters of each document. It ranks a document's features by count,
+length, and lexical order. Candidate anchors appear in at least two
+documents and at most half the stratum, with a minimum upper bound of
+two for tiny fixtures. The most supported anchors are retained up to
+`max_topics` (1–32, default 16). Each document uses its highest-ranked
+retained anchor. Documents without one stay in baseline order within
+their own group. Groups stay within the stratum and exposure windows and
+move exact record/range pairs through the same schedule writer.
+
+`sequence_order` in the receipt reports the lexical index identity and
+digest, eligible and assigned documents, anchors per stratum, scheduled
+records with an anchor, and topic transitions. Shared words are a
+heuristic for lexical coherence. The index reads no held-out features.
+
+The index uses a bounded on-disk aggregation and publishes a 72-byte
+lookup row per eligible document. The completed index in the work-area
+cache can serve different tokenizers, seeds and quotas over the same
+releases, family inventory, stratum mapping and options. Release additions
+can affect anchor frequencies across a whole stratum and rebuild this
+index. An interrupted index build retries its one text scan and reduction.
+After the index completes, schedule retries and reseal can reuse it. Audit
+independently rebuilds the index and base selection. Token segment IDs,
+contiguous supervision and the existing trainer path are shared.
+
+Three synthetic NVMe trials per size used 2,048 bytes of text per document
+and eight planted topics. These medians separate index construction from
+reordering with the finished index. Release verification is outside both
+timings.
+
+| Input documents | Lookup index | Index build | Reorder | Topic transitions |
+| --- | --- | --- | --- | --- |
+| 2,048 | 0.15 MB | 0.092 s | 0.008 s | 880 → 7 |
+| 32,768 | 2.36 MB | 1.392 s | 0.078 s | 14,242 → 7 |
+| 65,536 | 4.72 MB | 2.751 s | 0.148 s | 28,540 → 7 |
+
+The largest fixture's reorder read and wrote 21.36 MB each through scratch.
+The first pass over 8,192 shuffled reference blocks after file-page eviction
+advice took 0.567 s at baseline and 0.818 s with lexical order. Storage reads
+rose from 60.4 MB to 71.8 MB. Warm reads took 0.060 s and 0.065 s. A separate
+one-million-document test with short generated text built a 72 MB index in
+8.63 s. The main scratch database reached 236 MB and peak process RSS was
+150 MB through 200,000 warm lookups. These are synthetic operator and loader
+measurements. Production I/O and learning effects need separate evaluation.
+
 ### Offline transfer inspection
 
 ```sh

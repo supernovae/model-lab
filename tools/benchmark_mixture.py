@@ -235,6 +235,7 @@ def main():
     parser.add_argument("--transfer-plan", action="store_true")
     parser.add_argument("--project-selected", action="store_true")
     parser.add_argument("--source-order-sources", type=int, default=0)
+    parser.add_argument("--lexical-topics", type=int, default=0)
     args = parser.parse_args()
     if (
         not 1 <= args.workers <= 8
@@ -264,6 +265,10 @@ def main():
         or not 2 <= args.source_order_sources <= min(64, args.documents)
     ):
         parser.error("source ordering requires reference output and 2–64 sources")
+    if args.lexical_topics and (
+        args.token_output != "references" or not 1 <= args.lexical_topics <= 32
+    ):
+        parser.error("lexical ordering requires reference output and 1–32 anchors")
     # Affinity also bounds the baseline's default Rayon planner. Do this before
     # importing Lab or tokenizers; no nested BLAS/Rayon pool inherits more cores.
     if hasattr(os, "sched_getaffinity"):
@@ -304,16 +309,32 @@ def main():
     evidence.write_text("{}\n")
     origins.write_bytes(b"")
     inventory.write_bytes(b"synthetic-only\n")
+    topic_words = (
+        "metallurgy",
+        "horticulture",
+        "seismology",
+        "meteorology",
+        "woodworking",
+        "architecture",
+        "cartography",
+        "hydrology",
+    )
     references = []
     with ExitStack() as files:
         streams = [files.enter_context(source.open("wb")) for source in sources]
         for i in range(args.documents):
             # Deterministic duplicates, empty records and uneven lengths.
             key = i - 1 if i % 17 == 1 else i
+            marker = (
+                topic_words[(key // len(sources)) % len(topic_words)] + " "
+                if args.lexical_topics
+                else ""
+            )
+            doc_id = f"{i:064x}" if args.lexical_topics else str(i)
             text = (
                 ""
                 if i % 31 == 0
-                else (f"record {key:08d} " + "abcdefgh " * args.text_bytes)[
+                else (marker + f"record {key:08d} " + "abcdefgh " * args.text_bytes)[
                     : args.text_bytes + (i % 7)
                 ]
             )
@@ -321,7 +342,7 @@ def main():
             shard = i % len(sources)
             stream = streams[shard]
             row = {
-                "document_id": str(i),
+                "document_id": doc_id,
                 "source_id": source_ids[shard],
                 "content_sha256": content,
                 "text": text,
@@ -333,7 +354,7 @@ def main():
             stream.write(raw)
             references.append(
                 [
-                    str(i),
+                    doc_id,
                     shard,
                     offset,
                     len(raw),
@@ -504,27 +525,67 @@ def main():
             blocks=args.loader_blocks,
             seq_len=args.loader_row_tokens,
         )
+    orders = []
     if args.source_order_sources:
-        from klab.corpus.source_sequence_order import order_by_source
+        orders.append("source_order")
+    if args.lexical_topics:
+        orders.append("lexical_order")
+    for order in orders:
+        from klab.corpus.sequence_order import order_sequences
 
-        ordered = root / "source-ordered"
+        ordered = root / order
         ordered.mkdir()
         process = psutil.Process()
         io_counters = getattr(process, "io_counters", None)
+        topics = None
+        if order == "lexical_order":
+            from klab.corpus.lexical_topics import LexicalTopics, build_lexical_index
+            from klab.corpus.split_runs import rows
+
+            lexical = root / "lexical-index"
+            lexical.mkdir()
+            before = io_counters() if io_counters is not None else None
+            started = time.monotonic()
+            index = build_lexical_index(
+                lexical,
+                lexical / "scratch.sqlite",
+                (
+                    (row["document_id"], "general", row["text"])
+                    for source in sources
+                    for row in rows(source)
+                ),
+                max_topics=args.lexical_topics,
+                max_documents=args.documents,
+            )
+            elapsed = time.monotonic() - started
+            after = io_counters() if io_counters is not None else None
+            topics = LexicalTopics(index, "synthetic-index", args.lexical_topics)
+            result["lexical_build"] = {
+                "seconds": elapsed,
+                "records_per_second": args.documents / elapsed,
+                "index_bytes": index["files"][0]["bytes"],
+                "process_read_bytes": after.read_chars - before.read_chars
+                if after is not None
+                else None,
+                "process_write_bytes": after.write_chars - before.write_chars
+                if after is not None
+                else None,
+            }
         before = io_counters() if io_counters is not None else None
         started = time.monotonic()
         with verification_settings(scratch_dir=root):
-            members, coverage = order_by_source(
+            members, coverage = order_sequences(
                 staging / "train.records.jsonl",
                 receipt,
                 schedule,
                 ordered,
                 source_strata,
                 {"general": 1},
+                topics=topics,
             )
         elapsed = time.monotonic() - started
         after = io_counters() if io_counters is not None else None
-        result["source_order"] = {
+        result[order] = {
             **coverage,
             "sources": len(source_ids),
             "seconds": elapsed,
@@ -550,8 +611,8 @@ def main():
                     for file in (*schedule.tokens, *schedule.indexes)
                 },
             )
-            result["source_order"]["loaders"] = benchmark_loaders(
-                root / "ordered-loader",
+            result[order]["loaders"] = benchmark_loaders(
+                root / f"{order}-loader",
                 ordered_schedule,
                 ordered_receipt,
                 ordered / "train.records.jsonl",

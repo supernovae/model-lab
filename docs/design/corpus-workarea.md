@@ -274,6 +274,9 @@ explicit execution again for a requested replay of external code.
   boundaries, attention, and supervision masks through the normal loader.
   Source-coherent ordering now derives a schedule from a verified baseline
   selection. The paired arm keeps exact record and range membership.
+  Lexical-topic ordering uses a reusable TRAIN-only index of bounded
+  per-document word features. It uses the same schedule writer and records
+  grouping coverage while retaining the original token segments.
   Add shared-mechanism neighborhoods once mechanisms have typed outputs.
 - **Structured sources and compilation.** Start with pinned Wikipedia
   links and categories, bounded Wikidata statements with qualifiers and
