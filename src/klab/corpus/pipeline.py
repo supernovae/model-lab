@@ -964,9 +964,7 @@ def build_identity(
         ),
     }
     large_lm_build = uses_disk_lm_builder(project, transforms)
-    if minimum is not None and (
-        not large_lm_build or project.release.record_admission is not None
-    ):
+    if minimum is not None and not large_lm_build:
         raise ValueError(
             "minimum TRAIN text size requires an ordinary native disk LM build"
         )
