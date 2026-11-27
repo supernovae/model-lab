@@ -152,11 +152,26 @@ def _print_build_storage(storage: dict) -> None:
     )
     if append is not None:
         print(f"  Candidate flat span bytes to append {append:,}")
+    for stage, estimate in storage["stage_storage_estimates"].items():
+        size = estimate["payload_bytes"]
+        if size is not None:
+            basis = estimate["basis"].replace("_", " ")
+            print(f"  {stage} expects {size:,} payload bytes to write ({basis})")
+        else:
+            print(f"  {stage} fresh payload writes are unestimated")
+        if (peak := estimate.get("prior_named_peak_allocated_bytes")) is not None:
+            print(f"    Same-key named workspace previously peaked at {peak:,} bytes")
     if observed := storage["prior_stage_observation"]:
         status = "completed" if observed["completed"] else "incomplete"
         for stage, output in observed["stage_outputs"].items():
             print(
                 f"  Prior {stage} payload {output['payload_bytes']:,} bytes ({status} build)"
+            )
+        for stage, workspace in observed["stage_workspaces"].items():
+            print(
+                f"  Prior {stage} named workspace sampled "
+                f"{workspace['observed_peak_allocated_bytes']:,} allocated bytes at peak "
+                f"({workspace['incomplete_samples']:,} incomplete samples)"
             )
 
 

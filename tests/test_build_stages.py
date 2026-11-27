@@ -454,6 +454,14 @@ def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(
     monkeypatch.setattr(build_outputs, "sha256_file", hash_untracked)
     reference = Path(lab.run("corpus", "build", project, "--offline"))
     expected = tree(reference)
+    observed = lab.json("corpus", "plan", project, "--inspect-storage", "--json")[
+        "storage_inspection"
+    ]["prior_stage_observation"]
+    for stage, output in observed["stage_outputs"].items():
+        workspace = observed["stage_workspaces"][stage]
+        assert workspace["computation_key"] == output["computation_key"]
+        assert workspace["completed"] and workspace["incomplete_samples"] == 0
+        assert workspace["observed_peak_logical_bytes"] >= output["payload_bytes"]
     manifest = json.loads((reference / "build.json").read_bytes())
     assert {name: entry["sha256"] for name, entry in manifest["files"].items()} == {
         name: digest for name, digest in expected.items() if name != "build.json"
@@ -510,6 +518,15 @@ def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(
     assert view["verification_candidate_bytes"] == sum(
         (staging / name).stat().st_size for name in outputs
     ) - len(b"uncommitted tail")
+    estimate = plan["storage_inspection"]["stage_storage_estimates"]["views"]
+    assert estimate == {
+        "basis": "same_key_observation",
+        "payload_bytes": observed["stage_outputs"]["views"]["payload_bytes"]
+        - view["verification_candidate_bytes"],
+        "prior_named_peak_allocated_bytes": observed["stage_workspaces"]["views"][
+            "observed_peak_allocated_bytes"
+        ],
+    }
     (stage,) = manifest["stages"]
     assert (
         view["stage_replay_candidate_bytes"]
@@ -528,6 +545,12 @@ def test_view_resume_discards_uncommitted_tail_and_reuses_rendered_rows(
         assert incomplete["verification_candidate_bytes"] is None
         assert (
             incomplete_plan["storage_inspection"]["spans"]["append_candidate_bytes"]
+            is None
+        )
+        assert (
+            incomplete_plan["storage_inspection"]["stage_storage_estimates"]["views"][
+                "payload_bytes"
+            ]
             is None
         )
     finally:

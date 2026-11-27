@@ -948,9 +948,46 @@ Build still authenticates its inputs and journal before reusing the prefix.
 The last 64 KiB of the same build's progress journal can supply observed
 logical output bytes for the sealed index, deduplication and checkpointed
 view files, with their computation keys and the attempt's completion status.
-Those footprints include reused outputs and exclude temporary scratch and
-physical write amplification. Other fresh-stage writes and peak build
-scratch remain unestimated.
+`stage_storage_estimates` reports zero new stage payload bytes for a published
+build or an eligible retained candidate. Reuse still depends on verification.
+For a fresh or resumed stage, a prior output with the same computation key
+can forecast the logical payload bytes remaining. For checkpointed views,
+this subtracts the candidate committed prefix. A damaged or unresolved
+frontier leaves the forecast unknown. A stage with no matching observations
+leaves its fresh writes unknown. The span-specific forecast can still be
+available from the current normalized inputs.
+
+Fresh index, deduplication and view work also samples the stage's named
+workspace at entry and before cleanup. Long stages can sample at progress
+boundaries at most once every 30 seconds. Each sample visits at most 8,192
+entries and counts a hard-linked file once. The journal reports initial and
+sampled peak logical and allocated bytes, along with incomplete samples. The
+planner can show a matching completed peak as a reference for repeating the
+stage. These samples include staged outputs and checkpoints. Anonymous
+SQLite files, unlinked mappings, physical write amplification and peaks
+between samples are outside their coverage. Total peak build scratch and
+fresh normalization output still require workload evidence.
+
+On warm NVMe metadata, seven paired samples of sparse files took a median
+of 0.12 ms per scan at 128 entries and 4.0 ms at 4,096. At 8,193 entries the
+scan stopped at its limit, marked the sample incomplete and took 8.1 ms.
+
+A recipe with 125,000 added synthetic rows reused normalized inputs and
+rebuilt the index, duplicate decisions and views on NVMe. Across two trials
+per revision, median build time was 24.88 s before instrumentation and
+24.79 s after. Documents, spans, lineage, transform output and all three
+LM split digests matched. The named workspace peaks were 124.84 MB for
+indexing, 37.15 MB for deduplication and 783.67 MB for views. After the
+test build and its stage outputs were removed, the planner forecast a
+79.76 MB index payload and reported its matching historical workspace peak.
+The deduplication and view estimate keys remained unresolved until their
+input receipts became available.
+
+The build progress instrumentation changes the native build implementation
+digest and the current release verifier digest. Existing releases stay
+addressable, and the new build can reuse matching normalized, index and
+deduplication artifacts. Existing host-local release receipts can refresh
+through verification when reopened.
 
 Three synthetic Linux tmpfs runs per size measured the added inspection
 step over sparse normalized files and a populated progress journal. The

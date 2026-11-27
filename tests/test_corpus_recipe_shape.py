@@ -595,6 +595,10 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     assert candidate_stages["views"]["action"] == "run"
     forecast = view_plan["storage_inspection"]
     assert forecast["all_normalized_candidates_present"]
+    writes = forecast["stage_storage_estimates"]
+    assert writes["normalize"]["payload_bytes"] == 0
+    assert writes["views"]["payload_bytes"] is None
+    assert writes["views"]["prior_named_peak_allocated_bytes"] is None
     expected_spans = (other_build / "spans.jsonl").stat().st_size
     assert forecast["spans"] == {
         "logical_bytes": expected_spans,
@@ -605,6 +609,8 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     for label, directory in (("index", "index"), ("deduplicate", "dedup")):
         step = candidate_stages[label]
         assert step["action"] == "verify_candidate", view_plan
+        assert writes[label]["basis"] == "retained_candidate"
+        assert writes[label]["payload_bytes"] == 0
         (stored,) = (stage_store / directory).glob("*/receipt.json")
         assert step["computation_key"] == stored.parent.name
         assert step["verification_candidate_bytes"] == sum(
@@ -667,6 +673,11 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         }
     assert (view_build / "spans.jsonl").stat().st_size == expected_spans
     assert prior["stage_outputs"]["views"]["payload_bytes"] >= expected_spans
+    assert set(prior["stage_workspaces"]) == {"views"}
+    assert all(
+        step["payload_bytes"] == 0
+        for step in observed["stage_storage_estimates"].values()
+    )
 
     # Inspection reads the same compact group evidence as native resolution.
     evidence = json.loads((view_build / "report.json").read_bytes())[
@@ -1031,6 +1042,7 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     assert storage["normalized_candidate_payload_bytes"]["spans.jsonl"] > 0
     assert storage["spans"]["flat_output_bytes"] is None
     assert storage["spans"]["append_candidate_bytes"] is None
+    assert storage["stage_storage_estimates"]["normalize"]["payload_bytes"] is None
     assert (
         next(row for row in plan["stages"] if row["id"] == "index")["action"]
         == "await_normalization"

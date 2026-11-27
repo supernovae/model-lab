@@ -1358,23 +1358,24 @@ def build_large(
             raise ValueError("prepared payloads changed during native build")
 
     def index_stage(staging: Path, result: dict[str, Any]) -> None:
-        result["documents"] = native_index.index_prepared(
-            staging,
-            prepared,
-            project,
-            progress,
-            admission_files=admission_files,
-            checkpoint_store=group_store,
-            index_key=index_key,
-            generations=generations,
-            proof_store=proof_store,
-            verification_mode=verification_mode,
-        )
-        with _open_read_only(staging / "index.sqlite") as connection:
-            result["duplicate_evidence"] = native_index.group_counts(
-                connection, index_inputs["duplicate_evidence_methods"]
+        with progress.track_stage_workspace("index", index_key, groups_root):
+            result["documents"] = native_index.index_prepared(
+                staging,
+                prepared,
+                project,
+                progress,
+                admission_files=admission_files,
+                checkpoint_store=group_store,
+                index_key=index_key,
+                generations=generations,
+                proof_store=proof_store,
+                verification_mode=verification_mode,
             )
-        require_prepared_generation()
+            with _open_read_only(staging / "index.sqlite") as connection:
+                result["duplicate_evidence"] = native_index.group_counts(
+                    connection, index_inputs["duplicate_evidence_methods"]
+                )
+            require_prepared_generation()
 
     with (workspace / ".index.lock").open("a") as index_lock:
         fcntl.flock(index_lock, fcntl.LOCK_EX)
@@ -1415,7 +1416,8 @@ def build_large(
     progress.update(phase="deduplicating")
     index_receipt_sha256 = sha256_file(index_dir / "receipt.json")
     dedup_inputs = native_dedup_inputs(project, index_receipt_sha256)
-    dedup_groups_root = stages.root / f".dedup-{stages.key(dedup_inputs)}.groups"
+    dedup_key = stages.key(dedup_inputs)
+    dedup_groups_root = stages.root / f".dedup-{dedup_key}.groups"
     if dedup_groups_root.is_symlink():
         raise ValueError(f"symlinked dedup checkpoint: {dedup_groups_root}")
     if canary is None:
@@ -1429,8 +1431,14 @@ def build_large(
 
     def dedup_stage(staging: Path, result: dict[str, Any]) -> None:
         # The decisions are a narrow table beside the index, not a copy of it.
-        connection = native_dedup.open_dedup(index_dir, staging / "dedup.sqlite")
-        try:
+        with (
+            progress.track_stage_workspace(
+                "deduplicate", dedup_key, staging, dedup_groups_root
+            ),
+            closing(
+                native_dedup.open_dedup(index_dir, staging / "dedup.sqlite")
+            ) as connection,
+        ):
             result["groups"], result["dropped"] = native_dedup.deduplicate(
                 connection,
                 staging / "groups.jsonl",
@@ -1438,12 +1446,8 @@ def build_large(
                 progress=progress,
                 policy=project.release.policy.duplicates,
                 source_events=source_events,
-                checkpoints=ViewCheckpoints(
-                    dedup_groups_root, stages.key(dedup_inputs)
-                ),
+                checkpoints=ViewCheckpoints(dedup_groups_root, dedup_key),
             )
-        finally:
-            connection.close()
 
     with (workspace / ".dedup.lock").open("a") as dedup_lock:
         fcntl.flock(dedup_lock, fcntl.LOCK_EX)
@@ -1553,31 +1557,32 @@ def build_large(
                 )
             )
             progress.update(phase="writing_views")
-        _emit_build(
-            connection=connection,
-            staging=staging,
-            project=project,
-            lock=lock,
-            identity=identity,
-            build_id=build_id,
-            transform=transform,
-            prepared=prepared,
-            rights_files=rights_files,
-            source_events=source_events,
-            groups_path=dedup_dir / "groups.jsonl",
-            group_count=dedup_result["groups"],
-            dropped=dedup_result["dropped"],
-            progress=progress,
-            checkpoints=checkpoints,
-            diagnostics=root / "diagnostics" / f"{build_id}.json",
-            span_partitions=span_partitions,
-            span_projection=span_projection,
-            train_annotations=annotations,
-            duplicate_evidence={
-                "index_key": index_key,
-                "groups_by_method": index_result["duplicate_evidence"],
-            },
-        )
+        with progress.track_stage_workspace("views", checkpoints.identity, view_root):
+            _emit_build(
+                connection=connection,
+                staging=staging,
+                project=project,
+                lock=lock,
+                identity=identity,
+                build_id=build_id,
+                transform=transform,
+                prepared=prepared,
+                rights_files=rights_files,
+                source_events=source_events,
+                groups_path=dedup_dir / "groups.jsonl",
+                group_count=dedup_result["groups"],
+                dropped=dedup_result["dropped"],
+                progress=progress,
+                checkpoints=checkpoints,
+                diagnostics=root / "diagnostics" / f"{build_id}.json",
+                span_partitions=span_partitions,
+                span_projection=span_projection,
+                train_annotations=annotations,
+                duplicate_evidence={
+                    "index_key": index_key,
+                    "groups_by_method": index_result["duplicate_evidence"],
+                },
+            )
         require_prepared_generation()
         if any(
             range_file_identity(path) != before
