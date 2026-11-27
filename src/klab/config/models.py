@@ -637,7 +637,7 @@ class ModelConfig(StrictModel):
 
 
 class TokenizerOrigin(StrictModel):
-    """Explicit immutable origin of a tokenizer reused across frozen snapshots."""
+    """Explicit verified fit origin of a shared tokenizer."""
 
     dataset: DatasetConfig | None = Field(default=None, exclude_if=lambda v: v is None)
     mixture_declaration_path: Path | None = Field(
@@ -648,19 +648,34 @@ class TokenizerOrigin(StrictModel):
     )
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    train_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda v: v is None
+    )
 
     @model_validator(mode="after")
     def validate_origin(self) -> TokenizerOrigin:
         if (self.dataset is None) == (self.mixture_declaration_path is None):
             raise ValueError(
-                "tokenizer origin requires exactly one snapshot or mixture declaration"
+                "tokenizer origin requires exactly one dataset or mixture declaration"
             )
         if (self.mixture_declaration_path is None) != (
             self.mixture_declaration_sha256 is None
         ):
             raise ValueError("tokenizer origin mixture declaration requires its digest")
-        if self.dataset is not None and self.dataset.source != "snapshot":
-            raise ValueError("explicit tokenizer origin requires a frozen snapshot")
+        if self.dataset is not None and self.dataset.source not in {
+            "snapshot",
+            "local_text",
+        }:
+            raise ValueError(
+                "tokenizer origin dataset requires a snapshot or pinned local text"
+            )
+        local = self.dataset is not None and self.dataset.source == "local_text"
+        if local != (self.train_sha256 is not None):
+            raise ValueError(
+                "train_sha256 is required exactly for a local text tokenizer origin"
+            )
+        if local and self.dataset.train_path is None:
+            raise ValueError("local text tokenizer origin requires train_path")
         return self
 
 

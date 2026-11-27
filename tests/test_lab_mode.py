@@ -504,6 +504,39 @@ def test_cpu_smoke_loop_yaml_to_report_within_budget(tmp_path: Path) -> None:
     print(f"lab loop YAML->report: {elapsed:.1f}s (budget {LOOP_BUDGET_SECONDS}s)")
     assert elapsed < LOOP_BUDGET_SECONDS, f"lab loop took {elapsed:.1f}s"
 
+    arm = record["arms"]["candidate"]
+    panel = tmp_path / "rankings.json"
+    item = {
+        "id": "one",
+        "category": "association",
+        "prefix": "the answer is",
+        "candidates": ["red", "blue"],
+        "answer": "red",
+    }
+    declaration = {"schema_version": 1, "name": "smoke-ranking", "items": [item]}
+    panel.write_text(json.dumps(declaration))
+    args = (
+        "eval",
+        arm["run_id"],
+        "--runs-dir",
+        str(Path(arm["run_dir"]).parent),
+        "--checkpoint",
+        arm["checkpoint"],
+        "--ranking",
+        str(panel),
+    )
+    ranked = cli(*args)
+    assert ranked.returncode == 0, ranked.stderr[-2000:]
+    result = json.loads(ranked.stdout)
+    assert result["identity"]["checkpoint_sha256"] == arm["checkpoint_sha256"]
+    assert result["ranking"]["categories"]["association"]["chance"] == 0.5
+    assert set(result["ranking"]["items"][0]["scores"]) == {"red", "blue"}
+    assert Path(result["output"]).is_file()
+    item["prefix"] = "the " * 1024 + "answer is"
+    panel.write_text(json.dumps(declaration))
+    refused = cli(*args)
+    assert refused.returncode != 0 and "exceeds checkpoint context" in refused.stderr
+
 
 # --- Review fixes (PR #60): each test failed before its fix. -----------------
 

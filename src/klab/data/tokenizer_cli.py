@@ -25,6 +25,10 @@ def verify_configured_tokenizer(config_path: Path) -> dict[str, object]:
         config.tokenizer.origin is not None
         and config.tokenizer.origin.mixture_declaration_path is not None
     )
+    pinned_local_origin = (
+        config.tokenizer.origin is not None
+        and config.tokenizer.origin.train_sha256 is not None
+    )
     dataset = (
         config.tokenizer.origin.dataset
         if config.tokenizer.origin is not None
@@ -33,6 +37,7 @@ def verify_configured_tokenizer(config_path: Path) -> dict[str, object]:
     )
     if (
         not mixture_origin
+        and not pinned_local_origin
         and dataset.corpus_release_path is None
         and dataset.source
         not in {
@@ -42,7 +47,7 @@ def verify_configured_tokenizer(config_path: Path) -> dict[str, object]:
     ):
         raise ValueError(
             "read-only tokenizer origin verification requires a frozen corpus "
-            "export, snapshot, or verified token mixture; unbound sources cannot "
+            "export, snapshot, verified token mixture or pinned local origin; unbound sources cannot "
             "be authenticated without replay"
         )
     path = config.tokenizer.path
@@ -68,15 +73,22 @@ def verify_configured_tokenizer(config_path: Path) -> dict[str, object]:
         "vocab_size": actual,
         "special_ids": special_ids,
         "origin": {
-            key: manifest[key]
-            for key in (
-                "source",
-                "revision",
-                "source_manifest_sha256",
-                "corpus_export",
-                "corpus_forge_bakeoff",
-            )
-            if key in manifest
+            **{
+                key: manifest[key]
+                for key in (
+                    "source",
+                    "revision",
+                    "source_manifest_sha256",
+                    "corpus_export",
+                    "corpus_forge_bakeoff",
+                )
+                if key in manifest
+            },
+            **(
+                {"train_sha256": config.tokenizer.origin.train_sha256}
+                if pinned_local_origin
+                else {}
+            ),
         },
         "verification_mode": "cold",
     }

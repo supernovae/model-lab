@@ -219,3 +219,71 @@ def test_mixture_origin_rejects_changed_declaration_before_verification(tmp_path
     declaration.write_text('{"changed":true}')
     with pytest.raises(ValueError, match="declaration digest mismatch"):
         verify_run_tokenizer(config)
+
+
+def test_shared_local_tokenizer_checks_original_fit_even_with_a_new_file_pin(
+    tmp_path, monkeypatch
+):
+    from klab.config.loading import load_config
+    from klab.config.models import RunConfig
+    from klab.data.tokenizer_cli import verify_configured_tokenizer
+    from klab.training.manifest import sha256_file
+
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "work"))
+    original = tmp_path / "train.jsonl"
+    validation = tmp_path / "validation.jsonl"
+    alternate = tmp_path / "compiled.jsonl"
+    for path, text in (
+        (original, "The inlet flows into the upper pool."),
+        (validation, "Rain trickles over the empty weir."),
+        (alternate, "inlet drains_to pool"),
+    ):
+        path.write_text(json.dumps({"text": text}) + "\n")
+    dataset = {
+        "source": "local_text",
+        "revision": "fixture",
+        "license": "CC0-1.0",
+        "cache_dir": str(tmp_path / "prepared"),
+        "train_path": str(original),
+        "validation_path": str(validation),
+        "train_max_documents": 1,
+        "validation_max_documents": 1,
+        "train_max_tokens": 128,
+        "validation_max_tokens": 128,
+    }
+    token = tokenizer_module.train_tokenizer(
+        TokenizerTrainConfig(
+            schema_version=1,
+            vocab_size=260,
+            min_frequency=1,
+            max_documents=1,
+            dataset=dataset,
+            output_dir=tmp_path / "tokenizer",
+        )
+    )
+    base = load_config(
+        Path(__file__).resolve().parents[1] / "configs/runtime_smoke_cpu.yaml"
+    ).model_dump(mode="json")
+    base["model"]["vocab_size"] = 260
+    base["dataset"] = {**dataset, "train_path": str(alternate)}
+    base["tokenizer"] = {
+        "path": str(token),
+        "origin": {
+            "dataset": dataset,
+            "sha256": sha256_file(token),
+            "manifest_sha256": sha256_file(token.with_name("tokenizer_manifest.json")),
+            "train_sha256": sha256_file(original),
+        },
+    }
+    run = tmp_path / "run.json"
+    run.write_text(RunConfig.model_validate(base).model_dump_json())
+    assert verify_configured_tokenizer(run)["origin"]["train_sha256"] == sha256_file(
+        original
+    )
+
+    # Updating just the origin file digest cannot make unrelated bytes its fit.
+    original.write_bytes(alternate.read_bytes())
+    base["tokenizer"]["origin"]["train_sha256"] = sha256_file(original)
+    run.write_text(RunConfig.model_validate(base).model_dump_json())
+    with pytest.raises(ValueError, match="differs from tokenizer fit"):
+        verify_configured_tokenizer(run)
