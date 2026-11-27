@@ -528,6 +528,22 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         key: sum(expected_statistics(row)[key] for row in parent_rows)
         for key in ("utf8_bytes", "codepoints", "lines")
     }
+    language_args = (*annotate, "--kind", "source-language")
+    language = lab.json(*language_args)
+    assert parent_rows[0]["language"] == "en"  # the normalizer fallback
+    assert language["declared_language"] is None
+    assert language["payload"]["bytes"] == 45 * len(parent_rows)
+    assert language["totals"]["reported"] == 1
+    assert language["totals"]["missing"] == len(parent_rows) - 1
+    assert language["rows"] == [
+        {
+            "document_id": parent_rows[0]["document_id"],
+            "row_label": parent_rows[0]["metadata"]["language"],
+            "row_label_status": "reported",
+            "code_context": False,
+            "row_score": parent_rows[0]["metadata"]["language_score"],
+        }
+    ]
 
     # A view-only change reuses the exact index and deduplication stages.
     release_path = other / "release.yaml"
@@ -577,10 +593,24 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     with monkeypatch.context() as cached:
         cached.setattr(Path, "open", no_stage_body)
         page = lab.json(*annotate, "--offset", str(statistics["next_offset"]))
+        language_page = lab.json(
+            *language_args, "--offset", str(language["next_offset"])
+        )
     assert page["reused"]
     assert page["computation_key"] == statistics["computation_key"]
     assert page["payload"] == statistics["payload"]
     assert page["rows"] == [expected_statistics(parent_rows[1])]
+    assert language_page["reused"]
+    assert language_page["payload"] == language["payload"]
+    assert language_page["rows"] == [
+        {
+            "document_id": parent_rows[1]["document_id"],
+            "row_label": None,
+            "row_label_status": "missing",
+            "code_context": False,
+            "row_score": None,
+        }
+    ]
     payload = Path(statistics["payload"]["path"])
     original_payload = payload.read_bytes()
     payload.write_bytes(bytes([original_payload[0] ^ 1]) + original_payload[1:])
@@ -852,7 +882,11 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     )
     with pytest.raises(ValueError, match="JSONL source SHA-256 mismatch"):
         lab.run(
-            "corpus", "annotate-normalized", inventory["partitions"][0]["artifact_id"]
+            "corpus",
+            "annotate-normalized",
+            inventory["partitions"][0]["artifact_id"],
+            "--kind",
+            "source-language",
         )
     shutil.rmtree(appended_build)
     with pytest.raises(ValueError, match="prepared source shard changed"):

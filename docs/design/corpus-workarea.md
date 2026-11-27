@@ -274,6 +274,11 @@ explicit execution again for a requested replay of external code.
   minimum TRAIN byte count from these sidecars after duplicate resolution.
   This option changes view and release identities, and cold verification
   checks the resulting coverage and quota supply against released text.
+  The source-language annotator uses the same receipt and page path. It
+  keeps explicit source declarations separate from recorded row labels
+  and scores. These metadata claims bind the partition receipt rather
+  than memoizing by text digest. Language detection and selection over
+  this evidence remain separate operators.
 - **Coherent packing first.** Compare seeded random, source-coherent,
   lexical-topic, explicit-entity and link-neighborhood schedules using
   identical natural-language bytes and exposure budgets. Assign semantic

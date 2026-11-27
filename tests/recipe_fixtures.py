@@ -459,6 +459,8 @@ def write_recipe(
     # two documents. The release declares no canonical_origin duplicate key, so
     # both stay, and verification must not demand they share a representative.
     web[1] = {**web_row(1, "web", _WORDS["web"]), "url": web[0]["url"]}
+    web[0].update(language="en", language_score=0.97)
+    web[4].update(language="fr", language_score=0.66)
     if empty_document:
         web[2] = {**web[2], "text": ""}
     hf_source(
