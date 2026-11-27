@@ -181,10 +181,10 @@ def _write_large_duplicate_group(
 
 
 def _duplicate_key_bounds(connection, method, after):
-    """Seek a batch boundary in the covering index, including unique origins."""
+    """Seek a batch boundary in policy-independent duplicate groups."""
     predicate, values = _duplicate_key_start(method, after)
     row = connection.execute(
-        f"SELECT origin FROM origins WHERE {predicate} ORDER BY origin LIMIT 1 OFFSET ?",
+        f"SELECT origin FROM duplicate_groups WHERE {predicate} ORDER BY origin LIMIT 1 OFFSET ?",
         (*values, _DEDUP_WINDOW_KEYS - 1),
     ).fetchone()
     return row[0] if row else None
@@ -204,8 +204,7 @@ def _duplicate_keys(connection, method, after, end):
         predicate += " AND origin<=?"
         values = (*values, end)
     return connection.execute(
-        f"SELECT origin FROM origins WHERE {predicate} "
-        "GROUP BY origin HAVING COUNT(*)>1 ORDER BY origin",
+        f"SELECT origin FROM duplicate_groups WHERE {predicate} ORDER BY origin",
         values,
     )
 
@@ -474,7 +473,12 @@ def _resolve_duplicate_groups(
             if checkpoints.damaged:
                 progress.record("discarded_damaged_dedup_checkpoint")
             if state:
-                first_method, after = state["method"], state["after"]
+                first_method = state["method"]
+                after = (
+                    bytes.fromhex(state["after"])
+                    if state["after"] is not None
+                    else None
+                )
                 progress.record("reused_dedup_group_windows")
                 links_stream.seek(0)
                 for _ in range(state["groups"]):
@@ -512,9 +516,10 @@ def _resolve_duplicate_groups(
             output.flush()
             os.fsync(output.fileno())
             _duplicate_diagnostics(report_path, source_events, diagnostics, group.error)
+            label = key.decode("utf-8") if method == "canonical_origin" else key.hex()
             raise ValueError(
                 describe_failure(
-                    group.error, method, key, ids, group.splits, member_count=count
+                    group.error, method, label, ids, group.splits, member_count=count
                 )
             )
 
@@ -527,9 +532,9 @@ def _resolve_duplicate_groups(
             ):
                 for (key,) in keys:
                     digest = (
-                        hashlib.sha256(key.encode()).hexdigest()
+                        hashlib.sha256(key).hexdigest()
                         if method == "canonical_origin"
-                        else key
+                        else key.hex()
                     )
                     rows = cursor.execute(members_query, (method, key)).fetchmany(
                         _DEDUP_GROUP_ROWS + 1
@@ -622,7 +627,7 @@ def _resolve_duplicate_groups(
                 checkpoints.commit(
                     {
                         "method": index if after is not None else index + 1,
-                        "after": after,
+                        "after": after.hex() if after is not None else None,
                         "groups": groups,
                     }
                 )

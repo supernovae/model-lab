@@ -60,6 +60,27 @@ def ranked_choice(
     return (split != priority if priority else False, rank, kind != "paper", identifier)
 
 
+def drops_train_copy(splits: set[str], policy: DuplicatePolicy) -> bool:
+    return (
+        len(splits) == 2
+        and "train" in splits
+        and policy.heldout_overlap == "drop_train_copy"
+    )
+
+
+def group_policy_error(method, splits, incompatible_rights, policy):
+    """The per-key rejection rules, shared by resolution and group review."""
+    if len(splits) > 1 and not drops_train_copy(splits, policy):
+        return CROSS_SPLIT_OVERLAP
+    if (
+        method == "normalized"
+        and incompatible_rights
+        and policy.rights_conflict == "error"
+    ):
+        return RIGHTS_CONFLICT
+    return None
+
+
 def resolve_group(
     method: str, members: Iterable[Member], policy: DuplicatePolicy
 ) -> Group:
@@ -84,12 +105,7 @@ def resolve_group(
             best[split] = (candidate, member)
     splits = set(best)
     heldout = splits - {"train"}
-    contaminated = (
-        len(splits) > 1
-        and policy.heldout_overlap == "drop_train_copy"
-        and "train" in splits
-        and len(heldout) == 1
-    )
+    contaminated = drops_train_copy(splits, policy)
     priority = next(iter(heldout)) if heldout else None
     if ranked and priority:
         representative = best[priority][1].id
@@ -102,11 +118,7 @@ def resolve_group(
             ),
             key=lambda row: row[0],
         )[1].id
-    error = None
-    if len(splits) > 1 and not contaminated:
-        error = CROSS_SPLIT_OVERLAP
-    elif incompatible:
-        error = RIGHTS_CONFLICT
+    error = group_policy_error(method, splits, incompatible, policy)
     return Group(representative, sorted(splits), error, contaminated)
 
 

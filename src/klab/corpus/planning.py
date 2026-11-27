@@ -23,6 +23,7 @@ from klab.corpus.large_build import (
     native_view_checkpoints,
     native_view_members,
 )
+from klab.corpus.native_index import evidence_methods
 from klab.corpus.normalized_spans import SPAN_MEMBER
 from klab.corpus.pipeline import build_identity, uses_disk_lm_builder
 from klab.corpus.prepared_shards import normalized_store_root, prepared_file_directory
@@ -248,6 +249,8 @@ def plan_stage_candidate(
             size += entry["size"]
     except (KeyError, OSError, TypeError, ValueError) as error:
         return {**estimate, "action": "resolve", "reason": str(error)}, None
+    if name == "index" and "duplicate_evidence" in metadata.get("result", {}):
+        estimate["duplicate_evidence"] = metadata["result"]["duplicate_evidence"]
     return {
         **estimate,
         "action": "verify_candidate" if candidate == target else "resume_candidate",
@@ -482,7 +485,13 @@ def plan_build(
         "stages": [
             {"id": "acquire", "inputs": []},
             {"id": "normalize", "inputs": ["acquire"]},
-            {"id": "index", "inputs": ["normalize"]},
+            {
+                "id": "index",
+                "inputs": ["normalize"],
+                "duplicate_evidence_methods": list(
+                    evidence_methods(project.release.policy.duplicates)
+                ),
+            },
             {"id": "deduplicate", "inputs": ["index"]},
             {"id": "views", "inputs": ["index", "deduplicate"]},
             {"id": "freeze", "inputs": ["views"]},

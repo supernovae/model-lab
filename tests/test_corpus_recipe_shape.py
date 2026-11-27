@@ -668,8 +668,39 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     assert (view_build / "spans.jsonl").stat().st_size == expected_spans
     assert prior["stage_outputs"]["views"]["payload_bytes"] >= expected_spans
 
-    # A dedup-only option changes its key, keeping the index verification candidate.
+    # Inspection reads the same compact group evidence as native resolution.
+    evidence = json.loads((view_build / "report.json").read_bytes())[
+        "duplicate_evidence"
+    ]
+    index_key = candidate_stages["index"]["computation_key"]
+    assert evidence["index_key"] == index_key
+    assert (
+        candidate_stages["index"]["duplicate_evidence"] == evidence["groups_by_method"]
+    )
+    group_args = ("corpus", "duplicate-groups", str(config_path), index_key)
+    groups = lab.json(*group_args, "--limit", "1")
+    [group] = groups["groups"]
+    assert group["drops_train_copy"] and group["split_counts"] == {
+        "train": 1,
+        "validation": 1,
+        "test": 0,
+    }
+    another = lab.json(*group_args, "--limit", "1", "--after", groups["next_after"])
+    assert another["groups"][0]["sha256"] > group["sha256"]
+    group_args = (*group_args, "--group", group["sha256"], "--limit", "1")
+    first = lab.json(*group_args, "--cold")
+    with monkeypatch.context() as cached:
+        cached.setattr(Path, "open", no_stage_body)
+        second = lab.json(*group_args, "--after", first["next_after"])
+    assert second["next_after"] is None
+    members = [*first["members"], *second["members"]]
+    assert {row["drop_reason"] for row in members} == {None, "contaminated_heldout"}
+    winner = next(row["document_id"] for row in members if row["split"] == "validation")
+    assert {row["representative_id"] for row in members} == {winner}
+
+    # A dedup-only change, including enabled exact keys, preserves membership.
     view["policy"]["duplicates"]["heldout_overlap"] = "error"
+    view["policy"]["duplicates"]["keys"] = ["normalized"]
     release_path.write_text(yaml.safe_dump(view))
     changed = {row["id"]: row for row in lab.json(*plan_args)["stages"]}
     assert changed["index"] == candidate_stages["index"]
@@ -678,6 +709,20 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         changed["deduplicate"]["computation_key"]
         != candidate_stages["deduplicate"]["computation_key"]
     )
+    with pytest.raises(ValueError, match="cross-split exact text overlap"):
+        lab.run(*build_args)
+    rejected = lab.json(*group_args)
+    assert rejected["index_receipt_sha256"] == groups["index_receipt_sha256"]
+    assert rejected["group"]["policy_error"] == "cross-split exact text overlap"
+    assert rejected["decision_stage"] is None
+    assert rejected["members"][0]["document_id"] == members[0]["document_id"]
+
+    database = view_build.parent / "stages" / "index" / index_key / "index.sqlite"
+    saved_index = database.read_bytes()
+    database.write_bytes(bytes([saved_index[0] ^ 1]) + saved_index[1:])
+    with pytest.raises(ValueError, match="index output changed"):
+        lab.run(*group_args)
+    database.write_bytes(saved_index)
     release_path.write_bytes(original_release)
 
     transform_path = other / "transforms/lm.yaml"

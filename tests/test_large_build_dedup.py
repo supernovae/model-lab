@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from contextlib import closing
@@ -9,7 +10,7 @@ import pytest
 
 from klab.corpus import native_dedup
 from klab.corpus.native_dedup import deduplicate
-from klab.corpus.native_index import INDEX_SCHEMA, insert_indexed
+from klab.corpus.native_index import INDEX_SCHEMA, finish_index, insert_indexed
 from klab.corpus.project import DuplicatePolicy
 from klab.corpus.view_checkpoints import ViewCheckpoints
 
@@ -22,7 +23,9 @@ class _Progress:
         pass
 
 
-def _database(documents: list[tuple[str, str, str, str]]) -> sqlite3.Connection:
+def _database(
+    documents: list[tuple[str, str, str, str]], *, finish=True
+) -> sqlite3.Connection:
     """(document_id, split, raw_sha, normalized_sha) rows."""
     connection = sqlite3.connect(":memory:")
     connection.executescript(INDEX_SCHEMA)
@@ -48,8 +51,13 @@ def _database(documents: list[tuple[str, str, str, str]]) -> sqlite3.Connection:
             (0, 0, 0, 0, 0),
             split,
             2,
-            [("raw", raw), ("normalized", normalized)],
+            [
+                ("raw", raw.encode().ljust(32, b"\x00").hex()),
+                ("normalized", normalized.encode().ljust(32, b"\x00").hex()),
+            ],
         )
+    if finish:
+        finish_index(connection)
     return connection
 
 
@@ -316,8 +324,12 @@ def _corpus(seed: int) -> list[dict]:
                 "split": rng.choice(splits),
                 "source_id": rng.choice(["s0", "s1"]),
                 "document_kind": rng.choice(["prose", "paper"]),
-                "raw_content_sha256": f"r{rng.randrange(spread)}",
-                "content_sha256": f"n{rng.randrange(spread)}",
+                "raw_content_sha256": hashlib.sha256(
+                    f"r{rng.randrange(spread)}".encode()
+                ).hexdigest(),
+                "content_sha256": hashlib.sha256(
+                    f"n{rng.randrange(spread)}".encode()
+                ).hexdigest(),
                 "origin": f"o{rng.randrange(spread)}",
                 "license": "MIT",
                 "redistribution": rng.choice(["open"] * 9 + ["closed"]),
@@ -331,7 +343,7 @@ def _corpus(seed: int) -> list[dict]:
 
 
 def _disk_database(docs: list[dict], keys: tuple[str, ...]) -> sqlite3.Connection:
-    connection = _database([])
+    connection = _database([], finish=False)
     for doc in docs:
         record = {
             **doc,
@@ -350,6 +362,7 @@ def _disk_database(docs: list[dict], keys: tuple[str, ...]) -> sqlite3.Connectio
             {"s0": 0, "s1": 2}[doc["source_id"]],
             [(method, origins[method]) for method in keys],
         )
+    finish_index(connection)
     return connection
 
 

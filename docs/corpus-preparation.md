@@ -914,8 +914,10 @@ and their payload bytes, which the build will hash before reuse.
 identities are still unknown, the plan leaves the dependent key unresolved.
 `corpus build PROJECT --keep-stages 2` retains recent index and deduplication
 results for subsequent builds. A view-only policy change can preserve both
-keys. A duplicate-resolution policy change can preserve the index and
-change the deduplication key. With both upstream receipts, the plan can
+keys. Changing raw or normalized key selection, overlap handling, or the
+representative policy preserves exact group evidence and changes the decision
+key. Changing whether canonical-origin evidence is collected uses a different
+index key. With both upstream receipts, the plan can
 also resolve the exact view checkpoint key, which binds the build ID and
 the current normalized input generations.
 
@@ -1642,7 +1644,7 @@ in its `receipt.json` next to the SHA-256 and size of every output file:
 - **index**: the receipt digest of every prepared shard in order (which bind the
   source bytes, rights decision, normalizer options and document policy), the
   split declaration (with the digest of its assignment file), the declared
-  duplicate keys, source ranks, reviewed row-level files and the digests of
+  evidence methods, source ranks, reviewed row-level files and the digests of
   `native_index.py`, `duplicate_evidence.py` and `split_assignments.py`.
 - **dedup**: the verified index receipt digest, the whole
   `release.policy.duplicates` section and the digests of `native_dedup.py`,
@@ -1679,8 +1681,8 @@ Changing the normalizer, its implementation or the document policy produces
 new shard receipts. A successful build removes these stage outputs by default.
 Use `--keep-stages` to retain them for another iteration.
 
-The separated stage implementations change older index and dedup keys once.
-Shards with normalization-specific identities can supply that rebuild.
+The indexed group summaries change existing index and dedup keys once.
+Verified normalized shards can supply that rebuild.
 
 In one NVMe pair, the normalization phase used 200,000 synthetic rows,
 425 MB of pinned input and 767 MB of prepared payloads. Fresh runs
@@ -1758,8 +1760,8 @@ report progress as `dedup_groups`, `dedup_compress` and `dedup_reasons`.
 Use fast storage for `WORK/corpora/<id>/builds/stages`. A symlink works.
 
 Native dedup checkpoints the ordered group report and a binary file of
-document links. A window covers up to 100,000 origin rows, including unique
-origins, and can close after 64 MiB of group and link output. Groups through
+document links. A window covers up to 100,000 duplicate keys and can close
+after 64 MiB of group and link output. Groups through
 4,096 members are resolved in memory. Larger groups stream sorted member
 IDs to the audit and use four bytes of ordinal spool per member. SQLite's
 sort may also use scratch. A group stays atomic and can cross either window
@@ -1805,6 +1807,37 @@ rebuilds after a stop.
 - Prepared shards are kept; they are the normalize checkpoint.
 
 Run one build of a project at a time.
+
+### Inspect exact duplicate groups
+
+The native index records raw and normalized duplicate keys and split counts
+once. Each group refers to the ordered document references in the index.
+The separate dedup stage applies the enabled keys, overlap and rights rules,
+and writes final representative IDs and drop reasons. An accepted release
+records its active group decisions in `audit.json` and document decisions in
+`documents.jsonl`.
+
+Retain the index and decision stages with `--keep-stages`. Get `INDEX_KEY`
+from the planner's index computation key, the build's `report.json`, or
+`report.duplicate_evidence.index_key` in `corpus describe RELEASE`.
+
+```sh
+klab corpus build PROJECT --keep-stages 2
+klab corpus duplicate-groups PROJECT INDEX_KEY --method normalized --limit 25
+klab corpus duplicate-groups PROJECT INDEX_KEY --method normalized --group SHA256 --limit 25
+```
+
+Use the previous page's `next_after` as `--after`. Group pages use SHA-256
+order and member pages use index ordinal order. Each page returns up to
+1,000 rows. The command verifies the retained index receipt and opens no
+document bodies. It can reuse a host-local verification receipt, and
+`--cold` checks the stage bytes again. A member page includes final
+representatives and drop reasons when the index has a verified decision
+stage matching the project's current policy. Policy violations such as
+exact train/held-out overlap can be reviewed from the retained index even
+after a rejected build. The `policy_error` value describes the selected
+group's own keys. Use the build's diagnostics for component-level conflicts
+across multiple keys.
 
 ### When a build fails
 
@@ -3345,6 +3378,25 @@ index and rebuilt the duplicate decisions. Ordered index rows, the decision
 database and the duplicate-group report matched across runs. Cold
 verification still reads retained stage files. Production and slower-storage
 wall time and I/O remain unmeasured.
+
+#### Indexed duplicate group measurements
+
+Three single-worker NVMe trials used warm SQLite inputs with 1 million
+synthetic documents and 10,000 duplicate keys, and a denser fixture with
+400,000 documents and 32,000 duplicate keys. The native index stores exact
+digests as 32-byte values. It scans for repeated keys in covering-index
+order and reads their metadata in document ordinal order. The benchmark
+times final SQL index construction and then key discovery on a reopened
+connection. The intervals exclude loading the source rows, receipt hashing,
+and applying the duplicate policy to members.
+
+| Fixture | Finalize index | Discover groups | Logical reads across both phases | Sealed index bytes |
+| --- | ---: | ---: | ---: | ---: |
+| 1M documents | 1.27 → 1.33 s | 206 → 2.0 ms | 618 → 438 MB | 749 → 613 MB |
+| 400k documents | 0.49 → 0.55 s | 93 → 6.2 ms | 244 → 218 MB | 299 → 247 MB |
+
+Ordered group key digests matched. A signed warm 32-group page against the
+613 MB index took a median 0.44 ms and read 36 KB across nine calls.
 
 #### Native compact assembly recovery measurements
 

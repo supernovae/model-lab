@@ -549,6 +549,7 @@ def _emit_build(
     span_partitions: list[dict[str, Any]] | None = None,
     span_projection: dict[str, Any] | None = None,
     train_annotations=None,
+    duplicate_evidence: dict[str, Any] | None = None,
 ) -> None:
     from klab.corpus.measurement import summarize_release
     from klab.corpus.train_selection import (
@@ -838,6 +839,8 @@ def _emit_build(
         duplicate_groups=group_count,
         warnings=warnings,
     )
+    if duplicate_evidence is not None:
+        report["duplicate_evidence"] = duplicate_evidence
     if filtering:
         from klab.corpus.quota import estimate_supply
 
@@ -957,7 +960,7 @@ def native_index_inputs(
 
     The index follows the receipts of the prepared shards (which bind the
     source bytes, rights, normalizer and document policy), the split
-    declaration, duplicate keys, source ranks and the ordered files with
+    declaration, evidence methods, source ranks and the ordered files with
     row-level admission evidence.
     """
     index = {
@@ -969,7 +972,9 @@ def native_index_inputs(
             for shard in prepared
         ],
         "split": project.splits.model_dump(mode="json"),
-        "duplicate_keys": sorted(project.release.policy.duplicates.keys),
+        "duplicate_evidence_methods": native_index.evidence_methods(
+            project.release.policy.duplicates
+        ),
         "source_rank": {
             source.id: source_rank(source)
             for source in sorted(project.sources, key=lambda item: item.id)
@@ -1338,13 +1343,17 @@ def build_large(
             proof_store=proof_store,
             verification_mode=verification_mode,
         )
+        with _open_read_only(staging / "index.sqlite") as connection:
+            result["duplicate_evidence"] = native_index.group_counts(
+                connection, index_inputs["duplicate_evidence_methods"]
+            )
         require_prepared_generation()
 
     with (workspace / ".index.lock").open("a") as index_lock:
         fcntl.flock(index_lock, fcntl.LOCK_EX)
         stages.discard_incomplete("index")
         group_store.discard_incomplete("index-group")
-        index_dir, _ = run_stage(
+        index_dir, index_result = run_stage(
             stages,
             "index",
             index_inputs,
@@ -1537,6 +1546,10 @@ def build_large(
             span_partitions=span_partitions,
             span_projection=span_projection,
             train_annotations=annotations,
+            duplicate_evidence={
+                "index_key": index_key,
+                "groups_by_method": index_result["duplicate_evidence"],
+            },
         )
         require_prepared_generation()
         if any(

@@ -50,7 +50,7 @@ CREATE TABLE documents (
 );
 CREATE TABLE origins (
     method TEXT NOT NULL,
-    origin TEXT NOT NULL,
+    origin BLOB NOT NULL,
     document_number INTEGER NOT NULL
 );
 """
@@ -78,8 +78,34 @@ CREATE TABLE admitted_document_rows (
 """
 )
 INDEX_SCHEMA = _INDEX_TABLES.format(unique=" UNIQUE")
+_GROUPS_SCHEMA = """
+CREATE TABLE duplicate_groups (
+    method TEXT NOT NULL,
+    origin BLOB NOT NULL,
+    members INTEGER NOT NULL,
+    train INTEGER NOT NULL,
+    validation_count INTEGER NOT NULL,
+    test INTEGER NOT NULL,
+    incompatible_rights INTEGER NOT NULL,
+    PRIMARY KEY (method,origin)
+) WITHOUT ROWID
+"""
 _INDEX_GROUP_BYTES = 64 * 1024**2
 _INDEX_RANGE_BYTES = 64 * 1024**2
+
+
+def evidence_methods(duplicate_policy) -> tuple[str, ...]:
+    """Exact text membership is available regardless of the decision policy."""
+    exact = ("raw", "normalized")
+    return (
+        (*exact, "canonical_origin")
+        if "canonical_origin" in duplicate_policy.keys
+        else exact
+    )
+
+
+def _origin_bytes(method: str, key: str) -> bytes:
+    return key.encode("utf-8") if method == "canonical_origin" else bytes.fromhex(key)
 
 
 def insert_indexed(
@@ -118,7 +144,7 @@ def insert_indexed(
     )
     connection.executemany(
         "INSERT INTO origins(method,origin,document_number) VALUES (?,?,?)",
-        ((method, key, number) for method, key in origins),
+        ((method, _origin_bytes(method, key), number) for method, key in origins),
     )
     return number
 
@@ -164,7 +190,44 @@ def finish_index(
         "CREATE INDEX origins_by_key ON origins(method,origin,document_number)"
     )
     connection.execute("CREATE INDEX documents_source ON documents(source_id)")
+    connection.execute("DROP TABLE IF EXISTS duplicate_groups")
+    connection.execute(_GROUPS_SCHEMA)
+    # Find repeated keys in covering order. Read metadata in ordinal order
+    # so multiple keys for one document share the same index pages.
+    connection.execute(
+        """
+        WITH members AS MATERIALIZED (
+            SELECT keys.method,keys.origin,member.document_number
+            FROM (
+                SELECT method,origin FROM origins GROUP BY method,origin HAVING COUNT(*)>1
+            ) AS keys
+            CROSS JOIN origins AS member ON member.method=keys.method AND member.origin=keys.origin
+            ORDER BY member.document_number
+        )
+        INSERT INTO duplicate_groups
+        SELECT members.method,members.origin,COUNT(*),
+               SUM(d.split='train'),SUM(d.split='validation'),SUM(d.split='test'),
+               members.method='normalized' AND MIN(d.rights_signature)!=MAX(d.rights_signature)
+        FROM members
+        CROSS JOIN dedup AS d ON d.document_number=members.document_number
+        GROUP BY members.method,members.origin
+        """
+    )
     connection.commit()
+
+
+def group_counts(connection: sqlite3.Connection, methods) -> dict[str, dict[str, int]]:
+    """Count groups and membership per method without opening document bodies."""
+    counts = {
+        method: {"groups": groups, "memberships": members}
+        for method, groups, members in connection.execute(
+            "SELECT method,COUNT(*),SUM(members) FROM duplicate_groups GROUP BY method"
+        )
+    }
+    return {
+        method: counts.get(method, {"groups": 0, "memberships": 0})
+        for method in methods
+    }
 
 
 def _index_rows(
@@ -427,7 +490,7 @@ def index_prepared(
     verification_mode: VerificationMode = "cold",
 ) -> int:
     rank = {source.id: source_rank(source) for source in project.sources}
-    declared_keys = set(project.release.policy.duplicates.keys)
+    declared_keys = evidence_methods(project.release.policy.duplicates)
     file_ids = {key: ordinal for ordinal, key in enumerate(admission_files)}
     policy = None
 
