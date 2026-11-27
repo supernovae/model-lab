@@ -1181,18 +1181,28 @@ records follow the existing view rules. The release report records the
 threshold, sidecar digests, total excluded under `below_minimum_utf8_bytes`,
 and mixture supply from the selected TRAIN text.
 
-Use an ordinary native disk-backed LM-only build. Reviewed row admission,
-completed-preparation adoption, canaries, and in-memory builds require
-separate integration. The option belongs to the view-producing transform,
-so a threshold-only edit reuses the same normalized partitions, native
-index, duplicate decisions and available sidecars. The planner shows the
-sidecar dependency before view emission. The build automatically produces
-missing sidecars, checks their ordered document IDs against the native
-index, and joins their sizes in a four-byte-per-document scratch map.
+Use an ordinary native disk-backed LM-only build, including reviewed file
+or row admission. Completed-preparation adoption, canaries, and in-memory
+builds require separate integration. A threshold-only edit reuses the same
+normalized partitions, native index, duplicate decisions and available
+sidecars. The native planner shows the sidecar dependency before view
+emission for builds without reviewed admission. The build automatically
+produces missing sidecars, checks their ordered document IDs against the
+native index, and joins their sizes in a four-byte-per-document scratch map.
+Reviewed builds use sidecars for their admitted normalized shards.
 
 Cold release verification independently checks the byte counts, stage and
-view coverage, and the resulting quota estimate. The verified TRAIN
-lineage feeds ordinary mixture materialization.
+view coverage, and the resulting quota estimate. After the reviewed source
+and admission audit, the verifier matches the stage and views in order
+against narrow document metadata. The verified TRAIN lineage feeds ordinary
+mixture materialization.
+
+On a warm NVMe fixture, the ordered comparison processed 10,000, 100,000,
+and 1,000,000 synthetic document metadata rows in 0.043, 0.429, and 4.21
+seconds. The largest run read 914.22 MB for 914.20 MB of metadata, stage,
+and view inputs, with about 58 MiB peak process RSS. The measurement covers
+the comparison and report checks after metadata extraction. Full reviewed
+source replay and end-to-end release verification have separate costs.
 
 Three synthetic NVMe trials per size joined the sidecars to an existing
 native-style document index. These medians cover sidecar authentication,

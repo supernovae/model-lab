@@ -17,6 +17,7 @@ from contextlib import ExitStack, closing, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import lru_cache, partial
+from itertools import zip_longest
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -459,17 +460,17 @@ def streaming_verification(identity: dict[str, Any]) -> bool:
     """Whether the bounded-memory row validator applies (no reviewed admission)."""
     from klab.corpus.train_selection import minimum_train_bytes
 
-    applicable = (
-        identity["release"].get("record_admission") is None
-        and not identity["release"]["chat"]["selected"]
+    release = identity["release"]
+    lm_only = (
+        not release["chat"]["selected"]
         and all(spec["kind"] == "lm_text" for spec in identity["transforms"])
-        and identity["release"].get("fraction") is None
+        and release.get("fraction") is None
     )
-    if not applicable and minimum_train_bytes(identity["transforms"]) is not None:
+    if not lm_only and minimum_train_bytes(identity["transforms"]) is not None:
         raise ValueError(
             "minimum TRAIN text size requires ordinary disk LM verification"
         )
-    return applicable
+    return lm_only and release.get("record_admission") is None
 
 
 # Lines per parallel LM-view task; both files of a view are cut at the same line.
@@ -1688,14 +1689,24 @@ def _validate_rows_streaming(
                 and (wanted_origins is None or origins[source] in wanted_origins)
             )
             if minimum is not None:
+                available = Counter()
+                for source, domains, size in db.execute(
+                    "SELECT source, domains, SUM(utf8_bytes) FROM docs "
+                    "WHERE dropped IS NULL AND split='train' AND utf8_bytes>=? "
+                    "GROUP BY source, domains",
+                    (minimum,),
+                ):
+                    if source in eligible_sources:
+                        for domain in json.loads(domains):
+                            available[domain] += size
                 verify_train_selection_report(
-                    db,
                     _load(root / "report.json"),
                     release,
                     minimum,
-                    allowed_sources,
-                    eligible_sources,
-                    excluded_by_source,
+                    sum(
+                        excluded_by_source.get(source, 0) for source in allowed_sources
+                    ),
+                    available,
                     documents,
                 )
             expected = expected_rows(eligible_sources)
@@ -1803,6 +1814,9 @@ def _validate_rows_stored(
     options = _release_normalizer(identity)
     selected_normalizer = options.identity
     from klab.corpus.row_index import FileRowIndex
+    from klab.corpus.train_selection import minimum_train_bytes
+
+    minimum = minimum_train_bytes(identity["transforms"])
 
     def rows(path):
         return (record.value for record in evidence_files.records(path))
@@ -1819,12 +1833,13 @@ def _validate_rows_stored(
     assignments = document_assignments(root, identity)
 
     def checked_document(doc):
-        if doc["content_sha256"] != hashlib.sha256(doc["text"].encode()).hexdigest():
+        text = doc["text"].encode()
+        if doc["content_sha256"] != hashlib.sha256(text).hexdigest():
             raise ValueError("document content digest mismatch")
         _verify_cleaning_decision(doc, options)
         if assignments is not None:
             assignments.verify_document(doc["document_id"], doc["split"])
-        return {
+        metadata = {
             name: doc[name]
             for name in (
                 "document_id",
@@ -1835,6 +1850,9 @@ def _validate_rows_stored(
                 "content_sha256",
             )
         }
+        if minimum is not None:
+            metadata.update(utf8_bytes=len(text), domains=doc["domains"])
+        return metadata
 
     members = ReleaseMembers(root, receipt)
     document_map = row_index(
@@ -2057,20 +2075,26 @@ def _validate_rows_stored(
                 return stage, record.get("record_id", record.get("scenario_id"))
             return None
 
-        stage_rows = FileRowIndex(
-            row_connection,
-            evidence_files,
-            {
-                stage["id"]: members.member(f"stages/{stage['id']}.jsonl")
-                for stage in receipt["stages"]
-            },
-            stage_key,
+        stage_rows = (
+            FileRowIndex(
+                row_connection,
+                evidence_files,
+                {
+                    stage["id"]: members.member(f"stages/{stage['id']}.jsonl")
+                    for stage in receipt["stages"]
+                },
+                stage_key,
+            )
+            if minimum is None
+            else None
         )
         chats = row_index(root / "chat/records.jsonl")
         scenarios = row_index(root / "scenarios.jsonl", "scenario_id")
         generations = row_index(root / "generations.jsonl")
         semantic = row_index(root / "semantic/candidates.jsonl")
         for row in rows(lineage_path):
+            if minimum is not None and row["record_kind"] != "document":
+                raise ValueError("reviewed TRAIN selection requires document lineage")
             validate_lineage(row, documents=document_map)
             expected_origin = (
                 source_origins[document_map[row["record_id"]]["source_id"]]
@@ -2376,47 +2400,63 @@ def _validate_rows_stored(
             {parent["representative_id"] for parent in parent_rows}
         ):
             raise ValueError("incorrect duplicate representative lineage")
-    for doc in document_map.metadata_rows():
-        row = lineage_map.get(doc["document_id"])
-        if (
-            row is None
-            or row["record_kind"] != "document"
-            or row["split"] != doc["split"]
-        ):
-            raise ValueError("document lineage mismatch")
+
+    def checked_lineage():
+        with closing(document_map.metadata_rows()) as metadata:
+            for doc in metadata:
+                row = lineage_map.get(doc["document_id"])
+                if (
+                    row is None
+                    or row["record_kind"] != "document"
+                    or row["split"] != doc["split"]
+                    or minimum is not None
+                    and classified
+                    and row["rendered_sha256"] != doc["content_sha256"]
+                ):
+                    raise ValueError("document lineage mismatch")
+                yield doc
+
+    with closing(checked_lineage()) as documents:
+        if minimum is not None:
+            if progress is not None:
+                progress.start_phase("reviewed_train_selection")
+            _verify_reviewed_train_selection(
+                root, identity, minimum, source_origins, documents, members, rows
+            )
+        else:
+            for _ in documents:
+                pass
     if not classified:
         chats = row_index(root / "chat/records.jsonl")
     if progress is not None:
         progress.start_phase("reviewed_views")
     for split in ("train", "validation", "test"):
-        from itertools import zip_longest
-
-        lm = rows(members.member(f"lm/{split}.jsonl"))
-        lm_lineage = rows(members.member(f"lm/{split}.lineage.jsonl"))
-        for row, link in zip_longest(lm, lm_lineage):
-            if row is None or link is None:
-                raise ValueError("LM lineage count mismatch")
-            doc = document_map.metadata(link["record_id"])
-            if (
-                set(row) != {"text"}
-                or not isinstance(row["text"], str)
-                or not row["text"].strip()
-            ):
-                raise ValueError("invalid LM record or lineage")
-            digest = hashlib.sha256(row["text"].encode("utf-8")).hexdigest()
-            if classified and (
-                link["split"] != split
-                or lineage_map[link["record_id"]]["record_kind"] != "document"
-                or lineage_map[link["record_id"]]["rendered_sha256"] != digest
-            ):
-                raise ValueError("LM selected-view lineage mismatch")
-            if (
-                doc["content_sha256"] != digest
-                or doc["split"] != split
-                or doc["drop_reason"]
-            ):
-                raise ValueError("invalid LM record or lineage")
-        from itertools import zip_longest
+        if minimum is None:
+            lm = rows(members.member(f"lm/{split}.jsonl"))
+            lm_lineage = rows(members.member(f"lm/{split}.lineage.jsonl"))
+            for row, link in zip_longest(lm, lm_lineage):
+                if row is None or link is None:
+                    raise ValueError("LM lineage count mismatch")
+                doc = document_map.metadata(link["record_id"])
+                if (
+                    set(row) != {"text"}
+                    or not isinstance(row["text"], str)
+                    or not row["text"].strip()
+                ):
+                    raise ValueError("invalid LM record or lineage")
+                digest = hashlib.sha256(row["text"].encode("utf-8")).hexdigest()
+                if classified and (
+                    link["split"] != split
+                    or lineage_map[link["record_id"]]["record_kind"] != "document"
+                    or lineage_map[link["record_id"]]["rendered_sha256"] != digest
+                ):
+                    raise ValueError("LM selected-view lineage mismatch")
+                if (
+                    doc["content_sha256"] != digest
+                    or doc["split"] != split
+                    or doc["drop_reason"]
+                ):
+                    raise ValueError("invalid LM record or lineage")
 
         chat = rows(root / "chat" / f"{split}.jsonl")
         chat_lineage = rows(root / "chat" / f"{split}.lineage.jsonl")
@@ -2448,6 +2488,92 @@ def _validate_rows_stored(
 
         for _ in iter_rendered_conversations(root / "chat" / f"{split}.jsonl"):
             pass
+
+
+def _verify_reviewed_train_selection(
+    root, identity, minimum, source_origins, documents, members, rows
+):
+    """Match ordered native output to the reviewed document metadata scan."""
+    from klab.corpus.provenance import HUMAN_ORIGIN, SOURCE_ORIGIN
+    from klab.corpus.train_selection import verify_train_selection_report
+
+    [transform] = identity["transforms"]
+    release = identity["release"]
+    stage_sources = set(transform["inputs"]) or source_origins.keys()
+    shapes = release.get("include_shapes")
+    origins = release.get("include_origins")
+    view_sources = {
+        source
+        for source in stage_sources
+        if (shapes is None or "raw_document" in shapes)
+        and (
+            origins is None
+            or (
+                HUMAN_ORIGIN
+                if source_origins[source] == HUMAN_ORIGIN
+                else SOURCE_ORIGIN
+            )
+            in origins
+        )
+    }
+    available = Counter()
+    count = excluded = 0
+    with ExitStack() as streams:
+
+        def open_rows(name):
+            return streams.enter_context(closing(rows(members.member(name))))
+
+        stage = open_rows(f"stages/{transform['id']}.jsonl")
+        views = {
+            split: (
+                open_rows(f"lm/{split}.jsonl"),
+                open_rows(f"lm/{split}.lineage.jsonl"),
+            )
+            for split in ("train", "validation", "test")
+        }
+        for doc in documents:
+            count += 1
+            source = doc["source_id"]
+            if doc["drop_reason"] is not None or source not in stage_sources:
+                continue
+            split = doc["split"]
+            if split == "train" and doc["utf8_bytes"] < minimum:
+                excluded += 1
+                continue
+            link = {"record_id": doc["document_id"], "split": split}
+            emitted = next(stage, {})
+            text = emitted.get("text")
+            if (
+                not isinstance(text, str)
+                or emitted != {**link, "text": text}
+                or hashlib.sha256(text.encode("utf-8")).hexdigest()
+                != doc["content_sha256"]
+            ):
+                raise ValueError(
+                    "reviewed TRAIN selection stage differs from verified documents"
+                )
+            if source not in view_sources:
+                continue
+            view, lineage = views[split]
+            if (
+                not text.strip()
+                or next(view, None) != {"text": text}
+                or next(lineage, None) != link
+            ):
+                raise ValueError(
+                    "reviewed TRAIN selection view differs from verified documents"
+                )
+            if split == "train":
+                for domain in doc["domains"]:
+                    available[domain] += doc["utf8_bytes"]
+        if next(stage, None) is not None:
+            raise ValueError("reviewed TRAIN selection stage includes extra rows")
+        for view, lineage in views.values():
+            if next(view, None) is not None or next(lineage, None) is not None:
+                raise ValueError("reviewed TRAIN selection view includes extra rows")
+    verify_train_selection_report(
+        _load(root / "report.json"), release, minimum, excluded, available, count
+    )
 
 
 def _canonical_lines(path: str, start: int, end: int) -> tuple[int, int]:

@@ -1389,9 +1389,11 @@ def _archive_recipe(tmp_path: Path, body: bytes, *, budget: bool = False) -> Pat
 def test_archive_plan_step_snapshot_and_reviewed_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from corpus_fixtures import forge_release
+
     from klab.corpus.admission_draft import draft_admission_manifest
     from klab.corpus.pipeline import build
-    from klab.corpus.release import freeze, verify_release
+    from klab.corpus.release import ReleaseMembers, freeze, verify_release
     from klab.corpus.release_verify import verification_settings
     from klab.corpus.split_freeze import freeze_splits
     from klab.corpus.split_inventory import write_split_inventory
@@ -1401,6 +1403,8 @@ def test_archive_plan_step_snapshot_and_reviewed_release(
         f"rfc{number}.txt": (
             f"Request for Comments {number} defines protocol behaviour {number}. "
             "Implementations follow each numbered step and check the result.\n"
+            + "The request header includes a protocol identifier.\n"
+            * number
         ).encode()
         for number in (1, 2, 4, 5)
     }
@@ -1498,16 +1502,15 @@ def test_archive_plan_step_snapshot_and_reviewed_release(
     config = yaml.safe_load(recipe.read_text(encoding="utf-8"))
     config.update(splits="frozen.yaml", transforms=["transforms/lm.yaml"])
     _yaml(recipe, config)
-    _yaml(
-        recipe.parent / "transforms/lm.yaml",
-        {
-            "id": "lm",
-            "version": "1",
-            "kind": "lm_text",
-            "parameters": {},
-            "inputs": ["one"],
-        },
-    )
+    transform_path = recipe.parent / "transforms/lm.yaml"
+    transform = {
+        "id": "lm",
+        "version": "1",
+        "kind": "lm_text",
+        "parameters": {},
+        "inputs": ["one"],
+    }
+    _yaml(transform_path, transform)
     published = freeze(
         build(load_project(recipe), root, offline=True), root, share_lm_views=True
     )
@@ -1521,6 +1524,47 @@ def test_archive_plan_step_snapshot_and_reviewed_release(
         final["scratch"]["observed_peak_logical_bytes"]
         < manifest["files"]["documents.jsonl"]["size"]
     )
+    baseline = ReleaseMembers(published, manifest)
+    old_train = baseline.member("lm/train.jsonl").read_bytes().splitlines(keepends=True)
+    assert len(old_train) == 2
+    sizes = [len(json.loads(row)["text"].encode("utf-8")) for row in old_train]
+    minimum = min(sizes) + 1
+    transform["parameters"]["minimum_train_utf8_bytes"] = minimum
+    release["policy"]["mixture"]["total_tokens"] = 10
+    _yaml(transform_path, transform)
+    _yaml(recipe.parent / "release.yaml", release)
+    selected = freeze(
+        build(load_project(recipe), root, offline=True, keep_stages=2), root
+    )
+    assert (selected / "documents.jsonl").read_bytes() == baseline.member(
+        "documents.jsonl"
+    ).read_bytes()
+    assert (selected / "lm/train.jsonl").read_bytes() == old_train[
+        sizes.index(max(sizes))
+    ]
+    for split in ("validation", "test"):
+        for suffix in (".jsonl", ".lineage.jsonl"):
+            name = f"lm/{split}{suffix}"
+            assert (selected / name).read_bytes() == baseline.member(name).read_bytes()
+    report = json.loads((selected / "report.json").read_bytes())["train_selection"]
+    assert report["excluded_by_reason"] == {"below_minimum_utf8_bytes": 1}
+
+    def omit_eligible_train(path):
+        for name in ("lm/train.jsonl", "lm/train.lineage.jsonl"):
+            (path / name).write_bytes(b"")
+
+    with pytest.raises(ValueError, match="reviewed TRAIN selection view"):
+        verify_release(
+            forge_release(selected, omit_eligible_train), verification_mode="cold"
+        )
+
+    transform["parameters"]["minimum_train_utf8_bytes"] = 1
+    _yaml(transform_path, transform)
+    relaxed = build(load_project(recipe), root, offline=True)
+    assert (relaxed / "lm/train.jsonl").read_bytes() == b"".join(old_train)
+    events = (relaxed.parent.parent / "progress" / f"{relaxed.name}.jsonl").read_text()
+    for event in ("reused_index_stage", "reused_dedup_stage", "reused_text_statistics"):
+        assert event in events
 
 
 @pytest.mark.parametrize(

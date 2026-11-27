@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import mmap
 import re
 import struct
 import sys
 import tempfile
 from array import array
-from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -147,20 +145,15 @@ def _write_sizes(output, widths):
 
 
 def verify_train_selection_report(
-    db,
     report,
     release,
     minimum,
-    stage_sources,
-    view_sources,
-    excluded_by_source,
+    expected_exclusions,
+    available,
     documents,
 ):
     """Verify aggregate reasons and supply against independently checked text."""
     selection = report.get("train_selection")
-    expected_exclusions = sum(
-        excluded_by_source.get(source, 0) for source in stage_sources
-    )
     if (
         not isinstance(selection, dict)
         or selection.get("minimum_utf8_bytes") != minimum
@@ -199,15 +192,6 @@ def verify_train_selection_report(
         raise ValueError(
             "TRAIN selection sidecar inventory differs from document count"
         )
-    available = Counter()
-    for source, domains, size in db.execute(
-        "SELECT source, domains, SUM(utf8_bytes) FROM docs WHERE dropped IS NULL "
-        "AND split='train' AND utf8_bytes>=? GROUP BY source, domains",
-        (minimum,),
-    ):
-        if source in view_sources:
-            for domain in json.loads(domains):
-                available[domain] += size
     policy = MixturePolicy.model_validate(release["policy"]["mixture"])
     if report.get("mixture_supply") != estimate_supply(
         policy, release["mixture"], available
