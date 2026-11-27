@@ -18,6 +18,7 @@ class ProbeConfig(StrictModel):
     tier: Literal["fast", "standard", "full"] = "fast"
     final: bool = Field(default=False, strict=True)
     fast_fail: bool = Field(default=True, strict=True)
+    lm_eval: bool = Field(default=True, strict=True)
     lm_eval_protocol: BenchmarkProtocol | None = None
     lm_eval_tasks: list[str] | None = None
     lm_eval_limit: int | None = Field(default=None, strict=True, ge=1)
@@ -56,6 +57,16 @@ class ProbeConfig(StrictModel):
             or self.lm_eval_protocol is not None
         ):
             raise ValueError("lm_eval_tasks and lm_eval_limit require tier: full")
+        if not self.lm_eval and (
+            self.tier != "full"
+            or self.lm_eval_tasks is not None
+            or self.lm_eval_limit is not None
+            or self.lm_eval_protocol is not None
+        ):
+            raise ValueError(
+                "lm_eval: false leaves lm-eval out of tier: full; it takes no "
+                "other tier and no lm_eval_* option"
+            )
         if self.lm_eval_protocol is not None and (
             self.lm_eval_tasks is not None or self.lm_eval_limit is not None
         ):
@@ -127,6 +138,7 @@ def prepare_probe_config(args: argparse.Namespace) -> None:
     for key in (
         "tier",
         "final",
+        "lm_eval",
         "lm_eval_tasks",
         "lm_eval_limit",
         "lm_eval_protocol",

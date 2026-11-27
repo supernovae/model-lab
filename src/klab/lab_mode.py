@@ -889,8 +889,13 @@ def run_try(
     from klab.training.manifest import source_identity
     from klab.try_config import TryConfig
 
-    # Only seed errors precede attempt creation. Other parsing/setup failures
-    # still produce the established failed/interrupted record below.
+    if probe_tier == "full":
+        from klab.probes.lm_eval_adapter import require_harness
+
+        require_harness()  # before either arm trains
+
+    # Only this and seed errors precede attempt creation. Other parsing/setup
+    # failures still produce the established failed/interrupted record below.
     policy = TryConfig(
         seed=seed, repeat_baseline=repeat_baseline, continuation=continuation
     )

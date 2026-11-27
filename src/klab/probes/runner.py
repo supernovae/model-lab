@@ -22,7 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -1061,11 +1061,14 @@ def _run_battery(
     progress: Progress | None = None,
     context: LabContext | None = None,
     now: Callable[[], datetime] | None = None,
-    lm_eval: ProbeSpec | None = None,
+    lm_eval: ProbeSpec | Literal[False] | None = None,
     comparison: Mapping[str, Any] | None = None,
     leakage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the battery through TIER and return one result (never raises on probes).
+
+    LM_EVAL replaces the lm-eval probe's tasks or limit; ``False`` leaves the
+    probe out of the battery (a declared choice, recorded in the request).
 
     COMPARISON is the enclosing try's held-out comparison, when there is one;
     a ``NOT_COMPARABLE`` try gets a non-escalating verdict whatever the probes
@@ -1094,7 +1097,8 @@ def _run_battery(
     specs = [
         lm_spec if s.id == "lm_eval" else s
         for s in ordered(tier)
-        if not t_arm.reference or s.id in REFERENCE_PROBES
+        if (not t_arm.reference or s.id in REFERENCE_PROBES)
+        and (lm_eval is not False or s.id != "lm_eval")
     ]
     results: list[dict[str, Any]] = []
     dev: dict[str, dict[str, Any]] = {}
