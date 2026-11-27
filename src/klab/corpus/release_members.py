@@ -7,7 +7,7 @@ import os
 import re
 import stat
 from collections.abc import Iterator, Mapping
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from klab.corpus.normalized_spans import NORMALIZED_SPANS, SPAN_MEMBER
 from klab.corpus.release_verify import INVENTORY_RECEIPT_MIN_BYTES
 from klab.corpus.shards import range_file_identity
+from klab.corpus.typed_artifacts import typed_publisher_work_root
 from klab.result_publication import sync_directory
 from klab.safe_io import rename_noreplace, symlinked
 
@@ -144,12 +145,16 @@ def normalized_partition_lease(partition: Path) -> AbstractContextManager[None]:
     )
 
 
-def shared_payload_lease(
-    payload: Path, *, wait: bool = True
-) -> AbstractContextManager[None]:
-    """Lease one digest under the store's publisher lock."""
+@contextmanager
+def shared_payload_lease(payload: Path, *, wait: bool = True) -> Iterator[None]:
+    """Lease a digest and protect dependencies for a typed publication."""
     path = payload.parents[1] / "locks" / payload.name
-    return _release_lock(path, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
+    root = typed_publisher_work_root(payload)
+    with (
+        release_retention_lease(root) if root is not None else nullcontext(),
+        _release_lock(path, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB),
+    ):
+        yield
 
 
 @dataclass(frozen=True)

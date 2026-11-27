@@ -182,7 +182,11 @@ The overlay keeps release-specific split and duplicate decisions in logical
 document order and references exact normalized rows through the existing
 span catalog. Verified readers rejoin the text where needed, while metadata
 queries use the narrow view. The same retention closure protects both kinds
-of referenced record. Retention for other artifact families remains in #567.
+of referenced record. The [typed inventory](../corpus-preparation.md#inspect-and-retain-typed-corpus-artifacts)
+follows receipt dependencies for the standalone relational, procedural
+and command stores. Published outputs and sealed staging are retention
+roots. Explicit prune reclaims detached worker shards under the same
+Corpus retention lease as publication.
 
 Start with typed document, passage, annotation, duplicate-group, selection,
 entity, assertion, evidence, edge, index, and compiled sequence payloads.

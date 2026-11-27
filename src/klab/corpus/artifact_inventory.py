@@ -180,7 +180,7 @@ def _stamp(info: os.stat_result | None) -> tuple[int, ...] | None:
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
-class _RetentionScan:
+class RetentionScan:
     def __init__(self, root: Path, *, owned: bool = False) -> None:
         self.root = root
         self.owned = owned
@@ -229,7 +229,14 @@ class _RetentionScan:
             return False
         return True
 
-    def control(self, root: Path, name: str, *, optional: bool = False) -> dict | None:
+    def control(
+        self,
+        root: Path,
+        name: str,
+        *,
+        optional: bool = False,
+        max_bytes: int | None = None,
+    ) -> dict | None:
         path = root / name
         with _directory(root) as directory:
             try:
@@ -249,7 +256,13 @@ class _RetentionScan:
                 self.observe(path, info)
                 if self.problem_count != previous:
                     return None
-                result = json.load(stream)
+                if max_bytes is None:
+                    result = json.load(stream)
+                else:
+                    raw = stream.read(max_bytes + 1)
+                    if len(raw) > max_bytes:
+                        raise ValueError("control file exceeds the metadata scan limit")
+                    result = json.loads(raw)
                 if not isinstance(result, dict):
                     raise TypeError("invalid control file")
                 return result
@@ -290,7 +303,7 @@ class _ArtifactReferences:
     example: str = ""
 
 
-def _project_roots(scan: _RetentionScan) -> Iterator[Path]:
+def _project_roots(scan: RetentionScan) -> Iterator[Path]:
     corpora = scan.root / "corpora"
     if not scan.directory(corpora):
         if scan.owned:
@@ -313,7 +326,7 @@ def _span_references(root: Path, files: dict) -> Iterator[tuple[str, int]]:
 
 
 def _count_references(
-    scan: _RetentionScan,
+    scan: RetentionScan,
     path: Path,
     retained: Iterator[tuple[str, int]],
     reference_counts: dict[str, _ArtifactReferences],
@@ -340,7 +353,7 @@ def _count_references(
 
 
 def _release_references(
-    scan: _RetentionScan,
+    scan: RetentionScan,
     storage: str,
     *,
     artifact_ids: set[str] | None = None,
@@ -423,7 +436,7 @@ def _release_references(
     return references
 
 
-def _build_roots(scan: _RetentionScan, project: Path) -> Iterator[tuple[Path, bool]]:
+def _build_roots(scan: RetentionScan, project: Path) -> Iterator[tuple[Path, bool]]:
     builds = project / "builds"
     if scan.directory(builds):
         for build in builds.iterdir():
@@ -439,7 +452,7 @@ def _build_roots(scan: _RetentionScan, project: Path) -> Iterator[tuple[Path, bo
 
 
 def _build_references(
-    scan: _RetentionScan,
+    scan: RetentionScan,
     artifact_ids: set[str],
     release_builds: dict[tuple[str, str], str],
     declared_builds: set[tuple[str, str]] | None = None,
@@ -528,7 +541,7 @@ def _build_references(
 
 
 def _resumable_normalized_use(
-    scan: _RetentionScan, artifact_ids: set[str]
+    scan: RetentionScan, artifact_ids: set[str]
 ) -> tuple[dict[str, int], set[tuple[str, str]]]:
     """Resolve durable native pins and refuse unknown interrupted stage roots."""
     selected: dict[str, set[str]] = {}
@@ -601,7 +614,7 @@ def _resumable_normalized_use(
 def _normalized_reference_report(
     work_root: Path, rows: list[dict[str, Any]], *, include_builds: bool
 ) -> dict[str, Any]:
-    scan = _RetentionScan(work_root)
+    scan = RetentionScan(work_root)
     artifact_ids = {row["artifact_id"] for row in rows}
     releases: dict[str, _ArtifactReferences] = {}
     builds: dict[str, _ArtifactReferences] = {}
@@ -646,7 +659,7 @@ def _normalized_reference_report(
     return report
 
 
-def _shared_payloads(scan: _RetentionScan, root: Path) -> Iterator[tuple[str, int]]:
+def _shared_payloads(scan: RetentionScan, root: Path) -> Iterator[tuple[str, int]]:
     if symlinked(root):
         scan.issue(root, "unsafe_store")
         return
@@ -685,7 +698,7 @@ def shared_release_inventory(
     if after is not None and not _KEY.fullmatch(after):
         raise ValueError("shared release cursor must be a full SHA-256 digest")
     root = shared_store(work_root, storage)
-    scan = _RetentionScan(work_root)
+    scan = RetentionScan(work_root)
     references: dict[str, _ArtifactReferences] = {}
     totals = dict.fromkeys(
         (
@@ -778,7 +791,7 @@ def prune_shared_release_payloads(
                     if path.exists():
                         locks.enter_context(shared_payload_lease(path, wait=False))
                         leased.add(digest)
-            scan = _RetentionScan(work_root, owned=True)
+            scan = RetentionScan(work_root, owned=True)
             references = _release_references(scan, storage, artifact_ids=set(paths))
             for digest, path in paths.items():
                 if symlinked(path):
@@ -857,7 +870,7 @@ def prune_shared_release_payloads(
 
 
 def _selected_partition_bytes(
-    scan: _RetentionScan, path: Path, artifact_id: str, *, retired: bool = False
+    scan: RetentionScan, path: Path, artifact_id: str, *, retired: bool = False
 ) -> int | None:
     if not scan.directory(path):
         return None
@@ -972,7 +985,7 @@ def prune_normalized_partitions(
                     locks.enter_context(normalized_partition_lease(path))
                     leased.add(item)
 
-            scan = _RetentionScan(work_root, owned=True)
+            scan = RetentionScan(work_root, owned=True)
             selected = set(paths)
             release_builds: dict[tuple[str, str], str] = {}
             releases = _release_references(

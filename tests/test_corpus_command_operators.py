@@ -212,6 +212,13 @@ def test_command_publication_keeps_exact_nondeterministic_attempts(
     )
     assert _command(lab, "inspect", first["key"])["files"] == first["files"]
     assert marker.read_text().count("\n") == 2
+    inventory = lab.json("corpus", "artifacts", "--kind", "typed", "--json")
+    assert {
+        row["artifact_id"] for row in inventory["artifacts"] if row["published_root"]
+    } == {
+        f"command-output/{first['key']}",
+        f"command-output/{second['key']}",
+    }
 
     deterministic, _ = _make_spec(tmp_path, mode="different")
     approved = _command(lab, "plan", deterministic)

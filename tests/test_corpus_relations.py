@@ -300,6 +300,12 @@ def test_relational_sources_compile_and_train(tmp_path, monkeypatch, capsys):
         Path(run["logging"]["root_dir"]) / "compiled-smoke" / "manifest.json"
     ).is_file()
 
+    inventory = lab.json("corpus", "artifacts", "--kind", "typed", "--json")
+    typed = {row["artifact_id"]: row for row in inventory["artifacts"]}
+    assert typed[f"relation-sequences/{compiled['key']}"]["dependencies"] == [
+        f"relation-index/{index['key']}"
+    ]
+
     database = Path(index["path"]) / "relations.sqlite"
     with database.open("r+b") as raw:
         raw.write(b"X")
