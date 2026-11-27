@@ -15,6 +15,7 @@ from klab.canonical import canonical_digest
 from klab.corpus.acquisition import declaration_sha256
 from klab.corpus.bounded_metadata import read_inventory_metadata
 from klab.corpus.build_stages import RECEIPT, StageStore
+from klab.corpus.canary_storage import calibrate_storage, open_storage_canary
 from klab.corpus.large_build import (
     native_dedup_inputs,
     native_file_rights,
@@ -583,9 +584,11 @@ def plan_build(
     reference_normalized_spans: bool = False,
     reference_normalized_documents: bool = False,
     inspect_storage: bool = False,
+    storage_canary: Path | None = None,
 ) -> dict[str, Any]:
     """Plan a full native build using acquisition inventory and retained metadata."""
     reference_normalized_spans |= reference_normalized_documents
+    inspect_storage = inspect_storage or storage_canary is not None
     lock = work_root / "corpora" / project.config.id / "acquisition.json"
     normalized_root = normalized_store_root(work_root)
     plan: dict[str, Any] = {
@@ -671,6 +674,11 @@ def plan_build(
         )
         build_id = canonical_digest(identity)
         target = lock.parent / "builds" / build_id
+        canary = (
+            open_storage_canary(storage_canary, work_root, identity)
+            if storage_canary is not None
+            else None
+        )
         stage_by_id = {stage["id"]: stage for stage in plan["stages"]}
         if reference_normalized_documents:
             stage_by_id["views"]["reference_normalized_documents"] = True
@@ -798,7 +806,7 @@ def plan_build(
                         )
                     )
         if inspect_storage:
-            plan["storage_inspection"] = _build_storage(
+            storage = _build_storage(
                 lock.parent,
                 normalized_root,
                 build_id,
@@ -806,7 +814,27 @@ def plan_build(
                 prepared=prepared,
                 all_prepared=not pending,
             )
-    except (KeyError, OSError, TypeError, ValueError) as error:
+            if canary is not None:
+                observation = next(
+                    (
+                        row
+                        for row in _stage_observations(
+                            canary.workspace, canary.manifest["build_id"]
+                        )
+                        if row["completed"]
+                    ),
+                    {"stage_outputs": {}, "stage_workspaces": {}},
+                )
+                storage["canary_calibration"] = calibrate_storage(
+                    canary,
+                    sources,
+                    prepared,
+                    observation,
+                    stage_by_id,
+                    storage,
+                )
+            plan["storage_inspection"] = storage
+    except (AttributeError, KeyError, OSError, TypeError, ValueError) as error:
         return {**plan, "status": "blocked", "reason": str(error)}
     return {
         **plan,

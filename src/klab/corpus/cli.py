@@ -173,6 +173,33 @@ def _print_build_storage(storage: dict) -> None:
                 f"{workspace['observed_peak_allocated_bytes']:,} allocated bytes at peak "
                 f"({workspace['incomplete_samples']:,} incomplete samples)"
             )
+    if calibration := storage.get("canary_calibration"):
+        print(
+            f"  Canary {calibration['build_id']} sampled {calibration['sampled_files']:,} files "
+            f"and {calibration['sampled_input_bytes']:,} source bytes"
+        )
+        for source in calibration["coverage"]:
+            print(
+                f"    {source['source_id']}: {source['covered_files']:,}/{source['pending_files']:,} "
+                "pending files covered"
+            )
+        size = calibration["modeled_normalization_payload_bytes"]
+        print(
+            "  Canary normalization writes are unestimated"
+            if size is None
+            else f"  Canary models {size:,} new normalization payload bytes"
+        )
+        for name, row in calibration["stages"].items():
+            if row["modeled_payload_bytes"] is not None:
+                print(
+                    f"  Canary scenario {name} payload bytes {row['modeled_payload_bytes']:,}"
+                )
+        peaks = calibration["modeled_named_peak_by_filesystem"]
+        if peaks is None:
+            print("  Combined canary workspace scenario is unestimated")
+        else:
+            for scope, count in peaks.items():
+                print(f"  Modeled {scope.replace('_', ' ')} named peak {count:,} bytes")
 
 
 def _handle(args: argparse.Namespace) -> None:
@@ -482,7 +509,7 @@ def _run(args: argparse.Namespace) -> None:
             args.inspect_verification or args.cold or args.scratch_dir is not None
         )
         if args.build is not None:
-            if args.inspect_storage:
+            if args.inspect_storage or args.storage_canary is not None:
                 raise ValueError(
                     "--inspect-storage requires a project for build planning"
                 )
@@ -512,6 +539,7 @@ def _run(args: argparse.Namespace) -> None:
             root,
             reference_normalized_spans=args.reference_normalized_spans,
             inspect_storage=args.inspect_storage,
+            storage_canary=args.storage_canary,
             reference_normalized_documents=args.reference_normalized_documents,
         )
         if args.json:
@@ -1338,6 +1366,12 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "--inspect-storage",
         action="store_true",
         help="Inspect known build output bytes, prior stage footprints and storage capacity",
+    )
+    command.add_argument(
+        "--storage-canary",
+        type=Path,
+        metavar="BUILD",
+        help="Calibrate storage inspection from a matching published canary build",
     )
     command.add_argument(
         "--scratch-dir",

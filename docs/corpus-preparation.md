@@ -1001,6 +1001,62 @@ from the existing build plan.
 | 128 | 1.16 ms | 1.39 KB |
 | 4,096 | 38.3 ms | 1.40 KB |
 
+#### First-build storage from a canary
+
+For a recipe you have acquired but have yet to build, run a canary and pass
+the build path it prints to the planner:
+
+```sh
+klab --work-dir WORK corpus build PROJECT --offline --canary --canary-rows 1000
+klab --work-dir WORK corpus plan PROJECT --storage-canary CANARY_BUILD --json
+```
+
+`--storage-canary` turns on storage inspection and reads the published
+canary's build manifest, preparation receipts and progress journal. The
+canary must come from the current project's canary workspace and match its
+source pins and policy. The plan checks canary sample counts against the
+published build. It reads metadata and performs no payload hashing.
+
+`canary_calibration` reports pending and covered files and input bytes by
+source. A pending partition uses its own sampled prefix where available.
+Otherwise, it uses sampled partitions from the same source and file suffix.
+The model scales the measured normalized document, span and rejected payload
+bytes by source bytes. Retained normalization contributes its known sizes
+and document counts. An unsampled format leaves the full normalization and
+workspace estimates unknown. The report still includes estimates for the
+covered pending inputs.
+
+The model scales index and deduplication work by normalized document count
+and inline view work by normalized document bytes. It preserves estimates
+backed by exact stage keys. The named workspace scenario counts each stage's
+modeled peak alongside outputs retained from earlier stages. When build and
+normalized stores share a device, the model combines their estimated growth.
+Resuming an in-progress stage or choosing a view placement absent from the
+canary can leave the combined estimate unknown. Regular plan output still
+reports any exact candidate and checkpoint bytes for those stages.
+
+These estimates describe the supplied prefix sample. Changes in document
+sizes, rejection rates, duplicates or spill behavior can change the result.
+Use larger or better-covered canaries when the storage decision depends on
+the estimate. The model is advisory and covers named storage. The full
+incident workload and uncached rotational validation
+remain in [#450](https://github.com/supernovae/model-lab/issues/450).
+
+On an NVMe recipe fixture with 125,000 added synthetic rows, a 250-row
+canary produced 325 sample documents. A 1,000-row canary produced 1,075.
+Each canary took about 10 s. Each calibrated plan took 0.51 s including CLI
+startup. The full build took 27.69 s. Its reconstructed named peak combines
+the observed view workspace peak with retained index, deduplication and
+normalized payload bytes on the same device.
+
+| Measure | 250-row canary | 1,000-row canary | Full build |
+| --- | ---: | ---: | ---: |
+| Normalization payload | 392.70 MB | 393.63 MB | 392.38 MB |
+| Index payload | 99.76 MB | 86.81 MB | 79.76 MB |
+| Deduplication payload | 43.31 MB | 38.54 MB | 37.07 MB |
+| View payload | 743.95 MB | 755.41 MB | 755.90 MB |
+| Named workspace peak | 1.43 GB modeled | 1.36 GB modeled | 1.29 GB reconstructed |
+
 Planning writes no artifacts or verification receipts. It streams the
 acquisition lock and snapshot manifests, discards row-level inventories and
 reads bounded file rights evidence where needed. Each lock or snapshot
@@ -1980,10 +2036,11 @@ documents), data-shape failures in the sampled files and rows
 rights conflicts or held-out overlaps among duplicates that are both in the
 sample. What it cannot show: a rare bad row or file past the sample, a
 duplicate group whose members are in different, unsampled files, a rights
-conflict between files outside the sample, the real size of any stage or the
-disk it needs, and anything that depends on the whole corpus (token counts,
+conflict between files outside the sample, the actual size of the full build,
+and anything that depends on the whole corpus (token counts,
 mixture proportions, sources that are only empty after deduplication). Its
-counts are the sample's; do not read them as the release's. A canary refuses a
+counts describe the sample. [Storage planning](#first-build-storage-from-a-canary)
+can extrapolate them as an advisory scenario. A canary refuses a
 release with `release.record_admission` (every reviewed row must be present) and
 a release the memory builder would build.
 
