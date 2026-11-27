@@ -984,10 +984,10 @@ The deduplication and view estimate keys remained unresolved until their
 input receipts became available.
 
 The build progress instrumentation changes the native build implementation
-digest and the current release verifier digest. Existing releases stay
-addressable, and the new build can reuse matching normalized, index and
-deduplication artifacts. Existing host-local release receipts can refresh
-through verification when reopened.
+digest and the source-snapshot and release verifier digests. Existing
+releases stay addressable, and the new build can reuse matching normalized,
+index and deduplication artifacts. Host-local receipts issued under the
+previous verifier digests are refreshed through verification when reopened.
 
 Three synthetic Linux tmpfs runs per size measured the added inspection
 step over sparse normalized files and a populated progress journal. The
