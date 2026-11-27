@@ -1109,7 +1109,9 @@ largest scan counted 1.64 GB of logical payload sizes from metadata.
 | 5,000 | 400 | 128 ms | 1.04 MB | 45 MiB |
 | 25,000 | 2,000 | 658 ms | 5.18 MB | 54 MiB |
 
-### Text-statistics sidecars
+### Normalized annotation sidecars
+
+#### Text-statistics sidecars
 
 Build and inspect the text-statistics sidecar for a published normalized
 partition. Get its `artifact_id` from `corpus artifacts --kind normalized`.
@@ -1142,6 +1144,48 @@ the unfinished partition. A view or release-policy change can reuse the
 sidecar when the normalized input stays fixed. The operation holds a
 normalized retention lease while reading its inputs. Later reuse requires
 the exact input partition to remain available.
+
+#### Source-language sidecars
+
+```sh
+klab --work-dir WORK corpus annotate-normalized SOURCE/KEY --kind source-language --limit 20
+```
+
+The `source-language` kind exposes separate evidence from the partition's
+source declaration and upstream row metadata. The result's
+`declared_language` is null when the source declares none, even if the
+normalized document uses the English default. A row can report a
+`row_label` and numeric `row_score` when those fields survived
+normalization. A `code_context` flag identifies code documents or rows with
+code qualification. An upstream label can name a programming language, and
+scores retain upstream meaning. This annotator performs no language
+detection or filtering.
+
+Source-language sidecars use 45 bytes per row, in partition order. They
+store a 32-byte document ID, a little-endian uint32 label code, a one-byte
+code flag, and a little-endian binary64 score. The ordered `row_labels`
+dictionary lives in the receipt and starts at code 1. Code 0 means the
+label is missing. The maximum uint32 means the label is unusable. Labels
+must fit in 64 UTF-8 bytes, and the first 4,096 distinct usable labels
+are retained. Absent or unrepresentable scores use NaN on disk and null
+in JSON. The totals count reported, missing, and unusable labels, code
+rows, and recorded numeric scores separately.
+
+Both kinds use the same verified partition reader and bounded page
+path. Each missing annotation reads the normalized documents once. The
+shared producer changes the text-statistics computation key, so the
+first request after upgrade regenerates the text-statistics sidecar from
+the existing normalized partition.
+
+In three single-worker NVMe trials with cached input pages, the
+source-language sidecar processed 1 million synthetic documents in a
+median 3.06 s at about 60 MiB peak process RSS. It read 672.90 MB for a
+672.60 MB partition, wrote 45.00 MB, and returned a warm 32-row page in
+2.43 ms. On the same fixture, text statistics took a median 3.18 s on
+the shared path and 3.23 s on the previous path. Both produced the same
+payload digest.
+
+#### Text-statistics measurements
 
 Three synthetic NVMe trials per size used 2,048 UTF-8 bytes of text per
 document, with non-ASCII characters and a line break. The source partition

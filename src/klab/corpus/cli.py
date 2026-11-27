@@ -188,11 +188,15 @@ def _run(args: argparse.Namespace) -> None:
     root = resolve_work_dir(args.work_dir)
     command = args.corpus_command
     if command == "annotate-normalized":
+        from klab.corpus.source_language import annotate_source_language
         from klab.corpus.text_statistics import annotate_normalized
 
-        result = annotate_normalized(
-            root, args.partition, offset=args.offset, limit=args.limit
+        annotate = (
+            annotate_source_language
+            if args.kind == "source-language"
+            else annotate_normalized
         )
+        result = annotate(root, args.partition, offset=args.offset, limit=args.limit)
         print(json.dumps(result, sort_keys=True))
         return
     if command in {"artifacts", "release-prune"}:
@@ -950,9 +954,14 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     command.add_argument("--json", action="store_true")
     command.set_defaults(handler=_handle)
     command = sub.add_parser(
-        "annotate-normalized", help="Build and inspect normalized text statistics"
+        "annotate-normalized", help="Build and inspect typed normalized annotations"
     )
     command.add_argument("partition", metavar="SOURCE/KEY")
+    command.add_argument(
+        "--kind",
+        choices=("text-statistics", "source-language"),
+        default="text-statistics",
+    )
     command.add_argument("--offset", type=int, default=0)
     command.add_argument(
         "--limit", type=int, default=0, help="Rows to inspect, or zero for a summary"

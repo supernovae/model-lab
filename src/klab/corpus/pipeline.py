@@ -989,7 +989,11 @@ def build_identity(
         )
         if minimum is not None:
             identity["native_stage_implementation"].update(
-                implementation_digests("train_selection.py", "text_statistics.py")
+                implementation_digests(
+                    "train_selection.py",
+                    "text_statistics.py",
+                    "normalized_annotations.py",
+                )
             )
     else:
         identity["normalization_implementation"] = implementation_digests(
