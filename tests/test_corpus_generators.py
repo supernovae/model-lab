@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 from corpus_fixtures import PLAIN_OPTIONS, STRICT_POLICY, fixture_rights
+from recipe_fixtures import Lab
 
 from klab.corpus.acquisition import acquire
 from klab.corpus.document_normalization import markdown_sections, records_for_file
@@ -134,9 +135,12 @@ def test_scenario_oracle_is_deterministic_without_filesystem_access() -> None:
 
 def test_grounded_unverified_and_rejected_replies_replay_offline(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
 ) -> None:
     project, parent = _replay_project(tmp_path)
-    work = tmp_path / "work"
+    lab = Lab(tmp_path, monkeypatch, capsys)
+    work = lab.work
     acquire(project, work)
     built = build(project, work, offline=True)
     assert build(project, work, offline=True) == built
@@ -192,6 +196,70 @@ def test_grounded_unverified_and_rejected_replies_replay_offline(
     )
     for split in ("train", "validation", "test"):
         assert list(iter_rendered_conversations(released / "chat" / f"{split}.jsonl"))
+
+    from klab.corpus import release as publication
+    from klab.corpus.release_verify import verification_settings
+    from klab.corpus.row_index import EvidenceFiles
+    from klab.verification_proofs import verification_options
+
+    scratch = tmp_path / "audit-scratch"
+    scratch.mkdir(mode=0o700)
+    records = EvidenceFiles.records
+
+    def interrupt_documents(self, path):
+        if path.name == "documents.jsonl":
+            raise InterruptedError("stop after span index")
+        yield from records(self, path)
+
+    def refuse_span_scan(self, path):
+        if path.name == "spans.jsonl":
+            pytest.fail("reopened the signed span index's payload")
+        yield from records(self, path)
+
+    def interrupt_replay(*args, **kwargs):
+        raise InterruptedError("stop after both row indexes")
+
+    def plan_indexes():
+        plan = lab.json(
+            "corpus",
+            "plan",
+            "--build",
+            str(built),
+            "--scratch-dir",
+            str(scratch),
+            "--json",
+        )
+        (step,) = plan["verification_inspection"]["steps"]
+        return {row["id"]: row["action"] for row in step["row_indexes"]}
+
+    with verification_settings(
+        scratch_dir=scratch, workers=1, **verification_options(work)
+    ):
+        with monkeypatch.context() as stop:
+            stop.setattr(EvidenceFiles, "records", interrupt_documents)
+            with pytest.raises(InterruptedError, match="span index"):
+                publication.verify_release(released)
+        assert plan_indexes() == {
+            "reviewed-spans": "verify_candidate",
+            "reviewed-documents": "run",
+        }
+        with monkeypatch.context() as stop:
+            stop.setattr(EvidenceFiles, "records", refuse_span_scan)
+            stop.setattr(publication, "_verify_source_snapshots", interrupt_replay)
+            with pytest.raises(InterruptedError, match="both row indexes"):
+                publication.verify_release(released)
+        assert set(plan_indexes().values()) == {"verify_candidate"}
+        (index,) = scratch.glob("release-indexes/*/reviewed-documents/*/index.sqlite")
+        index.touch()
+        assert plan_indexes() == {
+            "reviewed-spans": "verify_candidate",
+            "reviewed-documents": "run",
+        }
+        with monkeypatch.context() as retry:
+            retry.setattr(EvidenceFiles, "records", refuse_span_scan)
+            assert publication.verify_release(released)["release_id"] == released.name
+
+    assert not list(scratch.glob("release-indexes/*/reviewed-*/*/index.sqlite"))
 
 
 def test_changed_prompt_digest_rejects_recorded_request(tmp_path: Path) -> None:

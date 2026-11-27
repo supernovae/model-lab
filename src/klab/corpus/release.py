@@ -60,7 +60,9 @@ from klab.corpus.release_members import (
     shared_member_path,
     shared_members,
 )
+from klab.corpus.release_receipt import lookup as lookup_receipt
 from klab.corpus.release_receipt import receipt_first, verifier_digest
+from klab.corpus.release_receipt import record as record_receipt
 from klab.corpus.release_verify import (
     INVENTORY_RECEIPT_MIN_BYTES,
     current_settings,
@@ -73,6 +75,7 @@ from klab.corpus.release_verify import (
 from klab.corpus.shards import chunk_ranges, range_file_identity, run_tasks
 from klab.corpus.split_assignments import document_assignments
 from klab.experiments.artifacts import snapshot_dependencies
+from klab.safe_io import symlinked
 from klab.training.manifest import sha256_file
 
 if TYPE_CHECKING:
@@ -1188,6 +1191,12 @@ def release_index_workspace(root: Path, scratch: Path) -> Path:
     return scratch / "release-indexes" / canonical_digest(str(root.resolve()))
 
 
+REVIEWED_INDEX_MEMBERS = {
+    "reviewed-spans": SPAN_MEMBER,
+    "reviewed-documents": DOCUMENTS,
+}
+
+
 @contextmanager
 def _release_index_store(root, verification_mode):
     """Own temporary index checkpoints until the row verdict completes."""
@@ -1226,7 +1235,7 @@ def _release_index_store(root, verification_mode):
                 shutil.rmtree(abandoned)
         store = StageStore(workspace)
         yield store
-        for stage in ("spans", "documents"):
+        for stage in ("spans", "documents", *REVIEWED_INDEX_MEMBERS):
             store.prune(stage, keep=0)
 
 
@@ -1934,24 +1943,177 @@ def _validate_rows(
     from klab.corpus.row_index import EvidenceFiles
 
     with (
-        metadata_operation(scratch_root(), max_database_bytes=None) as metadata,
-        AdmissionCoverage(metadata.connection) as coverage,
-        ExitStack() as replay_stack,
-        EvidenceFiles() as evidence_files,
-        progress.track_scratch(Path(metadata.temporary.name))
-        if progress is not None
-        else nullcontext(),
+        _release_index_store(root, verification_mode)
+        if proof_store is not None
+        else nullcontext() as store,
+        ExitStack() as operation,
     ):
+        temporary = (
+            Path(
+                operation.enter_context(
+                    tempfile.TemporaryDirectory(
+                        prefix=".verify-corpus-", dir=store.root
+                    )
+                )
+            )
+            if store is not None
+            else scratch_root()
+        )
+        metadata = operation.enter_context(
+            metadata_operation(temporary, max_database_bytes=None)
+        )
+        coverage = operation.enter_context(AdmissionCoverage(metadata.connection))
+        replay_stack = operation.enter_context(ExitStack())
+        evidence_files = operation.enter_context(EvidenceFiles())
+        indexes = (
+            operation.enter_context(closing(sqlite3.connect(":memory:", uri=True)))
+            if store is not None
+            else metadata.connection
+        )
+        if store is not None:
+            indexes.execute("PRAGMA temp_store=FILE")
+            indexes.execute("PRAGMA cache_size=-4096")
+        if progress is not None:
+            operation.enter_context(
+                progress.track_scratch(
+                    store.root if store is not None else Path(metadata.temporary.name)
+                )
+            )
         _validate_rows_stored(
             root,
             replay_stack=replay_stack,
             coverage=coverage,
             row_connection=metadata.connection,
             evidence_files=evidence_files,
+            index_connection=indexes,
+            index_store=store,
             proof_store=proof_store,
             verification_mode=verification_mode,
             progress=progress,
         )
+
+
+def reviewed_row_index_inputs(root, receipt, *, checkpointed=True):
+    """Bind independent reviewed indexes to their exact release and input generations."""
+    members = ReleaseMembers(root, receipt)
+    identity = receipt.get("identity", receipt.get("build_identity"))
+    for stage, member in REVIEWED_INDEX_MEMBERS.items():
+        names = [member]
+        if stage == "reviewed-documents" and (
+            assignment := identity["split"].get("assignment_file")
+        ):
+            names.append(f"assignments-{assignment['sha256']}.jsonl")
+        paths = {name: members.member(name) for name in names}
+        inputs = {
+            "artifact": receipt.get("release_id", receipt["build_id"]),
+            "producer": verifier_digest("release") if checkpointed else None,
+            "files": {
+                name: {
+                    "entry": receipt["files"][name],
+                    "generation": range_file_identity(path),
+                }
+                for name, path in paths.items()
+            },
+        }
+        yield stage, inputs, paths
+
+
+def _reviewed_row_indexes(
+    root, receipt, connection, files, store, proof_store, document_projection, progress
+):
+    from klab.corpus.row_index import FileRowIndex
+
+    for stage, inputs, paths in reviewed_row_index_inputs(
+        root, receipt, checkpointed=store is not None
+    ):
+        member = REVIEWED_INDEX_MEMBERS[stage]
+        path = paths[member]
+        documents = member == DOCUMENTS
+        options = {
+            "duplicate": "duplicate document identity"
+            if documents
+            else "duplicate evidence identity",
+            "order": (lambda row: (row["source_id"], None))
+            if documents
+            else (lambda row: (row["raw_path"], row["line_start"])),
+            "progress": progress,
+        }
+        key_name = "document_id" if documents else "record_id"
+
+        def row_key(_, row, name=key_name):
+            return row[name]
+
+        if progress is not None:
+            progress.start_phase(
+                stage.replace("-", "_") + "_index",
+                expected_input_bytes=path.stat().st_size,
+            )
+        if store is None:
+            if documents:
+                options["projection"] = document_projection()
+            yield FileRowIndex(connection, files, {"": path}, row_key, **options)
+            continue
+        key = store.key(inputs)
+        destination = store.directory(stage, key)
+        if symlinked(destination):
+            raise ValueError(f"unsafe reviewed row index directory: {destination}")
+        dependencies = list(paths.values())
+        generations = {
+            value: inputs["files"][name]["generation"] for name, value in paths.items()
+        }
+        if (
+            destination.is_dir()
+            and lookup_receipt(
+                proof_store,
+                "reviewed_row_index",
+                destination,
+                key,
+                dependencies,
+                skip_index_on_missing=True,
+            ).hit
+        ):
+            if progress is not None:
+                progress.update(input_bytes_reused=path.stat().st_size)
+                progress.record("reused_" + stage.replace("-", "_") + "_index")
+        else:
+            if destination.exists():
+                shutil.rmtree(destination)
+            store.discard_incomplete(stage)
+            if documents:
+                options["projection"] = document_projection()
+            with (
+                store.build(stage, inputs) as (staging, _),
+                _row_index_writer(staging / "index.sqlite") as database,
+            ):
+                FileRowIndex(
+                    database, files, {"": path}, row_key, table="records", **options
+                )
+                if any(
+                    range_file_identity(value) != stamp
+                    for value, stamp in generations.items()
+                ):
+                    raise ValueError("reviewed row index inputs changed")
+            record_receipt(
+                proof_store,
+                "reviewed_row_index",
+                destination,
+                key,
+                dependencies,
+                shared_generations=generations,
+            )
+            store.prune(stage, keep=1, protect=key)
+        index = FileRowIndex.attach(
+            connection,
+            files,
+            path,
+            destination / "index.sqlite",
+            stage.replace("-", "_"),
+        )
+        if any(
+            range_file_identity(value) != stamp for value, stamp in generations.items()
+        ):
+            raise ValueError("reviewed row index inputs changed")
+        yield index
 
 
 def _validate_rows_stored(
@@ -1961,6 +2123,8 @@ def _validate_rows_stored(
     coverage,
     row_connection,
     evidence_files,
+    index_connection,
+    index_store,
     proof_store: ProofStore | None = None,
     verification_mode: VerificationMode = "cold",
     progress: BuildProgress | None = None,
@@ -1994,9 +2158,7 @@ def _validate_rows_stored(
             **options,
         )
 
-    assignments = document_assignments(root, identity)
-
-    def checked_document(doc):
+    def checked_document(doc, *, assignments):
         text = doc["text"].encode()
         if doc["content_sha256"] != hashlib.sha256(text).hexdigest():
             raise ValueError("document content digest mismatch")
@@ -2025,16 +2187,17 @@ def _validate_rows_stored(
         return metadata
 
     members = ReleaseMembers(root, receipt)
-    document_map = row_index(
-        members.member("documents.jsonl"),
-        "document_id",
-        duplicate="duplicate document identity",
-        order=lambda doc: (doc["source_id"], None),
-        projection=checked_document,
-    )
-    spans = row_index(
-        members.member("spans.jsonl"),
-        order=lambda span: (span["raw_path"], span["line_start"]),
+    spans, document_map = _reviewed_row_indexes(
+        root,
+        receipt,
+        index_connection,
+        evidence_files,
+        index_store,
+        proof_store,
+        lambda: partial(
+            checked_document, assignments=document_assignments(root, identity)
+        ),
+        progress,
     )
     sources = {item["id"]: item for item in _load(root / "sources.json")}
 

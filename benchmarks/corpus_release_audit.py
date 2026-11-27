@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import io
 import json
+import math
 import os
 import resource
 import stat
@@ -13,6 +14,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+import psutil
 
 from klab.canonical import canonical_digest
 from klab.corpus.progress import recent_progress
@@ -92,7 +95,105 @@ def evict_fixture(root: Path, release: Path) -> int:
     return sizes
 
 
-def benchmark(release: Path, workspace: Path, *, workers: int, fixture: Path | None):
+def scratch_sample(scratch: Path, process: psutil.Process):
+    """Sample named workspace files and unlinked regular files open in the audit tree."""
+    files = {"named": {}, "unlinked": {}}
+    incomplete = False
+    try:
+        owners = [process, *process.children(recursive=True)]
+    except psutil.NoSuchProcess:
+        owners = []
+    except psutil.AccessDenied:
+        owners, incomplete = [], True
+
+    def inventory():
+        for path in scratch.rglob("*"):
+            yield "named", path
+        for owner in owners:
+            try:
+                with os.scandir(f"/proc/{owner.pid}/fd") as descriptors:
+                    for descriptor in descriptors:
+                        yield "unlinked", Path(descriptor.path)
+            except FileNotFoundError:
+                continue
+
+    try:
+        for count, (kind, path) in enumerate(inventory()):
+            if count == 16_384:
+                incomplete = True
+                break
+            try:
+                info = path.lstat() if kind == "named" else path.stat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                incomplete = True
+                continue
+            if stat.S_ISREG(info.st_mode) and (kind == "named" or info.st_nlink == 0):
+                files[kind][info.st_dev, info.st_ino] = info.st_blocks * 512
+    except OSError:
+        incomplete = True
+    named, unlinked = files["named"], files["unlinked"]
+    return {
+        "named_allocated_bytes": sum(named.values()),
+        "unlinked_allocated_bytes": sum(unlinked.values()),
+        "combined_allocated_bytes": sum((named | unlinked).values()),
+    }, incomplete
+
+
+def run_audit(command, env, log, scratch: Path, sample_seconds: float | None):
+    if sample_seconds is None:
+        result = subprocess.run(
+            command, env=env, stderr=log, stdout=subprocess.PIPE, check=True
+        )
+        return json.loads(result.stdout), None
+
+    peaks = dict.fromkeys(
+        (
+            "named_allocated_bytes",
+            "unlinked_allocated_bytes",
+            "combined_allocated_bytes",
+        ),
+        0,
+    )
+    samples = incomplete_samples = 0
+    observer_seconds = 0.0
+    with subprocess.Popen(
+        command, env=env, stderr=log, stdout=subprocess.PIPE
+    ) as child:
+        owner = psutil.Process(child.pid)
+        while True:
+            started = time.monotonic()
+            snapshot, incomplete = scratch_sample(scratch, owner)
+            observer_seconds += time.monotonic() - started
+            samples += 1
+            incomplete_samples += incomplete
+            for key in peaks:
+                peaks[key] = max(peaks[key], snapshot[key])
+            try:
+                output, _ = child.communicate(timeout=sample_seconds)
+            except subprocess.TimeoutExpired:
+                continue
+            break
+        if child.returncode:
+            raise subprocess.CalledProcessError(child.returncode, command)
+    return json.loads(output), {
+        "interval_seconds": sample_seconds,
+        "observer_seconds": observer_seconds,
+        "samples": samples,
+        "incomplete_samples": incomplete_samples,
+        "sampled_peaks": peaks,
+    }
+
+
+def benchmark(
+    release: Path,
+    workspace: Path,
+    *,
+    workers: int,
+    fixture: Path | None,
+    sample_seconds: float | None = None,
+):
     release = release.absolute()
     workspace = workspace.resolve()
     checkout = Path(__file__).resolve().parents[1]
@@ -117,7 +218,7 @@ def benchmark(release: Path, workspace: Path, *, workers: int, fixture: Path | N
         )
         before = journal.stat().st_size if journal.exists() else 0
         with (workspace / f"{mode}.log").open("xb") as log:
-            result = subprocess.run(
+            result, scratch_observation = run_audit(
                 [
                     sys.executable,
                     str(Path(__file__).resolve()),
@@ -133,10 +234,10 @@ def benchmark(release: Path, workspace: Path, *, workers: int, fixture: Path | N
                     str(workers),
                     *(["--cold"] if mode == "cold" else []),
                 ],
-                env=env,
-                stderr=log,
-                stdout=subprocess.PIPE,
-                check=True,
+                env,
+                log,
+                scratch,
+                sample_seconds,
             )
         recorded = journal.exists() and journal.stat().st_size > before
         final = next(recent_progress(journal), {}) if recorded else {}
@@ -146,7 +247,8 @@ def benchmark(release: Path, workspace: Path, *, workers: int, fixture: Path | N
                 "advised_fixture_bytes": advised,
                 "replay_journal_written": recorded,
                 "replay_summary": final,
-                **json.loads(result.stdout),
+                "scratch_observation": scratch_observation,
+                **result,
             }
         )
     if reports[0]["audit_sha256"] != reports[1]["audit_sha256"]:
@@ -172,9 +274,19 @@ if __name__ == "__main__":
         parser.add_argument(
             "--evict-fixture", type=Path, metavar="PRIVATE_FIXTURE_ROOT"
         )
+        parser.add_argument(
+            "--sample-scratch",
+            type=float,
+            metavar="SECONDS",
+            help="Sample named workspace and open unlinked scratch allocations with this interval",
+        )
         options = parser.parse_args()
         if sys.platform != "linux" or options.workers < 1:
             parser.error("requires Linux and positive worker count")
+        if options.sample_scratch is not None and not (
+            math.isfinite(options.sample_scratch) and options.sample_scratch >= 0.05
+        ):
+            parser.error("scratch sample interval must be at least 0.05 seconds")
         print(
             json.dumps(
                 benchmark(
@@ -182,6 +294,7 @@ if __name__ == "__main__":
                     options.workspace,
                     workers=options.workers,
                     fixture=options.evict_fixture,
+                    sample_seconds=options.sample_scratch,
                 ),
                 indent=2,
             )

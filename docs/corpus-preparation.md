@@ -2362,6 +2362,14 @@ verified index for raw replay, lineage and view checks. An interruption
 inside an unfinished index still repeats that index. The independent
 `--cold` pass rebuilds both indexes.
 
+Reviewed admission, fractional selection and chat use the same scratch
+workspace for separately sealed span and document range indexes. With an
+owned `--scratch-dir` and the default receipt-reuse mode, each completed
+index gets a host-signed receipt. Resume opens the signed index read-only
+and rebuilds any incomplete or changed index. Source replay, admission
+coverage, lineage, transformation and view checks still run. An independent
+`--cold` audit builds disposable indexes from the release payloads.
+
 The streaming replay uses one file-backed bitmap for lineage, each transform
 and the LM views in turn. Workers validate a record before returning its
 document row ID. The coordinator checks duplicates in the bitmap and matches
@@ -2376,9 +2384,8 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   location. The default is the host temporary directory. Use fast storage
   for indexes and sorts. Inspect previous scratch observations with
   `corpus plan --build BUILD --inspect-verification`. Disposable indexes
-  are removed after verification. A progress journal and streaming LM
-  checkpoints can survive a stop. Reviewed, fractional and chat checks
-  rebuild their disposable indexes after an interruption.
+  are removed after verification. A progress journal and completed row
+  index checkpoints can survive a stop.
 - **Scratch observations** in the progress journal report logical bytes and
   allocated bytes for named files in the row verification workspace. Samples
   occur at existing progress boundaries and once before cleanup. The final
@@ -3172,13 +3179,49 @@ and 87 MiB after for the 25,000-document release, and 83 MiB before and
 
 With the 25,000-document release and snapshots on NVMe and scratch on
 rotational ZFS, three paired cold-input trials took a median 7.441 s
-before and 4.922 s after. This measures slower scratch with NVMe
-inputs. Media-cold rotational input scans remain unmeasured.
+before and 4.922 s after. This measures slower scratch with NVMe inputs.
 
 The indexed verifier still reads full evidence where the check requires
 it, including cited text and generated payloads. Raw replay retains
-its existing per-adapter reads. Production-sized and out-of-cache audits
-remain to be measured. [#450](https://github.com/supernovae/model-lab/issues/450)
+its existing per-adapter reads. [#450](https://github.com/supernovae/model-lab/issues/450)
+
+#### Reviewed audit recovery measurements
+
+A second recipe-shaped synthetic release had 125,077 documents and used
+the verifier for reviewed admission, fractional selection and chat.
+The fixture enabled the chat view and contained source documents. The
+connected test also exercises chat records and their lineage. In each
+restart trial, `SIGTERM` stopped the audit when its journal entered raw
+replay. The retry used the same owned scratch and proof store.
+
+| NVMe measurement | Before | With signed row indexes |
+| --- | ---: | ---: |
+| Independent cold audit | 23.18 s | 22.83 s |
+| Cold storage reads | 927.21 MB | 927.21 MB |
+| Cold sampled combined scratch | 150.66 MB | 150.68 MB |
+| Cold peak individual RSS | 169 MiB | 160 MiB |
+| Warm retry after interruption | 23.07 s | 20.89 s |
+| Warm retry logical reads | 4.46 GB | 3.73 GB |
+| Warm retry sampled combined scratch | 254.23 MB | 150.67 MB |
+
+The retry reopened 103.78 MB of signed indexes. The old run kept abandoned
+disposable scratch after termination. The current run removed its abandoned
+private workspace and retained the two sealed indexes until verification
+completed. The 200 ms sampler observed a 9.64 MB unlinked-file peak in
+each cold and restart case, at a different point from the combined peak.
+Signed full-release reuse took about 0.37 s.
+
+The same release and inputs were copied onto rotational ZFS. Direct writes
+placed 926.89 MB of logical fixture bytes before the audit pair. The three
+drives' read counters increased by 139.47 MB over independent replay and
+receipt reuse. Independent replay took 27.66 s, with 63.29 MB of sampled
+combined allocation. Receipt reuse took 0.37 s. The replay and retry
+trials each produced the same release ID and audit digest. These times
+are single fixture observations. The historical 6.7-million-document
+incident retains its original reported measurements.
+
+New verifier code refreshes old host-local verification receipts when
+reopened. Release manifests and payload formats stay compatible.
 
 #### Describe link planning recovery measurements
 
@@ -4492,6 +4535,13 @@ replay journal sample when one was written.
 ```sh
 uv run --locked --no-sync python benchmarks/corpus_release_audit.py RELEASE RESULTS --workers 4
 ```
+
+Pass `--sample-scratch 0.2` to also sample named scratch and unlinked regular
+files held open by the audit process tree. The report gives individual peaks,
+the sampled simultaneous peak, observation time and incomplete sample count.
+It counts hard links and repeated descriptors once. This observes allocated
+disk blocks at intervals. Short-lived files and mappings whose descriptors
+have closed can escape the samples.
 
 For an isolated fixture copy, pass `--evict-fixture PRIVATE_FIXTURE_ROOT` to
 request file-local page eviction before independent replay. The command checks
