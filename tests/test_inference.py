@@ -166,7 +166,7 @@ def _assert_position_buckets(report: dict, panel: dict) -> None:
 
 
 def test_panels_report_loss_by_position_during_and_after_training(
-    trained_run, tmp_path
+    trained_run, tmp_path, monkeypatch, capsys
 ):
     from klab.data.packing import TokenBlockDataset, load_prepared_data
     from klab.evaluation.panels import run_panel
@@ -228,3 +228,39 @@ def test_panels_report_loss_by_position_during_and_after_training(
     )
     assert result["status"] == "complete", result["reason"]
     _assert_position_buckets(result, panel)
+
+    alignment = tmp_path / "alignment.json"
+    args = [
+        "klab",
+        "eval",
+        "original",
+        "--runs-dir",
+        str(trained_run.logging.root_dir),
+        "--checkpoint",
+        source.identity["checkpoint_relative_path"],
+        "--panel",
+        str(declaration),
+        "--gradient-against",
+        str(declaration),
+    ]
+    monkeypatch.setattr(sys, "argv", [*args, "--output", str(alignment)])
+    main()
+    capsys.readouterr()
+    aligned = json.loads(alignment.read_text())
+    assert aligned["evidence_complete"], aligned["reason"]
+    assert aligned["cosine"] == pytest.approx(1.0)
+    assert aligned["dot_product"] == pytest.approx(aligned["left_norm"] ** 2)
+    for scored in aligned["panels"].values():
+        assert scored["valid_targets"] == result["valid_targets"]
+        assert scored["loss"] == pytest.approx(result["loss"], rel=1e-6)
+
+    limited = tmp_path / "limited.json"
+    monkeypatch.setattr(
+        sys, "argv", [*args, "--output", str(limited), "--gradient-max-bytes", "1"]
+    )
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert error.value.code == 1
+    denied = json.loads(limited.read_text())
+    assert denied["status"] == "failed" and denied["panels"] == {}
+    assert "identity" not in denied  # cap refused before loading checkpoint tensors

@@ -1065,22 +1065,49 @@ def _train(args: argparse.Namespace) -> None:
 def _eval(args: argparse.Namespace) -> None:
     from klab.evaluation.inference import load_run, write_inference_result
 
+    if args.gradient_against is not None and args.panel is None:
+        raise ValueError("--gradient-against requires --panel")
+    if args.gradient_max_bytes is not None and args.gradient_against is None:
+        raise ValueError("--gradient-max-bytes requires --gradient-against")
     if args.panel is not None:
-        from klab.evaluation.panels import run_panel
-
         if not args.checkpoint or args.output is None:
             raise ValueError(
                 "named panel evaluation requires --checkpoint and --output"
             )
-        result = run_panel(
-            args.run_id,
-            Path(args.runs_dir),
-            args.checkpoint,
-            Path(args.panel),
-            Path(args.output),
-            backend=args.backend,
-            authorization=args.runtime_authorization,
-        )
+        if args.gradient_against is not None:
+            from klab.evaluation.gradient_alignment import (
+                DEFAULT_GRADIENT_BYTES,
+                run_gradient_alignment,
+            )
+
+            if args.backend not in {None, "cpu"}:
+                raise ValueError("gradient alignment runs on CPU")
+            result = run_gradient_alignment(
+                args.run_id,
+                Path(args.runs_dir),
+                args.checkpoint,
+                args.panel,
+                args.gradient_against,
+                args.output,
+                max_gradient_bytes=(
+                    DEFAULT_GRADIENT_BYTES
+                    if args.gradient_max_bytes is None
+                    else args.gradient_max_bytes
+                ),
+                authorization=args.runtime_authorization,
+            )
+        else:
+            from klab.evaluation.panels import run_panel
+
+            result = run_panel(
+                args.run_id,
+                Path(args.runs_dir),
+                args.checkpoint,
+                args.panel,
+                args.output,
+                backend=args.backend,
+                authorization=args.runtime_authorization,
+            )
         print(json.dumps({**result, "output": str(args.output)}, indent=2))
         if not result["evidence_complete"]:
             raise SystemExit(1)
@@ -2940,6 +2967,16 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     )
     evaluation_kind.add_argument(
         "--ranking", type=Path, help="Score declared answer choices from JSON"
+    )
+    evaluation.add_argument(
+        "--gradient-against",
+        type=Path,
+        help="Compare loss gradients with a second pinned panel on CPU",
+    )
+    evaluation.add_argument(
+        "--gradient-max-bytes",
+        type=int,
+        help="Gradient array storage cap (default 64 MiB)",
     )
     evaluation.add_argument(
         "--output", type=Path, help="New panel result file outside input roots"
