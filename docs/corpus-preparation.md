@@ -4129,7 +4129,8 @@ assertion IDs hash the subject, predicate, typed value and sorted qualifiers.
 Multiple evidence rows can support the same assertion. Conflicting values
 retain distinct assertion IDs.
 
-The compiler declaration requires `target` (`triples` or `walks`),
+The compiler declaration requires `target` (`triples`, `walks`,
+`hierarchy`, or `factorized`),
 `max_sequences` and `max_bytes`. For walks, give `seed`, `hops`, and
 `walks_per_entity`. Each walk starts at an entity with a directed edge,
 chooses a seeded outgoing edge, and ends at a dead end or the hop limit.
@@ -4159,6 +4160,54 @@ restarts only that stage. Compilation options and tokenization do not change
 the canonical index. Optional `--cold` verifies byte integrity without a
 host-local proof hit. The source locators and qualified claims still need
 semantic review for experiments that depend on factual correctness.
+
+### Hierarchies, factorization, and fidelity
+
+The structural targets share the same verified index as triples and walks.
+Both require `group_size` (2–1,024 assertions) and `max_scratch_bytes`.
+They build a narrow disposable SQLite index on the staging filesystem and
+stream each split. A large group can emit multiple sequences to stay within
+the size and row bounds.
+
+- `hierarchy` requires `hierarchy_predicate` and `max_depth`. It interprets
+  each entity assertion with that predicate as child → parent. A group emits
+  `["hierarchy",depth,predicate,parent,children]`, with root depth zero and
+  depth measured along the longest root-to-node path. It accepts multiple
+  parents. A cycle or a path beyond the depth cap refuses publication. Literal
+  values and other predicates are emitted as ordinary triples.
+- `factorized` groups entity assertions that share a predicate and target
+  and emits `["factorized",predicate,target,subjects]`. Singleton groups and
+  literal assertions remain ordinary triples.
+
+Members are either a subject string or an array starting with that subject
+and followed by its qualifiers and claim-class metadata where applicable.
+Expand each member with the shared predicate and entity value to recover the
+original triple. The compiler checks each structural sequence against its
+own expansion and verifies that every split emits the original assertion
+count. Qualifier, reference and provenance data remain in the canonical
+index. With `qualifiers: omit`, `omissions.jsonl` binds each omission to the
+split, sequence number, canonical assertion ID, and qualifier count. The
+assertion ID resolves the exact original qualifiers. The receipt distinguishes
+a qualifier projection from an assertion round trip.
+
+```bash
+klab corpus relations compare TRIPLES_KEY HIERARCHY_KEY FACTORIZED_KEY --tokenizer tokenizer.json --max-bytes 1073741824
+```
+
+The JSON comparison uses one tokenizer and one verified canonical index for
+all representations. It reports split-level sequence and assertion-visit
+counts, text and lineage bytes, scratch high-water size, fidelity, and token
+deltas from the first arm. Token counts use the data preparation encoder,
+with one EOS per serialized row, before deduplication, document selection,
+or packing. The byte cap covers text inputs to tokenization. Cold receipt
+verification also reads lineage and other stage files. Use the
+[shared tokenizer setup](datasets.md#several-runs-one-tokenizer) when preparing
+paired runs. Record token, source-information and compute budgets separately
+for [the Workshop study](https://github.com/supernovae/kybern-workshop/issues/118).
+
+Existing relation indexes and published sequence files remain usable.
+Re-running a prior compiler declaration may produce a new computation key
+because the compiler implementation changed.
 
 ### Relational compilation measurements
 
@@ -4193,6 +4242,28 @@ and [Wikidata item Q308](https://www.wikidata.org/wiki/Q308) at revision
 The adapters admitted all 20 captured page links and categories and 129
 Wikidata statements. They reported 51 unsupported statements with locators
 in the pinned entity row.
+
+### Structural representation measurements
+
+A synthetic NVMe fixture used ten disjoint worlds across three splits. Each
+world had an eight-way parent tree and an explicit shared category per entity.
+The larger fixture had 50,000 entities and 99,990 assertions. All three arms
+emitted every assertion, with qualifiers included. The comparison used the
+same 512-entry smoke tokenizer, counting one EOS per emitted sequence.
+
+| 99,990 assertions | Sequences | Serialized tokens | Text + lineage | Scratch | Compile wall / CPU | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Triples | 99,990 | 7,049,300 | 19.20 MB | 0 | 1.38 / 1.35 s | 98 MiB |
+| Shared relationships | 6,650 | 2,106,120 | 9.69 MB | 1.11 MB | 1.24 / 1.22 s | 100 MiB |
+| Hierarchy | 56,250 | 4,749,820 | 14.76 MB | 1.52 MB | 1.77 / 1.58 s | 99 MiB |
+
+CLI startup is included. The two-worker token comparison took 3.16 s wall,
+4.97 s CPU and 199 MiB peak process RSS. The warm hierarchy stage reopened
+in 0.59 s. On the 9,990-assertion fixture, the three compiles took 0.68 s,
+0.66 s and 0.70 s respectively, and the comparison took 1.23 s. The savings
+depend on shared structure, identifier choice and the tokenizer. These
+measurements cover preparation and encoding. Learning remains a separate
+experiment.
 
 ## Materialize a mixture
 

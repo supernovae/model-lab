@@ -326,8 +326,12 @@ explicit execution again for a requested replay of external code.
   integration. Add infoboxes, explicit linguistic
   relationships, scientific observations, software ASTs and formal
   definitions through separate source adapters as evidence warrants.
-  Use hierarchy and shared-property factorization before motif discovery
-  or description-length experiments. Add bounded symbolic derivations,
+  The compiler also emits bounded hierarchy groups over an explicit
+  acyclic predicate and shared-relationship groups over the same verified
+  split index. It checks round-trip assertion fidelity, records deliberate
+  qualifier omissions, and compares serialized bytes and tokens using
+  a fixed tokenizer. Motif discovery and description-length experiments
+  remain research directions. Add bounded symbolic derivations,
   procedural trajectories, constraints, counterfactuals and mixed
   curricula as separate targets. Use the same canonical inputs when
   comparing representations. Verify lossless transformations by round trip
