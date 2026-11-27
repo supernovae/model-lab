@@ -123,7 +123,11 @@ index, deduplication and checkpointed view payloads. Planning can use a
 same-key observation to forecast new writes, subtracting a verified-candidate
 view prefix. Build also samples named workspace allocations with a bounded
 entry budget. The planner shows matching historical peaks. Unmeasured first
-builds, anonymous scratch and aggregate peak demand remain explicit gaps.
+builds can use a matching native canary to model fresh normalization and
+stage writes and named workspace demand by device. Coverage gaps and
+incompatible placements leave affected estimates unknown. The full incident
+workload, anonymous scratch and uncached rotational validation stay in
+[#450](https://github.com/supernovae/model-lab/issues/450).
 `klab corpus plan --build BUILD` previews ordinary freeze from existing
 build metadata. It reports the release identity, verification and placement
 dependencies, shared store growth and duplicate staging bytes. Optional
