@@ -21,6 +21,7 @@ _NORMALIZED_DOCUMENTS = "docs.jsonl"
 _MAX_OPEN = 64
 _MAX_BATCH_ROWS = 2048
 _MAX_BATCH_BYTES = 8 * 1024**2
+_MAX_READ_BYTES = 256 * 1024
 
 
 def overlay_dependencies(root, files):
@@ -155,7 +156,10 @@ class DocumentText:
         stream = self._stream(partition)
         if size > 64 * 1024**2 and offset + size > os.fstat(stream.fileno()).st_size:
             raise ValueError("normalized document locator exceeds the partition")
-        raw = read_file_range(stream, offset, size)
+        return self._resolve(row, read_file_range(stream, offset, size))
+
+    @staticmethod
+    def _resolve(row, raw):
         if not raw.endswith(b"\n"):
             raise ValueError(
                 "normalized document locator misses a physical row boundary"
@@ -186,28 +190,64 @@ class DocumentText:
             return self._load(row, self._locator(row))
         return row
 
-    def records(self, rows) -> Iterator:
+    def records(self, rows, *, coalesce: bool = False) -> Iterator:
         """Read normalized ranges in source order inside bounded batches."""
         if not self.paths:
             yield from rows
             return
+        read_batch = self._coalesced_batch if coalesce else self._batch
         pending, size = [], 0
         for row, location, length in rows:
             locator = self._locator(row)
             if pending and (
                 len(pending) == _MAX_BATCH_ROWS or size + locator[2] > _MAX_BATCH_BYTES
             ):
-                yield from self._batch(pending)
+                yield from read_batch(pending)
                 pending, size = [], 0
             pending.append((row, location, length, locator))
             size += locator[2]
-        yield from self._batch(pending)
+        yield from read_batch(pending)
 
     def _batch(self, rows):
         resolved = [None] * len(rows)
-        for index in sorted(range(len(rows)), key=lambda i: rows[i][3][:2]):
+        for index in sorted(range(len(rows)), key=lambda index: rows[index][3][:2]):
             row, location, length, locator = rows[index]
             resolved[index] = self._load(row, locator), location, length
+        yield from resolved
+
+    def _coalesced_batch(self, rows):
+        resolved = [None] * len(rows)
+        ordered = sorted(range(len(rows)), key=lambda index: rows[index][3][:2])
+        start = 0
+        while start < len(ordered):
+            index = ordered[start]
+            row, location, length, locator = rows[index]
+            partition, offset, size = locator
+            stop = start + 1
+            end = offset + size
+            while stop < len(ordered):
+                following, position, width = rows[ordered[stop]][3]
+                if (
+                    following != partition
+                    or position != end
+                    or position + width - offset > _MAX_READ_BYTES
+                ):
+                    break
+                end += width
+                stop += 1
+            if stop == start + 1:
+                resolved[index] = self._load(row, locator), location, length
+            else:
+                payload = read_file_range(self._stream(partition), offset, end - offset)
+                for index in ordered[start:stop]:
+                    row, location, length, (_, position, width) = rows[index]
+                    begin = position - offset
+                    resolved[index] = (
+                        self._resolve(row, payload[begin : begin + width]),
+                        location,
+                        length,
+                    )
+            start = stop
         yield from resolved
 
 

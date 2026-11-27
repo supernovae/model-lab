@@ -4345,9 +4345,11 @@ normalized partitions are protected by the existing publication and prune
 leases. A cold verification authenticates the document overlay, normalized
 payloads, and their exact alignment. Warm verification binds every referenced
 file generation. A damaged or missing normalized parent invalidates the
-release. Text scans group reads in bounded batches and mixture encoding budgets
-the referenced row bytes. The LM views and their normal export and preparation
-interfaces retain their existing layout.
+release. Text scans group reads in bounded batches. Mixture encoding budgets
+the referenced row bytes and can read adjacent backing rows together, up to
+256 KiB per read. Unselected gaps are skipped and the original output order
+is preserved. The LM views and their normal export and preparation interfaces
+retain their existing layout.
 
 This option is available for ordinary native disk LM builds. It changes the
 build and release identities. Existing inline releases remain readable, and
@@ -4375,7 +4377,65 @@ of the backing normalized payload and the ordered reconstruction pass.
 The logical read figures were identical across three runs per arm, and
 their process counters reported zero physical storage reads. The extra
 cold reads are the measured cost of the opt-in storage saving on this
-fixture. Media-cold and production-size performance remain unmeasured.
+fixture.
+
+For the same fixture, a warm 8,192-row mixture encoder request over adjacent
+groups issued 603 backing-file reads, down from 8,192, with the same
+49.54 MB and identical ordered text. A seeded scattered request issued
+7,519 reads in place of 8,192 and read the same 49.55 MB. Median wall time
+was 164–166 ms across both versions and requests.
+An experimental full-audit run with coalescing enabled fetched the same
+9.40 GB from storage and took 49.69 s versus 49.11 s with per-row reads on the
+million-document fixture below. Coalescing is used for mixture encoding.
+
+The Linux audit benchmark runs the normal `corpus audit` command with a
+private proof store, first with `--cold` and then allowing receipt reuse.
+Give it the path of an existing release and a new results directory on the
+desired scratch filesystem. Results include elapsed time, CPU time, maximum
+individual process RSS, Linux I/O counters, the audit digest, and the final
+replay journal sample when one was written.
+
+```sh
+uv run --locked --no-sync python benchmarks/corpus_release_audit.py RELEASE RESULTS --workers 4
+```
+
+For an isolated fixture copy, pass `--evict-fixture PRIVATE_FIXTURE_ROOT` to
+request file-local page eviction before independent replay. The command checks
+that the release and its dependencies are private fixture files. This advice
+does not clear ZFS ARC or guarantee physical reads. Check storage counters
+before labeling a result media-cold. On a rotational ZFS copy of the 16,000-row
+fixture, both the process counters and the three drives reported zero physical
+reads. Independent replay took 2.71 s inline and 3.11 s with the overlay.
+Receipt-backed verification took about 0.37 s for either layout.
+
+On a separate NVMe fixture, 16 synthetic web shards brought the same recipe
+shape to 1,000,077 documents. The overlay reused the inline build's normalized
+partitions.
+Their recorded counts and LM view digests agreed. Four audit workers ran with
+file-local eviction on the private inputs before independent replay. Each
+audit fetched about one full physical input closure from NVMe. Logical
+read counters also include cached rereads and the verifier's scratch work.
+
+| Measurement | Inline | Document overlay |
+| --- | ---: | ---: |
+| Physical document member | 2.72 GB | 2.10 GB |
+| Release directory, excluding the shared store | 6.05 GB | 4.89 GB |
+| Independent audit time | 36.19 s | 49.50 s |
+| Independent audit CPU time | 97.11 s | 135.81 s |
+| Logical reads | 24.30 GB | 30.36 GB |
+| Process-attributed storage reads | 7.42 GB | 9.40 GB |
+| Process-attributed storage writes | 1.44 GB | 1.44 GB |
+| Peak sampled named scratch | 855 MB | 855 MB |
+| Peak individual process RSS | 798 MiB | 739 MiB |
+| Receipt-backed audit time | 0.40 s | 0.38 s |
+
+The overlay saved 1.16 GB per release on this fixture, including the flat
+span file. Independent audit took 13.31 s longer and fetched 1.98 GB more
+from storage. Both receipt-backed runs fetched zero bytes from storage.
+Freeze with independent verification on the pre-coalescing verifier took
+34.80 s inline and 47.77 s with the overlay, with uncontrolled OS caches.
+These are synthetic measurements. The full incident workload and uncached
+rotational replay remain open in [#450](https://github.com/supernovae/model-lab/issues/450).
 
 ## Simulate mechanisms and compile curricula
 
