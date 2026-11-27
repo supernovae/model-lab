@@ -379,6 +379,79 @@ one-million-document test with short generated text built a 72 MB index in
 150 MB through 200,000 warm lookups. These are synthetic operator and loader
 measurements. Production I/O and learning effects need separate evaluation.
 
+### Source-link ordering
+
+Use the same verified baseline and pair it with `kind: links`. Supply an
+LF-delimited JSON sidecar with exactly `from_document_id` and
+`to_document_id` on each row. Use lowercase SHA-256 document IDs from
+the baseline's finalized family inventory. The declaration pins the
+sidecar's exact bytes. It treats the edges as supplied evidence and
+retains their direction.
+
+```yaml
+sequence_order:
+  kind: links
+  base_declaration: /work/baseline.yaml
+  base_output: /work/baseline-mixture
+  links:
+    path: /work/source-links.jsonl
+    sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    max_neighborhoods: 16
+```
+
+Every endpoint must belong to the verified TRAIN family inventory.
+A missing or held-out endpoint refuses the sidecar before publication.
+The index deduplicates identical directed pairs. Within each stratum,
+targets with the most distinct incoming links become anchors, with ties
+ordered by document ID. `max_neighborhoods` allows 1–32 anchors per
+stratum and defaults to 16. Anchors keep their own group. A document that
+links to multiple anchors joins the highest-ranked one. Links across
+strata and self-links are inspectable and do not form packing groups.
+Documents without a group retain the baseline order within a fallback
+group. Each exposure is ordered separately with the exact baseline
+record/range pairs and supervision mask.
+
+Materialize through the usual mixture command. The receipt records
+the evidence SHA-256, index identity, exact edge and input-row counts,
+per-stratum anchor coverage, linked scheduled records and neighborhood
+transitions. Reseal can reuse the verified index. Full audit rebuilds it
+from the pinned sidecar and the authenticated inventories. Changing the
+tokenizer, quotas or seed can reuse the same index.
+Keep the pinned sidecar available for audits and index reconstruction.
+
+```sh
+klab corpus inspect-links ORDERED.yaml --output ORDERED_MIXTURE_DIR --document DOCUMENT_ID --limit 20
+```
+
+The query returns outgoing IDs in order and a `next_after` cursor. Pass
+the cursor as `--after` for the next page. The limit is 1–1,000. Warm
+queries authenticate the index and use a bounded range lookup over its
+primary key. Use `verify-mixture` for token and schedule verification.
+
+Three synthetic NVMe trials per size grouped documents around eight linked
+anchors. The index stores directed pairs, their scoped endpoints and the
+assignments in narrow SQLite tables. These medians exclude release
+verification and measure reordering with the finished index.
+
+| Input documents | Directed edges | Index build | Reorder | Neighborhood transitions |
+| --- | --- | --- | --- | --- |
+| 2,048 | 2,040 | 0.057 s | 0.013 s | 886 → 7 |
+| 32,768 | 32,760 | 0.215 s | 0.083 s | 14,252 → 7 |
+| 65,536 | 65,528 | 0.418 s | 0.154 s | 28,537 → 7 |
+
+The largest fixture built an 11.05 MB index from 11.27 MB of edge input.
+Its build issued 43.96 MB of logical reads, including database operations
+and hashing the closed index. The reorder read 24.27 MB and wrote 21.36 MB
+of metadata. Reading 8,192 shuffled reference blocks after file-page
+eviction advice took 0.570 s at baseline and 0.809 s ordered. Storage reads
+rose from 60.4 MB to 72.1 MB, with both warm passes at 0.064 s.
+
+A separate synthetic graph with one million edges built a 121 MB index in
+5.95 s at 86 MB peak process RSS. On the warm index, 4,096 pages of 32
+outgoing links from a 500,000-link hub took 0.052 s total in the query
+kernel. The query timing excludes CLI startup and receipt checks. Link
+ordering stays opt-in while production locality and learning are measured.
+
 ### Offline transfer inspection
 
 ```sh

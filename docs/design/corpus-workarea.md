@@ -277,6 +277,9 @@ explicit execution again for a requested replay of external code.
   Lexical-topic ordering uses a reusable TRAIN-only index of bounded
   per-document word features. It uses the same schedule writer and records
   grouping coverage while retaining the original token segments.
+  Source-link ordering ingests digest-pinned directed edges against the
+  verified TRAIN family scope. The retained index supports bounded
+  outgoing-link queries and one-hop grouping through the same writer.
   Add shared-mechanism neighborhoods once mechanisms have typed outputs.
 - **Structured sources and compilation.** Start with pinned Wikipedia
   links and categories, bounded Wikidata statements with qualifiers and

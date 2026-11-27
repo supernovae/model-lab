@@ -236,6 +236,7 @@ def main():
     parser.add_argument("--project-selected", action="store_true")
     parser.add_argument("--source-order-sources", type=int, default=0)
     parser.add_argument("--lexical-topics", type=int, default=0)
+    parser.add_argument("--link-neighborhoods", type=int, default=0)
     args = parser.parse_args()
     if (
         not 1 <= args.workers <= 8
@@ -269,6 +270,10 @@ def main():
         args.token_output != "references" or not 1 <= args.lexical_topics <= 32
     ):
         parser.error("lexical ordering requires reference output and 1–32 anchors")
+    if args.link_neighborhoods and (
+        args.token_output != "references" or not 1 <= args.link_neighborhoods <= 32
+    ):
+        parser.error("link ordering requires reference output and 1–32 neighborhoods")
     # Affinity also bounds the baseline's default Rayon planner. Do this before
     # importing Lab or tokenizers; no nested BLAS/Rayon pool inherits more cores.
     if hasattr(os, "sched_getaffinity"):
@@ -330,7 +335,11 @@ def main():
                 if args.lexical_topics
                 else ""
             )
-            doc_id = f"{i:064x}" if args.lexical_topics else str(i)
+            doc_id = (
+                f"{i:064x}"
+                if args.lexical_topics or args.link_neighborhoods
+                else str(i)
+            )
             text = (
                 ""
                 if i % 31 == 0
@@ -530,6 +539,8 @@ def main():
         orders.append("source_order")
     if args.lexical_topics:
         orders.append("lexical_order")
+    if args.link_neighborhoods:
+        orders.append("link_order")
     for order in orders:
         from klab.corpus.sequence_order import order_sequences
 
@@ -538,6 +549,7 @@ def main():
         process = psutil.Process()
         io_counters = getattr(process, "io_counters", None)
         topics = None
+        neighborhoods = None
         if order == "lexical_order":
             from klab.corpus.lexical_topics import LexicalTopics, build_lexical_index
             from klab.corpus.split_runs import rows
@@ -571,6 +583,60 @@ def main():
                 if after is not None
                 else None,
             }
+        elif order == "link_order":
+            import sqlite3
+
+            from klab.corpus.link_neighborhoods import (
+                LinkNeighborhoods,
+                build_link_index,
+            )
+
+            links = root / "link-index"
+            links.mkdir()
+            edges = write_rows(
+                root / "links.jsonl",
+                (
+                    {"from_document_id": f"{i:064x}", "to_document_id": f"{i % 8:064x}"}
+                    for i in range(8, args.documents)
+                ),
+            )
+            evidence = SimpleNamespace(
+                sha256=edges["sha256"], max_neighborhoods=args.link_neighborhoods
+            )
+            before = io_counters() if io_counters is not None else None
+            started = time.monotonic()
+            index = build_link_index(
+                links,
+                links / "scratch.sqlite",
+                Path(edges["path"]),
+                evidence.sha256,
+                (
+                    {"document_id": f"{i:064x}", "split": "train", "stratum": "general"}
+                    for i in range(args.documents)
+                ),
+                strata=("general",),
+                max_neighborhoods=args.link_neighborhoods,
+            )
+            elapsed = time.monotonic() - started
+            after = io_counters() if io_counters is not None else None
+            result["link_build"] = {
+                "seconds": elapsed,
+                "edges": edges["rows"],
+                "evidence_bytes": edges["bytes"],
+                "index_bytes": index["files"][0]["bytes"],
+                "process_read_bytes": after.read_chars - before.read_chars
+                if after is not None
+                else None,
+                "process_write_bytes": after.write_chars - before.write_chars
+                if after is not None
+                else None,
+            }
+            db = sqlite3.connect(
+                Path(index["files"][0]["path"]).as_uri() + "?mode=ro&immutable=1",
+                uri=True,
+            )
+            db.execute("PRAGMA cache_size=-8192")
+            neighborhoods = LinkNeighborhoods(db, index, "synthetic-index", evidence)
         before = io_counters() if io_counters is not None else None
         started = time.monotonic()
         with verification_settings(scratch_dir=root):
@@ -582,7 +648,10 @@ def main():
                 source_strata,
                 {"general": 1},
                 topics=topics,
+                neighborhoods=neighborhoods,
             )
+        if neighborhoods is not None:
+            db.close()
         elapsed = time.monotonic() - started
         after = io_counters() if io_counters is not None else None
         result[order] = {
