@@ -173,7 +173,8 @@ def _handle(args: argparse.Namespace) -> None:
             root,
             cold=getattr(args, "cold", False),
             read_only=args.corpus_command in {"plan", "artifacts", "release-prune"}
-            or getattr(args, "plan", False),
+            or getattr(args, "plan", False)
+            or getattr(args, "operator_command", None) == "plan",
         ),
     ):
         _run(args)
@@ -188,6 +189,26 @@ def _run(args: argparse.Namespace) -> None:
 
     root = resolve_work_dir(args.work_dir)
     command = args.corpus_command
+    if command == "operator":
+        from klab.corpus.command_operators import (
+            inspect_command_operator,
+            plan_command_operator,
+            run_command_operator,
+        )
+
+        if args.operator_command == "plan":
+            result = plan_command_operator(root, args.declaration, replay=args.replay)
+        elif args.operator_command == "run":
+            result = run_command_operator(
+                root,
+                args.declaration,
+                authorization=args.allow_command_operators,
+                replay=args.replay,
+            )
+        else:
+            result = inspect_command_operator(root, args.key)
+        print(json.dumps(result, sort_keys=True))
+        return
     if command == "mechanisms":
         from klab.corpus.mechanism_compile import (
             MechanismCompilation,
@@ -1019,6 +1040,36 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "corpus", help="Acquire, derive, freeze and inspect corpus releases"
     )
     sub = corpus.add_subparsers(dest="corpus_command", required=True)
+    operator = sub.add_parser(
+        "operator", help="Plan, run and inspect explicitly authorized Corpus commands"
+    )
+    operator_sub = operator.add_subparsers(dest="operator_command", required=True)
+    operator_plan = operator_sub.add_parser(
+        "plan", help="Resolve command pins and approval without running code"
+    )
+    operator_run = operator_sub.add_parser(
+        "run", help="Run or replay an approved command"
+    )
+    for action in (operator_plan, operator_run):
+        action.add_argument("declaration", type=Path)
+        action.add_argument("--replay", help="Artifact key of the result to replay")
+    operator_run.add_argument(
+        "--allow-command-operators",
+        metavar="APPROVAL",
+        help="Exact authorization printed by the corresponding plan",
+    )
+    operator_inspect = operator_sub.add_parser(
+        "inspect", help="Verify and inspect published output by artifact key"
+    )
+    operator_inspect.add_argument("key")
+    for action in (operator_plan, operator_run, operator_inspect):
+        action.add_argument("--work-dir", type=Path)
+        action.add_argument(
+            "--cold",
+            action="store_true",
+            help="Verify every byte and refresh the receipt",
+        )
+        action.set_defaults(handler=_handle)
     mechanisms = sub.add_parser(
         "mechanisms", help="Simulate, compile and audit procedural worlds"
     )

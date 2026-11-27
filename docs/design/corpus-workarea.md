@@ -245,15 +245,15 @@ processed and reused units, rates, resource bounds and replay cost. Test
 that deterministic stages produce the same payload digests after
 interruption and across worker counts.
 
-The proposed external command operator binds a pinned executable and
-output-affecting dependencies, validated parameters, explicit input and
-output contracts, execution context and determinism. Require
-`--allow-command-operators` at execution. Planning and inspection never
-run commands. Checked-out paths convey no trust. Launch with staged
-inputs and outputs and validate the outputs before ingestion. A plain
-subprocess runs with the caller's filesystem and network authority.
-Advertise only isolation and resource limits actually enforced. Require
-explicit execution again for a requested replay of external code.
+The [external command operator](../corpus-preparation.md#run-an-explicitly-authorized-corpus-command)
+binds a pinned executable, declared dependencies, typed contracts and
+resolved execution context. The CLI requires explicit approval for the
+exact plan, with a separate approval for replay. Planning and inspection
+never execute code. Output schema, bounded size and alignment are verified
+before the shared store publishes anything. A nondeterministic attempt is
+reusable by its exact artifact key. The host grants a plain subprocess the
+caller’s filesystem and network authority. The CLI records the actual
+resource bounds and the command's declared environment.
 
 ## Text refinement and compilation
 
