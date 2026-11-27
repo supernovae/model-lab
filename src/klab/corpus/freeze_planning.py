@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from klab.canonical import canonical_digest
+from klab.corpus.normalized_documents import (
+    DOCUMENT_REFERENCES,
+    DOCUMENTS,
+    overlay_dependencies,
+)
 from klab.corpus.normalized_spans import (
     NORMALIZED_SPANS,
     SPAN_MEMBER,
@@ -131,6 +136,19 @@ def _shared_placement(
                     if original is not None
                     else "verify_staged_reference"
                 ),
+            }
+        )
+    if DOCUMENT_REFERENCES in files:
+        docs = overlay_dependencies(destination, files)
+        actions.append(
+            {
+                "member": DOCUMENTS,
+                "storage": "normalized_document_text",
+                "bytes": sum(path.stat().st_size for path in docs),
+                "partitions": len(docs),
+                "action": "verify_published"
+                if state == "published"
+                else "verify_build_reference",
             }
         )
     for name in files.keys() - external:

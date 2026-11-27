@@ -147,17 +147,29 @@ def unpack_documents(payload: bytes) -> tuple[str, list[tuple[int, int]]]:
 
 def read_texts(path: str, locations: list[tuple[int, int]]) -> list[str]:
     """The ``text`` of the JSONL row at each ``(offset, size)``, by positional reads."""
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        texts = []
-        for offset, size in locations:
-            raw = os.pread(descriptor, size, offset)
-            if len(raw) != size:
-                raise ValueError("mixture source changed during materialization")
-            texts.append(json.loads(raw)["text"])
-        return texts
-    finally:
-        os.close(descriptor)
+
+    def records():
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            for offset, size in locations:
+                raw = os.pread(descriptor, size, offset)
+                if len(raw) != size:
+                    raise ValueError("mixture source changed during materialization")
+                yield json.loads(raw), offset, size
+        finally:
+            os.close(descriptor)
+
+    if os.path.basename(path) != "documents.jsonl" or not os.path.isfile(
+        os.path.join(os.path.dirname(path), "documents.refs.json")
+    ):
+        return [row["text"] for row, _, _ in records()]
+
+    from pathlib import Path
+
+    from klab.corpus.normalized_documents import DocumentText
+
+    with DocumentText(Path(path)) as source:
+        return [row["text"] for row, _, _ in source.records(records())]
 
 
 def text_digests(texts: list[str]) -> np.ndarray:

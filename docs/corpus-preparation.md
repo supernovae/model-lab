@@ -4270,6 +4270,66 @@ depend on shared structure, identifier choice and the tokenizer. These
 measurements cover preparation and encoding. Learning remains a separate
 experiment.
 
+## Reference normalized document text
+
+Ordinary native disk LM builds can keep release document metadata and decisions
+in an overlay and reuse the text in verified normalized partitions. The build
+option also references normalized evidence spans, so both streams retain the
+same set of partitions. Normalization, exact group evidence and duplicate
+decisions stay independent of the placement choice.
+
+```bash
+klab corpus plan PROJECT --reference-normalized-documents --inspect-storage --json
+klab corpus build PROJECT --offline --reference-normalized-documents
+klab corpus plan --build BUILD --json
+klab corpus freeze BUILD
+```
+
+The physical `documents.jsonl` member contains review metadata and normalized
+row locators. `documents.refs.json` binds the ordered catalog to the same
+partition receipts as the evidence spans. The verified release reader resolves
+the original text, checks row alignment, and presents the same document rows
+as an inline release. Metadata consumers can use the narrow member directly.
+A tool that reads the physical JSONL and needs a `text` field should use the
+verified release reader for this placement.
+
+Freeze publishes the overlay without rewriting the normalized text. Referenced
+normalized partitions are protected by the existing publication and prune
+leases. A cold verification authenticates the document overlay, normalized
+payloads, and their exact alignment. Warm verification binds every referenced
+file generation. A damaged or missing normalized parent invalidates the
+release. Text scans group reads in bounded batches and mixture encoding budgets
+the referenced row bytes. The LM views and their normal export and preparation
+interfaces retain their existing layout.
+
+This option is available for ordinary native disk LM builds. It changes the
+build and release identities. Existing inline releases remain readable, and
+verified normalized source partitions can be reused by the new build. Keep
+the overlay and its backing normalized store together when moving the release.
+
+### Document overlay measurements
+
+An NVMe fixture added 16,000 distinct text rows of about 4 KiB each to the
+recipe-shaped release. The inline and overlay audits used the same inputs
+and warm OS page caches. Both kept the existing LM views.
+
+| Measurement | Inline | Document overlay |
+| --- | ---: | ---: |
+| Per-release document member | 98.92 MB | 33.61 MB |
+| Total files in the release directory | 264.39 MB | 190.41 MB |
+| Freeze with cold verification | 2.55 s | 2.92 s |
+| Cold audit including CLI startup | 2.51 s | 2.96 s |
+| Warm audit including CLI startup | 0.59 s | 0.59 s |
+| Logical reads in the repeated cold audit | 868.52 MB | 965.74 MB |
+
+The release directory measurements exclude the shared normalized store,
+which both builds used. The cold audit includes independent authentication
+of the backing normalized payload and the ordered reconstruction pass.
+The logical read figures were identical across three runs per arm, and
+their process counters reported zero physical storage reads. The extra
+cold reads are the measured cost of the opt-in storage saving on this
+fixture. Media-cold and production-size performance remain unmeasured.
+
 ## Simulate mechanisms and compile curricula
 
 The built-in `bounded_transfer` rule transfers integer units between two

@@ -24,11 +24,15 @@ import numpy as np
 from klab.canonical import canonical_digest
 from klab.corpus.build_stages import implementation_digests
 from klab.corpus.measurement_inputs import MeasurementTokenizer, TokenizerGeneration
+from klab.corpus.normalized_documents import (
+    document_chunks,
+    document_range,
+    source_generations,
+)
 from klab.corpus.provenance import HUMAN_ORIGIN, SOURCE_ORIGIN
 from klab.corpus.release_verify import (
     current_settings,
     line_boundaries,
-    range_records,
     scratch_root,
 )
 from klab.corpus.shards import (
@@ -69,7 +73,7 @@ def _rights_range(
     """Retained train documents in one byte range: content digest, rights state, tokens."""
     model = _tokenizer(*tokenizer)
     digests, states, tokens, seen = [], [], [], set()
-    for row, _, _ in range_records(Path(path), start, end):
+    for row, _, _ in document_range(Path(path), start, end):
         if row["split"] != "train" or row.get("drop_reason"):
             continue
         rights = row.get("rights")
@@ -108,13 +112,15 @@ def measure_source_rights(
     """
     documents = release.member("documents.jsonl")
     generation = range_file_identity(documents)
+    normalized = source_generations(documents)
     cache = cache or _scratch_cache()
     plan = ShardPlan(
         RIGHTS_STAGE,
-        [(str(documents), *r, tokenizer.source) for r in chunk_ranges(documents)],
-        generation[2],
+        [(str(documents), *r, tokenizer.source) for r in document_chunks(documents)],
+        generation[2] + sum(item[2] for item in normalized),
         {
             "documents": generation,
+            "normalized_documents": normalized,
             "tokenizer": tokenizer.identity(),
             "measurement": sha256_file(Path(__file__)),
         },

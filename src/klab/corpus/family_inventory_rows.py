@@ -77,7 +77,7 @@ def covered_family_rows(
     expected_sha256: str | None = None,
 ) -> Iterator[dict[str, str]]:
     with (
-        closing(release.rows("documents.jsonl")) as documents,
+        closing(release.rows("documents.jsonl", document_text=False)) as documents,
         closing(
             join_family_documents(
                 documents,

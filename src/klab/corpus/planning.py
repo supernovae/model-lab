@@ -460,6 +460,19 @@ def _build_storage(
         "all_normalized_candidates_present": all_prepared
         if candidates is not None
         else None,
+        "documents": {
+            "placement": "normalized_text_reference"
+            if views.get("reference_normalized_documents")
+            else "inline",
+            "retained_member_bytes": existing_manifest["files"]["documents.jsonl"][
+                "size"
+            ]
+            if existing_manifest
+            else None,
+            "normalized_candidate_bytes": candidates["docs.jsonl"]
+            if candidates is not None and all_prepared
+            else None,
+        },
         "spans": {
             "logical_bytes": logical_spans,
             "flat_output_bytes": file_bytes,
@@ -474,9 +487,11 @@ def plan_build(
     work_root: Path,
     *,
     reference_normalized_spans: bool = False,
+    reference_normalized_documents: bool = False,
     inspect_storage: bool = False,
 ) -> dict[str, Any]:
     """Plan a full native build using acquisition inventory and retained metadata."""
+    reference_normalized_spans |= reference_normalized_documents
     lock = work_root / "corpora" / project.config.id / "acquisition.json"
     normalized_root = normalized_store_root(work_root)
     plan: dict[str, Any] = {
@@ -555,11 +570,16 @@ def plan_build(
         ):
             raise ValueError("acquisition source inventory does not match project")
         identity, _, _ = build_identity(
-            project, entries, reference_normalized_spans=reference_normalized_spans
+            project,
+            entries,
+            reference_normalized_spans=reference_normalized_spans,
+            reference_normalized_documents=reference_normalized_documents,
         )
         build_id = canonical_digest(identity)
         target = lock.parent / "builds" / build_id
         stage_by_id = {stage["id"]: stage for stage in plan["stages"]}
+        if reference_normalized_documents:
+            stage_by_id["views"]["reference_normalized_documents"] = True
         if reference_normalized_spans:
             stage_by_id["views"]["reference_normalized_spans"] = True
         stage_by_id["acquire"]["action"] = "verify_pinned"

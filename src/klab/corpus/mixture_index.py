@@ -25,6 +25,7 @@ from typing import Any, ClassVar
 import numpy as np
 
 from klab.canonical import canonical_digest, canonical_json
+from klab.corpus.normalized_documents import TEXT_REFERENCE
 from klab.corpus.shards import declare_stage, plan_ranges, run_sharded
 from klab.training.manifest import sha256_file
 
@@ -124,6 +125,7 @@ DOCUMENT_COLUMNS = {
     "content": "S",
     "offset": "<u8",
     "size": "<u4",
+    "document_bytes": "<u4",
     "split": "u1",
     "stratum": "u1",
     "eligible": "?",
@@ -217,6 +219,9 @@ def _documents_range(path: str, start: int, end: int, strata: dict[str, str]):
         columns["content"].append(_text(doc["content_sha256"]))
         columns["offset"].append(offset)
         columns["size"].append(size)
+        normalized = doc.get(TEXT_REFERENCE)
+        promised = max(size, normalized[2]) if normalized is not None else size
+        columns["document_bytes"].append(min(promised, MAX_ROW_BYTES + 1))
         columns["split"].append(split_code.get(doc["split"], len(SPLITS)))
         columns["stratum"].append(
             code[expected]
@@ -397,6 +402,7 @@ class Selection:
         "content": "S{content_width}",
         "offset": "<u8",
         "size": "<u4",
+        "document_bytes": "<u4",
         "family": "<u4",
         "source": "<u4",
     }
@@ -439,7 +445,7 @@ class Selection:
         return cls(directory)
 
     def candidates(self, stratum: str, frontier=None) -> Iterator[tuple]:
-        """`(offset, family, rank, id, size, content, source)` after the frontier."""
+        """`(offset, family, rank, id, size, content, source, document_bytes)` after the frontier."""
         start, end = self.strata.get(stratum, (0, 0))
         if frontier is not None:
             rank, doc_id = (item.encode("utf-8") for item in frontier)
@@ -464,6 +470,7 @@ class Selection:
                     batch["size"][index],
                     batch["content"][index].decode("utf-8"),
                     self.sources[batch["source"][index]],
+                    batch["document_bytes"][index],
                 )
 
 
@@ -585,8 +592,17 @@ class MixtureIndex:
         cursor = self.selection.candidates(stratum, frontier)
         path = str(Path(self.documents.name).resolve())
         try:
-            for offset, family, rank, doc_id, size, content, source in cursor:
-                if size > MAX_ROW_BYTES:
+            for (
+                offset,
+                family,
+                rank,
+                doc_id,
+                size,
+                content,
+                source,
+                document_bytes,
+            ) in cursor:
+                if document_bytes > MAX_ROW_BYTES:
                     raise ValueError("mixture record-byte cap exceeded")
                 self.frontier = [rank, doc_id]
                 yield (
@@ -597,6 +613,7 @@ class MixtureIndex:
                         "content_sha256": content,
                         "path": path,
                         "location": (offset, size),
+                        "document_bytes": document_bytes,
                     },
                     family,
                 )
