@@ -157,13 +157,20 @@ def build(tmp: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         train_tokens=1000,
         validation=np.zeros(10, dtype=np.int32),
     )
-    monkeypatch.setattr("klab.corpus.release.verify_release", lambda *a, **k: manifest)
+    from klab import staging
+    from klab.corpus import mixture as mixture_module
+    from klab.corpus import release as release_module
+    from klab.data import packing, tokenizer
+
+    # Import consumers before replacing their dependencies. Their from-imports
+    # must keep the real helpers after the fixture restores these attributes.
+    monkeypatch.setattr(release_module, "verify_release", lambda *a, **k: manifest)
     monkeypatch.setattr(
-        "klab.corpus.mixture.verify_mixture_dataset", lambda *a, **k: receipt
+        mixture_module, "verify_mixture_dataset", lambda *a, **k: receipt
     )
-    monkeypatch.setattr("klab.data.packing.prepare_data", lambda *a, **k: prepared)
-    monkeypatch.setattr("klab.data.tokenizer.load_tokenizer", lambda path: None)
-    monkeypatch.setattr("klab.staging.verify_stage_bundle", lambda *a, **k: staged)
+    monkeypatch.setattr(packing, "prepare_data", lambda *a, **k: prepared)
+    monkeypatch.setattr(tokenizer, "load_tokenizer", lambda path: None)
+    monkeypatch.setattr(staging, "verify_stage_bundle", lambda *a, **k: staged)
 
     report_path = tmp / "near-duplicates.json"
     near = {

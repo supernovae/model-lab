@@ -24,13 +24,13 @@ The [D1–D12 decision table](https://github.com/supernovae/model-lab/blob/b5302
 | Original increment | Evidence on main | Remaining work |
 | --- | --- | --- |
 | 1. Shared shard runner and verification | #494 and #495 landed the range runner. #576 bounds its worker window by CPU and available RAM, limits native threads, and verifies cached JSON and file-backed results within the same window. | Extend bounded scratch admission and receipted reductions to the remaining long passes. |
-| 2. Near-duplicate screen | #491 and #496 landed checkpointing, sharded scans, and template-aware classes. Completed screens can retain verified held-out and sampled training shingle evidence across changes to classification thresholds. | Reuse the constructed held-out index where it pays off. Add passage-level grouping and measure classification precision. |
+| 2. Near-duplicate screen | #491 and #496 landed checkpointing, sharded scans, and template-aware classes. Completed screens can retain verified held-out and sampled training shingle evidence across threshold changes. The same screen can emit advisory passage IDs and spans and score labeled pairs. | Measure constructed index reuse and classification on representative production sources. |
 | 3. Tokenizer sampling | #494 and #499 landed range scans and seeded-hash sampling. Workshop #112 pins the sample seed. | Keep this path. Track fit and cold sample-verification costs separately from sample selection. |
 | 4. Acquisition parts | #456 landed the verified transport cache. Bounded Git, Hugging Face and PDF reuse verified parts. Archives and wiki dumps reuse pinned inputs and completed derivations. Indexed Wikimedia commits planning and extraction in groups. #601 adds exact-generation staging inspection and removal under the adapter lock. | Measure representative archive and partial-body replay, wider Wikimedia runs, and recovery on slower storage. |
 | 5. Narrow build | #486 checkpoints complete disk-build index and dedup stages. #488 landed the canary. #579 resumes native disk LM view emission from verified append boundaries. The native disk index references prepared payloads and checkpoints groups of prepared files. | Measure out-of-cache emission and the largest input group. Bound compact index assembly, dedup replay, report measurement and manifest hashing. Extend emission recovery to completed preparation. |
 | 6. Freeze and verification | #500–#502 landed signed receipt reuse, freeze by verified rename, and resumable describe measurement. Cold verification still performs full checks. Reviewed, fractional and chat releases index file ranges and compact metadata for replay. | Extend checkpointing and measure out-of-cache replay for reviewed releases. Separate integrity from transformation replay and sampled audits. |
 | 7. Shared work area | `StageStore`, normalized shards, and token caches exist. Most source and build artifacts are still project-scoped. | Share immutable outputs across projects, narrow identities, and protect reference closure during explicit pruning. |
-| 8–9. Operators and sidecars | #448/#451 moved choice into recorded release policy. The normalized annotation store publishes typed text, source-language, quality, and privacy evidence. Native LM TRAIN selection consumes it through the regular build and verification path. #704 adds retained shingle evidence for rescreening. The native index retains exact group summaries independent of duplicate policy and supports bounded inspection of members and decisions. | Add passage and partition-level template evidence. Measure exact-content annotation memoization and calibrate evidence. |
+| 8–9. Operators and sidecars | #448/#451 moved choice into recorded release policy. The shared annotation path publishes text, upstream and detected language, quality, privacy, and source-local repeated-line evidence. Native TRAIN selection consumes approved predicates. The native index retains policy-independent exact groups with bounded inspection. Labeled audits cover annotations and document or passage screens. | Measure detector coverage and source quality on each planned production recipe. |
 | 10. Reference releases and mixtures | #503–#507 improved quota checks, mixture indexing, and the ordered writer. #519–#523 and #557 improved reuse and verification keys. Mixture checkpoints bind prefixes of the files that will be published. The sealed cache publishes bounded int32 or opt-in uint16 segments keyed on exact content, tokenizer behavior and physical encoding. Reference schedules bind exact segment dependencies. An opt-in direct loader reads those segments. Reference-only bundles own the schedule, records, validation and masks. Offline dispatch supports whole sealed segments or selected ranges with fidelity checks, and transfer inspection compares their physical bytes. | Measure accelerator use and batch wait at production sizes. Compare loader modes before choosing a default. Measure the transfer and replay costs of selected ranges on deployed workers. |
 | 11–12. Planner and external operators | Existing CLI, journals, preflight and dashboard supply entry points. | Add dependency plans, bounded inspection and explicitly authorized command operators. |
 | 13. Training preemption | #533 added opt-in device-layout changes under runtime optimization. #535/#537 added finished-run data cleanup and reuse. | Trainer recovery stays with #485 and #516. Corpus tracks data and schedule identity so those changes can proceed independently. |
@@ -281,7 +281,8 @@ explicit execution again for a requested replay of external code.
   upstream row label after duplicate resolution. Ordinary and reviewed
   builds check the decision in source replay. Completed preparation uses
   authenticated renders and binds the resulting views to signed build
-  evidence. Language detection remains separate work.
+  evidence. A separate bounded language detector reports its own observations
+  and abstentions and can memoize text-only work by exact content digest.
   The source-quality annotator preserves typed upstream scores, token
   counts and family-qualification evidence. The TRAIN policy sets a minimum
   in each named source's units and handles missing and invalid values explicitly.
@@ -293,8 +294,10 @@ explicit execution again for a requested replay of external code.
   contact-detail candidates and publishes document IDs and category
   flags. The optional TRAIN policy selects which candidate categories to exclude.
   Both policies compose with byte and row-language filtering and record their
-  exclusion counts and resulting mixture supply. Detector calibration remains
-  separate from release selection.
+  exclusion counts and resulting mixture supply. Partition-local repeated-line
+  profiles and passage matches remain advisory. Labeled audits bind the exact
+  sidecar payloads, candidate reports, and manual labels so threshold changes
+  can be compared on the same sample.
 - **Coherent packing first.** Compare seeded random, source-coherent,
   lexical-topic, explicit-entity and link-neighborhood schedules using
   identical natural-language bytes and exposure budgets. Assign semantic

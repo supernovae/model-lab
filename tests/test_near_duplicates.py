@@ -83,7 +83,9 @@ def test_template_only_pairs_are_counted_and_real_copies_stay_candidates(
 ) -> None:
     documents = _write(tmp_path / "documents.jsonl", corpus["rows"])
     strict = screen_documents(documents, identity="x")
-    aware = screen_documents(documents, identity="x", template_aware=True)
+    aware = screen_documents(
+        documents, identity="x", template_aware=True, list_template_pairs=True
+    )
 
     assert strict["parameters"]["template_aware"] is False
     assert "template_only" not in strict
@@ -124,6 +126,47 @@ def test_template_only_pairs_are_counted_and_real_copies_stay_candidates(
     # The pair that is a candidate is not also counted as template_only.
     assert aware["template_only_document_count"] == 25
     assert aware["boilerplate"]["heldout_shingles"] > 0
+
+    from klab.corpus.evidence_audit import audit_evidence
+    from klab.training.manifest import sha256_file
+
+    report = tmp_path / "template-report.json"
+    report.write_text(json.dumps(aware))
+    labels = tmp_path / "labels.json"
+    cohort = {
+        "report": report.name,
+        "sha256": sha256_file(report),
+        "pairs": [
+            {"units": ["h00", "t_template"], "expected": "template_only"},
+            {"units": ["h03", "t_copy"], "expected": "candidate"},
+            {"units": ["h07", "t_same"], "expected": "candidate"},
+            {"units": ["h00", "t_short"], "expected": "absent"},
+        ],
+    }
+    labels.write_text(json.dumps({"screens": [cohort]}))
+    [measured] = audit_evidence(tmp_path, labels)["screens"]
+    assert measured["predictions_by_expected_class"] == {
+        "template_only": {"template_only": 1},
+        "candidate": {"candidate": 2},
+        "absent": {"absent": 1},
+    }
+    assert measured["metrics"]["candidate"]["recall"] == 1
+    assert measured["metrics"]["template_only"]["precision"] == 1
+    assert measured["unlisted_pairs"] == 0
+    truncated = screen_documents(
+        documents,
+        identity="x",
+        template_aware=True,
+        list_template_pairs=True,
+        max_candidates=1,
+    )
+    report.write_text(json.dumps(truncated))
+    with pytest.raises(ValueError, match="screen digest differs"):
+        audit_evidence(tmp_path, labels)
+    cohort["sha256"] = sha256_file(report)
+    labels.write_text(json.dumps({"screens": [cohort]}))
+    [measured] = audit_evidence(tmp_path, labels)["screens"]
+    assert measured["unlisted_pairs"] > 0
 
 
 def test_the_training_sample_finds_a_template_the_heldout_side_barely_shows(
@@ -178,15 +221,26 @@ def test_the_training_sample_finds_a_template_the_heldout_side_barely_shows(
     assert screen_documents(documents, **retained, **new_policy) == fresh
 
 
-@pytest.mark.parametrize("template_aware", [False, True])
+@pytest.mark.parametrize(
+    ("template_aware", "passage_words"), [(False, None), (True, None), (True, 32)]
+)
 def test_shards_workers_and_a_killed_run_all_give_the_serial_report(
-    tmp_path: Path, corpus, monkeypatch: pytest.MonkeyPatch, template_aware: bool
+    tmp_path: Path,
+    corpus,
+    monkeypatch: pytest.MonkeyPatch,
+    template_aware: bool,
+    passage_words: int | None,
 ) -> None:
     from klab.corpus import shards
 
     documents = _write(tmp_path / "documents.jsonl", corpus["rows"])
     size = documents.stat().st_size
-    options = {"identity": "x", "template_aware": template_aware}
+    options = {
+        "identity": "x",
+        "template_aware": template_aware,
+        "passage_words": passage_words,
+        "list_template_pairs": template_aware,
+    }
     whole = screen_documents(documents, shard_bytes=size, **options)
     assert near_duplicates._line_ranges(documents, 4096)[1:]
     monkeypatch.setattr(shards, "PARALLEL_MIN_BYTES", 0)
@@ -234,9 +288,9 @@ def test_shards_workers_and_a_killed_run_all_give_the_serial_report(
     scans = []
     scan = near_duplicates._scan_file
 
-    def count_scan(staging, path, start, end, options):
+    def count_scan(staging, path, start, end, *options):
         scans.append((start, end))
-        return scan(staging, path, start, end, options)
+        return scan(staging, path, start, end, *options)
 
     monkeypatch.setattr(near_duplicates, "_scan_file", count_scan)
     calls.update(count=0, kill_at=None)

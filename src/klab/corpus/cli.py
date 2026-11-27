@@ -188,23 +188,27 @@ def _run(args: argparse.Namespace) -> None:
     root = resolve_work_dir(args.work_dir)
     command = args.corpus_command
     if command == "annotate-normalized":
-        from klab.corpus.privacy_candidates import annotate_privacy_candidates
-        from klab.corpus.privacy_exclusions import annotate_privacy_exclusions
-        from klab.corpus.source_language import annotate_source_language
-        from klab.corpus.source_quality import annotate_source_quality
-        from klab.corpus.text_statistics import annotate_normalized
+        from klab.corpus.annotation_kinds import ANNOTATORS
 
-        annotators = {
-            "text-statistics": annotate_normalized,
-            "source-language": annotate_source_language,
-            "source-quality": annotate_source_quality,
-            "privacy-exclusions": annotate_privacy_exclusions,
-            "privacy-candidates": annotate_privacy_candidates,
-        }
-        result = annotators[args.kind](
-            root, args.partition, offset=args.offset, limit=args.limit
+        options = {}
+        for value, name, kind in (
+            (args.template_sample_documents, "sample_documents", "template-lines"),
+            (args.template_min_support, "min_support", "template-lines"),
+            (args.memoize_content, "memoize_content", "detected-language"),
+        ):
+            if value is not None:
+                if args.kind != kind:
+                    raise ValueError(f"annotation option {name} requires {kind}")
+                options[name] = value
+        result = ANNOTATORS[args.kind](
+            root, args.partition, offset=args.offset, limit=args.limit, **options
         )
         print(json.dumps(result, sort_keys=True))
+        return
+    if command == "audit-evidence":
+        from klab.corpus.evidence_audit import audit_evidence
+
+        print(json.dumps(audit_evidence(root, args.labels), sort_keys=True))
         return
     if command == "duplicate-groups":
         from klab.corpus.duplicate_review import review_groups
@@ -920,6 +924,7 @@ def _run(args: argparse.Namespace) -> None:
                 ("max_heldout_documents", args.max_heldout_documents),
                 ("max_heldout_shingles", args.max_heldout_shingles),
                 ("max_candidates", args.max_candidates),
+                ("min_jaccard", args.min_jaccard),
                 ("boilerplate_heldout_documents", args.boilerplate_heldout_documents),
                 ("boilerplate_sample_documents", args.boilerplate_sample_documents),
                 ("boilerplate_sample_stride", args.boilerplate_sample_stride),
@@ -935,6 +940,8 @@ def _run(args: argparse.Namespace) -> None:
             shard_bytes=args.shard_bytes,
             template_aware=args.template_aware,
             retain_evidence=args.retain_evidence,
+            passage_words=args.passage_words,
+            list_template_pairs=args.list_template_pairs,
             **caps,
         )
     else:
@@ -943,6 +950,7 @@ def _run(args: argparse.Namespace) -> None:
 
 
 def add_commands(commands: argparse._SubParsersAction) -> None:
+    from klab.corpus.annotation_kinds import ANNOTATORS
     from klab.corpus.release_members import SHARED_STORES
 
     corpus = commands.add_parser(
@@ -981,19 +989,21 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     command.add_argument("partition", metavar="SOURCE/KEY")
     command.add_argument(
         "--kind",
-        choices=(
-            "text-statistics",
-            "source-language",
-            "source-quality",
-            "privacy-exclusions",
-            "privacy-candidates",
-        ),
+        choices=tuple(ANNOTATORS),
         default="text-statistics",
     )
     command.add_argument("--offset", type=int, default=0)
+    command.add_argument("--template-sample-documents", type=int)
+    command.add_argument("--template-min-support", type=int)
+    command.add_argument("--memoize-content", action="store_true", default=None)
     command.add_argument(
         "--limit", type=int, default=0, help="Rows to inspect, or zero for a summary"
     )
+    command.set_defaults(handler=_handle)
+    command = sub.add_parser(
+        "audit-evidence", help="Score a labeled sample against Corpus evidence"
+    )
+    command.add_argument("labels", type=Path, metavar="LABELS.json")
     command.set_defaults(handler=_handle)
     command = sub.add_parser(
         "duplicate-groups", help="Page verified native duplicate groups and decisions"
@@ -1499,6 +1509,17 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
             command.add_argument("--vocab-size", required=True, type=int)
             command.add_argument("--min-frequency", type=int, default=1)
         if name == "near-duplicates":
+            command.add_argument("--min-jaccard", type=float)
+            command.add_argument(
+                "--passage-words",
+                type=int,
+                help="Screen bounded overlapping passages of this word width",
+            )
+            command.add_argument(
+                "--list-template-pairs",
+                action="store_true",
+                help="List bounded template-only pairs for labeled review",
+            )
             for flag in (
                 "max-heldout-documents",
                 "max-heldout-shingles",

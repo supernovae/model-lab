@@ -39,6 +39,8 @@ class NormalizedAnnotator:
     row: struct.Struct
     render: Callable[[HashingWriter, Iterator[tuple[bytes, dict]], dict], dict]
     decode: Callable[[tuple, dict], dict]
+    options: dict | None = None
+    prepare: Callable[[Iterator[tuple[bytes, dict]], dict], dict] | None = None
 
 
 def _parent(work_root, partition):
@@ -91,18 +93,19 @@ def _parent(work_root, partition):
 
 
 def _render(output, docs, parent, expected, source, annotator):
+    profile_rows = expected if annotator.prepare is not None else 0
     with (
         output.open("xb") as stream,
         progress_phase(
             "corpus_" + annotator.kind.replace("-", "_"),
-            total_work=expected,
+            total_work=expected + profile_rows,
             unit="documents",
         ) as progress,
     ):
         writer = HashingWriter(stream)
         count = 0
 
-        def documents():
+        def documents(*, output_rows, completed_before=0):
             nonlocal count
             with closing(
                 records_from_path(
@@ -111,30 +114,44 @@ def _render(output, docs, parent, expected, source, annotator):
                     expected_sha256=parent["documents_sha256"],
                 )
             ) as records:
-                for count, record in enumerate(records, 1):
+                seen = 0
+                for seen, record in enumerate(records, 1):
                     row = record.value
                     doc_id = row.get("document_id") if isinstance(row, dict) else None
                     if (
-                        count > expected
+                        seen > expected
                         or not isinstance(doc_id, str)
                         or not _DIGEST.fullmatch(doc_id)
                     ):
                         raise ValueError("invalid document in normalized partition")
-                    if count % 8192 == 0:
-                        progress.update(completed_work=count, emit=False)
+                    if output_rows:
+                        count = seen
+                    if seen % 8192 == 0:
+                        progress.update(
+                            completed_work=completed_before + seen, emit=False
+                        )
                     yield bytes.fromhex(doc_id), row
+                if seen != expected:
+                    raise ValueError(
+                        "normalized partition document count differs from its receipt"
+                    )
 
-        with closing(documents()) as rows:
+        if annotator.prepare is not None:
+            with closing(documents(output_rows=False)) as rows:
+                source = annotator.prepare(rows, source)
+                if next(rows, None) is not None:
+                    raise ValueError(
+                        "annotation preparation stopped before the end of the partition"
+                    )
+        with closing(
+            documents(output_rows=True, completed_before=profile_rows)
+        ) as rows:
             summary = annotator.render(writer, rows, source)
             if next(rows, None) is not None:
                 raise ValueError(
                     "annotation producer stopped before the end of the partition"
                 )
-        if count != expected:
-            raise ValueError(
-                "normalized partition document count differs from its receipt"
-            )
-        progress.update(completed_work=count)
+        progress.update(completed_work=count + profile_rows)
         proof = writer.seal(output)
         if proof.size_bytes != count * annotator.row.size:
             raise ValueError("annotation producer wrote an unexpected payload size")
@@ -210,6 +227,7 @@ def annotate_partition(
                 "jsonl_records.py",
             ),
             "input": parent,
+            **({"options": annotator.options} if annotator.options is not None else {}),
         }
         key = canonical_digest(request)
         root = (
