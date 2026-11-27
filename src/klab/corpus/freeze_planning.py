@@ -32,6 +32,7 @@ from klab.corpus.release import (
     release_index_workspace,
     release_manifest_payload,
     release_row_index_inputs,
+    reviewed_row_index_inputs,
     streaming_verification,
 )
 from klab.corpus.release_members import (
@@ -216,7 +217,12 @@ def _shared_placement(
 
 
 def _retained_row_indexes(
-    root: Path, scratch: Path, manifest: dict[str, Any], identity: dict[str, Any]
+    root: Path,
+    scratch: Path,
+    manifest: dict[str, Any],
+    identity: dict[str, Any],
+    *,
+    streaming: bool,
 ) -> list[dict[str, Any]]:
     from klab.corpus.build_stages import StageStore
     from klab.corpus.planning import plan_stage_candidate
@@ -231,6 +237,33 @@ def _retained_row_indexes(
         return []
     if not trust.trusted(workspace.parent) or not trust.trusted(workspace):
         raise ValueError(f"unsafe release index workspace: {workspace}")
+    store = StageStore(workspace)
+    if not streaming:
+        proof_store = current_settings().proof_store
+        if proof_store is None:
+            return []
+        results = []
+        for stage, inputs, paths in reviewed_row_index_inputs(root, manifest):
+            candidate, _ = plan_stage_candidate(store, stage, inputs)
+            key = candidate["computation_key"]
+            if (
+                candidate["action"] == "verify_candidate"
+                and not lookup(
+                    proof_store,
+                    "reviewed_row_index",
+                    store.directory(stage, key),
+                    key,
+                    list(paths.values()),
+                    skip_index_on_missing=True,
+                ).hit
+            ):
+                candidate.update(
+                    action="run",
+                    verification_candidate_bytes=None,
+                    reason="no current signed checkpoint",
+                )
+            results.append({"id": stage, "when": "first", **candidate})
+        return results
     members = ReleaseMembers(root, manifest)
     keys = release_row_index_inputs(
         {name: members.member_paths(name) for name in RELEASE_ROW_INDEX_MEMBERS},
@@ -239,7 +272,6 @@ def _retained_row_indexes(
         NormalizerOptions.model_validate(identity["release"]["normalizer"]),
         checkpointed=True,
     )
-    store = StageStore(workspace)
     return [
         {
             "id": stage,
@@ -294,11 +326,12 @@ def _verification_step(
         ).hit:
             return {**result, "method": "receipt", "scratch_bytes": 0}
     if (
-        streaming
-        and settings.scratch_dir is not None
+        settings.scratch_dir is not None
         and settings.verification_mode == "verified_reuse"
     ):
-        result["row_indexes"] = _retained_row_indexes(root, scratch, manifest, identity)
+        result["row_indexes"] = _retained_row_indexes(
+            root, scratch, manifest, identity, streaming=streaming
+        )
     return {**result, "method": "verify_bytes"}
 
 

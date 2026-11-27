@@ -128,12 +128,16 @@ class EvidenceFiles:
         return artifact_fingerprint(path)
 
     def records(self, path):
-        if path not in self.generations:
-            self.generations[path] = self._generation(path)
+        self.bind(path)
         with path.open("rb") as stream:
             if artifact_fingerprint(stream.fileno()) != self.generations[path]:
                 raise ValueError(f"indexed evidence changed: {path}")
             yield from iter_jsonl_records(stream, source=str(path))
+
+    def bind(self, path):
+        """Track an input generation even when a retained index supplies its ranges."""
+        if path not in self.generations:
+            self.generations[path] = self._generation(path)
 
     def row(self, path, offset, size):
         if path not in self.streams:
@@ -162,11 +166,15 @@ class FileRowIndex(_KeyIndex):
         duplicate="duplicate evidence identity",
         order=None,
         projection=None,
+        table=None,
+        progress=None,
     ):
         self.connection = connection
         self.files = files
         self.paths = tuple(paths.values())
-        self.table = "evidence_" + uuid4().hex
+        self.table = table or "evidence_" + uuid4().hex
+        if not self.table.isidentifier():
+            raise ValueError("invalid row index table name")
         self.last = None
         connection.execute(
             f"CREATE TABLE {self.table}(key TEXT PRIMARY KEY, ordinal INTEGER UNIQUE, "
@@ -176,8 +184,17 @@ class FileRowIndex(_KeyIndex):
 
         def references():
             ordinal = 0
+            pending_rows = pending_bytes = 0
             for member, (label, path) in enumerate(paths.items()):
                 for record in files.records(path):
+                    if progress is not None:
+                        pending_rows += 1
+                        pending_bytes += len(record.raw)
+                        if pending_rows >= 4096 or pending_bytes >= 64 * 1024**2:
+                            progress.update(
+                                documents=pending_rows, input_bytes=pending_bytes
+                            )
+                            pending_rows = pending_bytes = 0
                     row = record.value
                     row_key = key(label, row)
                     if row_key is None:
@@ -199,6 +216,8 @@ class FileRowIndex(_KeyIndex):
                         else None,
                     )
                     ordinal += 1
+            if progress is not None:
+                progress.update(documents=pending_rows, input_bytes=pending_bytes)
 
         try:
             with database_byte_cap("evidence database byte cap exceeded"):
@@ -207,6 +226,23 @@ class FileRowIndex(_KeyIndex):
                 )
         except sqlite3.IntegrityError as error:
             raise ValueError(duplicate) from error
+
+    @classmethod
+    def attach(cls, connection, files, path, database, alias):
+        """Open a verified, single-member retained range index without copying it."""
+        if not alias.isidentifier():
+            raise ValueError("invalid row index database name")
+        files.bind(path)
+        connection.execute(
+            f"ATTACH DATABASE ? AS {alias}", (database.resolve().as_uri() + "?mode=ro",)
+        )
+        index = cls.__new__(cls)
+        index.connection = connection
+        index.files = files
+        index.paths = (path,)
+        index.table = f"{alias}.records"
+        index.last = None
+        return index
 
     def _row(self, member, offset, size):
         return self.files.row(self.paths[member], offset, size)
