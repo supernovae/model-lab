@@ -457,12 +457,19 @@ def _verify_source_snapshots(
 
 def streaming_verification(identity: dict[str, Any]) -> bool:
     """Whether the bounded-memory row validator applies (no reviewed admission)."""
-    return (
+    from klab.corpus.train_selection import minimum_train_bytes
+
+    applicable = (
         identity["release"].get("record_admission") is None
         and not identity["release"]["chat"]["selected"]
         and all(spec["kind"] == "lm_text" for spec in identity["transforms"])
         and identity["release"].get("fraction") is None
     )
+    if not applicable and minimum_train_bytes(identity["transforms"]) is not None:
+        raise ValueError(
+            "minimum TRAIN text size requires ordinary disk LM verification"
+        )
+    return applicable
 
 
 # Lines per parallel LM-view task; both files of a view are cut at the same line.
@@ -566,6 +573,7 @@ def _document_rows(
     end: int,
     options: NormalizerOptions,
     keys: tuple[str, ...],
+    include_text_bytes: bool = False,
 ):
     with (
         closing(_readonly(span_database)) as db,
@@ -584,7 +592,10 @@ def _document_rows(
 
         rows, replay_rows, duplicate_keys = [], [], []
         for doc, _, _ in range_records(Path(documents), start, end):
-            content_digest = hashlib.sha256(doc["text"].encode("utf-8")).digest()
+            encoded_text = doc["text"].encode("utf-8")
+            content_digest = hashlib.sha256(encoded_text).digest()
+            text_bytes = len(encoded_text)
+            del encoded_text
             if doc["content_sha256"] != content_digest.hex():
                 raise ValueError("document content digest mismatch")
             _verify_cleaning_decision(doc, options)
@@ -642,6 +653,7 @@ def _document_rows(
                     doc["source_family"],
                     doc["modality"],
                     json.dumps(doc["domains"]),
+                    *((text_bytes,) if include_text_bytes else ()),
                 )
             )
             replay_rows.append(
@@ -978,23 +990,35 @@ def _lineage_rows(database: str, lineage: str, start: int, end: int, origins):
 
 
 def _stage_rows(
-    database: str, path: str, start: int, end: int, selected: frozenset[str]
+    database: str,
+    path: str,
+    start: int,
+    end: int,
+    selected: frozenset[str],
+    minimum: int | None = None,
 ):
     db = _readonly(database)
     try:
         ids = array("q")
         for row, _, _ in range_records(Path(path), start, end):
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"record_id", "text", "split"}
+                or not isinstance(row["text"], str)
+            ):
+                raise ValueError("LM stage record differs from selected document")
             doc = db.execute(
                 "SELECT content_sha256, split, source, dropped, rowid FROM docs WHERE id=?",
                 (row["record_id"],),
             ).fetchone()
+            text = row["text"].encode("utf-8")
             if (
                 doc is None
-                or set(row) != {"record_id", "text", "split"}
-                or hashlib.sha256(row["text"].encode("utf-8")).digest() != doc[0]
+                or hashlib.sha256(text).digest() != doc[0]
                 or row["split"] != doc[1]
                 or (selected and doc[2] not in selected)
                 or doc[3] is not None
+                or (minimum is not None and doc[1] == "train" and len(text) < minimum)
             ):
                 raise ValueError("LM stage record differs from selected document")
             ids.append(doc[4])
@@ -1012,6 +1036,7 @@ def _view_rows(
     link_start: int,
     count: int,
     eligible_sources: frozenset[str],
+    minimum: int | None = None,
 ):
     db = _readonly(database)
     try:
@@ -1034,14 +1059,18 @@ def _view_rows(
                     "SELECT content_sha256, split, dropped, source, rowid FROM docs WHERE id=?",
                     (ref["record_id"],),
                 ).fetchone()
+                text = row["text"].encode("utf-8")
                 if (
                     found is None
                     or (
-                        hashlib.sha256(row["text"].encode("utf-8")).digest(),
+                        hashlib.sha256(text).digest(),
                         split,
                         None,
                     )
                     != found[:3]
+                    or (
+                        minimum is not None and split == "train" and len(text) < minimum
+                    )
                 ):
                     raise ValueError("invalid LM record or lineage")
                 if found[3] not in eligible_sources:
@@ -1137,6 +1166,8 @@ def release_row_index_inputs(
     checkpointed: bool,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Bind the row index keys to the exact files and verification rules."""
+    from klab.corpus.train_selection import minimum_train_bytes
+
     producer = verifier_digest("release") if checkpointed else None
     file_bindings = {
         name: {
@@ -1159,6 +1190,11 @@ def release_row_index_inputs(
             **common,
             "files": file_bindings,
             "keys": identity["release"]["policy"]["duplicates"]["keys"],
+            **(
+                {"include_text_bytes": True}
+                if minimum_train_bytes(identity.get("transforms", ())) is not None
+                else {}
+            ),
         },
     )
 
@@ -1320,12 +1356,15 @@ def _release_row_indexes(
         phase("spans", *spans_paths)
         span_database, spans = run("spans", span_inputs, build_spans)
         files_database = str(Path(span_database).with_name("files.sqlite"))
+        include_text_bytes = document_inputs.get("include_text_bytes", False)
+        byte_column = ", utf8_bytes INTEGER" if include_text_bytes else ""
+        placeholders = ",".join("?" for _ in range(9 + include_text_bytes))
 
         def index_documents(db, evidence, spool):
             db.execute(
                 "CREATE TABLE docs (id TEXT, source TEXT, split TEXT, "
                 "representative TEXT, dropped TEXT, content_sha256 BLOB, "
-                "source_family TEXT, modality TEXT, domains TEXT)"
+                f"source_family TEXT, modality TEXT, domains TEXT{byte_column})"
             )
             db.execute(
                 "ATTACH DATABASE ? AS span_files",
@@ -1338,7 +1377,7 @@ def _release_row_indexes(
 
             def load(rows):
                 docs, replay, keys, size = rows
-                db.executemany("INSERT INTO docs VALUES (?,?,?,?,?,?,?,?,?)", docs)
+                db.executemany(f"INSERT INTO docs VALUES ({placeholders})", docs)
                 spool.executemany(
                     "INSERT INTO replay VALUES (?,?,?,?,?,?,?,?,?)", replay
                 )
@@ -1357,6 +1396,7 @@ def _release_row_indexes(
                         end,
                         options,
                         tuple(document_inputs["keys"]),
+                        include_text_bytes,
                     )
                     for start, end in chunk_ranges(documents_path)
                 ),
@@ -1465,6 +1505,10 @@ def _validate_rows_streaming(
     raw offsets during the initial scan. Replay reads the pinned source file
     and the checked facts without revisiting the release payloads.
     """
+    from klab.corpus.train_selection import (
+        minimum_train_bytes,
+        verify_train_selection_report,
+    )
 
     support_generations = {
         root / name: range_file_identity(root / name) for name in _REPLAY_SUPPORT
@@ -1478,6 +1522,7 @@ def _validate_rows_streaming(
     )
     members = ReleaseMembers(root, receipt)
     identity = receipt.get("identity", receipt.get("build_identity"))
+    minimum = minimum_train_bytes(identity["transforms"])
     options = _release_normalizer(identity)
     pinned_snapshots = {row["source_id"]: row["sha256"] for row in receipt["snapshots"]}
     if len(pinned_snapshots) != len(receipt["snapshots"]) or pinned_snapshots != {
@@ -1565,6 +1610,21 @@ def _validate_rows_streaming(
                     "SELECT source, COUNT(*) FROM docs WHERE dropped IS NULL GROUP BY source"
                 )
             )
+            excluded_by_source = {}
+            if minimum is not None:
+                excluded_by_source = dict(
+                    db.execute(
+                        "SELECT source, COUNT(*) FROM docs WHERE dropped IS NULL AND split='train' "
+                        "AND utf8_bytes < ? GROUP BY source",
+                        (minimum,),
+                    )
+                )
+
+            def expected_rows(selected):
+                return sum(
+                    kept_by_source.get(source, 0) - excluded_by_source.get(source, 0)
+                    for source in selected
+                )
 
             def consume(coverage, result):
                 rows, size = result
@@ -1596,16 +1656,14 @@ def _validate_rows_streaming(
                 selected = frozenset(transform["inputs"]).intersection(sources)
                 stage_path = members.member(f"stages/{stage['id']}.jsonl")
                 total = phase(f"stage:{stage['id']}", stage_path)
-                expected = sum(
-                    kept_by_source.get(source, 0) for source in (selected or sources)
-                )
+                expected = expected_rows(selected or sources)
                 with document_coverage(
                     coverage_path, documents, duplicate="duplicate LM stage identity"
                 ) as coverage:
                     run_tasks(
                         _stage_rows,
                         (
-                            (database, str(stage_path), start, end, selected)
+                            (database, str(stage_path), start, end, selected, minimum)
                             for start, end in chunk_ranges(stage_path)
                         ),
                         partial(consume, coverage),
@@ -1629,7 +1687,18 @@ def _validate_rows_streaming(
                 if (shapes is None or "raw_document" in shapes)
                 and (wanted_origins is None or origins[source] in wanted_origins)
             )
-            expected = sum(kept_by_source.get(source, 0) for source in eligible_sources)
+            if minimum is not None:
+                verify_train_selection_report(
+                    db,
+                    _load(root / "report.json"),
+                    release,
+                    minimum,
+                    allowed_sources,
+                    eligible_sources,
+                    excluded_by_source,
+                    documents,
+                )
+            expected = expected_rows(eligible_sources)
             with document_coverage(
                 coverage_path, documents, duplicate="duplicate LM view identity"
             ) as coverage:
@@ -1655,6 +1724,7 @@ def _validate_rows_streaming(
                                 link_start,
                                 min(VIEW_LINES, view_lines - index * VIEW_LINES),
                                 eligible_sources,
+                                minimum,
                             )
                             for index, (view_start, link_start) in enumerate(
                                 zip(view_starts, link_starts, strict=True)

@@ -632,6 +632,13 @@ def _materialize_mixture(
     else:
         validate_source_strata(members.member("sources.json"), spec.source_strata)
     report = json.loads(members.member("report.json").read_bytes())
+    verified_selection = False
+    if "train_selection" in report:
+        from klab.corpus.train_selection import minimum_train_bytes
+
+        verified_selection = (
+            minimum_train_bytes(manifest["build_identity"]["transforms"]) is not None
+        )
     requested = report.get("requested_mixture")
     total_quota = sum(spec.target_quotas.values())
     if (
@@ -709,6 +716,7 @@ def _materialize_mixture(
                         seed=spec.seed,
                         order_policy=spec.order_policy,
                         strata=spec.source_strata,
+                        verified_selection=verified_selection,
                     )
                 index = MixtureIndex(
                     Path(scratch),
@@ -735,7 +743,7 @@ def _materialize_mixture(
                         spec.seed,
                         spec.order_policy,
                     )
-                    index.select(lineage)
+                    index.select(lineage, verified_selection=verified_selection)
                     if preflight is not None:
                         preflight.publish(index)
                 frontier = None

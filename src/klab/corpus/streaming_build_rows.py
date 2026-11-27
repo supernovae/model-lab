@@ -229,6 +229,7 @@ class StreamBuildRows:
                     reason,
                     row[0],
                     (ordinal + 1, offset),
+                    None,
                 )
 
     def family_inventory(self):
