@@ -43,6 +43,7 @@ from klab.probes import metrics, scoring
 from klab.probes.suite import (
     BY_ID,
     NEEDLE_PROBES,
+    SURFACE_PROBES,
     ProbeSpec,
     fact_items,
     final_verdict_access,
@@ -52,6 +53,7 @@ from klab.probes.suite import (
     parametric_manifest_sha256,
     prompts,
     suite_identity,
+    surface_items,
     tiers_through,
     verdict_split,
 )
@@ -188,7 +190,7 @@ def _describe(loaded: Any, arm: Arm) -> None:
 # --- Per-arm measurements ----------------------------------------------------
 
 
-def validation(loaded: Any, arm: Arm, protocol: Mapping[str, int]) -> dict[str, Any]:
+def validation(loaded: Any, arm: Arm, protocol: Mapping[str, Any]) -> dict[str, Any]:
     """Native held-out scoring with the probe observer, computed once per arm."""
     cached = arm.cache.get("validation")
     if cached is not None and cached.get("protocol") == dict(protocol):
@@ -327,8 +329,14 @@ def item_group(probe: str, items: list[dict[str, Any]]) -> str:
     )
 
 
-def _ranked(loaded: Any, items: list[dict[str, Any]]) -> dict[str, Any]:
-    scores = scoring.ranking_scores(loaded, items)
+def _ranked(
+    loaded: Any, items: list[dict[str, Any]], *, shared_context: bool = False
+) -> dict[str, Any]:
+    scores = (
+        scoring.shared_context_scores(loaded, items)
+        if shared_context
+        else scoring.ranking_scores(loaded, items)
+    )
     return {
         "credits": [
             scoring.tie_credit(s, item["answer"])
@@ -338,8 +346,131 @@ def _ranked(loaded: Any, items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+_CUT_SLACK = 16
+
+
+def _in_window(loaded: Any, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """ITEMS with this model's token count, and whether the whole item is in view.
+
+    An item out of view reports at least how many tokens it has, not the total.
+    """
+    limit = loaded.config.model.max_seq_len
+    if not items:
+        return []
+    answer = max(len(scoring.encode(loaded, f" {c}")) for c in items[0]["candidates"])
+    out = []
+    for item in items:
+        prefix = item["prefix"]
+        # A long item is first shown out of view by its opening characters
+        # alone: cutting a text can add at most the cut word's tokens, so a
+        # head that overflows with room to spare means the whole text does.
+        head = prefix[: 4 * limit]
+        ids = scoring.encode(loaded, head)
+        if len(head) < len(prefix) and len(ids) <= limit + _CUT_SLACK:
+            ids = scoring.encode(loaded, prefix)
+        fits = len(ids) + answer - 1 <= limit
+        out.append(
+            {
+                **item,
+                "tokens": len(ids),
+                "fits": fits,
+                **({"context_ids": ids} if fits else {}),
+            }
+        )
+    return out
+
+
+def _cells(items: list[dict[str, Any]]) -> dict[tuple[int, float], list[int]]:
+    cells: dict[tuple[int, float], list[int]] = {}
+    for index, item in enumerate(items):
+        cells.setdefault((item["chars"], item["depth"]), []).append(index)
+    return cells
+
+
+def _measure_surface(spec: ProbeSpec, loaded: Any) -> dict[str, Any]:
+    """One arm's long-context surface: only cells inside its window are scored."""
+    every = _in_window(loaded, surface_items(verdict_split(), spec.params))
+    held = [item for item in every if item["fits"]]
+    limit = loaded.config.model.max_seq_len
+    if not held:
+        raise ProbeInapplicable(
+            f"inapplicable: no cell fits the model's {limit}-token window "
+            f"(the shortest is over {min(i['tokens'] for i in every)} tokens)"
+        )
+    dev = [
+        item
+        for item in _in_window(loaded, surface_items("dev", spec.params))
+        if item["fits"]
+    ]
+    ranked = _ranked(loaded, held, shared_context=True)
+    return {
+        "value": float(np.mean(ranked["credits"])),
+        "credits": ranked["credits"],
+        "picked": ranked["picked"],
+        "constant_pick": scoring.constant_pick(held, ranked["picked"]),
+        "cell_constant_pick": {
+            f"{chars}/{depth}": scoring.constant_pick(
+                [held[i] for i in rows], [ranked["picked"][i] for i in rows]
+            )
+            for (chars, depth), rows in _cells(held).items()
+        },
+        "dev_credits": _ranked(loaded, dev, shared_context=True)["credits"],
+        "dev_keys": [i["key"] for i in dev],
+        "keys": [i["key"] for i in held],
+        "chars": [i["chars"] for i in held],
+        "tokens": [i["tokens"] for i in held],
+        "chance": 1 / len(held[0]["candidates"]),
+        # Identity of the whole grid, whatever this model's window holds.
+        "item_group": item_group(spec.id, every),
+        "window": limit,
+        "out_of_window": [
+            {
+                "chars": chars,
+                "depth": depth,
+                "at_least_tokens": max(every[i]["tokens"] for i in rows),
+            }
+            for (chars, depth), rows in _cells(every).items()
+            if not every[rows[0]]["fits"]
+        ],
+        "items": [
+            {
+                "prompt": None,
+                "answer": i["answer"],
+                "chars": i["chars"],
+                "depth": i["depth"],
+                "tokens": i["tokens"],
+            }
+            for i in held
+        ],
+    }
+
+
+def _shared_cells(
+    t: Mapping[str, Any], b: Mapping[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Both arms cut to the items inside both windows, in one order."""
+
+    def cut(side: Mapping[str, Any], keys: set[str], dev: set[str]) -> dict[str, Any]:
+        rows = [i for i, key in enumerate(side["keys"]) if key in keys]
+        out = dict(side)
+        for name in ("credits", "picked", "keys", "chars", "tokens", "items"):
+            out[name] = [side[name][i] for i in rows]
+        out["dev_credits"] = [
+            credit
+            for key, credit in zip(side["dev_keys"], side["dev_credits"], strict=True)
+            if key in dev
+        ]
+        out["dev_keys"] = [key for key in side["dev_keys"] if key in dev]
+        out["value"] = float(np.mean(out["credits"])) if rows else None
+        return out
+
+    keys = set(t["keys"]) & set(b["keys"])
+    dev = set(t["dev_keys"]) & set(b["dev_keys"])
+    return cut(t, keys, dev), cut(b, keys, dev)
+
+
 def _measure(
-    spec: ProbeSpec, loaded: Any, arm: Arm, protocol: Mapping[str, int]
+    spec: ProbeSpec, loaded: Any, arm: Arm, protocol: Mapping[str, Any]
 ) -> dict[str, Any]:
     """Everything one arm contributes to SPEC; judged later against the other."""
     if spec.id in {"heldout_loss", "calibration"}:
@@ -394,6 +525,8 @@ def _measure(
                 for r in rows[:2]
             ],
         }
+    if spec.id in SURFACE_PROBES:
+        return _measure_surface(spec, loaded)
     if spec.id in TEXT_PROBES:
 
         def items(split: str) -> list[dict[str, Any]]:
@@ -479,7 +612,7 @@ def probe_cache_key(probe_id: str) -> str:
 
 
 def _measure_safely(
-    spec: ProbeSpec, loaded: Any, arm: Arm, protocol: Mapping[str, int]
+    spec: ProbeSpec, loaded: Any, arm: Arm, protocol: Mapping[str, Any]
 ) -> dict[str, Any]:
     """Probe failures become evidence gaps; OOM and stops propagate."""
     key = probe_cache_key(spec.id)
@@ -662,6 +795,14 @@ def _judge(
                 "status": "not_comparable",
                 "note": "different items (prompts, answers or candidates differ)",
             }
+        if b is not None and spec.id in SURFACE_PROBES and t["keys"] != b["keys"]:
+            t, b = _shared_cells(t, b)
+            if not t["keys"]:
+                return {
+                    **row,
+                    "status": "not_comparable",
+                    "note": "no cell fits both models' windows",
+                }
         se = _paired(t["credits"], b["credits"]) if b else None
         row.update(judge(spec, t["value"], b["value"] if b else None, se=se))
         details: dict[str, Any] = {
@@ -706,6 +847,8 @@ def _judge(
             by_length: dict[str, dict[str, Any]] = {}
             for length in spec.params["char_lengths"]:
                 picks = [i for i, c in enumerate(t["chars"]) if c == length]
+                if not picks and spec.id in SURFACE_PROBES:
+                    continue  # out of window: not scored, in no average
                 by_length[str(length)] = {
                     "chars": length,
                     "tokens": max((t["tokens"][i] for i in picks), default=0),
@@ -719,6 +862,36 @@ def _judge(
                     else None,
                 }
             details["by_length"] = by_length
+        if spec.id in SURFACE_PROBES:
+            by_cell = []
+            for (chars, depth), rows in _cells(t["items"]).items():
+                cell = f"{chars}/{depth}"
+                by_cell.append(
+                    {
+                        "chars": chars,
+                        "depth": depth,
+                        "tokens": max(t["tokens"][i] for i in rows),
+                        "n": len(rows),
+                        "accuracy": float(np.mean([t["credits"][i] for i in rows])),
+                        "constant_pick": t["cell_constant_pick"][cell],
+                        "baseline_accuracy": float(
+                            np.mean([b["credits"][i] for i in rows])
+                        )
+                        if b
+                        else None,
+                        "baseline_constant_pick": b["cell_constant_pick"][cell]
+                        if b
+                        else None,
+                    }
+                )
+            details["by_cell"] = by_cell
+            # Longest then shallowest among the lowest: the hardest place to fail.
+            details["worst_cell"] = min(
+                by_cell, key=lambda c: (c["accuracy"], -c["chars"], c["depth"])
+            )
+            details["window"] = t["window"]
+            details["out_of_window"] = t["out_of_window"]
+            details["baseline_out_of_window"] = b["out_of_window"] if b else None
         row["details"] = details
         if b is not None:
             dev[spec.id] = {
@@ -884,7 +1057,7 @@ def _run_battery(
     *,
     tier: str = "fast",
     fast_fail: bool = True,
-    protocol: Mapping[str, int] | None = None,
+    protocol: Mapping[str, Any] | None = None,
     progress: Progress | None = None,
     context: LabContext | None = None,
     now: Callable[[], datetime] | None = None,
@@ -903,7 +1076,7 @@ def _run_battery(
     opened one at a time per tier: the baseline first, then the candidate,
     which is judged probe by probe so a hard failure stops it immediately.
     """
-    from klab.lab_mode import eval_protocol
+    from klab.lab_mode import eval_protocol, with_scoring_precision
 
     started_at = (now or (lambda: datetime.now(UTC)))()
     started = time.monotonic()
@@ -968,6 +1141,9 @@ def _run_battery(
             _describe(loaded, arm)
             if state["protocol"] is None and not arm.reference:
                 state["protocol"] = eval_protocol(loaded.config)
+            if not arm.reference and "precision" in state["protocol"]:
+                # Both arms are scored at the protocol's precision.
+                loaded = with_scoring_precision(loaded, state["protocol"]["precision"])
             was_training = loaded.model.training
             loaded.model.eval()
             try:

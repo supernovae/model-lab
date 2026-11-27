@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from typing import Any
 
 import numpy as np
@@ -53,6 +54,15 @@ def _byte_inputs(loaded: Any, ids: list[int]) -> dict[str, Any]:
     }
 
 
+def _autocast(loaded: Any) -> Any:
+    """The run's scoring precision; reference models are always scored in fp32."""
+    if getattr(loaded.config, "runtime", None) is None:
+        return nullcontext()
+    from klab.runtime import precision_context
+
+    return precision_context(loaded.config, loaded.device)
+
+
 def log_probs(loaded: Any, ids: Sequence[int], last: int | None = None) -> np.ndarray:
     """Log-softmax over the vocabulary at every position of IDS -> [T, V].
 
@@ -66,7 +76,7 @@ def log_probs(loaded: Any, ids: Sequence[int], last: int | None = None) -> np.nd
     if not ids or len(ids) > limit:
         raise ValueError(f"log_probs needs 1..{limit} tokens, got {len(ids)}")
     x = torch.tensor([ids], dtype=torch.long, device=loaded.device)
-    with torch.inference_mode():
+    with torch.inference_mode(), _autocast(loaded):
         logits = loaded.model(x, **_byte_inputs(loaded, ids))[0]
         if last is not None:
             logits = logits[-last:]
@@ -166,6 +176,41 @@ def ranking_scores(
                 loaded, item["prefix"], f" {candidate}"
             )
             scores[candidate] = total / max(count, 1)
+        out.append(scores)
+    return out
+
+
+def shared_context_scores(
+    loaded: Any, items: Sequence[Mapping[str, Any]]
+) -> list[dict[str, float]]:
+    """:func:`ranking_scores` for long contexts: one forward per item where it can.
+
+    When every candidate is a single token after the same context, the last
+    position of one forward holds every candidate's score, the same number as
+    scoring each alone. Any other item is scored candidate by candidate.
+    """
+    limit = loaded.config.model.max_seq_len
+    out = []
+    for item in items:
+        candidates = list(item["candidates"])
+        prefix = item["prefix"]
+        if not prefix or prefix != prefix.rstrip():
+            out.extend(ranking_scores(loaded, [item]))
+            continue
+        # The same split as split_pair, with the long context encoded once.
+        context = item.get("context_ids") or encode(loaded, prefix)
+        rests = [encode(loaded, f"{prefix} {c}")[len(context) :] for c in candidates]
+        if all(len(rest) == 1 for rest in rests):
+            row = log_probs(loaded, context[-limit:], last=1)[0]
+            scores = {
+                c: float(row[rest[0]])
+                for c, rest in zip(candidates, rests, strict=True)
+            }
+        else:
+            scores = {}
+            for candidate, rest in zip(candidates, rests, strict=True):
+                values, _ = score_tokens(loaded, [*context, *rest], len(context))
+                scores[candidate] = float(values.sum()) / max(len(rest), 1)
         out.append(scores)
     return out
 

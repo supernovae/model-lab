@@ -12,7 +12,12 @@ klab eval RUN_ID [--runs-dir RUNS] [--checkpoint GENERATION]
 
 `eval` loads the run's verified checkpoint (latest by default) and reports
 held-out loss and perplexity on its validation split, using the run's
-evaluation settings. Scoring runs in FP32 even for a model trained in BF16.
+evaluation settings. Scoring runs at the run's own `runtime.precision`, as its
+in-training validation does: a BF16 run is scored under BF16 autocast and the
+loss is reduced in FP32. At a long window this decides whether scoring fits at
+all, because dense attention over 16,384 tokens holds `heads × 16,384²` scores:
+24 GiB in FP32 for 24 heads, 12 GiB in BF16. `eval`, panels, `try` and `probe`
+all score this way. Panel results record `scoring_precision`.
 
 ### Bits per byte
 
@@ -214,6 +219,16 @@ To choose an extension method, pretrain one parent at short rows, then run two
 their RoPE setting, with the same long-document data and row length (for
 example `klab try yarn.yaml --vs abf.yaml`). Score each arm's checkpoint on the
 long panel with `klab eval --panel` and compare their `position_buckets`. Then
-run `klab probe TRY_ID --vs BASELINE --config full`, which adds
-[`long_needle`](probes.md#long-context-needle) retrieval at each length to the
-short-context probes that catch regressions at the pretraining window.
+run `klab probe TRY_ID --vs BASELINE --config full`, which adds the
+[`long_needle` and `kv_recall`](probes.md#long-context-needle) retrieval
+surfaces, by length and needle depth, to the short-context probes that catch
+regressions at the pretraining window.
+
+Choose on retrieval and on loss by position. Aggregate held-out loss is a
+guardrail here: require that it stays within a margin you state beforehand,
+and do not pick the arm with the lower loss for that reason alone. Loss
+averages over every position and is dominated by local prediction, so an arm
+can have the lower loss and still fail to use distant context (Gao et al.
+2025, "How to Train Long-Context Language Models (Effectively)", report the
+same of perplexity). Two arms that differ by a fraction of a percent in loss
+and by chance against perfect in a retrieval cell are separated by the cell.

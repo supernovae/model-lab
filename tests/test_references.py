@@ -213,6 +213,7 @@ def test_reference_arm_runs_text_level_probes_and_lm_eval_only(
         "fact_recall",
         "needle",
         "long_needle",
+        "kv_recall",
         "lm_eval",
     ]
     assert result["tiers_run"] == ["standard", "full"] and result["protocol"] == {}
@@ -223,9 +224,9 @@ def test_reference_arm_runs_text_level_probes_and_lm_eval_only(
     assert "inapplicable" in parametric["note"]
     assert recall["status"] == "info" and recall["details"]["item_group"]
     assert len(recall["details"]["items"]) == recall["details"]["n"]
-    for needle in result["probes"][2:4]:
+    for needle in result["probes"][2:5]:
         assert needle["status"] == "info" and needle["details"]["item_group"]
-    row = result["probes"][4]
+    row = result["probes"][5]
     assert row["status"] == "info" and row["value"] == pytest.approx(38 / 50)
     assert result["verdict"]["status"] == "info"
     assert result["verdict"]["action"] == "compare"

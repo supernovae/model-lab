@@ -767,6 +767,11 @@ def precision_context(config: Any, device: torch.device) -> Any:
     return torch.autocast(device_type=device.type, dtype=dtype)
 
 
+def scoring_precision(config: Any) -> str:
+    """The precision inference scores a run at: its resolved ``runtime.precision``."""
+    return _resolved_precision(config.runtime.precision)
+
+
 def make_grad_scaler(config: Any, device: torch.device) -> Any | None:
     """Return an enabled fp16 scaler only for validated scaler-capable backends."""
     if _resolved_precision(config.runtime.precision) != "fp16":

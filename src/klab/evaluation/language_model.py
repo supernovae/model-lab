@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 import random
 from collections.abc import Callable
+from contextlib import nullcontext
+from typing import Any
 
 import numpy as np
 import torch
@@ -58,6 +60,7 @@ def evaluate(
     before_batch: Callable[[int], None] | None = None,
     progress: Callable[[float, int, int], None] | None = None,
     positions: PositionLoss | None = None,
+    autocast: Any | None = None,
 ) -> dict[str, float | int | str | None]:
     """Evaluate no more than ``max_batches`` and report exactly scored labels.
 
@@ -66,6 +69,8 @@ def evaluate(
     ``before_batch`` receives forward-input positions before each model call;
     ``progress`` receives cumulative NLL, valid targets and completed batches.
     ``positions`` accumulates the same per-target losses by window position.
+    ``autocast`` is the scoring precision context (``precision_context``); the
+    loss itself is always reduced in fp32.
     """
     if batch_size <= 0 or max_batches <= 0:
         raise ValueError("batch_size and max_batches must be positive")
@@ -79,7 +84,7 @@ def evaluate(
     batches = 0
     try:
         model.eval()
-        with torch.inference_mode():
+        with torch.inference_mode(), autocast or nullcontext():
             limit = min(len(dataset), batch_size * max_batches)
             for start in range(0, limit, batch_size):
                 records = [

@@ -30,6 +30,7 @@ from klab.probes.points import (
     with_checkpoint_evidence,
 )
 from klab.probes.render import GLYPH, _compact, _num, _paint, params_text
+from klab.probes.suite import NEEDLE_PROBES, SURFACE_PROBES
 from klab.reference_models import REFERENCES, is_reference, reference_for
 
 REFERENCE_LOSS_NOTE = (
@@ -180,8 +181,8 @@ def pair(
         )
         if metric_id == "lm_eval" and target:
             hint = f"run `klab probe {shlex.quote(str(target))} --config full` (lmeval extra)"
-        elif metric_id in {"fact_recall", "needle", "long_needle"} and target:
-            standard = who["kind"] != "reference" and metric_id != "long_needle"
+        elif metric_id in {"fact_recall", *NEEDLE_PROBES} and target:
+            standard = who["kind"] != "reference" and metric_id not in SURFACE_PROBES
             tier = "standard" if standard else "full"
             hint = f"run `klab probe {shlex.quote(str(target))} --config {tier}`"
         elif metric_id == "code_pass1" and target:

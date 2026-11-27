@@ -27,7 +27,12 @@ from klab.engines.mlx import MLXEngine, preserve_rng_state
 from klab.evaluation.evidence import _validated_artifacts
 from klab.model.inspection import inspection_report
 from klab.model.transformer import DenseLM
-from klab.runtime import discover_runtimes, select_device, torch_device_for
+from klab.runtime import (
+    discover_runtimes,
+    precision_context,
+    select_device,
+    torch_device_for,
+)
 from klab.runtime_profile import RuntimeAuthorization, require_authorization
 from klab.training.checkpoints import CheckpointManager, VerificationReport
 from klab.training.manifest import read_manifest
@@ -90,6 +95,7 @@ class InferenceRun:
                 max_batches=self.config.evaluation.max_batches,
                 device=self.device,
                 observer=observer,
+                autocast=precision_context(self.config, self.device),
             )
         if observer is not None:
             raise ValueError("evaluation observers need the PyTorch engine")

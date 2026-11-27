@@ -28,15 +28,16 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import hashlib
+import itertools
 import json
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 from klab.data.withheld_facts import _FACTS, diagnostic_manifest, split_facts
 
 SUITE_NAME = "klab-probe-battery"
-SUITE_VERSION = 6
+SUITE_VERSION = 7
 SPLITS = ("dev", "heldout", "final")
 # Splits a selection loop (``try``, ``probe`` without a final declaration) may read.
 SELECTION_SPLITS = ("dev", "heldout")
@@ -63,6 +64,12 @@ class ProbeSpec:
     uncertainty: str = "none"
     params: dict[str, Any] = field(default_factory=dict)
 
+
+# The long-context surface: total characters by needle depth. With a
+# 32k-vocabulary BPE the lengths are about 2.5k, 5k, 10k, 15k, 20k and 30k
+# tokens, so a 16k window has four lengths in view and a 32k window all six.
+SURFACE_LENGTHS = (8192, 16384, 32768, 49152, 65536, 98304)
+SURFACE_DEPTHS = (0.0, 0.25, 0.5, 0.75, 1.0)
 
 PROBES: tuple[ProbeSpec, ...] = (
     ProbeSpec(
@@ -232,23 +239,61 @@ PROBES: tuple[ProbeSpec, ...] = (
         warn=0.05,
         fail=0.15,
         hard=False,
-        suggests="Retrieval across thousands of tokens degraded: compare RoPE "
-        "scaling or base, the extension stage's row length and its long-document "
-        "data.",
-        explains="The needle probe's items at long context lengths, for comparing "
-        "context-extension methods (RoPE base, interpolation, NTK, YaRN). The "
-        "code word opens 16,384, 32,768, 65,536 or 131,072 characters of "
-        "filler, about 4k, 8k, 16k and 32k tokens for a 32k-vocabulary BPE: the "
-        "first is a common pretraining window, so it is the in-distribution "
-        "control, and each further length doubles the distance to the code "
-        "word up to a 32k-token extension target. Lengths are in characters, "
-        "so every tokenizer is asked the same strings; a context longer than "
-        "the model's window pushes the code word out of view and scores as "
-        "chance. Scored by candidate ranking at each length (ties share credit).",
-        reference="needle-in-a-haystack (text-level, long context), candidate ranking",
+        suggests="Retrieval across thousands of tokens degraded: read "
+        "details.by_cell for the lengths and depths that fail, then compare RoPE "
+        "scaling or base, the extension stage's row length and its "
+        "long-document data.",
+        explains="A retrieval surface for comparing context-extension methods "
+        "(RoPE base, interpolation, NTK, YaRN). A code word is stated once in "
+        "filler text of 8,192 to 98,304 characters (about 2.5k to 30k tokens "
+        "for a 32k-vocabulary BPE), at five depths from the start of the "
+        "context to just before the question, and the model must recall it. "
+        "Every length-and-depth cell asks each code word equally often, so an "
+        "answer that ignores the context scores exactly chance. A cell longer "
+        "than the model's window is not scored and enters no average. Scored "
+        "by candidate ranking (ties share credit).",
+        reference="needle-in-a-haystack by depth and length (text-level), "
+        "candidate ranking",
         uncertainty="paired_items",
         params={
-            "char_lengths": [16384, 32768, 65536, 131072],
+            "kind": "needle",
+            "char_lengths": list(SURFACE_LENGTHS),
+            "depths": list(SURFACE_DEPTHS),
+            "repeats": 2,
+            "dev_repeats": 1,
+            "credit": "fractional_ties",
+        },
+    ),
+    ProbeSpec(
+        id="kv_recall",
+        title="Key-value recall in long context",
+        tier="full",
+        cost=4,
+        metric="accuracy",
+        higher_is_better=True,
+        mode="delta_abs",
+        warn=0.05,
+        fail=0.15,
+        hard=False,
+        suggests="Lookup among similar entries degraded: the model finds a "
+        "lone fact (see long_needle) but not one keyed fact among many. Read "
+        "details.by_cell, then compare the extension method and the share of "
+        "long documents in its data.",
+        explains="The long-context surface with a harder haystack: the whole "
+        "context is numbered boxes, each holding one of the code words, and the "
+        "question names one box. Every candidate answer appears many times in "
+        "the context, so only the queried key identifies it. Same lengths, "
+        "depths, balance and window rule as long_needle; scored by candidate "
+        "ranking (ties share credit).",
+        reference="key-value retrieval (Liu et al. 2024, Lost in the Middle; "
+        "HELMET recall), text-level, candidate ranking",
+        uncertainty="paired_items",
+        params={
+            "kind": "kv",
+            "char_lengths": list(SURFACE_LENGTHS),
+            "depths": list(SURFACE_DEPTHS),
+            "repeats": 2,
+            "dev_repeats": 1,
             "credit": "fractional_ties",
         },
     ),
@@ -283,7 +328,9 @@ PROBES: tuple[ProbeSpec, ...] = (
 )
 BY_ID = {spec.id: spec for spec in PROBES}
 # Probes built from the needle items, differing only in their character lengths.
-NEEDLE_PROBES = ("needle", "long_needle")
+# Long-context probes scored cell by cell (length x depth), in-window cells only.
+SURFACE_PROBES = ("long_needle", "kv_recall")
+NEEDLE_PROBES = ("needle", *SURFACE_PROBES)
 
 # --- Items -----------------------------------------------------------------
 
@@ -353,6 +400,7 @@ _FINAL_TEMPLATES = (
 )
 _FINAL_PARAMETRIC_TEMPLATE = "As everyone knows, the {r} of {s} is"
 _FINAL_NEEDLES = ("rope", "bell", "leaf", "nest", "coin", "fork")
+_FINAL_KV_SEED = 37
 _FINAL_FILLER = (
     "The wind was soft.",
     "A frog sat on a log.",
@@ -513,6 +561,92 @@ def needle_items(split: str, char_lengths: Sequence[int]) -> list[dict]:
     return items
 
 
+def kv_split(split: str) -> dict[str, Any]:
+    return {
+        "values": needle_split(split)["needles"],
+        "statement": "The code for box {k} is {w}.",
+        "question": "The code for box {k} is",
+        "seed": _pick(split, 11, 23, _FINAL_KV_SEED),
+    }
+
+
+_KV_KEYS = 9000  # four-digit box numbers, 1000..9999
+
+
+def _kv_lines(spec: dict[str, Any], item: int) -> Iterator[str]:
+    """Distractor entries for ITEM: distinct boxes, values spread over the pool.
+
+    Integer arithmetic only, so the text is the same on every platform.
+    """
+    values = spec["values"]
+    start = spec["seed"] * 7919 + item * 104729
+    for line in range(_KV_KEYS - 1):
+        key = 1000 + (start + line * 7919) % _KV_KEYS
+        value = values[((start + line) * 2654435761 % 4294967296 >> 9) % len(values)]
+        yield spec["statement"].format(k=key, w=value)
+    raise ValueError("key-value context needs more distinct keys")
+
+
+def _kv_target(spec: dict[str, Any], item: int) -> int:
+    """The queried box: the one key :func:`_kv_lines` never yields for ITEM."""
+    start = spec["seed"] * 7919 + item * 104729
+    return 1000 + (start + (_KV_KEYS - 1) * 7919) % _KV_KEYS
+
+
+def surface_items(split: str, params: Mapping[str, Any]) -> list[dict]:
+    """Text-level retrieval items over PARAMS' lengths and depths.
+
+    Each prefix is exactly ``chars`` characters: a haystack with the one
+    statement that answers the closing question placed ``depth`` of the way
+    through it, at a sentence boundary. ``kind: needle`` hides a code word in
+    filler; ``kind: kv`` asks for one numbered box among many holding the same
+    code words. Every cell asks each answer equally often.
+    """
+    kind = params["kind"]
+    needle, kv = needle_split(split), kv_split(split)
+    answers = needle["needles"]
+    repeats = int(params["dev_repeats" if split == "dev" else "repeats"])
+    items = []
+    for length in params["char_lengths"]:
+        for depth in params["depths"]:
+            for repeat in range(repeats):
+                for offset, word in enumerate(answers):
+                    index = repeat * len(answers) + offset
+                    if kind == "kv":
+                        key = _kv_target(kv, index)
+                        fact = kv["statement"].format(k=key, w=word)
+                        tail = " " + kv["question"].format(k=key)
+                        sentences: Iterator[str] = _kv_lines(kv, index)
+                    else:
+                        fact = needle["statement"].format(w=word)
+                        tail = " " + needle["question"]
+                        filler = needle["filler"]
+                        sentences = (
+                            filler[k % len(filler)] for k in itertools.count(index)
+                        )
+                    room = int(length) - len(fact) - 1 - len(tail)
+                    if room < 0:
+                        raise ValueError(f"surface length {length} is too short")
+                    stream, starts = "", []
+                    while len(stream) < room:
+                        starts.append(len(stream))
+                        stream += next(sentences) + " "
+                    at = max(s for s in starts if s <= depth * room)
+                    prefix = stream[:at] + fact + " " + stream[at:room] + tail
+                    assert len(prefix) == int(length)
+                    items.append(
+                        {
+                            "prefix": prefix,
+                            "answer": word,
+                            "candidates": answers,
+                            "chars": int(length),
+                            "depth": float(depth),
+                            "key": f"{int(length)}/{float(depth)}/{index}",
+                        }
+                    )
+    return items
+
+
 def prompts(split: str) -> list[str]:
     return list(_pick(split, _DEV_PROMPTS, _HELDOUT_PROMPTS, _FINAL_PROMPTS))
 
@@ -525,6 +659,7 @@ def split_payload(split: str) -> dict[str, Any]:
         # split_facts(dataset.synthetic_seed), bound at probe time.
         "parametric_pool": [_parametric_item(fact, split) for fact in _FACTS],
         "needle": needle_split(split),
+        "kv": kv_split(split),
     }
 
 
@@ -564,6 +699,7 @@ def suite_identity() -> dict[str, Any]:
 # Splits whose items a training corpus must not contain. ``dev`` is free to
 # read and tune against, so it is not screened.
 LEAKAGE_SPLITS = ("heldout", "final")
+_LEAK_TAIL = 512
 # Token windows of one item; ``Window`` is a tuple of token ids.
 Window = tuple[int, ...]
 LeakageEncode = Callable[[str, str | None], list[Window]]
@@ -594,10 +730,13 @@ def _leakage_items(
     for fact in closed_book:
         item = _parametric_item(fact, split)
         yield f"parametric_recall/{fact.subject}", item["question"], item["answer"]
-    for probe in NEEDLE_PROBES:
-        for item in needle_items(split, BY_ID[probe].params["char_lengths"]):
-            item_id = f"{probe}/{item['answer']}@{item['chars']}"
-            yield item_id, item["prefix"], item["answer"]
+    for item in needle_items(split, BY_ID["needle"].params["char_lengths"]):
+        yield f"needle/{item['answer']}@{item['chars']}", item["prefix"], item["answer"]
+    for probe in SURFACE_PROBES:
+        for item in surface_items(split, BY_ID[probe].params):
+            # A leak is the answer after the question; the window that shows it
+            # lies within the item's last characters.
+            yield f"{probe}/{item['key']}", item["prefix"][-_LEAK_TAIL:], item["answer"]
     for index, prompt in enumerate(prompts(split)):
         yield f"prompt/{index}", prompt, None
 
