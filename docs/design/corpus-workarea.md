@@ -314,7 +314,8 @@ explicit execution again for a requested replay of external code.
   Entity ordering uses explicit namespaced memberships and the same scoped
   index lifecycle. Its bounded entity-to-document queries also cover
   entities beyond the packing anchor cap.
-  Add shared-mechanism neighborhoods once mechanisms have typed outputs.
+  The procedural compiler exports exact-content mechanism membership for
+  the same TRAIN-scoped entity packing path.
 - **Structured sources and compilation.** The [relations interface](../corpus-preparation.md#extract-and-compile-typed-relations)
   extracts from pinned Wikipedia page links and categories, a bounded
   Wikidata statement subset and explicit miniature worlds. Shard receipts
@@ -331,9 +332,11 @@ explicit execution again for a requested replay of external code.
   split index. It checks round-trip assertion fidelity, records deliberate
   qualifier omissions, and compares serialized bytes and tokens using
   a fixed tokenizer. Motif discovery and description-length experiments
-  remain research directions. Add bounded symbolic derivations,
-  procedural trajectories, constraints, counterfactuals and mixed
-  curricula as separate targets. Use the same canonical inputs when
+  remain research directions. The [mechanism workflow](../corpus-preparation.md#simulate-mechanisms-and-compile-curricula)
+  publishes bounded deterministic transfer traces, exact derivations,
+  constraints and counterfactuals. It mixes source prose, procedural
+  representations and compatible structural views through the ordinary
+  training input, with source locators, bounded replay and split checks. Use the same canonical inputs when
   comparing representations. Verify lossless transformations by round trip
   or semantic equivalence. A lossy compiler records omitted information
   and reason while evidence and qualifiers remain in canonical artifacts.

@@ -2317,6 +2317,10 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
   | --- | --- |
   | `wikimedia member decode` | opt-in threaded decoding of verified compressed members, consumed and checkpointed in source order |
   | `wikimedia member parse` | opt-in process decoding and XML parsing of verified members, with bounded candidates consumed in source order |
+  | `procedural world simulation` | independent pinned world shards with committed observation and offset files |
+  | `procedural scope validation` | one writer validates semantic families and world IDs across shards |
+  | `procedural curriculum compilation` | one ordered writer streams split files and validates any structural parents |
+  | `mechanism membership join` | one streaming release scan against a bounded indexed set of mechanism labels |
   | `relation source extraction` | independent pinned source files, with receipted typed assertions and unresolved locators |
   | `relation index reduction` | single writer builds compact dictionaries and split-scoped adjacency |
   | `relational sequence compilation` | one ordered writer streams split partitions from the read-only adjacency index |
@@ -4264,6 +4268,109 @@ in 0.59 s. On the 9,990-assertion fixture, the three compiles took 0.68 s,
 depend on shared structure, identifier choice and the tokenizer. These
 measurements cover preparation and encoding. Learning remains a separate
 experiment.
+
+## Simulate mechanisms and compile curricula
+
+The built-in `bounded_transfer` rule transfers integer units between two
+containers with fixed capacities, minimum holdings and an action limit.
+The seeded trace records the requested direction and amount, the resulting
+state, and any violated conditions. A failed request leaves the state
+unchanged. The constraint answer is the largest legal amount from the given
+state and direction, including zero. The counterfactual starts from the
+same state and changes the amount across the feasibility boundary. Each
+world is independent.
+
+A simulation declaration gives a nonnegative 63-bit `seed`,
+`max_catalog_bytes`, `max_shard_bytes`, and a list of `sources`. Each source
+contains a local JSONL pin (`path`, `sha256`, `max_rows`, and optional
+`max_record_bytes`) plus `id`, `uri`, `license`, and `origin`. Use the same
+origin labels as the [relation source pins](#extract-and-compile-typed-relations).
+A world row gives the split, semantic family, initial state, rule and
+trajectory length (1–64). Optional `prose` comes from the pinned input.
+
+```json
+{"id":"world:example","family":"family:example","split":"train","rule":{"kind":"bounded_transfer","capacity":[10,12],"minimum":[2,3],"request_limit":7},"initial":[2,11],"steps":5,"prose":"Two containers exchange a conserved quantity."}
+```
+
+```bash
+klab corpus mechanisms simulate worlds.json --plan
+klab corpus mechanisms simulate worlds.json --workers 4
+klab corpus mechanisms audit WORLD_KEY --samples 20 --seed 4
+klab corpus mechanisms compile WORLD_KEY curriculum.json --plan
+klab corpus mechanisms compile WORLD_KEY curriculum.json
+```
+
+Published worlds refer to their completed simulation shards and a narrow
+SQLite scope catalog. Simulation and source checks stay on the existing
+ShardRunner. A retry reuses completed shards and rebuilds the scope catalog
+when needed. The catalog enforces unique world IDs, a single split per
+semantic family, and disjoint exact prose across splits. Audit selects up to
+100 seeded world positions, authenticates their referenced shards, and
+replays the exact typed trace and source locator. The audit reports which
+worlds it checked. A cold audit of a sampled world can read its entire source
+artifact for byte verification.
+
+A compiler declaration lists distinct `targets` selected from `prose`,
+`trajectories`, `derivations`, `constraints`, and `counterfactuals`, plus
+`max_bytes` and `max_sequences`. For each world, it emits those representations
+in the declared order and records missing prose in `omissions.jsonl`.
+An optional `relation_keys` list appends up to four verified hierarchy or
+factorization views of one canonical relation index. Shared IDs and family
+names must agree on split and family assignment. Structural rows keep their
+parent key and assertion lineage.
+
+The output is ordinary split JSONL with companion lineage identifying the
+input world, original line, rule digest and representation. Source rights
+remain with the pinned inputs. Point a [local text dataset](datasets.md) at
+the TRAIN and validation files for the existing tokenizer, token store and
+loader. Keep the test split for separate evaluation. Curriculum edits reuse
+the canonical simulated worlds. Interrupted compilation restarts the ordered
+write from those immutable shards. Byte and sequence counts include the
+derived views and their companion output files.
+
+### Pack by shared mechanism
+
+```bash
+klab corpus mechanisms memberships CURRICULUM_KEY RELEASE --max-inventory-bytes 1073741824 --max-scratch-bytes 268435456 --max-output-bytes 268435456
+```
+
+The join matches exact compiled TRAIN text hashes to kept TRAIN documents in a
+verified release. It uses the release's compact family inventory when present
+and otherwise scans the verified document member. The scan byte cap applies
+to the selected member. The two scan formats have per-record caps of 8 KiB
+and 64 MiB respectively.
+
+Install the returned `entities.jsonl` path and digest under
+`sequence_order.entities` with `sequence_order.kind: entities` in the
+existing ordered mixture declaration. It uses `mechanism:<rule digest>`
+membership IDs, so worlds with the same rule and validity conditions share
+a neighborhood. The packing index rechecks verified TRAIN family scope.
+Source text must survive normalization byte for byte to match its compiled
+hash. Structural-only rows keep their relational lineage and carry no
+mechanism membership unless represented in procedural output.
+
+### Procedural workflow measurements
+
+Four pinned shards supplied 50,000 synthetic worlds with four requests
+each and 13.39 MB of source data. On NVMe, the simulator emitted 73.34 MB
+of typed observations and offset sidecars plus a 6.70 MB scope catalog.
+The compiler emitted 250,000 distinct world/representation rows in five
+views, using 221.10 MB for text and lineage together.
+
+| Operation | Wall time | User + system CPU | Peak process RSS |
+| --- | ---: | ---: | ---: |
+| Cold simulation, one worker | 3.18 s | 3.09 s | 94 MiB |
+| Cold simulation, two workers | 2.05 s | 3.45 s | 93 MiB |
+| Resume with one of four shards complete, one worker | 2.56 s | 2.49 s | 93 MiB |
+| Compile five views | 5.28 s | 5.12 s | 99 MiB |
+| Warm curriculum open | 0.70 s | 0.69 s | 98 MiB |
+| Replay 100 sampled worlds with warm receipts | 0.59 s | 0.59 s | 98 MiB |
+
+CLI startup is included. All three builds produced identical catalog and
+referenced shard digests. The 5,000-world fixture simulated in 0.68 s and
+compiled in 1.18 s. These measurements cover the closed transfer system
+and artifact path. Learning effects and throughput on other mechanisms
+remain experimental questions.
 
 ## Materialize a mixture
 
