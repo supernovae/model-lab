@@ -15,6 +15,7 @@ from klab.canonical import canonical_digest
 from klab.corpus.artifact_inventory import RetentionScan
 from klab.corpus.build_stages import RECEIPT
 from klab.corpus.release_members import release_retention_lease, shared_payload_lease
+from klab.corpus.stage_inspection import TYPED_RECEIPT_MAX_BYTES
 from klab.corpus.typed_artifacts import KINDS, corpus_cache
 from klab.result_publication import sync_directory
 from klab.safe_io import rename_noreplace
@@ -23,7 +24,6 @@ from klab.verification_proofs import ProofStore
 _KEY = re.compile(r"[0-9a-f]{64}")
 _STAGING = ".incomplete-"
 _RETIRED = ".pruned-"
-_CONTROL_LIMIT = 16 * 1024**2
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,7 +192,9 @@ def _stage_files(scan, path, files):
 
 
 def _read_node(scan, kind, path, staged):
-    receipt = scan.control(path, RECEIPT, optional=staged, max_bytes=_CONTROL_LIMIT)
+    receipt = scan.control(
+        path, RECEIPT, optional=staged, max_bytes=TYPED_RECEIPT_MAX_BYTES
+    )
     if receipt is None:
         return None
     key = receipt["key"]
@@ -222,7 +224,7 @@ def _read_node(scan, kind, path, staged):
     references = tuple(_refs(scan.root, kind, receipt))
     if not _dependency_files_valid(references):
         raise ValueError("invalid typed dependency file pin")
-    return Node(
+    node = Node(
         _id(kind, key),
         path,
         files,
@@ -231,6 +233,7 @@ def _read_node(scan, kind, path, staged):
         _stage_files(scan, path, files),
         staged,
     )
+    return node, receipt
 
 
 def _retired_size(scan, path):
@@ -271,10 +274,12 @@ def _scan_store(scan):
                         _retired_size(scan, path)
                     )
                     continue
-                node = _read_node(scan, kind, path, staging)
-                if node is None:
+                entry = _read_node(scan, kind, path, staging)
+                if entry is None:
                     unsealed += 1
-                elif staging:
+                    continue
+                node, _ = entry
+                if staging:
                     staged.append(node)
                 else:
                     nodes[node.artifact_id] = node
@@ -413,11 +418,13 @@ class Inventory:
         }
 
 
-def typed_inventory(root, *, limit, after=None, unreferenced=False):
+def typed_inventory(root, *, limit, after=None, unreferenced=False, artifact_kind=None):
     if not 1 <= limit <= 1000:
         raise ValueError("artifact limit must be between 1 and 1000")
     if after is not None:
         parse_id(after)
+    if artifact_kind is not None and artifact_kind not in KINDS:
+        raise ValueError(f"unknown typed artifact kind: {artifact_kind}")
     inventory = Inventory.read(root)
     ids = inventory.nodes.keys() | inventory.retired.keys()
     reclaimable = (
@@ -425,7 +432,13 @@ def typed_inventory(root, *, limit, after=None, unreferenced=False):
     )
     visible = reclaimable if unreferenced else ids
     page = nsmallest(
-        limit + 1, (key for key in visible if after is None or key > after)
+        limit + 1,
+        (
+            key
+            for key in visible
+            if (after is None or key > after)
+            and (artifact_kind is None or key.startswith(artifact_kind + "/"))
+        ),
     )
     rows = []
     for key in page[:limit]:
@@ -455,6 +468,61 @@ def typed_inventory(root, *, limit, after=None, unreferenced=False):
         else None,
         "artifacts": rows,
         "next_after": page[limit - 1] if len(page) > limit else None,
+    }
+
+
+def typed_artifact_detail(root, artifact_id, *, offset=0, limit=20):
+    """Read one sealed stage's metadata, without hashing or opening its payload."""
+    if offset < 0 or not 1 <= limit <= 100:
+        raise ValueError(
+            "artifact detail requires a nonnegative offset and a limit of 1–100"
+        )
+    kind, key = parse_id(artifact_id)
+    cache = corpus_cache(root)
+    path = cache / KINDS[kind].directory / key
+    scan = RetentionScan(root)
+    lineage = reversed([part for part in path.parents if part.is_relative_to(root)])
+    if not all(scan.directory(part) for part in (*lineage, path)):
+        raise ValueError(f"missing or unsafe typed artifact: {artifact_id}")
+    node, receipt = _read_node(scan, kind, path, staged=False)
+    scan.check_generations()
+    if scan.problem_count:
+        raise ValueError(f"typed artifact changed during inspection: {artifact_id}")
+    inputs, result = receipt["inputs"], receipt["result"]
+    sources = inputs.get("sources", [])
+    dependencies = sorted({reference.target for reference in node.references})
+    end = offset + limit
+    summary_keys = (
+        "coverage",
+        "partitions",
+        "counts",
+        "sequences",
+        "payload_bytes",
+        "scratch_bytes",
+        "fidelity",
+        "failed_derivations",
+        "unresolved",
+        "assertions",
+        "evidence",
+        "matched_documents",
+        "memberships",
+    )
+    return {
+        "artifact_id": artifact_id,
+        "verification": "advisory",
+        "bytes": node.size,
+        "file_count": len(node.files),
+        "result": {name: result[name] for name in summary_keys if name in result},
+        "options": {
+            name: inputs["options"][name]
+            for name in ("target", "targets", "seed", "qualifiers")
+            if name in inputs.get("options", {})
+        },
+        "source_count": len(sources),
+        "sources": sources[offset:end],
+        "dependency_count": len(dependencies),
+        "dependencies": dependencies[offset:end],
+        "next_offset": end if end < max(len(sources), len(dependencies)) else None,
     }
 
 

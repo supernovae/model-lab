@@ -4428,6 +4428,8 @@ shards in those stores.
 
 ```bash
 klab corpus artifacts --kind typed --limit 25 --json
+klab corpus artifacts --kind typed --artifact-kind relation-index --json
+klab corpus artifacts --kind typed --detail relation-index/KEY --limit 20 --json
 klab corpus artifacts --kind typed --unreferenced --json
 klab corpus release-prune --kind typed --artifact-id procedural-source-shard/KEY --json
 klab corpus release-prune --kind typed --artifact-id procedural-source-shard/KEY --apply --json
@@ -4438,6 +4440,14 @@ dependency counts and up to 20 direct dependencies per row. Continue with
 `--after` and the returned `next_after`. This is a metadata scan of receipts
 and file generations. Use the individual artifact verifier for byte
 integrity or replay checks.
+
+Use `--artifact-kind` to filter inventory rows while keeping the store-wide
+storage totals. `--detail KIND/KEY` reads one receipt and checks the file
+inventory and sizes. It returns compiler targets, recorded coverage or
+sequence counts when available, and a page of source pins and direct
+dependencies. Set `--offset` to its `next_offset` to continue. The
+[Corpus dashboard](dashboard.md#corpus) uses these same readers for metadata
+and the verified relation reader for assertion and evidence pages.
 
 Published typed outputs are durable retention roots. That preserves the
 outputs used by releases, preparations, runs and external recipes without
