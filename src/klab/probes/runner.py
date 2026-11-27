@@ -1031,6 +1031,21 @@ def _require_complete_benchmark(results: list[dict[str, Any]], spec: ProbeSpec) 
             )
 
 
+def require_tier(tier: str, lm_eval: ProbeSpec | Literal[False] | None = None) -> None:
+    """Refuse before any work when TIER needs something this interpreter lacks.
+
+    The full tier ends with lm-eval: without the harness or one of its task
+    datasets, every earlier probe (or both arms of a try) would run first.
+    LM_EVAL is the probe as it will run; ``False`` means it is left out.
+    """
+    if tier != "full" or lm_eval is False:
+        return
+    from klab.probes.lm_eval_adapter import require_tasks
+
+    spec = lm_eval or BY_ID["lm_eval"]
+    require_tasks(spec.params["tasks"], spec.params.get("protocol"))
+
+
 def run_battery(
     target: Any, baseline: Any | None = None, *, final: bool = False, **options: Any
 ) -> dict[str, Any]:

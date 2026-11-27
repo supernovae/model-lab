@@ -98,9 +98,9 @@ resource_envelope: ./bounds.yaml
 - **`seed`** applies to both arms, overriding any seed in the baseline or the
   delta (0 to 2³²−1). Without it, a delta that sets `seed` makes the seed a
   changed variable. The record shows which.
-- **`probe_tier: full`** needs the `lmeval` extra in the interpreter that runs
-  the try. `try` and `sweep` refuse before any arm trains when it is missing
-  and print the install command ([probe tiers](probes.md#tiers-and-fast-fail)). To train
+- **`probe_tier: full`** needs the `lmeval` extra and its task datasets in the
+  interpreter that runs the try. `try` and `sweep` refuse before any arm
+  trains when either is missing and print the cause ([probe tiers](probes.md#tiers-and-fast-fail)). To train
   without it, use `standard` and run `klab probe` afterwards.
 - **Paths** resolve relative to the declaration.
 - **Runtime.** Use `runtime_profile` or `--runtime ID`, not both. `--backend`

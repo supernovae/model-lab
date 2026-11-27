@@ -1228,27 +1228,48 @@ def test_surface_scores_only_cells_inside_the_window(
     assert list(row["details"]["by_length"]) == ["64"]
 
 
+@pytest.mark.parametrize("gap", ["harness", "dataset"])
 def test_full_tier_needs_lm_eval_up_front_or_a_declared_omission(
+    gap: str,
     tried: tuple[Path, dict[str, Any]],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    import importlib.machinery
     import importlib.util
+    import types
 
     root, record = tried
     run_id = record["arms"]["candidate"]["run_id"]
-    find_spec = importlib.util.find_spec
-    monkeypatch.setattr(
-        importlib.util,
-        "find_spec",
-        lambda name, *a: None if name == "lm_eval" else find_spec(name, *a),
-    )
+    if gap == "harness":
+        find_spec = importlib.util.find_spec
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name, *a: None if name == "lm_eval" else find_spec(name, *a),
+        )
+        refusal = "cannot import lm_eval"
+    else:
+        # The harness imports, but one task's dataset cannot be fetched.
+        def get_task_dict(names: list[str], manager: Any) -> dict[str, Any]:
+            if names == ["hellaswag"]:
+                raise ConnectionError("no route to the dataset host")
+            return {}
+
+        harness = types.ModuleType("lm_eval")
+        harness.__spec__ = importlib.machinery.ModuleSpec("lm_eval", None)
+        tasks = types.ModuleType("lm_eval.tasks")
+        tasks.TaskManager = object  # type: ignore[attr-defined]
+        tasks.get_task_dict = get_task_dict  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "lm_eval", harness)
+        monkeypatch.setitem(sys.modules, "lm_eval.tasks", tasks)
+        refusal = "task 'hellaswag' does not load"
     probes = root / "work" / "lab" / "probes"
     before = sorted(probes.iterdir()) if probes.exists() else []
-    # Without the harness the command refuses before it scores anything, and
-    # names the install for the interpreter that would have run it.
-    with pytest.raises(SystemExit, match="cannot import lm_eval") as refused:
+    # The command refuses before it scores anything and names the interpreter
+    # that would have run it.
+    with pytest.raises(SystemExit, match=refusal) as refused:
         _cli(monkeypatch, capsys, root, "probe", run_id, "--config", "full")
     assert sys.executable in str(refused.value)
     assert (sorted(probes.iterdir()) if probes.exists() else []) == before
