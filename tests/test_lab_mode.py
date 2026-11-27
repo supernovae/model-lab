@@ -506,14 +506,23 @@ def test_cpu_smoke_loop_yaml_to_report_within_budget(tmp_path: Path) -> None:
 
     arm = record["arms"]["candidate"]
     panel = tmp_path / "rankings.json"
+    question = "the answer is"
     item = {
         "id": "one",
         "category": "association",
-        "prefix": "the answer is",
+        "prefix": "Choose red\n" + question,
         "candidates": ["red", "blue"],
         "answer": "red",
     }
-    declaration = {"schema_version": 1, "name": "smoke-ranking", "items": [item]}
+    peer = {**item, "id": "two", "prefix": "Choose blue\n" + question, "answer": "blue"}
+    declaration = {
+        "schema_version": 1,
+        "name": "smoke-ranking",
+        "items": [item, peer],
+        "pairs": [
+            {"id": "switch", "left": "one", "right": "two", "question": question}
+        ],
+    }
     panel.write_text(json.dumps(declaration))
     args = (
         "eval",
@@ -530,9 +539,27 @@ def test_cpu_smoke_loop_yaml_to_report_within_budget(tmp_path: Path) -> None:
     result = json.loads(ranked.stdout)
     assert result["identity"]["checkpoint_sha256"] == arm["checkpoint_sha256"]
     assert result["ranking"]["categories"]["association"]["chance"] == 0.5
-    assert set(result["ranking"]["items"][0]["scores"]) == {"red", "blue"}
+    left, right = result["ranking"]["items"]
+    assert set(left["scores"]) == {"red", "blue"}
+    pairs = result["ranking"]["pairs"]
+    assert pairs["overall"]["joint_accuracy"] == left["credit"] * right["credit"]
+    assert pairs["overall"]["chance"] == 0.25
+    assert pairs["categories"]["association"]["mean_answer_margin"] == pytest.approx(
+        (
+            left["scores"]["red"]
+            - left["scores"]["blue"]
+            + right["scores"]["blue"]
+            - right["scores"]["red"]
+        )
+        / 2
+    )
     assert Path(result["output"]).is_file()
-    item["prefix"] = "the " * 1024 + "answer is"
+    peer["prefix"] = item["prefix"]
+    panel.write_text(json.dumps(declaration))
+    refused = cli(*args)
+    assert refused.returncode != 0 and "distinct contexts" in refused.stderr
+    peer["prefix"] = "Choose blue\n" + question
+    item["prefix"] = "the " * 1024 + "\n" + question
     panel.write_text(json.dumps(declaration))
     refused = cli(*args)
     assert refused.returncode != 0 and "exceeds checkpoint context" in refused.stderr
