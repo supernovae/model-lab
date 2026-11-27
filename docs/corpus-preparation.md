@@ -4270,6 +4270,53 @@ depend on shared structure, identifier choice and the tokenizer. These
 measurements cover preparation and encoding. Learning remains a separate
 experiment.
 
+## Inspect and retain typed Corpus artifacts
+
+The typed inventory covers published relation indexes and sequences,
+procedural worlds and sequences, mechanism memberships, and command
+outputs. It also reports the intermediate relation and procedural source
+shards in those stores.
+
+```bash
+klab corpus artifacts --kind typed --limit 25 --json
+klab corpus artifacts --kind typed --unreferenced --json
+klab corpus release-prune --kind typed --artifact-id procedural-source-shard/KEY --json
+klab corpus release-prune --kind typed --artifact-id procedural-source-shard/KEY --apply --json
+```
+
+Inventory returns one page of stable `KIND/KEY` IDs with byte counts,
+dependency counts and up to 20 direct dependencies per row. Continue with
+`--after` and the returned `next_after`. This is a metadata scan of receipts
+and file generations. Use the individual artifact verifier for byte
+integrity or replay checks.
+
+Published typed outputs are durable retention roots. That preserves the
+outputs used by releases, preparations, runs and external recipes without
+needing to search each possible consumer location. Sealed staging receipts
+also protect their dependencies. The scanner follows typed keys, file pins
+from command inputs, and exact source digests when a catalog omits a local
+path. Compiled procedural worlds keep their referenced simulation shards.
+Intermediate relation extraction shards can be rebuilt from their pinned
+sources.
+
+Only explicitly selected unreferenced source shards are eligible for
+removal. A preview reports eligibility and logical bytes. Apply takes the
+existing Corpus retention lease and the selected writer locks, rescans the
+references, and retires a shard with a no-replace rename before removing
+its files. Retry an interrupted removal with the same ID. A published or
+sealed staged dependency, an incomplete metadata scan, or an active
+publisher blocks removal where it is unsafe. An interrupted unsealed
+producer can reuse its completed worker shards when they are still present.
+Pruning such detached shards trades the saved disk space for recomputation.
+
+On a local warm-filesystem synthetic store, the CLI took 0.38 s and 90 MiB
+peak RSS for 1,000 source shards, and 1.13 s and 157 MiB for 10,000 source
+shards. Both commands requested the first 25 eligible entries. At 10,000
+shards, the scan accounted for 663 MB of published artifacts, including
+332 MB protected and 331 MB eligible to prune. The synthetic payloads
+were sparse files and the scan did not read their bodies. These timings
+include CLI startup and cover inventory only.
+
 ## Reference normalized document text
 
 Ordinary native disk LM builds can keep release document metadata and decisions

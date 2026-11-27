@@ -307,3 +307,115 @@ def test_procedural_scope_rejects_invalid_initial_state_and_cross_shard_family(
     )
     with pytest.raises(ValueError, match="conflicting family or split"):
         lab.json("corpus", "mechanisms", "compile", worlds["key"], str(options))
+
+
+def test_typed_retention_protects_publication_and_recovers_explicit_shard_prune(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from klab.corpus.release_members import shared_payload_lease
+
+    lab = Lab(tmp_path, monkeypatch, capsys)
+    declaration = _sources(tmp_path, [_world("retained", "train")])
+    simulate = ("corpus", "mechanisms", "simulate", str(declaration), "--workers", "1")
+    kept = lab.json(*simulate)
+    kept_key = f"procedural-worlds/{kept['key']}"
+    kept_shard = f"procedural-source-shard/{kept['shards'][0]['key']}"
+    options = tmp_path / "compile.json"
+    options.write_bytes(
+        canonical_json(
+            {"targets": ["constraints"], "max_sequences": 5, "max_bytes": 1024**2}
+        )
+    )
+    compiled = lab.json("corpus", "mechanisms", "compile", kept["key"], str(options))
+    compiled_key = f"procedural-sequences/{compiled['key']}"
+
+    _sources(tmp_path, [_world("orphan", "validation")])
+    with monkeypatch.context() as fault:
+        fault.setenv("KLAB_FAULT", "procedural world simulation:1")
+        with pytest.raises(RuntimeError, match="after shard 1"):
+            lab.json(*simulate)
+
+    inventory = ("corpus", "artifacts", "--kind", "typed", "--json")
+    listed = lab.json(*inventory)
+    assert listed["scan_status"] == "complete"
+    by_key = {item["artifact_id"]: item for item in listed["artifacts"]}
+    assert by_key[compiled_key]["dependencies"] == [kept_key]
+    assert by_key[kept_key]["dependencies"] == [kept_shard]
+    assert by_key[kept_shard]["action"] == "protected"
+    [orphan] = lab.json(*inventory, "--unreferenced")["artifacts"]
+    assert (
+        orphan["action"] == "prune" and listed["reclaimable_bytes"] == orphan["bytes"]
+    )
+    assert listed["published_bytes"] == listed["retained_bytes"] + orphan["bytes"]
+    first = lab.json(*inventory, "--limit", "1")
+    assert all(
+        item["artifact_id"] > first["next_after"]
+        for item in lab.json(*inventory, "--after", str(first["next_after"]))[
+            "artifacts"
+        ]
+    )
+
+    key = orphan["artifact_id"]
+    prune = (
+        "corpus",
+        "release-prune",
+        "--kind",
+        "typed",
+        "--artifact-id",
+        key,
+        "--json",
+    )
+    with shared_payload_lease(Path(kept["path"])):
+        with pytest.raises(SystemExit, match="1"):
+            lab.json(*prune, "--apply")
+        assert json.loads(capsys.readouterr().out)["status"] == "blocked"
+
+    # A seal that reached staging before a crash also protects its inputs.
+    _sources(tmp_path, [_world("awaiting-publication", "test")])
+    waiting = lab.json(*simulate)
+    published = Path(waiting["path"])
+    pending = published.with_name(f".incomplete-{published.name}")
+    published.rename(pending)
+    listing = lab.json(*inventory)
+    staging_shard = f"procedural-source-shard/{waiting['shards'][0]['key']}"
+    assert listing["staging_manifests"] == 1
+    assert (
+        next(
+            row for row in listing["artifacts"] if row["artifact_id"] == staging_shard
+        )["action"]
+        == "protected"
+    )
+
+    kept_receipt = Path(kept["path"]) / "receipt.json"
+    original = kept_receipt.read_bytes()
+    broken = json.loads(original)
+    broken["result"]["shards"][0]["payload"]["sha256"] = "0" * 64
+    kept_receipt.write_bytes(canonical_json(broken))
+    try:
+        assert lab.json(*inventory, "--unreferenced")["reclaimable_bytes"] is None
+        lab.run("corpus", "artifacts", "--kind", "typed", "--unreferenced")
+        with pytest.raises(SystemExit, match="1"):
+            lab.json(*prune, "--apply")
+        assert json.loads(capsys.readouterr().out)["status"] == "blocked"
+    finally:
+        kept_receipt.write_bytes(original)
+
+    # Resume an explicitly selected removal interrupted after the no-replace rename.
+    shard_root = lab.work / "cache/corpus/mechanisms/simulation/files/shard"
+    orphan_path = shard_root / key.split("/")[-1]
+    retired = orphan_path.with_name(f".pruned-{orphan_path.name}")
+    orphan_path.rename(retired)
+    preview = lab.json(
+        *prune, "--artifact-id", kept_shard, "--artifact-id", compiled_key
+    )
+    assert {row["artifact_id"]: row["action"] for row in preview["payloads"]} == {
+        key: "prune",
+        kept_shard: "protected",
+        compiled_key: "protected",
+    }
+    removed = lab.json(*prune, "--apply")
+    assert removed["pruned"] == [key] and removed["pruned_bytes"] == orphan["bytes"]
+    assert not retired.exists()
+    assert lab.json("corpus", "mechanisms", "audit", kept["key"])["replayed"]

@@ -321,7 +321,15 @@ def _run(args: argparse.Namespace) -> None:
             None,
         )
         if command == "release-prune":
-            if args.kind == "normalized":
+            if args.kind == "typed":
+                from klab.corpus.typed_retention import prune_typed_artifacts
+
+                if not args.artifact_id:
+                    raise ValueError("typed prune requires --artifact-id KIND/KEY")
+                result = prune_typed_artifacts(
+                    root, artifacts=args.artifact_id, apply=args.apply
+                )
+            elif args.kind == "normalized":
                 if args.partition is None:
                     raise ValueError("normalized prune requires --partition SOURCE/KEY")
                 result = prune_normalized_partitions(
@@ -350,6 +358,38 @@ def _run(args: argparse.Namespace) -> None:
                     print(f"  {problem['path']}  {problem['reason']}")
             if result["status"] in {"blocked", "partial"}:
                 raise SystemExit(1)
+            return
+        if args.kind == "typed":
+            from klab.corpus.typed_retention import typed_inventory
+
+            if (
+                args.source_id is not None
+                or args.build_references
+                or args.release_references
+            ):
+                raise ValueError(
+                    "typed inventory reports its retained dependencies without normalized filters"
+                )
+            inventory = typed_inventory(
+                root, limit=args.limit, after=args.after, unreferenced=args.unreferenced
+            )
+            if args.json:
+                print(json.dumps(inventory, sort_keys=True))
+            else:
+                retained = inventory["retained_bytes"]
+                retained_text = f"{retained:,}" if retained is not None else "unknown"
+                print(
+                    f"{inventory['published_manifests']:,} typed artifacts, {retained_text} retained bytes"
+                )
+                print(f"Reference scan {inventory['scan_status']}")
+                for row in inventory["artifacts"]:
+                    print(
+                        f"  {row['action']} {row['artifact_id']} ({row['bytes']:,} bytes)"
+                    )
+                for problem in inventory["problems"]:
+                    print(f"  {problem['path']}  {problem['reason']}")
+                if inventory["next_after"] is not None:
+                    print(f"Next page --after {inventory['next_after']}")
             return
         if storage is not None:
             if args.source_id is not None:
@@ -1160,7 +1200,9 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "artifacts", help="Inspect shared Corpus storage and release references"
     )
     command.add_argument(
-        "--kind", choices=("normalized", *SHARED_STORES.values()), default="normalized"
+        "--kind",
+        choices=("normalized", "typed", *SHARED_STORES.values()),
+        default="normalized",
     )
     command.add_argument("--source-id")
     command.add_argument("--limit", type=int, default=100)
@@ -1228,11 +1270,14 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         help="Preview or remove explicitly selected unreferenced Corpus artifacts",
     )
     command.add_argument(
-        "--kind", choices=("normalized", *SHARED_STORES.values()), required=True
+        "--kind",
+        choices=("normalized", "typed", *SHARED_STORES.values()),
+        required=True,
     )
     selected = command.add_mutually_exclusive_group(required=True)
     selected.add_argument("--digest", action="append", metavar="SHA256")
     selected.add_argument("--partition", action="append", metavar="SOURCE/KEY")
+    selected.add_argument("--artifact-id", action="append", metavar="KIND/KEY")
     command.add_argument("--apply", action="store_true")
     command.add_argument("--json", action="store_true")
     command.set_defaults(handler=_handle)
