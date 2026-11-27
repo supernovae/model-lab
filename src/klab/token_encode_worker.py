@@ -169,7 +169,7 @@ def read_texts(path: str, locations: list[tuple[int, int]]) -> list[str]:
     from klab.corpus.normalized_documents import DocumentText
 
     with DocumentText(Path(path)) as source:
-        return [row["text"] for row, _, _ in source.records(records())]
+        return [row["text"] for row, _, _ in source.records(records(), coalesce=True)]
 
 
 def text_digests(texts: list[str]) -> np.ndarray:

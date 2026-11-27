@@ -2078,6 +2078,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
 def test_document_overlay_reuses_normalized_text_through_release_consumers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
+    from klab.corpus import normalized_documents
     from klab.corpus.normalized_documents import DOCUMENT_REFERENCES, TEXT_REFERENCE
     from klab.corpus.normalized_spans import span_partitions
     from klab.token_encode_worker import read_texts
@@ -2105,6 +2106,37 @@ def test_document_overlay_reuses_normalized_text_through_release_consumers(
     assert read_texts(str(projected / "documents.jsonl"), locations) == [
         row["text"] for row in expected[:2]
     ]
+    # A source contains several adjacent backing records but release rows are in
+    # document-ID order. Pick two adjacent records and skip one before the third.
+    offset = 0
+    by_source = []
+    for index, raw in enumerate(physical):
+        locator = json.loads(raw)[TEXT_REFERENCE]
+        by_source.append((locator, (offset, len(raw)), expected[index]["text"]))
+        offset += len(raw)
+    for _, group in groupby(sorted(by_source), key=lambda row: row[0][0]):
+        source_rows = list(group)
+        if len(source_rows) >= 4:
+            break
+    first, second, _, fourth = source_rows[:4]
+    _, start, width = first[0]
+    _, second_start, second_width = second[0]
+    _, later_start, later_width = fourth[0]
+    assert start + width == second_start < second_start + second_width < later_start
+    reads = []
+    read = normalized_documents.read_file_range
+
+    def record_read(stream, offset, size):
+        reads.append((offset, size))
+        return read(stream, offset, size)
+
+    request = (fourth, second, first)
+    with monkeypatch.context() as patch:
+        patch.setattr(normalized_documents, "read_file_range", record_read)
+        assert read_texts(
+            str(projected / "documents.jsonl"), [r[1] for r in request]
+        ) == [r[2] for r in request]
+    assert reads == [(start, width + second_width), (later_start, later_width)]
     for split in ("train", "validation", "test"):
         assert (projected / "lm" / f"{split}.jsonl").read_bytes() == (
             inline / "lm" / f"{split}.jsonl"
