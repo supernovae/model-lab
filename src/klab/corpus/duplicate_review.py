@@ -2,68 +2,19 @@
 
 from __future__ import annotations
 
-import json
 import re
 import sqlite3
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import ExitStack, closing
 from pathlib import Path
 
-from klab.canonical import canonical_digest
-from klab.corpus.build_stages import (
-    RECEIPT,
-    StageStore,
-    implementation_digests,
-    verify_stage,
-)
+from klab.corpus.build_stages import StageStore
 from klab.corpus.dedup_policy import drops_train_copy, group_policy_error
 from klab.corpus.large_build import native_dedup_inputs
-from klab.corpus.release_receipt import receipt_first, stat_index
-from klab.corpus.release_verify import current_settings
-from klab.safe_io import symlinked
-from klab.training.manifest import sha256_file
+from klab.corpus.stage_inspection import open_verified_stage
 
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _METHODS = ("raw", "normalized")
 _GROUP_COLUMNS = "origin,members,train,validation_count,test,incompatible_rights"
-
-
-@contextmanager
-def _verified_stage(store, name, key):
-    directory = store.directory(name, key)
-    receipt_path = directory / RECEIPT
-    if symlinked(receipt_path) or not receipt_path.is_file():
-        raise ValueError(f"missing or unsafe retained Corpus {name} stage: {key}")
-    before, _ = stat_index([directory], strict=False)
-    receipt = json.loads(receipt_path.read_bytes())
-    if (
-        receipt["key"] != key
-        or receipt["stage"] != name
-        or canonical_digest(receipt["inputs"]) != key
-    ):
-        raise ValueError(f"retained Corpus {name} stage identity differs")
-    receipt_sha256 = sha256_file(receipt_path)
-    proof_identity = canonical_digest(
-        [
-            receipt_sha256,
-            implementation_digests("duplicate_review.py", "build_stages.py"),
-        ]
-    )
-    settings = current_settings()
-    _, verified = receipt_first(
-        "duplicate_evidence_stage",
-        directory,
-        proof_identity,
-        [],
-        settings.proof_store,
-        settings.verification_mode,
-        verify=lambda: verify_stage(directory, name, key, receipt["inputs"]),
-        reused=lambda: receipt,
-    )
-    if before != verified:
-        raise ValueError(f"Corpus {name} stage changed during verification")
-    yield directory, receipt, receipt_sha256
-    if stat_index([directory], strict=False)[0] != before:
-        raise ValueError(f"Corpus {name} stage changed during inspection")
 
 
 def _group_summary(row, method, policy):
@@ -118,7 +69,7 @@ def review_groups(
     policy = project.release.policy.duplicates
     with ExitStack() as stack:
         index_dir, index_receipt, index_sha = stack.enter_context(
-            _verified_stage(store, "index", index_key)
+            open_verified_stage(store, "index", index_key)
         )
         try:
             counts = index_receipt["result"]["duplicate_evidence"][method]
@@ -172,7 +123,7 @@ def review_groups(
         decision_join = ""
         if decided:
             directory, _, _ = stack.enter_context(
-                _verified_stage(store, "dedup", dedup_key)
+                open_verified_stage(store, "dedup", dedup_key)
             )
             connection.execute(
                 "ATTACH DATABASE ? AS decisions",

@@ -315,10 +315,15 @@ explicit execution again for a requested replay of external code.
   index lifecycle. Its bounded entity-to-document queries also cover
   entities beyond the packing anchor cap.
   Add shared-mechanism neighborhoods once mechanisms have typed outputs.
-- **Structured sources and compilation.** Start with pinned Wikipedia
-  links and categories, bounded Wikidata statements with qualifiers and
-  references, and deterministic miniature worlds. Compile triples and
-  seeded graph traversals first. Add infoboxes, explicit linguistic
+- **Structured sources and compilation.** The [relations interface](../corpus-preparation.md#extract-and-compile-typed-relations)
+  extracts from pinned Wikipedia page links and categories, a bounded
+  Wikidata statement subset and explicit miniature worlds. Shard receipts
+  preserve accepted records and unresolved locators. A scope-wide SQLite
+  reduction keeps typed assertions, separate evidence and split-scoped
+  integer adjacency. Triples and seeded walks serialize independently from
+  the graph and feed the existing local-text preparation and next-token
+  loader. Reference schedules over compiled representations remain a later
+  integration. Add infoboxes, explicit linguistic
   relationships, scientific observations, software ASTs and formal
   definitions through separate source adapters as evidence warrants.
   Use hierarchy and shared-property factorization before motif discovery
