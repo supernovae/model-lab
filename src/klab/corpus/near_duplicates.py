@@ -35,6 +35,7 @@ import re
 import shutil
 import struct
 import tempfile
+import unicodedata
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import closing
@@ -64,6 +65,7 @@ _ROWS = _HASHES // _BANDS
 # Shingles whose MinHashes are computed at once; bounds the working matrix.
 _BLOCK = 8192
 _WORD_CACHE = 1 << 20
+_DEFAULT_SAMPLE_STRIDE = 256
 
 
 def _seeded(label: str, count: int) -> np.ndarray:
@@ -536,17 +538,17 @@ def _sampled(document_id: str, stride: int) -> bool:
     return int.from_bytes(digest, "big") % stride == 0
 
 
-def _scan_rows(rows, options: _Options, add_held, add_sample):
+def _scan_rows(rows, sample_stride: int | None, add_held, add_sample):
     """Read one shard into its held-out shingle evidence and training sample."""
     shingler = _Shingler()
-    tally = _Tally(options.max_candidates)
+    tally = _Tally(0)  # This pass records coverage and proposes no candidates.
     sampled: Counter[str] = Counter()
     for _, row in rows:
         if row["split"] not in _SPLITS:
             raise ValueError("near-duplicate invalid document split")
         if row["split"] == "train":
-            if options.template_aware and _sampled(
-                row["document_id"], options.boilerplate_sample_stride
+            if sample_stride is not None and _sampled(
+                row["document_id"], sample_stride
             ):
                 source = str(row.get("source_id"))
                 add_sample(source, shingler(row["text"]))
@@ -563,7 +565,7 @@ def _scan(shard: int) -> dict[str, Any]:
     sample: dict[str, list[np.ndarray]] = defaultdict(list)
     result = _scan_rows(
         _JOB["read"](*_JOB["shards"][shard]),
-        _JOB["options"],
+        _JOB["sample_stride"],
         lambda fields, shingles: held.append((fields, shingles)),
         lambda source, shingles: sample[source].append(shingles),
     )
@@ -597,7 +599,7 @@ def _read_evidence(path: Path):
             yield fields, np.frombuffer(values, dtype="<u8")
 
 
-def _scan_file(staging, path, start, end, options):
+def _scan_file(staging, path, start, end, sample_stride):
     with (staging / "evidence.bin").open("xb") as stream:
 
         def emit(fields, shingles):
@@ -605,17 +607,17 @@ def _scan_file(staging, path, start, end, options):
 
         return _scan_rows(
             _document_rows(Path(path), start, end),
-            _Options(**options),
+            sample_stride,
             emit,
             emit,
         )
 
 
-def _scan_results(shards, workers, options, evidence):
+def _scan_results(shards, workers, sample_stride, evidence):
     if evidence is None:
         yield from _run(_scan, len(shards), workers)
         return
-    plan = replace(evidence, tasks=[(*task, vars(options)) for task in evidence.tasks])
+    plan = replace(evidence, tasks=[(*task, sample_stride) for task in evidence.tasks])
     with (
         verification_settings(workers=workers),
         closing(run_sharded_files(plan, _scan_file, ordered=True)) as segments,
@@ -683,7 +685,7 @@ def screen(
     template_aware: bool = False,
     boilerplate_heldout_documents: int = 20,
     boilerplate_sample_documents: int = 4,
-    boilerplate_sample_stride: int = 256,
+    boilerplate_sample_stride: int = _DEFAULT_SAMPLE_STRIDE,
     boilerplate_min_share: float = 0.5,
     boilerplate_sketch_bits: int = 27,
     workers: int = 1,
@@ -739,19 +741,21 @@ def screen(
         template_aware=template_aware,
         boilerplate_heldout_documents=boilerplate_heldout_documents,
         boilerplate_sample_documents=boilerplate_sample_documents,
-        boilerplate_sample_stride=boilerplate_sample_stride,
         boilerplate_min_share=boilerplate_min_share,
     )
     index = _Index(options)
     base = _Tally(max_candidates)
     sketch = _Sketch(boilerplate_sketch_bits) if template_aware else None
+    sample_stride = boilerplate_sample_stride if template_aware else None
     sampled: Counter[str] = Counter()
     seen: set[str] = set()
     _JOB.clear()
-    _JOB.update(read=read, shards=list(shards), options=options)
+    _JOB.update(
+        read=read, shards=list(shards), options=options, sample_stride=sample_stride
+    )
     held: list[tuple[dict[str, Any], np.ndarray]] = []
     total_shingles = 0
-    with closing(_scan_results(shards, workers, options, _evidence)) as results:
+    with closing(_scan_results(shards, workers, sample_stride, _evidence)) as results:
         for result in results:
             base.merge(_Tally.from_state(result["tally"], max_candidates))
             sampled.update(result["sampled"])
@@ -913,15 +917,29 @@ def screen_documents(
     checkpoint_every: int = 200_000,
     workers: int = 1,
     shard_bytes: int = 256 << 20,
+    retain_evidence: bool = False,
+    template_aware: bool = False,
+    boilerplate_sample_stride: int = _DEFAULT_SAMPLE_STRIDE,
     **options: Any,
 ) -> dict[str, Any]:
     """Screen a `documents.jsonl` file in line-aligned shards of `shard_bytes`.
 
     With `checkpoint_dir` each shard saves first-pass shingle evidence and
-    training progress. The key binds the file, every option and the shard plan.
+    training progress. `retain_evidence` keeps verified first-pass shards after
+    success so later screens can reuse them with different comparison options.
     """
+    if retain_evidence and checkpoint_dir is None:
+        raise ValueError(
+            "retaining near-duplicate evidence requires a checkpoint directory"
+        )
+    documents = documents.resolve(strict=True)
     observed = range_file_identity(documents)
     shards = _line_ranges(documents, shard_bytes)
+    options = {
+        **options,
+        "template_aware": template_aware,
+        "boilerplate_sample_stride": boilerplate_sample_stride,
+    }
 
     def read(start: int, end: int):
         return _document_rows(documents, start, end)
@@ -929,13 +947,18 @@ def screen_documents(
     if checkpoint_dir is None:
         report = screen(read, shards, workers=workers, **options)
     else:
-        inputs = {
-            "identity": identity,
+        evidence_inputs = {
             "file": observed,
-            "algorithm": "word_shingle_minhash_lsh_v2",
+            "numpy_version": np.__version__,
+            "unicode_version": unicodedata.unidata_version,
+            "implementation": implementation_digests("near_duplicates.py"),
+            "sample_stride": boilerplate_sample_stride if template_aware else None,
+        }
+        inputs = {
+            **evidence_inputs,
+            "identity": identity,
             "options": options,
             "shards": shards,
-            "implementation": implementation_digests("near_duplicates.py"),
         }
         key = canonical_digest(inputs)
         root = Path(checkpoint_dir)
@@ -943,11 +966,16 @@ def screen_documents(
             root / f"near-duplicates-{key[:16]}.json", key, checkpoint_every
         )
         evidence = checkpoint.path.with_suffix(".evidence")
+        if retain_evidence:
+            evidence_key = canonical_digest(
+                {**evidence_inputs, "shard_bytes": shard_bytes}
+            )
+            evidence = root / f"near-duplicates-{evidence_key}.retained-evidence"
         plan = ShardPlan(
             EVIDENCE_STAGE,
             [(str(documents), start, end) for start, end in shards],
             observed[2],
-            inputs={"screen": key},
+            inputs=evidence_inputs if retain_evidence else {"screen": key},
             store=evidence,
         )
         root.mkdir(parents=True, exist_ok=True)
@@ -969,7 +997,7 @@ def screen_documents(
                 _evidence=plan,
                 **options,
             )
-            if evidence.exists():
+            if not retain_evidence and evidence.exists():
                 shutil.rmtree(evidence)
     if range_file_identity(documents) != observed:
         raise ValueError("documents changed during near-duplicate screen")
