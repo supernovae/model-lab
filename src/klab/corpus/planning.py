@@ -36,7 +36,7 @@ from klab.corpus.project import (
 )
 from klab.corpus.release import consumed_release
 from klab.corpus.shards import range_file_identity
-from klab.corpus.train_selection import minimum_train_bytes, train_row_language
+from klab.corpus.train_selection import minimum_train_bytes, train_row_selection
 from klab.safe_io import symlinked
 from klab.workspace_preflight import check_storage
 
@@ -495,12 +495,24 @@ def plan_build(
         "build_scratch_bytes": None,
     }
     specs = [declaration_payload(t) for t in project.transforms]
-    minimum, language = minimum_train_bytes(specs), train_row_language(specs)
+    minimum, row_selection = minimum_train_bytes(specs), train_row_selection(specs)
     annotations = {}
     if minimum is not None:
         annotations["text_statistics"] = {"minimum_train_utf8_bytes": minimum}
-    if language is not None:
-        annotations["source_language"] = {"train_row_language": language.report()}
+    if row_selection is not None:
+        options = row_selection.report()
+        if row_selection.language:
+            annotations["source_language"] = {
+                "train_row_language": options["row_language"]
+            }
+        if row_selection.quality:
+            annotations["source_quality"] = {
+                "train_source_quality": options["source_quality"]
+            }
+        if row_selection.privacy_mask:
+            annotations["privacy_candidates"] = {
+                "train_privacy_candidates": options["privacy_candidates"]
+            }
     plan["stages"][4]["inputs"].extend(annotations)
     plan["stages"][2:2] = [
         {"id": name, "inputs": ["normalize"], **params}

@@ -547,9 +547,12 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     quality_args = (*annotate, "--kind", "source-quality")
     quality = lab.json(*quality_args)
     assert quality["payload"]["bytes"] == 57 * len(parent_rows)
+    reported = sum(
+        (row.get("metadata") or {}).get("score") is not None for row in parent_rows
+    )
     assert quality["totals"]["score"] == {
-        "reported": 1,
-        "missing": len(parent_rows) - 1,
+        "reported": reported,
+        "missing": len(parent_rows) - reported,
         "invalid": 0,
     }
     assert quality["totals"]["token_count"] == {
@@ -704,6 +707,10 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         "allowed": ["en"],
         "missing": "keep",
     }
+    transform["parameters"]["train_source_quality"] = {
+        "web_fineweb": {"field": "score", "minimum": 0.5, "missing": "drop"}
+    }
+    transform["parameters"]["train_privacy_candidates"] = ["email_like"]
     transform_path.write_text(yaml.safe_dump(transform))
     planned = lab.json(*plan_args)
     assert planned["normalization_source_bytes"] == 0
@@ -720,14 +727,18 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     assert "text_statistics" in stages["views"]["inputs"]
     assert stages["source_language"]["action"] == "verify_or_build_sidecars"
     assert "source_language" in stages["views"]["inputs"]
+    for evidence in ("source_quality", "privacy_candidates"):
+        assert stages[evidence]["action"] == "verify_or_build_sidecars"
+        assert evidence in stages["views"]["inputs"]
 
     from klab.corpus import train_selection
 
-    annotate_partition = train_selection.annotate_normalized
-    mismatched = tmp_path / "mismatched-statistics.bin"
-    mismatched.write_bytes(bytes([original_payload[0] ^ 1]) + original_payload[1:])
+    annotate_partition = train_selection.annotate_source_quality
+    mismatched = tmp_path / "mismatched-quality.bin"
+    quality_bytes = Path(quality["payload"]["path"]).read_bytes()
+    mismatched.write_bytes(bytes([quality_bytes[0] ^ 1]) + quality_bytes[1:])
 
-    def wrong_statistics(root, identifier):
+    def wrong_quality(root, identifier):
         result = annotate_partition(root, identifier)
         if identifier == parent_id:
             result["payload"].update(
@@ -736,28 +747,32 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         return result
 
     with monkeypatch.context() as wrong:
-        wrong.setattr(train_selection, "annotate_normalized", wrong_statistics)
+        wrong.setattr(train_selection, "annotate_source_quality", wrong_quality)
         with pytest.raises(
             ValueError,
-            match="text-statistics rows differ from the native document index",
+            match="source-quality rows differ from the native document index",
         ):
             lab.run(*build_args)
     selected_build = Path(lab.run(*build_args))
     assert selected_build.name == planned["build_id"]
     selected_release = Path(lab.run("corpus", "freeze", str(selected_build), "--cold"))
-    expected_train, disallowed = [], []
-    short = 0
+    expected_train, disallowed, low_quality = [], [], []
+    short = missing = private = 0
     for row, doc in zip(original_train, train_documents, strict=True):
+        metadata = doc.get("metadata") or {}
         if len(doc["text"].encode("utf-8")) < threshold:
             short += 1
-        elif (
-            doc["document_kind"] != "code"
-            and (doc.get("metadata") or {}).get("language") == "fr"
-        ):
+        elif doc["document_kind"] != "code" and metadata.get("language") == "fr":
             disallowed.append(doc["document_id"])
+        elif doc["source_id"] == "web_fineweb" and metadata.get("score") is None:
+            missing += 1
+        elif doc["source_id"] == "web_fineweb" and metadata.get("score", 1) < 0.5:
+            low_quality.append(doc["document_id"])
+        elif "fixture@example.org" in doc["text"]:
+            private += 1
         else:
             expected_train.append(row)
-    assert disallowed
+    assert disallowed and low_quality and private and missing
     assert 0 < len(expected_train) < len(original_train)
     assert (selected_release / "lm/train.jsonl").read_bytes() == b"".join(
         expected_train
@@ -766,16 +781,19 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         assert (selected_release / member).read_bytes() == (
             other_build / member
         ).read_bytes()
-    policy_result = json.loads((selected_release / "report.json").read_bytes())[
+    policy_result = lab.json("corpus", "describe", str(selected_release))["report"][
         "train_selection"
     ]
     assert policy_result["excluded_by_reason"] == {
         "below_minimum_utf8_bytes": short,
         "row_language_not_allowed": len(disallowed),
         "row_language_missing": 0,
+        "below_source_quality_minimum": len(low_quality),
+        "source_quality_unavailable": missing,
+        "privacy_candidate": private,
     }
 
-    def change_language(path):
+    def change_metadata(path, document_id, key, value):
         documents = path / "documents.jsonl"
         with (
             documents.open("rb") as source,
@@ -783,17 +801,24 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         ):
             for line in source:
                 doc = json.loads(line)
-                if doc["document_id"] == disallowed[0]:
-                    doc["metadata"]["language"] = "en"
+                if doc["document_id"] == document_id:
+                    doc["metadata"][key] = value
                     line = canonical_json(doc) + b"\n"
                 output.write(line)
         (path / "changed.jsonl").replace(documents)
 
-    forged_language = forge_release(selected_release, change_language)
-    with pytest.raises(
-        ValueError, match="row language decision differs from pinned source"
+    for identifier, key, value, reason in (
+        (disallowed[0], "language", "en", "row language"),
+        (low_quality[0], "score", 1.0, "source-quality"),
     ):
-        lab.run("corpus", "audit", str(forged_language), "--cold")
+        forged = forge_release(
+            selected_release,
+            lambda path: change_metadata(path, identifier, key, value),  # noqa: B023 - called immediately
+        )
+        with pytest.raises(
+            ValueError, match=f"{reason} decision differs from pinned source"
+        ):
+            lab.run("corpus", "audit", str(forged), "--cold")
     selected_inventory = tmp_path / "selected-family-inventory.jsonl"
     write_family_inventory(selected_release, selected_inventory)
     selected_export = Path(
@@ -849,23 +874,24 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     assert used_train and used_train <= known_train
 
     transform["parameters"] = {
-        "train_row_language": {"allowed": ["en", "fr"], "missing": "keep"}
+        "train_row_language": {"allowed": ["en", "fr"], "missing": "keep"},
+        "train_source_quality": {
+            "web_fineweb": {"field": "score", "minimum": 0, "missing": "keep"}
+        },
+        "train_privacy_candidates": ["phone_like"],
     }
     transform_path.write_text(yaml.safe_dump(transform))
     relaxed = Path(lab.run(*build_args))
     relaxed_report = json.loads((relaxed / "report.json").read_bytes())
-    assert (
-        relaxed_report["train_selection"]["language_sidecars"]
-        == policy_result["language_sidecars"]
-    )
+    for field in ("language_sidecars", "quality_sidecars", "privacy_sidecars"):
+        assert relaxed_report["train_selection"][field] == policy_result[field]
     assert (relaxed / "lm/train.jsonl").read_bytes() == b"".join(original_train)
     relaxed_progress = (
         relaxed.parent.parent / "progress" / f"{relaxed.name}.jsonl"
     ).read_text()
-    assert (
-        "reused_source_language" in relaxed_progress
-        and "built_source_language" not in relaxed_progress
-    )
+    for annotator in ("source_language", "source_quality", "privacy_candidates"):
+        assert f"reused_{annotator}" in relaxed_progress
+        assert f"built_{annotator}" not in relaxed_progress
     assert (
         "reused_index_stage" in relaxed_progress
         and "reused_dedup_stage" in relaxed_progress
@@ -887,6 +913,24 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     assert strict_report["train_selection"]["excluded_by_reason"][
         "row_language_missing"
     ] == (len(original_train) - len(kept))
+
+    transform["parameters"] = {
+        "train_source_quality": {
+            "web_fineweb": {"field": "token_count", "minimum": 0, "missing": "drop"}
+        }
+    }
+    transform_path.write_text(yaml.safe_dump(transform))
+    quality_build = Path(lab.run(*build_args))
+    quality_release = Path(lab.run("corpus", "freeze", str(quality_build), "--cold"))
+    expected_quality_train = []
+    for row, doc in zip(original_train, train_documents, strict=True):
+        value = (doc.get("metadata") or {}).get("token_count")
+        if doc["source_id"] != "web_fineweb" or type(value) is int and value >= 0:
+            expected_quality_train.append(row)
+    assert len(expected_quality_train) < len(original_train)
+    assert (quality_release / "lm/train.jsonl").read_bytes() == b"".join(
+        expected_quality_train
+    )
     assert not normalized
     transform_path.write_bytes(original_transform)
     release_path.write_bytes(original_release)

@@ -45,13 +45,18 @@ def test_retained_train_selection_reuses_rows_and_limits_ranked_offsets(
         "fixture/train.jsonl.gz",
         [
             {
-                "text": f"Chapter {number}\n" + "A café has a quiet garden. " * number,
+                "text": f"Chapter {number}\n"
+                + "A café has a quiet garden. " * number
+                + (
+                    "Contact fixture@example.org."
+                    if number % 2
+                    else "Call 415-555-0134."
+                ),
                 "url": f"https://example.org/chapter/{number}",
-                "language": label,
+                "language": f"label-{number}",
+                "score": number,
             }
-            for number, label in enumerate(
-                ("en", "fr", "de", "it", "es", "pt", "nl", "pl"), 1
-            )
+            for number in range(1, 17)
         ],
     )
     source["acquisition"].update(
@@ -60,7 +65,7 @@ def test_retained_train_selection_reuses_rows_and_limits_ranked_offsets(
                 "path": shard.path,
                 "expected_sha256": shard.sha256,
                 "max_shard_bytes": len(shard.body),
-                "max_scanned_rows": 8,
+                "max_scanned_rows": 16,
                 "hash_modulus": 1,
                 "hash_remainders": [0],
             }
@@ -130,7 +135,7 @@ def test_retained_train_selection_reuses_rows_and_limits_ranked_offsets(
     )
     admission = root / "admission.json"
     draft = draft_admission_manifest(project, root, application, policy, admission)
-    assert draft["counts"] == {"qualify": 8, "exclude": 0, "quarantine": 0}
+    assert draft["counts"] == {"qualify": 16, "exclude": 0, "quarantine": 0}
     inventory = root / "inventory.jsonl"
     report = write_split_inventory(project, root, inventory)
     write(
@@ -199,17 +204,32 @@ def test_retained_train_selection_reuses_rows_and_limits_ranked_offsets(
     def width(doc):
         return len(doc["text"].encode("utf-8"))
 
-    shortest, disallowed, *kept = sorted(
+    shortest, disallowed, low_score, *qualified = sorted(
         (doc for doc in rows(baseline / "documents.jsonl") if doc["split"] == "train"),
         key=width,
     )
-    assert len(kept) == 2 and width(shortest) < width(disallowed)
+    assert width(shortest) < width(disallowed)
+    marker, category = (
+        ("fixture@example.org", "email_like")
+        if "fixture@example.org" in qualified[0]["text"]
+        else ("415-555-0134", "phone_like")
+    )
+    kept = [doc for doc in qualified if marker not in doc["text"]]
+    assert 0 < len(kept) < len(qualified)
     selection = {
-        "allowed": sorted(doc["metadata"]["language"] for doc in kept),
+        "allowed": sorted(
+            doc["metadata"]["language"] for doc in [low_score, *qualified]
+        ),
         "missing": "drop",
     }
+    score_floor = qualified[0]["metadata"]["score"]
     transform["parameters"].update(
-        minimum_train_utf8_bytes=width(shortest) + 1, train_row_language=selection
+        minimum_train_utf8_bytes=width(shortest) + 1,
+        train_row_language=selection,
+        train_source_quality={
+            source_id: {"field": "score", "minimum": score_floor, "missing": "drop"}
+        },
+        train_privacy_candidates=[category],
     )
     expected = {doc["document_id"] for doc in kept}
     write("transforms/lm.yaml", transform)
@@ -222,8 +242,15 @@ def test_retained_train_selection_reuses_rows_and_limits_ranked_offsets(
         "below_minimum_utf8_bytes": 1,
         "row_language_not_allowed": 1,
         "row_language_missing": 0,
+        "below_source_quality_minimum": 1,
+        "source_quality_unavailable": 0,
+        "privacy_candidate": len(qualified) - len(kept),
     }
-    assert audited["language_sidecars"]
+    assert (
+        audited["language_sidecars"]
+        and audited["quality_sidecars"]
+        and audited["privacy_sidecars"]
+    )
 
     def edit_row_label(path):
         def edited():
@@ -257,6 +284,9 @@ def test_retained_train_selection_reuses_rows_and_limits_ranked_offsets(
     assert report["train_selection"]["excluded_by_reason"] == {
         "row_language_not_allowed": 2,
         "row_language_missing": 0,
+        "below_source_quality_minimum": 1,
+        "source_quality_unavailable": 0,
+        "privacy_candidate": len(qualified) - len(kept),
     }
     assert report["mixture_supply"]["strata"][stratum]["train_utf8_bytes"] == sum(
         map(width, kept)

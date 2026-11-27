@@ -554,9 +554,8 @@ def _emit_build(
     from klab.corpus.train_selection import (
         BELOW_MINIMUM,
         CHECK_ROW_LABEL,
-        LANGUAGE_EXCLUSIONS,
         minimum_train_bytes,
-        train_row_language,
+        train_row_selection,
     )
 
     ordered_rows = ordered_rows or _SQLBuildRows(
@@ -568,8 +567,8 @@ def _emit_build(
     release_spec = declaration_payload(project.release)
     stage_spec = declaration_payload(transform)
     minimum = minimum_train_bytes([stage_spec])
-    language = train_row_language([stage_spec])
-    filtering = minimum is not None or language is not None
+    row_selection = train_row_selection([stage_spec])
+    filtering = minimum is not None or row_selection is not None
     completed = identity.get("completed_preparation")
     if completed is None and filtering != (train_annotations is not None):
         raise ValueError("TRAIN selection requires verified sidecars")
@@ -581,8 +580,8 @@ def _emit_build(
     excluded_train = Counter()
     if minimum is not None:
         excluded_train[BELOW_MINIMUM] = 0
-    if language is not None:
-        excluded_train.update(dict.fromkeys(LANGUAGE_EXCLUSIONS.values(), 0))
+    reasons = row_selection.reasons() if row_selection is not None else {}
+    excluded_train.update(dict.fromkeys(reasons.values(), 0))
     count = 0
     stage_count = 0
     stage_digest = hashlib.sha256()
@@ -726,9 +725,7 @@ def _emit_build(
                 not selected_sources or doc["source_id"] in selected_sources
             )
             if selected_for_stage and filtering and split == "train":
-                size, language_reason = (
-                    annotation if annotation is not None else (None, 0)
-                )
+                size, row_reason = annotation if annotation is not None else (None, 0)
                 if minimum is not None:
                     if size is None:
                         # Completed source renders were authenticated before emission.
@@ -737,12 +734,12 @@ def _emit_build(
                         excluded_train[BELOW_MINIMUM] += 1
                         boundary(len(raw_doc))
                         continue
-                if language is not None and (
-                    completed is not None or language_reason == CHECK_ROW_LABEL
+                if row_selection is not None and (
+                    completed is not None or row_reason == CHECK_ROW_LABEL
                 ):
-                    language_reason = language.document_decision(doc)
-                if language_reason:
-                    excluded_train[LANGUAGE_EXCLUSIONS[language_reason]] += 1
+                    row_reason = row_selection.document_decision(doc)
+                if row_reason:
+                    excluded_train[reasons[row_reason]] += 1
                     boundary(len(raw_doc))
                     continue
             if selected_for_stage:
@@ -849,14 +846,10 @@ def _emit_build(
             selection_report["source_render_ids"] = completed["source_stage_ids"]
         if minimum is not None:
             selection_report["minimum_utf8_bytes"] = minimum
-            if completed is None:
-                selection_report["sidecars"] = train_annotations.sidecars
-        if language is not None:
-            selection_report["row_language"] = language.report()
-            if completed is None:
-                selection_report["language_sidecars"] = (
-                    train_annotations.language_sidecars
-                )
+        if row_selection is not None:
+            selection_report.update(row_selection.report())
+        if completed is None:
+            selection_report.update(train_annotations.inventories)
         report["train_selection"] = selection_report
         report["mixture_supply"] = estimate_supply(
             project.release.policy.mixture, project.release.mixture, train_bytes
@@ -1508,19 +1501,19 @@ def build_large(
         from klab.corpus.train_selection import (
             minimum_train_bytes,
             open_train_annotations,
-            train_row_language,
+            train_row_selection,
         )
 
         specs = [declaration_payload(transform)]
-        minimum, language = minimum_train_bytes(specs), train_row_language(specs)
+        minimum, row_selection = minimum_train_bytes(specs), train_row_selection(specs)
         annotations = None
-        if minimum is not None or language is not None:
+        if minimum is not None or row_selection is not None:
             progress.update(
-                phase="train_annotations" if language else "text_statistics"
+                phase="train_annotations" if row_selection else "text_statistics"
             )
             annotations = selection.enter_context(
                 open_train_annotations(
-                    work_root, prepared, connection, minimum, language, progress
+                    work_root, prepared, connection, minimum, row_selection, progress
                 )
             )
             progress.update(phase="writing_views")

@@ -467,6 +467,9 @@ def write_recipe(
         language="fr", language_score=0.66, score=2.5, int_score=-3, token_count=117
     )
     web[5]["token_count"] = -1
+    web[6]["score"] = 0.9
+    web[6]["text"] += " Contact fixture@example.org for details."
+    web[7]["score"] = 0.95
     if empty_document:
         web[2] = {**web[2], "text": ""}
     hf_source(

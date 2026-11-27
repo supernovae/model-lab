@@ -1286,6 +1286,62 @@ page took 2.41 ms. Searching for plausible endings before checking
 bounded prefixes reduced the initial 17.82 s scan on the same fixture.
 The output digest matched.
 
+#### Select TRAIN text by source quality and privacy candidates
+
+Use `train_source_quality` and `train_privacy_candidates` in the parameters
+of the existing `lm_text` transform. Use either option or both.
+
+```yaml
+parameters:
+  train_source_quality:
+    web_fineweb:
+      field: score
+      minimum: 0.5
+      missing: keep
+  train_privacy_candidates: [email_like, phone_like]
+```
+
+Declare one field and an inclusive minimum per named source. The available
+fields are `score`, `int_score` and `token_count`. Use an integer minimum for
+the last two. Choose `keep` or `drop` for missing and invalid values.
+Sources with no rule pass the quality filter. Set thresholds in each source's
+own units using the source's score scale.
+The privacy filter excludes TRAIN records with any declared candidate
+category. These matches are heuristic. Review the sidecar to choose an
+appropriate policy for the corpus.
+
+The transform applies the filters after duplicate resolution. The first
+failed filter determines the reported reason in this order: byte floor,
+row language, source quality, privacy candidate. The report distinguishes
+`below_source_quality_minimum`, `source_quality_unavailable`, and
+`privacy_candidate`. Inspect the resolved options, evidence references, and
+reason counts in `klab corpus describe RELEASE`. The original documents,
+duplicate groups, validation, and test remain available. Mixture supply and
+loading use the selected TRAIN lineage.
+
+Native disk LM builds, including reviewed admission, verify or produce the
+typed sidecars and join them by ordered document ID. Quality rules request
+annotations only for their named sources. If multiple selection options
+are enabled, the join uses one decision byte per document in addition to the
+optional four-byte size map. Policy-only edits reuse normalization, the
+native index, duplicate decisions and available annotations. The ordinary
+native planner shows the view dependencies. Cold audit recomputes candidate
+flags from normalized text and checks applicable metadata decisions against
+pinned source rows. Completed preparation evaluates the same predicates
+while emitting views from authenticated renders. It records render identities
+and supplies signed selected lineage to retained mixtures. Canaries and
+in-memory builds are outside this selection path.
+
+The quality and privacy annotator producer digests change with this release,
+so their previous sidecars are regenerated on first use.
+
+In three single-worker NVMe trials on 1 million documents with warm sidecar
+payloads, the quality-and-privacy join took a median 0.65 s and read 164.66 MB
+including the document index. All four signals together took 0.87 s and read
+253.66 MB at about 63 MiB peak process RSS. The byte-and-language join took
+0.58 s before and 0.57 s after the change with identical output. The timed
+interval starts at index access and ends when the scratch maps are ready.
+
 #### Select TRAIN text by upstream row language
 
 Set `train_row_language` in the parameters of an `lm_text` transform

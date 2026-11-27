@@ -30,7 +30,7 @@ The [D1–D12 decision table](https://github.com/supernovae/model-lab/blob/b5302
 | 5. Narrow build | #486 checkpoints complete disk-build index and dedup stages. #488 landed the canary. #579 resumes native disk LM view emission from verified append boundaries. The native disk index references prepared payloads and checkpoints groups of prepared files. | Measure out-of-cache emission and the largest input group. Bound compact index assembly, dedup replay, report measurement and manifest hashing. Extend emission recovery to completed preparation. |
 | 6. Freeze and verification | #500–#502 landed signed receipt reuse, freeze by verified rename, and resumable describe measurement. Cold verification still performs full checks. Reviewed, fractional and chat releases index file ranges and compact metadata for replay. | Extend checkpointing and measure out-of-cache replay for reviewed releases. Separate integrity from transformation replay and sampled audits. |
 | 7. Shared work area | `StageStore`, normalized shards, and token caches exist. Most source and build artifacts are still project-scoped. | Share immutable outputs across projects, narrow identities, and protect reference closure during explicit pruning. |
-| 8–9. Operators and sidecars | #448/#451 moved choice into recorded release policy. Exact deduplication and the approximate screen exist. The runner declares stages but there is no general typed operator registry or sidecar store. | Extract reusable evidence and make selection consume sidecars without rewriting source text. |
+| 8–9. Operators and sidecars | #448/#451 moved choice into recorded release policy. The normalized annotation store publishes typed text, source-language, quality, and privacy evidence. Native LM TRAIN selection consumes it through the regular build and verification path. #704 adds retained shingle evidence for rescreening. | Publish policy-independent duplicate groups with bounded inspection. Add passage and partition-level template evidence. |
 | 10. Reference releases and mixtures | #503–#507 improved quota checks, mixture indexing, and the ordered writer. #519–#523 and #557 improved reuse and verification keys. Mixture checkpoints bind prefixes of the files that will be published. The sealed cache publishes bounded int32 or opt-in uint16 segments keyed on exact content, tokenizer behavior and physical encoding. Reference schedules bind exact segment dependencies. An opt-in direct loader reads those segments. Reference-only bundles own the schedule, records, validation and masks. Offline dispatch supports whole sealed segments or selected ranges with fidelity checks, and transfer inspection compares their physical bytes. | Measure accelerator use and batch wait at production sizes. Compare loader modes before choosing a default. Measure the transfer and replay costs of selected ranges on deployed workers. |
 | 11–12. Planner and external operators | Existing CLI, journals, preflight and dashboard supply entry points. | Add dependency plans, bounded inspection and explicitly authorized command operators. |
 | 13. Training preemption | #533 added opt-in device-layout changes under runtime optimization. #535/#537 added finished-run data cleanup and reuse. | Trainer recovery stays with #485 and #516. Corpus tracks data and schedule identity so those changes can proceed independently. |
@@ -283,16 +283,18 @@ explicit execution again for a requested replay of external code.
   authenticated renders and binds the resulting views to signed build
   evidence. Language detection remains separate work.
   The source-quality annotator preserves typed upstream scores, token
-  counts and family-qualification evidence. It reports missing and
-  invalid fields separately and leaves calibration and selection to
-  explicit downstream policies.
+  counts and family-qualification evidence. The TRAIN policy sets a minimum
+  in each named source's units and handles missing and invalid values explicitly.
   Recorded privacy exclusions use a sparse sidecar over the normalized
   rejection inventory. It records reason codes and numeric locators for
   events that occurred before document IDs were assigned. It reuses
   prior screening without reading source bodies or changing exclusion
   rules. A separate annotator scans surviving normalized text for
   contact-detail candidates and publishes document IDs and category
-  flags. Calibration and use in selection remain separate work.
+  flags. The optional TRAIN policy selects which candidate categories to exclude.
+  Both policies compose with byte and row-language filtering and record their
+  exclusion counts and resulting mixture supply. Detector calibration remains
+  separate from release selection.
 - **Coherent packing first.** Compare seeded random, source-coherent,
   lexical-topic, explicit-entity and link-neighborhood schedules using
   identical natural-language bytes and exposure budgets. Assign semantic
