@@ -544,6 +544,29 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
             "row_score": parent_rows[0]["metadata"]["language_score"],
         }
     ]
+    quality_args = (*annotate, "--kind", "source-quality")
+    quality = lab.json(*quality_args)
+    assert quality["payload"]["bytes"] == 57 * len(parent_rows)
+    assert quality["totals"]["score"] == {
+        "reported": 1,
+        "missing": len(parent_rows) - 1,
+        "invalid": 0,
+    }
+    assert quality["totals"]["token_count"] == {
+        "reported": 1,
+        "missing": len(parent_rows) - 2,
+        "invalid": 1,
+    }
+    assert quality["rows"] == [
+        {
+            "document_id": parent_rows[0]["document_id"],
+            "score": parent_rows[0]["metadata"]["score"],
+            "int_score": parent_rows[0]["metadata"]["int_score"],
+            "token_count": parent_rows[0]["metadata"]["token_count"],
+            "qualification_evidence": "family_hint_recorded",
+            "invalid_fields": [],
+        }
+    ]
 
     # A view-only change reuses the exact index and deduplication stages.
     release_path = other / "release.yaml"
@@ -596,6 +619,7 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         language_page = lab.json(
             *language_args, "--offset", str(language["next_offset"])
         )
+        quality_page = lab.json(*quality_args, "--offset", str(quality["next_offset"]))
     assert page["reused"]
     assert page["computation_key"] == statistics["computation_key"]
     assert page["payload"] == statistics["payload"]
@@ -609,6 +633,17 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
             "row_label_status": "missing",
             "code_context": False,
             "row_score": None,
+        }
+    ]
+    assert quality_page["reused"] and quality_page["payload"] == quality["payload"]
+    assert quality_page["rows"] == [
+        {
+            "document_id": parent_rows[1]["document_id"],
+            "score": None,
+            "int_score": None,
+            "token_count": None,
+            "qualification_evidence": "family_hint_recorded",
+            "invalid_fields": ["token_count"],
         }
     ]
     payload = Path(statistics["payload"]["path"])
