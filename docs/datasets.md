@@ -253,6 +253,13 @@ klab data budget --prepared-root "$PREPARED" --config run.yaml \
   default) refuses when the source was not fully covered. Review the schedule
   it implies before training.
 
+With `training.matched_stories`, coverage reports EOS-delimited groups for the
+training split and for whole-document validation. Each group makes one update
+in training, including the final group in a pass. Every stored token is a
+target, with a virtual EOS supplying the initial context. The budget uses
+these counts for whole passes and keeps the declared optimizer settings. See
+[document batching](document-batching.md) for layouts and memory bounds.
+
 For a Corpus token mixture, coverage checks the configuration against the
 verified mixture and the prepared cache's receipt. Use `--no-require-full`
 to derive whole passes over that selected mixture. The full-source

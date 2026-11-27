@@ -12,6 +12,7 @@ from recipe_fixtures import Lab
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.jsonl_records import read_rows
 from klab.corpus.relation_sources import wikipedia_entity
+from klab.training.checkpoints import CheckpointManager
 from klab.training.manifest import sha256_file
 
 
@@ -328,6 +329,10 @@ def test_relational_sources_compile_and_train(tmp_path, monkeypatch, capsys):
     run["model"]["vocab_size"] = 320
     run["training"]["micro_batch_size"] = 1
     run["training"]["max_tokens"] = 32
+    run["training"]["matched_stories"] = {
+        "layout": "contiguous",
+        "targets_per_update": 64,
+    }
     run["dataset"].update(
         source="local_text",
         train_path=str(path / "train.jsonl"),
@@ -347,10 +352,32 @@ def test_relational_sources_compile_and_train(tmp_path, monkeypatch, capsys):
     prepared = Path(lab.run("data", "prepare", str(config)))
     manifest = json.loads((prepared / "manifest.json").read_bytes())
     assert manifest["supervision"] == {"kind": "all_tokens"}
-    lab.run("train", str(config), "--run-id", "compiled-smoke")
-    assert (
-        Path(run["logging"]["root_dir"]) / "compiled-smoke" / "manifest.json"
-    ).is_file()
+    budgeted = tmp_path / "whole-passes.yaml"
+    budget = lab.json(
+        "data",
+        "budget",
+        "--prepared-root",
+        str(prepared),
+        "--config",
+        str(config),
+        "--passes",
+        "2",
+        "--no-require-full",
+        "--output",
+        str(budgeted),
+        "--json",
+    )
+    matched = budget["coverage"]["splits"]["train"]["matched_groups"]
+    assert matched["documents_per_pass"] == compiled["partitions"]["train"]["sequences"]
+    assert budget["max_tokens"] == 2 * manifest["train"]["tokens"]
+    lab.run("train", str(budgeted), "--run-id", "compiled-smoke", "--require-prepared")
+    run_root = Path(run["logging"]["root_dir"]) / "compiled-smoke"
+    checkpoint = CheckpointManager(run_root).load(run_root / "checkpoints/latest.json")
+    assert (checkpoint.step, checkpoint.tokens_seen) == (
+        2 * matched["groups_per_pass"],
+        budget["max_tokens"],
+    )
+    assert checkpoint.exposure["cursor"]["completed_loader_passes"] == 2
 
     inventory = lab.json("corpus", "artifacts", "--kind", "typed", "--json")
     typed = {row["artifact_id"]: row for row in inventory["artifacts"]}

@@ -1,6 +1,6 @@
 """Verified source coverage and fresh-run supervised-target budget proposals.
 
-Passes refer to usable complete TokenBlockDataset blocks, not source records.
+Passes follow the configured loader's complete blocks or EOS-delimited groups.
 No preparation, source acquisition, training, or source-compatibility grant occurs.
 """
 
@@ -22,14 +22,17 @@ from klab.config.models import RunConfig
 from klab.training.manifest import sha256_file, source_identity
 
 if TYPE_CHECKING:
+    from tokenizers import Tokenizer
+
     from klab.corpus.mixture_schedule import VerifiedSchedule
+    from klab.data.packing import PreparedData
 
 _CHUNK_TOKENS = 1 << 20
 
 
 def _bind_config(
     manifest: dict, config: RunConfig
-) -> tuple[dict | None, VerifiedSchedule | None]:
+) -> tuple[dict | None, VerifiedSchedule | None, Tokenizer]:
     """Match the native packing identity, including live source bindings."""
     identity = manifest["cache_identity"]
     from klab.data.packing import (
@@ -96,7 +99,7 @@ def _bind_config(
         raise ValueError(
             "prepared dataset/tokenizer/packing/source binding differs from config"
         )
-    return snapshot, schedule
+    return snapshot, schedule, tokenizer
 
 
 def _block_counts(positions: int, mask: np.ndarray | None, seq_len: int) -> dict:
@@ -174,6 +177,65 @@ def _source_coverage(snapshot: dict | None, split: str, packed: dict) -> dict:
     }
 
 
+def _matched_counts(config: RunConfig, data: PreparedData, tokenizer: Tokenizer):
+    from klab.data.story_packing import MatchedStoryDataset
+
+    matched = config.training.matched_stories
+    assert matched is not None
+    if (
+        (
+            config.model.memory != "none"
+            and not (config.model.memory == "ngram" and matched.unpadded_documents)
+        )
+        or data.train_supervision is not None
+        or data.train_byte_addresses is not None
+    ):
+        raise ValueError("matched exposure requires plain all-token training data")
+    eos = tokenizer.token_to_id("<eos>")
+    if eos is None:
+        raise ValueError("matched exposure requires an EOS token")
+    plans = {
+        "train": MatchedStoryDataset(
+            data.train,
+            config.training.seq_len,
+            eos,
+            layout=matched.layout,
+            targets_per_update=matched.targets_per_update,
+            unpadded_documents=matched.unpadded_documents,
+            frozen_update_ends=matched.frozen_update_ends,
+            target_group_transition=(
+                matched.target_group_transition.model_dump()
+                if matched.target_group_transition
+                else None
+            ),
+        )
+    }
+    if matched.unpadded_documents:
+        if (
+            data.validation_supervision is not None
+            or data.validation_byte_addresses is not None
+        ):
+            raise ValueError("whole-document validation requires plain all-token data")
+        plans["validation"] = MatchedStoryDataset(
+            data.validation,
+            config.training.seq_len,
+            eos,
+            layout="story",
+            targets_per_update=1,
+            unpadded_documents=True,
+        )
+    return {
+        split: {
+            "layout": plan.layout,
+            "groups_per_pass": len(plan),
+            "documents_per_pass": len(plan.document_ends),
+            "supervised_targets": len(plan.ids),
+            **plan.layout_costs()[plan.layout],
+        }
+        for split, plan in plans.items()
+    }
+
+
 def coverage(prepared_root: Path, config: RunConfig | Path | None = None) -> dict:
     """Read an authenticated report; block exposure needs a sequence-length config.
 
@@ -187,8 +249,8 @@ def coverage(prepared_root: Path, config: RunConfig | Path | None = None) -> dic
     if isinstance(config, (str, Path)):
         config = load_config(Path(config))
     header = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    verified_snapshot, schedule = (
-        _bind_config(header, config) if config is not None else (None, None)
+    verified_snapshot, schedule, tokenizer = (
+        _bind_config(header, config) if config is not None else (None, None, None)
     )
     data = load_prepared_data(
         root,
@@ -209,6 +271,10 @@ def coverage(prepared_root: Path, config: RunConfig | Path | None = None) -> dic
         if snapshot is not None and snapshot != verified_snapshot:
             raise ValueError("embedded snapshot differs from verified source")
         snapshot = verified_snapshot
+    matched_counts = {}
+    if config is not None and config.training.matched_stories is not None:
+        assert tokenizer is not None
+        matched_counts = _matched_counts(config, data, tokenizer)
     splits = {}
     for split in ("train", "validation"):
         positions = manifest[split]["tokens"]
@@ -218,9 +284,11 @@ def coverage(prepared_root: Path, config: RunConfig | Path | None = None) -> dic
             "preparation": manifest[split],
             "packed_tokens": positions,
             "blocks": None
-            if config is None
+            if config is None or split in matched_counts
             else _block_counts(positions, mask, config.training.seq_len),
         }
+        if split in matched_counts:
+            splits[split]["matched_groups"] = matched_counts[split]
     return {
         "format": "klab-dataset-coverage-v1",
         "prepared_root": str(root.absolute()),
@@ -260,18 +328,33 @@ def derive_budget(
         raise FileExistsError(f"budget output already exists: {output}")
     config_path = Path(config_path).absolute()
     config = load_config(config_path)
+    matched = config.training.matched_stories
+    if matched is not None and matched.target_group_transition is not None:
+        raise ValueError(
+            "fresh budgeting cannot author a checkpoint-bound group transition"
+        )
     report = coverage(prepared_root, config)
     if require_full and not all(
         row["source_coverage"]["full"] for row in report["splits"].values()
     ):
         raise ValueError("full source coverage is incomplete, unsupported, or unproven")
-    train = report["splits"]["train"]["blocks"]
-    validation = report["splits"]["validation"]["blocks"]
+    train = report["splits"]["train"]
+    validation = report["splits"]["validation"]
+    train = train["blocks"] or train["matched_groups"]
+    validation = validation["blocks"] or validation["matched_groups"]
     if not train["supervised_targets"] or not validation["supervised_targets"]:
-        raise ValueError("training and validation need supervised complete blocks")
-    batch = config.training.micro_batch_size * config.training.gradient_accumulation
-    blocks = passes * train["usable_blocks"]
-    steps = (blocks + batch - 1) // batch
+        raise ValueError("training and validation need supervised blocks or groups")
+    if matched is not None:
+        steps = passes * train["groups_per_pass"]
+        layout = {"groups_per_pass": train["groups_per_pass"]}
+    else:
+        batch = config.training.micro_batch_size * config.training.gradient_accumulation
+        blocks = passes * train["usable_blocks"]
+        steps = (blocks + batch - 1) // batch
+        layout = {
+            "effective_batch": batch,
+            "final_update_blocks": (blocks - 1) % batch + 1,
+        }
     targets = passes * train["supervised_targets"]
     payload = _absolute_paths(config.model_dump(mode="python"), config_path.parent)
     payload["training"].update(max_steps=steps, max_tokens=targets)
@@ -287,14 +370,13 @@ def derive_budget(
         "output": str(output.absolute()),
         "passes": passes,
         "require_full": require_full,
-        "effective_batch": batch,
+        **layout,
         "max_steps": steps,
         "max_tokens": targets,
         "previous_budget": {
             "max_steps": config.training.max_steps,
             "max_tokens": config.training.max_tokens,
         },
-        "final_update_blocks": (blocks - 1) % batch + 1,
         "coverage": report,
     }
 
@@ -352,8 +434,9 @@ def _handle(args: argparse.Namespace) -> None:
                     )
                 )
             )
-            if row["blocks"] is not None:
-                print("  " + ", ".join(f"{k}={v}" for k, v in row["blocks"].items()))
+            layout = row["blocks"] or row.get("matched_groups")
+            if layout is not None:
+                print("  " + ", ".join(f"{k}={v}" for k, v in layout.items()))
         if "max_steps" in result:
             print(
                 f"Fresh budget: max_steps={result['max_steps']}, max_tokens={result['max_tokens']}; {result['output']}"
