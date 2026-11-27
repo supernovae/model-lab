@@ -620,15 +620,6 @@ def _materialize_mixture(
                 Path(cohort["release_path"]), cohort["manifest"]
             )
             validate_source_strata(cohort_members.member("sources.json"), mapped)
-            report_path = cohort_members.member("report.json")
-            summary = json.loads(report_path.read_bytes())
-            if (
-                summary["view_counts"]["lm"]["train"]
-                != summary["split_counts"]["train"]
-            ):
-                raise ValueError(
-                    "additive release TRAIN view does not cover its kept TRAIN documents"
-                )
     else:
         validate_source_strata(members.member("sources.json"), spec.source_strata)
     report = json.loads(members.member("report.json").read_bytes())

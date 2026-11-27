@@ -1178,24 +1178,47 @@ The option filters TRAIN records after duplicate decisions and source
 selection. It applies to the transform output and its LM view. Keep the
 document inventory for lineage and split checks. Validation and test
 records follow the existing view rules. The release report records the
-threshold, sidecar digests, total excluded under `below_minimum_utf8_bytes`,
+threshold, selection inputs, total excluded under `below_minimum_utf8_bytes`,
 and mixture supply from the selected TRAIN text.
 
-Use an ordinary native disk-backed LM-only build, including reviewed file
-or row admission. Completed-preparation adoption, canaries, and in-memory
-builds require separate integration. A threshold-only edit reuses the same
-normalized partitions, native index, duplicate decisions and available
-sidecars. The native planner shows the sidecar dependency before view
+Use a native disk-backed LM-only build, including reviewed file or row
+admission and the completed-preparation build. A threshold-only edit reuses
+the same normalized partitions, native index, duplicate decisions and
+available sidecars. The native planner shows the sidecar dependency before view
 emission for builds without reviewed admission. The build automatically
 produces missing sidecars, checks their ordered document IDs against the
 native index, and joins their sizes in a four-byte-per-document scratch map.
-Reviewed builds use sidecars for their admitted normalized shards.
+Ordinary reviewed builds use sidecars for their admitted normalized shards.
+Canaries and in-memory builds require separate integration.
 
 Cold release verification independently checks the byte counts, stage and
 view coverage, and the resulting quota estimate. After the reviewed source
 and admission audit, the verifier matches the stage and views in order
 against narrow document metadata. The verified TRAIN lineage feeds ordinary
 mixture materialization.
+
+With `--reuse-completed-preparation`, the writer measures the normalized
+text it already reads for view emission and records the authenticated source
+render IDs in the report. The same source renders and ordered row phases
+remain reusable across threshold edits. In-place freeze checks that the
+selected TRAIN view can supply the declared mixture and authenticates the
+signed build outputs. Additive mixtures join the manifest-bound TRAIN
+lineage to kept source offsets in document ID order. They read text for
+selected candidates and continue to check cross-release conflicts using
+the full duplicate-key indexes.
+
+Changing the floor requires a new build and release. On upgrade, an
+existing mixture whose completion proof no longer matches the installed
+producer can use the existing reseal path to refresh byte verification.
+
+In a single-worker synthetic NVMe benchmark with 1 million eligible
+references, ranking took 10.24 s with the floor unset. A floor that retained
+every row took 11.67 s and read 97.00 MB of additional lineage. Retaining
+half the rows took 6.52 s, read 462.71 MB in total and wrote 128.40 MB of
+ranked offsets, down from 542.61 MB read and 256.80 MB written with the
+floor unset. Peak process RSS was about 197 MiB in all three cases. Ranking
+read the reference, deduplication and lineage inputs. It opens no source
+document bodies until token scheduling requests a ranked candidate.
 
 On a warm NVMe fixture, the ordered comparison processed 10,000, 100,000,
 and 1,000,000 synthetic document metadata rows in 0.043, 0.429, and 4.21

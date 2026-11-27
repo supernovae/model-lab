@@ -3,9 +3,12 @@
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
+from corpus_fixtures import PLAIN_NORMALIZER, STRICT_POLICY, neutral_corpus
+from recipe_fixtures import Lab, MockHub, Shard
 
 from klab.canonical import canonical_digest, canonical_json
 from klab.corpus.admission_inspection_cache import capture
@@ -15,6 +18,228 @@ from klab.corpus.release import consumed_release, freeze
 from klab.corpus.split_freeze import finalize_family_inventory
 from klab.corpus.split_runs import SplitStages
 from klab.training.manifest import sha256_file
+
+
+def test_retained_train_selection_reuses_rows_and_limits_ranked_offsets(
+    tmp_path, monkeypatch, capsys
+):
+    from klab.corpus import split_inventory_adoption
+    from klab.corpus.acquisition import acquire
+    from klab.corpus.admission_draft import draft_admission_manifest
+    from klab.corpus.pipeline import build
+    from klab.corpus.project import declaration_payload, load_project
+    from klab.corpus.retained_mixture import RetainedMixtureIndex, prepared_release
+    from klab.corpus.split_freeze import freeze_splits
+    from klab.corpus.split_inventory import write_split_inventory
+    from klab.corpus.split_runs import rows
+
+    root = Lab(tmp_path, monkeypatch, capsys).work
+    source = declaration_payload(neutral_corpus(root).sources[0])
+    source.pop("explicit_training_restriction")
+    source_id = source["id"]
+    stratum = source["domains"][0]
+    shard = Shard(
+        "fixture/train.jsonl.gz",
+        [
+            {
+                "text": f"Chapter {number}\n" + "A café has a quiet garden. " * number,
+                "url": f"https://example.org/chapter/{number}",
+            }
+            for number in range(1, 9)
+        ],
+    )
+    source["acquisition"].update(
+        bounded_shards=[
+            {
+                "path": shard.path,
+                "expected_sha256": shard.sha256,
+                "max_shard_bytes": len(shard.body),
+                "max_scanned_rows": 8,
+                "hash_modulus": 1,
+                "hash_remainders": [0],
+            }
+        ],
+        qualification={"profile": "web_text", "family_fields": ["url"]},
+    )
+    hub = MockHub()
+    hub.register("fixture/neutral", source["revision"], shard, "fixture")
+    hub.install(monkeypatch)
+
+    def write(name, value):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(value), encoding="utf-8")
+        return path
+
+    write("sources/fixture.yaml", source)
+    transform = {
+        "id": "lm",
+        "version": "1",
+        "kind": "lm_text",
+        "inputs": [],
+        "parameters": {},
+    }
+    write("transforms/lm.yaml", transform)
+    write(
+        "splits.yaml",
+        {"schema_version": 1, "unit": "document", "assignments": {"document": "train"}},
+    )
+    release = {
+        "publication_mode": "metadata_reconstruction_only",
+        "normalizer": PLAIN_NORMALIZER,
+        "policy": STRICT_POLICY,
+        "mixture": {stratum: 1.0},
+        "lm": {"selected": True, "training_splits": ["train", "validation"]},
+        "chat": {"selected": False, "training_splits": []},
+    }
+    write("inventory-release.yaml", release)
+    config = {
+        "schema_version": 1,
+        "id": "selected-fixture",
+        "sources": ["sources/fixture.yaml"],
+        "transforms": ["transforms/lm.yaml"],
+        "splits": "splits.yaml",
+        "release": "inventory-release.yaml",
+    }
+    producer = write("inventory.yaml", config)
+    project = load_project(producer)
+    acquire(project, root)
+    policy = root / "policy.md"
+    policy.write_text("Reviewed fixture source policy.\n")
+    application = root / "application.json"
+    application.write_bytes(
+        canonical_json(
+            {
+                "policy_id": "fixture",
+                "policy_sha256": sha256_file(policy),
+                "sources": [
+                    {
+                        "source_id": source_id,
+                        "license_label": "MIT",
+                        "rights": source["rights"],
+                    }
+                ],
+            }
+        )
+    )
+    admission = root / "admission.json"
+    draft = draft_admission_manifest(project, root, application, policy, admission)
+    assert draft["counts"] == {"qualify": 8, "exclude": 0, "quarantine": 0}
+    inventory = root / "inventory.jsonl"
+    report = write_split_inventory(project, root, inventory)
+    write(
+        "release.yaml",
+        {
+            **release,
+            "record_admission": {
+                "path": admission.name,
+                "sha256": sha256_file(admission),
+            },
+        },
+    )
+    reviewed = write("reviewed.yaml", {**config, "release": "release.yaml"})
+    # The historical executor handoff is tested separately. Use a real
+    # inventory, admission, split, build and signed publication here.
+    completion_file = root / "completed-inventory.json"
+    completion_file.write_bytes(
+        canonical_json(
+            {
+                "project": {"path": str(producer)},
+                "inventory": {"path": str(inventory)},
+            }
+        )
+    )
+    completion = {"path": str(completion_file), "sha256": sha256_file(completion_file)}
+    monkeypatch.setattr(
+        split_inventory_adoption,
+        "adopt_completed_inventory",
+        lambda *_: SimpleNamespace(
+            provenance={"declaration": completion},
+            dependencies=capture([inventory]),
+            report=report,
+            check=lambda *_: None,
+        ),
+    )
+    clusters = root / "clusters.json"
+    clusters.write_bytes(
+        canonical_json(
+            {
+                "schema_version": 1,
+                "inventory_sha256": sha256_file(inventory),
+                "inventory_completion": completion,
+                "seed": "fixture",
+                "source_strata": {source_id: stratum},
+                "split_weights": {"train": 2, "validation": 1, "test": 1},
+                "merges": [],
+                "reviewer": "Fixture reviewer",
+                "reviewed_on": "2026-11-12",
+            }
+        )
+    )
+    frozen = root / "frozen.yaml"
+    freeze_splits(
+        load_project(reviewed),
+        root,
+        inventory,
+        clusters,
+        frozen,
+        reuse_completed_preparation=True,
+    )
+    recipe = write(
+        "build.yaml", {**config, "release": "release.yaml", "splits": frozen.name}
+    )
+    baseline = build(load_project(recipe), root, reuse_completed_preparation=True)
+    train = list(rows(baseline / "lm/train.jsonl"))
+    [shortest, *remaining] = sorted(len(row["text"].encode("utf-8")) for row in train)
+    assert len(remaining) == 3 and min(remaining) > shortest
+
+    transform["parameters"]["minimum_train_utf8_bytes"] = shortest + 1
+    write("transforms/lm.yaml", transform)
+    selected = build(load_project(recipe), root, reuse_completed_preparation=True)
+    assert freeze(selected, root, reuse_completed_preparation=True) == selected
+    assert (selected / "documents.jsonl").read_bytes() == (
+        baseline / "documents.jsonl"
+    ).read_bytes()
+    for split in ("validation", "test"):
+        name = f"lm/{split}.jsonl"
+        assert (selected / name).read_bytes() == (baseline / name).read_bytes()
+    report = json.loads((selected / "report.json").read_bytes())
+    assert report["train_selection"]["excluded_by_reason"] == {
+        "below_minimum_utf8_bytes": 1
+    }
+    assert report["mixture_supply"]["strata"][stratum]["train_utf8_bytes"] == sum(
+        remaining
+    )
+    progress = (
+        selected.parent.parent / "progress" / f"{selected.name}.jsonl"
+    ).read_text()
+    for event in (
+        "reused_completed_source_render",
+        "reused_build_join_splits",
+        "reused_build_deduplicate",
+    ):
+        assert event in progress
+
+    cohort = prepared_release(root, selected)
+    expected = {row["record_id"] for row in rows(selected / "lm/train.lineage.jsonl")}
+    scratch = root / "mixture-scratch"
+    scratch.mkdir()
+    with RetainedMixtureIndex(
+        scratch, root, [cohort], 17, {source_id: stratum}
+    ) as index:
+        assert {row[2] for row in rows(index.ranked)} == expected
+    assert len(expected) == 3
+    with (selected / "lm/train.lineage.jsonl").open("ab") as stream:
+        stream.write(b"\n")
+    with pytest.raises(ValueError, match="JSONL source SHA-256 mismatch"):
+        RetainedMixtureIndex(scratch, root, [cohort], 17, {source_id: stratum})
+
+    transform["parameters"]["minimum_train_utf8_bytes"] = max(remaining) + 1
+    write("transforms/lm.yaml", transform)
+    empty = build(load_project(recipe), root, reuse_completed_preparation=True)
+    with pytest.raises(ValueError, match="declared mixture cannot be supplied"):
+        freeze(empty, root, reuse_completed_preparation=True)
+    assert not (empty / "manifest.json").exists()
 
 
 def test_retained_build_recovers_from_closed_execution(tmp_path, monkeypatch):
