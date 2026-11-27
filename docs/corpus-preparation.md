@@ -1109,6 +1109,57 @@ largest scan counted 1.64 GB of logical payload sizes from metadata.
 | 5,000 | 400 | 128 ms | 1.04 MB | 45 MiB |
 | 25,000 | 2,000 | 658 ms | 5.18 MB | 54 MiB |
 
+### Text-statistics sidecars
+
+Build and inspect the text-statistics sidecar for a published normalized
+partition. Get its `artifact_id` from `corpus artifacts --kind normalized`.
+
+```sh
+klab --work-dir WORK corpus annotate-normalized SOURCE/KEY --limit 20
+```
+
+The JSON includes aggregate counts, an optional page and `next_offset`.
+Pass that value as `--offset` for the next page. The default limit of zero
+returns aggregate counts and the artifact reference. Page size is capped
+at 1,000 rows. Each normalized document gets a row in the input order,
+including documents a later release policy excludes. The fields are the
+document ID, UTF-8 bytes, Unicode codepoints and LF-separated lines. A
+trailing LF terminates its line. Empty text counts as zero lines.
+
+The fixed-width sidecar has 44 bytes per row. It stores the 32-byte
+document ID followed by three little-endian unsigned 32-bit counts in
+the order above. The receipt binds the normalized partition and its
+receipt, the document bytes and the annotator implementation. It records
+separate computation and payload digests. Callers can join the sidecar
+to its exact input partition by document ID and ordinal. The annotator
+processes one JSONL row at a time, with a 64 MiB input-row limit.
+
+The first build verifies the normalized document digest while reading it
+once. It hashes output as it writes, before publishing the completed
+stage. Warm reuse verifies the receipt and file generations, then seeks
+directly to a requested page. A retry after an interrupted write repeats
+the unfinished partition. A view or release-policy change can reuse the
+sidecar when the normalized input stays fixed. The operation holds a
+normalized retention lease while reading its inputs. Later reuse requires
+the exact input partition to remain available.
+
+Three synthetic NVMe trials per size used 2,048 UTF-8 bytes of text per
+document, with non-ASCII characters and a line break. The source partition
+was already prepared and its pages were available in the OS cache. Warm
+timings include authentication and a 32-row page.
+
+| Documents | Normalized document file | Sidecar | Build median | Warm median |
+| ---: | ---: | ---: | ---: | ---: |
+| 2,048 | 4.39 MB | 0.09 MB | 0.026 s | 2.30 ms |
+| 32,768 | 70.19 MB | 1.44 MB | 0.173 s | 2.27 ms |
+| 65,536 | 140.38 MB | 2.88 MB | 0.338 s | 2.24 ms |
+
+A separate million-document fixture with 512 text bytes per document read
+606.37 MB of logical process bytes from a 606.00 MB document file and
+produced a 44.00 MB sidecar in 2.94 s. Peak process RSS was 63 MB. A warm
+32-row page took 2.30 ms and read 0.26 MB of process metadata and sidecar
+bytes. Release selection over these columns remains under #568.
+
 ### Prune shared artifacts
 
 Preview pruning an exact digest and apply the same selection with:

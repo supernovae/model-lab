@@ -187,6 +187,14 @@ def _run(args: argparse.Namespace) -> None:
 
     root = resolve_work_dir(args.work_dir)
     command = args.corpus_command
+    if command == "annotate-normalized":
+        from klab.corpus.text_statistics import annotate_normalized
+
+        result = annotate_normalized(
+            root, args.partition, offset=args.offset, limit=args.limit
+        )
+        print(json.dumps(result, sort_keys=True))
+        return
     if command in {"artifacts", "release-prune"}:
         from klab.corpus.artifact_inventory import (
             normalized_inventory,
@@ -940,6 +948,15 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         help="Preview shared payloads without an observed release reference",
     )
     command.add_argument("--json", action="store_true")
+    command.set_defaults(handler=_handle)
+    command = sub.add_parser(
+        "annotate-normalized", help="Build and inspect normalized text statistics"
+    )
+    command.add_argument("partition", metavar="SOURCE/KEY")
+    command.add_argument("--offset", type=int, default=0)
+    command.add_argument(
+        "--limit", type=int, default=0, help="Rows to inspect, or zero for a summary"
+    )
     command.set_defaults(handler=_handle)
     command = sub.add_parser(
         "release-prune",

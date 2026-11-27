@@ -502,6 +502,33 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
     assert existing["build_id"] == other_build.name
     assert existing["sources"] == []
 
+    published = lab.json(
+        "corpus", "artifacts", "--source-id", "web_fineweb", "--limit", "1", "--json"
+    )
+    parent_id = published["partitions"][0]["artifact_id"]
+    annotate = ("corpus", "annotate-normalized", parent_id, "--limit", "1")
+    statistics = lab.json(*annotate)
+    parent_docs = lab.work / "cache/corpus/normalized" / parent_id / "docs.jsonl"
+    parent_rows = [
+        json.loads(line) for line in parent_docs.read_bytes().split(b"\n") if line
+    ]
+    assert len(parent_rows) == statistics["documents"] > 1
+
+    def expected_statistics(row):
+        value = row["text"]
+        return {
+            "document_id": row["document_id"],
+            "utf8_bytes": len(value.encode("utf-8")),
+            "codepoints": len(value),
+            "lines": len(value.split("\n")) - int(not value or value.endswith("\n")),
+        }
+
+    assert statistics["rows"] == [expected_statistics(parent_rows[0])]
+    assert statistics["totals"] == {
+        key: sum(expected_statistics(row)[key] for row in parent_rows)
+        for key in ("utf8_bytes", "codepoints", "lines")
+    }
+
     # A view-only change reuses the exact index and deduplication stages.
     release_path = other / "release.yaml"
     original_release = release_path.read_bytes()
@@ -547,6 +574,20 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         view_build.parent.parent / "progress" / f"{view_build.name}.jsonl"
     ).read_text()
     assert "reused_index_stage" in progress and "reused_dedup_stage" in progress
+    with monkeypatch.context() as cached:
+        cached.setattr(Path, "open", no_stage_body)
+        page = lab.json(*annotate, "--offset", str(statistics["next_offset"]))
+    assert page["reused"]
+    assert page["computation_key"] == statistics["computation_key"]
+    assert page["payload"] == statistics["payload"]
+    assert page["rows"] == [expected_statistics(parent_rows[1])]
+    payload = Path(statistics["payload"]["path"])
+    original_payload = payload.read_bytes()
+    payload.write_bytes(bytes([original_payload[0] ^ 1]) + original_payload[1:])
+    repaired = lab.json(*annotate)
+    assert not repaired["reused"]
+    assert repaired["rows"] == statistics["rows"]
+    assert repaired["payload"]["sha256"] == statistics["payload"]["sha256"]
     observed = lab.json(*plan_args, "--inspect-storage")["storage_inspection"]
     assert observed["spans"]["append_candidate_bytes"] == 0
     prior = observed["prior_stage_observation"]
@@ -656,7 +697,17 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         == first["retained_bytes"]
         > inventory["retained_bytes"]
     )
-    partition.write_bytes(b"damaged normalized partition")
+    original_docs = partition.read_bytes()
+    digest_field = b'"content_sha256":"'
+    offset = original_docs.index(digest_field) + len(digest_field)
+    replacement = b"0" if original_docs[offset : offset + 1] == b"1" else b"1"
+    partition.write_bytes(
+        original_docs[:offset] + replacement + original_docs[offset + 1 :]
+    )
+    with pytest.raises(ValueError, match="JSONL source SHA-256 mismatch"):
+        lab.run(
+            "corpus", "annotate-normalized", inventory["partitions"][0]["artifact_id"]
+        )
     shutil.rmtree(appended_build)
     with pytest.raises(ValueError, match="prepared source shard changed"):
         lab.run("corpus", "build", str(config_path), "--offline")
