@@ -202,7 +202,9 @@ def test_prospective_hf_rows_keep_provenance_and_exclude_private_material(
     source = neutral_corpus(lab.work).sources[0]
     safe = {
         "text": "A public tutorial explains operating system scheduling and reliable "
-        "deployments with concrete examples across several paragraphs. " * 2,
+        "deployments with concrete examples across several paragraphs. "
+        * 2
+        + "It mentions @internal.example and the unformatted number 2025550100.",
         "url": "https://example.org/tutorial",
         "id": "warc-record-1",
         "_klab_source": {
@@ -222,9 +224,11 @@ def test_prospective_hf_rows_keep_provenance_and_exclude_private_material(
         "id": "warc-record-3",
     }
     empty = {**safe, "text": ""}
+    email = {**safe, "text": safe["text"] + " Email reader@example.test."}
+    phone = {**safe, "text": safe["text"] + " Telephone (202) 555-0100."}
     raw = b"".join(
         json.dumps(row).encode() + b"\n"
-        for row in (safe, secret, empty, excluded_platform)
+        for row in (safe, secret, empty, excluded_platform, email, phone)
     )
     raw_path = lab.work / "sample.jsonl"
     raw_path.write_bytes(raw)
@@ -246,8 +250,8 @@ def test_prospective_hf_rows_keep_provenance_and_exclude_private_material(
     docs, spans, rejected = (
         partition / member for member in ("docs.jsonl", "spans.jsonl", "rejected.jsonl")
     )
-    [document] = iter_rows(docs)
-    [evidence] = iter_rows(spans)
+    document, email_doc, phone_doc = iter_rows(docs)
+    evidence, *_ = iter_rows(spans)
     assert document["metadata"]["url"] == safe["url"]
     assert document["metadata"]["id"] == safe["id"]
     assert document["metadata"]["source_row_index"] == 882
@@ -268,13 +272,39 @@ def test_prospective_hf_rows_keep_provenance_and_exclude_private_material(
         "1",
     )
     open_file = Path.open
-    forbidden = {raw_path, docs, spans}
+    forbidden = {raw_path, spans, rejected}
 
     def check_open(path, *args, **kwargs):
         if path in forbidden:
             pytest.fail("privacy inspection reopened a body file")
         return open_file(path, *args, **kwargs)
 
+    candidates = (
+        "corpus",
+        "annotate-normalized",
+        partition.relative_to(normalized).as_posix(),
+        "--kind",
+        "privacy-candidates",
+        "--limit",
+        "2",
+    )
+    with monkeypatch.context() as reading:
+        reading.setattr(Path, "open", check_open)
+        flags = lab.json(*candidates)
+        forbidden.add(docs)
+        next_page = lab.json(*candidates, "--offset", str(flags["next_offset"]))
+    assert flags["totals"] == {"any": 2, "email_like": 1, "phone_like": 1}
+    assert flags["payload"]["bytes"] == 99
+    assert flags["rows"] == [
+        {"document_id": document["document_id"], "candidates": []},
+        {"document_id": email_doc["document_id"], "candidates": ["email_like"]},
+    ]
+    assert next_page["reused"] and next_page["payload"] == flags["payload"]
+    assert next_page["rows"] == [
+        {"document_id": phone_doc["document_id"], "candidates": ["phone_like"]}
+    ]
+
+    forbidden.remove(rejected)
     with monkeypatch.context() as reading:
         reading.setattr(Path, "open", check_open)
         first = lab.json(*annotate)
