@@ -1249,14 +1249,42 @@ The cold build verifies the rejection inventory in one pass. Warm
 inspection authenticates its generations and seeks directly to a page
 of the sparse sidecar. It requires neither the source bodies nor the
 normalized documents. Coverage is limited to recorded exclusions.
-Scanning surviving documents for candidate privacy evidence is a
-separate operation.
 
 Three single-worker NVMe trials with cached input pages processed
 1 million synthetic rejection records in a median 1.71 s at about
 60 MiB peak process RSS. They read 105.14 MB for a 104.84 MB inventory
 and wrote 400,000 findings in a 6.8 MB sidecar. A warm 32-row page took
 a median 2.41 ms.
+
+#### Privacy candidates in surviving documents
+
+```sh
+klab --work-dir WORK corpus annotate-normalized SOURCE/KEY --kind privacy-candidates --limit 20
+```
+
+This optional scan records two contact-detail indicators in surviving
+normalized text. `email_like` recognizes bounded ASCII address patterns
+with a dotted domain. `phone_like` recognizes formatted North
+American-style numbers with a hyphenated suffix. Each category is a
+presence flag. The summary reports documents with each flag and
+documents with at least one flag. Examples, public contact information
+and real private contact details can produce the same flags. The scan
+covers these two formats and supplies no admission or exclusion decision.
+
+Rows follow normalized partition order. Each 33-byte row stores the
+32-byte document ID and one flag byte. Bit 0 marks email and bit 1 marks
+phone. Pages contain the document ID and candidate categories without
+matched strings or surrounding text. The cold scan verifies normalized
+documents in one pass. Warm views can reuse the receipted artifact and
+seek directly to a bounded page.
+
+Three single-worker NVMe trials with cached input pages took a median
+3.72 s to scan 1 million synthetic documents with frequent at-signs and
+hyphens. The build read 642.30 MB for 642.00 MB of normalized input and
+wrote a 33 MB sidecar at about 60 MiB peak process RSS. A warm 32-row
+page took 2.41 ms. Searching for plausible endings before checking
+bounded prefixes reduced the initial 17.82 s scan on the same fixture.
+The output digest matched.
 
 #### Select TRAIN text by upstream row language
 

@@ -290,7 +290,9 @@ explicit execution again for a requested replay of external code.
   rejection inventory. It records reason codes and numeric locators for
   events that occurred before document IDs were assigned. It reuses
   prior screening without reading source bodies or changing exclusion
-  rules. Candidate scanning of surviving documents remains separate.
+  rules. A separate annotator scans surviving normalized text for
+  contact-detail candidates and publishes document IDs and category
+  flags. Calibration and use in selection remain separate work.
 - **Coherent packing first.** Compare seeded random, source-coherent,
   lexical-topic, explicit-entity and link-neighborhood schedules using
   identical natural-language bytes and exposure budgets. Assign semantic

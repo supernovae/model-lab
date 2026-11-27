@@ -188,6 +188,7 @@ def _run(args: argparse.Namespace) -> None:
     root = resolve_work_dir(args.work_dir)
     command = args.corpus_command
     if command == "annotate-normalized":
+        from klab.corpus.privacy_candidates import annotate_privacy_candidates
         from klab.corpus.privacy_exclusions import annotate_privacy_exclusions
         from klab.corpus.source_language import annotate_source_language
         from klab.corpus.source_quality import annotate_source_quality
@@ -198,6 +199,7 @@ def _run(args: argparse.Namespace) -> None:
             "source-language": annotate_source_language,
             "source-quality": annotate_source_quality,
             "privacy-exclusions": annotate_privacy_exclusions,
+            "privacy-candidates": annotate_privacy_candidates,
         }
         result = annotators[args.kind](
             root, args.partition, offset=args.offset, limit=args.limit
@@ -969,6 +971,7 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
             "source-language",
             "source-quality",
             "privacy-exclusions",
+            "privacy-candidates",
         ),
         default="text-statistics",
     )
