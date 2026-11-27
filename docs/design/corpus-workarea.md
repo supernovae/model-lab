@@ -115,8 +115,7 @@ identify a view checkpoint and report the candidate verified prefix and
 uncommitted tail from metadata. Build authenticates the checkpoint chain
 before reuse. The shared view identity implementation changes the native
 build key. New builds can reuse verified normalization, index and deduplication
-artifacts across that change. Fresh-stage scratch estimates, reference
-publication and closure-aware pruning remain in #567.
+artifacts across that change. Fresh-stage scratch estimates remain in #567.
 Native storage inspection reports the filesystems' available bytes, published
 normalized candidate sizes and the flat span output and append bytes when
 their inputs are known. Builds journal logical output footprints for sealed

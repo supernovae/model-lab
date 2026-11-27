@@ -736,6 +736,7 @@ def test_document_start_rows_and_stratum_exposures(
     assert b"".join(projected.blocks(32)) == b"".join(schedule.blocks(32))
     assert list(projected.ranges()) != list(schedule.ranges())
     monkeypatch.setattr(mixture_batches, "_PAGE_RECORDS", 2)
+    monkeypatch.setattr(mixture_batches, "_PAGES", 1)
     with mixture_batches.ReferencedTokenArray(
         schedule,
         references / "train.records.jsonl",

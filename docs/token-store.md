@@ -568,6 +568,9 @@ sampler reads its input and target IDs from verified segment ranges and uses
 the prepared supervision mask. A sparse position index supports shuffled
 batches, quota truncation, EOS and `document_start` filler. The loader keeps
 at most 16 segment files open and caches at most 256 pages of range metadata.
+Each cached page retains the binary ranges and a searchable list of packed
+end positions. The loader finds the starting row once for a slice and then
+walks adjacent rows and pages as needed.
 
 By default, preparation retains the contiguous arrays.
 `training.mixture_prepared_storage: references` with the direct loader omits
@@ -653,6 +656,34 @@ Input and label hashes matched. On the larger fixture, storage reads on
 the first pass were 75.4 MB for contiguous and 91.3 MB for references.
 Creating the sparse reference index took 70 ms after verification.
 Accelerator utilization and production step throughput remain unmeasured.
+
+A separate CPU benchmark exercised schedule cache misses on deterministic
+synthetic data. Sixteen verified uint16 segments supplied variable-length
+ranges, including `document_start` filler and EOS. Each pass read the same
+8,192 shuffled blocks of 512 targets through the reference loader. The
+smaller schedule fit in 128 pages. The larger had 4,096 pages for the
+256-page cache. Each result is the median of nine warm passes across three
+process pairs, including hashing the input and target arrays.
+
+| Schedule records | Warm pass before → after | Warm p95 per four blocks before → after | Peak process RSS before → after |
+| ---: | ---: | ---: | ---: |
+| 32,768 | 112.0 → 108.8 ms | 61.0 → 59.2 µs | 368 → 364 MiB |
+| 1,048,576 | 327.3 → 192.1 ms | 175.0 → 103.1 µs | 377 → 370 MiB |
+
+All paired input and target digests matched. Warm passes fetched zero bytes
+from storage. After file-local eviction, both revisions fetched 12.58 MB
+for the smaller fixture and 116.99 MB for the larger one. At one million
+records, opening the loader after verification took 1.63 s before and 1.61 s
+after. The benchmark covers CPU batch assembly.
+The loader tests compare prepared supervision across row padding and forced
+schedule page eviction. The connected training recipe also exercises the
+reference loader through preparation, training and resume.
+
+In a separate end-to-end synthetic mixture benchmark with 65,536 input
+documents, both loaders produced the same batch digest. For the same 8,192
+shuffled 512-target blocks, first-pass times were 0.91 s contiguous and
+0.86 s referenced. Warm times were 27 ms and 65 ms respectively. This
+comparison used the usual CPU loaders and includes no model execution.
 
 ## Mixture speed
 
