@@ -1159,7 +1159,7 @@ normalized document uses the English default. A row can report a
 normalization. A `code_context` flag identifies code documents or rows with
 code qualification. An upstream label can name a programming language, and
 scores retain upstream meaning. This annotator performs no language
-detection or filtering.
+detection. The optional selector below consumes the row label evidence.
 
 Source-language sidecars use 45 bytes per row, in partition order. They
 store a 32-byte document ID, a little-endian uint32 label code, a one-byte
@@ -1184,6 +1184,50 @@ median 3.06 s at about 60 MiB peak process RSS. It read 672.90 MB for a
 2.43 ms. On the same fixture, text statistics took a median 3.18 s on
 the shared path and 3.23 s on the previous path. Both produced the same
 payload digest.
+
+#### Select TRAIN text by upstream row language
+
+Set `train_row_language` in the parameters of an `lm_text` transform
+for an ordinary native disk LM build without reviewed admission.
+
+```yaml
+parameters:
+  train_row_language:
+    allowed: [en, fr]
+    missing: keep
+```
+
+Use exact upstream label strings and explicitly choose `keep` or `drop`
+for missing or invalid labels. The policy only uses upstream row labels
+that normalization retained. Source declarations, the normalizer's
+language default and upstream scores do not determine selection. Code rows
+bypass the language filter. Validation and test retain their existing
+views. A row excluded by the optional byte floor counts under that reason
+first. For rows that pass it, the report counts `row_language_not_allowed`
+and `row_language_missing` separately and estimates mixture supply from
+selected TRAIN text.
+
+The build verifies or creates the source-language sidecars and joins
+them to the existing index by document ID and partition ordinal. A
+language-only edit reuses normalization, native indexes, duplicate
+decisions and annotation. The planner shows the dependency. The join
+uses one byte per document for language decisions, plus the existing
+four-byte sizes when the byte floor is enabled. Dictionary overflow is
+resolved from the same normalized row already decoded for view emission.
+Cold verification checks the recorded language decisions against the
+pinned source during raw replay and verifies coverage and quota supply.
+
+In three single-worker synthetic trials over 1 million native index rows,
+the warm language join took a median 0.45 s and read 119.66 MB. The combined
+join took 0.58 s and read 163.66 MB, exactly one additional 44 MB
+text-statistics payload. The byte-floor join on the same fixture took
+0.44 s with the shared implementation and 0.42 s before it. These timings
+cover reading the existing index and sidecars and writing the scratch
+maps. Cold sidecar creation and full release verification have separate
+costs.
+
+Reviewed-admission builds, completed-preparation adoption, canaries and
+in-memory builds need separate integration for this option.
 
 #### Text-statistics measurements
 

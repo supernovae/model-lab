@@ -932,9 +932,10 @@ def build_identity(
     """Resolve the build identity, ordered transforms and builder from its pins."""
     transforms = _ordered_transforms(project)
     stage_specs = [declaration_payload(t) for t in transforms]
-    from klab.corpus.train_selection import minimum_train_bytes
+    from klab.corpus.train_selection import minimum_train_bytes, train_row_language
 
     minimum = minimum_train_bytes(stage_specs)
+    language = train_row_language(stage_specs)
     for t in stage_specs:
         if t["kind"] not in KINDS:
             raise ValueError(f"unregistered transform: {t['kind']}")
@@ -968,6 +969,12 @@ def build_identity(
         raise ValueError(
             "minimum TRAIN text size requires an ordinary native disk LM build"
         )
+    if language is not None and (
+        not large_lm_build or project.release.record_admission is not None
+    ):
+        raise ValueError(
+            "train_row_language requires native disk LM without reviewed admission"
+        )
     if reference_normalized_spans:
         if not large_lm_build or project.release.record_admission is not None:
             raise ValueError("referenced spans require an ordinary native disk build")
@@ -987,12 +994,13 @@ def build_identity(
             "build_outputs.py",
             "measurement.py",
         )
-        if minimum is not None:
+        if minimum is not None or language is not None:
             identity["native_stage_implementation"].update(
                 implementation_digests(
                     "train_selection.py",
                     "text_statistics.py",
                     "normalized_annotations.py",
+                    *(("source_language.py",) if language is not None else ()),
                 )
             )
     else:
@@ -1023,11 +1031,14 @@ def build(
             "--canary and --reuse-completed-preparation exclude each other"
         )
     if reuse_completed_preparation or canary is not None:
-        from klab.corpus.train_selection import minimum_train_bytes
+        from klab.corpus.train_selection import minimum_train_bytes, train_row_language
 
-        minimum = minimum_train_bytes(
-            [declaration_payload(t) for t in project.transforms]
-        )
+        specs = [declaration_payload(t) for t in project.transforms]
+        minimum = minimum_train_bytes(specs)
+        if train_row_language(specs) is not None:
+            raise ValueError(
+                "train_row_language requires native disk LM without a canary or completed-preparation adoption"
+            )
         if canary is not None and minimum is not None:
             raise ValueError(
                 "minimum TRAIN text size requires an ordinary native disk LM build"
