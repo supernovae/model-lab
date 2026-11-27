@@ -32,7 +32,7 @@ The [D1–D12 decision table](https://github.com/supernovae/model-lab/blob/b5302
 | 7. Shared work area | #567 shipped shared normalized partitions, verified release payload references, dependency-aware plans and protected pruning. Typed relational, procedural and command artifacts share the store and retention contracts. | Measure reuse and storage demand on production source expansions. |
 | 8–9. Operators and sidecars | #448/#451 moved choice into recorded release policy. The shared annotation path publishes text, upstream and detected language, quality, privacy, and source-local repeated-line evidence. Native TRAIN selection consumes approved predicates. The native index retains policy-independent exact groups with bounded inspection. Labeled audits cover annotations and document or passage screens. | Measure detector coverage and source quality on each planned production recipe. |
 | 10. Reference releases and mixtures | Mixture checkpoints bind prefixes of the files that will be published. The sealed cache publishes bounded int32 or opt-in uint16 segments keyed on exact content, tokenizer behavior and physical encoding. Reference schedules bind exact segment dependencies. An opt-in direct loader reads those segments. Reference-only bundles own the schedule, records, validation and masks. Offline dispatch supports whole sealed segments or selected ranges with fidelity checks. The [retained Workshop mixture comparison](../token-store.md#retained-workshop-mixture-comparison) supports keeping contiguous as the default. | Measure transfer and replay costs when deploying selected ranges on hosted workers. |
-| 11–12. Planner and external operators | #717 completes native storage planning with a measured canary. #711 ships explicit approval and replay authorization for local command operators. The [Corpus dashboard](../dashboard.md#corpus) exposes typed storage, lineage, compilation metadata and paginated graph evidence through existing readers. | Extend the dashboard to conventional release summaries, annotation and duplicate evidence, and links between recipes and run results. |
+| 11–12. Planner and external operators | #717 completes native storage planning with a measured canary. #711 ships explicit approval and replay authorization for local command operators. The [Corpus dashboard](../dashboard.md#corpus) covers typed storage and graph evidence, conventional release metadata, recorded sidecars and duplicate decisions, and links to runs recording one release. | Surface cross-release mixture lineage, representation comparisons and training recipe detail. |
 | 13. Training preemption | #533 added opt-in device-layout changes under runtime optimization. #535/#537 added finished-run data cleanup and reuse. | Trainer recovery stays with #485 and #516. Corpus tracks data and schedule identity so those changes can proceed independently. |
 
 Workshop's [foundational corpus](https://github.com/supernovae/kybern-workshop/pull/112)
@@ -820,13 +820,14 @@ pipeline costs.
    [Command extension #573](https://github.com/supernovae/model-lab/issues/573)
 
 Land machine-readable inspection and current documentation in every
-increment. The existing dashboard now shows typed inventory and storage,
-source pins, direct dependencies, representation counts, and paginated
-assertions and evidence. Browser queries authenticate a host-local proof and
-open the selected SQLite index read-only. The CLI remains the entry point for
-cold verification. Extend the dashboard with conventional release, annotation
-and duplicate summaries, token and compression comparisons, and links from
-run results to recipe and artifact identities.
+increment. The dashboard shows typed inventory, direct artifact dependencies,
+representation counts, and paginated assertion and duplicate evidence.
+Indexed browser queries authenticate a host-local proof and open the selected
+SQLite index read-only. Conventional release pages check the digest of each
+control file they open and show source rights, sidecar pins, published duplicate
+decisions and recorded run references. The CLI remains the entry point for
+full release verification and cold index scans. Extend the views with token
+and compression comparisons and links to cross-release mixtures and recipes.
 
 Each format change switches all readers and writers together and names
 the artifacts to rebuild. Reuse verified transport and snapshots where

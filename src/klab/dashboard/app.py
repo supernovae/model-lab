@@ -1240,6 +1240,8 @@ def _run_header(root: Path, focused_ids: list[str], tab: str) -> None:
     """Say which run this is, how it ended, and where it sits among its attempts."""
     if not focused_ids:
         return
+    from klab.dashboard.corpus_releases import run_release_link
+
     try:
         groups = _lineages(str(root))
     except OSError, sqlite3.Error, ValueError:
@@ -1250,6 +1252,7 @@ def _run_header(root: Path, focused_ids: list[str], tab: str) -> None:
         for index, attempt in enumerate(group.attempts)
     }
     blocks = []
+    corpus_root = resolve_work_dir()
     for run_id in focused_ids:
         if run_id not in located:
             blocks.append(f"<div class='rh-run'><b>{html.escape(run_id)}</b></div>")
@@ -1262,6 +1265,10 @@ def _run_header(root: Path, focused_ids: list[str], tab: str) -> None:
             else "no update recorded"
         )
         links = []
+        if address := run_release_link(corpus_root, attempt.record.config):
+            links.append(
+                f"<a href='{html.escape(address)}' target='_self'>Corpus release</a>"
+            )
         if len(group.attempts) > 1:
             if index > 0:
                 earlier = group.attempts[index - 1].run_id
@@ -1449,7 +1456,7 @@ def main() -> None:
             url_path="explorer",
         ),
         st.Page(
-            lambda: corpus_view.corpus_page(resolve_work_dir()),
+            lambda: corpus_view.corpus_page(resolve_work_dir(), root),
             title="Corpus",
             icon=":material/dataset:",
             url_path="corpus",

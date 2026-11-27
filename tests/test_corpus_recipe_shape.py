@@ -278,6 +278,113 @@ def documents(release: Path) -> list[dict]:
     return list(members.rows("documents.jsonl"))
 
 
+def check_published_release_browsing(
+    lab, release, policy, exact_group, expected_members
+):
+    from klab.corpus import stage_inspection
+
+    reference = f"{release.parent.parent.name}@{release.name}"
+    location = str(release.relative_to(lab.work))
+    catalog = lab.json("corpus", "releases", "--limit", "100")
+    assert any(row["location"] == location for row in catalog["releases"])
+    first = lab.json("corpus", "releases", reference, "--limit", "1")
+    second = lab.json(
+        "corpus",
+        "releases",
+        reference,
+        "--limit",
+        "1",
+        "--offset",
+        str(first["next_offset"]),
+    )
+    assert first["rows"][0]["id"] != second["rows"][0]["id"]
+    assert first["rows"][0]["snapshot_sha256"]
+    annotations = lab.json("corpus", "releases", reference, "--section", "annotations")
+    assert (
+        annotations["selection"]["excluded_by_reason"] == policy["excluded_by_reason"]
+    )
+    assert annotations["selection"]["annotation_counts"]["source-quality"] == len(
+        policy["quality_sidecars"]
+    )
+    assert all("payload_sha256" in row for row in annotations["rows"])
+    published = lab.json(
+        "corpus", "releases", reference, "--section", "duplicate-decisions"
+    )
+    assert published["dedupe"]["groups"] == published["row_count"]
+    assert any(row["sha256"] == exact_group for row in published["rows"])
+    retained = lab.json(
+        "corpus", "duplicate-groups", "--release", reference, "--group", exact_group
+    )
+    assert retained["members"] == expected_members
+
+    report_path = release / "report.json"
+    raw = report_path.read_bytes()
+    try:
+        report_path.write_bytes(b"!" + raw[1:])
+        with pytest.raises(
+            ValueError, match="release control member changed: report.json"
+        ):
+            lab.json("corpus", "releases", reference)
+    finally:
+        report_path.write_bytes(raw)
+
+    from streamlit.testing.v1 import AppTest
+
+    from klab.dashboard.corpus_releases import run_release_link
+    from klab.training.metrics import ExperimentStore
+
+    store = lab.root / "release-runs"
+    config = {
+        "dataset": {"revision": release.name, "corpus_release_path": str(release)}
+    }
+    ExperimentStore(store).create_run("exact-pinned-run", config, {})
+    ExperimentStore(store).create_run(
+        "unrelated", {"dataset": {"revision": release.name}}, {}
+    )
+    assert run_release_link(lab.work, config) is not None
+    app = AppTest.from_function(
+        render_release_dashboard, args=(str(lab.work), str(store))
+    )
+    app.query_params["release"] = location
+    app.query_params["release_id"] = release.name
+    app.run()
+    assert not app.exception
+    assert app.code[0].value == release.name
+
+    def click(label):
+        next(button for button in app.button if button.label == label).click().run()
+        assert not app.exception
+
+    def no_cold_scan(*args, **kwargs):
+        pytest.fail("dashboard tried to hash a retained index")
+
+    with lab.monkeypatch.context() as patch:
+        patch.setattr(stage_inspection, "verify_stage", no_cold_scan)
+        next(box for box in app.selectbox if box.label == "Release evidence").select(
+            "annotations"
+        )
+        click("Read release metadata")
+        assert any("Annotations" in block.value for block in app.markdown)
+        next(field for field in app.text_input if field.label == "Group SHA-256").input(
+            exact_group
+        )
+        click("Query duplicate evidence")
+        assert set(app.dataframe[-1].value["document_id"]) == {
+            row["document_id"] for row in expected_members
+        }
+        click("Find recorded training runs")
+        links = app.get("link_button")
+        assert len(links) == 1 and "run=exact-pinned-run" in links[0].proto.url
+
+
+def render_release_dashboard(root, store):
+    from pathlib import Path
+
+    from klab.dashboard.corpus_view import corpus_page
+
+    corpus_page(Path(root), Path(store))
+
+
 def test_recipe_shaped_corpus_reaches_a_verified_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
@@ -848,6 +955,9 @@ def test_recipe_shaped_corpus_reaches_a_verified_release(
         "source_quality_unavailable": missing,
         "privacy_candidate": private,
     }
+    check_published_release_browsing(
+        lab, selected_release, policy_result, group["sha256"], members
+    )
 
     def change_metadata(path, document_id, key, value):
         documents = path / "documents.jsonl"
