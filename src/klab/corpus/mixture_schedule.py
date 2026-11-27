@@ -35,6 +35,23 @@ _SHA256 = re.compile("[0-9a-f]{64}")
 _FORMAT = "int32-segment-ranges"
 
 
+def schedule_token_counts(raw: bytes) -> np.ndarray:
+    """View the final uint32 field in a page of fixed-width schedule ranges."""
+    count, trailing = divmod(len(raw), SCHEDULE_RANGE.size)
+    if trailing:
+        raise ValueError("partial mixture schedule range")
+    if not count:
+        return np.empty(0, dtype="<u4")
+    dtype = np.dtype("<u4")
+    return np.ndarray(
+        count,
+        dtype=dtype,
+        buffer=raw,
+        offset=SCHEDULE_RANGE.size - dtype.itemsize,
+        strides=(SCHEDULE_RANGE.size,),
+    )
+
+
 def token_cache_root(release: Path, output_parent: Path) -> Path:
     from klab.corpus.preparation_inputs import corpus_work_root
 

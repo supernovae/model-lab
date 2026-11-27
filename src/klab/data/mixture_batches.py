@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from array import array
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from contextlib import ExitStack, closing
 from pathlib import Path
@@ -19,6 +19,7 @@ from klab.corpus.mixture_schedule import (
     VerifiedSchedule,
     open_verified_schedule_member,
     require_schedule_generation,
+    schedule_token_counts,
     verify_schedule,
 )
 from klab.corpus.release_verify import verification_settings
@@ -108,21 +109,17 @@ class ReferencedTokenArray:
             require_schedule_generation(
                 self.schedule.schedule, self.schedule_file.fileno()
             )
-            ends, entries = [], []
-            position = self.landmarks[page]
-            gap_index = bisect_right(self.gap_rows, first - 1)
-            for row, (segment, offset, take) in enumerate(
-                SCHEDULE_RANGE.iter_unpack(raw), first
-            ):
-                if gap_index < len(self.gap_rows) and self.gap_rows[gap_index] == row:
-                    position += self.gap_sizes[gap_index]
-                    gap_index += 1
-                entries.append((position, segment, offset))
-                position += take
-                ends.append(position)
+            ends = schedule_token_counts(raw).astype(np.uint64)
+            gap_start = bisect_left(self.gap_rows, first)
+            gap_end = bisect_left(self.gap_rows, first + count, lo=gap_start)
+            if gap_start != gap_end:
+                rows = np.asarray(self.gap_rows)[gap_start:gap_end] - first
+                ends[rows] += np.asarray(self.gap_sizes)[gap_start:gap_end]
+            ends.cumsum(out=ends)
+            ends += self.landmarks[page]
             if len(self.pages) == _PAGES:
                 self.pages.popitem(last=False)
-            self.pages[page] = ends, entries
+            self.pages[page] = ends.tolist(), raw
         self.pages.move_to_end(page)
         return self.pages[page]
 
@@ -155,32 +152,43 @@ class ReferencedTokenArray:
         if position == 0:
             position = 1
         limit = min(stop, self.end)
-        while position < limit:
+        if position < limit:
             page = bisect_right(self.landmarks, position) - 1
-            ends, entries = self._page(page)
+            ends, ranges = self._page(page)
             row = bisect_right(ends, position)
-            document, segment, offset = entries[row]
-            end = ends[row]
-            if document <= position == start < stop < end:
-                content = self._content(
-                    segment, offset + start - document, stop - start
+            while position < limit:
+                segment, offset, count = SCHEDULE_RANGE.unpack_from(
+                    ranges, row * SCHEDULE_RANGE.size
                 )
-                return content if self.token_width == 4 else content.astype(self.dtype)
-            if values is None:
-                values = np.full(stop - start, self.pad, dtype=self.dtype)
-            if position < document:
-                # Filler is PAD, with EOS immediately before the new document.
-                if document <= limit:
-                    values[document - 1 - start] = self.schedule.eos
-                position = min(document, limit)
-            content_end = min(end - 1, limit)
-            if position < content_end:
-                values[position - start : content_end - start] = self._content(
-                    segment, offset + position - document, content_end - position
-                )
-            if end <= limit:
-                values[end - 1 - start] = self.schedule.eos
-            position = min(end, limit)
+                end = ends[row]
+                document = end - count
+                if document <= position == start < stop < end:
+                    content = self._content(
+                        segment, offset + start - document, stop - start
+                    )
+                    return (
+                        content if self.token_width == 4 else content.astype(self.dtype)
+                    )
+                if values is None:
+                    values = np.full(stop - start, self.pad, dtype=self.dtype)
+                if position < document:
+                    # Filler is PAD, with EOS immediately before the new document.
+                    if document <= limit:
+                        values[document - 1 - start] = self.schedule.eos
+                    position = min(document, limit)
+                content_end = min(end - 1, limit)
+                if position < content_end:
+                    values[position - start : content_end - start] = self._content(
+                        segment, offset + position - document, content_end - position
+                    )
+                if end <= limit:
+                    values[end - 1 - start] = self.schedule.eos
+                position = min(end, limit)
+                row += 1
+                if position < limit and row == len(ends):
+                    page += 1
+                    ends, ranges = self._page(page)
+                    row = 0
         if values is None:
             values = np.full(max(0, stop - start), self.pad, dtype=self.dtype)
         if start == 0 and len(values):
