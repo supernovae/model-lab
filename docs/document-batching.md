@@ -101,6 +101,10 @@ larger than the prepared data, a budget that ends mid-document, or a horizon tha
 conflicts with warmup. Publish the inputs again for the new config, since they
 are bound to it.
 
+For one or more whole passes, use [data budget](datasets.md#prepare)
+against the prepared cache. It uses each pass's actual EOS groups and keeps the
+optimizer policy you declared.
+
 `frozen_update_ends` fixes group boundaries at given token counts; schedules and
 continuations keep them.
 
