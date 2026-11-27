@@ -180,6 +180,23 @@ def ranking_scores(
     return out
 
 
+def score_encoded_choices(
+    loaded: Any, context: Sequence[int], continuations: Mapping[str, Sequence[int]]
+) -> dict[str, float]:
+    """Reuse one model forward when every encoded choice is one token."""
+    if all(len(tokens) == 1 for tokens in continuations.values()):
+        limit = loaded.config.model.max_seq_len
+        row = log_probs(loaded, context[-limit:], last=1)[0]
+        return {
+            choice: float(row[tokens[0]]) for choice, tokens in continuations.items()
+        }
+    scores = {}
+    for choice, tokens in continuations.items():
+        values, _ = score_tokens(loaded, [*context, *tokens], len(context))
+        scores[choice] = float(values.sum()) / max(len(tokens), 1)
+    return scores
+
+
 def shared_context_scores(
     loaded: Any, items: Sequence[Mapping[str, Any]]
 ) -> list[dict[str, float]]:
@@ -189,7 +206,6 @@ def shared_context_scores(
     position of one forward holds every candidate's score, the same number as
     scoring each alone. Any other item is scored candidate by candidate.
     """
-    limit = loaded.config.model.max_seq_len
     out = []
     for item in items:
         candidates = list(item["candidates"])
@@ -199,19 +215,11 @@ def shared_context_scores(
             continue
         # The same split as split_pair, with the long context encoded once.
         context = item.get("context_ids") or encode(loaded, prefix)
-        rests = [encode(loaded, f"{prefix} {c}")[len(context) :] for c in candidates]
-        if all(len(rest) == 1 for rest in rests):
-            row = log_probs(loaded, context[-limit:], last=1)[0]
-            scores = {
-                c: float(row[rest[0]])
-                for c, rest in zip(candidates, rests, strict=True)
-            }
-        else:
-            scores = {}
-            for candidate, rest in zip(candidates, rests, strict=True):
-                values, _ = score_tokens(loaded, [*context, *rest], len(context))
-                scores[candidate] = float(values.sum()) / max(len(rest), 1)
-        out.append(scores)
+        continuations = {
+            choice: encode(loaded, f"{prefix} {choice}")[len(context) :]
+            for choice in candidates
+        }
+        out.append(score_encoded_choices(loaded, context, continuations))
     return out
 
 

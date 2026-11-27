@@ -56,6 +56,27 @@ ordinary evaluation results. Use separate development and final
 declarations and keep final items outside model selection. The study owns
 the answer keys and split assignments.
 
+To test whether changing the context changes the answer, optionally add
+`pairs` to the same declaration:
+
+```json
+"pairs": [{"id": "route-switch", "left": "left-rule", "right": "right-rule", "question": "Which route is open?"}]
+```
+
+`left` and `right` name two unused items. They must share a category, the same
+ordered choices, and the exact `question` appended after a newline in each
+prefix. The context before that newline must differ, and the correct choices
+must differ. The study decides the change to make in the context and supplies
+the answer keys.
+
+The `ranking.pairs` result reports joint accuracy and mean answer margin overall
+and by category. Joint credit multiplies the two item credits, so a fixed
+unique answer earns zero and uniform binary choices earn 0.25. The answer
+margin averages how much each context favors its correct choice over the
+other context's correct choice, in mean log probability per token. It is zero
+when the relative scores are unchanged. Lab computes both measures from the
+existing item scores without running the model again.
+
 ### Bits per byte
 
 Loss per token depends on the tokenizer: a larger vocabulary makes tokens
