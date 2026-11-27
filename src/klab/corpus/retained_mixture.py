@@ -39,7 +39,11 @@ from klab.corpus.split_runs import (
     rows,
     write_rows,
 )
-from klab.corpus.train_selection import minimum_train_bytes, train_row_language
+from klab.corpus.train_selection import (
+    minimum_train_bytes,
+    train_row_selection,
+    train_selection_options_match,
+)
 from klab.verification_proofs import read_trusted_small as _small
 
 _DOCUMENT_ID = re.compile(r"[0-9a-f]{64}")
@@ -163,10 +167,10 @@ def prepared_release(root, release):
     members = ReleaseMembers(release, manifest)
     report = json.loads(members.member("report.json").read_bytes())
     minimum = minimum_train_bytes(identity["transforms"])
-    language = train_row_language(identity["transforms"])
+    row_selection = train_row_selection(identity["transforms"])
     view_count = report["view_counts"]["lm"]["train"]
     selection = None
-    if minimum is None and language is None:
+    if minimum is None and row_selection is None:
         if view_count != report["split_counts"]["train"]:
             raise ValueError(
                 "additive release TRAIN view does not cover its kept TRAIN documents"
@@ -174,8 +178,7 @@ def prepared_release(root, release):
     else:
         recorded = report["train_selection"]
         if (
-            recorded.get("minimum_utf8_bytes") != minimum
-            or recorded.get("row_language") != (language.report() if language else None)
+            not train_selection_options_match(recorded, minimum, row_selection)
             or recorded["source_render_ids"]
             != identity["completed_preparation"]["source_stage_ids"]
         ):

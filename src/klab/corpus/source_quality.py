@@ -6,10 +6,10 @@ from pathlib import Path
 
 from klab.corpus.normalized_annotations import NormalizedAnnotator, annotate_partition
 
-_FIELDS = ("score", "int_score", "token_count")
+QUALITY_FIELDS = ("score", "int_score", "token_count")
 _VALUE_STATES = ("missing", "reported", "invalid")
 _QUALIFICATION_STATES = ("not_recorded", "family_hint_recorded", "unresolved")
-_ROW = struct.Struct("<32sdqQB")
+SOURCE_QUALITY_ROW = struct.Struct("<32sdqQB")
 
 
 def _score(value):
@@ -26,8 +26,19 @@ def _integer(value, lower, upper):
     return (0 if value is None else 2), 0
 
 
+def quality_value(field, value):
+    """Project a source field to the same state and value as its sidecar."""
+    if field == "score":
+        return _score(value)
+    if field == "int_score":
+        return _integer(value, -(2**63), 2**63)
+    if field == "token_count":
+        return _integer(value, 0, 2**64)
+    raise ValueError(f"unknown source-quality field: {field}")
+
+
 def _render(writer, documents, _source):
-    counts = [[0, 0, 0] for _ in _FIELDS]
+    counts = [[0, 0, 0] for _ in QUALITY_FIELDS]
     qualification_counts = [0, 0, 0]
     for doc_id, row in documents:
         metadata = row.get("metadata")
@@ -50,11 +61,11 @@ def _render(writer, documents, _source):
         flags = (
             score_state | (int_state << 2) | (token_state << 4) | (qualification << 6)
         )
-        writer.write(_ROW.pack(doc_id, score, int_score, tokens, flags))
+        writer.write(SOURCE_QUALITY_ROW.pack(doc_id, score, int_score, tokens, flags))
     return {
         "totals": {
             name: dict(zip(_VALUE_STATES, field_counts, strict=True))
-            for name, field_counts in zip(_FIELDS, counts, strict=True)
+            for name, field_counts in zip(QUALITY_FIELDS, counts, strict=True)
         }
         | {
             "qualification_evidence": dict(
@@ -75,7 +86,7 @@ def _decode(values, _summary):
         "invalid_fields": [],
     }
     for offset, (field, value) in enumerate(
-        zip(_FIELDS, (score, int_score, tokens), strict=True)
+        zip(QUALITY_FIELDS, (score, int_score, tokens), strict=True)
     ):
         state = (flags >> (offset * 2)) & 3
         if state == 3:
@@ -87,7 +98,7 @@ def _decode(values, _summary):
 
 
 _ANNOTATOR = NormalizedAnnotator(
-    "source-quality", "source_quality.py", _ROW, _render, _decode
+    "source-quality", "source_quality.py", SOURCE_QUALITY_ROW, _render, _decode
 )
 
 

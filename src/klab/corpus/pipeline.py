@@ -932,10 +932,12 @@ def build_identity(
     """Resolve the build identity, ordered transforms and builder from its pins."""
     transforms = _ordered_transforms(project)
     stage_specs = [declaration_payload(t) for t in transforms]
-    from klab.corpus.train_selection import minimum_train_bytes, train_row_language
+    from klab.corpus.train_selection import minimum_train_bytes, train_row_selection
 
     minimum = minimum_train_bytes(stage_specs)
-    language = train_row_language(stage_specs)
+    row_selection = train_row_selection(
+        stage_specs, {source.id for source in project.sources}
+    )
     for t in stage_specs:
         if t["kind"] not in KINDS:
             raise ValueError(f"unregistered transform: {t['kind']}")
@@ -969,8 +971,8 @@ def build_identity(
         raise ValueError(
             "minimum TRAIN text size requires an ordinary native disk LM build"
         )
-    if language is not None and not large_lm_build:
-        raise ValueError("train_row_language requires a native disk LM build")
+    if row_selection is not None and not large_lm_build:
+        raise ValueError("TRAIN row selection requires a native disk LM build")
     if reference_normalized_spans:
         if not large_lm_build or project.release.record_admission is not None:
             raise ValueError("referenced spans require an ordinary native disk build")
@@ -990,14 +992,22 @@ def build_identity(
             "build_outputs.py",
             "measurement.py",
         )
-        if minimum is not None or language is not None:
+        if minimum is not None or row_selection is not None:
+            annotation_implementation = [
+                "train_selection.py",
+                "normalized_annotations.py",
+            ]
+            if minimum is not None:
+                annotation_implementation.append("text_statistics.py")
+            if row_selection is not None:
+                if row_selection.language:
+                    annotation_implementation.append("source_language.py")
+                if row_selection.quality:
+                    annotation_implementation.append("source_quality.py")
+                if row_selection.privacy_mask:
+                    annotation_implementation.append("privacy_candidates.py")
             identity["native_stage_implementation"].update(
-                implementation_digests(
-                    "train_selection.py",
-                    "text_statistics.py",
-                    "normalized_annotations.py",
-                    *(("source_language.py",) if language is not None else ()),
-                )
+                implementation_digests(*annotation_implementation)
             )
     else:
         identity["normalization_implementation"] = implementation_digests(
@@ -1027,14 +1037,16 @@ def build(
             "--canary and --reuse-completed-preparation exclude each other"
         )
     if reuse_completed_preparation or canary is not None:
-        from klab.corpus.train_selection import minimum_train_bytes, train_row_language
+        from klab.corpus.train_selection import minimum_train_bytes, train_row_selection
 
         specs = [declaration_payload(t) for t in project.transforms]
         minimum = minimum_train_bytes(specs)
-        language = train_row_language(specs)
-        if canary is not None and language is not None:
+        row_selection = train_row_selection(
+            specs, {source.id for source in project.sources}
+        )
+        if canary is not None and row_selection is not None:
             raise ValueError(
-                "train_row_language requires native disk LM without a canary"
+                "TRAIN row selection requires native disk LM without a canary"
             )
         if canary is not None and minimum is not None:
             raise ValueError(

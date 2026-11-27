@@ -25,8 +25,8 @@ _PHONE_PREFIX = re.compile(
     r"(?:\([2-9][0-9]{2}\) ?|[2-9][0-9]{2}-)"
     r"[2-9][0-9]{2}\Z"
 )
-_FIELDS = ("email_like", "phone_like")
-_ROW = struct.Struct("<32sB")
+PRIVACY_FIELDS = ("email_like", "phone_like")
+PRIVACY_ROW = struct.Struct("<32sB")
 
 
 def _email_like(text):
@@ -51,6 +51,13 @@ def _phone_like(text):
     return False
 
 
+def privacy_flags(text, mask=3):
+    """Evaluate the requested categories with the normalized annotator."""
+    email = bool(mask & 1) and _email_like(text)
+    phone = bool(mask & 2) and _phone_like(text)
+    return email | (phone << 1)
+
+
 def _render(writer, documents, _source):
     emails = phones = candidates = 0
     for doc_id, row in documents:
@@ -59,7 +66,7 @@ def _render(writer, documents, _source):
             raise ValueError("invalid document in normalized partition")  # noqa: TRY004 - invalid serialized artifact
         email = _email_like(text)
         phone = _phone_like(text)
-        writer.write(_ROW.pack(doc_id, email | (phone << 1)))
+        writer.write(PRIVACY_ROW.pack(doc_id, email | (phone << 1)))
         emails += email
         phones += phone
         candidates += email or phone
@@ -68,16 +75,18 @@ def _render(writer, documents, _source):
 
 def _decode(values, _summary):
     doc_id, flags = values
-    if flags >= 1 << len(_FIELDS):
+    if flags >= 1 << len(PRIVACY_FIELDS):
         raise ValueError("invalid privacy candidate flags")
     return {
         "document_id": doc_id.hex(),
-        "candidates": [name for bit, name in enumerate(_FIELDS) if flags & (1 << bit)],
+        "candidates": [
+            name for bit, name in enumerate(PRIVACY_FIELDS) if flags & (1 << bit)
+        ],
     }
 
 
 _ANNOTATOR = NormalizedAnnotator(
-    "privacy-candidates", "privacy_candidates.py", _ROW, _render, _decode
+    "privacy-candidates", "privacy_candidates.py", PRIVACY_ROW, _render, _decode
 )
 
 
