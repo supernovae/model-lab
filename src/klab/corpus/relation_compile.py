@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from contextlib import ExitStack
+import json
+import sqlite3
+from contextlib import ExitStack, nullcontext
 from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
@@ -10,6 +12,13 @@ from pydantic import Field, model_validator
 from klab.canonical import canonical_digest, canonical_json
 from klab.config.models import StrictModel
 from klab.corpus.build_stages import implementation_digests
+from klab.corpus.relation_sources import Identifier
+from klab.corpus.relation_structure import (
+    encode_structure,
+    expand_structure,
+    structural_groups,
+    structural_scratch,
+)
 from klab.corpus.relations import (
     ASSERTION_COLUMNS,
     ASSERTION_JOINS,
@@ -26,7 +35,7 @@ from klab.progress import progress_phase
 from klab.workspace_preflight import check_storage, require_storage
 
 COMPILED = "relation-sequences"
-_MAX_SEQUENCE_BYTES = 8 * 1024**2
+MAX_RELATION_SEQUENCE_BYTES = 8 * 1024**2
 declare_stage(
     "relational sequence compilation",
     Single(
@@ -36,7 +45,7 @@ declare_stage(
 
 
 class CompileRelations(StrictModel):
-    target: Literal["triples", "walks"]
+    target: Literal["triples", "walks", "hierarchy", "factorized"]
     qualifiers: Literal["include", "omit"] = "include"
     seed: Annotated[int, Field(ge=0, le=2**63 - 1, strict=True)] | None = None
     hops: Annotated[int, Field(ge=1, le=64, strict=True)] | None = None
@@ -44,15 +53,40 @@ class CompileRelations(StrictModel):
     max_sequences: Annotated[int, Field(gt=0, strict=True)]
     max_bytes: Annotated[int, Field(gt=0, le=2**40, strict=True)]
 
+    group_size: Annotated[int, Field(ge=2, le=1024, strict=True)] | None = None
+    max_scratch_bytes: (
+        Annotated[int, Field(ge=1024**2, le=2**40, strict=True)] | None
+    ) = None
+    hierarchy_predicate: Identifier | None = None
+    max_depth: Annotated[int, Field(ge=1, le=4096, strict=True)] | None = None
+
+    @property
+    def structural(self):
+        return self.target in {"hierarchy", "factorized"}
+
     @model_validator(mode="after")
-    def walk_options(self):
+    def target_options(self):
         walk_parameters = (self.seed, self.hops, self.walks_per_entity)
         if self.target == "walks" and None in walk_parameters:
             raise ValueError("walks need seed, hops and walks_per_entity")
-        if self.target == "triples" and any(
+        if self.target != "walks" and any(
             value is not None for value in walk_parameters
         ):
             raise ValueError("seed, hops and walks_per_entity apply only to walks")
+        structure = (self.group_size, self.max_scratch_bytes)
+        hierarchy = (self.hierarchy_predicate, self.max_depth)
+        for enabled, values, names in (
+            (self.structural, structure, "group_size and max_scratch_bytes"),
+            (
+                self.target == "hierarchy",
+                hierarchy,
+                "hierarchy_predicate and max_depth",
+            ),
+        ):
+            if enabled and None in values:
+                raise ValueError(f"{self.target} requires {names}")
+            if not enabled and any(value is not None for value in values):
+                raise ValueError(f"{self.target} does not support {names}")
         return self
 
 
@@ -100,42 +134,61 @@ def _follow(db, split, options, start, walk):
         current = row["next"]
 
 
-def _serialize(rows, options):
+def _serialize(rows, options, tag):
     triples = []
     assertion_ids = []
-    omitted = size = 0
+    omissions = []
+    size = 0
     for row in rows:
         record = assertion_record(row)
         triple = [record["subject"], record["predicate"], record["value"]]
-        if options.qualifiers == "include" and record["qualifiers"]:
-            triple.append(record["qualifiers"])
-        else:
-            omitted += len(record["qualifiers"])
+        if record["qualifiers"]:
+            if options.qualifiers == "include":
+                triple.append(record["qualifiers"])
+            else:
+                omissions.append(
+                    {
+                        "assertion": row["assertion_id"],
+                        "qualifiers": len(record["qualifiers"]),
+                    }
+                )
         classes = claim_classes(row)
         if classes != ["explicit"]:
             triple.append({"claim_classes": classes})
         raw = canonical_json(triple)
         size += len(raw) + 1
-        if size > min(options.max_bytes, _MAX_SEQUENCE_BYTES):
+        if size > min(options.max_bytes, MAX_RELATION_SEQUENCE_BYTES):
             raise ValueError("a compiled sequence exceeds the per-sequence byte limit")
         triples.append(raw)
         assertion_ids.append(row["assertion_id"])
-    representation = (
-        triples[0] if options.target == "triples" else b"[" + b",".join(triples) + b"]"
-    )
-    return representation.decode(), assertion_ids, omitted
+    if tag:
+        expected = [json.loads(triple) for triple in triples]
+        representation = canonical_json(encode_structure(tag, expected))
+        if list(expand_structure(json.loads(representation))) != expected:
+            raise ValueError("structural compilation failed round-trip verification")
+    elif options.target == "walks":
+        representation = b"[" + b",".join(triples) + b"]"
+    else:
+        representation = triples[0]
+    return representation.decode(), assertion_ids, omissions
 
 
-def _write_sequences(db, staging, result, options, coverage):
+def _write_sequences(db, staging, result, options, coverage, ledger):
     sequences = payload_bytes = 0
     partitions = {}
     for index, split in enumerate(SPLITS):
         count = steps = omitted = 0
-        selected = (
-            _triples(db, index)
-            if options.target == "triples"
-            else _walks(db, index, options)
-        )
+        if options.structural:
+            selected = structural_groups(
+                db, index, options, MAX_RELATION_SEQUENCE_BYTES
+            )
+        else:
+            groups = (
+                _triples(db, index)
+                if options.target == "triples"
+                else _walks(db, index, options)
+            )
+            selected = ((rows, ()) for rows in groups)
         with (
             progress_phase(
                 "corpus_relation_compile", unit="sequences", derived={"split": split}
@@ -143,11 +196,24 @@ def _write_sequences(db, staging, result, options, coverage):
             (staging / f"{split}.jsonl").open("wb") as text,
             (staging / f"{split}.lineage.jsonl").open("wb") as lineage,
         ):
-            for rows in selected:
-                value, assertion_ids, omissions = _serialize(rows, options)
+            for rows, tag in selected:
+                value, assertion_ids, omissions = _serialize(rows, options, tag)
                 data = canonical_json({"text": value}) + b"\n"
                 evidence = canonical_json({"assertions": assertion_ids}) + b"\n"
-                payload_bytes += len(data) + len(evidence)
+                omission = b""
+                if omissions:
+                    omission = (
+                        canonical_json(
+                            {
+                                "split": split,
+                                "sequence": count + 1,
+                                "reason": "compiler_qualifiers_omit",
+                                "assertions": omissions,
+                            }
+                        )
+                        + b"\n"
+                    )
+                payload_bytes += len(data) + len(evidence) + len(omission)
                 sequences += 1
                 if (
                     payload_bytes > options.max_bytes
@@ -158,12 +224,18 @@ def _write_sequences(db, staging, result, options, coverage):
                     )
                 text.write(data)
                 lineage.write(evidence)
+                if omission:
+                    ledger.write(omission)
                 count += 1
                 steps += len(assertion_ids)
-                omitted += omissions
+                omitted += sum(item["qualifiers"] for item in omissions)
                 if count % 8192 == 0:
                     progress.update(completed_work=count, emit=False)
             progress.update(completed_work=count)
+        if options.structural and steps != coverage[split]["assertions"]:
+            raise ValueError(
+                f"structural compilation changed assertion coverage in {split}"
+            )
         partitions[split] = {
             "sequences": count,
             "assertion_visits": steps,
@@ -177,6 +249,14 @@ def _write_sequences(db, staging, result, options, coverage):
         partitions=partitions,
         sequences=sequences,
         payload_bytes=payload_bytes,
+        fidelity=(
+            "qualifier_projection"
+            if any(row["qualifier_visits_omitted"] for row in partitions.values())
+            else "assertion_round_trip"
+        )
+        if options.structural
+        else "assertion_visits",
+        scratch_bytes=result.get("scratch_bytes", 0),
         evidence_fields_omitted=[
             "source",
             "line",
@@ -193,8 +273,11 @@ def compile_relations(root, key, options, *, plan_only=False):
     store = relation_store(root)
     with ExitStack() as verified:
         db, receipt, _ = verified.enter_context(open_relations(root, key))
+        implementation = ["relation_compile.py"]
+        if options.structural:
+            implementation.append("relation_structure.py")
         inputs = {
-            "implementation": implementation_digests("relation_compile.py"),
+            "implementation": implementation_digests(*implementation),
             "index": {"stage": INDEX, "key": key, "files": receipt["files"]},
             "options": options.model_dump(mode="json"),
         }
@@ -209,10 +292,38 @@ def compile_relations(root, key, options, *, plan_only=False):
             }
 
         def produce(staging, result):
-            require_storage([check_storage(staging, projected_bytes=options.max_bytes)])
-            _write_sequences(
-                db, staging, result, options, receipt["result"]["coverage"]
+            scratch_bytes = options.max_scratch_bytes or 0
+            require_storage(
+                [
+                    check_storage(
+                        staging, projected_bytes=options.max_bytes + scratch_bytes
+                    )
+                ]
             )
+            scratch = (
+                structural_scratch(db, staging, scratch_bytes, result)
+                if options.structural
+                else nullcontext()
+            )
+            ledger = (
+                (staging / "omissions.jsonl").open("wb")
+                if options.qualifiers == "omit"
+                else nullcontext()
+            )
+            try:
+                with ledger as omissions, scratch:
+                    _write_sequences(
+                        db,
+                        staging,
+                        result,
+                        options,
+                        receipt["result"]["coverage"],
+                        omissions,
+                    )
+            except sqlite3.Error as error:
+                raise ValueError(
+                    f"cannot compile the relation structure: {error}"
+                ) from error
             # Check the graph generation before the compiled result can be published.
             verified.close()
 

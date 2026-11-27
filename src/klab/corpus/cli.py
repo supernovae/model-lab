@@ -197,6 +197,16 @@ def _run(args: argparse.Namespace) -> None:
         elif args.relation_command == "compile":
             options = CompileRelations.model_validate_json(args.options.read_bytes())
             result = compile_relations(root, args.key, options, plan_only=args.plan)
+        elif args.relation_command == "compare":
+            from klab.corpus.relation_comparison import compare_relations
+
+            result = compare_relations(
+                root,
+                args.keys,
+                args.tokenizer,
+                max_bytes=args.max_bytes,
+                workers=args.workers,
+            )
         else:
             result = inspect_relations(
                 root,
@@ -989,7 +999,7 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     extract.add_argument("declaration", type=Path)
     extract.add_argument("--plan", action="store_true")
     compile_command = relation_sub.add_parser(
-        "compile", help="Compile triples or walks into training text"
+        "compile", help="Compile relational representations into training text"
     )
     compile_command.add_argument("key")
     compile_command.add_argument("options", type=Path)
@@ -1004,7 +1014,14 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     query.add_argument("--unresolved", action="store_true")
     inspect.add_argument("--after", type=int, default=0)
     inspect.add_argument("--limit", type=int, default=50)
-    for command in (extract, compile_command, inspect):
+    comparison = relation_sub.add_parser(
+        "compare", help="Compare verified relational artifacts with one tokenizer"
+    )
+    comparison.add_argument("keys", nargs="+")
+    comparison.add_argument("--tokenizer", type=Path, required=True)
+    comparison.add_argument("--max-bytes", type=int, required=True)
+    add_workers_flag(comparison)
+    for command in (extract, compile_command, inspect, comparison):
         command.add_argument("--work-dir", type=Path)
         command.add_argument(
             "--cold",

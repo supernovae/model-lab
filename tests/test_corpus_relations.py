@@ -319,3 +319,164 @@ def test_corpus_relations_refuse_a_family_shared_by_train_and_validation(
     with pytest.raises(ValueError, match="spans multiple splits"):
         lab.json(*extract)
     assert lab.json(*extract, "--plan")["candidate"] is False
+
+
+def test_structural_representations_round_trip_and_compare(
+    tmp_path, monkeypatch, capsys
+):
+    from klab.corpus.relation_structure import expand_structure
+    from klab.data.tokenizer import load_tokenizer
+
+    lab = Lab(tmp_path, monkeypatch, capsys)
+    parent = "world:parent"
+    qualifier = {
+        "predicate": "world:condition",
+        "value": {"kind": "text", "text": "verified"},
+    }
+    branch = triple("world:leaf", parent, "world:left")
+    claims = [
+        triple("world:left", parent, "world:root"),
+        triple("world:right", parent, "world:root"),
+        branch,
+        {**branch, "qualifiers": [qualifier], "claim_class": "derived"},
+        triple("world:leaf", parent, "world:right"),
+        triple("world:leaf", "world:cycle", "world:right"),
+        triple("world:right", "world:cycle", "world:leaf"),
+        {
+            "subject": "world:leaf",
+            "predicate": "world:label",
+            "value": {"kind": "text", "text": "leaf"},
+        },
+        triple("world:validation/child", parent, "world:validation/root"),
+    ]
+    scope = [
+        {"id": f"world:{entity}", "family": "world:train", "split": "train"}
+        for entity in ("root", "left", "right", "leaf")
+    ] + [
+        {
+            "id": f"world:validation/{entity}",
+            "family": "world:validation",
+            "split": "validation",
+        }
+        for entity in ("root", "child")
+    ]
+    source = pin(
+        tmp_path,
+        "claims.jsonl",
+        claims,
+        id="claims",
+        format="records",
+        uri="urn:klab:structure",
+        license="CC0-1.0",
+        origin="procedural",
+    )
+    declaration = tmp_path / "structure.json"
+    declaration.write_bytes(
+        canonical_json(
+            {
+                "scope": pin(tmp_path, "scope.jsonl", scope),
+                "sources": [source],
+                "max_index_bytes": 4 * 1024**2,
+                "max_shard_output_bytes": 1024**2,
+            }
+        )
+    )
+    index = lab.json("corpus", "relations", "extract", str(declaration))
+    config = tmp_path / "compile.json"
+    command = ("corpus", "relations", "compile", index["key"], str(config))
+    limits = {"max_sequences": 50, "max_bytes": 1024**2}
+    structure = {"group_size": 2, "max_scratch_bytes": 1024**2}
+    hierarchy = {"target": "hierarchy", "hierarchy_predicate": parent, "max_depth": 2}
+
+    def compile_view(**options):
+        config.write_bytes(canonical_json({**limits, **options}))
+        return lab.json(*command)
+
+    def texts(arm, split):
+        return [
+            json.loads(row["text"])
+            for row in read_rows(Path(arm["path"]) / f"{split}.jsonl")
+        ]
+
+    baseline = compile_view(target="triples")
+    tree = compile_view(**structure, **hierarchy)
+    factor = compile_view(target="factorized", **structure)
+    lossy = compile_view(target="factorized", qualifiers="omit", **structure)
+    assert texts(tree, "train")[0] == [
+        "hierarchy",
+        0,
+        parent,
+        "world:root",
+        ["world:left", "world:right"],
+    ]
+    assert texts(tree, "train")[1][0:4] == ["hierarchy", 1, parent, "world:left"]
+    assert texts(factor, "train")[0] == [
+        "factorized",
+        parent,
+        "world:root",
+        ["world:left", "world:right"],
+    ]
+    for arm in (tree, factor):
+        assert arm["fidelity"] == "assertion_round_trip"
+        assert arm["scratch_bytes"] <= structure["max_scratch_bytes"]
+        for split in ("train", "validation", "test"):
+            expanded = [
+                canonical_json(assertion)
+                for sequence in texts(arm, split)
+                for assertion in (
+                    expand_structure(sequence)
+                    if sequence[0] in {"factorized", "hierarchy"}
+                    else [sequence]
+                )
+            ]
+            assert sorted(expanded) == sorted(
+                map(canonical_json, texts(baseline, split))
+            )
+
+    [omission] = read_rows(Path(lossy["path"]) / "omissions.jsonl")
+    assert omission == {
+        "split": "train",
+        "sequence": 2,
+        "reason": "compiler_qualifiers_omit",
+        "assertions": [
+            {
+                "assertion": canonical_digest({**branch, "qualifiers": [qualifier]}),
+                "qualifiers": 1,
+            }
+        ],
+    }
+    assert lossy["fidelity"] == "qualifier_projection"
+    assert lab.json(*command)["reused"] is True
+    assert (
+        lab.json("corpus", "relations", "extract", str(declaration))["files"]
+        == index["files"]
+    )
+
+    write_smoke_inputs(tmp_path)
+    tokenizer_path = tmp_path / "tokenizer/tokenizer.json"
+    tokenizer = load_tokenizer(tokenizer_path)
+    compare = ("corpus", "relations", "compare", baseline["key"], factor["key"])
+    report = lab.json(
+        *compare,
+        "--tokenizer",
+        str(tokenizer_path),
+        "--max-bytes",
+        str(1024**2),
+        "--workers",
+        "1",
+    )
+    reference, compressed = report["representations"]
+    assert compressed["tokens"] < reference["tokens"]
+    assert compressed["partitions"]["train"]["tokens"] == sum(
+        len(
+            tokenizer.encode(
+                canonical_json(sequence).decode(), add_special_tokens=False
+            ).ids
+        )
+        + 1
+        for sequence in texts(factor, "train")
+    )
+
+    with pytest.raises(ValueError, match="contains a directed cycle"):
+        compile_view(**structure, **{**hierarchy, "hierarchy_predicate": "world:cycle"})
+    assert lab.json(*command, "--plan")["candidate"] is False
