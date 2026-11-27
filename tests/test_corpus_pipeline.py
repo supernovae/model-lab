@@ -188,8 +188,18 @@ def test_normalized_duplicates_preserve_distinct_raw_origins() -> None:
 
 def test_prospective_hf_rows_keep_provenance_and_exclude_private_material(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
 ) -> None:
-    source = neutral_corpus(tmp_path).sources[0]
+    from recipe_fixtures import Lab
+
+    from klab.corpus.jsonl_records import iter_rows
+    from klab.corpus.prepared_shards import normalized_store_root, prepare_file
+    from klab.corpus.progress import BuildProgress
+    from klab.training.manifest import sha256_file
+
+    lab = Lab(tmp_path, monkeypatch, capsys)
+    source = neutral_corpus(lab.work).sources[0]
     safe = {
         "text": "A public tutorial explains operating system scheduling and reliable "
         "deployments with concrete examples across several paragraphs. " * 2,
@@ -211,34 +221,91 @@ def test_prospective_hf_rows_keep_provenance_and_exclude_private_material(
         "url": "https://stackoverflow.com/questions/123",
         "id": "warc-record-3",
     }
-    rejected: list[dict[str, object]] = []
+    empty = {**safe, "text": ""}
     raw = b"".join(
-        json.dumps(row).encode() + b"\n" for row in (safe, secret, excluded_platform)
+        json.dumps(row).encode() + b"\n"
+        for row in (safe, secret, empty, excluded_platform)
     )
+    raw_path = lab.work / "sample.jsonl"
+    raw_path.write_bytes(raw)
     name = "sample/10BT/000_00000.parquet.sample.jsonl"
-    pairs = records_for_file(
-        raw,
-        name,
-        source,
-        "b" * 64,
-        file_rights=resolve_file_rights(
+    normalized = normalized_store_root(lab.work)
+    partition = prepare_file(
+        prepared_root=normalized,
+        source=source,
+        file={"path": name, "sha256": sha256_file(raw_path), "size": len(raw)},
+        snapshot_sha="b" * 64,
+        source_path=raw_path,
+        decision=resolve_file_rights(
             source.rights, name, raw, prospective_private_research=True
         ),
-        rejected_records=rejected,
+        progress=BuildProgress(lab.work / "progress.jsonl", "privacy-fixture"),
         normalizer_options=PLAIN_OPTIONS,
         document_policy=PRIVATE_DOCS,
     )
-    assert len(pairs) == 1
-    document, evidence = pairs[0]
+    docs, spans, rejected = (
+        partition / member for member in ("docs.jsonl", "spans.jsonl", "rejected.jsonl")
+    )
+    [document] = iter_rows(docs)
+    [evidence] = iter_rows(spans)
     assert document["metadata"]["url"] == safe["url"]
     assert document["metadata"]["id"] == safe["id"]
     assert document["metadata"]["source_row_index"] == 882
     assert document["source_location"].endswith("#row=1")
     assert evidence["raw_sha256"] != document["content_sha256"]
-    assert [row["reason"] for row in rejected] == [
+    assert [row["reason"] for row in iter_rows(rejected)] == [
         "secret_or_private_identifier",
+        "empty_or_nontext",
         "excluded_platform_terms_or_private_paste",
     ]
+    annotate = (
+        "corpus",
+        "annotate-normalized",
+        partition.relative_to(normalized).as_posix(),
+        "--kind",
+        "privacy-exclusions",
+        "--limit",
+        "1",
+    )
+    open_file = Path.open
+    forbidden = {raw_path, docs, spans}
+
+    def check_open(path, *args, **kwargs):
+        if path in forbidden:
+            pytest.fail("privacy inspection reopened a body file")
+        return open_file(path, *args, **kwargs)
+
+    with monkeypatch.context() as reading:
+        reading.setattr(Path, "open", check_open)
+        first = lab.json(*annotate)
+        forbidden.add(rejected)
+        second = lab.json(*annotate, "--offset", str(first["next_offset"]))
+    assert first["input"]["exclusions"] == "research_privacy"
+    assert first["input"]["rejected_records"] == 3
+    assert first["findings"] == 2 and first["payload"]["bytes"] == 34
+    assert first["rows"] == [
+        {
+            "rejection_ordinal": 1,
+            "snapshot_row": 2,
+            "reason": "secret_or_private_identifier",
+        }
+    ]
+    assert second["reused"] and second["payload"] == first["payload"]
+    assert second["next_offset"] is None
+    assert second["rows"] == [
+        {
+            "rejection_ordinal": 3,
+            "snapshot_row": 4,
+            "reason": "excluded_platform_terms_or_private_paste",
+        }
+    ]
+    rejected.write_bytes(
+        rejected.read_bytes().replace(
+            b"secret_or_private_identifier", b"x" * len("secret_or_private_identifier")
+        )
+    )
+    with pytest.raises(ValueError, match="JSONL source SHA-256 mismatch"):
+        lab.run(*annotate)
 
 
 def test_scholarly_abstracts_and_full_papers_keep_distinct_kinds_and_corpus_ids(

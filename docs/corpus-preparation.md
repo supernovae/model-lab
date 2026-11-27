@@ -1223,6 +1223,41 @@ cached input pages took a median 3.34 s at about 60 MiB peak process RSS.
 The annotator read 720.37 MB for 720.07 MB of normalized input and wrote
 a 57 MB sidecar. The median warm 32-row page took 2.48 ms.
 
+#### Recorded privacy exclusions
+
+```sh
+klab --work-dir WORK corpus annotate-normalized SOURCE/KEY --kind privacy-exclusions --limit 20
+```
+
+Inspect a normalized partition's recorded `secret_or_private_identifier`
+and `excluded_platform_terms_or_private_paste` outcomes. The command
+reads the receipted `rejected.jsonl` member and counts the two reasons
+separately. The result records the partition's exclusion policy and the
+total rejection records checked. A partition prepared with
+`exclusions: none` has no research-privacy screening evidence.
+
+The result pages contain reason codes and numeric locators. They carry
+no matched strings or source text. `rejection_ordinal` is one-based in
+the original rejection inventory. `snapshot_row` is the one-based
+sampled record ordinal when normalization recorded it, or null for a
+file passage. These events precede assignment of normalized document IDs.
+Each 17-byte sidecar row stores these two locators as little-endian
+uint64 values (zero for an absent snapshot row), followed by reason
+code 1 or 2 in the order above.
+
+The cold build verifies the rejection inventory in one pass. Warm
+inspection authenticates its generations and seeks directly to a page
+of the sparse sidecar. It requires neither the source bodies nor the
+normalized documents. Coverage is limited to recorded exclusions.
+Scanning surviving documents for candidate privacy evidence is a
+separate operation.
+
+Three single-worker NVMe trials with cached input pages processed
+1 million synthetic rejection records in a median 1.71 s at about
+60 MiB peak process RSS. They read 105.14 MB for a 104.84 MB inventory
+and wrote 400,000 findings in a 6.8 MB sidecar. A warm 32-row page took
+a median 2.41 ms.
+
 #### Select TRAIN text by upstream row language
 
 Set `train_row_language` in the parameters of an `lm_text` transform
