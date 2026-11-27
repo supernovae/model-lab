@@ -452,6 +452,80 @@ outgoing links from a 500,000-link hub took 0.052 s total in the query
 kernel. The query timing excludes CLI startup and receipt checks. Link
 ordering stays opt-in while production locality and learning are measured.
 
+### Explicit-entity ordering
+
+Set `kind: entities` with a verified reference baseline that uses contiguous
+packing. The pinned JSONL sidecar has one `document_id` and one `entity_id`
+per row. Document IDs come from the finalized TRAIN family inventory. An
+entity ID is a case-sensitive `namespace:identifier`, such as
+`wikidata:Q42`. Preserve the IDs assigned by the source adapter so that
+references to the same entity agree across documents and partitions.
+
+```yaml
+sequence_order:
+  kind: entities
+  base_declaration: /work/baseline.yaml
+  base_output: /work/baseline-mixture
+  entities:
+    path: /work/entity-memberships.jsonl
+    sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    max_neighborhoods: 16
+```
+
+The index refuses a missing or held-out document before publication and
+deduplicates exact document/entity pairs. Within each stratum, entities
+with at least two distinct member documents compete for up to
+`max_neighborhoods` groups (1–32, default 16). Rank by member count and then
+entity ID. Documents with several eligible entities join their
+highest-ranked group. Documents without an assigned entity retain baseline
+order within the fallback group. Both arms use the same selected record/range
+pairs, exposure windows, supervision mask and sealed token segments.
+
+The signed receipt records the evidence digest, input rows, unique pairs,
+distinct entity IDs, coverage and transitions. The same index can serve
+different quotas, seeds and tokenizers across the same inventory, evidence
+and grouping options. Full audit independently rebuilds that index and the
+baseline selection. Use the usual mixture materialization command.
+
+```sh
+klab corpus inspect-entities ORDERED.yaml --output ORDERED_MIXTURE_DIR --entity wikidata:Q42 --limit 20
+```
+
+The query returns TRAIN document IDs in ascending order, including members
+of entities outside the packing cap. Use `--after` with `next_after` to
+continue. Each page contains up to 1,000 IDs. Warm inspection uses the
+authenticated edge or membership index with an indexed cursor lookup.
+
+The shared neighborhood producer changes the index computation identity
+for previously published link-ordered mixtures. Rematerialize those arms
+at new output paths from their original declarations and verified baselines.
+Use `verify-mixture --reseal` to refresh stale baseline proofs. The same
+release, tokenizer and token segments can serve the new output.
+
+Three synthetic NVMe trials per size used one explicit membership per
+document and eight entities. These medians exclude release verification.
+Reordering uses the finished index.
+
+| Input documents | Membership index | Build | Reorder | Entity transitions |
+| --- | --- | --- | --- | --- |
+| 2,048 | 0.32 MB | 0.022 s | 0.008 s | 886 → 7 |
+| 32,768 | 4.83 MB | 0.203 s | 0.075 s | 14,252 → 7 |
+| 65,536 | 9.61 MB | 0.409 s | 0.150 s | 28,537 → 7 |
+
+On the largest fixture the build issued 25.09 MB of logical reads for
+7.60 MB of evidence. After file-page eviction advice, the first pass over
+8,192 shuffled reference blocks took 0.568 s at baseline and 0.680 s for
+entity order. Warm passes took 0.059 s for both. Link index membership and
+schedule digests matched before and after the refactor in all nine paired
+trials. On the largest fixture the link build medians were 0.418 s before
+and 0.414 s after.
+
+A separate synthetic million-membership test with 500,001 distinct entity
+IDs built a 104 MB index in 4.46 s at 78 MB peak process RSS. The warm index
+returned 4,096 pages of 32 member IDs in 0.049 s in the query kernel. This
+timing excludes CLI startup and receipt checks. Production loader and
+learning measurements remain separate.
+
 ### Offline transfer inspection
 
 ```sh

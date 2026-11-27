@@ -102,7 +102,9 @@ def order_sequences(
     if topics is not None:
         transition_label = "topic"
     elif neighborhoods is not None:
-        transition_label = "neighborhood"
+        transition_label = (
+            "entity" if neighborhoods.kind == "entities" else "neighborhood"
+        )
     coverage = {
         "groups": len(groups),
         f"{transition_label}_transitions_before": transitions,
@@ -111,7 +113,10 @@ def order_sequences(
     if topics is not None:
         coverage.update(lexical_index=topics.receipt, topic_records=assigned)
     if neighborhoods is not None:
-        coverage.update(link_index=neighborhoods.receipt, linked_records=assigned)
+        if neighborhoods.kind == "entities":
+            coverage.update(entity_index=neighborhoods.receipt, entity_records=assigned)
+        else:
+            coverage.update(link_index=neighborhoods.receipt, linked_records=assigned)
     return (
         {
             "train_records_sha256": record_proof.sha256,

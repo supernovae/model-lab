@@ -124,7 +124,7 @@ class StratumPolicy(BaseModel):
         return self
 
 
-class LinkEvidence(BaseModel):
+class NeighborhoodEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: Path
@@ -135,13 +135,16 @@ class LinkEvidence(BaseModel):
 class SequenceOrder(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["source", "lexical", "links"]
+    kind: Literal["source", "lexical", "links", "entities"]
     base_declaration: Path
     base_output: Path
     max_topics: int | None = Field(
         default=None, strict=True, ge=1, le=32, exclude_if=lambda value: value is None
     )
-    links: LinkEvidence | None = Field(
+    links: NeighborhoodEvidence | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    entities: NeighborhoodEvidence | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
 
@@ -152,6 +155,10 @@ class SequenceOrder(BaseModel):
         if (self.kind == "links") != (self.links is not None):
             raise ValueError(
                 "links evidence is required exactly for link sequence ordering"
+            )
+        if (self.kind == "entities") != (self.entities is not None):
+            raise ValueError(
+                "entities evidence is required exactly for entity sequence ordering"
             )
         return self
 
@@ -481,20 +488,20 @@ def _sequence_order_result(
     if schedule is None:
         raise ValueError("sequence ordering requires a verified reference schedule")
     topic_scope = nullcontext()
-    link_scope = nullcontext()
+    neighborhood_scope = nullcontext()
     if order.kind == "lexical":
         from klab.corpus.lexical_topics import lexical_topics
 
         topic_scope = lexical_topics(
             spec, base, audit_directory=destination if audit_base else None
         )
-    elif order.kind == "links":
-        from klab.corpus.link_neighborhoods import link_neighborhoods
+    elif order.kind in {"links", "entities"}:
+        from klab.corpus.neighborhood_index import open_neighborhood_index
 
-        link_scope = link_neighborhoods(
+        neighborhood_scope = open_neighborhood_index(
             spec, base, audit_directory=destination if audit_base else None
         )
-    with topic_scope as topics, link_scope as neighborhoods:
+    with topic_scope as topics, neighborhood_scope as neighborhoods:
         members, coverage = order_sequences(
             order.base_output / TRAIN_RECORDS,
             base,
@@ -1306,9 +1313,9 @@ def _completed_mixture_cache(spec):
             cache.authority["mixture"]["lexical_topics.py"] = sha256_file(
                 Path(__file__).with_name("lexical_topics.py")
             )
-        elif spec.sequence_order.kind == "links":
-            cache.authority["mixture"]["link_neighborhoods.py"] = sha256_file(
-                Path(__file__).with_name("link_neighborhoods.py")
+        elif spec.sequence_order.kind in {"links", "entities"}:
+            cache.authority["mixture"]["neighborhood_index.py"] = sha256_file(
+                Path(__file__).with_name("neighborhood_index.py")
             )
     return cache
 
@@ -1500,15 +1507,22 @@ def inspect_mixture_transfer(
     return receipt, plan_transfer(schedule)
 
 
-def inspect_mixture_links(declaration, output, document, *, after=None, limit=20):
-    """Page over verified links using the signed mixture receipt as authority."""
-    from klab.corpus.link_neighborhoods import link_neighborhoods
+def inspect_mixture_neighborhood(
+    declaration, output, key, *, kind, after=None, limit=20
+):
+    """Page over verified evidence using the signed mixture receipt as authority."""
+    from klab.corpus.neighborhood_index import open_neighborhood_index
 
     with _verification_operation():
         raw = declaration.read_bytes()
         spec = MixtureDeclaration.model_validate(yaml.safe_load(raw))
-        if spec.sequence_order is None or spec.sequence_order.kind != "links":
-            raise ValueError("link inspection requires a link-ordered mixture")
+        if (
+            kind not in {"links", "entities"}
+            or spec.sequence_order is None
+            or spec.sequence_order.kind != kind
+        ):
+            raise ValueError(f"{kind} inspection requires a matching ordered mixture")
+        index_field = "link_index" if kind == "links" else "entity_index"
         output = output.resolve()
         receipt = _read_mixture_receipt(output)
         release = _verified_members(spec.release_path.resolve())
@@ -1524,15 +1538,15 @@ def inspect_mixture_links(declaration, output, document, *, after=None, limit=20
             # The index independently checks the inventory generation or hashes it.
             family_sha256=receipt["family_inventory_sha256"],
         )
-        with link_neighborhoods(spec, receipt) as index:
-            if receipt["sequence_order"]["link_index"] != index.receipt:
+        with open_neighborhood_index(spec, receipt) as index:
+            if receipt["sequence_order"][index_field] != index.receipt:
                 raise ValueError(
-                    "link index differs from the authenticated mixture receipt"
+                    "neighborhood index differs from the authenticated mixture receipt"
                 )
             return {
                 "release_id": receipt["release_id"],
-                "link_index": index.receipt,
-                **index.outgoing(document, after=after, limit=limit),
+                index_field: index.receipt,
+                **index.page(key, after=after, limit=limit),
             }
 
 

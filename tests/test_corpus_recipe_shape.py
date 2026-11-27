@@ -1295,7 +1295,8 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     for line in (mixture / "train.records.jsonl").read_bytes().splitlines():
         row = json.loads(line)
         by_stratum.setdefault(row["stratum"], {})[row["document_id"]] = None
-    linked_ids = list(max(by_stratum.values(), key=len))
+    main_stratum = max(by_stratum, key=lambda name: len(by_stratum[name]))
+    linked_ids = list(by_stratum[main_stratum])
     assert len(linked_ids) >= 4
     anchors = linked_ids[-2:]
     from_doc = linked_ids[0]
@@ -1363,10 +1364,10 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         "--limit",
         "1",
     )
-    from klab.corpus import link_neighborhoods as links_module
+    from klab.corpus import neighborhood_index as index_module
 
     with monkeypatch.context() as warm:
-        warm.setattr(links_module, "build_link_index", unexpected_features)
+        warm.setattr(index_module, "build_neighborhood_index", unexpected_features)
         warm.setattr(mixture_module, "_reference_schedule", unexpected_features)
         warm.setattr(mixture_module, "_inventory_sha256", unexpected_features)
         first = lab.json(*inspect)
@@ -1376,19 +1377,106 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     )
     assert second["next_after"] is None
 
-    link_config = yaml.safe_load(run_config.read_text())
-    link_config["dataset"].update(
-        mixture_declaration_path=str(link_declaration),
-        mixture_output_path=str(link_output),
-        train_path=linked["train_schedule_path"],
+    entity_ids = ("fixture:one", "catalog:one")
+    mentions = [
+        {"document_id": doc, "entity_id": entity_ids[i % 2]}
+        for i, doc in enumerate(linked_ids)
+    ]
+    other_document = next(
+        doc
+        for stratum, docs in by_stratum.items()
+        if stratum != main_stratum
+        for doc in docs
     )
-    run_config = tmp_path / "link-ordered-pretrain.yaml"
-    run_config.write_text(yaml.safe_dump(link_config))
-    source_prepared = Path(lab.run("data", "prepare", str(run_config)))
-    assert (source_prepared / "train_supervision.npy").read_bytes() == (
+    mentions.append({"document_id": other_document, "entity_id": entity_ids[0]})
+    entity_path = tmp_path / "entities.jsonl"
+    entity_declaration = tmp_path / "entity-order.yaml"
+    entity_output = tmp_path / "entity-order" / "mixture"
+    del ordering["sequence_order"]["links"]
+
+    def declare_entities(rows):
+        entity_path.write_bytes(b"".join(canonical_json(row) + b"\n" for row in rows))
+        ordering["sequence_order"].update(
+            kind="entities",
+            entities={
+                "path": str(entity_path),
+                "sha256": sha256_file(entity_path),
+                "max_neighborhoods": 2,
+            },
+        )
+        entity_declaration.write_text(yaml.safe_dump(ordering))
+
+    declare_entities([*mentions, {"document_id": held_out, "entity_id": entity_ids[0]}])
+    with pytest.raises(ValueError, match="outside the verified TRAIN family inventory"):
+        mixture_module.materialize_mixture(entity_declaration, entity_output)
+    assert not entity_output.exists()
+    declare_entities([*mentions, mentions[0]])
+    entity_order = lab.json(
+        "corpus",
+        "materialize-mixture",
+        str(entity_declaration),
+        "--output",
+        str(entity_output),
+    )
+    entity_index = entity_order["sequence_order"]["entity_index"]
+    assert (
+        entity_index["entities"],
+        entity_index["mentions"],
+        entity_index["input_rows"],
+    ) == (
+        2,
+        len(mentions),
+        len(mentions) + 1,
+    )
+    assert entity_index["anchors_by_stratum"] == {main_stratum: 2}
+    assert entity_index["assigned_documents"] == len(linked_ids)
+    assert selection_pairs(mixture) == selection_pairs(entity_output)
+    assert (
+        lab.json(
+            "corpus",
+            "verify-mixture",
+            str(entity_declaration),
+            "--output",
+            str(entity_output),
+            "--audit",
+        )
+        == entity_order
+    )
+    inspect = (
+        "corpus",
+        "inspect-entities",
+        str(entity_declaration),
+        "--output",
+        str(entity_output),
+        "--entity",
+        entity_ids[0],
+        "--limit",
+        "1",
+    )
+    with monkeypatch.context() as warm:
+        warm.setattr(index_module, "build_neighborhood_index", unexpected_features)
+        warm.setattr(mixture_module, "_inventory_sha256", unexpected_features)
+        warm.setattr(mixture_module, "_reference_schedule", unexpected_features)
+        first = lab.json(*inspect)
+        second = lab.json(*inspect, "--after", first["next_after"])
+    assert (
+        first["document_ids"] + second["document_ids"]
+        == sorted([*linked_ids[::2], other_document])[:2]
+    )
+
+    entity_config = yaml.safe_load(run_config.read_text())
+    entity_config["dataset"].update(
+        mixture_declaration_path=str(entity_declaration),
+        mixture_output_path=str(entity_output),
+        train_path=entity_order["train_schedule_path"],
+    )
+    run_config = tmp_path / "entity-ordered-pretrain.yaml"
+    run_config.write_text(yaml.safe_dump(entity_config))
+    paired_prepared = Path(lab.run("data", "prepare", str(run_config)))
+    assert (paired_prepared / "train_supervision.npy").read_bytes() == (
         prepared_dir / "train_supervision.npy"
     ).read_bytes()
-    ordered_manifest = json.loads((source_prepared / "manifest.json").read_text())
+    ordered_manifest = json.loads((paired_prepared / "manifest.json").read_text())
     assert ordered_manifest["train"]["sha256"] != prepared_manifest["train"]["sha256"]
 
     # A training update must actually obtain its IDs from the segment view.
@@ -1461,8 +1549,8 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     assert not (projected / "sealed").exists()
     assert not (dispatch / "assets/data/train.npy").exists()
     mixture.rename(tmp_path / "original-mixture")
-    link_output.rename(tmp_path / "original-link-order")
-    links_path.rename(tmp_path / "original-source-links.jsonl")
+    entity_output.rename(tmp_path / "original-entity-order")
+    entity_path.rename(tmp_path / "original-entities.jsonl")
     Path(prepared_manifest["train_reference"]["cache_root"]).rename(
         tmp_path / "original-token-store"
     )

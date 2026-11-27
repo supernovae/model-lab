@@ -1,4 +1,4 @@
-"""Verified directed document links and bounded one-hop TRAIN neighborhoods."""
+"""Verified directed links and entity mentions in TRAIN-scoped indexes."""
 
 from __future__ import annotations
 
@@ -25,43 +25,82 @@ from klab.workdir import resolve_work_dir
 from klab.workspace_preflight import check_storage, require_storage
 
 _DIGEST = re.compile(r"[0-9a-f]{64}")
-_EDGE_FIELDS = {"from_document_id", "to_document_id"}
-_MAX_EDGE_BYTES = 4096
+_ENTITY_ID = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}:[A-Za-z0-9][A-Za-z0-9_.:/-]{0,190}"
+)
+_MAX_RECORD_BYTES = 4096
 _MEMBERSHIP = struct.Struct("<32sB")
-_INDEX = "links.sqlite"
+
+_LINK_SCHEMA = """
+    CREATE TABLE edges(source BLOB, target BLOB,
+        PRIMARY KEY(source,target)) WITHOUT ROWID;
+    CREATE TABLE anchors(id BLOB PRIMARY KEY, stratum INTEGER, rank INTEGER) WITHOUT ROWID;
+"""
+_ENTITY_SCHEMA = """
+    CREATE TABLE mentions(entity TEXT, document BLOB,
+        PRIMARY KEY(entity,document)) WITHOUT ROWID;
+    CREATE TABLE anchors(entity TEXT, stratum INTEGER, rank INTEGER,
+        PRIMARY KEY(entity,stratum)) WITHOUT ROWID;
+"""
 
 
 def _document_id(value):
     if not isinstance(value, str) or not _DIGEST.fullmatch(value):
-        raise ValueError("link document IDs must be lowercase SHA-256 strings")
+        raise ValueError("neighborhood document IDs must be lowercase SHA-256 strings")
     return bytes.fromhex(value)
 
 
-def _edges(path, digest):
+def _entity_id(value):
+    if not isinstance(value, str) or not _ENTITY_ID.fullmatch(value):
+        raise ValueError(
+            "entity IDs must be namespaced identifiers such as wikidata:Q42"
+        )
+    return value
+
+
+def _evidence_rows(path, digest, kind):
+    links = kind == "links"
+    fields = (
+        {"from_document_id", "to_document_id"}
+        if links
+        else {"entity_id", "document_id"}
+    )
     for record in records_from_path(
-        path, max_record_bytes=_MAX_EDGE_BYTES, expected_sha256=digest
+        path, max_record_bytes=_MAX_RECORD_BYTES, expected_sha256=digest
     ):
         row = record.value
-        if not isinstance(row, dict) or row.keys() != _EDGE_FIELDS:
+        if not isinstance(row, dict) or row.keys() != fields:
             raise ValueError(
-                f"invalid link evidence at physical line {record.physical_line}"
+                f"invalid {kind} evidence at physical line {record.physical_line}"
             )
-        yield _document_id(row["from_document_id"]), _document_id(row["to_document_id"])
+        if links:
+            yield (
+                _document_id(row["from_document_id"]),
+                _document_id(row["to_document_id"]),
+            )
+        else:
+            yield _entity_id(row["entity_id"]), _document_id(row["document_id"])
 
 
-def _read_graph(db, path, digest, inventory, strata):
-    with progress_phase("corpus_link_evidence", unit="edges") as progress:
+def _read_evidence(db, path, digest, inventory, strata, kind):
+    if kind == "links":
+        insert = "INSERT OR IGNORE INTO edges VALUES (?, ?)"
+        endpoints = """
+            INSERT OR IGNORE INTO endpoints(id) SELECT source FROM edges;
+            INSERT OR IGNORE INTO endpoints(id) SELECT target FROM edges;
+        """
+    else:
+        insert = "INSERT OR IGNORE INTO mentions VALUES (?, ?)"
+        endpoints = "INSERT OR IGNORE INTO endpoints(id) SELECT document FROM mentions;"
+    with progress_phase(f"corpus_{kind}_evidence", unit="rows") as progress:
         input_rows = 0
-        for input_rows, edge in enumerate(_edges(path, digest), 1):
-            db.execute("INSERT OR IGNORE INTO edges VALUES (?, ?)", edge)
+        for input_rows, item in enumerate(_evidence_rows(path, digest, kind), 1):
+            db.execute(insert, item)
             if input_rows % 8192 == 0:
                 progress.update(completed_work=input_rows, emit=False)
         progress.update(completed_work=input_rows)
-    db.executescript("""
-        INSERT OR IGNORE INTO endpoints(id) SELECT source FROM edges;
-        INSERT OR IGNORE INTO endpoints(id) SELECT target FROM edges;
-    """)
-    with progress_phase("corpus_link_scope", unit="inventory rows") as progress:
+    db.executescript(endpoints)
+    with progress_phase(f"corpus_{kind}_scope", unit="inventory rows") as progress:
         for offset, row in enumerate(inventory, 1):
             if row["split"] == "train" and row["stratum"] in strata:
                 db.execute(
@@ -75,12 +114,12 @@ def _read_graph(db, path, digest, inventory, strata):
                 progress.update(completed_work=offset, emit=False)
     if db.execute("SELECT 1 FROM endpoints WHERE stratum IS NULL LIMIT 1").fetchone():
         raise ValueError(
-            "link endpoint falls outside the verified TRAIN family inventory"
+            "neighborhood document falls outside the verified TRAIN family inventory"
         )
     return input_rows
 
 
-def _assign_neighborhoods(db, max_neighborhoods):
+def _assign_links(db, max_neighborhoods):
     db.execute(
         """
         INSERT INTO anchors
@@ -105,6 +144,34 @@ def _assign_neighborhoods(db, max_neighborhoods):
         GROUP BY e.source;
         INSERT OR REPLACE INTO assignments SELECT id, rank FROM anchors;
     """)
+
+
+def _assign_entities(db, max_neighborhoods):
+    db.execute(
+        """
+        INSERT INTO anchors
+        WITH support AS (
+            SELECT m.entity, d.stratum, COUNT(*) AS documents FROM mentions m
+            JOIN endpoints d ON d.id=m.document GROUP BY m.entity, d.stratum
+            HAVING COUNT(*) >= 2
+        ), ranked AS (
+            SELECT entity, stratum, ROW_NUMBER() OVER (
+                PARTITION BY stratum ORDER BY documents DESC, entity
+            ) AS rank FROM support
+        ) SELECT entity, stratum, rank FROM ranked WHERE rank<=?
+    """,
+        (max_neighborhoods,),
+    )
+    db.execute("""
+        INSERT INTO assignments
+        SELECT m.document, MIN(a.rank) FROM mentions m
+        JOIN endpoints d ON d.id=m.document
+        JOIN anchors a ON a.entity=m.entity AND a.stratum=d.stratum
+        GROUP BY m.document
+    """)
+
+
+def _membership(db):
     digest = hashlib.sha256()
     members = 0
     for document, rank in db.execute("SELECT id, rank FROM assignments ORDER BY id"):
@@ -113,14 +180,17 @@ def _assign_neighborhoods(db, max_neighborhoods):
     return digest.hexdigest(), members
 
 
-def build_link_index(
-    directory, partial, path, digest, inventory, *, strata, max_neighborhoods
+def build_neighborhood_index(
+    directory, partial, path, digest, inventory, *, kind, strata, max_neighborhoods
 ):
-    """Parse edge bytes once, then join only compact facts on bounded storage."""
+    """Parse pinned evidence once, then reduce compact facts on bounded storage."""
+    if kind not in {"links", "entities"}:
+        raise ValueError("neighborhood index requires links or entities")
+    links = kind == "links"
     labels = sorted(strata)
     projected = 8 * 1024**2 + 4 * path.stat().st_size
     if symlinked(partial):
-        raise ValueError("unsafe link index staging path")
+        raise ValueError("unsafe neighborhood index staging path")
     partial.unlink(missing_ok=True)
     require_storage([check_storage(partial.parent, projected_bytes=projected)])
     try:
@@ -131,23 +201,24 @@ def build_link_index(
                 PRAGMA cache_size=-8192;
                 PRAGMA temp_store=FILE;
                 PRAGMA max_page_count={projected // 8192};
-                CREATE TABLE edges(source BLOB, target BLOB,
-                    PRIMARY KEY(source,target)) WITHOUT ROWID;
                 CREATE TABLE endpoints(id BLOB PRIMARY KEY, stratum INTEGER) WITHOUT ROWID;
-                CREATE TABLE anchors(id BLOB PRIMARY KEY, stratum INTEGER, rank INTEGER) WITHOUT ROWID;
                 CREATE TABLE assignments(id BLOB PRIMARY KEY, rank INTEGER) WITHOUT ROWID;
             """)
-            input_rows = _read_graph(
+            db.executescript(_LINK_SCHEMA if links else _ENTITY_SCHEMA)
+            input_rows = _read_evidence(
                 db,
                 path,
                 digest,
                 inventory,
                 {name: ordinal for ordinal, name in enumerate(labels)},
+                kind,
             )
             with progress_phase(
-                "corpus_link_neighborhoods", unit="documents"
+                f"corpus_{kind}_neighborhoods", unit="documents"
             ) as progress:
-                membership, members = _assign_neighborhoods(db, max_neighborhoods)
+                assign = _assign_links if links else _assign_entities
+                assign(db, max_neighborhoods)
+                membership, members = _membership(db)
                 progress.update(completed_work=members)
             anchors = {
                 labels[ordinal]: count
@@ -155,16 +226,25 @@ def build_link_index(
                     "SELECT stratum, COUNT(*) FROM anchors GROUP BY stratum"
                 )
             }
-            unique_edges = db.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+            if links:
+                evidence_counts = {
+                    "edges": db.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+                }
+            else:
+                mentions = db.execute("SELECT COUNT(*) FROM mentions").fetchone()[0]
+                entities = db.execute(
+                    "SELECT COUNT(*) FROM (SELECT DISTINCT entity FROM mentions)"
+                ).fetchone()[0]
+                evidence_counts = {"mentions": mentions, "entities": entities}
             db.commit()
-        artifact = directory / _INDEX
+        artifact = directory / f"{kind}.sqlite"
         with partial.open("rb") as stream:
             # The sidecar stage publishes only a durable, closed database.
             os.fsync(stream.fileno())
         rename_noreplace(partial, artifact)
         sync_directory(directory)
         return {
-            "edges": unique_edges,
+            **evidence_counts,
             "input_rows": input_rows,
             "anchors_by_stratum": anchors,
             "assigned_documents": members,
@@ -181,9 +261,10 @@ def build_link_index(
         partial.unlink(missing_ok=True)
 
 
-class LinkNeighborhoods:
-    def __init__(self, db, result, identity, evidence):
+class NeighborhoodIndex:
+    def __init__(self, db, result, identity, evidence, kind):
         self.db = db
+        self.kind = kind
         self.max_neighborhoods = evidence.max_neighborhoods
         self.receipt = {
             "id": identity,
@@ -198,31 +279,38 @@ class LinkNeighborhoods:
         ).fetchone()
         return row[0] if row else 0
 
-    def outgoing(self, document, *, after=None, limit=20):
+    def page(self, key, *, after=None, limit=20):
         if not 1 <= limit <= 1000:
-            raise ValueError("link inspection limit must be between 1 and 1000")
+            raise ValueError("neighborhood inspection limit must be between 1 and 1000")
+        if self.kind == "links":
+            query = "SELECT target FROM edges WHERE source=? AND target>? ORDER BY target LIMIT ?"
+            key_field, docs_field = "document_id", "outgoing_document_ids"
+            lookup = _document_id(key)
+        else:
+            query = "SELECT document FROM mentions WHERE entity=? AND document>? ORDER BY document LIMIT ?"
+            key_field, docs_field = "entity_id", "document_ids"
+            lookup = _entity_id(key)
         rows = self.db.execute(
-            "SELECT target FROM edges WHERE source=? AND target>? ORDER BY target LIMIT ?",
-            (
-                _document_id(document),
-                b"" if after is None else _document_id(after),
-                limit + 1,
-            ),
+            query,
+            (lookup, b"" if after is None else _document_id(after), limit + 1),
         ).fetchall()
         targets = [row[0].hex() for row in rows[:limit]]
         return {
-            "document_id": document,
-            "outgoing_document_ids": targets,
+            key_field: key,
+            docs_field: targets,
             "next_after": targets[-1] if len(rows) > limit else None,
         }
 
 
 @contextmanager
-def link_neighborhoods(spec, base, *, audit_directory=None):
-    evidence = spec.sequence_order.links
+def open_neighborhood_index(spec, base, *, audit_directory=None):
+    order = spec.sequence_order
+    assert order is not None
+    kind = order.kind
+    evidence = order.links if kind == "links" else order.entities
     assert evidence is not None
     if not evidence.path.is_file():
-        raise ValueError("link evidence must be an existing JSONL file")
+        raise ValueError("neighborhood evidence must be an existing JSONL file")
     with ExitStack() as stack:
         releases = [
             stack.enter_context(open_release(path))
@@ -242,8 +330,9 @@ def link_neighborhoods(spec, base, *, audit_directory=None):
         dependencies = capture([evidence.path, *(path for path, _ in inventories)])
         request = {
             "producer": implementation_digests(
-                "jsonl_records.py", "link_neighborhoods.py"
+                "jsonl_records.py", "neighborhood_index.py"
             ),
+            "kind": kind,
             "scope": [
                 [release.manifest["release_id"], digest]
                 for release, (_, digest) in zip(releases, inventories, strict=True)
@@ -254,7 +343,7 @@ def link_neighborhoods(spec, base, *, audit_directory=None):
         }
         identity = canonical_digest(request)
         work_root = resolve_work_dir()
-        root = work_root / "cache" / "link-neighborhoods"
+        root = work_root / "cache" / "neighborhood-indexes"
 
         def inventory():
             for path, digest in inventories:
@@ -262,12 +351,13 @@ def link_neighborhoods(spec, base, *, audit_directory=None):
                     yield record.value
 
         def build(directory, partial):
-            result = build_link_index(
+            result = build_neighborhood_index(
                 directory,
                 partial,
                 evidence.path,
                 evidence.sha256,
                 inventory(),
+                kind=kind,
                 strata=spec.target_quotas,
                 max_neighborhoods=evidence.max_neighborhoods,
             )
@@ -283,7 +373,7 @@ def link_neighborhoods(spec, base, *, audit_directory=None):
                     producer_scoped=True,
                 )
                 result = stages.phase(
-                    "train-links",
+                    f"train-{kind}",
                     lambda directory: build(
                         directory, stages.root / ".building.sqlite"
                     ),
@@ -300,6 +390,6 @@ def link_neighborhoods(spec, base, *, audit_directory=None):
                 )
             )
             db.execute("PRAGMA cache_size=-8192")
-        yield LinkNeighborhoods(db, result, identity, evidence)
+        yield NeighborhoodIndex(db, result, identity, evidence, kind)
         if checkpoint_stamp(path) != generation:
-            raise ValueError("link index changed during use")
+            raise ValueError("neighborhood index changed during use")
