@@ -1729,6 +1729,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         "2",
         "--output",
         str(tmp_path / "two-passes.yaml"),
+        "--json",
     )
     assert budget["max_tokens"] == 2 * sum(quotas.values())
     ordered_config = yaml.safe_load(run_config.read_text())
@@ -1771,6 +1772,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         str(scoring_run),
         "--config",
         str(policy_path),
+        "--json",
     )
     assert compared["comparison"]["comparable"]
     assert compared["comparison"]["bits_per_byte_delta"] is not None
