@@ -86,7 +86,8 @@ Probes run cheapest first: by tier, then declared cost.
 | Fact recall (from weights) | standard · 1 | closed-book: ranks the trained value of one of the run's own withheld-facts *training* facts (manifest of its `dataset.synthetic_seed`) among the values of the same relation, with no context; also reports never-trained control facts | −0.05 / −0.15 | no | the facts are not stored in the weights (runs trained on `withheld_facts` only; inapplicable elsewhere) |
 | Fact recall (reworded) | standard · 2 | ranks the stated answer among candidates from the same relation (mean token log-prob), asked in different words than the fact was stated; fractional tie credit | −0.05 / −0.15 | no | context handling or memory wiring |
 | Needle in context | standard · 3 | retrieve a code word stated at the start of a filler context of exactly 96/192/384 characters (text-level: the same strings for every tokenizer, references included; a context beyond the model's window scores chance); fractional tie credit | −0.05 / −0.15 | no | attention span, positions or sequence-length changes |
-| Needle in long context | full · 4 | the needle items at 16,384/32,768/65,536/131,072 characters, about 4k/8k/16k/32k tokens for a 32k-vocabulary BPE (see [long-context needle](#long-context-needle)); fractional tie credit | −0.05 / −0.15 | no | RoPE scaling or base, the extension stage's row length or its long-document data |
+| Needle in long context | full · 4 | recall a code word stated once in 8,192–98,304 characters of filler (about 2.5k–30k tokens for a 32k-vocabulary BPE) at five depths; cells beyond the model's window are not scored (see [long-context needle](#long-context-needle)); fractional tie credit | −0.05 / −0.15 | no | retrieval across thousands of tokens: RoPE scaling or base, the extension stage's row length and long-document data |
+| Key-value recall in long context | full · 4 | the same lengths and depths, with a context made entirely of numbered boxes holding the candidate words; the question names one box (Liu et al. 2024; HELMET recall); fractional tie credit | −0.05 / −0.15 | no | lookup among similar entries: the extension method and the share of long documents in its data |
 | Standard tasks (lm-eval) | full · 4 | mean `acc` over lambada_openai, hellaswag, arc_easy, piqa at `limit=50` | −0.02 / −0.05 | no | treat small moves as noise at tiny scale |
 
 **Credit.** Recall and needle rank candidates by mean token log-prob of
@@ -150,28 +151,49 @@ records each task, the chance level and this caveat in the result.
 
 ### Long-context needle
 
-`long_needle` asks the needle probe's items (same code words, filler and
-question) at 16,384, 32,768, 65,536 and 131,072 characters, so it can tell
-context-extension methods apart where the 96–384 character needle cannot. With
-a 32k-vocabulary BPE these are about 4k, 8k, 16k and 32k tokens: the first is
-a common pretraining window and serves as the in-distribution control, and each
-further length doubles the distance to the code word. The code word always
-opens the context, so every length measures retrieval across the whole
-context. As with the needle probe, a context longer than the model's window
-pushes the code word out of view and scores as chance; `details.by_length`
-records each length's characters, this model's token count and both arms'
-accuracy.
+`long_needle` and `kv_recall` measure retrieval over a surface of context
+length by needle depth, so they can tell context-extension methods apart where
+the 96–384 character needle cannot. A single score at one depth tests one path
+through that surface; these report every cell.
 
-Cost: each length scores 6 held-out items × 6 candidates and 4 dev items × 4
-candidates, so 52 forwards per length and 208 per arm, each over the item's
-last `max_seq_len` tokens. Candidates are scored one forward each, without a
-shared prefix cache, because the ranking protocol scores every candidate through
-the one token-scoring path that references also use. Only the continuation's
-rows of the log-softmax are copied to the host. On a 32k-window model the
-131,072-character length dominates, at 52 forwards of about 32k tokens per
-arm. On the CPU smoke model (64-token window) the probe takes about 7 s per
-arm, mostly tokenizing the long contexts. To compare extension arms with it,
-see [comparing context extensions](evaluation.md#comparing-context-extensions).
+- **Lengths:** 8,192, 16,384, 32,768, 49,152, 65,536 and 98,304 characters.
+  With a 32k-vocabulary BPE these are about 2.5k, 5k, 10k, 15k, 20k and 30k
+  tokens, so a 16k window has four lengths in view and a 32k window all six.
+  Lengths are in characters, so every tokenizer is asked the same strings.
+- **Depths:** the statement that answers the question sits 0, 25, 50, 75 or
+  100% of the way through the context, at a sentence boundary. Depth 0 opens
+  the context; depth 100 is just before the question and is the control that
+  shows the model can answer at that length at all.
+- **Items:** 12 held-out items per cell (each of the six code words twice) and
+  4 dev items. Because every cell asks each answer equally often, a model that
+  answers without reading the context scores exactly chance in every cell,
+  and `constant_pick` flags it.
+- **Out of window:** a cell whose items do not fit the model's `max_seq_len`
+  is not scored. It is listed in `details.out_of_window` (with
+  `at_least_tokens`, a lower bound: an item is shown out of view from its
+  opening characters, without tokenizing all of it) and enters no average. Two arms with different windows are compared on the cells both
+  hold. A model that holds no cell reports the probe as `skipped`.
+
+`long_needle` hides one `Code: WORD.` sentence in filler text. `kv_recall` is
+the harder haystack, following the key-value retrieval task of Liu et al. 2024
+("Lost in the Middle") that HELMET uses for recall: the whole context is lines
+like `The code for box 4218 is moon.`, each box holding one of the six code
+words, and the question names one box. Every candidate answer appears hundreds
+of times, so only the key identifies it. A model can pass `long_needle` by
+noticing the one unusual sentence; it cannot pass `kv_recall` that way.
+
+`details.by_cell` lists each scored cell: `chars`, `depth`, this model's
+`tokens`, `n`, both arms' accuracy and `constant_pick`. `details.worst_cell`
+names the weakest one, and `details.by_length` keeps the per-length average.
+The probe's value is the mean over scored items. Read the cells before the
+value: an extension that fails only past 10k tokens moves the average little.
+
+Cost: one forward per item where every candidate is a single token after the
+same context, which the last position of one forward answers exactly;
+otherwise one forward per candidate. A 16k-window model scores 20 cells: 320
+forwards per probe per arm, 640 for both. Scoring runs at the run's precision
+(see the [result schema](#result-schema-klab-probe-v1)). To compare extension arms, see
+[comparing context extensions](evaluation.md#comparing-context-extensions).
 
 The lm-eval adapter scores through the same token-scoring path as the probes
 (`klab.probes.scoring`). It follows the harness boundary rules (trailing

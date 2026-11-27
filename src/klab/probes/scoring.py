@@ -180,6 +180,41 @@ def ranking_scores(
     return out
 
 
+def shared_context_scores(
+    loaded: Any, items: Sequence[Mapping[str, Any]]
+) -> list[dict[str, float]]:
+    """:func:`ranking_scores` for long contexts: one forward per item where it can.
+
+    When every candidate is a single token after the same context, the last
+    position of one forward holds every candidate's score, the same number as
+    scoring each alone. Any other item is scored candidate by candidate.
+    """
+    limit = loaded.config.model.max_seq_len
+    out = []
+    for item in items:
+        candidates = list(item["candidates"])
+        prefix = item["prefix"]
+        if not prefix or prefix != prefix.rstrip():
+            out.extend(ranking_scores(loaded, [item]))
+            continue
+        # The same split as split_pair, with the long context encoded once.
+        context = item.get("context_ids") or encode(loaded, prefix)
+        rests = [encode(loaded, f"{prefix} {c}")[len(context) :] for c in candidates]
+        if all(len(rest) == 1 for rest in rests):
+            row = log_probs(loaded, context[-limit:], last=1)[0]
+            scores = {
+                c: float(row[rest[0]])
+                for c, rest in zip(candidates, rests, strict=True)
+            }
+        else:
+            scores = {}
+            for candidate, rest in zip(candidates, rests, strict=True):
+                values, _ = score_tokens(loaded, [*context, *rest], len(context))
+                scores[candidate] = float(values.sum()) / max(len(rest), 1)
+        out.append(scores)
+    return out
+
+
 def top_candidate(scores: Mapping[str, float], rtol: float = 1e-9) -> str:
     """The model's pick, or ``"tie: a / b"`` when several share the top score.
 

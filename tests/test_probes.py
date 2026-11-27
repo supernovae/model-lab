@@ -57,6 +57,9 @@ PINNED_SUITE = {
     5: "b7f7b01dc04b9531f5680b398afbf4ffb0e7333e267fe79540e73eda84c20ec9",
     # v6: long_needle in the full tier (the needle items at 16k-131k characters).
     6: "6b09c6ab9c21c10d2ae0eb3984c52ffdf6d73931c5f3d7f57129d7f7d5778f2f",
+    # v7: long_needle becomes a length-by-depth surface that leaves out-of-window
+    # cells unscored; kv_recall added on the same grid.
+    7: "48aca9e139e44f498fce14ccba90636fc927c5576de61162eeac16d6770c0adf",
 }
 
 RESULT_KEYS = {
@@ -1177,7 +1180,55 @@ def test_probe_cli_without_baseline_reports_absolute_values(
     assert "--vs BASELINE" in text
 
 
-def test_full_tier_scores_long_needle_by_length(
+@pytest.mark.parametrize("probe", ["long_needle", "kv_recall"])
+def test_surface_scores_only_cells_inside_the_window(
+    probe: str,
+    tried: tuple[Path, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cell longer than the window is left out, and an answer that ignores the
+    context scores exactly chance in every cell that is scored."""
+    import dataclasses
+
+    from klab.evaluation.inference import load_run
+
+    root, record = tried
+    loaded = load_run(
+        record["arms"]["candidate"]["run_id"], root / "work/lab/runs", backend="cpu"
+    )
+    window = loaded.config.model.max_seq_len
+    spec = BY_ID[probe]
+    spec = dataclasses.replace(
+        spec, params={**spec.params, "char_lengths": [64, 4096], "depths": [0.0, 1.0]}
+    )
+    favourite = "kite"
+    monkeypatch.setattr(
+        scoring,
+        "shared_context_scores",
+        lambda _loaded, items: [
+            {c: float(c == favourite) for c in item["candidates"]} for item in items
+        ],
+    )
+    measured = runner._measure_surface(spec, loaded)
+    assert set(measured["chars"]) == {64} and max(measured["tokens"]) <= window
+    assert [(c["chars"], c["depth"]) for c in measured["out_of_window"]] == [
+        (4096, 0.0),
+        (4096, 1.0),
+    ]
+    assert all(c["at_least_tokens"] > window for c in measured["out_of_window"])
+    row = runner._judge(spec, measured, None, {"validation": True}, {})
+    cells = row["details"]["by_cell"]
+    assert [(c["chars"], c["depth"], c["n"]) for c in cells] == [
+        (64, 0.0, 12),
+        (64, 1.0, 12),
+    ]
+    assert all(c["accuracy"] == pytest.approx(1 / 6) for c in cells)
+    assert all(c["constant_pick"] for c in cells)
+    assert row["value"] == pytest.approx(1 / 6)
+    assert list(row["details"]["by_length"]) == ["64"]
+
+
+def test_full_tier_skips_a_surface_no_cell_of_which_fits(
     tried: tuple[Path, dict[str, Any]],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1193,15 +1244,14 @@ def test_full_tier_scores_long_needle_by_length(
         "full",
         "--json",
     )
-    row = next(r for r in json.loads(out)["probes"] if r["id"] == "long_needle")
-    lengths = BY_ID["long_needle"].params["char_lengths"]
-    by_length = row["details"]["by_length"]
-    assert sorted(v["chars"] for v in by_length.values()) == lengths
-    # Every length is far beyond the 64-token smoke window, yet each item is
-    # scored (code word out of view), never dropped or turned into an error.
-    assert all(v["tokens"] > 64 for v in by_length.values())
-    assert all(v["accuracy"] is not None for v in by_length.values())
-    assert row["status"] not in MISSING_STATUSES and row["details"]["n"] == 24
+    result = json.loads(out)
+    rows = {r["id"]: r for r in result["probes"]}
+    # The smoke window is 64 tokens; the shortest cell is thousands. Out of
+    # window is inapplicable, never chance and never missing evidence.
+    for probe in ("long_needle", "kv_recall"):
+        assert rows[probe]["status"] == "skipped" and rows[probe]["value"] is None
+        assert "no cell fits" in rows[probe]["note"]
+        assert probe not in [m["id"] for m in result["verdict"]["missing"]]
 
 
 def test_standalone_probe_scores_validation_once_per_arm(
