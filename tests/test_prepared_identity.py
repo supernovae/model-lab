@@ -138,7 +138,12 @@ def test_unknown_data_implementation_is_fail_closed():
     )
     assert (
         packing.preparation_source_identity(
-            {**inventory, "data/snapshot_writer.py": "c"}
+            {
+                **inventory,
+                "data/snapshot_writer.py": "c",
+                "data/coverage.py": "d",
+                "data/loader_benchmark.py": "e",
+            }
         )
         == baseline
     )

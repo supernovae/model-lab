@@ -253,6 +253,11 @@ klab data budget --prepared-root "$PREPARED" --config run.yaml \
   default) refuses when the source was not fully covered. Review the schedule
   it implies before training.
 
+For a Corpus token mixture, coverage checks the configuration against the
+verified mixture and the prepared cache's receipt. Use `--no-require-full`
+to derive whole passes over that selected mixture. The full-source
+certification applies to an exhausted dataset snapshot.
+
 For large corpora, the [token store](token-store.md) encodes each document once
 and builds prepared arrays by copying.
 
@@ -263,7 +268,8 @@ its inputs, the complete tokenizer, the packing settings and the version of
 Lab's preparation code. Model shape, optimizer, batch sizes, worker counts and
 file locations are not part of it, so models of different sizes share prepared
 data. Changing any input, the tokenizer or Lab's preparation code produces a new
-directory.
+directory. Coverage and loader benchmark edits are outside the preparation
+fingerprint.
 
 To copy prepared data to another disk, copy the whole directory, manifest
 included, and point the config's `cache_dir` at the new location. Lab verifies

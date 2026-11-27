@@ -1579,6 +1579,7 @@ def _try(args: argparse.Namespace) -> None:
             fresh_baseline=args.fresh_baseline,
             repeat_baseline=args.repeat_baseline,
             continuation=args.continuation,
+            preflight_waiver=args.preflight_waiver,
             probe_tier=None if args.probe_tier == "none" else args.probe_tier,
             request={
                 **args.try_config_loaded.model_dump(mode="json"),

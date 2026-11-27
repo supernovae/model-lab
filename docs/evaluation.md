@@ -76,7 +76,8 @@ normalizer, so decoding gives back the source text exactly, and two runs with
 different tokenizers that report the same `text_sha256` scored the same text.
 Each document is scored on its own after one `<eos>`, every token once, longer
 documents in windows of the model's `max_seq_len`; the end of the document is
-not a target. Chat and preference data, whose targets are masked, are refused.
+not a target. Corpus mixtures can use this score when all validation tokens
+are supervised. Masked chat and preference validation is refused.
 Prepare enough validation documents for every tokenizer you compare: a token
 cap that cuts the split at a different document changes the digest.
 

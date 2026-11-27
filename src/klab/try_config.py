@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
-from pydantic import Field, ValidationError, field_validator
+from pydantic import Field, StringConstraints, ValidationError, field_validator
 
 from klab.config.models import RunSeed, StrictModel
 
@@ -29,6 +29,9 @@ class TryConfig(StrictModel):
     fresh_baseline: bool = Field(default=False, strict=True)
     repeat_baseline: bool = Field(default=False, strict=True)
     continuation: TryContinuation | None = None
+    preflight_waiver: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] | None
+    ) = Field(default=None, exclude_if=lambda value: value is None)
     lab_dir: Path | None = None
     runtime_profile: Path | None = None
     resource_envelope: Path | None = None
@@ -117,6 +120,7 @@ def prepare_try_config(args: argparse.Namespace) -> None:
         "fresh_baseline",
         "repeat_baseline",
         "continuation",
+        "preflight_waiver",
         "lab_dir",
         "runtime_profile",
         "resource_envelope",

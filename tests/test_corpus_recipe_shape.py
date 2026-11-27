@@ -1452,6 +1452,30 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     assert set(tokens("validation")) == {SOURCE_STRATA[name] for name in HELDOUT}
     assert all(tokens("validation").values())
 
+    # A full unique-token budget includes one EOS for every training row.
+    train_domains = views["train"]["dimensions"]["source_domain"]
+    whole_pass = yaml.safe_load(template_path.read_text())
+    whole_pass["target_quotas"] = {
+        stratum: train_domains[stratum]["actual_tokens"]
+        + train_domains[stratum]["records"]
+        for stratum in STRATA
+    }
+    whole_pass["max_exposures"] = 1
+    whole_pass_path = tmp_path / "whole-pass.template.yaml"
+    whole_pass_path.write_text(yaml.safe_dump(whole_pass))
+    assert (
+        lab.json(
+            "corpus",
+            "describe",
+            str(release),
+            "--tokenizer",
+            str(tokenizer_json),
+            "--mixture",
+            str(whole_pass_path),
+        )
+        == described
+    )
+
     # Materialize the mixture from the checked-in template and verify it.
     template = (recipe.corpus / "mixture.template.yaml").read_text()
     for key, value in {
@@ -1690,6 +1714,73 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
         )
         == ordered
     )
+
+    from klab.data.coverage import coverage as read_coverage
+    from klab.lab_mode import read_record
+
+    budget = lab.json(
+        "data",
+        "budget",
+        "--prepared-root",
+        str(prepared_dir),
+        "--config",
+        str(run_config),
+        "--no-require-full",
+        "--passes",
+        "2",
+        "--output",
+        str(tmp_path / "two-passes.yaml"),
+        "--json",
+    )
+    assert budget["max_tokens"] == 2 * sum(quotas.values())
+    ordered_config = yaml.safe_load(run_config.read_text())
+    ordered_config["dataset"].update(
+        train_path=ordered["train_schedule_path"],
+        mixture_declaration_path=str(order_declaration),
+        mixture_output_path=str(order_output),
+    )
+    ordered_run = tmp_path / "ordered-run.yaml"
+    ordered_run.write_text(yaml.safe_dump(ordered_config))
+    with pytest.raises(ValueError, match="configured token mixture differs"):
+        read_coverage(prepared_dir, ordered_run)
+
+    policy_path = tmp_path / "mixture-try.yaml"
+    reason = "Bounded verified CPU recipe fixture"
+    policy_path.write_text(
+        yaml.safe_dump({"preflight_waiver": reason, "probe_tier": "none"})
+    )
+    delta_path = tmp_path / "mixture-order-delta.yaml"
+    delta_path.write_text(
+        yaml.safe_dump(
+            {
+                "kind": "delta",
+                "set": {
+                    "dataset.train_path": ordered["train_schedule_path"],
+                    "dataset.mixture_declaration_path": str(order_declaration),
+                    "dataset.mixture_output_path": str(order_output),
+                },
+            }
+        )
+    )
+    scoring_run = tmp_path / "mixture-text-eval.yaml"
+    scoring_config = yaml.safe_load(run_config.read_text())
+    scoring_config["evaluation"]["text_documents"] = 1
+    scoring_run.write_text(yaml.safe_dump(scoring_config))
+    lab.run(
+        "try",
+        str(delta_path),
+        "--vs",
+        str(scoring_run),
+        "--config",
+        str(policy_path),
+    )
+    (comparison_path,) = (lab.work / "lab" / "tries").glob("*/try.json")
+    compared = read_record(comparison_path)
+    assert compared["comparison"]["comparable"]
+    assert compared["comparison"]["bits_per_byte_delta"] is not None
+    for arm in compared["arms"].values():
+        run_manifest = json.loads((Path(arm["run_dir"]) / "manifest.json").read_text())
+        assert run_manifest["preflight"]["waived"] == reason
 
     from klab.corpus import lexical_topics as topics_module
 

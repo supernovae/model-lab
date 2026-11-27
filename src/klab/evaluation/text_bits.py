@@ -34,7 +34,13 @@ def heldout_documents(run: Path, tokenizer: Any, count: int) -> list[str]:
         raise ValueError("text_documents must be positive")
     root = Path(run) / "data"
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    if supervision_requires_mask(manifest):
+    tokens = np.load(root / "validation.npy", mmap_mode="r", allow_pickle=False)
+    # A Corpus mixture stores masks for both splits, even when only the
+    # training schedule inserts masked positions.
+    if supervision_requires_mask(manifest) and (
+        manifest["source"] != "local_token_mixture"
+        or not _all_validation_targets(root, tokens)
+    ):
         raise ValueError(
             "bits per byte needs plain text validation; this run's validation "
             "targets are masked (chat or preference data)"
@@ -42,7 +48,6 @@ def heldout_documents(run: Path, tokenizer: Any, count: int) -> list[str]:
     eos = tokenizer.token_to_id("<eos>")
     if eos is None:
         raise ValueError("tokenizer has no <eos> special token")
-    tokens = np.load(root / "validation.npy", mmap_mode="r", allow_pickle=False)
     ends = np.flatnonzero(np.asarray(tokens) == eos)
     if len(ends) < count:
         raise ValueError(
@@ -60,6 +65,17 @@ def heldout_documents(run: Path, tokenizer: Any, count: int) -> list[str]:
         )
         start = int(end) + 1
     return documents
+
+
+def _all_validation_targets(root: Path, tokens: np.ndarray) -> bool:
+    supervision = np.load(
+        root / "validation_supervision.npy", mmap_mode="r", allow_pickle=False
+    )
+    return (
+        supervision.dtype == np.dtype(bool)
+        and supervision.shape == tokens.shape
+        and bool(np.all(supervision))
+    )
 
 
 def text_digest(documents: list[str]) -> str:
