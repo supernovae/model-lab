@@ -282,6 +282,10 @@ explicit execution again for a requested replay of external code.
   builds check the decision in source replay. Completed preparation uses
   authenticated renders and binds the resulting views to signed build
   evidence. Language detection remains separate work.
+  The source-quality annotator preserves typed upstream scores, token
+  counts and family-qualification evidence. It reports missing and
+  invalid fields separately and leaves calibration and selection to
+  explicit downstream policies.
 - **Coherent packing first.** Compare seeded random, source-coherent,
   lexical-topic, explicit-entity and link-neighborhood schedules using
   identical natural-language bytes and exposure budgets. Assign semantic

@@ -189,14 +189,17 @@ def _run(args: argparse.Namespace) -> None:
     command = args.corpus_command
     if command == "annotate-normalized":
         from klab.corpus.source_language import annotate_source_language
+        from klab.corpus.source_quality import annotate_source_quality
         from klab.corpus.text_statistics import annotate_normalized
 
-        annotate = (
-            annotate_source_language
-            if args.kind == "source-language"
-            else annotate_normalized
+        annotators = {
+            "text-statistics": annotate_normalized,
+            "source-language": annotate_source_language,
+            "source-quality": annotate_source_quality,
+        }
+        result = annotators[args.kind](
+            root, args.partition, offset=args.offset, limit=args.limit
         )
-        result = annotate(root, args.partition, offset=args.offset, limit=args.limit)
         print(json.dumps(result, sort_keys=True))
         return
     if command in {"artifacts", "release-prune"}:
@@ -959,7 +962,7 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     command.add_argument("partition", metavar="SOURCE/KEY")
     command.add_argument(
         "--kind",
-        choices=("text-statistics", "source-language"),
+        choices=("text-statistics", "source-language", "source-quality"),
         default="text-statistics",
     )
     command.add_argument("--offset", type=int, default=0)

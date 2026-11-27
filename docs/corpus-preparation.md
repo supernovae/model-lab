@@ -1185,6 +1185,44 @@ median 3.06 s at about 60 MiB peak process RSS. It read 672.90 MB for a
 the shared path and 3.23 s on the previous path. Both produced the same
 payload digest.
 
+#### Source-quality sidecars
+
+```sh
+klab --work-dir WORK corpus annotate-normalized SOURCE/KEY --kind source-quality --limit 20
+```
+
+The `source-quality` sidecar records `score`, `int_score`, and
+`token_count` from the upstream metadata retained by normalization.
+Scores keep their source-specific scales, and token counts describe the
+upstream record. The annotator performs no scoring or tokenization.
+It also records whether normalization saved a family hint, flagged its
+qualification evidence as unresolved, or recorded neither. A family hint
+is evidence of attribution. Admission and training rights are decided
+by the existing release policies.
+
+Each page shows null for missing or invalid fields and lists the
+invalid ones in `invalid_fields`. Summaries count both states
+separately. `score` accepts finite binary64 values and integers within
+the exact binary64 range. `int_score` and `token_count` require integers
+in the signed and unsigned 64-bit ranges respectively. A negative
+upstream token count is invalid evidence.
+
+The 57-byte rows are in partition order. Each holds the 32-byte document
+ID, little-endian binary64 score, signed int64 score, unsigned uint64
+token count, and one status byte. From the low bits upward, four
+two-bit fields record the states for `score`, `int_score`, `token_count`
+and qualification evidence. For numeric fields, 0 means missing, 1
+means reported, and 2 means invalid. For qualification evidence, those
+values mean not recorded, family hint recorded, and unresolved.
+Unavailable numeric slots are zero on disk. The shared annotation
+receipt binds the partition and payload, and warm pages seek directly
+to the requested rows.
+
+Three single-worker NVMe runs over 1 million synthetic documents with
+cached input pages took a median 3.34 s at about 60 MiB peak process RSS.
+The annotator read 720.37 MB for 720.07 MB of normalized input and wrote
+a 57 MB sidecar. The median warm 32-row page took 2.48 ms.
+
 #### Select TRAIN text by upstream row language
 
 Set `train_row_language` in the parameters of an `lm_text` transform
