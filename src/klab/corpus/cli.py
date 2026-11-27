@@ -206,6 +206,20 @@ def _run(args: argparse.Namespace) -> None:
         )
         print(json.dumps(result, sort_keys=True))
         return
+    if command == "duplicate-groups":
+        from klab.corpus.duplicate_review import review_groups
+
+        result = review_groups(
+            root,
+            load_project(args.project),
+            args.index_key,
+            method=args.method,
+            group=args.group,
+            after=args.after,
+            limit=args.limit,
+        )
+        print(json.dumps(result, sort_keys=True))
+        return
     if command in {"artifacts", "release-prune"}:
         from klab.corpus.artifact_inventory import (
             normalized_inventory,
@@ -979,6 +993,25 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     command.add_argument("--offset", type=int, default=0)
     command.add_argument(
         "--limit", type=int, default=0, help="Rows to inspect, or zero for a summary"
+    )
+    command.set_defaults(handler=_handle)
+    command = sub.add_parser(
+        "duplicate-groups", help="Page verified native duplicate groups and decisions"
+    )
+    command.add_argument("project", type=Path, metavar="PROJECT")
+    command.add_argument("index_key", metavar="INDEX_KEY")
+    command.add_argument(
+        "--method", choices=("raw", "normalized"), default="normalized"
+    )
+    command.add_argument(
+        "--group", metavar="SHA256", help="Page the members of a single group"
+    )
+    command.add_argument(
+        "--after", help="Continue from the prior page's next_after value"
+    )
+    command.add_argument("--limit", type=int, default=100)
+    command.add_argument(
+        "--cold", action="store_true", help="Verify the retained stage bytes"
     )
     command.set_defaults(handler=_handle)
     command = sub.add_parser(
