@@ -253,6 +253,11 @@ klab data budget --prepared-root "$PREPARED" --config run.yaml \
   default) refuses when the source was not fully covered. Review the schedule
   it implies before training.
 
+For a Corpus token mixture, coverage checks the configuration against the
+verified mixture and the prepared cache's receipt. Use `--no-require-full`
+to derive whole passes over that selected mixture. The full-source
+certification applies to an exhausted dataset snapshot.
+
 For large corpora, the [token store](token-store.md) encodes each document once
 and builds prepared arrays by copying.
 

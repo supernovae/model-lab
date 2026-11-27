@@ -19,17 +19,9 @@ import yaml
 from klab.canonical import canonical_digest
 from klab.config.loading import load_config
 from klab.config.models import RunConfig
-from klab.training.manifest import source_identity
+from klab.training.manifest import sha256_file, source_identity
 
 _CHUNK_TOKENS = 1 << 20
-_LOCATION_KEYS = {
-    "cache_dir",
-    "train_path",
-    "validation_path",
-    "source_manifest_path",
-    "corpus_release_path",
-    "corpus_export_path",
-}
 
 
 def _bind_config(manifest: dict, config: RunConfig) -> dict | None:
@@ -39,6 +31,7 @@ def _bind_config(manifest: dict, config: RunConfig) -> dict | None:
         _local_chat_identity,
         canonical_tokenizer_sha256,
         packing_identity,
+        prepared_dataset_identity,
         prepared_source_matches,
     )
     from klab.data.tokenizer import load_tokenizer
@@ -49,11 +42,7 @@ def _bind_config(manifest: dict, config: RunConfig) -> dict | None:
     if tokenizer.get_vocab_size() != config.model.vocab_size:
         raise ValueError("tokenizer vocabulary differs from config")
     expected = {
-        "dataset": {
-            k: v
-            for k, v in config.dataset.model_dump(mode="json").items()
-            if k not in _LOCATION_KEYS
-        },
+        "dataset": prepared_dataset_identity(config.dataset),
         "packing": packing_identity(config),
         "tokenizer_sha256": canonical_tokenizer_sha256(tokenizer),
         "local_chat_source": _local_chat_identity(config.dataset),
@@ -83,6 +72,20 @@ def _bind_config(manifest: dict, config: RunConfig) -> dict | None:
         from klab.corpus.export import verify_release_export
 
         expected["corpus_export"] = verify_release_export(config.dataset)
+    if config.dataset.source == "local_token_mixture":
+        from klab.corpus.mixture import verified_mixture_dataset
+        from klab.corpus.release_verify import verification_settings
+
+        with verification_settings(verification_mode="verified_reuse"):
+            mixture, _ = verified_mixture_dataset(
+                config.dataset, config.tokenizer.path, config.model.vocab_size
+            )
+        if mixture != manifest.get("token_mixture"):
+            raise ValueError("configured token mixture differs from prepared data")
+        assert config.dataset.mixture_output_path is not None
+        expected["token_mixture_receipt_sha256"] = sha256_file(
+            config.dataset.mixture_output_path / "receipt.json"
+        )
     if any(identity.get(k) != value for k, value in expected.items()):
         raise ValueError(
             "prepared dataset/tokenizer/packing/source binding differs from config"

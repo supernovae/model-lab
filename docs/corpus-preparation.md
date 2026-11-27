@@ -4802,10 +4802,12 @@ klab corpus verify-mixture DECLARATION --output OUTPUT [--audit | --reseal]
 Run `klab corpus describe RELEASE --tokenizer TOKENIZER --mixture TEMPLATE`
 first: it needs only the release and the fitted tokenizer, not the family
 inventory, and is the gate before near-duplicates, the mixture export and the
-family inventory. It counts tokens before cross-document deduplication, so it
-can pass what `materialize-mixture` still refuses by a little, never the
-reverse by much. A quota failure there means the release must be rebuilt with
-corrected `mixture` weights and `policy.mixture`, so check it as soon as a
+family inventory. The quota check includes the EOS target per training record.
+The reported view token totals count the rendered text. The quota check uses
+the counts before cross-document deduplication, so `materialize-mixture` can
+still refuse a quota that this check passes. A quota failure there means the
+release must be rebuilt with corrected `mixture` weights and `policy.mixture`,
+so check it as soon as a
 tokenizer exists.
 
 A mixture declaration sets per-stratum token quotas, `max_exposures` (1 for

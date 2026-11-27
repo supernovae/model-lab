@@ -3928,7 +3928,11 @@ def _describe_verified(
         quotas, exposures = template_requirements(mixture)
         domains = measured["views"]["lm"]["train"]["dimensions"]["source_domain"]
         require_supply(
-            {stratum: row["actual_tokens"] for stratum, row in domains.items()},
+            # The mixture writer schedules one EOS target per retained record.
+            {
+                stratum: row["actual_tokens"] + row["records"]
+                for stratum, row in domains.items()
+            },
             quotas,
             exposures,
         )
