@@ -77,6 +77,50 @@ other context's correct choice, in mean log probability per token. It is zero
 when the relative scores are unchanged. Lab computes both measures from the
 existing item scores without running the model again.
 
+### Score generated answers
+
+Use a JSON declaration when a simulator, reference dataset, or formal system
+supplies an exact answer. Each item supplies its own prompt and a unique ID.
+
+```json
+{
+  "schema_version": 1,
+  "name": "transfer-development",
+  "max_new_tokens": 8,
+  "items": [
+    {
+      "id": "remaining-1",
+      "category": "mechanism",
+      "prompt": "Tank A starts with 8 units and sends 3. How many units remain? Answer with an integer:",
+      "kind": "integer",
+      "accepted": ["5"]
+    }
+  ]
+}
+```
+
+```sh
+klab eval RUN_ID --answers answers.json
+```
+
+Lab greedily decodes each prompt using the selected checkpoint and stops at
+the first line feed or end-of-sequence token. Prompts and the full completion
+budget must fit the checkpoint context. The declaration supports up to 2,000
+items and 1–32 new tokens per item. For a completed answer line, Lab trims
+surrounding whitespace. `integer` accepts ASCII digits with an optional leading
+sign and ignores leading zeros. `yes_no` accepts either word in any case with
+an optional final period. `text` matches a whole line case-sensitively against
+the supplied aliases. A response that reaches the token cap without a stop,
+an empty response, or an invalid answer form earns zero credit.
+
+The run's evaluation artifact includes individual responses, counts of valid
+and correct answers, token and forward-position counts, and breakdowns by
+category and answer kind. It pins the declaration, checkpoint, and tokenizer.
+Lab verifies the weights and tokenizer and checks the sizes of the unused
+training and validation payloads. Use a fixed prompt and decoding budget when
+comparing checkpoints. This score measures the requested answer format on the
+declared tasks. Keep separate development and final families.
+
 ### Bits per byte
 
 Loss per token depends on the tokenizer: a larger vocabulary makes tokens

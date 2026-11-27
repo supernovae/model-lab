@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -94,6 +95,90 @@ def test_selected_checkpoint_identity_is_not_latest(trained_run, tmp_path):
     # A frozen generation selection remains independently usable.
     again = load_run("history", tmp_path, str(generations[0]))
     assert again.identity == initial.identity
+
+
+def test_generated_answers_score_only_complete_answer_lines(
+    trained_run, tmp_path, monkeypatch, capsys
+):
+    from klab.evaluation import answers
+    from klab.evaluation.generation_request import GenerationResult
+
+    cases = [
+        ("signed", "integer", "2", " +002 ", "stop"),
+        ("extra", "integer", "2", "2 or 3", "stop"),
+        ("truncated", "integer", "2", "2", "length"),
+        ("punctuated", "yes_no", "no", " No.", "stop"),
+        ("wrong", "yes_no", "no", "yes", "stop"),
+        ("label", "text", "Tank A", "Tank A", "stop"),
+    ]
+    declaration = {
+        "schema_version": 1,
+        "name": "generated-answers",
+        "max_new_tokens": 4,
+        "items": [
+            {
+                "id": name,
+                "category": "mechanism",
+                "prompt": f"{name}? Answer:",
+                "kind": kind,
+                "accepted": [key],
+            }
+            for name, kind, key, _, _ in cases
+        ],
+    }
+    panel = tmp_path / "answers.json"
+    panel.write_text(json.dumps(declaration))
+    root = trained_run.logging.root_dir
+    monkeypatch.setenv("KLAB_WORK_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["klab", "eval", "original", "--runs-dir", str(root), "--answers", str(panel)],
+    )
+    outputs = {f"{name}? Answer:": (text, finish) for name, _, _, text, finish in cases}
+
+    def generate(model, tokenizer, prompt, context, max_new_tokens, device, **options):
+        assert max_new_tokens == 4
+        assert options["strict_context"] and options["temperature"] == 0
+        assert options["stop_sequences"] == ("\n",)
+        text, finish = outputs[prompt]
+        return GenerationResult(prompt + text, [], 2, 4, finish, 5)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(answers, "generate_result", generate)
+        main()
+    result = json.loads(capsys.readouterr().out)
+    report = result["answers"]
+    assert [row["correct"] for row in report["items"]] == [
+        True,
+        False,
+        False,
+        True,
+        False,
+        True,
+    ]
+    assert report["overall"] == {
+        "items": 6,
+        "correct": 3,
+        "valid_form": 4,
+        "length_limited": 1,
+        "completion_tokens": 24,
+        "forward_input_positions": 30,
+    }
+    assert report["kinds"]["yes_no"]["valid_form"] == 2
+    assert report["kinds"]["yes_no"]["correct"] == 1
+    saved = Path(result.pop("output"))
+    assert json.loads(saved.read_text()) == result
+    pointer = json.loads((root / "original/checkpoints/latest.json").read_text())
+    assert result["identity"]["checkpoint_sha256"] == pointer["manifest_sha256"]
+    assert result["identity"]["run_data_hashed"] is False
+
+    # The real decoder must refuse to crop a prompt to fit the generation budget.
+    declaration["items"][0]["prompt"] = "answer " * 100
+    panel.write_text(json.dumps(declaration))
+    with pytest.raises(ValueError, match="answer item signed: .*exceed max_seq_len"):
+        main()
+    assert list(saved.parent.glob("answers-*.json")) == [saved]
 
 
 def _chat_cli(monkeypatch, capsys, cwd, *options):

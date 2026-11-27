@@ -1087,6 +1087,23 @@ def _eval(args: argparse.Namespace) -> None:
         return
     if args.output is not None:
         raise ValueError("--output requires --panel")
+    if args.answers is not None:
+        from klab.evaluation.answers import read_answers, score_answers
+
+        panel, digest = read_answers(args.answers)
+        loaded = load_run(
+            args.run_id,
+            Path(args.runs_dir),
+            args.checkpoint,
+            args.backend,
+            authorization=args.runtime_authorization,
+            hash_training_state=False,
+            hash_run_data=False,
+        )
+        result = score_answers(loaded, panel, digest)
+        path = write_inference_result(loaded.run, "answers", result)
+        print(json.dumps({**result, "output": str(path)}, indent=2))
+        return
     from klab.evaluation.rankings import read_ranking, score_ranking
 
     ranking = read_ranking(args.ranking) if args.ranking is not None else None
@@ -2937,6 +2954,9 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
     evaluation_kind = evaluation.add_mutually_exclusive_group()
     evaluation_kind.add_argument(
         "--panel", type=Path, help="Pinned development heldout panel JSON"
+    )
+    evaluation_kind.add_argument(
+        "--answers", type=Path, help="Score generated first-line answers from JSON"
     )
     evaluation_kind.add_argument(
         "--ranking", type=Path, help="Score declared answer choices from JSON"
