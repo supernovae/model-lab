@@ -204,9 +204,11 @@ def test_prospective_hf_rows_keep_provenance_and_exclude_private_material(
         "text": "A public tutorial explains operating system scheduling and reliable "
         "deployments with concrete examples across several paragraphs. "
         * 2
-        + "It mentions @internal.example and the unformatted number 2025550100.",
+        + "\n\nReviewers explain which changes affect this build.\n\n"
+        "It mentions @internal.example and the unformatted number 2025550100.",
         "url": "https://example.org/tutorial",
         "id": "warc-record-1",
+        "score": 0.8,
         "_klab_source": {
             "source_shard_path": "sample/10BT/000_00000.parquet",
             "source_row_index": 882,
@@ -224,11 +226,45 @@ def test_prospective_hf_rows_keep_provenance_and_exclude_private_material(
         "id": "warc-record-3",
     }
     empty = {**safe, "text": ""}
-    email = {**safe, "text": safe["text"] + " Email reader@example.test."}
-    phone = {**safe, "text": safe["text"] + " Telephone (202) 555-0100."}
+    email = {**safe, "text": safe["text"] + " Email reader@example.test.", "score": 0.2}
+    phone = {
+        **safe,
+        "text": safe["text"] + " Telephone (202) 555-0100.",
+        "score": "unknown",
+    }
+    international = {
+        "text": "The office can help with this form and you could call +44 20 7946 0958. You can find details about the form with the application instructions.",
+        "url": "https://example.org/contact",
+    }
+    prose = [
+        ("Les enfants sont dans cette maison avec leur mère depuis une heure.", "fr"),
+        (
+            "Los vecinos han salido desde esta plaza para hablar con ellos cuando llegue el tren.",
+            "es",
+        ),
+        ("Das ist der Weg für die Kinder, die sich bei dem alten Haus treffen.", "de"),
+        (
+            "Uma criança ainda não sabe como essa história dos avós também pode mudar.",
+            "pt",
+        ),
+        ("Ciao, grazie per il viaggio di domani.", "it"),
+    ]
     raw = b"".join(
         json.dumps(row).encode() + b"\n"
-        for row in (safe, secret, empty, excluded_platform, email, phone)
+        for row in (
+            safe,
+            secret,
+            empty,
+            excluded_platform,
+            email,
+            phone,
+            safe,
+            international,
+            *(
+                {"text": " ".join([text] * 3), "url": f"https://example.org/{language}"}
+                for text, language in prose
+            ),
+        )
     )
     raw_path = lab.work / "sample.jsonl"
     raw_path.write_bytes(raw)
@@ -250,7 +286,7 @@ def test_prospective_hf_rows_keep_provenance_and_exclude_private_material(
     docs, spans, rejected = (
         partition / member for member in ("docs.jsonl", "spans.jsonl", "rejected.jsonl")
     )
-    document, email_doc, phone_doc = iter_rows(docs)
+    document, email_doc, phone_doc, *other_docs = iter_rows(docs)
     evidence, *_ = iter_rows(spans)
     assert document["metadata"]["url"] == safe["url"]
     assert document["metadata"]["id"] == safe["id"]
@@ -292,9 +328,11 @@ def test_prospective_hf_rows_keep_provenance_and_exclude_private_material(
         reading.setattr(Path, "open", check_open)
         flags = lab.json(*candidates)
         forbidden.add(docs)
-        next_page = lab.json(*candidates, "--offset", str(flags["next_offset"]))
+        next_page = lab.json(
+            *candidates[:-1], "1", "--offset", str(flags["next_offset"])
+        )
     assert flags["totals"] == {"any": 2, "email_like": 1, "phone_like": 1}
-    assert flags["payload"]["bytes"] == 99
+    assert flags["payload"]["bytes"] == 33 * (3 + len(other_docs))
     assert flags["rows"] == [
         {"document_id": document["document_id"], "candidates": []},
         {"document_id": email_doc["document_id"], "candidates": ["email_like"]},
@@ -303,6 +341,77 @@ def test_prospective_hf_rows_keep_provenance_and_exclude_private_material(
     assert next_page["rows"] == [
         {"document_id": phone_doc["document_id"], "candidates": ["phone_like"]}
     ]
+
+    parent = partition.relative_to(normalized).as_posix()
+    detected = ("corpus", "annotate-normalized", parent, "--kind", "detected-language")
+    without_memo = lab.json(*detected)
+    with_memo = lab.json(*detected, "--memoize-content")
+    assert with_memo["memoized_documents"] == 1
+    assert with_memo["payload"]["sha256"] == without_memo["payload"]["sha256"]
+    labeled_docs = [document, email_doc, phone_doc, *other_docs]
+
+    def labels(kind, expected, **options):
+        return {
+            "kind": kind,
+            "partition": parent,
+            "rows": [
+                {"document_id": doc["document_id"], "expected": value}
+                for doc, value in zip(labeled_docs, expected, strict=True)
+            ],
+            **options,
+        }
+
+    label_file = tmp_path / "labels.json"
+    samples = [
+        labels("detected-language", ["en"] * 5 + [language for _, language in prose]),
+        labels(
+            "privacy-candidates",
+            [
+                [],
+                ["email_like"],
+                ["phone_like"],
+                [],
+                ["phone_like"],
+                *([] for _ in prose),
+            ],
+        ),
+        labels("template-lines", [True] * 4 + [False] * (1 + len(prose))),
+        labels(
+            "source-quality",
+            [True, True, False, True, False, *([False] * len(prose))],
+            quality_rule={"field": "score", "minimum": 0.5, "missing": "drop"},
+        ),
+    ]
+    label_file.write_text(json.dumps({"annotations": samples}))
+    audit = lab.json("corpus", "audit-evidence", str(label_file))
+    language, privacy, template, quality = [
+        item["metrics"] for item in audit["annotations"]
+    ]
+    assert language["coverage"] == 0.9 and language["accuracy_when_detected"] == 1
+    assert (
+        privacy["email_like"]["precision"] == 1
+        and privacy["phone_like"]["recall"] == 0.5
+    )
+    assert template["precision"] == template["recall"] == 1
+    assert quality["recall"] == 2 / 3 and quality["field_states"]["invalid"] == 1
+    template_args = (
+        "corpus",
+        "annotate-normalized",
+        parent,
+        "--kind",
+        "template-lines",
+    )
+    with monkeypatch.context() as reading:
+        reading.setattr(Path, "open", check_open)
+        template_page = lab.json(*template_args, "--limit", "1")
+    assert template_page["reused"] and template_page["rows"][0]["template_lines"] == 1
+    alternate = lab.json(*template_args, "--template-min-support", "5")
+    assert alternate["computation_key"] != template_page["computation_key"]
+    assert alternate["totals"]["marked_documents"] == 0
+    samples[0]["rows"][0]["document_id"] = "0" * 64
+    label_file.write_text(json.dumps({"annotations": samples}))
+    with pytest.raises(ValueError, match="labels do not match verified document IDs"):
+        lab.run("corpus", "audit-evidence", str(label_file))
 
     forbidden.remove(rejected)
     with monkeypatch.context() as reading:

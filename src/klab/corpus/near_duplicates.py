@@ -143,9 +143,62 @@ def _band_keys(shingles: np.ndarray) -> list[int]:
 
 
 _FIELDS = ("document_id", "split", "source_id", "source_location", "content_sha256")
+_PARAGRAPH_BREAK = re.compile(r"\n(?:[ \t]*\n)+")
+_PASSAGE_WORD = re.compile(r"\w+")
+_MIN_PASSAGE_WORDS = 8
+
+
+def _passage(row, start, end):
+    text = row["text"][start:end]
+    parent = row["document_id"]
+    identifier = canonical_digest([parent, start, end])
+    return {
+        "document_id": identifier,
+        "split": row["split"],
+        "source_id": row.get("source_id"),
+        "source_location": row.get("source_location"),
+        "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "text": text,
+        "passage": {
+            "document_id": parent,
+            "passage_id": identifier,
+            "start": start,
+            "end": end,
+        },
+    }
+
+
+def _passages(row, width):
+    """Stream overlapping lexical windows within paragraphs, with codepoint spans."""
+    text = row["text"]
+    start = 0
+    for boundary in itertools.chain(_PARAGRAPH_BREAK.finditer(text), (None,)):
+        end = len(text) if boundary is None else boundary.start()
+        words = []
+        pending = False
+        for word in _PASSAGE_WORD.finditer(text, start, end):
+            words.append(word.span())
+            pending = True
+            if len(words) == width:
+                yield _passage(row, words[0][0], words[-1][1])
+                del words[: width // 2]
+                pending = False
+        if pending and len(words) >= _MIN_PASSAGE_WORDS:
+            yield _passage(row, words[0][0], words[-1][1])
+        if boundary is not None:
+            start = boundary.end()
+
+
+def _evidence_fields(row):
+    fields = {field: row.get(field) for field in _FIELDS}
+    if "passage" in row:
+        fields["passage"] = row["passage"]
+    return fields
 
 
 def _order(pair: dict[str, Any]) -> tuple[str, str]:
+    if "left_passage" in pair:
+        return pair["left_passage"]["passage_id"], pair["right_passage"]["passage_id"]
     return pair["left_document_id"], pair["right_document_id"]
 
 
@@ -217,6 +270,7 @@ def _better(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
         "document_id": a["document_id"],
         "split": a["split"],
         "source_id": a["source_id"],
+        **({"passage": a["passage"]} if "passage" in a else {}),
         "pairs": a["pairs"] + b["pairs"],
         "max_jaccard": max(a["max_jaccard"], b["max_jaccard"]),
         "min_boilerplate_share": min(
@@ -224,6 +278,11 @@ def _better(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
         ),
         "closest_document_id": closest["closest_document_id"],
         "closest_content_jaccard": closest["closest_content_jaccard"],
+        **(
+            {"closest_passage": closest["closest_passage"]}
+            if "closest_passage" in closest
+            else {}
+        ),
     }
 
 
@@ -233,6 +292,7 @@ class _Tally:
     def __init__(self, max_candidates: int) -> None:
         self.max_candidates = max_candidates
         self.found: list[dict[str, Any]] = []
+        self.template_found: list[dict[str, Any]] = []
         self.candidate_count = 0
         self.identical_count = 0
         self.comparisons = 0
@@ -247,10 +307,14 @@ class _Tally:
     def keep_listed(self, limit: int | None = None) -> None:
         self.found.sort(key=_order)
         del self.found[limit or self.max_candidates :]
+        if self.template_found:
+            self.template_found.sort(key=_order)
+            del self.template_found[limit or self.max_candidates :]
 
-    def add_found(self, pair: dict[str, Any]) -> None:
-        self.found.append(pair)
-        if len(self.found) >= 2 * self.max_candidates:
+    def add_found(self, pair: dict[str, Any], *, template=False) -> None:
+        results = self.template_found if template else self.found
+        results.append(pair)
+        if len(results) >= 2 * self.max_candidates:
             self.keep_listed()
 
     def add_template_only(self, entry: dict[str, Any]) -> None:
@@ -269,6 +333,7 @@ class _Tally:
 
     def merge(self, other: _Tally) -> None:
         self.found += other.found
+        self.template_found += other.template_found
         self.keep_listed()
         for name in (
             "candidate_count",
@@ -291,6 +356,7 @@ class _Tally:
         self.keep_listed()
         return {
             "found": self.found,
+            "template_found": self.template_found,
             "candidate_count": self.candidate_count,
             "identical_count": self.identical_count,
             "comparisons": self.comparisons,
@@ -310,6 +376,7 @@ class _Tally:
     def from_state(cls, saved: dict[str, Any], max_candidates: int) -> _Tally:
         tally = cls(max_candidates)
         tally.found = list(saved["found"])
+        tally.template_found = list(saved["template_found"])
         for name in (
             "candidate_count",
             "identical_count",
@@ -447,7 +514,7 @@ class _Index:
 
     def add(self, row: dict[str, Any], shingles: np.ndarray, keys: list[int]) -> None:
         index = len(self.held)
-        self.held.append({field: row.get(field) for field in _FIELDS})
+        self.held.append(_evidence_fields(row))
         self.held_shingles.append(shingles)
         self.identical[row["content_sha256"]].append(index)
         for key in keys:
@@ -493,14 +560,26 @@ class _Index:
                         "document_id": subject["document_id"],
                         "split": subject["split"],
                         "source_id": subject["source_id"],
+                        **(
+                            {"passage": subject["passage"]}
+                            if "passage" in subject
+                            else {}
+                        ),
                         "pairs": 1,
                         "max_jaccard": similarity,
                         "min_boilerplate_share": share,
                         "closest_document_id": right["document_id"],
                         "closest_content_jaccard": content,
+                        **(
+                            {"closest_passage": right["passage"]}
+                            if "passage" in right
+                            else {}
+                        ),
                     }
                 )
-                return
+                if not self.options.list_template_pairs:
+                    return
+                kind = "template_only"
             else:
                 # Template explains too little of the match to set it aside.
                 kind = "partly_template"
@@ -511,9 +590,11 @@ class _Index:
             }
         elif not (exact or similarity >= self.options.min_jaccard):
             return
-        tally.candidate_count += 1
-        tally.classes[extra.get("class", "leak")] += 1
-        tally.identical_count += exact
+        template_only = extra.get("class") == "template_only"
+        if not template_only:
+            tally.candidate_count += 1
+            tally.classes[extra.get("class", "leak")] += 1
+            tally.identical_count += exact
         left = subject
         if right["document_id"] < left["document_id"]:
             left, right = right, left
@@ -525,8 +606,19 @@ class _Index:
                 "shared_shingles": len(shared),
                 "union_shingles": union,
                 "identical_content_sha256": exact,
+                **(
+                    {
+                        "left_passage": left["passage"],
+                        "right_passage": right["passage"],
+                        "left_document_id": left["passage"]["document_id"],
+                        "right_document_id": right["passage"]["document_id"],
+                    }
+                    if self.options.passage_words is not None
+                    else {}
+                ),
                 **extra,
-            }
+            },
+            template=template_only,
         )
 
 
@@ -538,7 +630,9 @@ def _sampled(document_id: str, stride: int) -> bool:
     return int.from_bytes(digest, "big") % stride == 0
 
 
-def _scan_rows(rows, sample_stride: int | None, add_held, add_sample):
+def _scan_rows(
+    rows, sample_stride: int | None, add_held, add_sample, passage_words=None
+):
     """Read one shard into its held-out shingle evidence and training sample."""
     shingler = _Shingler()
     tally = _Tally(0)  # This pass records coverage and proposes no candidates.
@@ -546,17 +640,21 @@ def _scan_rows(rows, sample_stride: int | None, add_held, add_sample):
     for _, row in rows:
         if row["split"] not in _SPLITS:
             raise ValueError("near-duplicate invalid document split")
-        if row["split"] == "train":
-            if sample_stride is not None and _sampled(
-                row["document_id"], sample_stride
-            ):
-                source = str(row.get("source_id"))
-                add_sample(source, shingler(row["text"]))
-                sampled[source] += 1
+        train = row["split"] == "train"
+        if train and not (
+            sample_stride is not None and _sampled(row["document_id"], sample_stride)
+        ):
             continue
-        shingles = shingler(row["text"])
-        add_held({field: row.get(field) for field in _FIELDS}, shingles)
-        tally.account(row, shingles)
+        units = (row,) if passage_words is None else _passages(row, passage_words)
+        for unit in units:
+            shingles = shingler(unit["text"])
+            if train:
+                source = str(row.get("source_id"))
+                add_sample(source, shingles)
+                sampled[source] += 1
+            else:
+                add_held(_evidence_fields(unit), shingles)
+                tally.account(unit, shingles)
     return {"tally": tally.state(), "sampled": sampled}
 
 
@@ -568,6 +666,7 @@ def _scan(shard: int) -> dict[str, Any]:
         _JOB["sample_stride"],
         lambda fields, shingles: held.append((fields, shingles)),
         lambda source, shingles: sample[source].append(shingles),
+        _JOB["options"].passage_words,
     )
     held.extend((source, np.concatenate(parts)) for source, parts in sample.items())
     return {**result, "evidence": held}
@@ -599,7 +698,7 @@ def _read_evidence(path: Path):
             yield fields, np.frombuffer(values, dtype="<u8")
 
 
-def _scan_file(staging, path, start, end, sample_stride):
+def _scan_file(staging, path, start, end, sample_stride, passage_words=None):
     with (staging / "evidence.bin").open("xb") as stream:
 
         def emit(fields, shingles):
@@ -610,14 +709,18 @@ def _scan_file(staging, path, start, end, sample_stride):
             sample_stride,
             emit,
             emit,
+            passage_words,
         )
 
 
-def _scan_results(shards, workers, sample_stride, evidence):
+def _scan_results(shards, workers, sample_stride, evidence, passage_words):
     if evidence is None:
         yield from _run(_scan, len(shards), workers)
         return
-    plan = replace(evidence, tasks=[(*task, sample_stride) for task in evidence.tasks])
+    arguments = (
+        (sample_stride,) if passage_words is None else (sample_stride, passage_words)
+    )
+    plan = replace(evidence, tasks=[(*task, *arguments) for task in evidence.tasks])
     with (
         verification_settings(workers=workers),
         closing(run_sharded_files(plan, _scan_file, ordered=True)) as segments,
@@ -646,13 +749,19 @@ def _stream(shard: int) -> dict[str, Any]:
     for position, row in _JOB["read"](start, end):
         if row["split"] != "train":
             continue
-        if row["document_id"] in seen:
-            raise ValueError("near-duplicate duplicate document ID")
-        shingles = shingler(row["text"])
-        keys = index.keys(str(row.get("source_id")), shingles)
-        for other in index.proposals(row["content_sha256"], keys):
-            index.compare(tally, row, shingles, other)
-        tally.account(row, shingles)
+        units = (
+            (row,)
+            if options.passage_words is None
+            else _passages(row, options.passage_words)
+        )
+        for unit in units:
+            if unit["document_id"] in seen:
+                raise ValueError("near-duplicate duplicate document ID")
+            shingles = shingler(unit["text"])
+            keys = index.keys(str(unit.get("source_id")), shingles)
+            for other in index.proposals(unit["content_sha256"], keys):
+                index.compare(tally, unit, shingles, other)
+            tally.account(unit, shingles)
         tally.trained += 1
         if checkpoint is not None and tally.trained % checkpoint.every == 0:
             checkpoint.save({**tally.state(), "offset": position, "done": False})
@@ -683,6 +792,8 @@ def screen(
     max_candidates: int = 20_000,
     min_jaccard: float = 0.65,
     template_aware: bool = False,
+    passage_words: int | None = None,
+    list_template_pairs: bool = False,
     boilerplate_heldout_documents: int = 20,
     boilerplate_sample_documents: int = 4,
     boilerplate_sample_stride: int = _DEFAULT_SAMPLE_STRIDE,
@@ -735,10 +846,16 @@ def screen(
         or not 8 <= boilerplate_sketch_bits <= 32
     ):
         raise ValueError("near-duplicate caps must be positive and threshold in (0, 1]")
+    if passage_words is not None and not 16 <= passage_words <= 512:
+        raise ValueError("passage length must be between 16 and 512 words")
+    if list_template_pairs and not template_aware:
+        raise ValueError("listing template pairs requires template-aware screening")
     options = _Options(
         max_candidates=max_candidates,
         min_jaccard=min_jaccard,
         template_aware=template_aware,
+        passage_words=passage_words,
+        list_template_pairs=list_template_pairs,
         boilerplate_heldout_documents=boilerplate_heldout_documents,
         boilerplate_sample_documents=boilerplate_sample_documents,
         boilerplate_min_share=boilerplate_min_share,
@@ -755,7 +872,9 @@ def screen(
     )
     held: list[tuple[dict[str, Any], np.ndarray]] = []
     total_shingles = 0
-    with closing(_scan_results(shards, workers, sample_stride, _evidence)) as results:
+    with closing(
+        _scan_results(shards, workers, sample_stride, _evidence, passage_words)
+    ) as results:
         for result in results:
             base.merge(_Tally.from_state(result["tally"], max_candidates))
             sampled.update(result["sampled"])
@@ -877,6 +996,30 @@ def screen(
             "template_only_truncated": len(listed) > max_candidates,
             "template_only": listed[:max_candidates],
         }
+    if list_template_pairs:
+        report["template_pairs"] = base.template_found
+        report["template_pairs_truncated"] = base.template_only_count > max_candidates
+    if passage_words is not None:
+        report["unit"] = "passage"
+        report["parameters"]["passage_words"] = passage_words
+        report["parameters"]["passage_min_words"] = _MIN_PASSAGE_WORDS
+        report["passage_count"] = report.pop("document_count")
+        for row in coverage:
+            row["passages"] = row.pop("documents")
+            row["passages_without_words"] = row.pop("documents_without_words")
+        if template_aware:
+            report["boilerplate"]["sampled_passages"] = report["boilerplate"].pop(
+                "sampled_documents"
+            )
+            report["template_only_passage_count"] = report.pop(
+                "template_only_document_count"
+            )
+            for entry in report["template_only"]:
+                entry["document_id"] = entry["passage"]["document_id"]
+                entry["closest_document_id"] = entry["closest_passage"]["document_id"]
+        report["limitations"] += (
+            " Passage boundaries and lexical proposals can miss embedded or paraphrased matches."
+        )
     return report
 
 
@@ -919,6 +1062,7 @@ def screen_documents(
     shard_bytes: int = 256 << 20,
     retain_evidence: bool = False,
     template_aware: bool = False,
+    passage_words: int | None = None,
     boilerplate_sample_stride: int = _DEFAULT_SAMPLE_STRIDE,
     **options: Any,
 ) -> dict[str, Any]:
@@ -938,6 +1082,7 @@ def screen_documents(
     options = {
         **options,
         "template_aware": template_aware,
+        "passage_words": passage_words,
         "boilerplate_sample_stride": boilerplate_sample_stride,
     }
 
@@ -953,6 +1098,7 @@ def screen_documents(
             "unicode_version": unicodedata.unidata_version,
             "implementation": implementation_digests("near_duplicates.py"),
             "sample_stride": boilerplate_sample_stride if template_aware else None,
+            "passage_words": passage_words,
         }
         inputs = {
             **evidence_inputs,
@@ -1020,7 +1166,7 @@ DECISION_CHOICES = ("merged", "dropped", "kept")
 
 
 def pair_key(pair: dict[str, Any]) -> tuple[str, ...]:
-    return tuple(sorted((pair["left_document_id"], pair["right_document_id"])))
+    return tuple(sorted(_order(pair)))
 
 
 def check_decisions(
@@ -1038,6 +1184,8 @@ def check_decisions(
     a record that was written for this exact report.
     """
     problems: list[str] = []
+    if report.get("unit") == "passage":
+        problems.append("pretraining decisions require a document-level screen")
     if record.get("schema_version") != 1:
         problems.append("decision record schema_version must be 1")
     if record.get("report_sha256") != report_sha256:

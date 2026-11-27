@@ -362,6 +362,12 @@ def check_near_duplicates(ev: Evidence) -> Check:
             "--near-duplicate-decisions (the reviewer's record)"
         )
     report = _load_json(ev.near_duplicates)
+    if report.get("unit") == "passage":
+        return Check(
+            "near_duplicates",
+            FAIL,
+            "pretraining decisions require a document-level screen",
+        )
     report_sha = sha256_file(ev.near_duplicates)
     problems: list[str] = []
     release = ev.report

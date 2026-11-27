@@ -13,6 +13,7 @@ import yaml
 from corpus_fixtures import write_prose_project
 from lab_fixtures import write_smoke_inputs
 
+from klab.canonical import canonical_digest
 from klab.cli.main import main
 from klab.config.loading import load_config
 from klab.corpus.acquisition import acquire
@@ -30,6 +31,9 @@ from klab.data.tokenizer import load_tokenizer
 from klab.training.manifest import sha256_file
 
 SAMPLE = Path(__file__).resolve().parent / "fixtures" / "corpus-sample"
+_PLANTED_PASSAGE = (
+    "Record identifiers bind each retained answer to its original document and split"
+)
 
 
 def _klab(monkeypatch: pytest.MonkeyPatch, capsys, *argv: str) -> dict:
@@ -57,6 +61,10 @@ def planted_release(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     guide = (project / "sources/fixtures/guide.md").read_text(encoding="utf-8")
     section = guide[guide.index("## Inspecting lineage") :]
     assert section.rstrip().endswith("generated answer.")
+    section = section.rstrip() + f"\n\n{_PLANTED_PASSAGE}.\n"
+    (project / "sources/fixtures/guide.md").write_text(
+        guide[: guide.index("## Inspecting lineage")] + section, encoding="utf-8"
+    )
     (project / "sources/fixtures/checks.py").write_text(
         section.replace("generated answer.", "generated output."), encoding="utf-8"
     )
@@ -132,6 +140,76 @@ def test_template_aware_near_duplicates_keeps_the_planted_pair_on_the_cli(
         same["left_document_id"],
         same["right_document_id"],
     )
+    passage = _klab(
+        monkeypatch,
+        capsys,
+        "corpus",
+        "near-duplicates",
+        str(planted_release),
+        "--passage-words",
+        "32",
+        "--template-aware",
+        "--list-template-pairs",
+        "--workers",
+        "1",
+    )
+    assert (
+        passage["unit"] == "passage"
+        and passage["passage_count"] > aware["document_count"]
+    )
+    texts = {
+        doc["document_id"]: doc["text"]
+        for line in (planted_release / "documents.jsonl").read_bytes().splitlines()
+        for doc in [json.loads(line)]
+    }
+    duplicated = next(
+        item
+        for item in passage["candidates"]
+        if item["identical_content_sha256"]
+        and {item[side]["document_id"] for side in ("left_passage", "right_passage")}
+        == {pair["left_document_id"], pair["right_document_id"]}
+    )
+    left, right = [
+        texts[span["document_id"]][span["start"] : span["end"]]
+        for side in ("left_passage", "right_passage")
+        for span in [duplicated[side]]
+    ]
+    assert left == right == _PLANTED_PASSAGE
+
+    from types import SimpleNamespace
+
+    from klab.preflight import FAIL, check_near_duplicates
+
+    saved = tmp_path / "passage-report.json"
+    saved.write_text(json.dumps(passage))
+    expected_ids = []
+    for parent in (pair["left_document_id"], pair["right_document_id"]):
+        start = texts[parent].index(_PLANTED_PASSAGE)
+        expected_ids.append(
+            canonical_digest([parent, start, start + len(_PLANTED_PASSAGE)])
+        )
+    labels = tmp_path / "labels.json"
+    labels.write_text(
+        json.dumps(
+            {
+                "screens": [
+                    {
+                        "report": saved.name,
+                        "sha256": sha256_file(saved),
+                        "pairs": [
+                            {"units": expected_ids, "expected": "candidate"},
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    audited = _klab(monkeypatch, capsys, "corpus", "audit-evidence", str(labels))
+    assert audited["screens"][0]["metrics"]["candidate"]["recall"] == 1
+    check = check_near_duplicates(
+        SimpleNamespace(near_duplicates=saved, near_duplicate_decisions=saved)
+    )
+    assert check.status == FAIL
 
 
 def test_decision_record_must_decide_every_pair_of_this_report() -> None:

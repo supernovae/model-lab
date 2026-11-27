@@ -1187,6 +1187,52 @@ median 3.06 s at about 60 MiB peak process RSS. It read 672.90 MB for a
 the shared path and 3.23 s on the previous path. Both produced the same
 payload digest.
 
+#### Detected language and template lines
+
+```sh
+klab corpus annotate-normalized SOURCE/KEY --kind detected-language --limit 20
+klab corpus annotate-normalized SOURCE/KEY --kind template-lines --template-min-support 4 --limit 20
+```
+
+`detected-language` keeps deterministic observations separate from upstream
+`source-language` claims. It checks distinct function words in the first
+8,192 codepoints for German, English, Spanish, French, and Portuguese. A
+detection requires three distinct markers and a lead of two over the next
+language. It reports `insufficient`, `ambiguous`, and `code` separately from
+`detected`. Mixed-language and unsupported text can be misclassified.
+The marker count and margin describe this heuristic. The recorded upstream
+label remains the input to `train_row_language` selection.
+
+`--memoize-content` reuses text-only detector results within a partition by
+exact content SHA-256 and checks the cached prefix. The cache holds up to
+256 prefixes. Use it on sources with many nearby exact repeats. Changing
+the option records a separate computation key and leaves the decoded values
+identical. The sidecar reports the number of detector calls it avoided.
+
+`template-lines` samples the lowest document hashes from one normalized
+partition. `--template-sample-documents` defaults to 256. It counts a
+case-folded, whitespace-normalized line once per sampled document and marks
+lines seen in at least `--template-min-support` sampled documents (default 4).
+Each pass examines up to 128 nonempty physical lines per document. Eligible
+lines have at least three whitespace-delimited words and up to 256 codepoints.
+The sidecar includes a profile digest, eligible and repeated line counts, and
+a flag for the line limit. It verifies source bytes during both scans and
+serves later pages from compact observations. An interrupted partition repeats
+its scans, and completed partitions stay reusable. Repeated content can be useful
+material. Inspect the observations before using them to change a corpus.
+
+The shared sidecar producer changes in this release. Earlier normalized
+annotation sidecars are rebuilt on first use from the same normalized inputs.
+
+Three single-worker NVMe trials used 100,000 synthetic records and about
+140 MB of normalized JSONL. Template profiling and annotation took a median
+0.93 s, read 280.41 MB across both passes, and wrote 3.7 MB at about 60 MiB
+peak process RSS. A warm 32-row page in a fresh process took 28 ms and read
+0.29 MB. On a partition with 64 distinct texts, language memoization reduced
+the median from 2.65 s to 0.41 s and reused 99,936 detector results. On unique
+text it took 2.68 s versus 2.59 s with the memo disabled. Sidecar payload
+digests agreed within each pair.
+
 #### Source-quality sidecars
 
 ```sh
@@ -2355,7 +2401,8 @@ klab --work-dir WORK corpus audit RELEASE --scratch-dir /fast/disk --workers 16
 audit that was written with the release. Run it for that audit, not to verify.
 
 `near-duplicates` compares every document, including dropped ones, against the
-other splits by three-word shingles and reports pairs at Jaccard 0.65 or more,
+other splits by three-word shingles and reports pairs at Jaccard 0.65 or more
+by default (`--min-jaccard`),
 plus identical text. Training documents are compared with validation and test
 documents, and validation with test; training documents are not compared with
 each other. It is a lexical screen: it does not catch paraphrases, and MinHash
@@ -2462,6 +2509,82 @@ or more held-out documents of its source (or by roughly a thousand training
 documents) can be called `template_only` against a training copy. A template
 used by only a few documents is not recognised, and its pairs stay candidates.
 Raise `--boilerplate-heldout-documents` to be stricter.
+
+Add `--list-template-pairs` to retain the pair-level `template_only`
+classifications in the JSON report. The separate `template_pairs` list is
+independently bounded by `--max-candidates` and has its own truncation flag.
+
+#### Passage screening and labeled audits
+
+```sh
+klab corpus near-duplicates RELEASE --passage-words 64 --template-aware --list-template-pairs --retain-evidence > passage-screen.json
+klab corpus audit-evidence LABELS.json
+```
+
+`--passage-words` accepts widths from 16 to 512 lexical words. Each paragraph
+has deterministic windows with half-width overlap and a final shorter window
+when needed, with an eight-word minimum. Pair records carry passage IDs and
+half-open codepoint offsets in their parent normalized documents. In passage
+mode the held-out cap and frequency thresholds count passages. The training sample still selects
+parent documents by ID and contributes their windows. Coverage and template
+totals count windows, including overlap. Checkpoints commit after whole
+parent documents. The width enters the retained evidence key.
+
+Passage matches are advisory. Segmentation and lexical proposals can miss
+embedded copies, and exact repeated passages can be ordinary boilerplate.
+Pretraining acceptance uses a separate document-level screen. An upgrade
+starts new near-duplicate checkpoint and retained evidence keys.
+
+The audit reads a local JSON file with optional `annotations` and `screens`
+arrays. For each annotation group give `kind`, `partition`, `offset` (default
+zero), and consecutive `rows` with `document_id` and `expected`. Supply an
+ISO-style language label or null for `detected-language`, an array of
+`email_like` and `phone_like` for `privacy-candidates`, a boolean for
+`template-lines`, or a keep boolean for `source-quality`. The quality group
+also takes `quality_rule` with the same `field`, `minimum`, and `missing`
+options as TRAIN selection. Optional `options` for template groups are
+`sample_documents` and `min_support`. Detected language groups can set
+`memoize_content`. The audit verifies the annotated page and its exact
+document order.
+
+For each screen group give `report` relative to the labels file or an
+absolute path, `sha256` of the report bytes, and `pairs`. Each pair has a
+two-element `units` array of document IDs or passage IDs and `expected` set
+to `candidate`, `template_only`, or `absent`.
+
+```json
+{
+  "screens": [{
+    "report": "passage-screen.json",
+    "sha256": "SCREEN_SHA256",
+    "pairs": [{"units": ["PASSAGE_ID_A", "PASSAGE_ID_B"], "expected": "candidate"}]
+  }]
+}
+```
+
+The output binds the labels, sidecar payloads and screen digests and reports
+precision, recall, and language coverage with abstentions. The audit counts
+an omitted pair as `unlisted` when a required list is incomplete and excludes
+it from precision and recall. Keep label sets to at most 1,000 examples and
+screen files to 64 MiB. Use multiple label files for larger audits.
+
+The connected synthetic fixtures cover a planted document copy, a contained
+passage, template-only and unrelated pairs, repeat lines, multilingual text,
+an unsupported Italian row, and a phone format outside the detector's
+coverage. The four labeled document pairs and the planted passage agreed
+with the screen. Ten labeled annotation rows yielded nine correct language detections and
+one abstention, phone recall of 1/2, and quality keep recall of 2/3 for the
+declared score threshold. The repeated-line labels all agreed. These are
+controlled sample results. Evaluate thresholds on source-specific labels
+before applying them to a production recipe.
+
+Three single-worker lexical scans on a warm NVMe fixture of 40,000 documents
+returned identical document reports in a median 4.89 s before and 4.90 s after.
+Passage mode screened 80,000 windows in 7.02 s. Logical reads were 105.27 MB
+for the document screen and 106.26 MB for passages. Peak process RSS was about
+164 MiB and 168 MiB respectively. Release verification was outside the interval.
+
+#### Record document-level overlap decisions
 
 Save the report to a file and decide every listed pair in a decision record
 that names the report by the SHA-256 of that file, so a record cannot be reused

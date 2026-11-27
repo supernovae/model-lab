@@ -25,7 +25,9 @@ klab train CONFIG --stage-bundle STAGE --require-prepared \
 ```
 
 `CONFIG` is the composed config (`dataset.source: local_token_mixture`). The
-release, tokenizer and mixture are found through it. The release is verified
+contamination evidence must come from a document-level screen. Use passage
+reports for [labeled analysis](corpus-preparation.md#passage-screening-and-labeled-audits).
+The release, tokenizer and mixture are found through `CONFIG`. The release is verified
 with its signed receipt unless `--cold-verify` is given. The decision record is
 described under [near-duplicates](corpus-preparation.md); the sizing
 result under [engram memory](engram.md#size-the-tables).
