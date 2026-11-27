@@ -218,9 +218,9 @@ def packing_identity(config: RunConfig) -> dict[str, object]:
 def preparation_source_identity(inventory: dict[str, str] | None = None) -> str:
     """Conservative reader/transform/packing fingerprint, not acquisition code.
 
-    snapshot_writer is publication-only. Snapshot content, selection and reader
-    semantics remain bound by the verified manifest and sources.py fingerprint.
-    All other data modules (including newly added ones) remain fail-closed.
+    The snapshot writer publishes inputs. Coverage and the loader benchmark
+    inspect prepared data. Snapshot verification and all preparation modules
+    (including newly added ones) remain fail-closed.
     """
     if inventory is None:
         root = Path(__file__).parents[1]
@@ -233,7 +233,12 @@ def preparation_source_identity(inventory: dict[str, str] | None = None) -> str:
         if name.startswith("data/")
         and name.endswith(".py")
         and name.count("/") == 1
-        and name != "data/snapshot_writer.py"
+        and name
+        not in {
+            "data/snapshot_writer.py",
+            "data/coverage.py",
+            "data/loader_benchmark.py",
+        }
     )
     names.append("config/models.py")
     return hashlib.sha256(
