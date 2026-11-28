@@ -179,6 +179,122 @@ def test_generated_answers_score_only_complete_answer_lines(
     with pytest.raises(ValueError, match="answer item signed: .*exceed max_seq_len"):
         main()
     assert list(saved.parent.glob("answers-*.json")) == [saved]
+    check_study_evidence(tmp_path, root, saved, result, monkeypatch, capsys)
+
+
+def render_study_panel(path, runs, lab):
+    from pathlib import Path
+
+    from klab.dashboard.corpus_studies import studies_page
+
+    studies_page([Path(path)], Path(lab), Path(runs))
+
+
+def check_study_evidence(tmp_path, runs, saved, result, monkeypatch, capsys):
+    from streamlit.testing.v1 import AppTest
+
+    from klab.lab_records import TRY_FORMAT, write_sealed
+    from klab.training.manifest import sha256_file
+
+    identity = result["identity"]
+    lab = tmp_path / "lab"
+    trial = lab / "tries/try-example/try.json"
+    trial.parent.mkdir(parents=True)
+    write_sealed(
+        trial,
+        {
+            "format": TRY_FORMAT,
+            "try_id": "try-example",
+            "arms": {"candidate": identity},
+        },
+    )
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text("name: example\n")
+    summary = tmp_path / "results.json"
+    summary.write_text(
+        json.dumps(
+            {
+                "split": "development",
+                "tokenizer_sha256": identity["tokenizer_sha256"],
+                "budgets": {"4": {"sha256": result["answers"]["sha256"]}},
+                "runs": [
+                    {
+                        "arm": "plain",
+                        "seed": 1,
+                        "run_id": identity["run_id"],
+                        "checkpoint_sha256": identity["checkpoint_sha256"],
+                        "max_new_tokens": 4,
+                        "result_sha256": sha256_file(saved),
+                        "try_id": "try-example",
+                    }
+                ],
+            }
+        )
+    )
+    study = tmp_path / "study.json"
+    revision = "a" * 40
+    study.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "Tiny study",
+                "repository": "https://github.com/example/corpus",
+                "revision": revision,
+                "directory": "recipes/example",
+                "recipe": {"path": recipe.name, "sha256": sha256_file(recipe)},
+                "results": [
+                    {
+                        "id": "answers",
+                        "title": "Generated answers",
+                        "evaluation": "answers",
+                        "split": "development",
+                        "store": "runs",
+                        "path": summary.name,
+                        "sha256": sha256_file(summary),
+                    }
+                ],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "klab",
+            "corpus",
+            "study",
+            str(study),
+            "--runs-dir",
+            str(runs),
+            "--lab-dir",
+            str(lab),
+            "--budget",
+            "4",
+        ],
+    )
+    main()
+    pinned = json.loads(capsys.readouterr().out)
+    [row] = pinned["rows"]
+    assert row["status"] == "verified" and row["metrics"]["correct"] == 3
+    assert f"/blob/{revision}/" in pinned["recipe"]["url"]
+    app = AppTest.from_function(
+        render_study_panel, args=(str(study), str(runs), str(lab))
+    ).run()
+    next(
+        button for button in app.button if button.label == "Verify first evidence page"
+    ).click().run()
+    assert not app.exception
+    assert list(app.dataframe[0].value["Correct"]) == [3]
+    assert any("run=original" in link.proto.url for link in app.get("link_button"))
+
+    raw = saved.read_bytes()
+    try:
+        saved.write_bytes(b"!" + raw[1:])
+        main()
+        [rejected] = json.loads(capsys.readouterr().out)["rows"]
+        assert rejected["status"] == "rejected" and "metrics" not in rejected
+    finally:
+        saved.write_bytes(raw)
 
 
 def _chat_cli(monkeypatch, capsys, cwd, *options):

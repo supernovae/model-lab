@@ -4465,6 +4465,45 @@ depend on shared structure, identifier choice and the tokenizer. These
 measurements cover preparation and encoding. Learning remains a separate
 experiment.
 
+## Inspect pinned Corpus study results
+
+A study declaration links a repository revision and recipe to one or more
+development result files. The result files stay with the recipe. Lab checks the
+local file digests, opens a page of the original saved evaluations, and links
+to their runs. This reads metadata and scores without running inference.
+
+```bash
+klab corpus study STUDY.json --lab-dir LAB --result RESULT_ID
+klab corpus study STUDY.json --lab-dir LAB --result RESULT_ID --budget 8 --offset 20
+klab dashboard --lab-dir LAB --study STUDY.json
+```
+
+The JSON declaration has `schema_version: 1`, a `name`, an HTTPS `repository`,
+its full Git `revision` and repo-relative `directory`, a `recipe` pin, and
+`results`. Each pin has `path` relative to the declaration and `sha256`. A
+result also has an `id`, `title`, `evaluation` of `ranking` or `answers`,
+`split: development`, and a `store` of `lab` or `runs`. The `lab` store
+resolves under `LAB/runs`. The `runs` store uses the selected run store.
+
+Each published result names `tokenizer_sha256` and a `runs` array. A row pins
+`arm`, `seed`, `run_id`, and `checkpoint_sha256`, with an optional `try_id`.
+Ranking rows pin `ranking_result_sha256` and share the report's
+`score_panel_sha256`. Generated answer rows pin `result_sha256`, name
+`max_new_tokens`, and use the panel digest at `budgets[cap].sha256`.
+An exact evaluation receipt and any declared Lab try must agree on the run and
+checkpoint. Evaluation receipts must also agree on the tokenizer and panel.
+
+Pages are capped at 20 observations, and each metadata file at 4 MiB. A missing
+receipt is unavailable and a mismatched receipt is rejected. Both statuses
+withhold scores. Each file needs a pin. The repository URLs point to the
+declared revision, and inspection reads only the configured local files.
+
+The retained paired-seed Workshop pilot verified all 21 ranking receipts and
+42 answer receipts. Seven warm in-process reads of the first 20 observations
+per result took median times of 5.24 ms and 8.01 ms, with 0.76 MB and 1.75 MB
+of logical reads respectively. Rendering and physical media reads were outside
+this measurement.
+
 ## Inspect and retain typed Corpus artifacts
 
 The typed inventory covers published relation indexes and sequences,

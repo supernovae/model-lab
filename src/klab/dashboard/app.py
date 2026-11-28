@@ -92,6 +92,7 @@ def arguments() -> argparse.Namespace:
         "--run-store", action="append", type=parse_run_store, default=[]
     )
     parser.add_argument("--lab-dir")
+    parser.add_argument("--study", action="append", type=Path, default=[])
     args, _ = parser.parse_known_args()
     return args
 
@@ -1460,7 +1461,9 @@ def main() -> None:
             url_path="explorer",
         ),
         st.Page(
-            lambda: corpus_view.corpus_page(resolve_work_dir(), root),
+            lambda: corpus_view.corpus_page(
+                resolve_work_dir(), root, lab_dir=lab_dir, studies=args.study
+            ),
             title="Corpus",
             icon=":material/dataset:",
             url_path="corpus",

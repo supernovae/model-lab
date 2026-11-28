@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shlex
 import sqlite3
+from collections.abc import Sequence
 from pathlib import Path
 
 import streamlit as st
@@ -233,10 +234,21 @@ def _relations(root: Path, key: str) -> None:
         )
 
 
-def corpus_page(root: Path, run_store: Path | None = None) -> None:
+def corpus_page(
+    root: Path,
+    run_store: Path | None = None,
+    *,
+    lab_dir: Path | None = None,
+    studies: Sequence[Path] = (),
+) -> None:
     st.header("Corpus")
     st.caption(str(root))
-    views = ("Typed artifacts", "Published releases", "Representation comparisons")
+    views = (
+        "Typed artifacts",
+        "Published releases",
+        "Representation comparisons",
+        "Studies",
+    )
     linked = st.query_params.get("release")
     if linked is not None and st.session_state.get("corpus_selected_link") != linked:
         st.session_state["corpus_view"] = views[1]
@@ -251,6 +263,11 @@ def corpus_page(root: Path, run_store: Path | None = None) -> None:
         from klab.dashboard.corpus_comparisons import comparison_page
 
         comparison_page(root)
+        return
+    if view == "Studies":
+        from klab.dashboard.corpus_studies import studies_page
+
+        studies_page(studies, lab_dir or root / "lab", run_store or root / "runs")
         return
     _inventory(root)
     selected = _artifact(root)
