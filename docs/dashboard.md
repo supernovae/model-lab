@@ -124,6 +124,16 @@ matched in every trial.
 | 25,600 | 2.70 ms · 4.79 MB read | 0.57 ms · 56 KB read |
 | 256,000 | 23.75 ms · 49.93 MB read | 0.62 ms · 64 KB read |
 
+### Representation comparisons
+
+Save a measurement with `klab corpus relations compare`, then open
+**Representation comparisons** in Corpus. List saved keys or enter one directly.
+Choose a split to compare token counts including EOS, deltas from the baseline,
+serialized text and lineage bytes, and recorded fidelity and qualifier omissions.
+Each report names its canonical relation index and tokenizer. The page verifies
+the saved report and reads neither compiled text nor a tokenizer. Counts describe
+the serialization before packing and training.
+
 ## Runs
 
 A long run is rarely one process: every recovery is a new run whose parent is the
@@ -366,6 +376,21 @@ or sentence hides the previous result until you run again. A failed new comparis
 clears the prior comparison, so old charts cannot appear under a new selection.
 
 ## Run detail
+
+Under **Overview**, **Recorded mixture lineage** opens the mixture evidence
+embedded in the selected run's pinned preparation manifest. It shows the base
+release, any ordered additive release and prior split inventory digest, the
+tokenizer and recipe digests, and scheduled tokens by stratum. Where the saved
+validation path identifies a local base release, the panel links to it. The CLI
+returns the same evidence.
+
+```bash
+klab corpus mixture-lineage RUN_ID --runs-dir RUNS
+```
+
+Both paths read the run's manifests. The scheduled counts precede trainer
+shifting and block-edge loss, and the recorded lineage remains available when
+the original mixture directory has moved.
 
 One page shows one run (or several, overlaid). It opens from an attempt on the
 Runs page, or from a stable link:

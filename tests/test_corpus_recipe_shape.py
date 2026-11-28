@@ -2270,6 +2270,7 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     assert (run / "token-segments/projection.json").is_file()
     assert json.loads((run / "progress.json").read_text())["step"] == 1
     assert (run / "checkpoints/latest.json").is_file()
+    check_recorded_mixture_lineage(lab, run, release.name, quotas)
     # A second outbound bundle uses the run's authenticated closure. The
     # receiving worker's digest cache needs no segment upload on resume.
     resume_dispatch = tmp_path / "resume-dispatch"
@@ -2298,6 +2299,72 @@ def test_recipe_shaped_pipeline_trains_on_the_mixture(
     resumed = tmp_path / "runs/mini-resumed"
     assert not (resumed / "data/train.npy").exists()
     assert json.loads((resumed / "progress.json").read_text())["step"] == 2
+
+
+def check_recorded_mixture_lineage(lab, run, base_release, quotas):
+    from klab.canonical import canonical_digest
+    from klab.safe_io import write_canonical_json
+    from klab.training.manifest import config_sha256, read_manifest
+
+    args = ("corpus", "mixture-lineage", run.name, "--runs-dir")
+    lineage = lab.json(*args, str(run.parent))
+    assert lineage["mixture_revision"] == lineage["base_release_id"] == base_release
+    assert lineage["scheduled_target_tokens"] == quotas
+    assert lineage["additional_releases"] == []
+
+    # Model the additive binding in a copy of the two pinned control files.
+    # No checkpoint or training arrays are required to inspect those records.
+    fixture = lab.root / "additive-lineage-fixture" / run.name
+    (fixture / "data").mkdir(parents=True)
+    prepared = json.loads((run / "data/manifest.json").read_bytes())
+    original = prepared["token_mixture"]
+    additional = "e" * 64
+    binding = {"base_release_id": base_release, "additional_release_ids": [additional]}
+    composite = canonical_digest(binding)
+    inventory = original["family_inventory_sha256"]
+    original.update(
+        release_id=composite,
+        additive_release_binding={
+            **binding,
+            "evidence": [
+                {
+                    "release_id": additional,
+                    "prior": {
+                        "release_id": base_release,
+                        "inventory_sha256": inventory,
+                    },
+                }
+            ],
+        },
+    )
+    prepared["revision"] = composite
+    data_path = fixture / "data/manifest.json"
+    write_canonical_json(data_path, prepared)
+    manifest = read_manifest(run / "manifest.json")
+    for section in ("requested_config", "effective_config"):
+        manifest[section]["dataset"]["revision"] = composite
+        manifest[f"{section}_sha256"] = config_sha256(manifest[section])
+    for artifact in manifest["artifacts"]:
+        if artifact["relative_path"] == "data/manifest.json":
+            artifact.update(
+                sha256=sha256_file(data_path), size_bytes=data_path.stat().st_size
+            )
+    write_canonical_json(
+        fixture / "manifest.json", {**manifest, "sha256": canonical_digest(manifest)}
+    )
+    additive = lab.json(*args, str(fixture.parent))
+    assert (
+        additive["mixture_revision"] == composite
+        and additive["base_release_id"] == base_release
+    )
+    assert additive["additional_releases"] == [
+        {"release_id": additional, "prior_inventory_sha256": inventory}
+    ]
+    data_path.write_bytes(b"!" + data_path.read_bytes()[1:])
+    with pytest.raises(
+        ValueError, match="preparation manifest differs from its recorded pin"
+    ):
+        lab.json(*args, str(fixture.parent))
 
 
 def test_document_overlay_reuses_normalized_text_through_release_consumers(

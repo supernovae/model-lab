@@ -31,6 +31,11 @@ def run_release_link(work_root: Path, config: dict) -> str | None:
         member = Path(validation)
         if member.parts[-2:] == ("lm", "validation.jsonl"):
             path = str(member.parent.parent)
+    return local_release_link(work_root, path, release_id)
+
+
+def local_release_link(work_root: Path, path, release_id) -> str | None:
+    """Build the dashboard URL for an exact release at a permitted location."""
     if (
         not isinstance(path, str)
         or not isinstance(release_id, str)

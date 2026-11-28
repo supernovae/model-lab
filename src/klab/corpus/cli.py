@@ -231,6 +231,16 @@ def _run(args: argparse.Namespace) -> None:
 
     root = resolve_work_dir(args.work_dir)
     command = args.corpus_command
+    if command == "mixture-lineage":
+        from klab.corpus.recorded_mixture import recorded_mixture_lineage
+
+        print(
+            json.dumps(
+                recorded_mixture_lineage(args.runs_dir or root / "runs", args.run_id),
+                sort_keys=True,
+            )
+        )
+        return
     if command == "operator":
         from klab.corpus.command_operators import (
             inspect_command_operator,
@@ -300,6 +310,24 @@ def _run(args: argparse.Namespace) -> None:
                 max_bytes=args.max_bytes,
                 workers=args.workers,
             )
+        elif args.relation_command == "comparisons":
+            from klab.corpus.relation_comparison import (
+                comparison_inventory,
+                read_comparison,
+            )
+
+            if args.key is None:
+                result = comparison_inventory(
+                    root,
+                    limit=20 if args.limit is None else args.limit,
+                    after=args.after,
+                )
+            else:
+                if args.limit is not None or args.after is not None:
+                    raise ValueError(
+                        "limit and after apply to the comparison inventory"
+                    )
+                result = read_comparison(root, args.key)
         else:
             result = inspect_relations(
                 root,
@@ -1202,6 +1230,14 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "corpus", help="Acquire, derive, freeze and inspect corpus releases"
     )
     sub = corpus.add_subparsers(dest="corpus_command", required=True)
+    lineage = sub.add_parser(
+        "mixture-lineage", help="Read the mixture lineage pinned by a saved run"
+    )
+    lineage.add_argument("run_id")
+    lineage.add_argument(
+        "--runs-dir", type=Path, help="Selected run store (default WORK_DIR/runs)"
+    )
+    lineage.set_defaults(handler=_handle)
     operator = sub.add_parser(
         "operator", help="Plan, run and inspect explicitly authorized Corpus commands"
     )
@@ -1301,7 +1337,13 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     comparison.add_argument("--tokenizer", type=Path, required=True)
     comparison.add_argument("--max-bytes", type=int, required=True)
     add_workers_flag(comparison)
-    for command in (extract, compile_command, inspect, comparison):
+    comparisons = relation_sub.add_parser(
+        "comparisons", help="List or read saved representation comparisons"
+    )
+    comparisons.add_argument("key", nargs="?", metavar="KEY")
+    comparisons.add_argument("--limit", type=int)
+    comparisons.add_argument("--after")
+    for command in (extract, compile_command, inspect, comparison, comparisons):
         command.add_argument("--work-dir", type=Path)
         command.add_argument(
             "--cold",

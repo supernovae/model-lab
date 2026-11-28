@@ -452,6 +452,10 @@ def overview(view: DashboardSnapshot, root: Path | None = None) -> None:
                 unsafe_allow_html=True,
             )
     comparison(chosen, view)
+    if root is not None and len(chosen) == 1:
+        from klab.dashboard.corpus_mixture import mixture_panel
+
+        mixture_panel(root, resolve_work_dir(), chosen[0].run_id, chosen[0].config)
     selected_events = _rows_for(view.events, selected_ids)
     happened = run_overview.timeline(selected_events)
     if happened:
