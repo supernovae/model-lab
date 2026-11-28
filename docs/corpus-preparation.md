@@ -4369,6 +4369,8 @@ a qualifier projection from an assertion round trip.
 
 ```bash
 klab corpus relations compare TRIPLES_KEY HIERARCHY_KEY FACTORIZED_KEY --tokenizer tokenizer.json --max-bytes 1073741824
+klab corpus relations comparisons --limit 20
+klab corpus relations comparisons COMPARISON_KEY
 ```
 
 The JSON comparison uses one tokenizer and one verified canonical index for
@@ -4381,6 +4383,27 @@ verification also reads lineage and other stage files. Use the
 [shared tokenizer setup](datasets.md#several-runs-one-tokenizer) when preparing
 paired runs. Record token, source-information and compute budgets separately
 for [the Workshop study](https://github.com/supernovae/kybern-workshop/issues/118).
+
+The comparison publishes a compact immutable report in the Corpus relations
+store. It binds the ordered inputs, payload digests, one tokenizer and encoder
+implementation. Repeating an exact comparison reuses that report after
+verifying the inputs. An over-budget text selection is refused before cold
+stage verification. The list supports `--after` with its `next_after` cursor.
+Opening a saved key checks the report's bytes and reads no compiled streams.
+Use the [Corpus dashboard](dashboard.md#representation-comparisons) to inspect
+one report across splits without creating a new measurement.
+
+On two synthetic NVMe graphs with warm input proofs, the first comparison
+encoded triples and factorized views with two workers. The table gives one
+first comparison and the medians of seven repeated comparisons and saved
+report inspections. Bytes are process logical reads. Factorization emitted
+ordinary triples on this graph because each predicate and target had only
+one subject. Repeated measurements and saved reads matched the original counts.
+
+| Assertions | First comparison | Exact reuse | Saved report |
+| ---: | ---: | ---: | ---: |
+| 25,600 | 628 ms · 26.03 MB | 1.09 ms · 111 KB | 0.35 ms · 18 KB |
+| 256,000 | 5.68 s · 197.62 MB | 1.28 ms · 112 KB | 0.42 ms · 18 KB |
 
 Existing relation indexes and published sequence files remain usable.
 Re-running a prior compiler declaration may produce a new computation key

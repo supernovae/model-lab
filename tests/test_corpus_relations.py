@@ -667,6 +667,69 @@ def test_structural_representations_round_trip_and_compare(
         for sequence in texts(factor, "train")
     )
 
+    from klab.corpus import relation_comparison, stage_inspection
+
+    comparison_key = report["comparison_key"]
+    comparisons = ("corpus", "relations", "comparisons")
+    assert lab.json(*comparisons)["comparison_keys"] == [comparison_key]
+    saved = lab.json(*comparisons, comparison_key)
+    assert saved["representations"] == report["representations"]
+    assert saved["tokenizer_sha256"] == report["tokenizer_sha256"]
+
+    def unexpected_work(*args, **kwargs):
+        pytest.fail(
+            "a comparison re-encoded a verified saved result or verified an over-budget input"
+        )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(relation_comparison, "_measure", unexpected_work)
+        warm = lab.json(
+            *compare,
+            "--tokenizer",
+            str(tokenizer_path),
+            "--max-bytes",
+            str(1024**2),
+            "--workers",
+            "2",
+        )
+        assert warm["reused"] and warm["comparison_key"] == comparison_key
+        patch.setattr(stage_inspection, "verify_stage", unexpected_work)
+        with pytest.raises(
+            ValueError, match="text inputs exceed the comparison byte limit"
+        ):
+            lab.json(
+                *compare,
+                "--tokenizer",
+                str(tokenizer_path),
+                "--max-bytes",
+                "1",
+                "--cold",
+            )
+
+    from streamlit.testing.v1 import AppTest
+
+    app = AppTest.from_function(render_corpus_view, args=(str(lab.work),)).run()
+    app.radio(key="corpus_view").set_value("Representation comparisons").run()
+    app.text_input(key="corpus_comparison_key").input(comparison_key).run()
+    assert not app.exception
+    next(box for box in app.selectbox if box.label == "Split").select("train").run()
+    table = app.dataframe[0].value
+    assert list(table["Tokens incl. EOS"]) == [
+        row["partitions"]["train"]["tokens"] for row in saved["representations"]
+    ]
+    assert list(table["Baseline"]) == [True, False]
+
+    result_path = (
+        lab.work
+        / "cache/corpus/relations/relation-comparison"
+        / comparison_key
+        / "comparison.json"
+    )
+    raw = result_path.read_bytes()
+    result_path.write_bytes(b"!" + raw[1:])
+    with pytest.raises(ValueError, match="output changed"):
+        lab.json(*comparisons, comparison_key)
+
     with pytest.raises(ValueError, match="contains a directed cycle"):
         compile_view(**structure, **{**hierarchy, "hierarchy_predicate": "world:cycle"})
     assert lab.json(*command, "--plan")["candidate"] is False

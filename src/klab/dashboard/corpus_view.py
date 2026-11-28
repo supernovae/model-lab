@@ -236,16 +236,21 @@ def _relations(root: Path, key: str) -> None:
 def corpus_page(root: Path, run_store: Path | None = None) -> None:
     st.header("Corpus")
     st.caption(str(root))
-    views = ("Typed artifacts", "Published releases")
+    views = ("Typed artifacts", "Published releases", "Representation comparisons")
     linked = st.query_params.get("release")
     if linked is not None and st.session_state.get("corpus_selected_link") != linked:
         st.session_state["corpus_view"] = views[1]
         st.session_state["corpus_selected_link"] = linked
     view = st.radio("Corpus view", views, horizontal=True, key="corpus_view")
-    if view == views[1]:
+    if view == "Published releases":
         from klab.dashboard.corpus_releases import release_page
 
         release_page(root, run_store)
+        return
+    if view == "Representation comparisons":
+        from klab.dashboard.corpus_comparisons import comparison_page
+
+        comparison_page(root)
         return
     _inventory(root)
     selected = _artifact(root)
