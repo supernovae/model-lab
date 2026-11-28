@@ -94,6 +94,8 @@ def _dashboard(args: argparse.Namespace) -> None:
         resolve_work_dir(getattr(args, "work_dir", None))
     )
     command.extend(["--lab-dir", str(lab_dir)])
+    for study in args.study:
+        command.extend(["--study", str(study.absolute())])
     # Replace the launcher so container stop signals and exit status reach the
     # actual server, including when it is PID 1.
     # Nothing may depend on Python cleanup or buffered output after this exec.
@@ -3212,6 +3214,14 @@ def build_parser(work_dir: Path | None = None) -> argparse.ArgumentParser:
         "--lab-dir",
         type=Path,
         help="Lab root for the Probes page (default: WORK_DIR/lab)",
+    )
+    dashboard.add_argument(
+        "--study",
+        action="append",
+        type=Path,
+        default=[],
+        metavar="DECLARATION",
+        help="Local Corpus study declaration available in the dashboard (repeatable)",
     )
     dashboard.set_defaults(handler=_dashboard)
     from klab.corpus.cli import add_commands as add_corpus_commands

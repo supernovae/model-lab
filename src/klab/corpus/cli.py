@@ -231,6 +231,21 @@ def _run(args: argparse.Namespace) -> None:
 
     root = resolve_work_dir(args.work_dir)
     command = args.corpus_command
+    if command == "study":
+        from klab.corpus.study_evidence import study_page
+        from klab.lab_mode import lab_root
+
+        result = study_page(
+            args.declaration,
+            lab_root(root, args.lab_dir),
+            args.runs_dir or root / "runs",
+            result_id=args.result,
+            offset=args.offset,
+            limit=args.limit,
+            budget=args.budget,
+        )
+        print(json.dumps(result, sort_keys=True))
+        return
     if command == "mixture-lineage":
         from klab.corpus.recorded_mixture import recorded_mixture_lineage
 
@@ -1230,6 +1245,21 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
         "corpus", help="Acquire, derive, freeze and inspect corpus releases"
     )
     sub = corpus.add_subparsers(dest="corpus_command", required=True)
+    study = sub.add_parser(
+        "study", help="Verify a page of a pinned Corpus study's development results"
+    )
+    study.add_argument("declaration", type=Path)
+    study.add_argument("--lab-dir", type=Path)
+    study.add_argument("--runs-dir", type=Path)
+    study.add_argument("--result", help="Result ID in the study declaration")
+    study.add_argument("--offset", type=int, default=0)
+    study.add_argument("--limit", type=int, default=20)
+    study.add_argument(
+        "--budget",
+        type=int,
+        help="Restrict generated answers to this completion budget",
+    )
+    study.set_defaults(handler=_handle)
     lineage = sub.add_parser(
         "mixture-lineage", help="Read the mixture lineage pinned by a saved run"
     )

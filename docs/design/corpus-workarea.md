@@ -32,7 +32,7 @@ The [D1–D12 decision table](https://github.com/supernovae/model-lab/blob/b5302
 | 7. Shared work area | #567 shipped shared normalized partitions, verified release payload references, dependency-aware plans and protected pruning. Typed relational, procedural and command artifacts share the store and retention contracts. | Measure reuse and storage demand on production source expansions. |
 | 8–9. Operators and sidecars | #448/#451 moved choice into recorded release policy. The shared annotation path publishes text, upstream and detected language, quality, privacy, and source-local repeated-line evidence. Native TRAIN selection consumes approved predicates. The native index retains policy-independent exact groups with bounded inspection. Labeled audits cover annotations and document or passage screens. | Measure detector coverage and source quality on each planned production recipe. |
 | 10. Reference releases and mixtures | Mixture checkpoints bind prefixes of the files that will be published. The sealed cache publishes bounded int32 or opt-in uint16 segments keyed on exact content, tokenizer behavior and physical encoding. Reference schedules bind exact segment dependencies. An opt-in direct loader reads those segments. Reference-only bundles own the schedule, records, validation and masks. Offline dispatch supports whole sealed segments or selected ranges with fidelity checks. The [retained Workshop mixture comparison](../token-store.md#retained-workshop-mixture-comparison) supports keeping contiguous as the default. | Measure transfer and replay costs when deploying selected ranges on hosted workers. |
-| 11–12. Planner and external operators | #717 completes native storage planning with a measured canary. #711 ships explicit approval and replay authorization for local command operators. The [Corpus dashboard](../dashboard.md#corpus) covers typed and conventional release evidence, saved token and serialization comparisons, and run-owned base and additive mixture lineage. | Connect study outcomes and reusable recipe declarations across the respective repositories. |
+| 11–12. Planner and external operators | #717 completes native storage planning with a measured canary. #711 ships explicit approval and replay authorization for local command operators. The [Corpus dashboard](../dashboard.md#corpus) covers typed and conventional release evidence, saved serialization comparisons, run-owned mixture lineage, and pinned studies linking recipe declarations to native development evaluations. | Extend study coverage as new recipes record compatible evidence. |
 | 13. Training preemption | #533 added opt-in device-layout changes under runtime optimization. #535/#537 added finished-run data cleanup and reuse. | Trainer recovery stays with #485 and #516. Corpus tracks data and schedule identity so those changes can proceed independently. |
 
 Workshop's [foundational corpus](https://github.com/supernovae/kybern-workshop/pull/112)
@@ -828,8 +828,9 @@ control file they open and show source rights, sidecar pins, published duplicate
 decisions and recorded run references. The CLI remains the entry point for
 full release verification and cold index scans. Saved serialization comparisons
 can be inspected without encoding again. Run manifests pin base and additive
-mixture lineage and the recipe digest. Study-level links from reusable recipes
-to evaluation outcomes remain open.
+mixture lineage and the recipe digest. Pinned study declarations connect
+repository recipes and published development results to native evaluation and
+run records. The same bounded reader serves the dashboard and CLI.
 
 Each format change switches all readers and writers together and names
 the artifacts to rebuild. Reuse verified transport and snapshots where

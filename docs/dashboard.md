@@ -134,6 +134,18 @@ Each report names its canonical relation index and tokenizer. The page verifies
 the saved report and reads neither compiled text nor a tokenizer. Counts describe
 the serialization before packing and training.
 
+### Studies
+
+Start the dashboard with `--study DECLARATION` for each study to include.
+**Studies** in Corpus lets you choose a development result, verify a page of
+its recorded evaluations, and open the pinned recipe and published result.
+The observation detail shows the exact evaluation, checkpoint, tokenizer and
+panel digests and links to the run in its recorded store. Generated answers
+show their completion caps alongside their counts. Missing or mismatched
+receipts show their verification status. The view opens no training arrays,
+checkpoints or final evaluation results. See the
+[study declaration contract](corpus-preparation.md#inspect-pinned-corpus-study-results).
+
 ## Runs
 
 A long run is rarely one process: every recovery is a new run whose parent is the
