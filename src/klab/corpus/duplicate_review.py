@@ -10,6 +10,8 @@ from pathlib import Path
 from klab.corpus.build_stages import StageStore
 from klab.corpus.dedup_policy import drops_train_copy, group_policy_error
 from klab.corpus.large_build import native_dedup_inputs
+from klab.corpus.native_dedup import DEDUP_IMPLEMENTATION_FILES
+from klab.corpus.project import DuplicatePolicy
 from klab.corpus.stage_inspection import open_verified_stage
 
 _DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -42,9 +44,70 @@ def review_groups(
     work_root: Path, project, index_key, *, method, group=None, after=None, limit=100
 ):
     """Inspect a retained exact group page or one group's indexed member page."""
+    return _review_groups(
+        work_root,
+        project.config.id,
+        project.release.policy.duplicates,
+        index_key,
+        lambda receipt: native_dedup_inputs(project, receipt),
+        method=method,
+        group=group,
+        after=after,
+        limit=limit,
+    )
+
+
+def review_release_groups(
+    work_root: Path, profile: dict, *, method, group=None, after=None, limit=100
+):
+    """Review the index and policy named by a verified release control report."""
+    evidence = profile["duplicate_evidence"]
+    if not evidence:
+        raise ValueError("release does not record a native exact duplicate index")
+    policy = DuplicatePolicy.model_validate(profile["duplicate_policy"])
+    producer = profile["native_stage_implementation"]
+
+    def decision_inputs(index_receipt):
+        if not set(DEDUP_IMPLEMENTATION_FILES) <= producer.keys():
+            return None
+        return {
+            "stage": "dedup",
+            "duplicates": policy.model_dump(mode="json"),
+            "implementation": {
+                name: producer[name] for name in DEDUP_IMPLEMENTATION_FILES
+            },
+            "index": index_receipt,
+        }
+
+    return _review_groups(
+        work_root,
+        profile["corpus_id"],
+        policy,
+        evidence["index_key"],
+        decision_inputs,
+        method=method,
+        group=group,
+        after=after,
+        limit=limit,
+    )
+
+
+def _review_groups(
+    work_root,
+    corpus_id,
+    policy,
+    index_key,
+    decision_inputs,
+    *,
+    method,
+    group,
+    after,
+    limit,
+):
     if (
         method not in _METHODS
         or not _DIGEST.fullmatch(index_key)
+        or not re.fullmatch(r"[a-z][a-z0-9_-]*", corpus_id)
         or not 1 <= limit <= 1000
     ):
         raise ValueError(
@@ -64,9 +127,7 @@ def review_groups(
     if ordinal >= 2**63:
         raise ValueError("member cursor exceeds the native ordinal range")
 
-    stage_root = work_root / "corpora" / project.config.id / "builds" / "stages"
-    store = StageStore(stage_root.resolve())
-    policy = project.release.policy.duplicates
+    store = StageStore(work_root / "corpora" / corpus_id / "builds" / "stages")
     with ExitStack() as stack:
         index_dir, index_receipt, index_sha = stack.enter_context(
             open_verified_stage(store, "index", index_key)
@@ -80,7 +141,8 @@ def review_groups(
         connection = stack.enter_context(
             closing(
                 sqlite3.connect(
-                    (index_dir / "index.sqlite").as_uri() + "?mode=ro", uri=True
+                    (index_dir / "index.sqlite").as_uri() + "?mode=ro&immutable=1",
+                    uri=True,
                 )
             )
         )
@@ -114,20 +176,24 @@ def review_groups(
         if row is None:
             raise ValueError(f"no {method} duplicate group: {group}")
         result["group"] = _group_summary(row, method, policy)
-        dedup_key = store.key(native_dedup_inputs(project, index_sha))
-        decision_dir = store.directory("dedup", dedup_key)
-        decided = decision_dir.exists() or decision_dir.is_symlink()
+        inputs = decision_inputs(index_sha)
+        dedup_key = store.key(inputs) if inputs is not None else None
+        decision_dir = store.directory("dedup", dedup_key) if dedup_key else None
+        decided = decision_dir is not None and (
+            decision_dir.exists() or decision_dir.is_symlink()
+        )
         decision_columns = (
             ", selected.representative_id, selected.drop_reason" if decided else ""
         )
         decision_join = ""
         if decided:
+            assert dedup_key is not None
             directory, _, _ = stack.enter_context(
                 open_verified_stage(store, "dedup", dedup_key)
             )
             connection.execute(
                 "ATTACH DATABASE ? AS decisions",
-                ((directory / "dedup.sqlite").as_uri() + "?mode=ro",),
+                ((directory / "dedup.sqlite").as_uri() + "?mode=ro&immutable=1",),
             )
             decision_join = "LEFT JOIN decisions.dedup AS selected ON selected.document_number=o.document_number AND selected.document_id=d.document_id "
         rows = connection.execute(

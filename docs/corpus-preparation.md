@@ -2286,6 +2286,7 @@ None of them is a quality score.
 
 | Command | Shows |
 | --- | --- |
+| `klab corpus releases [RELEASE]` | Published release locations or a bounded page of the named release's control metadata |
 | `klab corpus describe RELEASE [--tokenizer PATH [--mixture TEMPLATE]]` | Record counts by origin, verification and shape; token counts with a tokenizer. `--mixture` also checks the mixture template's `target_quotas` against the measured TRAIN tokens per stratum at its `max_exposures` (and `strata` overrides), failing with `required quota impossible for STRATUM`, as `materialize-mixture` does, for every short stratum. Runs on `--workers` processes and keeps each finished run under `WORK/cache/describe`, so a stopped or repeated describe measures only what is missing |
 | `klab corpus sources RELEASE` | Sources and their rights |
 | `klab corpus audit RELEASE` | The build audit |
@@ -2294,6 +2295,28 @@ None of them is a quality score.
 | `klab corpus lineage RELEASE RECORD_ID` | One record's lineage |
 | `klab corpus near-duplicates RELEASE` | MinHash near-duplicate pairs across splits |
 | `klab corpus consumers RELEASE --runs-dir RUNS` | Runs that trained on it |
+
+Use `corpus releases` to browse without opening document payloads. With no
+reference it lists published locations, including releases frozen in place.
+With a `CORPUS@RELEASE` reference or an exact location in the selected work
+root, it checks the manifest identity and the control files' recorded sizes
+and hashes. It shows view and refinement counts, source and rights pins,
+sidecars recorded by TRAIN selection, and published duplicate decisions.
+
+```bash
+klab corpus releases --corpus-id CORPUS --limit 20
+klab corpus releases CORPUS@RELEASE --section annotations --limit 20
+klab corpus releases CORPUS@RELEASE --section duplicate-decisions --limit 20
+klab corpus duplicate-groups --release CORPUS@RELEASE --method normalized --limit 20
+```
+
+Continue the catalog with `--after` and detail pages with `--offset` from the
+returned cursor. Each metadata file is capped at 16 MiB in this view, and a
+published duplicate decision shows its count and up to five member IDs.
+The indexed `duplicate-groups --release` form uses the exact index and
+duplicate policy from the release instead of a mutable project declaration.
+It needs retained native stages for indexed membership and decisions.
+Use `corpus audit` for complete release verification and the full audit.
 
 `sample`, `review`, `lineage`, `sources`, `audit` and `describe` resolve declared
 members of one verified release generation. Sampling streams lineage until it

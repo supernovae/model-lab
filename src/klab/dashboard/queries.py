@@ -241,6 +241,24 @@ def runs(root: Path) -> list[RunRecord]:
         return list(_run_rows(connection))
 
 
+def runs_recording_release(root: Path, release_id: str, *, limit=20):
+    """Return recent runs whose recorded configuration pins this Corpus release."""
+    if not 1 <= limit <= 100:
+        raise ValueError("release run limit must be between 1 and 100")
+    if not (root / "experiments.sqlite3").is_file():
+        return []
+    with _connect(root) as connection:
+        return connection.execute(
+            "SELECT run_id,name,status FROM runs "
+            "WHERE json_extract(config_json, '$.dataset.revision')=? "
+            "AND (json_type(config_json, '$.dataset.corpus_release_path')='text' "
+            "OR (json_extract(config_json, '$.dataset.source')='local_token_mixture' "
+            "AND json_type(config_json, '$.dataset.mixture_output_path')='text')) "
+            "ORDER BY updated_at DESC, run_id DESC LIMIT ?",
+            (release_id, limit),
+        ).fetchall()
+
+
 def metrics(root: Path, run_ids: list[str]) -> list[dict[str, object]]:
     wanted = set(run_ids)
     return [row for row in snapshot(root).metrics if row["run_id"] in wanted]

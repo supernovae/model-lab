@@ -336,17 +336,54 @@ def _run(args: argparse.Namespace) -> None:
         print(json.dumps(audit_evidence(root, args.labels), sort_keys=True))
         return
     if command == "duplicate-groups":
-        from klab.corpus.duplicate_review import review_groups
+        from klab.corpus.duplicate_review import review_groups, review_release_groups
 
-        result = review_groups(
-            root,
-            load_project(args.project),
-            args.index_key,
-            method=args.method,
-            group=args.group,
-            after=args.after,
-            limit=args.limit,
-        )
+        options = {
+            "method": args.method,
+            "group": args.group,
+            "after": args.after,
+            "limit": args.limit,
+        }
+        if args.release is not None:
+            from klab.corpus.release_catalog import release_profile
+
+            if args.project is not None or args.index_key is not None:
+                raise ValueError("choose PROJECT INDEX_KEY or --release RELEASE")
+            profile = release_profile(
+                root, args.release, section="annotations", limit=1
+            )
+            result = review_release_groups(root, profile, **options)
+        else:
+            if args.project is None or args.index_key is None:
+                raise ValueError(
+                    "duplicate-groups requires PROJECT INDEX_KEY or --release RELEASE"
+                )
+            result = review_groups(
+                root, load_project(args.project), args.index_key, **options
+            )
+        print(json.dumps(result, sort_keys=True))
+        return
+    if command == "releases":
+        from klab.corpus.release_catalog import release_catalog, release_profile
+
+        if args.reference is None:
+            if args.section is not None or args.offset is not None:
+                raise ValueError(
+                    "release section and offset require a release reference"
+                )
+            result = release_catalog(
+                root, corpus_id=args.corpus_id, after=args.after, limit=args.limit
+            )
+        else:
+            if args.corpus_id is not None or args.after is not None:
+                raise ValueError("corpus ID and cursor filter the release list")
+            result = release_profile(
+                root,
+                args.reference,
+                section=args.section or "sources",
+                offset=args.offset or 0,
+                limit=args.limit,
+            )
         print(json.dumps(result, sort_keys=True))
         return
     if command in {"artifacts", "release-prune"}:
@@ -1158,6 +1195,7 @@ def _run(args: argparse.Namespace) -> None:
 
 def add_commands(commands: argparse._SubParsersAction) -> None:
     from klab.corpus.annotation_kinds import ANNOTATORS
+    from klab.corpus.release_catalog import RELEASE_SECTIONS
     from klab.corpus.release_members import SHARED_STORES
 
     corpus = commands.add_parser(
@@ -1330,8 +1368,13 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     command = sub.add_parser(
         "duplicate-groups", help="Page verified native duplicate groups and decisions"
     )
-    command.add_argument("project", type=Path, metavar="PROJECT")
-    command.add_argument("index_key", metavar="INDEX_KEY")
+    command.add_argument("project", type=Path, nargs="?", metavar="PROJECT")
+    command.add_argument("index_key", nargs="?", metavar="INDEX_KEY")
+    command.add_argument(
+        "--release",
+        metavar="RELEASE",
+        help="Use a published release's index and policy",
+    )
     command.add_argument(
         "--method", choices=("raw", "normalized"), default="normalized"
     )
@@ -1345,6 +1388,18 @@ def add_commands(commands: argparse._SubParsersAction) -> None:
     command.add_argument(
         "--cold", action="store_true", help="Verify the retained stage bytes"
     )
+    command.set_defaults(handler=_handle)
+    command = sub.add_parser(
+        "releases", help="Browse a page of published release metadata"
+    )
+    command.add_argument("reference", nargs="?", metavar="RELEASE")
+    command.add_argument("--corpus-id")
+    command.add_argument(
+        "--after", help="Continue a release list from its next_after value"
+    )
+    command.add_argument("--section", choices=RELEASE_SECTIONS)
+    command.add_argument("--offset", type=int, help="Continue a release detail page")
+    command.add_argument("--limit", type=int, default=20)
     command.set_defaults(handler=_handle)
     command = sub.add_parser(
         "release-prune",

@@ -605,7 +605,14 @@ def test_retained_build_recovers_from_closed_execution(tmp_path, monkeypatch):
     assert consumed_release(build) is None
     assert data.stat() == before
     assert freeze_retained(build, root) == build
-    assert verify_retained_release(build)["release_id"]
+    release_id = verify_retained_release(build)["release_id"]
+    from klab.corpus.release_catalog import release_catalog, release_profile
+
+    catalog = release_catalog(root, corpus_id=build.parent.parent.name)
+    assert str(build.relative_to(root)) in {
+        row["location"] for row in catalog["releases"]
+    }
+    assert release_profile(root, str(build))["release_id"] == release_id
     assert data.stat() == before
     assert (
         json.loads((build / "release-publication.json").read_text())["method"]

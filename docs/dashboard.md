@@ -27,7 +27,7 @@ with Streamlit so stop signals and the server's exit status are preserved.
 | **Models** | Where does each checkpoint sit on cost vs quality, next to known models? | checkpoint catalog, Pareto frontier, reference models, runs nobody has scored yet |
 | **Behaviors** | What does the model actually do, and where does it fail? | greedy generations side by side, fact-recall hits and misses, needle by length, reliability diagram |
 | **Explorer** | What is inside this model, and how does it process a sentence? | architecture diagram, per-token loss and top-k, attention maps, weight stats, residual activation RMS, expert routing, memory lookups, paired checkpoint comparison |
-| **Corpus** | What did Corpus publish, and what supports an assertion? | typed storage, source pins, compilation counts, dependencies, and indexed assertion and evidence queries |
+| **Corpus** | What did Corpus publish, and what evidence shaped it? | releases, source and annotation pins, duplicate decisions, typed storage, and indexed assertion evidence |
 
 The Lab pages read records through the same verified reader as
 `klab report` (`klab.lab_records`). A record that fails its seal is
@@ -50,9 +50,46 @@ on purpose. The point is how the pages read, not the scores.
 
 ## Corpus
 
-The **Corpus** page reads typed artifacts from the dashboard's selected work root
+The **Corpus** page reads releases and typed artifacts from the dashboard's selected work root
 (`--work-dir` or `KLAB_WORK_DIR`). Run store and Lab record selectors are
-independent of this root. **Scan inventory** reads typed store receipts and
+independent of this root.
+
+### Published releases
+
+**List published releases** discovers locations under the work root, including
+metadata-only freezes in place. Select a location or enter `CORPUS@RELEASE`.
+The page checks the release manifest's identity and the hashes of the control
+files it opens. It shows declared bytes, kept and dropped counts, sources and
+licensing records, and sidecar pins and exclusion counts from TRAIN selection.
+Sidecar pins describe what the build used. A row does not verify the local
+sidecar payload. A page contains up to 20 rows, and each control file is capped
+at 16 MiB. The badge lists the files checked when the page was read.
+
+**Duplicate decisions** pages the published audit. When the release also names
+a retained exact index, **Query duplicate evidence** pages indexed groups and
+members using the release's recorded policy. A matching retained decision
+stage adds representatives and drop reasons. The app requires current
+host-local proofs for these stages and displays the ordinary CLI command to
+refresh them. For source, annotation or audit pages, the metadata path reads
+no training or document payloads.
+
+**Find recorded training runs** looks up the release ID in configurations in
+the currently selected run store. It returns up to 20 direct Corpus exports or
+token mixtures with that exact release revision. Matching local locations
+also link back to Corpus from Run detail. Additive mixture identities and
+run-owned copies in other work roots require their own artifact inspection.
+The run links describe recorded inputs. Use `corpus consumers` to verify run
+evidence against a release.
+
+On the retained 390.03 GB Workshop release with 20,869,920 documents, ten
+in-process warm reads of the same 20-row page took a median 4.13 ms and
+1.60 MB of logical reads for sources, or 20.40 ms and 8.44 MB for published
+duplicate decisions. The duplicate view verified the 6.88 MB audit containing
+13,921 decisions. Measurements exclude rendering and physical media I/O.
+
+### Typed artifacts
+
+**Scan inventory** reads typed store receipts and
 file metadata on demand. It shows recorded sizes and observed retention and
 returns 20 artifacts at a time. The optional kind filter applies to rows and
 the totals cover the typed store. An incomplete scan shows its problems and
